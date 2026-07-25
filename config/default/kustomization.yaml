@@ -22,6 +22,7 @@ resources:
 - ../rbac
 - ../manager
 - ../harness-wrapper
+- ../admission
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook
@@ -49,3 +50,94 @@ patches:
 # Future webhook CA bundle injection should be wired into the manager runtime.
 # +kubebuilder:scaffold:crdkustomizecainjectionns
 # +kubebuilder:scaffold:crdkustomizecainjectionname
+
+replacements:
+- source:
+    group: ""
+    version: v1
+    kind: Namespace
+    name: system
+    fieldPath: metadata.name
+  targets:
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: gateway-task-protection
+    fieldPaths:
+    - spec.variables.[name=controllerNamespace].expression
+    options:
+      delimiter: "'"
+      index: 1
+- source:
+    group: ""
+    version: v1
+    kind: ServiceAccount
+    name: controller-manager
+    fieldPath: metadata.name
+  targets:
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: gateway-task-protection
+    fieldPaths:
+    - spec.variables.[name=controllerServiceAccount].expression
+    options:
+      delimiter: "'"
+      index: 1
+- source:
+    group: ""
+    version: v1
+    kind: ServiceAccount
+    name: ai-worker
+    fieldPath: metadata.name
+  targets:
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: gateway-task-protection
+    fieldPaths:
+    - spec.variables.[name=aiWorkerServiceAccount].expression
+    options:
+      delimiter: "'"
+      index: 1
+- source:
+    group: ""
+    version: v1
+    kind: ServiceAccount
+    name: vendor-worker
+    fieldPath: metadata.name
+  targets:
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: gateway-task-protection
+    fieldPaths:
+    - spec.variables.[name=vendorWorkerServiceAccount].expression
+    options:
+      delimiter: "'"
+      index: 1
+- source:
+    group: ""
+    version: v1
+    kind: ServiceAccount
+    name: container-worker
+    fieldPath: metadata.name
+  targets:
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: gateway-task-protection
+    fieldPaths:
+    - spec.variables.[name=containerWorkerServiceAccount].expression
+    options:
+      delimiter: "'"
+      index: 1
+
+transformers:
+- remove_admission_policy_namespace.yaml
+- remove_admission_policy_binding_namespace.yaml

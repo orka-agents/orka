@@ -32,8 +32,6 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-const roleUser = "user"
-
 const customToolName = "custom_tool"
 
 func TestGetAPIKey_EnvVar(t *testing.T) {
@@ -596,7 +594,7 @@ func TestExecuteAgentLoop_NoToolCalls(t *testing.T) {
 	}
 
 	messages := []llm.Message{
-		{Role: "user", Content: "hello"},
+		{Role: roleUser, Content: "hello"},
 	}
 
 	result, err := executeAgentLoop(
@@ -738,7 +736,7 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 	)
 
 	result, err := executeAgentLoopWithEvents(
-		context.Background(), provider, []llm.Message{{Role: "user", Content: "hello"}}, "", "test-model",
+		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "hello"}}, "", "test-model",
 		nil, nil, nil, recorder,
 	)
 	if err != nil {
@@ -804,7 +802,7 @@ func TestAIWorkerRecordsRejectedToolTelemetry(t *testing.T) {
 	recorder := common.NewFakeEventRecorder()
 
 	if _, err := executeAgentLoopWithEvents(
-		context.Background(), provider, []llm.Message{{Role: "user", Content: "use disabled tool"}}, "", "test-model",
+		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "use disabled tool"}}, "", "test-model",
 		nil, nil, nil, recorder,
 	); err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
@@ -847,7 +845,7 @@ func TestAIWorkerEventToolCallCompleteness(t *testing.T) {
 	recorder := common.NewFakeEventRecorder()
 
 	result, err := executeAgentLoopWithEvents(
-		context.Background(), provider, []llm.Message{{Role: "user", Content: "use tool"}}, "", "test-model",
+		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "use tool"}}, "", "test-model",
 		llmTools, nil, nil, recorder,
 	)
 	if err != nil {
@@ -882,7 +880,7 @@ func TestAIWorkerEventContextTruncated(t *testing.T) {
 	recorder := common.NewFakeEventRecorder()
 	result, err := executeAgentLoopWithEvents(
 		context.Background(), provider,
-		[]llm.Message{{Role: "user", Content: strings.Repeat("hello ", 200)}},
+		[]llm.Message{{Role: roleUser, Content: strings.Repeat("hello ", 200)}},
 		"", "test-model", nil, nil, nil, recorder,
 	)
 	if err != nil {
@@ -897,7 +895,7 @@ func TestAIWorkerEventContextTruncated(t *testing.T) {
 func TestAIWorkerEventRecorderFailureDoesNotChangeResult(t *testing.T) {
 	provider := &mockProvider{response: &llm.CompletionResponse{Content: "ok", StopReason: "end_turn"}}
 	result, err := executeAgentLoopWithEvents(
-		context.Background(), provider, []llm.Message{{Role: "user", Content: "hello"}}, "", "test-model",
+		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "hello"}}, "", "test-model",
 		nil, nil, nil, panicEventRecorder{},
 	)
 	if err != nil {
@@ -955,7 +953,7 @@ func TestExecuteAgentLoop_CompletionError(t *testing.T) {
 	}
 
 	messages := []llm.Message{
-		{Role: "user", Content: "hello"},
+		{Role: roleUser, Content: "hello"},
 	}
 
 	_, err := executeAgentLoop(
@@ -1202,7 +1200,7 @@ func TestExecuteAgentLoopTracingStepParentsModelAndToolSiblings(t *testing.T) {
 	}})
 	baseToolCtx := &toolspkg.ToolContext{TaskID: "task-a", Namespace: "team-a", Tenant: "team-a"}
 	result, err := executeAgentLoopWithEvents(
-		context.Background(), provider, []llm.Message{{Role: "user", Content: "use tool"}}, "", "test-model",
+		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "use tool"}}, "", "test-model",
 		llmTools, nil, nil, common.NoopEventRecorder{}, baseToolCtx,
 	)
 	if err != nil {
@@ -1247,5 +1245,126 @@ func TestExecuteAgentLoopTracingStepParentsModelAndToolSiblings(t *testing.T) {
 	attrs := testutil.AttributeMap(stepSpan)
 	if got := attrs[tracing.AttrTaskID].AsString(); got != "task-a" {
 		t.Fatalf("step %s = %q", tracing.AttrTaskID, got)
+	}
+}
+
+func TestBuildInitialMessagesDoesNotDuplicateTranscriptPrompt(t *testing.T) {
+	session := []llm.Message{{Role: roleUser, Content: "current gateway message"}}
+	messages := buildInitialMessages(session, "current gateway message", true, "", "")
+	if len(messages) != 1 || messages[0].Content != "current gateway message" {
+		t.Fatalf("messages = %#v, want transcript prompt exactly once", messages)
+	}
+	fallback := buildInitialMessages(nil, "current gateway message", true, "", "")
+	if len(fallback) != 1 || fallback[0].Content != "current gateway message" {
+		t.Fatalf("fallback messages = %#v", fallback)
+	}
+}
+
+func TestBuildInitialMessagesPreservesAutonomousContextWithIncludedPrompt(t *testing.T) {
+	session := []llm.Message{{Role: roleUser, Content: "current gateway message"}}
+	planContext := "## Previous Plan State\n\nkeep the migration plan"
+	approvalContext := "## Resolved Human Approvals\n\n- APPROVED call-1"
+	fullPrompt := planContext + "\n\n" + approvalContext + "\n\n## Task\n\ncurrent gateway message"
+	messages := buildInitialMessages(session, fullPrompt, true, planContext, approvalContext)
+	if len(messages) != 1 {
+		t.Fatalf("messages = %#v, want one merged user message", messages)
+	}
+	if strings.Count(messages[0].Content, "current gateway message") != 1 ||
+		!strings.Contains(messages[0].Content, "Previous Plan State") ||
+		!strings.Contains(messages[0].Content, "Resolved Human Approvals") {
+		t.Fatalf("merged content = %q", messages[0].Content)
+	}
+}
+
+func TestBuildInitialMessagesPreservesCompleteApprovalsWhenPlanIsTruncated(t *testing.T) {
+	current := strings.Repeat("u", 64<<10)
+	planContext := "## Previous Plan State\n\n" + strings.Repeat("p", 64<<10)
+	approvalContext := "## Resolved Human Approvals\n\n- APPROVED critical-call"
+	messages := buildInitialMessages(
+		[]llm.Message{{Role: roleUser, Content: current}},
+		planContext+"\n\n"+approvalContext+"\n\n## Task\n\n"+current,
+		true,
+		planContext,
+		approvalContext,
+	)
+	if len(messages) != 1 || !strings.Contains(messages[0].Content, approvalContext) {
+		t.Fatalf("resolved approvals were not preserved: %#v", messages)
+	}
+	if strings.Count(messages[0].Content, "APPROVED critical-call") != 1 ||
+		strings.Count(messages[0].Content, current) != 1 {
+		t.Fatalf("merged context duplicated or lost required content")
+	}
+}
+
+func TestBuildInitialMessagesBoundsTranscriptBytesAndKeepsFinalUser(t *testing.T) {
+	current := strings.Repeat("u", 64<<10)
+	session := []llm.Message{
+		{Role: roleUser, Content: "old question"},
+		{Role: "assistant", Content: strings.Repeat("a", 80<<10)},
+		{Role: roleUser, Content: current},
+	}
+	messages := buildInitialMessages(session, current, true, "", "")
+	total := 0
+	foundCurrent := false
+	for _, message := range messages {
+		total += initialMessageBytes(message)
+		if message.Role == roleUser && message.Content == current {
+			foundCurrent = true
+		}
+	}
+	if total > maxSessionContextBytes {
+		t.Fatalf("bounded messages use %d bytes, want <= %d", total, maxSessionContextBytes)
+	}
+	if !foundCurrent {
+		t.Fatalf("final user message missing from %#v", messages)
+	}
+	if len(messages) != 1 || strings.Contains(messages[0].Content, "old question") {
+		t.Fatalf("history is not a contiguous suffix: %#v", messages)
+	}
+}
+
+func TestBuildInitialMessagesPreservesOversizedTaskPrompt(t *testing.T) {
+	prompt := strings.Repeat("p", 128<<10)
+	messages := buildInitialMessages(
+		[]llm.Message{{Role: "assistant", Content: "prior context"}},
+		prompt,
+		false,
+		"",
+		"",
+	)
+	if len(messages) == 0 || messages[len(messages)-1].Content != prompt {
+		t.Fatalf("oversized Task prompt was changed: last=%d bytes", len(messages[len(messages)-1].Content))
+	}
+}
+
+func TestBuildInitialMessagesDropsLeadingOrphanAssistant(t *testing.T) {
+	messages := buildInitialMessages([]llm.Message{
+		{Role: roleUser, Content: strings.Repeat("q", 96<<10)},
+		{Role: "assistant", Content: "orphaned reply"},
+		{Role: roleUser, Content: "current question"},
+	}, "current question", true, "", "")
+	if len(messages) != 1 || messages[0].Role != roleUser || messages[0].Content != "current question" {
+		t.Fatalf("bounded turn history = %#v, want only the complete current user turn", messages)
+	}
+}
+
+func TestParseSessionContextIncludesGatewaySenderProvenance(t *testing.T) {
+	encoded, err := json.Marshal(store.SessionMessage{
+		Role: roleUser, Content: "current", SourceType: "gateway-event",
+		Metadata: map[string]string{
+			"senderId": "user-1", "senderDisplayName": "User One", "accountId": "acct", "contextId": "room",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := parseSessionContext(append(encoded, '\n'))
+	if len(messages) != 1 || messages[0].Role != roleUser {
+		t.Fatalf("parseSessionContext() = %#v", messages)
+	}
+	for _, want := range []string{`senderId="user-1"`, `senderDisplayName="User One"`, `contextId="room"`, "current"} {
+		if !strings.Contains(messages[0].Content, want) {
+			t.Fatalf("parsed content = %q, want %q", messages[0].Content, want)
+		}
 	}
 }

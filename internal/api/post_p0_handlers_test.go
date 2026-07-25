@@ -12,15 +12,19 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/events"
 	forkcontext "github.com/orka-agents/orka/internal/fork"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tasktrace"
@@ -54,13 +58,13 @@ func (f *postP0FakeSessionStore) DeleteSession(ctx context.Context, namespace, n
 	delete(f.records, f.key(namespace, name))
 	return nil
 }
-func (f *postP0FakeSessionStore) AcquireLock(ctx context.Context, namespace, name, taskName string) error {
+func (f *postP0FakeSessionStore) AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
 	return nil
 }
-func (f *postP0FakeSessionStore) ReleaseLock(ctx context.Context, namespace, name, taskName string) error {
+func (f *postP0FakeSessionStore) ReleaseLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
 	return nil
 }
-func (f *postP0FakeSessionStore) IsLocked(ctx context.Context, namespace, name, currentTask string) (bool, error) {
+func (f *postP0FakeSessionStore) IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string) (bool, error) {
 	return false, nil
 }
 func (f *postP0FakeSessionStore) AppendMessages(ctx context.Context, namespace, name string, messages []store.SessionMessage) error {
@@ -68,6 +72,9 @@ func (f *postP0FakeSessionStore) AppendMessages(ctx context.Context, namespace, 
 }
 func (f *postP0FakeSessionStore) LoadTranscript(ctx context.Context, namespace, name string, maxMessages int) ([]store.SessionMessage, error) {
 	return nil, nil
+}
+func (f *postP0FakeSessionStore) LoadTranscriptThrough(ctx context.Context, namespace, name, throughMessageID string, maxMessages int) ([]store.SessionMessage, error) {
+	return f.LoadTranscript(ctx, namespace, name, maxMessages)
 }
 func (f *postP0FakeSessionStore) SearchTranscript(ctx context.Context, filter store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error) {
 	return nil, nil
@@ -126,6 +133,30 @@ func TestListSessionEventsAggregatesTaskEvents(t *testing.T) {
 	}
 	if listed.LatestSeq != 3 || len(listed.Events) != 2 || listed.Events[0].Seq != 2 || listed.Events[0].TaskName != "task-b" || listed.Events[0].TaskSeq != 1 {
 		t.Fatalf("listed = %#v", listed)
+	}
+}
+
+func TestSessionEventEndpointsHideGatewaySessions(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	h, app := setupPostP0Handlers(t, eventStore, &postP0FakeSessionStore{records: map[string]*store.SessionRecord{
+		"default/gateway-session": {
+			Namespace: "default", Name: "gateway-session", SessionType: store.SessionTypeGateway,
+		},
+	}})
+	app.Get("/api/v1/sessions/:id/events", h.ListSessionEvents)
+	app.Get("/api/v1/sessions/:id/stream", h.StreamSessionEvents)
+
+	for _, path := range []string{
+		"/api/v1/sessions/gateway-session/events?namespace=default",
+		"/api/v1/sessions/gateway-session/stream?namespace=default",
+	} {
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil))
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s status=%d, want %d", path, resp.StatusCode, http.StatusNotFound)
+		}
 	}
 }
 
@@ -665,6 +696,106 @@ func TestForkTaskAPI(t *testing.T) {
 	}
 }
 
+func TestForkTaskAPIDetachesGatewaySession(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "gateway-source", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "gateway-source")
+	source.Spec.Type = corev1alpha1.TaskTypeAgent
+	source.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: "gateway.orka.ai/default/namespace-uid/chat/gateway-uid"}
+	source.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "gateway-transaction"}
+	source.Labels = map[string]string{gatewayruntime.TaskGatewayEventLabel: "gateway-event"}
+	source.Annotations = map[string]string{
+		gatewayruntime.TaskGatewayEventAnnotation: "gateway-event",
+		gatewayruntime.TaskGatewayNameAnnotation:  "chat",
+	}
+	source.Spec.SessionRef = &corev1alpha1.SessionReference{
+		Name: "gateway-session", Create: false, Append: false,
+		MaxMessages: 50, ThroughMessageID: "gateway:message:user", PromptIncluded: true,
+	}
+	sessionStore := &postP0FakeSessionStore{records: map[string]*store.SessionRecord{
+		"default/gateway-session": {
+			Namespace: "default", Name: "gateway-session", SessionType: store.SessionTypeGateway,
+		},
+	}}
+	h, app := setupPostP0Handlers(t, eventStore, sessionStore, source,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: types.UID("namespace-uid")}},
+		&gatewayv1alpha1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: "default", UID: types.UID("gateway-uid")}},
+	)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/tasks/gateway-source/fork?namespace=default",
+		bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"gateway-fork","prompt":"continue independently"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	created := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "gateway-fork"}, created); err != nil {
+		t.Fatalf("get created: %v", err)
+	}
+	if created.Spec.SessionRef != nil {
+		t.Fatalf("created sessionRef = %#v, want gateway Session detached", created.Spec.SessionRef)
+	}
+	if created.Spec.RequestedBy != nil || created.Spec.Transaction != nil {
+		t.Fatalf("created gateway provenance = requestedBy:%#v transaction:%#v, want detached", created.Spec.RequestedBy, created.Spec.Transaction)
+	}
+	if _, owned := gatewayruntime.TaskIdentity(created); owned {
+		t.Fatalf("created fork still has gateway ownership: labels=%#v annotations=%#v", created.Labels, created.Annotations)
+	}
+	forkEvents, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace: "default", StreamID: "gateway-fork",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(forkEvents) != 1 || forkEvents[0].SessionName != "" {
+		t.Fatalf("fork events = %#v, want no gateway Session association", forkEvents)
+	}
+	sessionEvents, _, err := eventStore.ListSessionExecutionEvents(context.Background(), store.SessionExecutionEventFilter{
+		Namespace: "default", SessionName: "gateway-session",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessionEvents) != 2 {
+		t.Fatalf("gateway Session events = %#v, want only source fork request/created events", sessionEvents)
+	}
+}
+
+func TestResolveForkSessionNamesDetachesGatewayOwnershipWhenSessionMissing(t *testing.T) {
+	source := testTask("default", "gateway-missing-session-source")
+	source.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: "gateway.orka.ai/default/namespace-uid/chat/gateway-uid"}
+	source.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "gateway-transaction"}
+	source.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "missing-gateway-session", PromptIncluded: true, ThroughMessageID: "gateway:event:user"}
+	source.Labels = map[string]string{gatewayruntime.TaskGatewayEventLabel: "gateway-event"}
+	source.Annotations = map[string]string{
+		gatewayruntime.TaskGatewayEventAnnotation: "gateway-event",
+		gatewayruntime.TaskGatewayNameAnnotation:  "chat",
+	}
+	forked := source.DeepCopy()
+	forked.Name = "detached-fork"
+	h := &Handlers{sessionStore: &postP0FakeSessionStore{records: map[string]*store.SessionRecord{}}}
+	sourceSession, forkedSession, err := h.resolveForkSessionNames(context.Background(), "default", source, forked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceSession != "missing-gateway-session" || forkedSession != "" {
+		t.Fatalf("session names = (%q, %q)", sourceSession, forkedSession)
+	}
+	if forked.Spec.SessionRef != nil || forked.Spec.RequestedBy != nil || forked.Spec.Transaction != nil {
+		t.Fatalf("fork retained gateway spec provenance: %+v", forked.Spec)
+	}
+	if _, owned := gatewayruntime.TaskIdentity(forked); owned {
+		t.Fatalf("fork retained gateway metadata: labels=%#v annotations=%#v", forked.Labels, forked.Annotations)
+	}
+}
+
 func TestForkTaskAPIDoesNotAppendRequestEventWhenCreateFails(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "source-task", events.ExecutionEventTypeTaskStarted)
@@ -1018,6 +1149,8 @@ func setupPostP0Handlers(t *testing.T, eventStore store.ExecutionEventStore, ses
 	t.Helper()
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
+	_ = gatewayv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	h := NewHandlers(HandlersConfig{Client: fakeClient, ExecutionEventStore: eventStore, SessionStore: sessionStore})
 	app := fiber.New()

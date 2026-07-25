@@ -26,6 +26,7 @@ Available Commands:
   auth        Inspect authentication
   completion  Generate the autocompletion script for the specified shell
   config      Manage CLI configuration
+  gateway     Inspect generic gateway resources and durable event delivery
   help        Help about any command
   login       Authenticate with the Orka dashboard
   memory      Manage durable memory
@@ -3037,6 +3038,398 @@ Usage:
 
 Flags:
   -h, --help   help for delete
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka gateway`
+
+```text
+Inspect generic gateway resources and durable event delivery
+
+Usage:
+  orka gateway [command]
+
+Available Commands:
+  binding     Inspect GatewayBinding routes
+  class       Inspect cluster-scoped GatewayClass profiles
+  deliveries  Inspect and retry durable gateway deliveries
+  events      Inspect durable normalized gateway ingress events
+  get         Get a gateway resource
+  list        List gateway resources
+
+Flags:
+  -h, --help   help for gateway
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+
+Use "orka gateway [command] --help" for more information about a command.
+```
+
+## `orka gateway list`
+
+```text
+List gateway resources
+
+Usage:
+  orka gateway list [flags]
+
+Flags:
+      --continue string   Continue/cursor token for the next page
+      --cursor string     Cursor token for the next page
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 100)
+  -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka gateway get`
+
+```text
+Get a gateway resource
+
+Usage:
+  orka gateway get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka gateway class`
+
+```text
+Inspect cluster-scoped GatewayClass profiles
+
+Usage:
+  orka gateway class [command]
+
+Available Commands:
+  get         Get a gateway class resource
+  list        List gateway class resources
+
+Flags:
+  -h, --help   help for class
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+
+Use "orka gateway class [command] --help" for more information about a command.
+```
+
+## `orka gateway class list`
+
+```text
+List gateway class resources
+
+Usage:
+  orka gateway class list [flags]
+
+Flags:
+      --continue string   Continue/cursor token for the next page
+      --cursor string     Cursor token for the next page
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 100)
+  -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka gateway class get`
+
+```text
+Get a gateway class resource
+
+Usage:
+  orka gateway class get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka gateway binding`
+
+```text
+Inspect GatewayBinding routes
+
+Usage:
+  orka gateway binding [command]
+
+Available Commands:
+  get         Get a gateway binding resource
+  list        List gateway binding resources
+
+Flags:
+  -h, --help   help for binding
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+
+Use "orka gateway binding [command] --help" for more information about a command.
+```
+
+## `orka gateway binding list`
+
+```text
+List gateway binding resources
+
+Usage:
+  orka gateway binding list [flags]
+
+Flags:
+      --continue string   Continue/cursor token for the next page
+      --cursor string     Cursor token for the next page
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 100)
+  -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka gateway binding get`
+
+```text
+Get a gateway binding resource
+
+Usage:
+  orka gateway binding get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka gateway events`
+
+```text
+Inspect durable normalized gateway ingress events
+
+Usage:
+  orka gateway events [command]
+
+Available Commands:
+  get         Get a gateway event resource
+  list        List gateway event resources
+
+Flags:
+  -h, --help   help for events
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+
+Use "orka gateway events [command] --help" for more information about a command.
+```
+
+## `orka gateway events list`
+
+```text
+List gateway event resources
+
+Usage:
+  orka gateway events list [flags]
+
+Flags:
+      --binding string    Filter by GatewayBinding name
+      --continue string   Continue/cursor token for the next page
+      --cursor string     Cursor token for the next page
+      --gateway string    Filter by Gateway name
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 100)
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --session string    Filter by Session name
+      --state string      Filter by comma-separated event state
+      --task string       Filter by Task name
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka gateway events get`
+
+```text
+Get a gateway event resource
+
+Usage:
+  orka gateway events get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka gateway deliveries`
+
+```text
+Inspect and retry durable gateway deliveries
+
+Usage:
+  orka gateway deliveries [command]
+
+Available Commands:
+  get         Get a gateway delivery resource
+  list        List gateway delivery resources
+  retry       Retry a dead-lettered gateway delivery
+
+Flags:
+  -h, --help   help for deliveries
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+
+Use "orka gateway deliveries [command] --help" for more information about a command.
+```
+
+## `orka gateway deliveries list`
+
+```text
+List gateway delivery resources
+
+Usage:
+  orka gateway deliveries list [flags]
+
+Flags:
+      --binding string    Filter by GatewayBinding name
+      --continue string   Continue/cursor token for the next page
+      --cursor string     Cursor token for the next page
+      --event string      Filter by gateway event ID
+      --gateway string    Filter by Gateway name
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 100)
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --session string    Filter by Session name
+      --state string      Filter by comma-separated delivery state
+      --task string       Filter by Task name
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka gateway deliveries get`
+
+```text
+Get a gateway delivery resource
+
+Usage:
+  orka gateway deliveries get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka gateway deliveries retry`
+
+```text
+Retry a dead-lettered gateway delivery
+
+Usage:
+  orka gateway deliveries retry <delivery-id> [flags]
+
+Flags:
+  -h, --help            help for retry
+  -o, --output string   Output format: table, json, yaml (default "json")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

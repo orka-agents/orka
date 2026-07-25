@@ -1,0 +1,45 @@
+{{- $issuerPrefix := "gateway.orka.ai/" -}}
+{{- if .Values.controller.watchNamespace -}}
+{{- $issuerPrefix = printf "gateway.orka.ai/%s/" .Values.controller.watchNamespace -}}
+{{- end -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-gateway-task-protection
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["core.orka.ai"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["tasks", "tasks/status"]
+  matchConditions:
+    - name: owned-gateway-task
+      expression: >-
+        (request.operation == 'CREATE' && has(object.spec.requestedBy) && object.spec.requestedBy.issuer.startsWith('{{ $issuerPrefix }}')) ||
+        ((request.operation == 'UPDATE' || request.operation == 'DELETE') && has(oldObject.spec.requestedBy) && oldObject.spec.requestedBy.issuer.startsWith('{{ $issuerPrefix }}'))
+  validations:
+    - expression: >-
+        (request.operation == 'DELETE' &&
+          (request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector' ||
+           request.userInfo.username == 'system:serviceaccount:kube-system:garbage-collector' ||
+           request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller' ||
+           request.userInfo.username == 'system:kube-controller-manager')) ||
+        request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:{{ include "orka.serviceAccountName" . }}' ||
+        request.userInfo.username == 'system:serviceaccount:' + (request.operation == 'CREATE' ? object.spec.requestedBy.issuer : oldObject.spec.requestedBy.issuer).split('/')[1] + ':orka-ai-worker' ||
+        request.userInfo.username == 'system:serviceaccount:' + (request.operation == 'CREATE' ? object.spec.requestedBy.issuer : oldObject.spec.requestedBy.issuer).split('/')[1] + ':orka-vendor-worker' ||
+        request.userInfo.username == 'system:serviceaccount:' + (request.operation == 'CREATE' ? object.spec.requestedBy.issuer : oldObject.spec.requestedBy.issuer).split('/')[1] + ':orka-container-worker'
+      message: gateway-owned Tasks may only be managed by the owning Orka controller, trusted workers, or Kubernetes cleanup controllers
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-gateway-task-protection
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "orka.fullname" . }}-gateway-task-protection
+  validationActions: [Deny]

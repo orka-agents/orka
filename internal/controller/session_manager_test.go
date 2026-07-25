@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -626,6 +627,40 @@ func TestSessionManager_AppendMessages_WithPromptAndResult(t *testing.T) {
 	}
 }
 
+func TestSessionManager_AppendMessages_PromptIncludedSkipsDuplicateUserMessage(t *testing.T) {
+	sm, ss := setupSessionManager()
+	ctx := context.Background()
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "prompt-included-session", SessionType: "task",
+	}))
+	require.NoError(t, ss.AppendMessages(ctx, "default", "prompt-included-session", []store.SessionMessage{{
+		Role: "user", Content: "canonical transcript prompt", Timestamp: time.Now(),
+	}}))
+	require.NoError(t, ss.SaveResult(ctx, defaultNS, testTask, []byte("assistant result")))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Prompt: "must not be appended again",
+			SessionRef: &corev1alpha1.SessionReference{
+				Name: "prompt-included-session", Append: true, PromptIncluded: true,
+				ThroughMessageID: "canonical:user",
+			},
+		},
+		Status: corev1alpha1.TaskStatus{ResultRef: &corev1alpha1.ResultReference{Available: true}},
+	}
+	if err := sm.AppendMessages(ctx, task, ss); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := ss.LoadTranscript(ctx, "default", "prompt-included-session", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[0].Content != "canonical transcript prompt" ||
+		messages[1].Role != "assistant" || messages[1].Content != "assistant result" {
+		t.Fatalf("messages = %#v, want canonical user plus assistant only", messages)
+	}
+}
+
 func TestSessionManager_AppendMessages_NilResultStore(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
@@ -707,5 +742,54 @@ func TestSessionManager_AppendMessages_NoPromptNoResult(t *testing.T) {
 	}
 	if len(msgs) != 0 {
 		t.Errorf("expected 0 messages, got %d", len(msgs))
+	}
+}
+
+func TestSessionManagerLoadsTranscriptThroughStableMessageID(t *testing.T) {
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ss := sqlite.NewStore(db, ":memory:")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "cutoff-session", SessionType: "gateway", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ss.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{Event: store.GatewayEvent{
+		ID: "gateway-event", Namespace: "default", NamespaceUID: "namespace-uid", GatewayUID: "gateway-uid", GatewayGeneration: 1, GatewayName: "chat",
+		BindingName: "room", BindingUID: "binding-uid", ExternalEventID: "external-event",
+		ProtocolVersion: "orka.gateway.v1", EventType: "text", State: store.GatewayEventTaskCreated,
+		AccountID: "acct", ContextID: "room", SenderID: "sender", Text: "current",
+		ReplyTarget: "room", SessionName: "cutoff-session", TaskName: "task", TaskUID: "task-uid",
+		ReceivedAt: now, NextAttemptAt: now, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ss.AppendMessages(ctx, "default", "cutoff-session", []store.SessionMessage{
+		{ID: "prior-user", Order: 2, Role: "user", Content: "first"},
+		{ID: "prior-assistant", Order: 3, Role: "assistant", Content: "reply"},
+		{ID: store.GatewayUserMessageID("gateway-event"), Order: 4, Role: "user", Content: "current"},
+		{ID: "future-user", Order: 6, Role: "user", Content: "future"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewSessionManager(ss)
+	manager.SetGatewayEventStore(ss)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid"},
+		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{
+			Name: "mutated-session", MaxMessages: 1, ThroughMessageID: "future-user",
+		}},
+	}
+	messages, err := manager.LoadTranscript(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 || messages[0].Content != "first" || messages[1].Content != "reply" || messages[2].Content != "current" {
+		t.Fatalf("cutoff transcript = %#v", messages)
 	}
 }

@@ -1,3 +1,19 @@
+{{- $gatewayCRDsReady := false -}}
+{{- if and .Values.controller.gateway.enabled (not .Values.controller.gateway.crdsReadyOverride) -}}
+{{- $gatewayClassCRD := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gatewayclasses.gateway.orka.ai" -}}
+{{- $gatewayCRD := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gateways.gateway.orka.ai" -}}
+{{- $gatewayBindingCRD := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gatewaybindings.gateway.orka.ai" -}}
+{{- $taskCRD := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "tasks.core.orka.ai" -}}
+{{- $taskSchemaReady := false -}}
+{{- if $taskCRD -}}
+{{- $taskSchemaReady = eq (get (default (dict) $taskCRD.metadata.annotations) "gateway.orka.ai/session-cutoff-schema") "v1" -}}
+{{- end -}}
+{{- $gatewayCRDsReady = and (not (empty $gatewayClassCRD)) (not (empty $gatewayCRD)) (not (empty $gatewayBindingCRD)) $taskSchemaReady -}}
+{{- end -}}
+{{- $gatewayRuntimeEnabled := and .Values.controller.gateway.enabled (or .Values.controller.gateway.crdsReadyOverride $gatewayCRDsReady) -}}
+{{- if and $gatewayRuntimeEnabled (not .Values.store.persistence.enabled) (not .Values.controller.gateway.allowEphemeralStore) -}}
+{{- fail "controller.gateway.enabled requires store.persistence.enabled=true; set controller.gateway.allowEphemeralStore=true only for disposable development" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,6 +60,17 @@ spec:
             {{- end }}
             - --leader-elect={{ .Values.controller.leaderElect }}
             - --zap-log-level={{ .Values.controller.logLevel }}
+            - --gateway-enabled={{ $gatewayRuntimeEnabled }}
+            - --gateway-pending-per-session={{ .Values.controller.gateway.pendingPerSession }}
+            - --gateway-max-records-per-gateway={{ .Values.controller.gateway.maxRecordsPerGateway }}
+            - --gateway-max-rejected-records-per-gateway={{ .Values.controller.gateway.maxRejectedRecordsPerGateway }}
+            - --gateway-event-expiry={{ .Values.controller.gateway.eventExpiry }}
+            - --gateway-terminal-retention={{ .Values.controller.gateway.terminalRetention }}
+            - --gateway-delivery-timeout={{ .Values.controller.gateway.deliveryTimeout }}
+            - --gateway-delivery-max-attempts={{ .Values.controller.gateway.deliveryMaxAttempts }}
+            - --gateway-claim-lease={{ .Values.controller.gateway.claimLease }}
+            - --gateway-poll-interval={{ .Values.controller.gateway.pollInterval }}
+            - --gateway-batch-size={{ .Values.controller.gateway.batchSize }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}
             - {{ printf "--oidc-issuer=%s" .issuer | quote }}
@@ -146,6 +173,12 @@ spec:
             {{- end }}
             {{- if .skillWrite }}
             - {{ printf "--context-token-skill-write-scopes=%s" .skillWrite | quote }}
+            {{- end }}
+            {{- if .gatewayRead }}
+            - {{ printf "--context-token-gateway-read-scopes=%s" .gatewayRead | quote }}
+            {{- end }}
+            {{- if .gatewayOperate }}
+            - {{ printf "--context-token-gateway-operate-scopes=%s" .gatewayOperate | quote }}
             {{- end }}
             {{- end }}
             {{- with .tts }}

@@ -65,6 +65,7 @@ func NewDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+//nolint:gocyclo // schema migrations intentionally keep ordered, fail-fast upgrade steps in one transaction boundary
 func migrate(db *sql.DB) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS results (
@@ -79,8 +80,11 @@ func migrate(db *sql.DB) error {
 			namespace     TEXT NOT NULL,
 			name          TEXT NOT NULL,
 			session_type  TEXT NOT NULL DEFAULT 'task',
-			active_task   TEXT NOT NULL DEFAULT '',
-			message_count INTEGER NOT NULL DEFAULT 0,
+			owner_type    TEXT NOT NULL DEFAULT '',
+			owner_ref     TEXT NOT NULL DEFAULT '',
+			active_task     TEXT NOT NULL DEFAULT '',
+			active_task_uid TEXT NOT NULL DEFAULT '',
+			message_count   INTEGER NOT NULL DEFAULT 0,
 			input_tokens  INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
 			cancelled     BOOLEAN NOT NULL DEFAULT FALSE,
@@ -92,12 +96,17 @@ func migrate(db *sql.DB) error {
 			id           INTEGER PRIMARY KEY AUTOINCREMENT,
 			namespace    TEXT NOT NULL,
 			session_name TEXT NOT NULL,
+			message_id   TEXT NOT NULL DEFAULT '',
+			sort_order   INTEGER NOT NULL DEFAULT 0,
 			role         TEXT NOT NULL,
 			content      TEXT NOT NULL DEFAULT '',
 			name         TEXT,
 			input        TEXT,
 			tool_calls   TEXT,
 			tool_call_id TEXT,
+			source_type  TEXT NOT NULL DEFAULT '',
+			source_ref   TEXT NOT NULL DEFAULT '',
+			metadata_json TEXT NOT NULL DEFAULT '{}',
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (namespace, session_name) REFERENCES sessions(namespace, name) ON DELETE CASCADE
 		)`,
@@ -567,12 +576,208 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_monitor_events_monitor
 			ON monitor_events(monitor_namespace, monitor_name, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS gateway_events (
+			id                    TEXT NOT NULL,
+			namespace             TEXT NOT NULL,
+			namespace_uid         TEXT NOT NULL DEFAULT '',
+			gateway_uid           TEXT NOT NULL,
+			gateway_generation    INTEGER NOT NULL DEFAULT 0,
+			gateway_name          TEXT NOT NULL,
+			binding_name          TEXT NOT NULL DEFAULT '',
+			binding_uid           TEXT NOT NULL DEFAULT '',
+			binding_generation    INTEGER NOT NULL DEFAULT 0,
+			agent_name            TEXT NOT NULL DEFAULT '',
+			agent_uid             TEXT NOT NULL DEFAULT '',
+			external_event_id     TEXT NOT NULL,
+			protocol_version      TEXT NOT NULL,
+			event_type            TEXT NOT NULL,
+			state                 TEXT NOT NULL,
+			state_message         TEXT NOT NULL DEFAULT '',
+			account_id            TEXT NOT NULL,
+			context_id            TEXT NOT NULL,
+			thread_id             TEXT NOT NULL DEFAULT '',
+			sender_id             TEXT NOT NULL,
+			sender_display_name   TEXT NOT NULL DEFAULT '',
+			text                  TEXT NOT NULL DEFAULT '',
+			reply_target          TEXT NOT NULL DEFAULT '',
+			metadata_json         TEXT NOT NULL DEFAULT '{}',
+			session_name          TEXT NOT NULL DEFAULT '',
+			 task_name             TEXT NOT NULL DEFAULT '',
+			 task_uid              TEXT NOT NULL DEFAULT '',
+			 delivery_id           TEXT NOT NULL DEFAULT '',
+			 provider_message_id    TEXT NOT NULL DEFAULT '',
+			 trace_parent          TEXT NOT NULL DEFAULT '',
+			 trace_state           TEXT NOT NULL DEFAULT '',
+			 transcript_order      INTEGER NOT NULL DEFAULT 0,
+			attempt_count         INTEGER NOT NULL DEFAULT 0,
+			claim_owner           TEXT NOT NULL DEFAULT '',
+			claim_until           TIMESTAMP,
+			next_attempt_at       TIMESTAMP NOT NULL,
+			occurred_at           TIMESTAMP,
+			received_at           TIMESTAMP NOT NULL,
+			expires_at            TIMESTAMP NOT NULL,
+			created_at            TIMESTAMP NOT NULL,
+			updated_at            TIMESTAMP NOT NULL,
+			completed_at          TIMESTAMP,
+			PRIMARY KEY (namespace, id),
+			UNIQUE(namespace, gateway_uid, external_event_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_events_dispatch
+			ON gateway_events(state, next_attempt_at, received_at, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_events_session
+			ON gateway_events(namespace, session_name, state, received_at, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_events_task_owner
+			ON gateway_events(namespace, session_name, task_name, created_at DESC, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_events_task_identity
+			ON gateway_events(namespace, task_name, task_uid, state, created_at DESC, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_events_gateway
+			ON gateway_events(namespace, gateway_name, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS gateway_event_tombstones (
+			namespace          TEXT NOT NULL,
+			gateway_uid        TEXT NOT NULL,
+			external_event_id  TEXT NOT NULL,
+			event_id           TEXT NOT NULL,
+			task_name          TEXT NOT NULL DEFAULT '',
+			task_uid           TEXT NOT NULL DEFAULT '',
+			envelope_digest    TEXT NOT NULL,
+			session_name       TEXT NOT NULL DEFAULT '',
+			transcript_order   INTEGER NOT NULL DEFAULT 0,
+			expires_at         TIMESTAMP NOT NULL,
+			created_at         TIMESTAMP NOT NULL,
+			PRIMARY KEY (namespace, gateway_uid, external_event_id),
+			UNIQUE(namespace, event_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_event_tombstones_expiry
+			ON gateway_event_tombstones(namespace, expires_at)`,
+		`CREATE TABLE IF NOT EXISTS gateway_deliveries (
+			id                    TEXT NOT NULL,
+			idempotency_id        TEXT NOT NULL,
+			namespace             TEXT NOT NULL,
+			namespace_uid         TEXT NOT NULL DEFAULT '',
+			gateway_uid           TEXT NOT NULL,
+			gateway_generation    INTEGER NOT NULL DEFAULT 0,
+			gateway_name          TEXT NOT NULL,
+			binding_name          TEXT NOT NULL DEFAULT '',
+			event_id              TEXT NOT NULL,
+			task_name             TEXT NOT NULL DEFAULT '',
+			session_name          TEXT NOT NULL DEFAULT '',
+			kind                  TEXT NOT NULL,
+			state                 TEXT NOT NULL,
+			account_id            TEXT NOT NULL,
+			context_id            TEXT NOT NULL,
+			thread_id             TEXT NOT NULL DEFAULT '',
+			reply_target          TEXT NOT NULL,
+			text                  TEXT NOT NULL,
+			metadata_json         TEXT NOT NULL DEFAULT '{}',
+			attempt_count         INTEGER NOT NULL DEFAULT 0,
+			max_attempts          INTEGER NOT NULL DEFAULT 10,
+			manual_retry_count    INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at       TIMESTAMP NOT NULL,
+			expires_at            TIMESTAMP NOT NULL,
+			 provider_message_id   TEXT NOT NULL DEFAULT '',
+			 trace_parent          TEXT NOT NULL DEFAULT '',
+			 trace_state           TEXT NOT NULL DEFAULT '',
+			 last_error            TEXT NOT NULL DEFAULT '',
+			claim_owner           TEXT NOT NULL DEFAULT '',
+			claim_until           TIMESTAMP,
+			created_at            TIMESTAMP NOT NULL,
+			updated_at            TIMESTAMP NOT NULL,
+			delivered_at          TIMESTAMP,
+			PRIMARY KEY (namespace, id),
+			UNIQUE(namespace, idempotency_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_deliveries_send
+			ON gateway_deliveries(state, next_attempt_at, created_at, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_deliveries_event
+			ON gateway_deliveries(namespace, event_id, created_at, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_deliveries_gateway
+			ON gateway_deliveries(namespace, gateway_name, created_at DESC)`,
 	}
 
 	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("migration failed: %w", err)
 		}
+	}
+
+	if err := ensureSQLiteColumns(db, "sessions", []sqliteColumnMigration{
+		{Name: "owner_type", Definition: "owner_type TEXT NOT NULL DEFAULT ''"},
+		{Name: "owner_ref", Definition: "owner_ref TEXT NOT NULL DEFAULT ''"},
+		{Name: "active_task_uid", Definition: "active_task_uid TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE sessions SET active_task_uid = COALESCE((
+		SELECT event.task_uid FROM gateway_events event
+		WHERE event.namespace = sessions.namespace AND event.session_name = sessions.name
+		  AND event.task_name = sessions.active_task AND event.state = 'TaskCreated' AND event.task_uid <> ''
+		ORDER BY event.created_at DESC, event.id DESC LIMIT 1
+	), '') WHERE active_task <> '' AND active_task_uid = ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if err := ensureSQLiteColumns(db, "gateway_events", []sqliteColumnMigration{
+		{Name: "namespace_uid", Definition: "namespace_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "gateway_generation", Definition: "gateway_generation INTEGER NOT NULL DEFAULT 0"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureGatewayEventTombstoneSchema(db); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "gateway_deliveries", []sqliteColumnMigration{
+		{Name: "namespace_uid", Definition: "namespace_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "gateway_generation", Definition: "gateway_generation INTEGER NOT NULL DEFAULT 0"},
+	}); err != nil {
+		return err
+	}
+
+	if err := ensureSQLiteColumns(db, "session_messages", []sqliteColumnMigration{
+		{Name: "message_id", Definition: "message_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "sort_order", Definition: "sort_order INTEGER NOT NULL DEFAULT 0"},
+		{Name: "source_type", Definition: "source_type TEXT NOT NULL DEFAULT ''"},
+		{Name: "source_ref", Definition: "source_ref TEXT NOT NULL DEFAULT ''"},
+		{Name: "metadata_json", Definition: "metadata_json TEXT NOT NULL DEFAULT '{}'"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE session_messages SET message_id = 'legacy:' || id WHERE message_id = ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE session_messages SET sort_order = id * 2 WHERE sort_order = 0`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_message_id
+		ON session_messages(namespace, session_name, message_id) WHERE message_id <> ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_session_messages_namespace_message_id
+		ON session_messages(namespace, message_id) WHERE message_id <> ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_sort_order
+		ON session_messages(namespace, session_name, sort_order) WHERE sort_order > 0`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+
+	if err := ensureSQLiteColumns(db, "gateway_events", []sqliteColumnMigration{
+		{Name: "transcript_order", Definition: "transcript_order INTEGER NOT NULL DEFAULT 0"},
+		{Name: "binding_uid", Definition: "binding_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "binding_generation", Definition: "binding_generation INTEGER NOT NULL DEFAULT 0"},
+		{Name: "agent_name", Definition: "agent_name TEXT NOT NULL DEFAULT ''"},
+		{Name: "agent_uid", Definition: "agent_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "task_uid", Definition: "task_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "delivery_id", Definition: "delivery_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "provider_message_id", Definition: "provider_message_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "trace_parent", Definition: "trace_parent TEXT NOT NULL DEFAULT ''"},
+		{Name: "trace_state", Definition: "trace_state TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "gateway_deliveries", []sqliteColumnMigration{
+		{Name: "trace_parent", Definition: "trace_parent TEXT NOT NULL DEFAULT ''"},
+		{Name: "trace_state", Definition: "trace_state TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
 	}
 
 	if err := ensureSQLiteColumns(db, "execution_events", []sqliteColumnMigration{
@@ -688,6 +893,20 @@ func backfillExecutionEventSessionCursors(db *sql.DB) error {
 				ELSE excluded.latest_seq
 			END`)
 	if err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	return nil
+}
+
+func ensureGatewayEventTombstoneSchema(db *sql.DB) error {
+	if err := ensureSQLiteColumns(db, "gateway_event_tombstones", []sqliteColumnMigration{
+		{Name: "task_name", Definition: "task_name TEXT NOT NULL DEFAULT ''"},
+		{Name: "task_uid", Definition: "task_uid TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_gateway_event_tombstones_task
+		ON gateway_event_tombstones(namespace, task_name, task_uid)`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 	return nil

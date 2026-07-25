@@ -111,6 +111,8 @@ type ContextTokenAuthorizationConfig struct {
 	MonitorOperateScopes          []string
 	SkillReadScopes               []string
 	SkillWriteScopes              []string
+	GatewayReadScopes             []string
+	GatewayOperateScopes          []string
 	ConfigMapReadScopeList        []string
 }
 
@@ -141,6 +143,8 @@ type ContextTokenAuthorizationConfigOptions struct {
 	MonitorOperateScopes       string
 	SkillReadScopes            string
 	SkillWriteScopes           string
+	GatewayReadScopes          string
+	GatewayOperateScopes       string
 	ConfigMapReadScopes        string
 }
 
@@ -179,6 +183,8 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	monitorOperate := defaultScopes(opts.MonitorOperateScopes, ContextTokenScopeMonitorsOperate)
 	skillRead := defaultScopes(opts.SkillReadScopes, ContextTokenScopeSkillsRead)
 	skillWrite := defaultScopes(opts.SkillWriteScopes, ContextTokenScopeSkillsWrite)
+	gatewayRead := defaultScopes(opts.GatewayReadScopes, ContextScopeGatewaysRead)
+	gatewayOperate := defaultScopes(opts.GatewayOperateScopes, ContextScopeGatewaysOperate)
 	configMapRead := defaultScopes(opts.ConfigMapReadScopes, ContextTokenScopeConfigMapsRead)
 	return ContextTokenAuthorizationConfig{
 		Mode:                          mode,
@@ -205,6 +211,8 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 		MonitorOperateScopes:          monitorOperate,
 		SkillReadScopes:               skillRead,
 		SkillWriteScopes:              skillWrite,
+		GatewayReadScopes:             gatewayRead,
+		GatewayOperateScopes:          gatewayOperate,
 		ConfigMapReadScopeList:        configMapRead,
 	}, nil
 }

@@ -899,14 +899,6 @@ func formatResolvedApprovalsContext(resolved []approvals.ResolvedApproval) strin
 	return sb.String()
 }
 
-func prependResolvedApprovalsContext(prompt string, resolved []approvals.ResolvedApproval) string {
-	section := strings.TrimSpace(formatResolvedApprovalsContext(resolved))
-	if section == "" {
-		return prompt
-	}
-	return section + "\n\n## Task\n\n" + prompt
-}
-
 func prepareApprovalToolContext(baseToolCtx *tools.ToolContext, recorder common.EventRecorder) *tools.ToolContext {
 	if baseToolCtx == nil {
 		return nil

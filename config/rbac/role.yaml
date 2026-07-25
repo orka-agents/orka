@@ -84,6 +84,17 @@ rules:
   - list
   - watch
 - apiGroups:
+  - apiextensions.k8s.io
+  resourceNames:
+  - gatewaybindings.gateway.orka.ai
+  - gatewayclasses.gateway.orka.ai
+  - gateways.gateway.orka.ai
+  - tasks.core.orka.ai
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+- apiGroups:
   - apps
   resources:
   - daemonsets
@@ -228,6 +239,38 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewaybindings
+  - gatewayclasses
+  - gateways
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewaybindings/finalizers
+  - gatewayclasses/finalizers
+  - gateways/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewaybindings/status
+  - gatewayclasses/status
+  - gateways/status
+  verbs:
+  - get
+  - patch
+  - update
 - apiGroups:
   - metrics.k8s.io
   resources:

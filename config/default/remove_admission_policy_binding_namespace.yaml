@@ -1,0 +1,12 @@
+apiVersion: builtin
+kind: PatchTransformer
+metadata:
+  name: remove-admission-policy-binding-namespace
+patch: |-
+  - op: remove
+    path: /metadata/namespace
+target:
+  group: admissionregistration.k8s.io
+  version: v1
+  kind: ValidatingAdmissionPolicyBinding
+  name: gateway-task-protection

@@ -30,6 +30,7 @@ const (
 	ExecutionEventTypeAgentRuntimeFailed            = "AgentRuntimeFailed"
 	ExecutionEventTypeAgentRuntimeCancelled         = "AgentRuntimeCancelled"
 	ExecutionEventTypeResultSubmitted               = "ResultSubmitted"
+	ExecutionEventTypeGatewayDeliveryCompleted      = "GatewayDeliveryCompleted"
 	ExecutionEventTypeArtifactUploadCompleted       = "ArtifactUploadCompleted"
 	ExecutionEventTypeArtifactUploadFailed          = "ArtifactUploadFailed"
 	ExecutionEventTypeTaskForkRequested             = "TaskForkRequested"
@@ -83,6 +84,7 @@ var executionEventTypes = []string{
 	ExecutionEventTypeAgentRuntimeFailed,
 	ExecutionEventTypeAgentRuntimeCancelled,
 	ExecutionEventTypeResultSubmitted,
+	ExecutionEventTypeGatewayDeliveryCompleted,
 	ExecutionEventTypeArtifactUploadCompleted,
 	ExecutionEventTypeArtifactUploadFailed,
 	ExecutionEventTypeTaskForkRequested,

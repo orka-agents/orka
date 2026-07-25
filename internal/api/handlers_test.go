@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
@@ -148,6 +149,7 @@ func setupTestHandlersWithAuthzStore(
 	t.Helper()
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
+	_ = gatewayv1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
@@ -209,6 +211,7 @@ func setupTestHandlersWithAuthzStore(
 func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
+	_ = gatewayv1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
@@ -2413,6 +2416,21 @@ func TestNewHandlers(t *testing.T) {
 	}
 }
 
+type metadataOnlySessionStore struct {
+	store.SessionStore
+	typeReader transcriptSessionTypeReader
+	getCalls   int
+}
+
+func (s *metadataOnlySessionStore) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
+	s.getCalls++
+	return s.SessionStore.GetSession(ctx, namespace, name)
+}
+
+func (s *metadataOnlySessionStore) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
+	return s.typeReader.GetSessionType(ctx, namespace, name)
+}
+
 func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -2459,6 +2477,31 @@ func TestHandlers_ListSessions_Success(t *testing.T) {
 	if !ok || len(items) != 1 {
 		t.Errorf("Expected 1 session, got %v", result.Items)
 	}
+}
+
+func TestHandlers_ListSessions_HidesGatewaySessions(t *testing.T) {
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "ordinary-session", SessionType: "task",
+	}))
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "gateway-session", SessionType: store.SessionTypeGateway,
+	}))
+
+	app.Get("/sessions", handlers.ListSessions)
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result ListResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	items, ok := result.Items.([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	item, ok := items[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "ordinary-session", item["name"])
 }
 
 func TestHandlers_ListSessions_Empty(t *testing.T) {
@@ -2560,6 +2603,41 @@ func TestHandlers_GetSession_Success(t *testing.T) {
 	}
 }
 
+func TestHandlers_GetSession_HidesGatewaySession(t *testing.T) {
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "gateway-session", SessionType: store.SessionTypeGateway,
+	}))
+	require.NoError(t, ss.AppendMessages(ctx, "default", "gateway-session", []store.SessionMessage{{
+		Role: "user", Content: "private gateway message",
+	}}))
+
+	app.Get("/sessions/:id", handlers.GetSession)
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions/gateway-session", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestHandlers_GetSessionRejectsGatewayBeforeLoadingTranscript(t *testing.T) {
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "gateway-metadata-only", SessionType: store.SessionTypeGateway,
+	}))
+	require.NoError(t, ss.AppendMessages(ctx, "default", "gateway-metadata-only", []store.SessionMessage{{
+		Role: "user", Content: strings.Repeat("private", 1024),
+	}}))
+	wrapped := &metadataOnlySessionStore{SessionStore: ss, typeReader: ss}
+	handlers.sessionStore = wrapped
+	app.Get("/sessions/:id", handlers.GetSession)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions/gateway-metadata-only", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	require.Zero(t, wrapped.getCalls)
+}
+
 func TestHandlers_GetSession_NotFound(t *testing.T) {
 	handlers, app, _ := setupTestHandlersWithSessionManager()
 	app.Get("/sessions/:id", handlers.GetSession)
@@ -2629,6 +2707,23 @@ func TestHandlers_DeleteSession_Success(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
+}
+
+func TestHandlers_DeleteSession_HidesAndPreservesGatewaySession(t *testing.T) {
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "gateway-session", SessionType: store.SessionTypeGateway,
+	}))
+
+	app.Delete("/sessions/:id", handlers.DeleteSession)
+	resp, err := app.Test(httptest.NewRequest(http.MethodDelete, "/sessions/gateway-session", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	session, err := ss.GetSession(ctx, "default", "gateway-session")
+	require.NoError(t, err)
+	require.Equal(t, store.SessionTypeGateway, session.SessionType)
 }
 
 func TestHandlers_DeleteSession_NotFound(t *testing.T) {

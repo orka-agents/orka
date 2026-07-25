@@ -701,8 +701,6 @@ Key configuration values for the Helm chart:
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
-| `crds.install` | `true` | Install CRDs |
-| `crds.keep` | `true` | Keep CRDs on uninstall |
 | `monitoring.enabled` | `false` | Enable Prometheus ServiceMonitor |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
@@ -726,6 +724,8 @@ controller:
       monitorRead: orka:monitors:read
       monitorWrite: orka:monitors:write
       monitorOperate: orka:monitors:operate
+      gatewayRead: orka:gateways:read
+      gatewayOperate: orka:gateways:operate
     tts:
       url: https://tts.example.com
       audience: orka-workers
@@ -742,7 +742,9 @@ The Helm keys mirror the controller flags: for example,
 `controller.contextToken.scopes.secretRead` renders
 `--context-token-secret-read-scopes`,
 `controller.contextToken.scopes.monitorRead` renders
-`--context-token-monitor-read-scopes`, and
+`--context-token-monitor-read-scopes`,
+`controller.contextToken.scopes.gatewayRead` renders
+`--context-token-gateway-read-scopes`, and
 `controller.contextToken.tts.toolTokenTTL` renders
 `--context-token-tool-token-ttl`.
 
@@ -753,6 +755,17 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--api-port` | `8080` | REST API server port |
+| `--gateway-enabled` | `true` | Enable generic gateway reconciliation and ingress |
+| `--gateway-pending-per-session` | `100` | Maximum pending gateway events per Session |
+| `--gateway-max-records-per-gateway` | `1000` | Maximum retained accepted/dead-letter event records per Gateway before ingress is throttled |
+| `--gateway-max-rejected-records-per-gateway` | `250` | Separate audit budget for rejected events so unauthorized traffic cannot consume operational capacity |
+| `--gateway-event-expiry` | `24h` | Queue and delivery retry expiry |
+| `--gateway-terminal-retention` | `720h` | Terminal event and delivery retention |
+| `--gateway-delivery-timeout` | `15s` | One synchronous adapter delivery timeout |
+| `--gateway-delivery-max-attempts` | `10` | Delivery attempts before dead-lettering |
+| `--gateway-claim-lease` | `1m` | Event and delivery claim lease |
+| `--gateway-poll-interval` | `500ms` | Dispatcher and delivery poll interval |
+| `--gateway-batch-size` | `25` | Maximum gateway records processed per iteration |
 | `--watch-namespace` | `""` | Namespace to watch (empty = all) |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
@@ -797,6 +810,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--context-token-monitor-operate-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_OPERATE_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor manual runs. Defaults to `orka:monitors:operate` |
 | `--context-token-skill-read-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Skill reads. Defaults to `orka:skills:read` |
 | `--context-token-skill-write-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Skill writes. Defaults to `orka:skills:write` |
+| `--context-token-gateway-read-scopes` | `ORKA_CONTEXT_TOKEN_GATEWAY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing gateway resource and ledger reads. Defaults to `orka:gateways:read` |
+| `--context-token-gateway-operate-scopes` | `ORKA_CONTEXT_TOKEN_GATEWAY_OPERATE_SCOPES` env or `""` | Comma-separated scopes authorizing dead-lettered delivery retries. Defaults to `orka:gateways:operate` |
 | `--context-token-tts-url` | `ORKA_CONTEXT_TOKEN_TTS_URL` env or `""` | kontxt TTS base URL for optional token exchange/replacement |
 | `--context-token-tts-audience` | `ORKA_CONTEXT_TOKEN_TTS_AUDIENCE` env or `""` | Audience requested from kontxt TTS exchanges |
 | `--context-token-tts-timeout` | `ORKA_CONTEXT_TOKEN_TTS_TIMEOUT` env or `""` | Timeout for kontxt TTS exchanges. Defaults to `5s` when TTS is enabled |

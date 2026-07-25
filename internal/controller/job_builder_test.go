@@ -543,7 +543,7 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,
 			SessionRef: &corev1alpha1.SessionReference{
-				Name: "test-session",
+				Name: "test-session", PromptIncluded: true, ThroughMessageID: "message-1",
 			},
 		},
 	}
@@ -577,6 +577,49 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 	initContainer := job.Spec.Template.Spec.InitContainers[0]
 	if initContainer.Name != "fetch-session" {
 		t.Errorf("Init container name = %s, want fetch-session", initContainer.Name)
+	}
+	if !hasVolume(job.Spec.Template.Spec.Volumes, "session-token") ||
+		!hasVolumeMount(initContainer.VolumeMounts, "session-token") {
+		t.Fatal("fetch-session init container must receive its projected session token")
+	}
+	if hasVolumeMount(job.Spec.Template.Spec.Containers[0].VolumeMounts, "session-token") {
+		t.Fatal("main worker container must not mount the dedicated session token")
+	}
+	transcriptURL, ok := findEnvVar(initContainer.Env, sessionTranscriptURLEnv)
+	if !ok || !strings.Contains(transcriptURL.Value, "taskName="+testTask) {
+		t.Fatalf("%s env = %#v, want task-aware transcript URL", sessionTranscriptURLEnv, transcriptURL)
+	}
+	if required, ok := findEnvVar(initContainer.Env, sessionTranscriptRequiredEnv); !ok || required.Value != scheduledRunLabelValue {
+		t.Fatalf("%s env = %#v, want true", sessionTranscriptRequiredEnv, required)
+	}
+	if attempts, ok := findEnvVar(initContainer.Env, sessionTranscriptMaxAttemptsEnv); !ok || attempts.Value != "300" {
+		t.Fatalf("%s env = %#v, want 300", sessionTranscriptMaxAttemptsEnv, attempts)
+	}
+	for _, want := range []string{
+		"transcript.jsonl.tmp", `mv "$TMP" "$FINAL"`, "attempt=$((attempt + 1))",
+		`SA_JWT=$(cat "$TOKEN_FILE")`,
+		`"$ORKA_SESSION_TRANSCRIPT_URL"`, `"$ORKA_SESSION_TRANSCRIPT_MAX_ATTEMPTS"`,
+		`if [ "$ORKA_SESSION_TRANSCRIPT_REQUIRED" = "true" ]`, "exit 1",
+	} {
+		if !strings.Contains(initContainer.Command[2], want) {
+			t.Fatalf("fetch-session command = %q, want %q", initContainer.Command[2], want)
+		}
+	}
+	if env, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, workerenv.SessionPromptIncluded); !ok || env.Value != scheduledRunLabelValue {
+		t.Fatalf("%s env = %#v, want true", workerenv.SessionPromptIncluded, env)
+	}
+}
+
+func TestSessionTranscriptFetchCommandAllowsEmptyFallbackOnlyWhenPromptIsNotIncluded(t *testing.T) {
+	command := sessionTranscriptFetchCommand()
+	shortTimeout := &metav1.Duration{Duration: 2 * time.Second}
+	longTimeout := &metav1.Duration{Duration: 2 * time.Minute}
+	if sessionTranscriptMaxAttempts(false, nil) != "5" || sessionTranscriptMaxAttempts(true, nil) != "300" ||
+		sessionTranscriptMaxAttempts(false, shortTimeout) != "1" ||
+		sessionTranscriptMaxAttempts(true, shortTimeout) != "1" ||
+		sessionTranscriptMaxAttempts(true, longTimeout) != "119" ||
+		!strings.Contains(command, `: > "$TMP"`) || !strings.Contains(command, `mv "$TMP" "$FINAL"`) {
+		t.Fatalf("sessionTranscriptFetchCommand() = %q", command)
 	}
 }
 
@@ -617,6 +660,36 @@ func TestJobBuilder_Build_CustomContainerWithSessionKeepsTokenOutOfMainContainer
 	}
 	if !hasVolumeMount(job.Spec.Template.Spec.InitContainers[0].VolumeMounts, "session-token") {
 		t.Fatal("fetch-session init container should mount the session token")
+	}
+	if required, ok := findEnvVar(job.Spec.Template.Spec.InitContainers[0].Env, sessionTranscriptRequiredEnv); !ok || required.Value != "false" {
+		t.Fatalf("%s env = %#v, want false", sessionTranscriptRequiredEnv, required)
+	}
+	if attempts, ok := findEnvVar(job.Spec.Template.Spec.InitContainers[0].Env, sessionTranscriptMaxAttemptsEnv); !ok || attempts.Value != "5" {
+		t.Fatalf("%s env = %#v, want 5", sessionTranscriptMaxAttemptsEnv, attempts)
+	}
+}
+
+func TestJobBuilder_SessionURLIsNotInterpolatedIntoShell(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{
+				Name: "x$(touch /tmp/session-injection)",
+			},
+		},
+	}
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initContainer := job.Spec.Template.Spec.InitContainers[0]
+	if strings.Contains(initContainer.Command[2], "session-injection") {
+		t.Fatalf("session value was interpolated into shell command: %q", initContainer.Command[2])
+	}
+	if transcriptURL, ok := findEnvVar(initContainer.Env, sessionTranscriptURLEnv); !ok || !strings.Contains(transcriptURL.Value, "session-injection") {
+		t.Fatalf("%s env = %#v", sessionTranscriptURLEnv, transcriptURL)
 	}
 }
 

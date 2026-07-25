@@ -20,6 +20,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -32,10 +33,12 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/controller"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	_ "github.com/orka-agents/orka/internal/metrics"
@@ -54,8 +57,10 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 
 	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(gatewayv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(sandboxextv1beta1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
@@ -104,6 +109,17 @@ func main() {
 	var chatMaxTasksPerTurn int
 	var chatMaxSessionSize int
 	var chatMaxPrematureEndRetries int
+	var gatewayEnabled bool
+	var gatewayPendingPerSession int
+	var gatewayMaxRecordsPerGateway int
+	var gatewayMaxRejectedRecordsPerGateway int
+	var gatewayEventExpiry time.Duration
+	var gatewayTerminalRetention time.Duration
+	var gatewayDeliveryTimeout time.Duration
+	var gatewayDeliveryMaxAttempts int
+	var gatewayClaimLease time.Duration
+	var gatewayPollInterval time.Duration
+	var gatewayBatchSize int
 	var aiWorkerImage string
 	var storeBackend string
 	var storePath string
@@ -147,6 +163,8 @@ func main() {
 	var contextTokenMonitorOperateScopes string
 	var contextTokenSkillReadScopes string
 	var contextTokenSkillWriteScopes string
+	var contextTokenGatewayReadScopes string
+	var contextTokenGatewayOperateScopes string
 	var contextTokenTTSURL string
 	var contextTokenTTSAudience string
 	var contextTokenTTSTimeout string
@@ -227,6 +245,27 @@ func main() {
 		"How many times to re-prompt the coordinator with 'continue with tool_use' before accepting a "+
 			"no-tool-use response as the final turn. The model must emit the GOAL_STATE sentinel on its true "+
 			"final turn — see coordinatorSystemPrompt.")
+	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
+	flag.IntVar(&gatewayPendingPerSession, "gateway-pending-per-session", 100,
+		"Maximum pending gateway events per Session.")
+	flag.IntVar(&gatewayMaxRecordsPerGateway, "gateway-max-records-per-gateway", 1000,
+		"Maximum retained gateway event records per Gateway before ingress is throttled.")
+	flag.IntVar(&gatewayMaxRejectedRecordsPerGateway, "gateway-max-rejected-records-per-gateway", 250,
+		"Maximum retained rejected event audit records per Gateway.")
+	flag.DurationVar(&gatewayEventExpiry, "gateway-event-expiry", 24*time.Hour,
+		"Maximum age for queued events and delivery retries.")
+	flag.DurationVar(&gatewayTerminalRetention, "gateway-terminal-retention", 30*24*time.Hour,
+		"Retention for terminal gateway events and deliveries.")
+	flag.DurationVar(&gatewayDeliveryTimeout, "gateway-delivery-timeout", 15*time.Second,
+		"Timeout for one synchronous adapter delivery call.")
+	flag.IntVar(&gatewayDeliveryMaxAttempts, "gateway-delivery-max-attempts", 10,
+		"Maximum adapter delivery attempts before dead-lettering.")
+	flag.DurationVar(&gatewayClaimLease, "gateway-claim-lease", time.Minute,
+		"Lease duration for gateway event and delivery claims.")
+	flag.DurationVar(&gatewayPollInterval, "gateway-poll-interval", 500*time.Millisecond,
+		"Gateway dispatcher and delivery poll interval.")
+	flag.IntVar(&gatewayBatchSize, "gateway-batch-size", 25,
+		"Maximum gateway events and deliveries processed per iteration.")
 	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
 	flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
 	flag.StringVar(&controllerURL, "controller-url", "",
@@ -409,6 +448,12 @@ func main() {
 	flag.StringVar(&contextTokenSkillWriteScopes, "context-token-skill-write-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SKILL_WRITE_SCOPES"),
 		"Comma-separated context-token scopes that authorize Skill writes. Defaults to orka:skills:write.")
+	flag.StringVar(&contextTokenGatewayReadScopes, "context-token-gateway-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_GATEWAY_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize gateway reads. Defaults to orka:gateways:read.")
+	flag.StringVar(&contextTokenGatewayOperateScopes, "context-token-gateway-operate-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_GATEWAY_OPERATE_SCOPES"),
+		"Comma-separated context-token scopes that authorize delivery retries. Defaults to orka:gateways:operate.")
 	flag.StringVar(&contextTokenTTSURL, "context-token-tts-url", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_URL"),
 		"kontxt TTS base URL for optional token exchange/replacement.")
 	flag.StringVar(&contextTokenTTSAudience, "context-token-tts-audience", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"),
@@ -513,6 +558,8 @@ func main() {
 		MonitorOperateScopes:       contextTokenMonitorOperateScopes,
 		SkillReadScopes:            contextTokenSkillReadScopes,
 		SkillWriteScopes:           contextTokenSkillWriteScopes,
+		GatewayReadScopes:          contextTokenGatewayReadScopes,
+		GatewayOperateScopes:       contextTokenGatewayOperateScopes,
 	})
 	if err != nil {
 		setupLog.Error(err, "invalid context token authorization configuration")
@@ -618,6 +665,19 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	if gatewayEnabled {
+		checkCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := gatewayruntime.WaitForGatewayPrerequisites(checkCtx, mgr.GetAPIReader(), 500*time.Millisecond)
+		cancel()
+		if err != nil {
+			if gatewayruntime.GatewayPrerequisiteErrorIsTransient(err) {
+				setupLog.Error(err, "gateway prerequisite verification failed")
+				os.Exit(1)
+			}
+			setupLog.Error(err, "gateway prerequisites are unavailable; disabling generic gateway")
+			gatewayEnabled = false
+		}
+	}
 
 	if taskProvenanceAdmissionEnabled {
 		admissionConfig := orkaadmission.NewTaskProvenanceConfig(
@@ -660,6 +720,26 @@ func main() {
 
 	// Create helper components
 	sessionManager := controller.NewSessionManager(sqliteStore)
+	sessionManager.SetGatewayEventStore(sqliteStore)
+	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
+	gatewayConfig := gatewayruntime.Config{
+		Enabled: gatewayEnabled, Namespace: watchNamespace, PendingPerSession: gatewayPendingPerSession,
+		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,
+		MaxRecordsPerGateway:         gatewayMaxRecordsPerGateway,
+		MaxRejectedRecordsPerGateway: gatewayMaxRejectedRecordsPerGateway,
+		EventExpiry:                  gatewayEventExpiry,
+		TerminalRetention:            gatewayTerminalRetention, DeliveryTimeout: gatewayDeliveryTimeout,
+		DeliveryMaxAttempts: gatewayDeliveryMaxAttempts, ClaimLease: gatewayClaimLease,
+		PollInterval: gatewayPollInterval, BatchSize: gatewayBatchSize,
+	}
+	gatewayService := gatewayruntime.NewService(mgr.GetClient(), sqliteStore, sqliteStore, sqliteStore, gatewayConfig)
+	gatewayService.APIReader = mgr.GetAPIReader()
+	if gatewayEnabled {
+		if err := mgr.Add(gatewayService); err != nil {
+			setupLog.Error(err, "unable to add gateway service")
+			os.Exit(1)
+		}
+	}
 	webhookNotifier := controller.NewWebhookNotifier()
 	webhookNotifier.SetKubeClient(mgr.GetClient())
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
@@ -707,7 +787,6 @@ func main() {
 	}
 
 	// Setup Task controller with helper components
-	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
 	if err := (&controller.TaskReconciler{
 		Client:                             mgr.GetClient(),
 		Scheme:                             mgr.GetScheme(),
@@ -771,6 +850,27 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRuntime")
 		os.Exit(1)
+	}
+
+	if gatewayEnabled {
+		if err := (&controller.GatewayClassReconciler{
+			Client: mgr.GetClient(), Scheme: mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "GatewayClass")
+			os.Exit(1)
+		}
+		if err := (&controller.GatewayReconciler{
+			Client: mgr.GetClient(), Scheme: mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "Gateway")
+			os.Exit(1)
+		}
+		if err := (&controller.GatewayBindingReconciler{
+			Client: mgr.GetClient(), Scheme: mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "GatewayBinding")
+			os.Exit(1)
+		}
 	}
 
 	if err := (&controller.ProviderReconciler{
@@ -852,8 +952,12 @@ func main() {
 		SecurityStore:             sqliteStore,
 		RepositoryMonitorStore:    sqliteStore,
 		ExecutionEventStore:       sqliteStore,
+		GatewayEventStore:         sqliteStore,
+		GatewayDeliveryStore:      sqliteStore,
+		GatewayService:            gatewayService,
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
+		APIReader:                 mgr.GetAPIReader(),
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,

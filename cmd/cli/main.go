@@ -75,6 +75,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newModelsCmd())
 	cmd.AddCommand(newWorkspaceCmd())
 	cmd.AddCommand(newSubstrateCmd())
+	cmd.AddCommand(newGatewayCmd())
 
 	return cmd
 }

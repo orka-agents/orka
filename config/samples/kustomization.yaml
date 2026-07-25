@@ -12,4 +12,7 @@ resources:
 - core_v1alpha1_agent_claude.yaml
 - core_v1alpha1_agent_codex.yaml
 - core_v1alpha1_agent_opencode.yaml
+- gateway_v1alpha1_gatewayclass.yaml
+- gateway_v1alpha1_gateway.yaml
+- gateway_v1alpha1_gatewaybinding.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

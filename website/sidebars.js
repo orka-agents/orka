@@ -43,6 +43,7 @@ const sidebars = {
       collapsed: false,
       items: [
         'operations/agent-runtime-security',
+        'operations/gateways',
       ],
     },
     {
@@ -54,6 +55,7 @@ const sidebars = {
         'reference/cli',
         'reference/cli-commands',
         'reference/execution-events',
+        'reference/gateway-api',
         'reference/openai-compat',
         'reference/anthropic-compat',
       ],

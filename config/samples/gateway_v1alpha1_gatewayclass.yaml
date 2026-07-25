@@ -1,0 +1,15 @@
+apiVersion: gateway.orka.ai/v1alpha1
+kind: GatewayClass
+metadata:
+  name: generic-chat
+spec:
+  contractVersion: orka.gateway.v1
+  category: chat
+  capabilities:
+    inboundText: true
+    outboundText: true
+    threads: true
+    senderIdentity: true
+    idempotentDelivery: true
+  allowedMetadataKeys:
+    - tenantTier

@@ -49,6 +49,7 @@ commands=(
   "security" "security repo" "security repo list" "security repo get" "security repo create" "security repo update" "security repo delete" "security scan" "security scan run" "security scan list" "security threat-model" "security threat-model get" "security threat-model update" "security finding" "security finding list" "security finding get" "security finding dismiss" "security finding reopen" "security finding validate" "security finding patch" "security finding patches" "security finding pr" "security slice" "security slice list" "security slice get" "security dropped-findings" "security dropped-findings list"
   "monitor" "monitor list" "monitor get" "monitor create" "monitor update" "monitor delete" "monitor run" "monitor runs" "monitor items" "monitor events"
   "substrate" "substrate pool" "substrate pool list" "substrate pool get" "substrate pool create" "substrate pool update" "substrate pool delete"
+  "gateway" "gateway list" "gateway get" "gateway class" "gateway class list" "gateway class get" "gateway binding" "gateway binding list" "gateway binding get" "gateway events" "gateway events list" "gateway events get" "gateway deliveries" "gateway deliveries list" "gateway deliveries get" "gateway deliveries retry"
   "completion"
 )
 
