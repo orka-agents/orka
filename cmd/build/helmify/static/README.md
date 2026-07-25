@@ -53,7 +53,7 @@ kubectl --context "$TARGET_CONTEXT" apply \
   --field-manager=orka-crd-lifecycle \
   -f "$TARGET_CRDS"
 
-kubectl create --dry-run=client -f "$TARGET_CRDS" -o json | \
+kubectl --context "$TARGET_CONTEXT" create --dry-run=client -f "$TARGET_CRDS" -o json | \
   jq -c '{name: .metadata.name, spec: .spec}' | \
   while IFS= read -r target; do
     name="$(jq -er '.name' <<< "$target")"

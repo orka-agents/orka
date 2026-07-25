@@ -50,7 +50,7 @@ fi
 # SSA cannot remove fields omitted by a new manager during first adoption. Replace
 # each CRD spec atomically, guarded by resourceVersion, so stale schema fields are
 # removed without deleting the CRD or its custom resources.
-kubectl create --dry-run=client -f "${target_crds}" -o json | \
+"${kubectl_cmd[@]}" create --dry-run=client -f "${target_crds}" -o json | \
   jq -c '{name: .metadata.name, spec: .spec}' | \
   while IFS= read -r target; do
     name=$(jq -er '.name' <<< "${target}")
