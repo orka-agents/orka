@@ -1035,6 +1035,10 @@ func isDuplicateStartRejectedError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var clientErr harness.ClientError
+	if errors.As(err, &clientErr) && clientErr.IsDuplicateTurn() {
+		return true
+	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "turn already exists") || strings.Contains(message, "turn already completed")
 }

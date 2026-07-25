@@ -1218,6 +1218,37 @@ func TestHarnessWrapperBrokeredContinueFailureRetriesToolRequest(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperDuplicateTurnErrorUsesTypedReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		harness.WriteError(w, http.StatusConflict, "turn already exists")
+	}))
+	defer server.Close()
+	client, err := harness.NewClient(server.URL, harness.WithBearerToken("x"))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.StartTurn(context.Background(), harness.StartTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task-a",
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Deadline:         time.Now().UTC().Add(time.Minute),
+		AuthIdentity:     harness.AuthIdentity{Subject: "user:test"},
+	})
+	if err == nil {
+		t.Fatal("StartTurn() error = nil, want duplicate conflict")
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "exists") {
+		t.Fatalf("StartTurn() error = %v, want exact bearer redaction to alter display text", err)
+	}
+	if !harnessWrapperDuplicateTurnError(err) {
+		t.Fatal("typed duplicate-turn error was not recognized for recovery")
+	}
+}
+
 func TestHarnessWrapperRuntimeRefUsesObservedRuntimeName(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "agentkit-fibey-runtime"})
 	defer server.Close()

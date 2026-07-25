@@ -88,7 +88,7 @@ func (c *Client) Health(ctx context.Context) (_ *HealthResponse, err error) {
 		return nil, err
 	}
 	if err := response.Validate(); err != nil {
-		return nil, safeClientError("health", 0, err.Error())
+		return nil, safeClientError("health", 0, err.Error(), err)
 	}
 	return &response, nil
 }
@@ -100,7 +100,7 @@ func (c *Client) Capabilities(ctx context.Context) (_ *CapabilitiesResponse, err
 		return nil, err
 	}
 	if err := response.Validate(); err != nil {
-		return nil, safeClientError("capabilities", 0, err.Error())
+		return nil, safeClientError("capabilities", 0, err.Error(), err)
 	}
 	return &response, nil
 }
@@ -113,7 +113,7 @@ type startTurnResponseWire struct {
 func (c *Client) StartTurn(ctx context.Context, request StartTurnRequest) (_ *StartTurnResponse, err error) {
 	defer func() { err = c.sanitizeClientError(err) }()
 	if err := request.Validate(); err != nil {
-		return nil, safeClientError("start_turn", 0, err.Error())
+		return nil, safeClientError("start_turn", 0, err.Error(), err)
 	}
 	var decoded startTurnResponseWire
 	if err := c.postJSON(ctx, TurnsPath, request, &decoded); err != nil {
@@ -148,11 +148,11 @@ func (c *Client) StartTurn(ctx context.Context, request StartTurnRequest) (_ *St
 func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (_ *CancelTurnResponse, err error) {
 	defer func() { err = c.sanitizeClientError(err) }()
 	if err := request.Validate(); err != nil {
-		return nil, safeClientError("cancel_turn", 0, err.Error())
+		return nil, safeClientError("cancel_turn", 0, err.Error(), err)
 	}
 	rel, err := CancelTurnPath(request.TurnID)
 	if err != nil {
-		return nil, safeClientError("cancel_turn", 0, err.Error())
+		return nil, safeClientError("cancel_turn", 0, err.Error(), err)
 	}
 	var response CancelTurnResponse
 	if err := c.postJSON(ctx, rel, request, &response); err != nil {
@@ -187,18 +187,18 @@ func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (_ *
 func (c *Client) ContinueTurn(ctx context.Context, request ContinueTurnRequest) (_ *ContinueTurnResponse, err error) {
 	defer func() { err = c.sanitizeClientError(err) }()
 	if err := request.Validate(); err != nil {
-		return nil, safeClientError("continue_turn", 0, err.Error())
+		return nil, safeClientError("continue_turn", 0, err.Error(), err)
 	}
 	rel, err := ContinueTurnPath(request.TurnID)
 	if err != nil {
-		return nil, safeClientError("continue_turn", 0, err.Error())
+		return nil, safeClientError("continue_turn", 0, err.Error(), err)
 	}
 	var response ContinueTurnResponse
 	if err := c.postJSON(ctx, rel, request, &response); err != nil {
 		return nil, err
 	}
 	if err := response.ValidateFor(request); err != nil {
-		return nil, safeClientError("continue_turn", 0, err.Error())
+		return nil, safeClientError("continue_turn", 0, err.Error(), err)
 	}
 	return &response, nil
 }
@@ -209,7 +209,7 @@ func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outp
 	defer cancel()
 	rel, err := OutputTurnPath(turnID)
 	if err != nil {
-		return nil, safeClientError("fetch_turn_output", 0, err.Error())
+		return nil, safeClientError("fetch_turn_output", 0, err.Error(), err)
 	}
 	if strings.TrimSpace(outputRef) == "" {
 		return nil, safeClientError("fetch_turn_output", 0, "output ref is required")
@@ -220,13 +220,13 @@ func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outp
 	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, safeClientError("fetch_turn_output", 0, err.Error())
+		return nil, safeClientError("fetch_turn_output", 0, err.Error(), err)
 	}
 	req.Header.Set("Accept", "application/octet-stream")
 	c.setAuthHeader(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, safeClientError("fetch_turn_output", 0, err.Error())
+		return nil, safeClientError("fetch_turn_output", 0, err.Error(), err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -234,7 +234,7 @@ func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outp
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchTurnOutputBytes+1))
 	if err != nil {
-		return nil, safeClientError("fetch_turn_output", resp.StatusCode, err.Error())
+		return nil, safeClientError("fetch_turn_output", resp.StatusCode, err.Error(), err)
 	}
 	if len(data) > maxFetchTurnOutputBytes {
 		return nil, safeClientError("fetch_turn_output", resp.StatusCode, "output exceeds harness fetch limit")
@@ -245,7 +245,7 @@ func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outp
 func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSeq int64, emit func(HarnessEventFrame) error) error {
 	rel, err := EventStreamPath(turnID)
 	if err != nil {
-		return c.sanitizeClientError(safeClientError("stream_frames", 0, err.Error()))
+		return c.sanitizeClientError(safeClientError("stream_frames", 0, err.Error(), err))
 	}
 	if emit == nil {
 		return c.sanitizeClientError(safeClientError("stream_frames", 0, "emit callback is required"))
@@ -258,13 +258,13 @@ func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSe
 	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return c.sanitizeClientError(safeClientError("stream_frames", 0, err.Error()))
+		return c.sanitizeClientError(safeClientError("stream_frames", 0, err.Error(), err))
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	c.setAuthHeader(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return c.sanitizeClientError(safeClientError("stream_frames", 0, err.Error()))
+		return c.sanitizeClientError(safeClientError("stream_frames", 0, err.Error(), err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -278,13 +278,13 @@ func (c *Client) getJSON(ctx context.Context, rel string, out any) error {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resolve(rel).String(), nil)
 	if err != nil {
-		return safeClientError("get", 0, err.Error())
+		return safeClientError("get", 0, err.Error(), err)
 	}
 	req.Header.Set("Accept", "application/json")
 	c.setAuthHeader(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return safeClientError("get", 0, err.Error())
+		return safeClientError("get", 0, err.Error(), err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -298,18 +298,18 @@ func (c *Client) postJSON(ctx context.Context, rel string, in, out any) error {
 	defer cancel()
 	payload, err := json.Marshal(in)
 	if err != nil {
-		return safeClientError("post", 0, err.Error())
+		return safeClientError("post", 0, err.Error(), err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.resolve(rel).String(), bytes.NewReader(payload))
 	if err != nil {
-		return safeClientError("post", 0, err.Error())
+		return safeClientError("post", 0, err.Error(), err)
 	}
 	req.Header.Set("Accept", "application/json")
 	c.setAuthHeader(req)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return unknownAcceptanceClientError("post", err.Error())
+		return unknownAcceptanceClientError("post", err.Error(), err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -321,7 +321,7 @@ func (c *Client) postJSON(ctx context.Context, rel string, in, out any) error {
 func decodeBoundedJSON(op string, status int, body io.Reader, out any) error {
 	data, err := io.ReadAll(io.LimitReader(body, maxHarnessControlResponseBytes+1))
 	if err != nil {
-		return safeClientError(op, status, err.Error())
+		return safeClientError(op, status, err.Error(), err)
 	}
 	if len(data) > maxHarnessControlResponseBytes {
 		return safeClientError(op, status, "JSON response exceeds harness control limit")
@@ -330,7 +330,7 @@ func decodeBoundedJSON(op string, status int, body io.Reader, out any) error {
 		return nil
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return safeClientError(op, status, err.Error())
+		return safeClientError(op, status, err.Error(), err)
 	}
 	return nil
 }
@@ -409,7 +409,12 @@ func (c *Client) statusError(op string, resp *http.Response) error {
 	if message == "" {
 		message = resp.Status
 	}
-	return safeClientError(op, resp.StatusCode, message)
+	clientErr := ClientError{Op: op, StatusCode: resp.StatusCode, Message: events.RedactExecutionEventText(message)}
+	if resp.StatusCode == http.StatusConflict {
+		lower := strings.ToLower(message)
+		clientErr.duplicateTurn = strings.Contains(lower, "turn already exists") || strings.Contains(lower, "turn already completed")
+	}
+	return clientErr
 }
 
 func (c *Client) resolve(rel string) *url.URL {
@@ -458,7 +463,7 @@ func readSSEFramesWithSanitizer(r io.Reader, emit func(HarnessEventFrame) error,
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return sanitizeSSEClientError(sanitize, safeClientError("stream_frames", 0, err.Error()))
+		return sanitizeSSEClientError(sanitize, safeClientError("stream_frames", 0, err.Error(), err))
 	}
 	if data.Len() > 0 {
 		if err := emitSSEData(data.String(), emit, sanitize); err != nil {
@@ -522,7 +527,20 @@ type ClientError struct {
 	RemoteAcceptanceUnknown bool
 	sanitizedDisplay        string
 	sanitizedDisplaySet     bool
+	duplicateTurn           bool
+	contextCanceled         bool
+	deadlineExceeded        bool
 }
+
+// Is reports typed context termination causes without exposing raw error text.
+func (e ClientError) Is(target error) bool {
+	return target == context.Canceled && e.contextCanceled ||
+		target == context.DeadlineExceeded && e.deadlineExceeded
+}
+
+// IsDuplicateTurn reports whether the remote deterministically rejected an
+// already-started or already-completed turn identity.
+func (e ClientError) IsDuplicateTurn() bool { return e.duplicateTurn }
 
 func (e ClientError) Error() string {
 	if e.sanitizedDisplaySet {
@@ -546,14 +564,25 @@ func acceptedClientError(op, message string) error {
 	}
 }
 
-func unknownAcceptanceClientError(op, message string) error {
-	return ClientError{
+func unknownAcceptanceClientError(op, message string, causes ...error) error {
+	clientErr := ClientError{
 		Op:                      op,
 		Message:                 events.RedactExecutionEventText(message),
 		RemoteAcceptanceUnknown: true,
 	}
+	return withClientErrorCause(clientErr, causes)
 }
 
-func safeClientError(op string, status int, message string) error {
-	return ClientError{Op: op, StatusCode: status, Message: events.RedactExecutionEventText(message)}
+func safeClientError(op string, status int, message string, causes ...error) error {
+	clientErr := ClientError{Op: op, StatusCode: status, Message: events.RedactExecutionEventText(message)}
+	return withClientErrorCause(clientErr, causes)
+}
+
+func withClientErrorCause(clientErr ClientError, causes []error) ClientError {
+	if len(causes) == 0 || causes[0] == nil {
+		return clientErr
+	}
+	clientErr.contextCanceled = errors.Is(causes[0], context.Canceled)
+	clientErr.deadlineExceeded = errors.Is(causes[0], context.DeadlineExceeded)
+	return clientErr
 }

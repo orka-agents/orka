@@ -805,6 +805,27 @@ func sequenceProbeFrame(
 	}
 }
 
+func TestDuplicateStartClassificationUsesTypedClientReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		harness.WriteError(w, http.StatusConflict, "turn already exists")
+	}))
+	defer server.Close()
+	client, err := harness.NewClient(server.URL, harness.WithBearerToken("x"))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.StartTurn(context.Background(), defaultStartTurnRequest("duplicate-turn"))
+	if err == nil {
+		t.Fatal("StartTurn() error = nil, want conflict")
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "exists") {
+		t.Fatalf("StartTurn() error = %v, want exact bearer redaction to alter display text", err)
+	}
+	if !isDuplicateStartRejectedError(err) {
+		t.Fatal("sanitized duplicate rejection was not classified from typed client reason")
+	}
+}
+
 func TestIsAuthRequiredErrorRequiresAuthenticationStatus(t *testing.T) {
 	if !isAuthRequiredError(harness.ClientError{StatusCode: http.StatusUnauthorized, Message: "denied"}) {
 		t.Fatal("isAuthRequiredError(401) = false")

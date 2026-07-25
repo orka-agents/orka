@@ -530,12 +530,10 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			if _, err := client.StartTurn(ctx, request); err != nil {
 				message := err.Error()
 				switch {
-				case strings.Contains(message, "turn already exists"):
-					// Treat a duplicate turn ID as idempotent recovery after the wrapper
-					// accepted the planned turn before Running status was persisted.
-				case strings.Contains(message, "turn already completed"):
-					// The wrapper already ran this turn to completion and evicted it; its
-					// tombstone rejects re-acceptance. Recover instead of re-executing.
+				case harnessWrapperDuplicateTurnError(err):
+					// Treat an already-started or already-completed turn ID as idempotent
+					// recovery after the wrapper accepted the planned turn before Running
+					// status was persisted.
 				case strings.Contains(message, "maximum concurrent turns"):
 					if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
 						return ctrl.Result{}, clearErr
@@ -1402,6 +1400,11 @@ func harnessWrapperAuthError(err error) bool {
 		}
 	}
 	return false
+}
+
+func harnessWrapperDuplicateTurnError(err error) bool {
+	var clientErr harness.ClientError
+	return errors.As(err, &clientErr) && clientErr.IsDuplicateTurn()
 }
 
 func harnessWrapperStartTurnErrorIsRetryable(err error) bool {

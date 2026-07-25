@@ -133,6 +133,30 @@ func TestClientErrorSanitizesRenderedFields(t *testing.T) {
 	}
 }
 
+func TestClientStreamFramesPreservesContextCancellationCause(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, context.Canceled
+	})}
+	client, err := NewClient(
+		"https://adapter.example",
+		WithHTTPClient(httpClient),
+		WithBearerToken("context"),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	err = client.StreamFrames(context.Background(), "turn-a", 0, func(HarnessEventFrame) error { return nil })
+	if err == nil {
+		t.Fatal("StreamFrames() error = nil, want context cancellation")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("StreamFrames() error = %v, want context.Canceled cause", err)
+	}
+	if strings.Contains(err.Error(), "context") {
+		t.Fatalf("StreamFrames() error = %v, configured bearer leaked", err)
+	}
+}
+
 func TestClientStreamFramesPreservesCallbackClientError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
