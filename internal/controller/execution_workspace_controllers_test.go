@@ -377,7 +377,7 @@ func TestExecutionWorkspaceClassReconcilerFailsClosedOnInvalidNamespacePolicy(t 
 		t.Fatalf("get class: %v", err)
 	}
 	condition := workspaceprovider.FindCondition(got.Status.Conditions, string(workspacev1alpha1.ConditionClassReady))
-	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "NamespacePolicyInvalid" {
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != reasonNamespacePolicyInvalid {
 		t.Fatalf("class condition = %#v", condition)
 	}
 }
@@ -465,6 +465,7 @@ func TestWorkspaceAttachmentManagerRotatesAndRevokesCredentials(t *testing.T) {
 	scheme := testWorkspaceScheme(t)
 	workspace := testBoundWorkspace(t, "default", "workspace", "class", "provider")
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: workspace.Namespace, UID: types.UID("task-uid")}}
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(workspace).
@@ -573,15 +574,26 @@ func TestFakeWorkspaceProviderReconcilesProviderPoolAndWorkspace(t *testing.T) {
 	workspace.Spec.Attachment = workspaceAttachmentForTest(
 		"attachment", 3, metav1.NewTime(time.Now().Add(time.Minute)),
 	)
+	suspended := testBoundWorkspace(t, "default", "suspended-workspace", class.Name, provider.Name)
+	suspended.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
+	mapper, parameters := preparePooledClassProfileForTest(t, provider, pool, class, workspace, suspended)
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Spec.CoreAdmission.PoolBinding = &workspacev1alpha1.ImmutableObjectBinding{
+		Name: pool.Name, UID: pool.UID, Generation: pool.Generation,
+	}
+	markWorkspaceAdmittedForPolicyReview(suspended, suspended.Generation)
+	suspended.Spec.CoreAdmission.PoolBinding = &workspacev1alpha1.ImmutableObjectBinding{
+		Name: pool.Name, UID: pool.UID, Generation: pool.Generation,
+	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(provider, pool, workspace).
-		WithObjects(provider, class, pool, workspace).
+		WithStatusSubresource(provider, pool, workspace, suspended).
+		WithObjects(provider, class, pool, workspace, suspended, parameters).
 		Build()
 	providerReconciler := &FakeExecutionWorkspaceProviderReconciler{Client: c}
 	if _, err := providerReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}); err != nil {
 		t.Fatalf("reconcile fake provider: %v", err)
 	}
-	workspaceReconciler := &FakeExecutionWorkspaceReconciler{Client: c}
+	workspaceReconciler := &FakeExecutionWorkspaceReconciler{Client: c, APIReader: c, RESTMapper: mapper}
 	if _, err := workspaceReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}}); err != nil {
 		t.Fatalf("reconcile fake workspace: %v", err)
 	}
@@ -600,7 +612,7 @@ func TestFakeWorkspaceProviderReconcilesProviderPoolAndWorkspace(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, gotPool); err != nil {
 		t.Fatalf("get fake pool: %v", err)
 	}
-	if gotPool.Status.Allocated != 1 || gotPool.Status.Total < 1 {
+	if gotPool.Status.Allocated != 1 || gotPool.Status.Suspended != 1 || gotPool.Status.Total < 2 {
 		t.Fatalf("fake pool status = %#v", gotPool.Status)
 	}
 }
@@ -693,7 +705,9 @@ func testGenericProvider(name string) *workspacev1alpha1.ExecutionWorkspaceProvi
 	}
 }
 
-func testGenericPool(namespace, name, provider string) *workspacev1alpha1.ExecutionWorkspacePool {
+func testGenericPool(namespace, _ string, provider string) *workspacev1alpha1.ExecutionWorkspacePool {
+	const name = "pool"
+
 	return &workspacev1alpha1.ExecutionWorkspacePool{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, UID: types.UID(name + "-uid"), Generation: 1},
 		Spec: workspacev1alpha1.ExecutionWorkspacePoolSpec{
@@ -736,4 +750,29 @@ func testBoundWorkspace(t *testing.T, namespace, name, className, providerName s
 			Lifecycle:       validWorkspaceLifecycle(),
 		},
 	}
+}
+
+func preparePooledClassProfileForTest(
+	t *testing.T,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+	pool *workspacev1alpha1.ExecutionWorkspacePool,
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+	workspaces ...*workspacev1alpha1.ExecutionWorkspace,
+) (apimeta.RESTMapper, *unstructured.Unstructured) {
+	t.Helper()
+	mapper, parameters := testParameterMapping(pool.Namespace, &pool.Spec.ParametersRef)
+	c := fake.NewClientBuilder().
+		WithScheme(testWorkspaceScheme(t)).
+		WithObjects(provider, pool, parameters).
+		Build()
+	reconciler := &ExecutionWorkspaceClassReconciler{Client: c, APIReader: c, RESTMapper: mapper}
+	profileHash, err := reconciler.resolvedClassProfileHash(context.Background(), class)
+	if err != nil {
+		t.Fatalf("resolve pooled class profile: %v", err)
+	}
+	class.Status.ProfileHash = profileHash
+	for _, workspace := range workspaces {
+		workspace.Spec.ClassBinding.ProfileHash = profileHash
+	}
+	return mapper, parameters
 }

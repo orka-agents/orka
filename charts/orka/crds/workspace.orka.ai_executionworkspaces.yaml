@@ -157,6 +157,123 @@ spec:
                 x-kubernetes-validations:
                 - message: uid is required
                   rule: self.uid.size() > 0
+              coreAdmission:
+                description: |-
+                  CoreAdmission is written once by Orka core after validating class and provider policy.
+                  Provider adapters must treat it as read-only and must not progress normal
+                  lifecycle work until this marker matches the immutable bindings,
+                  coreAdmission.admittedGeneration equals metadata.generation, and the
+                  Admitted=True condition records that same generation. The spec marker and
+                  status condition form a dual signal: provider status writers cannot mint the
+                  marker, and ordinary spec writers cannot mint the condition.
+                properties:
+                  admittedGeneration:
+                    description: AdmittedGeneration is the workspace generation validated
+                      by Orka core.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  classBinding:
+                    description: ClassBinding is the exact class binding admitted
+                      by core.
+                    properties:
+                      generation:
+                        description: Generation is the observed generation used to
+                          resolve the binding.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      name:
+                        description: Name is the bound object's name.
+                        minLength: 1
+                        type: string
+                      profileHash:
+                        description: |-
+                          ProfileHash is a SHA-256 digest of the functional profile resolved for this binding.
+                          It is populated for class bindings and may be omitted for provider bindings.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      uid:
+                        description: UID is the bound object's immutable Kubernetes
+                          UID.
+                        type: string
+                    required:
+                    - generation
+                    - name
+                    - uid
+                    type: object
+                    x-kubernetes-validations:
+                    - message: uid is required
+                      rule: self.uid.size() > 0
+                  poolBinding:
+                    description: PoolBinding pins the pool identity used for a pooled
+                      workspace.
+                    properties:
+                      generation:
+                        description: Generation is the observed generation used to
+                          resolve the binding.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      name:
+                        description: Name is the bound object's name.
+                        minLength: 1
+                        type: string
+                      profileHash:
+                        description: |-
+                          ProfileHash is a SHA-256 digest of the functional profile resolved for this binding.
+                          It is populated for class bindings and may be omitted for provider bindings.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      uid:
+                        description: UID is the bound object's immutable Kubernetes
+                          UID.
+                        type: string
+                    required:
+                    - generation
+                    - name
+                    - uid
+                    type: object
+                    x-kubernetes-validations:
+                    - message: uid is required
+                      rule: self.uid.size() > 0
+                  providerBinding:
+                    description: ProviderBinding is the exact provider binding admitted
+                      by core.
+                    properties:
+                      generation:
+                        description: Generation is the observed generation used to
+                          resolve the binding.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      name:
+                        description: Name is the bound object's name.
+                        minLength: 1
+                        type: string
+                      profileHash:
+                        description: |-
+                          ProfileHash is a SHA-256 digest of the functional profile resolved for this binding.
+                          It is populated for class bindings and may be omitted for provider bindings.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      uid:
+                        description: UID is the bound object's immutable Kubernetes
+                          UID.
+                        type: string
+                    required:
+                    - generation
+                    - name
+                    - uid
+                    type: object
+                    x-kubernetes-validations:
+                    - message: uid is required
+                      rule: self.uid.size() > 0
+                required:
+                - admittedGeneration
+                - classBinding
+                - providerBinding
+                type: object
               desiredState:
                 default: Ready
                 description: DesiredState is owned by Orka core.
@@ -363,6 +480,24 @@ spec:
             x-kubernetes-validations:
             - message: classBinding.profileHash is required
               rule: self.classBinding.profileHash.size() > 0
+            - message: coreAdmission must match the immutable workspace bindings
+              rule: '!has(self.coreAdmission) || (self.coreAdmission.classBinding.name
+                == self.classBinding.name && self.coreAdmission.classBinding.uid ==
+                self.classBinding.uid && self.coreAdmission.classBinding.generation
+                == self.classBinding.generation && has(self.coreAdmission.classBinding.profileHash)
+                == has(self.classBinding.profileHash) && (!has(self.coreAdmission.classBinding.profileHash)
+                || self.coreAdmission.classBinding.profileHash == self.classBinding.profileHash)
+                && self.coreAdmission.providerBinding.name == self.providerBinding.name
+                && self.coreAdmission.providerBinding.uid == self.providerBinding.uid
+                && self.coreAdmission.providerBinding.generation == self.providerBinding.generation
+                && has(self.coreAdmission.providerBinding.profileHash) == has(self.providerBinding.profileHash)
+                && (!has(self.coreAdmission.providerBinding.profileHash) || self.coreAdmission.providerBinding.profileHash
+                == self.providerBinding.profileHash))'
+            - message: coreAdmission cannot be removed once set
+              rule: '!has(oldSelf.coreAdmission) || has(self.coreAdmission)'
+            - message: coreAdmission.admittedGeneration must not decrease
+              rule: '!has(oldSelf.coreAdmission) || self.coreAdmission.admittedGeneration
+                >= oldSelf.coreAdmission.admittedGeneration'
             - message: mode is immutable
               rule: self.mode == oldSelf.mode
             - message: classBinding is immutable
@@ -376,6 +511,8 @@ spec:
               rule: self.slot == oldSelf.slot
             - message: lifecycle is immutable
               rule: self.lifecycle == oldSelf.lifecycle
+            - message: Deleted desiredState is terminal
+              rule: oldSelf.desiredState != 'Deleted' || self.desiredState == 'Deleted'
             - message: attachmentEpoch must not decrease
               rule: '!has(oldSelf.attachmentEpoch) || (has(self.attachmentEpoch) &&
                 self.attachmentEpoch >= oldSelf.attachmentEpoch)'

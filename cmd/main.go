@@ -928,22 +928,26 @@ func main() {
 			os.Exit(1)
 		}
 		if err := (&controller.ExecutionWorkspaceReconciler{
-			Client:      mgr.GetClient(),
-			CleanupOnly: !workspaceProviderAPIEnabled,
+			Client:                  mgr.GetClient(),
+			APIReader:               mgr.GetAPIReader(),
+			RESTMapper:              mgr.GetRESTMapper(),
+			AdmissionLeaseNamespace: currentPodNamespace(),
+			CleanupOnly:             !workspaceProviderAPIEnabled,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ExecutionWorkspaceCore")
 			os.Exit(1)
 		}
-	}
-	if workspaceProviderAPIEnabled {
 		if err := (&controller.ExecutionWorkspaceClassReconciler{
-			Client:     mgr.GetClient(),
-			APIReader:  mgr.GetAPIReader(),
-			RESTMapper: mgr.GetRESTMapper(),
+			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
+			RESTMapper:  mgr.GetRESTMapper(),
+			CleanupOnly: !workspaceProviderAPIEnabled,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ExecutionWorkspaceClassCore")
 			os.Exit(1)
 		}
+	}
+	if workspaceProviderAPIEnabled {
 		if fakeWorkspaceProviderEnabled {
 			if err := (&controller.FakeExecutionWorkspaceProviderReconciler{
 				Client: mgr.GetClient(),
@@ -958,7 +962,9 @@ func main() {
 				os.Exit(1)
 			}
 			if err := (&controller.FakeExecutionWorkspaceReconciler{
-				Client: mgr.GetClient(),
+				Client:     mgr.GetClient(),
+				APIReader:  mgr.GetAPIReader(),
+				RESTMapper: mgr.GetRESTMapper(),
 			}).SetupWithManager(mgr); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "FakeExecutionWorkspace")
 				os.Exit(1)

@@ -20,21 +20,22 @@ import (
 )
 
 type attachmentLifecycleDriver struct {
-	active          bool
-	everAttached    bool
-	initialized     bool
-	suspended       bool
-	initialPolls    int
-	servicePolls    int
-	detachPolls     int
-	suspendPolls    int
-	resumePolls     int
-	deletePolls     int
-	activateCalls   int
-	revocationCalls int
-	missingDeadline bool
-	metadata        *workspaceprovider.AdapterMetadata
-	connectionRef   *workspacev1alpha1.SecretReference
+	active            bool
+	everAttached      bool
+	initialized       bool
+	suspended         bool
+	initialPolls      int
+	servicePolls      int
+	detachPolls       int
+	suspendPolls      int
+	resumePolls       int
+	deletePolls       int
+	activateCalls     int
+	revocationCalls   int
+	revocationPending bool
+	missingDeadline   bool
+	metadata          *workspaceprovider.AdapterMetadata
+	connectionRef     *workspacev1alpha1.SecretReference
 }
 
 func (d *attachmentLifecycleDriver) Metadata() workspaceprovider.AdapterMetadata {
@@ -53,7 +54,39 @@ func (d *attachmentLifecycleDriver) ObserveProvider(
 	context.Context,
 	*workspacev1alpha1.ExecutionWorkspaceProvider,
 ) (workspaceprovider.ProviderObservation, error) {
-	return workspaceprovider.ProviderObservation{}, nil
+	return d.providerObservation(), nil
+}
+
+func (d *attachmentLifecycleDriver) providerObservation() workspaceprovider.ProviderObservation {
+	metadata := d.Metadata()
+	return workspaceprovider.ProviderObservation{
+		Adapter: workspacev1alpha1.ExecutionWorkspaceAdapterStatus{
+			Version: metadata.Version,
+			Digest:  metadata.Digest,
+		},
+		Backend: workspacev1alpha1.ExecutionWorkspaceBackendStatus{
+			Version:     "2026.07",
+			APIVersions: []string{"conformance.test/v1"},
+		},
+		SupportedFeatures: append([]workspacev1alpha1.ExecutionWorkspaceFeature(nil), metadata.Features...),
+	}
+}
+
+func (d *attachmentLifecycleDriver) providerBinding() *workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus {
+	metadata := d.Metadata()
+	return &workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus{
+		ContractVersion:   metadata.Contracts[0],
+		AdapterVersion:    metadata.Version,
+		AdapterDigest:     metadata.Digest,
+		BackendAPIVersion: d.providerObservation().Backend.APIVersions[0],
+	}
+}
+
+func (d *attachmentLifecycleDriver) withProviderBinding(
+	observation workspaceprovider.WorkspaceObservation,
+) workspaceprovider.WorkspaceObservation {
+	observation.ProviderBinding = d.providerBinding()
+	return observation
 }
 
 func (d *attachmentLifecycleDriver) ReconcilePool(
@@ -70,21 +103,35 @@ func (d *attachmentLifecycleDriver) ReconcileWorkspace(
 	if _, ok := ctx.Deadline(); !ok {
 		d.missingDeadline = true
 	}
+	lifecycleMaintenance := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted ||
+		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+	if lifecycleMaintenance && !workspaceCurrentlyCoreAdmitted(workspace) {
+		state := workspacev1alpha1.ExecutionWorkspaceStateQuarantined
+		observation := workspaceprovider.WorkspaceObservation{State: state}
+		if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
+			observation.State = workspacev1alpha1.ExecutionWorkspaceStateDeleted
+			observation.Disposition = validConformanceDisposition()
+		}
+		return d.withProviderBinding(observation), nil
+	}
+	if !lifecycleMaintenance && !d.revocationPending && !workspaceCurrentlyCoreAdmitted(workspace) {
+		return workspaceprovider.WorkspaceObservation{}, nil
+	}
 	if workspace.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeService {
 		if d.servicePolls == 0 {
 			d.servicePolls++
-			return workspaceprovider.WorkspaceObservation{
+			return d.withProviderBinding(workspaceprovider.WorkspaceObservation{
 				State:      workspacev1alpha1.ExecutionWorkspaceStateProvisioning,
 				ExternalID: "service-1",
-			}, nil
+			}), nil
 		}
-		return workspaceprovider.WorkspaceObservation{
+		return d.withProviderBinding(workspaceprovider.WorkspaceObservation{
 			State:      workspacev1alpha1.ExecutionWorkspaceStateReady,
 			ExternalID: "service-1",
 			Endpoints: []workspacev1alpha1.ExecutionWorkspaceEndpoint{{
 				Name: "mcp", URL: "https://service.example/mcp", Protocol: "HTTPS",
 			}},
-		}, nil
+		}), nil
 	}
 	if !d.initialized {
 		if d.initialPolls == 0 {
@@ -98,67 +145,70 @@ func (d *attachmentLifecycleDriver) ReconcileWorkspace(
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
 		if d.deletePolls == 0 {
 			d.deletePolls++
-			return workspaceprovider.WorkspaceObservation{
+			return d.withProviderBinding(workspaceprovider.WorkspaceObservation{
 				State:      workspacev1alpha1.ExecutionWorkspaceStateDeleting,
 				ExternalID: "workspace-1",
-			}, nil
+			}), nil
 		}
-		return workspaceprovider.WorkspaceObservation{
+		return d.withProviderBinding(workspaceprovider.WorkspaceObservation{
 			State:       workspacev1alpha1.ExecutionWorkspaceStateDeleted,
 			ExternalID:  "workspace-1",
 			Disposition: validConformanceDisposition(),
-		}, nil
+		}), nil
 	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
 		if d.suspendPolls == 0 {
 			d.suspendPolls++
-			return workspaceprovider.WorkspaceObservation{
+			return d.withProviderBinding(workspaceprovider.WorkspaceObservation{
 				State:      workspacev1alpha1.ExecutionWorkspaceStateSuspending,
 				ExternalID: "workspace-1",
-			}, nil
+			}), nil
 		}
 		d.suspended = true
-		return workspaceprovider.WorkspaceObservation{
+		return d.withProviderBinding(workspaceprovider.WorkspaceObservation{
 			State:      workspacev1alpha1.ExecutionWorkspaceStateSuspended,
 			ExternalID: "workspace-1",
-		}, nil
+		}), nil
 	}
 	if workspace.Spec.Attachment != nil {
 		if !d.active {
-			return workspaceprovider.WorkspaceObservation{
+			return d.withProviderBinding(workspaceprovider.WorkspaceObservation{
 				State:      workspacev1alpha1.ExecutionWorkspaceStateAttaching,
 				ExternalID: "workspace-1",
-			}, nil
+			}), nil
 		}
-		return workspaceprovider.WorkspaceObservation{
+		return d.withProviderBinding(workspaceprovider.WorkspaceObservation{
 			State:         workspacev1alpha1.ExecutionWorkspaceStateAttached,
 			ExternalID:    "workspace-1",
 			AttachedEpoch: workspace.Spec.Attachment.Epoch,
-		}, nil
+		}), nil
 	}
 	if d.everAttached && d.detachPolls == 0 {
 		d.detachPolls++
-		return workspaceprovider.WorkspaceObservation{
+		return d.withProviderBinding(workspaceprovider.WorkspaceObservation{
 			State:         workspacev1alpha1.ExecutionWorkspaceStateDetaching,
 			ExternalID:    "workspace-1",
 			AttachedEpoch: 1,
-		}, nil
+		}), nil
 	}
 	if d.suspended {
 		if d.resumePolls == 0 {
 			d.resumePolls++
-			return workspaceprovider.WorkspaceObservation{
+			return d.withProviderBinding(workspaceprovider.WorkspaceObservation{
 				State:      workspacev1alpha1.ExecutionWorkspaceStateProvisioning,
 				ExternalID: "workspace-1",
-			}, nil
+			}), nil
 		}
 		d.suspended = false
 	}
-	return workspaceprovider.WorkspaceObservation{
+	if d.revocationPending && d.detachPolls > 0 {
+		d.revocationPending = false
+	}
+	return d.withProviderBinding(workspaceprovider.WorkspaceObservation{
 		State:         workspacev1alpha1.ExecutionWorkspaceStateReady,
 		ExternalID:    "workspace-1",
 		ConnectionRef: d.connectionRef,
-	}, nil
+	}), nil
 }
 
 func (d *attachmentLifecycleDriver) ActivateAttachment(
@@ -183,11 +233,32 @@ func (d *attachmentLifecycleDriver) RevokeAttachment(
 		d.missingDeadline = true
 	}
 	d.revocationCalls++
+	d.revocationPending = true
 	if workspace.Spec.Attachment != nil || epoch != 1 {
 		return context.Canceled
 	}
 	d.active = false
 	return nil
+}
+
+func conformanceProviderFixture(
+	metadata workspaceprovider.AdapterMetadata,
+	advertised workspaceprovider.ProviderObservation,
+) *workspacev1alpha1.ExecutionWorkspaceProvider {
+	adapter := advertised.Adapter
+	backend := advertised.Backend
+	backend.APIVersions = append([]string(nil), advertised.Backend.APIVersions...)
+	return &workspacev1alpha1.ExecutionWorkspaceProvider{
+		Spec: workspacev1alpha1.ExecutionWorkspaceProviderSpec{
+			ControllerName:    metadata.ControllerName,
+			RequiredContracts: append([]string(nil), metadata.Contracts...),
+		},
+		Status: workspacev1alpha1.ExecutionWorkspaceProviderStatus{
+			Adapter:            &adapter,
+			Backend:            &backend,
+			SupportedContracts: append([]string(nil), metadata.Contracts...),
+		},
+	}
 }
 
 func TestInteractiveLifecycleExercisesAttachmentControllerAndWaitsForDetach(t *testing.T) {
@@ -200,7 +271,11 @@ func TestInteractiveLifecycleExercisesAttachmentControllerAndWaitsForDetach(t *t
 	workspace.Spec.Lifecycle.DeletionPolicy = conformanceDeletionPolicy()
 
 	timing := conformanceTiming{timeout: time.Second, pollInterval: time.Millisecond}
-	runInteractiveLifecycle(t, driver, workspace, driver.Metadata(), timing)
+	metadata := driver.Metadata()
+	advertised := driver.providerObservation()
+	runInteractiveLifecycle(
+		t, driver, conformanceProviderFixture(metadata, advertised), workspace, metadata, advertised, timing,
+	)
 	service := &workspacev1alpha1.ExecutionWorkspace{}
 	service.Spec.Mode = workspacev1alpha1.ExecutionWorkspaceModeService
 	service.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
@@ -209,7 +284,9 @@ func TestInteractiveLifecycleExercisesAttachmentControllerAndWaitsForDetach(t *t
 			Name: "mcp", Port: 8080, Protocol: "HTTPS",
 		}},
 	}
-	runServiceEndpoint(t, driver, service, timing)
+	runServiceEndpoint(
+		t, driver, conformanceProviderFixture(metadata, advertised), service, metadata, advertised, timing,
+	)
 
 	if driver.missingDeadline {
 		t.Fatal("conformance driver call did not receive a deadline-bearing context")
@@ -222,9 +299,10 @@ func TestInteractiveLifecycleExercisesAttachmentControllerAndWaitsForDetach(t *t
 		)
 	}
 	if driver.initialPolls != 1 || driver.servicePolls != 1 || driver.detachPolls != 1 ||
-		driver.suspendPolls != 1 || driver.resumePolls != 1 || driver.deletePolls != 1 {
+		driver.suspendPolls != 1 || driver.resumePolls != 1 || driver.deletePolls != 0 {
 		t.Fatalf(
-			"transition polls = initial %d service %d detach %d suspend %d resume %d delete %d, want 1 each",
+			"transition polls = initial %d service %d detach %d suspend %d resume %d delete %d, "+
+				"want one poll for non-delete transitions and zero for immediate maintenance deletion",
 			driver.initialPolls,
 			driver.servicePolls,
 			driver.detachPolls,
@@ -232,6 +310,18 @@ func TestInteractiveLifecycleExercisesAttachmentControllerAndWaitsForDetach(t *t
 			driver.resumePolls,
 			driver.deletePolls,
 		)
+	}
+}
+
+func TestValidateWorkspaceAdmissionProbeResultRejectsProgressWithAdmissionError(t *testing.T) {
+	observation := workspaceprovider.WorkspaceObservation{
+		State:      workspacev1alpha1.ExecutionWorkspaceStateReady,
+		ExternalID: "already-created",
+	}
+	if err := validateWorkspaceAdmissionProbeResult(
+		observation, workspaceprovider.ErrWorkspaceNotAdmitted, "admission probe",
+	); err == nil {
+		t.Fatal("progressed observation with ErrWorkspaceNotAdmitted passed admission validation")
 	}
 }
 
@@ -271,7 +361,28 @@ func TestValidatePoolObservationRejectsImpossibleCounters(t *testing.T) {
 		wantError   bool
 	}{
 		{name: "empty", observation: workspaceprovider.PoolObservation{}},
-		{name: "valid", observation: workspaceprovider.PoolObservation{Available: 2, Allocated: 3, Suspended: 1, Total: 3}},
+		{
+			name: "available allocated and suspended",
+			observation: workspaceprovider.PoolObservation{
+				Available: 1,
+				Allocated: 1,
+				Suspended: 1,
+				Total:     3,
+			},
+		},
+		{
+			name: "documented disjoint capacity example",
+			observation: workspaceprovider.PoolObservation{
+				Available: 3, Allocated: 8, Suspended: 20, Total: 31,
+			},
+		},
+		{
+			name: "disjoint capacity sum exceeds total",
+			observation: workspaceprovider.PoolObservation{
+				Available: 3, Allocated: 8, Suspended: 20, Total: 30,
+			},
+			wantError: true,
+		},
 		{name: "negative", observation: workspaceprovider.PoolObservation{Available: -1}, wantError: true},
 		{
 			name:        "available exceeds total",
@@ -282,6 +393,21 @@ func TestValidatePoolObservationRejectsImpossibleCounters(t *testing.T) {
 			name:        "allocated exceeds total",
 			observation: workspaceprovider.PoolObservation{Allocated: 2, Total: 1},
 			wantError:   true,
+		},
+		{
+			name:        "available plus allocated exceeds total",
+			observation: workspaceprovider.PoolObservation{Available: 2, Allocated: 2, Total: 3},
+			wantError:   true,
+		},
+		{
+			name: "widened counter sum exceeds total without overflow",
+			observation: workspaceprovider.PoolObservation{
+				Available: 1<<31 - 1,
+				Allocated: 1<<31 - 1,
+				Suspended: 1<<31 - 1,
+				Total:     1<<31 - 1,
+			},
+			wantError: true,
 		},
 		{
 			name:        "suspended exceeds total",
@@ -297,6 +423,190 @@ func TestValidatePoolObservationRejectsImpossibleCounters(t *testing.T) {
 			}
 			if !tt.wantError && err != nil {
 				t.Fatalf("validatePoolObservation(%#v) error = %v", tt.observation, err)
+			}
+		})
+	}
+}
+
+func providerBindingConformanceFixture() (
+	workspaceprovider.AdapterMetadata,
+	workspaceprovider.ProviderObservation,
+	*workspacev1alpha1.ExecutionWorkspaceProvider,
+	workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus,
+) {
+	metadata := workspaceprovider.AdapterMetadata{
+		ControllerName: "conformance.test/v1",
+		Version:        "1.2.3",
+		Digest:         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Contracts:      []string{workspacev1alpha1.ContractVersionV1, "workspace.orka.ai/v2"},
+	}
+	advertised := workspaceprovider.ProviderObservation{
+		Adapter: workspacev1alpha1.ExecutionWorkspaceAdapterStatus{
+			Version: metadata.Version,
+			Digest:  metadata.Digest,
+		},
+		Backend: workspacev1alpha1.ExecutionWorkspaceBackendStatus{
+			Version:     "2026.07",
+			APIVersions: []string{"backend.test/v1", "backend.test/v2"},
+		},
+	}
+	provider := conformanceProviderFixture(metadata, advertised)
+	binding := workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus{
+		ContractVersion:   workspacev1alpha1.ContractVersionV1,
+		AdapterVersion:    metadata.Version,
+		AdapterDigest:     metadata.Digest,
+		BackendAPIVersion: "backend.test/v1",
+	}
+	return metadata, advertised, provider, binding
+}
+
+func TestValidateProviderBindingIdentityMatchesProviderFixtureAndAdvertisedMetadata(t *testing.T) {
+	metadata, advertised, provider, valid := providerBindingConformanceFixture()
+	tests := []struct {
+		name      string
+		binding   *workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus
+		wantError bool
+	}{
+		{name: "valid", binding: &valid},
+		{name: "nil", binding: nil, wantError: true},
+		{
+			name: "empty selected contract",
+			binding: &workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus{
+				AdapterVersion:    valid.AdapterVersion,
+				AdapterDigest:     valid.AdapterDigest,
+				BackendAPIVersion: valid.BackendAPIVersion,
+			},
+			wantError: true,
+		},
+		{
+			name: "contract mismatch",
+			binding: &workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus{
+				ContractVersion:   "workspace.orka.ai/v3",
+				AdapterVersion:    valid.AdapterVersion,
+				AdapterDigest:     valid.AdapterDigest,
+				BackendAPIVersion: valid.BackendAPIVersion,
+			},
+			wantError: true,
+		},
+		{
+			name: "adapter version mismatch",
+			binding: &workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus{
+				ContractVersion:   valid.ContractVersion,
+				AdapterVersion:    "9.9.9",
+				AdapterDigest:     valid.AdapterDigest,
+				BackendAPIVersion: valid.BackendAPIVersion,
+			},
+			wantError: true,
+		},
+		{
+			name: "adapter digest mismatch",
+			binding: &workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus{
+				ContractVersion:   valid.ContractVersion,
+				AdapterVersion:    valid.AdapterVersion,
+				AdapterDigest:     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				BackendAPIVersion: valid.BackendAPIVersion,
+			},
+			wantError: true,
+		},
+		{
+			name: "backend API mismatch",
+			binding: &workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus{
+				ContractVersion:   valid.ContractVersion,
+				AdapterVersion:    valid.AdapterVersion,
+				AdapterDigest:     valid.AdapterDigest,
+				BackendAPIVersion: "backend.test/v3",
+			},
+			wantError: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateProviderBindingIdentity(tt.binding, provider, metadata, advertised)
+			if tt.wantError && err == nil {
+				t.Fatalf("validateProviderBindingIdentity(%#v) succeeded, want error", tt.binding)
+			}
+			if !tt.wantError && err != nil {
+				t.Fatalf("validateProviderBindingIdentity(%#v) error = %v", tt.binding, err)
+			}
+		})
+	}
+}
+
+func TestInteractiveProviderBindingConformanceRequiresStableBinding(t *testing.T) {
+	metadata, advertised, provider, stable := providerBindingConformanceFixture()
+	alternate := stable
+	alternate.ContractVersion = "workspace.orka.ai/v2"
+	alternate.BackendAPIVersion = "backend.test/v2"
+
+	states := []workspacev1alpha1.ExecutionWorkspaceState{
+		workspacev1alpha1.ExecutionWorkspaceStateReady,
+		workspacev1alpha1.ExecutionWorkspaceStateAttaching,
+		workspacev1alpha1.ExecutionWorkspaceStateAttached,
+		workspacev1alpha1.ExecutionWorkspaceStateDetaching,
+		workspacev1alpha1.ExecutionWorkspaceStateReady,
+		workspacev1alpha1.ExecutionWorkspaceStateSuspending,
+		workspacev1alpha1.ExecutionWorkspaceStateSuspended,
+		workspacev1alpha1.ExecutionWorkspaceStateProvisioning,
+		workspacev1alpha1.ExecutionWorkspaceStateReady,
+		workspacev1alpha1.ExecutionWorkspaceStateDeleting,
+		workspacev1alpha1.ExecutionWorkspaceStateDeleted,
+	}
+	stableObservations := make([]workspaceprovider.WorkspaceObservation, 0, len(states))
+	for _, state := range states {
+		binding := stable
+		stableObservations = append(stableObservations, workspaceprovider.WorkspaceObservation{
+			State:           state,
+			ProviderBinding: &binding,
+		})
+	}
+
+	tests := []struct {
+		name         string
+		observations []workspaceprovider.WorkspaceObservation
+		wantErrorAt  int
+	}{
+		{name: "stable through lifecycle", observations: stableObservations, wantErrorAt: -1},
+		{
+			name:         "nil at ready",
+			observations: []workspaceprovider.WorkspaceObservation{{State: workspacev1alpha1.ExecutionWorkspaceStateReady}},
+			wantErrorAt:  0,
+		},
+		{
+			name: "nil after ready",
+			observations: []workspaceprovider.WorkspaceObservation{
+				{State: workspacev1alpha1.ExecutionWorkspaceStateReady, ProviderBinding: &stable},
+				{State: workspacev1alpha1.ExecutionWorkspaceStateAttaching},
+			},
+			wantErrorAt: 1,
+		},
+		{
+			name: "unstable but independently valid binding",
+			observations: []workspaceprovider.WorkspaceObservation{
+				{State: workspacev1alpha1.ExecutionWorkspaceStateReady, ProviderBinding: &stable},
+				{State: workspacev1alpha1.ExecutionWorkspaceStateAttaching, ProviderBinding: &alternate},
+			},
+			wantErrorAt: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			validator := &interactiveProviderBindingConformance{
+				provider: provider, metadata: metadata, advertised: advertised,
+			}
+			for index, observation := range tt.observations {
+				err := validator.validate(observation)
+				if index == tt.wantErrorAt {
+					if err == nil {
+						t.Fatalf("observation %d (%s) passed, want error", index, observation.State)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("observation %d (%s) error = %v", index, observation.State, err)
+				}
+			}
+			if tt.wantErrorAt >= 0 {
+				t.Fatalf("observations completed, want error at index %d", tt.wantErrorAt)
 			}
 		})
 	}
@@ -363,6 +673,11 @@ func TestProviderObservationMatchesAdvertisedMetadata(t *testing.T) {
 	}
 	if err := validateAdapterMetadata(metadata); err != nil {
 		t.Fatalf("valid metadata: %v", err)
+	}
+	invalidContracts := metadata
+	invalidContracts.Contracts = append(append([]string(nil), metadata.Contracts...), "")
+	if err := validateAdapterMetadata(invalidContracts); err == nil {
+		t.Fatal("metadata with an empty contract passed validation")
 	}
 	observation := workspaceprovider.ProviderObservation{
 		Adapter: workspacev1alpha1.ExecutionWorkspaceAdapterStatus{
@@ -567,7 +882,8 @@ func TestRunDataPlaneConformance(t *testing.T) {
 	workspace.UID = types.UID("probe-uid")
 	workspace.Spec.Mode = workspacev1alpha1.ExecutionWorkspaceModeInteractive
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
-	runDataPlaneConformance(t, driver, &DataPlaneFixture{
+	advertised := driver.providerObservation()
+	runDataPlaneConformance(t, driver, conformanceProviderFixture(metadata, advertised), &DataPlaneFixture{
 		Workspace:          workspace,
 		Connection:         workspaceprovider.ConnectionData{Endpoint: server.URL, CAData: caData, ControlAuth: controlValue},
 		Bearer:             bearerValue,
@@ -576,7 +892,7 @@ func TestRunDataPlaneConformance(t *testing.T) {
 		ExecExpectedStdout: "1",
 		FilePath:           "/workspace/conformance.txt",
 		FileData:           []byte("conformance-data"),
-	}, metadata, conformanceTiming{timeout: time.Second, pollInterval: time.Millisecond})
+	}, metadata, advertised, conformanceTiming{timeout: time.Second, pollInterval: time.Millisecond})
 }
 
 func TestConformanceConnectionRequiresTLS(t *testing.T) {

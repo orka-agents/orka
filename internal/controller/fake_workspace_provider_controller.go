@@ -3,9 +3,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -159,10 +161,11 @@ func (r *FakeExecutionWorkspacePoolReconciler) Reconcile(ctx context.Context, re
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	total := min(pool.Spec.Capacity.MinReady+allocated, pool.Spec.Capacity.MaxSize)
-	// A downsize never evicts leased workspaces; total may temporarily exceed maxSize.
-	total = max(total, allocated)
-	available := max(total-allocated, 0)
+	used := allocated + suspended
+	total := min(pool.Spec.Capacity.MinReady+used, pool.Spec.Capacity.MaxSize)
+	// A downsize never evicts active or suspended workspaces; total may temporarily exceed maxSize.
+	total = max(total, used)
+	available := max(total-used, 0)
 	return ctrl.Result{RequeueAfter: fakeProviderHeartbeatPeriod}, retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &workspacev1alpha1.ExecutionWorkspacePool{}
 		if err := r.Get(ctx, req.NamespacedName, current); err != nil {
@@ -181,7 +184,7 @@ func (r *FakeExecutionWorkspacePoolReconciler) Reconcile(ctx context.Context, re
 			Message:            "fake pool capacity is reconciled",
 			ObservedGeneration: current.Generation,
 		})
-		admitted := allocated < current.Spec.Capacity.MaxSize
+		admitted := used < current.Spec.Capacity.MaxSize
 		workspaceprovider.SetCondition(&current.Status.Conditions, metav1.Condition{
 			Type:               string(workspacev1alpha1.ConditionPoolAdmitted),
 			Status:             conditionStatus(admitted),
@@ -204,20 +207,15 @@ func (r *FakeExecutionWorkspacePoolReconciler) countPoolWorkspaces(
 	var allocated, suspended int32
 	for i := range workspaces.Items {
 		workspace := &workspaces.Items[i]
-		class := &workspacev1alpha1.ExecutionWorkspaceClass{}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: workspace.Spec.ClassBinding.Name}, class); err != nil {
+		if !workspaceHasCoreAdmission(workspace) || workspace.Spec.CoreAdmission.PoolBinding == nil ||
+			workspace.Spec.CoreAdmission.PoolBinding.UID != pool.UID || workspaceComputeCapacityReleased(workspace) {
 			continue
 		}
-		if class.Spec.PoolRef == nil || class.Spec.PoolRef.Name != pool.Name {
-			continue
-		}
-		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateDeleted || workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateDeleting {
+		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended {
+			suspended++
 			continue
 		}
 		allocated++
-		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended {
-			suspended++
-		}
 	}
 	return allocated, suspended, nil
 }
@@ -234,6 +232,8 @@ func (r *FakeExecutionWorkspacePoolReconciler) SetupWithManager(mgr ctrl.Manager
 // status and is intentionally free of provider-native branches.
 type FakeExecutionWorkspaceReconciler struct {
 	client.Client
+	APIReader  client.Reader
+	RESTMapper apimeta.RESTMapper
 }
 
 func (r *FakeExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -246,11 +246,28 @@ func (r *FakeExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ct
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	admissionPending := false
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &workspacev1alpha1.ExecutionWorkspace{}
 		if err := r.Get(ctx, req.NamespacedName, current); err != nil {
 			return err
 		}
+		maintenance := workspaceHasMaintenanceIntent(current) || workspaceNeedsAttachmentRevocation(current)
+		if !maintenance && !workspaceCurrentlyAdmittedByCore(current) {
+			admissionPending = true
+			return nil
+		}
+		if !maintenance {
+			withinCapacity, err := r.workspaceWithinPoolCapacity(ctx, current)
+			if err != nil {
+				return err
+			}
+			if !withinCapacity {
+				admissionPending = true
+				return nil
+			}
+		}
+		admissionPending = false
 		before := current.DeepCopy()
 		current.Status.ObservedGeneration = current.Generation
 		current.Status.ExternalID = fmt.Sprintf("fake/%s/%s", current.Namespace, current.Name)
@@ -319,9 +336,170 @@ func (r *FakeExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ct
 		// core-owned entries in the conditions array.
 		return r.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 	})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if admissionPending {
+		return ctrl.Result{RequeueAfter: workspaceRequeueInterval}, nil
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *FakeExecutionWorkspaceReconciler) workspaceReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+func (r *FakeExecutionWorkspaceReconciler) workspaceWithinPoolCapacity(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) (bool, error) {
+	var poolBinding *workspacev1alpha1.ImmutableObjectBinding
+	if workspaceCurrentlyAdmittedByCore(workspace) {
+		poolBinding = workspace.Spec.CoreAdmission.PoolBinding
+	}
+	pool, grandfathered, err := r.resolveWorkspaceCapacityPool(ctx, workspace, poolBinding)
+	if err != nil {
+		return false, err
+	}
+	if grandfathered || pool == nil {
+		return true, nil
+	}
+	candidates, err := r.fakePoolCapacityCandidates(ctx, workspace.Namespace, pool)
+	if err != nil {
+		return false, err
+	}
+	return workspaceWinsFakePoolCapacity(workspace, candidates, pool.Spec.Capacity.MaxSize), nil
+}
+
+func (r *FakeExecutionWorkspaceReconciler) resolveWorkspaceCapacityPool(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	poolBinding *workspacev1alpha1.ImmutableObjectBinding,
+) (*workspacev1alpha1.ExecutionWorkspacePool, bool, error) {
+	poolName := ""
+	if poolBinding != nil {
+		// Core already reserved this immutable pool identity. Use that binding rather
+		// than the mutable live class so deletion or replacement cannot strand the
+		// workspace before the adapter publishes its first status.
+		poolName = poolBinding.Name
+	} else {
+		class := &workspacev1alpha1.ExecutionWorkspaceClass{}
+		classKey := types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Spec.ClassBinding.Name}
+		if err := r.workspaceReader().Get(ctx, classKey, class); err != nil {
+			return nil, false, fmt.Errorf("get fake workspace class for capacity: %w", err)
+		}
+		if class.Spec.PoolRef == nil {
+			return nil, false, nil
+		}
+		poolName = class.Spec.PoolRef.Name
+	}
+
+	pool := &workspacev1alpha1.ExecutionWorkspacePool{}
+	poolKey := types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}
+	if err := r.workspaceReader().Get(ctx, poolKey, pool); err != nil {
+		if poolBinding != nil && apierrors.IsNotFound(err) {
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("get fake workspace pool for capacity: %w", err)
+	}
+	return pool, poolBinding != nil && pool.UID != poolBinding.UID, nil
+}
+
+type fakePoolCapacityCandidate struct {
+	name        string
+	uid         types.UID
+	created     metav1.Time
+	provisioned bool
+}
+
+func (r *FakeExecutionWorkspaceReconciler) fakePoolCapacityCandidates(
+	ctx context.Context,
+	namespace string,
+	pool *workspacev1alpha1.ExecutionWorkspacePool,
+) ([]fakePoolCapacityCandidate, error) {
+	workspaces := &workspacev1alpha1.ExecutionWorkspaceList{}
+	if err := r.workspaceReader().List(ctx, workspaces, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list fake workspace pool allocations: %w", err)
+	}
+	candidates := make([]fakePoolCapacityCandidate, 0, len(workspaces.Items))
+	for i := range workspaces.Items {
+		candidateWorkspace := &workspaces.Items[i]
+		if !workspaceHasCoreAdmission(candidateWorkspace) || candidateWorkspace.Spec.CoreAdmission.PoolBinding == nil ||
+			candidateWorkspace.Spec.CoreAdmission.PoolBinding.UID != pool.UID {
+			continue
+		}
+		provisioned := candidateWorkspace.Status.State != "" ||
+			candidateWorkspace.Spec.CoreAdmission.PoolBinding.Generation < pool.Generation
+		if !provisioned && (!candidateWorkspace.DeletionTimestamp.IsZero() || workspaceHasMaintenanceIntent(candidateWorkspace)) {
+			continue
+		}
+		if workspaceComputeCapacityReleased(candidateWorkspace) {
+			continue
+		}
+		candidates = append(candidates, fakePoolCapacityCandidate{
+			name:        candidateWorkspace.Name,
+			uid:         candidateWorkspace.UID,
+			created:     candidateWorkspace.CreationTimestamp,
+			provisioned: provisioned,
+		})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].provisioned != candidates[j].provisioned {
+			return candidates[i].provisioned
+		}
+		if !candidates[i].created.Equal(&candidates[j].created) {
+			return candidates[i].created.Before(&candidates[j].created)
+		}
+		if candidates[i].name != candidates[j].name {
+			return candidates[i].name < candidates[j].name
+		}
+		return string(candidates[i].uid) < string(candidates[j].uid)
+	})
+	return candidates, nil
+}
+
+func workspaceWinsFakePoolCapacity(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	candidates []fakePoolCapacityCandidate,
+	maxSize int32,
+) bool {
+	provisionedCount := 0
+	for _, candidate := range candidates {
+		if !candidate.provisioned {
+			break
+		}
+		provisionedCount++
+		if candidate.name == workspace.Name && candidate.uid == workspace.UID {
+			// Downsizing never evicts or freezes already provisioned workspaces.
+			return true
+		}
+	}
+	availableSlots := int(maxSize) - provisionedCount
+	if availableSlots <= 0 {
+		return false
+	}
+	for _, candidate := range candidates[provisionedCount:] {
+		if availableSlots == 0 {
+			break
+		}
+		availableSlots--
+		if candidate.name == workspace.Name && candidate.uid == workspace.UID {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *FakeExecutionWorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
+	if r.RESTMapper == nil {
+		r.RESTMapper = mgr.GetRESTMapper()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacev1alpha1.ExecutionWorkspace{}).
 		Named("fake-execution-workspace").

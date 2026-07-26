@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -12,9 +13,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
-
-const workspacePolicyReviewProfileHash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestExecutionWorkspaceClassReadinessPolicyMatrix(t *testing.T) {
 	t.Parallel()
@@ -59,6 +59,15 @@ func TestExecutionWorkspaceClassReadinessPolicyMatrix(t *testing.T) {
 			wantReason: "ClassNotReady",
 		},
 		{
+			name: "adapter status does not grandfather a workspace before core admission",
+			mutate: func(class *workspacev1alpha1.ExecutionWorkspaceClass, workspace *workspacev1alpha1.ExecutionWorkspace) {
+				class.Status.Conditions[0].Status = metav1.ConditionFalse
+				workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+				workspace.Status.ObservedGeneration = workspace.Generation
+			},
+			wantReason: "ClassNotReady",
+		},
+		{
 			name:       "new workspace accepts current ready pinned class",
 			mutate:     func(*workspacev1alpha1.ExecutionWorkspaceClass, *workspacev1alpha1.ExecutionWorkspace) {},
 			wantReason: string(workspacev1alpha1.ReasonReady),
@@ -67,6 +76,7 @@ func TestExecutionWorkspaceClassReadinessPolicyMatrix(t *testing.T) {
 			name: "provisioned workspace preserves pinned class while class is not ready",
 			mutate: func(class *workspacev1alpha1.ExecutionWorkspaceClass, workspace *workspacev1alpha1.ExecutionWorkspace) {
 				workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+				markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 				class.Status.ObservedGeneration = class.Generation - 1
 				class.Status.Conditions[0].ObservedGeneration = class.Generation - 1
 				class.Status.Conditions[0].Status = metav1.ConditionFalse
@@ -77,6 +87,7 @@ func TestExecutionWorkspaceClassReadinessPolicyMatrix(t *testing.T) {
 			name: "provisioned workspace still requires pinned profile hash",
 			mutate: func(class *workspacev1alpha1.ExecutionWorkspaceClass, workspace *workspacev1alpha1.ExecutionWorkspace) {
 				workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+				markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 				class.Status.ProfileHash = ""
 			},
 			wantReason: "ClassNotReady",
@@ -85,6 +96,7 @@ func TestExecutionWorkspaceClassReadinessPolicyMatrix(t *testing.T) {
 			name: "provisioned workspace rejects profile mismatch",
 			mutate: func(class *workspacev1alpha1.ExecutionWorkspaceClass, workspace *workspacev1alpha1.ExecutionWorkspace) {
 				workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+				markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 				class.Status.ProfileHash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 			},
 			wantReason: "ClassProfileMismatch",
@@ -158,6 +170,7 @@ func TestExecutionWorkspaceReuseScopePolicyMatrix(t *testing.T) {
 			t.Parallel()
 			class, provider, workspace := workspacePolicyReviewFixture(t)
 			class.Spec.AllowedReuseScopes = tt.allowed
+			refreshWorkspacePolicyReviewProfile(t, class, provider, workspace)
 			if tt.session {
 				workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
 					Name: "session",
@@ -175,11 +188,12 @@ func TestExecutionWorkspaceReuseScopePolicyMatrix(t *testing.T) {
 func TestExecutionWorkspaceProviderLifecyclePolicyMatrix(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name           string
-		lifecycle      workspacev1alpha1.ExecutionWorkspaceProviderLifecycleState
-		workspaceState workspacev1alpha1.ExecutionWorkspaceState
-		classReady     bool
-		wantReason     string
+		name               string
+		lifecycle          workspacev1alpha1.ExecutionWorkspaceProviderLifecycleState
+		workspaceState     workspacev1alpha1.ExecutionWorkspaceState
+		previouslyAdmitted bool
+		classReady         bool
+		wantReason         string
 	}{
 		{
 			name:       "active accepts new workspace",
@@ -188,11 +202,12 @@ func TestExecutionWorkspaceProviderLifecyclePolicyMatrix(t *testing.T) {
 			wantReason: string(workspacev1alpha1.ReasonReady),
 		},
 		{
-			name:           "active preserves provisioned workspace",
-			lifecycle:      workspacev1alpha1.ExecutionWorkspaceProviderActive,
-			workspaceState: workspacev1alpha1.ExecutionWorkspaceStateReady,
-			classReady:     true,
-			wantReason:     string(workspacev1alpha1.ReasonReady),
+			name:               "active preserves provisioned workspace",
+			previouslyAdmitted: true,
+			lifecycle:          workspacev1alpha1.ExecutionWorkspaceProviderActive,
+			workspaceState:     workspacev1alpha1.ExecutionWorkspaceStateReady,
+			classReady:         true,
+			wantReason:         string(workspacev1alpha1.ReasonReady),
 		},
 		{
 			name:       "draining rejects new workspace",
@@ -201,10 +216,18 @@ func TestExecutionWorkspaceProviderLifecyclePolicyMatrix(t *testing.T) {
 			wantReason: string(workspacev1alpha1.ReasonProviderDraining),
 		},
 		{
-			name:           "draining preserves provisioned workspace after class becomes not ready",
+			name:           "draining rejects raced adapter status without core admission",
 			lifecycle:      workspacev1alpha1.ExecutionWorkspaceProviderDraining,
-			workspaceState: workspacev1alpha1.ExecutionWorkspaceStateSuspended,
-			wantReason:     string(workspacev1alpha1.ReasonReady),
+			workspaceState: workspacev1alpha1.ExecutionWorkspaceStateReady,
+			classReady:     true,
+			wantReason:     string(workspacev1alpha1.ReasonProviderDraining),
+		},
+		{
+			name:               "draining preserves provisioned workspace after class becomes not ready",
+			previouslyAdmitted: true,
+			lifecycle:          workspacev1alpha1.ExecutionWorkspaceProviderDraining,
+			workspaceState:     workspacev1alpha1.ExecutionWorkspaceStateSuspended,
+			wantReason:         string(workspacev1alpha1.ReasonReady),
 		},
 		{
 			name:       "disabled rejects new workspace",
@@ -213,10 +236,11 @@ func TestExecutionWorkspaceProviderLifecyclePolicyMatrix(t *testing.T) {
 			wantReason: string(workspacev1alpha1.ReasonProviderDisabled),
 		},
 		{
-			name:           "disabled rejects provisioned workspace even after class becomes not ready",
-			lifecycle:      workspacev1alpha1.ExecutionWorkspaceProviderDisabled,
-			workspaceState: workspacev1alpha1.ExecutionWorkspaceStateReady,
-			wantReason:     string(workspacev1alpha1.ReasonProviderDisabled),
+			name:               "disabled rejects provisioned workspace even after class becomes not ready",
+			previouslyAdmitted: true,
+			lifecycle:          workspacev1alpha1.ExecutionWorkspaceProviderDisabled,
+			workspaceState:     workspacev1alpha1.ExecutionWorkspaceStateReady,
+			wantReason:         string(workspacev1alpha1.ReasonProviderDisabled),
 		},
 	}
 
@@ -226,6 +250,9 @@ func TestExecutionWorkspaceProviderLifecyclePolicyMatrix(t *testing.T) {
 			class, provider, workspace := workspacePolicyReviewFixture(t)
 			provider.Spec.LifecycleState = tt.lifecycle
 			workspace.Status.State = tt.workspaceState
+			if tt.previouslyAdmitted {
+				markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+			}
 			if !tt.classReady {
 				class.Status.Conditions[0].Status = metav1.ConditionFalse
 			}
@@ -268,6 +295,7 @@ func TestExecutionWorkspaceDisabledProviderMaintenanceIntentMatrix(t *testing.T)
 			provider.Spec.LifecycleState = workspacev1alpha1.ExecutionWorkspaceProviderDisabled
 			class.Status.Conditions[0].Status = metav1.ConditionFalse
 			workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+			markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 			workspace.Spec.DesiredState = tt.desired
 			workspace.Finalizers = []string{executionWorkspaceFinalizer}
 
@@ -281,8 +309,13 @@ func TestExecutionWorkspaceDisabledProviderMaintenanceIntentMatrix(t *testing.T)
 				Namespace: workspace.Namespace,
 				Name:      workspace.Name,
 			}}
-			if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
-				t.Fatalf("Reconcile: %v", err)
+			// A newly quarantined generation must be observed before core publishes
+			// the provider-visible denial condition. Existing maintenance intents
+			// converge idempotently through the same two reconciliation passes.
+			for range 2 {
+				if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+					t.Fatalf("Reconcile: %v", err)
+				}
 			}
 
 			got := &workspacev1alpha1.ExecutionWorkspace{}
@@ -482,9 +515,23 @@ func workspacePolicyReviewFixture(
 	t.Helper()
 	class := testGenericClass("default", "class", "provider")
 	provider := testGenericProvider("provider")
+	provider.Status.ObservedGeneration = provider.Generation
+	provider.Status.SupportedContracts = []string{workspacev1alpha1.ContractVersionV1}
+	provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
+		workspacev1alpha1.WorkspaceFeatureExec,
+		workspacev1alpha1.WorkspaceFeatureReset,
+		workspacev1alpha1.WorkspaceFeatureSuspend,
+		workspacev1alpha1.WorkspaceFeatureTLS,
+	}
+	provider.Status.Conditions = []metav1.Condition{{
+		Type:               string(workspacev1alpha1.ConditionProviderReady),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(workspacev1alpha1.ReasonReady),
+		ObservedGeneration: provider.Generation,
+	}}
 	workspace := testBoundWorkspace(t, "default", "workspace", class.Name, provider.Name)
+	refreshWorkspacePolicyReviewProfile(t, class, provider, workspace)
 	class.Status.ObservedGeneration = class.Generation
-	class.Status.ProfileHash = workspacePolicyReviewProfileHash
 	class.Status.Conditions = []metav1.Condition{{
 		Type:               string(workspacev1alpha1.ConditionClassReady),
 		Status:             metav1.ConditionTrue,
@@ -495,6 +542,29 @@ func workspacePolicyReviewFixture(
 	return class, provider, workspace
 }
 
+func refreshWorkspacePolicyReviewProfile(
+	t *testing.T,
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+) {
+	t.Helper()
+	mapper, parameters := testParameterMapping(class.Namespace, class.Spec.ParametersRef)
+	tempClient := fake.NewClientBuilder().
+		WithScheme(testWorkspaceScheme(t)).
+		WithObjects(provider, parameters).
+		Build()
+	classValidator := &ExecutionWorkspaceClassReconciler{
+		Client: tempClient, APIReader: tempClient, RESTMapper: mapper,
+	}
+	profileHash, err := classValidator.resolvedClassProfileHash(context.Background(), class)
+	if err != nil {
+		t.Fatalf("resolve workspace policy review profile: %v", err)
+	}
+	class.Status.ProfileHash = profileHash
+	workspace.Spec.ClassBinding.ProfileHash = profileHash
+}
+
 func validateWorkspacePolicyReviewBindings(
 	t *testing.T,
 	class *workspacev1alpha1.ExecutionWorkspaceClass,
@@ -502,16 +572,32 @@ func validateWorkspacePolicyReviewBindings(
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) string {
 	t.Helper()
+	mapper, parameters := testParameterMapping(class.Namespace, class.Spec.ParametersRef)
 	c := fake.NewClientBuilder().
 		WithScheme(testWorkspaceScheme(t)).
-		WithObjects(class, provider).
+		WithObjects(class, provider, parameters).
 		Build()
-	reconciler := &ExecutionWorkspaceReconciler{Client: c}
+	reconciler := &ExecutionWorkspaceReconciler{Client: c, APIReader: c, RESTMapper: mapper}
 	reason, _, err := reconciler.validateWorkspaceBindings(context.Background(), workspace)
 	if err != nil {
 		t.Fatalf("validateWorkspaceBindings: %v", err)
 	}
 	return reason
+}
+
+func markWorkspaceAdmittedForPolicyReview(workspace *workspacev1alpha1.ExecutionWorkspace, observedGeneration int64) {
+	workspace.Spec.CoreAdmission = &workspacev1alpha1.ExecutionWorkspaceCoreAdmission{
+		ClassBinding:       workspace.Spec.ClassBinding,
+		ProviderBinding:    workspace.Spec.ProviderBinding,
+		AdmittedGeneration: observedGeneration,
+	}
+	workspace.Status.ObservedGeneration = observedGeneration
+	workspace.Status.Conditions = []metav1.Condition{{
+		Type:               string(workspacev1alpha1.ConditionWorkspaceAdmitted),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(workspacev1alpha1.ReasonReady),
+		ObservedGeneration: observedGeneration,
+	}}
 }
 
 func workspacePolicyReviewValidDisposition() *workspacev1alpha1.ExecutionWorkspaceDisposition {
@@ -532,4 +618,130 @@ func workspacePolicyReviewDispositionWith(
 	disposition := workspacePolicyReviewValidDisposition()
 	mutate(disposition)
 	return disposition
+}
+
+func TestExecutionWorkspacePoolAdmissionPolicyMatrix(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		mutate     func(*workspacev1alpha1.ExecutionWorkspacePool)
+		wantReason string
+	}{
+		{name: "current ready admitted pool", wantReason: string(workspacev1alpha1.ReasonReady)},
+		{
+			name: "pool capacity unavailable",
+			mutate: func(pool *workspacev1alpha1.ExecutionWorkspacePool) {
+				workspaceprovider.SetCondition(&pool.Status.Conditions, metav1.Condition{
+					Type:               string(workspacev1alpha1.ConditionPoolAdmitted),
+					Status:             metav1.ConditionFalse,
+					Reason:             string(workspacev1alpha1.ReasonCapacityUnavailable),
+					ObservedGeneration: pool.Generation,
+				})
+			},
+			wantReason: string(workspacev1alpha1.ReasonCapacityUnavailable),
+		},
+		{
+			name: "stale pool readiness",
+			mutate: func(pool *workspacev1alpha1.ExecutionWorkspacePool) {
+				pool.Status.ObservedGeneration--
+			},
+			wantReason: "PoolNotReady",
+		},
+		{
+			name: "deleting pool",
+			mutate: func(pool *workspacev1alpha1.ExecutionWorkspacePool) {
+				pool.Finalizers = []string{"test/finalizer"}
+				now := metav1.Now()
+				pool.DeletionTimestamp = &now
+			},
+			wantReason: "PoolDeleting",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := testGenericProvider("provider")
+			provider.Status.ObservedGeneration = provider.Generation
+			provider.Status.SupportedContracts = []string{workspacev1alpha1.ContractVersionV1}
+			provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
+				workspacev1alpha1.WorkspaceFeatureExec,
+				workspacev1alpha1.WorkspaceFeaturePools,
+				workspacev1alpha1.WorkspaceFeatureReset,
+				workspacev1alpha1.WorkspaceFeatureSuspend,
+				workspacev1alpha1.WorkspaceFeatureTLS,
+			}
+			workspaceprovider.SetCondition(&provider.Status.Conditions, metav1.Condition{
+				Type:               string(workspacev1alpha1.ConditionProviderReady),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(workspacev1alpha1.ReasonReady),
+				ObservedGeneration: provider.Generation,
+			})
+			pool := testGenericPool("default", "pool", provider.Name)
+			pool.Status.ObservedGeneration = pool.Generation
+			workspaceprovider.SetCondition(&pool.Status.Conditions, metav1.Condition{
+				Type:               string(workspacev1alpha1.ConditionPoolReady),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(workspacev1alpha1.ReasonReady),
+				ObservedGeneration: pool.Generation,
+			})
+			workspaceprovider.SetCondition(&pool.Status.Conditions, metav1.Condition{
+				Type:               string(workspacev1alpha1.ConditionPoolAdmitted),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(workspacev1alpha1.ReasonReady),
+				ObservedGeneration: pool.Generation,
+			})
+			class := testGenericClass(pool.Namespace, "class", provider.Name)
+			class.Spec.ProviderRef = nil
+			class.Spec.ParametersRef = nil
+			class.Spec.PoolRef = &corev1.LocalObjectReference{Name: pool.Name}
+			mapper, parameters := testParameterMapping(pool.Namespace, &pool.Spec.ParametersRef)
+			c := fake.NewClientBuilder().
+				WithScheme(testWorkspaceScheme(t)).
+				WithStatusSubresource(provider, pool, class).
+				WithObjects(provider, pool, class, parameters).
+				Build()
+			classReconciler := &ExecutionWorkspaceClassReconciler{
+				Client: c, APIReader: c, RESTMapper: mapper,
+			}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: class.Namespace, Name: class.Name}}
+			if _, err := classReconciler.Reconcile(context.Background(), request); err != nil {
+				t.Fatalf("reconcile ready pooled class: %v", err)
+			}
+			if err := c.Get(context.Background(), request.NamespacedName, class); err != nil {
+				t.Fatalf("get ready pooled class: %v", err)
+			}
+			if class.Status.ProfileHash == "" {
+				t.Fatal("pooled class did not receive a profile hash")
+			}
+
+			if err := c.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, pool); err != nil {
+				t.Fatalf("get pool before mutation: %v", err)
+			}
+			if test.mutate != nil {
+				test.mutate(pool)
+				if pool.DeletionTimestamp != nil {
+					pool.DeletionTimestamp = nil
+					if err := c.Update(context.Background(), pool); err != nil {
+						t.Fatalf("add pool finalizer: %v", err)
+					}
+					if err := c.Delete(context.Background(), pool); err != nil {
+						t.Fatalf("mark pool deleting: %v", err)
+					}
+				} else if err := c.Status().Update(context.Background(), pool); err != nil {
+					t.Fatalf("update mutated pool status: %v", err)
+				}
+			}
+
+			workspace := testBoundWorkspace(t, class.Namespace, "workspace", class.Name, provider.Name)
+			workspace.Spec.ClassBinding.ProfileHash = class.Status.ProfileHash
+			reconciler := &ExecutionWorkspaceReconciler{Client: c, APIReader: c, RESTMapper: mapper}
+			reason, _, err := reconciler.validateWorkspaceBindings(context.Background(), workspace)
+			if err != nil {
+				t.Fatalf("validateWorkspaceBindings: %v", err)
+			}
+			if reason != test.wantReason {
+				t.Fatalf("reason = %q, want %q", reason, test.wantReason)
+			}
+		})
+	}
 }

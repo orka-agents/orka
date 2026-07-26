@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -41,7 +42,7 @@ func TestFakeExecutionWorkspaceProviderRequiresAvailableConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			provider := fakeProviderForReviewTest("fake-provider")
+			provider := fakeProviderForReviewTest()
 			if !tt.wantPublished {
 				staleHeartbeat := metav1.NewTime(now.Add(-time.Second))
 				provider.Status = workspacev1alpha1.ExecutionWorkspaceProviderStatus{
@@ -148,6 +149,124 @@ func TestFakeExecutionWorkspaceProviderRequiresAvailableConfig(t *testing.T) {
 	}
 }
 
+func TestFakeExecutionWorkspaceWaitsForCurrentCoreAdmission(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		generation       int64
+		coreAdmission    bool
+		admissionStatus  metav1.ConditionStatus
+		admittedAt       int64
+		desiredState     workspacev1alpha1.ExecutionWorkspaceDesiredState
+		wantState        workspacev1alpha1.ExecutionWorkspaceState
+		wantRequeueAfter time.Duration
+	}{
+		{
+			name:             "missing admission",
+			generation:       1,
+			desiredState:     workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+			wantRequeueAfter: workspaceRequeueInterval,
+		},
+		{
+			name:             "adapter forged current condition without core marker",
+			generation:       1,
+			admissionStatus:  metav1.ConditionTrue,
+			admittedAt:       1,
+			desiredState:     workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+			wantRequeueAfter: workspaceRequeueInterval,
+		},
+		{
+			name:             "stale admission after spec generation change",
+			coreAdmission:    true,
+			generation:       2,
+			admissionStatus:  metav1.ConditionTrue,
+			admittedAt:       1,
+			desiredState:     workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+			wantRequeueAfter: workspaceRequeueInterval,
+		},
+		{
+			name:             "denied display condition pauses current progression",
+			coreAdmission:    true,
+			generation:       1,
+			admissionStatus:  metav1.ConditionFalse,
+			admittedAt:       1,
+			desiredState:     workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+			wantRequeueAfter: workspaceRequeueInterval,
+		},
+		{
+			name:            "current admission",
+			coreAdmission:   true,
+			generation:      1,
+			admissionStatus: metav1.ConditionTrue,
+			admittedAt:      1,
+			desiredState:    workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+			wantState:       workspacev1alpha1.ExecutionWorkspaceStateReady,
+		},
+		{
+			name:         "quarantine maintenance bypasses admission",
+			generation:   1,
+			desiredState: workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined,
+			wantState:    workspacev1alpha1.ExecutionWorkspaceStateQuarantined,
+		},
+		{
+			name:         "delete maintenance bypasses admission",
+			generation:   1,
+			desiredState: workspacev1alpha1.ExecutionWorkspaceDesiredDeleted,
+			wantState:    workspacev1alpha1.ExecutionWorkspaceStateDeleted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			provider := fakeProviderForReviewTest()
+			class := testGenericClass("default", "class", provider.Name)
+			workspace := testBoundWorkspace(t, "default", "workspace", class.Name, provider.Name)
+			workspace.Generation = tt.generation
+			workspace.Spec.DesiredState = tt.desiredState
+			if tt.coreAdmission {
+				workspace.Spec.CoreAdmission = &workspacev1alpha1.ExecutionWorkspaceCoreAdmission{
+					ClassBinding:       workspace.Spec.ClassBinding,
+					ProviderBinding:    workspace.Spec.ProviderBinding,
+					AdmittedGeneration: tt.admittedAt,
+				}
+			}
+			if tt.admittedAt > 0 {
+				workspace.Status.Conditions = []metav1.Condition{{
+					Type:               string(workspacev1alpha1.ConditionWorkspaceAdmitted),
+					Status:             tt.admissionStatus,
+					Reason:             string(workspacev1alpha1.ReasonReady),
+					ObservedGeneration: tt.admittedAt,
+				}}
+			}
+			c := fake.NewClientBuilder().
+				WithScheme(testWorkspaceScheme(t)).
+				WithStatusSubresource(workspace).
+				WithObjects(provider, class, workspace).
+				Build()
+			reconciler := &FakeExecutionWorkspaceReconciler{Client: c}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}}
+			result, err := reconciler.Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if result.RequeueAfter != tt.wantRequeueAfter {
+				t.Fatalf("RequeueAfter = %s, want %s", result.RequeueAfter, tt.wantRequeueAfter)
+			}
+			got := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(context.Background(), request.NamespacedName, got); err != nil {
+				t.Fatalf("get workspace: %v", err)
+			}
+			if got.Status.State != tt.wantState {
+				t.Fatalf("state = %q, want %q; status=%#v", got.Status.State, tt.wantState, got.Status)
+			}
+			if tt.wantState == "" && (got.Status.ExternalID != "" || got.Status.ProviderBinding != nil) {
+				t.Fatalf("adapter status was published before current core admission: %#v", got.Status)
+			}
+		})
+	}
+}
+
 func TestFakeExecutionWorkspaceServiceEndpointSchemes(t *testing.T) {
 	t.Parallel()
 
@@ -165,7 +284,8 @@ func TestFakeExecutionWorkspaceServiceEndpointSchemes(t *testing.T) {
 		t.Run(tt.protocol, func(t *testing.T) {
 			t.Parallel()
 
-			provider := fakeProviderForReviewTest("fake-provider")
+			provider := fakeProviderForReviewTest()
+			class := testGenericClass("default", "service-class", provider.Name)
 			workspace := &workspacev1alpha1.ExecutionWorkspace{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "workspace",
@@ -175,6 +295,9 @@ func TestFakeExecutionWorkspaceServiceEndpointSchemes(t *testing.T) {
 				},
 				Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 					Mode: workspacev1alpha1.ExecutionWorkspaceModeService,
+					ClassBinding: workspacev1alpha1.ImmutableObjectBinding{
+						Name: class.Name, UID: class.UID, Generation: class.Generation,
+					},
 					ProviderBinding: workspacev1alpha1.ImmutableObjectBinding{
 						Name:       provider.Name,
 						UID:        provider.UID,
@@ -186,10 +309,11 @@ func TestFakeExecutionWorkspaceServiceEndpointSchemes(t *testing.T) {
 					}},
 				},
 			}
+			markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 			c := fake.NewClientBuilder().
 				WithScheme(testWorkspaceScheme(t)).
 				WithStatusSubresource(workspace).
-				WithObjects(provider, workspace).
+				WithObjects(provider, class, workspace).
 				Build()
 			reconciler := &FakeExecutionWorkspaceReconciler{Client: c}
 
@@ -214,7 +338,9 @@ func TestFakeExecutionWorkspaceServiceEndpointSchemes(t *testing.T) {
 	}
 }
 
-func fakeProviderForReviewTest(name string) *workspacev1alpha1.ExecutionWorkspaceProvider {
+func fakeProviderForReviewTest() *workspacev1alpha1.ExecutionWorkspaceProvider {
+	const name = "fake-provider"
+
 	return &workspacev1alpha1.ExecutionWorkspaceProvider{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       name,
@@ -240,4 +366,161 @@ func fakeProviderConfigForReviewTest(name string) *unstructured.Unstructured {
 	config.SetName(name)
 	config.SetUID(types.UID(name + "-uid"))
 	return config
+}
+
+func TestFakeExecutionWorkspacePoolCapacitySelectsOneDeterministicWinner(t *testing.T) {
+	t.Parallel()
+	provider := fakeProviderForReviewTest()
+	pool := testGenericPool("default", "pool", provider.Name)
+	pool.Spec.Capacity.MinReady = 0
+	pool.Spec.Capacity.MaxSize = 1
+	class := testGenericClass(pool.Namespace, "class", provider.Name)
+	class.Spec.ProviderRef = nil
+	class.Spec.ParametersRef = nil
+	class.Spec.PoolRef = &corev1.LocalObjectReference{Name: pool.Name}
+
+	first := testBoundWorkspace(t, pool.Namespace, "workspace-a", class.Name, provider.Name)
+	second := testBoundWorkspace(t, pool.Namespace, "workspace-b", class.Name, provider.Name)
+	mapper, parameters := preparePooledClassProfileForTest(t, provider, pool, class, first, second)
+	markWorkspaceAdmittedForPolicyReview(first, first.Generation)
+	first.Spec.CoreAdmission.PoolBinding = &workspacev1alpha1.ImmutableObjectBinding{
+		Name: pool.Name, UID: pool.UID, Generation: pool.Generation,
+	}
+	markWorkspaceAdmittedForPolicyReview(second, second.Generation)
+	second.Spec.CoreAdmission.PoolBinding = &workspacev1alpha1.ImmutableObjectBinding{
+		Name: pool.Name, UID: pool.UID, Generation: pool.Generation,
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(first, second).
+		WithObjects(provider, pool, class, first, second, parameters).
+		Build()
+	reconciler := &FakeExecutionWorkspaceReconciler{Client: c, APIReader: c, RESTMapper: mapper}
+
+	secondRequest := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: second.Namespace, Name: second.Name}}
+	if result, err := reconciler.Reconcile(context.Background(), secondRequest); err != nil {
+		t.Fatalf("reconcile second candidate: %v", err)
+	} else if result.RequeueAfter != workspaceRequeueInterval {
+		t.Fatalf("second candidate RequeueAfter = %s, want %s", result.RequeueAfter, workspaceRequeueInterval)
+	}
+	firstRequest := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: first.Namespace, Name: first.Name}}
+	if _, err := reconciler.Reconcile(context.Background(), firstRequest); err != nil {
+		t.Fatalf("reconcile first candidate: %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), secondRequest); err != nil {
+		t.Fatalf("reconcile second candidate after allocation: %v", err)
+	}
+
+	gotFirst := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(context.Background(), firstRequest.NamespacedName, gotFirst); err != nil {
+		t.Fatalf("get first candidate: %v", err)
+	}
+	gotSecond := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(context.Background(), secondRequest.NamespacedName, gotSecond); err != nil {
+		t.Fatalf("get second candidate: %v", err)
+	}
+	if gotFirst.Status.State != workspacev1alpha1.ExecutionWorkspaceStateReady {
+		t.Fatalf("first candidate state = %q, want Ready", gotFirst.Status.State)
+	}
+	if gotSecond.Status.State != "" || gotSecond.Status.ExternalID != "" {
+		t.Fatalf("second candidate exceeded maxSize: %#v", gotSecond.Status)
+	}
+}
+
+func TestFakeExecutionWorkspaceGrandfathersCoreAdmittedPoolBindingBeforeFirstStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		replacePool bool
+	}{
+		{name: "deleted pool"},
+		{name: "replaced pool", replacePool: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			provider := fakeProviderForReviewTest()
+			boundPool := testGenericPool("default", "pool", provider.Name)
+			class := testGenericClass(boundPool.Namespace, "class", provider.Name)
+			class.Spec.PoolRef = &corev1.LocalObjectReference{Name: boundPool.Name}
+			workspace := testBoundWorkspace(t, boundPool.Namespace, "workspace", class.Name, provider.Name)
+			markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+			workspace.Spec.CoreAdmission.PoolBinding = &workspacev1alpha1.ImmutableObjectBinding{
+				Name: boundPool.Name, UID: boundPool.UID, Generation: boundPool.Generation,
+			}
+
+			objects := []client.Object{provider, class, workspace}
+			if tt.replacePool {
+				replacement := boundPool.DeepCopy()
+				replacement.UID = types.UID("replacement-pool-uid")
+				replacement.Generation++
+				objects = append(objects, replacement)
+			}
+			c := fake.NewClientBuilder().
+				WithScheme(testWorkspaceScheme(t)).
+				WithStatusSubresource(workspace).
+				WithObjects(objects...).
+				Build()
+			reconciler := &FakeExecutionWorkspaceReconciler{Client: c, APIReader: c}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{
+				Namespace: workspace.Namespace,
+				Name:      workspace.Name,
+			}}
+
+			result, err := reconciler.Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			if result.RequeueAfter != 0 {
+				t.Fatalf("Reconcile() RequeueAfter = %s, want 0", result.RequeueAfter)
+			}
+			got := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := c.Get(context.Background(), request.NamespacedName, got); err != nil {
+				t.Fatalf("get workspace: %v", err)
+			}
+			if got.Status.State != workspacev1alpha1.ExecutionWorkspaceStateReady || got.Status.ExternalID == "" {
+				t.Fatalf("workspace remained stranded before first provider status: %#v", got.Status)
+			}
+		})
+	}
+}
+
+func TestFakeExecutionWorkspacePoolGrandfatheringRequiresCurrentCoreAdmission(t *testing.T) {
+	t.Parallel()
+	provider := fakeProviderForReviewTest()
+	boundPool := testGenericPool("default", "pool", provider.Name)
+	class := testGenericClass(boundPool.Namespace, "class", provider.Name)
+	class.Spec.PoolRef = &corev1.LocalObjectReference{Name: boundPool.Name}
+	workspace := testBoundWorkspace(t, boundPool.Namespace, "workspace", class.Name, provider.Name)
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
+	workspace.Spec.CoreAdmission.PoolBinding = &workspacev1alpha1.ImmutableObjectBinding{
+		Name: boundPool.Name, UID: boundPool.UID, Generation: boundPool.Generation,
+	}
+	workspace.Status.ObservedGeneration = 0
+	workspace.Status.Conditions = nil
+
+	c := fake.NewClientBuilder().
+		WithScheme(testWorkspaceScheme(t)).
+		WithStatusSubresource(workspace).
+		WithObjects(provider, class, workspace).
+		Build()
+	reconciler := &FakeExecutionWorkspaceReconciler{Client: c, APIReader: c}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}}
+
+	result, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter != workspaceRequeueInterval {
+		t.Fatalf("Reconcile() RequeueAfter = %s, want %s", result.RequeueAfter, workspaceRequeueInterval)
+	}
+	got := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(context.Background(), request.NamespacedName, got); err != nil {
+		t.Fatalf("get workspace: %v", err)
+	}
+	if got.Status.State != "" || got.Status.ExternalID != "" || got.Status.ProviderBinding != nil {
+		t.Fatalf("adapter status was published without current core admission: %#v", got.Status)
+	}
 }

@@ -84,14 +84,36 @@ type ExecutionWorkspaceServiceSpec struct {
 	Ports []ExecutionWorkspaceServicePort `json:"ports"`
 }
 
+// ExecutionWorkspaceCoreAdmission records the immutable bindings that Orka core validated.
+// Provider adapters must not create or modify this marker.
+type ExecutionWorkspaceCoreAdmission struct {
+	// ClassBinding is the exact class binding admitted by core.
+	ClassBinding ImmutableObjectBinding `json:"classBinding"`
+
+	// ProviderBinding is the exact provider binding admitted by core.
+	ProviderBinding ImmutableObjectBinding `json:"providerBinding"`
+
+	// PoolBinding pins the pool identity used for a pooled workspace.
+	// +optional
+	PoolBinding *ImmutableObjectBinding `json:"poolBinding,omitempty"`
+
+	// AdmittedGeneration is the workspace generation validated by Orka core.
+	// +kubebuilder:validation:Minimum=1
+	AdmittedGeneration int64 `json:"admittedGeneration"`
+}
+
 // ExecutionWorkspaceSpec defines one concrete provider-bound environment.
 // +kubebuilder:validation:XValidation:rule="self.classBinding.profileHash.size() > 0",message="classBinding.profileHash is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.coreAdmission) || (self.coreAdmission.classBinding.name == self.classBinding.name && self.coreAdmission.classBinding.uid == self.classBinding.uid && self.coreAdmission.classBinding.generation == self.classBinding.generation && has(self.coreAdmission.classBinding.profileHash) == has(self.classBinding.profileHash) && (!has(self.coreAdmission.classBinding.profileHash) || self.coreAdmission.classBinding.profileHash == self.classBinding.profileHash) && self.coreAdmission.providerBinding.name == self.providerBinding.name && self.coreAdmission.providerBinding.uid == self.providerBinding.uid && self.coreAdmission.providerBinding.generation == self.providerBinding.generation && has(self.coreAdmission.providerBinding.profileHash) == has(self.providerBinding.profileHash) && (!has(self.coreAdmission.providerBinding.profileHash) || self.coreAdmission.providerBinding.profileHash == self.providerBinding.profileHash))",message="coreAdmission must match the immutable workspace bindings"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.coreAdmission) || has(self.coreAdmission)",message="coreAdmission cannot be removed once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.coreAdmission) || self.coreAdmission.admittedGeneration >= oldSelf.coreAdmission.admittedGeneration",message="coreAdmission.admittedGeneration must not decrease"
 // +kubebuilder:validation:XValidation:rule="self.mode == oldSelf.mode",message="mode is immutable"
 // +kubebuilder:validation:XValidation:rule="self.classBinding == oldSelf.classBinding",message="classBinding is immutable"
 // +kubebuilder:validation:XValidation:rule="self.providerBinding == oldSelf.providerBinding",message="providerBinding is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef)",message="sessionRef is immutable"
 // +kubebuilder:validation:XValidation:rule="self.slot == oldSelf.slot",message="slot is immutable"
 // +kubebuilder:validation:XValidation:rule="self.lifecycle == oldSelf.lifecycle",message="lifecycle is immutable"
+// +kubebuilder:validation:XValidation:rule="oldSelf.desiredState != 'Deleted' || self.desiredState == 'Deleted'",message="Deleted desiredState is terminal"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.attachmentEpoch) || (has(self.attachmentEpoch) && self.attachmentEpoch >= oldSelf.attachmentEpoch)",message="attachmentEpoch must not decrease"
 // +kubebuilder:validation:XValidation:rule="!has(self.attachment) || self.mode == 'Interactive'",message="attachments are only valid for Interactive workspaces"
 // +kubebuilder:validation:XValidation:rule="!has(self.service) || self.mode == 'Service'",message="service ports are only valid for Service workspaces"
@@ -106,6 +128,16 @@ type ExecutionWorkspaceSpec struct {
 
 	// ProviderBinding pins the provider installation used to create this workspace.
 	ProviderBinding ImmutableObjectBinding `json:"providerBinding"`
+
+	// CoreAdmission is written once by Orka core after validating class and provider policy.
+	// Provider adapters must treat it as read-only and must not progress normal
+	// lifecycle work until this marker matches the immutable bindings,
+	// coreAdmission.admittedGeneration equals metadata.generation, and the
+	// Admitted=True condition records that same generation. The spec marker and
+	// status condition form a dual signal: provider status writers cannot mint the
+	// marker, and ordinary spec writers cannot mint the condition.
+	// +optional
+	CoreAdmission *ExecutionWorkspaceCoreAdmission `json:"coreAdmission,omitempty"`
 
 	// SessionRef pins the conversation Session for session-scoped reuse.
 	// +optional

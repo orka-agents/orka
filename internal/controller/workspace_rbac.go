@@ -9,9 +9,11 @@ package controller
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceclasses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceclasses,verbs=use
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceclasses/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceclasses/finalizers,verbs=update
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspacepools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspacepools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaces,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaces,verbs=admit
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaces/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaces/finalizers,verbs=update
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create

@@ -15,6 +15,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -29,6 +30,7 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	workspace := testBoundWorkspace(t, "attachment-review", "workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	firstTask := attachmentReviewTask(workspace.Namespace, "first-task")
 	secondTask := attachmentReviewTask(workspace.Namespace, "second-task")
@@ -56,11 +58,11 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 	}
 	current.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
 	current.Status.AttachedEpoch = first.Epoch
-	current.Status.Conditions = []metav1.Condition{{
+	apimeta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type:   string(workspacev1alpha1.ConditionWorkspaceAttached),
 		Status: metav1.ConditionTrue,
 		Reason: "Attached",
-	}}
+	})
 	if err := c.Status().Update(ctx, current); err != nil {
 		t.Fatalf("mark first attachment active: %v", err)
 	}
@@ -76,11 +78,11 @@ func TestWorkspaceAttachmentManagerPersistsEpochAcrossReattach(t *testing.T) {
 	}
 	current.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	current.Status.AttachedEpoch = 0
-	current.Status.Conditions = []metav1.Condition{{
+	apimeta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type:   string(workspacev1alpha1.ConditionWorkspaceAttached),
 		Status: metav1.ConditionFalse,
 		Reason: "Revoked",
-	}}
+	})
 	if err := c.Status().Update(ctx, current); err != nil {
 		t.Fatalf("mark first attachment revoked: %v", err)
 	}
@@ -114,6 +116,7 @@ func TestWorkspaceAttachmentManagerBootstrapsLegacyActiveEpochOnRevocation(t *te
 	t.Parallel()
 	ctx := context.Background()
 	workspace := testBoundWorkspace(t, "attachment-review", "legacy-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateAttached
 	workspace.Status.AttachedEpoch = 7
 	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
@@ -158,6 +161,7 @@ func TestWorkspaceAttachmentManagerStoresHeaderSafeBearerText(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	workspace := testBoundWorkspace(t, "attachment-review", "token-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	task := attachmentReviewTask(workspace.Namespace, "token-task")
 	c := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
@@ -308,6 +312,7 @@ func TestWorkspaceAttachmentManagerRevalidatesReusableStateBeforeIntentPatch(t *
 			t.Parallel()
 			ctx := context.Background()
 			workspace := testBoundWorkspace(t, "attachment-review", "state-"+strings.ReplaceAll(testCase.name, " ", "-"), "class", "provider")
+			markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 			workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 			task := attachmentReviewTask(workspace.Namespace, "state-task-"+strings.ReplaceAll(testCase.name, " ", "-"))
 			baseClient := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
@@ -361,6 +366,7 @@ func TestWorkspaceAttachmentManagerUsesOptimisticLockForIntentRevalidation(t *te
 	t.Parallel()
 	ctx := context.Background()
 	workspace := testBoundWorkspace(t, "attachment-review", "optimistic-lock-workspace", "class", "provider")
+	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	task := attachmentReviewTask(workspace.Namespace, "optimistic-lock-task")
 	baseClient := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).

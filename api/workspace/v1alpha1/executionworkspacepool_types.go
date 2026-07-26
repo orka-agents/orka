@@ -44,15 +44,15 @@ type ExecutionWorkspacePoolStatus struct {
 	// +optional
 	Available int32 `json:"available,omitempty"`
 
-	// Allocated is capacity currently bound to concrete workspaces.
+	// Allocated is non-suspended capacity currently reserved for or bound to concrete workspaces.
 	// +optional
 	Allocated int32 `json:"allocated,omitempty"`
 
-	// Suspended is reusable capacity not consuming active compute.
+	// Suspended is a disjoint bucket of reusable capacity not consuming active compute.
 	// +optional
 	Suspended int32 `json:"suspended,omitempty"`
 
-	// Total is all capacity represented by the pool.
+	// Total is all capacity represented by the disjoint Available, Allocated, and Suspended buckets.
 	// +optional
 	Total int32 `json:"total,omitempty"`
 

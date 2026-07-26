@@ -18,16 +18,24 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
 
 const (
-	classReadinessRequeue        = 30 * time.Second
-	reasonParametersScopeInvalid = "ParametersScopeInvalid"
-	reasonProfileDrift           = "ProfileDrift"
-	reasonRequiredFeatures       = "RequiredFeaturesUnavailable"
+	executionWorkspaceClassFinalizer = "workspace.orka.ai/class-protection"
+	classReadinessRequeue            = 30 * time.Second
+	reasonParametersScopeInvalid     = "ParametersScopeInvalid"
+	reasonProfileDrift               = "ProfileDrift"
+	reasonRequiredFeatures           = "RequiredFeaturesUnavailable"
+	reasonProviderBindingMismatch    = "ProviderBindingMismatch"
+	reasonNamespacePolicyInvalid     = "NamespacePolicyInvalid"
+	reasonClassNotReady              = "ClassNotReady"
+	reasonPoolNotReady               = "PoolNotReady"
+	reasonProviderNotReady           = "ProviderNotReady"
+	messageProviderDisabled          = "provider is disabled"
 )
 
 var errInvalidProviderNamespaceSelector = errors.New("invalid provider namespace selector")
@@ -37,14 +45,35 @@ var errInvalidProviderNamespaceSelector = errors.New("invalid provider namespace
 // each Task/Tool caller by WorkspaceClassAuthorizer.
 type ExecutionWorkspaceClassReconciler struct {
 	client.Client
-	APIReader  client.Reader
-	RESTMapper apimeta.RESTMapper
+	APIReader   client.Reader
+	RESTMapper  apimeta.RESTMapper
+	CleanupOnly bool
+}
+
+func (r *ExecutionWorkspaceClassReconciler) classPolicyReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 func (r *ExecutionWorkspaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	class := &workspacev1alpha1.ExecutionWorkspaceClass{}
 	if err := r.Get(ctx, req.NamespacedName, class); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if !class.DeletionTimestamp.IsZero() {
+		return r.reconcileClassDeletion(ctx, class)
+	}
+	if r.CleanupOnly {
+		return ctrl.Result{}, nil
+	}
+	if !controllerutil.ContainsFinalizer(class, executionWorkspaceClassFinalizer) {
+		controllerutil.AddFinalizer(class, executionWorkspaceClassFinalizer)
+		if err := r.Update(ctx, class); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	providerName, reason, message, err := r.resolveClassProvider(ctx, class)
@@ -83,6 +112,69 @@ func (r *ExecutionWorkspaceClassReconciler) Reconcile(ctx context.Context, req c
 	return ctrl.Result{RequeueAfter: classReadinessRequeue}, nil
 }
 
+func (r *ExecutionWorkspaceClassReconciler) reconcileClassDeletion(
+	ctx context.Context,
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(class, executionWorkspaceClassFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	blocked, err := r.classHasBoundWorkspaces(ctx, class)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if blocked {
+		providerName := ""
+		if class.Status.ProviderRef != nil {
+			providerName = class.Status.ProviderRef.Name
+		}
+		condition := metav1.Condition{
+			Type:               string(workspacev1alpha1.ConditionClassReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             "ReferencesRemain",
+			Message:            "class deletion is blocked by workspaces bound to this class UID",
+			ObservedGeneration: class.Generation,
+		}
+		if err := r.patchClassStatus(
+			ctx,
+			types.NamespacedName{Namespace: class.Namespace, Name: class.Name},
+			providerName,
+			class.Status.ProfileHash,
+			condition,
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: classReadinessRequeue}, nil
+	}
+	controllerutil.RemoveFinalizer(class, executionWorkspaceClassFinalizer)
+	if err := r.Update(ctx, class); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *ExecutionWorkspaceClassReconciler) classHasBoundWorkspaces(
+	ctx context.Context,
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	workspaces := &workspacev1alpha1.ExecutionWorkspaceList{}
+	if err := reader.List(ctx, workspaces, client.InNamespace(class.Namespace)); err != nil {
+		return false, fmt.Errorf("list workspaces bound to class: %w", err)
+	}
+	for i := range workspaces.Items {
+		workspace := &workspaces.Items[i]
+		if workspace.Spec.ClassBinding.Name == class.Name &&
+			workspace.Spec.ClassBinding.UID == class.UID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 //nolint:gocyclo // Readiness deliberately evaluates direct/pool, provider, feature, and namespace gates.
 func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	ctx context.Context,
@@ -100,7 +192,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 		}
 	} else if class.Spec.PoolRef != nil {
 		pool := &workspacev1alpha1.ExecutionWorkspacePool{}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: class.Namespace, Name: class.Spec.PoolRef.Name}, pool); err != nil {
+		if err := r.classPolicyReader().Get(ctx, types.NamespacedName{Namespace: class.Namespace, Name: class.Spec.PoolRef.Name}, pool); err != nil {
 			if client.IgnoreNotFound(err) == nil {
 				return "", "PoolNotFound", "referenced workspace pool does not exist", nil
 			}
@@ -115,7 +207,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 				pool.Status.Conditions, string(workspacev1alpha1.ConditionPoolReady),
 			)
 		if !poolReady {
-			return providerName, "PoolNotReady", "referenced workspace pool is not ready", nil
+			return providerName, reasonPoolNotReady, "referenced workspace pool is not ready", nil
 		}
 		parameters, reason, message, err := r.resolveNamespacedParameters(
 			ctx, class.Namespace, &pool.Spec.ParametersRef,
@@ -132,7 +224,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	}
 
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
-	if err := r.Get(ctx, types.NamespacedName{Name: providerName}, provider); err != nil {
+	if err := r.classPolicyReader().Get(ctx, types.NamespacedName{Name: providerName}, provider); err != nil {
 		if client.IgnoreNotFound(err) == nil {
 			return providerName, "ProviderNotFound", "referenced workspace provider does not exist", nil
 		}
@@ -146,12 +238,12 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 		message := "provider is draining and rejects new workspaces"
 		if provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled {
 			reason = string(workspacev1alpha1.ReasonProviderDisabled)
-			message = "provider is disabled"
+			message = messageProviderDisabled
 		}
 		return providerName, reason, message, nil
 	}
 	if !workspaceprovider.ConditionIsTrue(provider.Status.Conditions, string(workspacev1alpha1.ConditionProviderReady)) {
-		return providerName, "ProviderNotReady", "provider is not ready for new workspaces", nil
+		return providerName, reasonProviderNotReady, "provider is not ready for new workspaces", nil
 	}
 	requiredFeatures := append(
 		[]workspacev1alpha1.ExecutionWorkspaceFeature(nil), class.Spec.RequiredFeatures...,
@@ -188,7 +280,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 	}
 	allowed, err := r.namespaceAllowedByProvider(ctx, class.Namespace, provider)
 	if errors.Is(err, errInvalidProviderNamespaceSelector) {
-		return providerName, "NamespacePolicyInvalid", "provider namespace usage policy is invalid", nil
+		return providerName, reasonNamespacePolicyInvalid, "provider namespace usage policy is invalid", nil
 	}
 	if err != nil {
 		return "", "", "", err
@@ -263,13 +355,13 @@ func (r *ExecutionWorkspaceClassReconciler) resolvedClassProfileHash(
 	} else {
 		pool := &workspacev1alpha1.ExecutionWorkspacePool{}
 		key := types.NamespacedName{Namespace: class.Namespace, Name: class.Spec.PoolRef.Name}
-		if err := r.Get(ctx, key, pool); err != nil {
+		if err := r.classPolicyReader().Get(ctx, key, pool); err != nil {
 			return "", fmt.Errorf("get resolved workspace pool provider: %w", err)
 		}
 		providerName = pool.Spec.ProviderRef.Name
 	}
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
-	if err := r.Get(ctx, types.NamespacedName{Name: providerName}, provider); err != nil {
+	if err := r.classPolicyReader().Get(ctx, types.NamespacedName{Name: providerName}, provider); err != nil {
 		return "", fmt.Errorf("get resolved workspace provider identity: %w", err)
 	}
 	requiredContracts := append([]string(nil), provider.Spec.RequiredContracts...)
@@ -310,7 +402,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolvedClassProfileHash(
 	}
 	pool := &workspacev1alpha1.ExecutionWorkspacePool{}
 	key := types.NamespacedName{Namespace: class.Namespace, Name: class.Spec.PoolRef.Name}
-	if err := r.Get(ctx, key, pool); err != nil {
+	if err := r.classPolicyReader().Get(ctx, key, pool); err != nil {
 		return "", fmt.Errorf("get resolved workspace pool: %w", err)
 	}
 	parameters, _, _, err := r.resolveNamespacedParameters(ctx, class.Namespace, &pool.Spec.ParametersRef)
@@ -343,6 +435,15 @@ func (r *ExecutionWorkspaceClassReconciler) namespaceAllowedByProvider(
 	namespace string,
 	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
 ) (bool, error) {
+	return namespaceAllowedByWorkspaceProvider(ctx, r.classPolicyReader(), namespace, provider)
+}
+
+func namespaceAllowedByWorkspaceProvider(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+) (bool, error) {
 	if provider.Spec.UsagePolicy == nil || provider.Spec.UsagePolicy.AllowedNamespaceSelector == nil {
 		return true, nil
 	}
@@ -351,7 +452,7 @@ func (r *ExecutionWorkspaceClassReconciler) namespaceAllowedByProvider(
 		return false, fmt.Errorf("%w: %v", errInvalidProviderNamespaceSelector, err)
 	}
 	ns := &corev1.Namespace{}
-	if err := r.Get(ctx, types.NamespacedName{Name: namespace}, ns); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Name: namespace}, ns); err != nil {
 		return false, fmt.Errorf("get namespace for provider policy: %w", err)
 	}
 	return selector.Matches(labels.Set(ns.Labels)), nil

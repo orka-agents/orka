@@ -130,7 +130,8 @@ spec:
               pool counts.
             properties:
               allocated:
-                description: Allocated is capacity currently bound to concrete workspaces.
+                description: Allocated is non-suspended capacity currently reserved
+                  for or bound to concrete workspaces.
                 format: int32
                 type: integer
               available:
@@ -204,11 +205,13 @@ spec:
                 format: int64
                 type: integer
               suspended:
-                description: Suspended is reusable capacity not consuming active compute.
+                description: Suspended is a disjoint bucket of reusable capacity not
+                  consuming active compute.
                 format: int32
                 type: integer
               total:
-                description: Total is all capacity represented by the pool.
+                description: Total is all capacity represented by the disjoint Available,
+                  Allocated, and Suspended buckets.
                 format: int32
                 type: integer
             type: object

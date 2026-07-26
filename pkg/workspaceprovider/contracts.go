@@ -2,6 +2,7 @@ package workspaceprovider
 
 import (
 	"context"
+	"errors"
 
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
@@ -22,7 +23,9 @@ type ProviderObservation struct {
 	SupportedFeatures []workspacev1alpha1.ExecutionWorkspaceFeature
 }
 
-// PoolObservation contains provider-independent pool counts.
+// PoolObservation contains provider-independent, disjoint pool counts.
+// Available is immediately allocatable, Allocated is reserved or active and bound, Suspended
+// is reusable but not consuming active compute, and Total covers all three buckets.
 type PoolObservation struct {
 	Available int32
 	Allocated int32
@@ -40,6 +43,10 @@ type WorkspaceObservation struct {
 	Endpoints       []workspacev1alpha1.ExecutionWorkspaceEndpoint
 	Disposition     *workspacev1alpha1.ExecutionWorkspaceDisposition
 }
+
+// ErrWorkspaceNotAdmitted is returned by adapters that explicitly reject normal
+// workspace reconciliation until Orka core publishes current admission.
+var ErrWorkspaceNotAdmitted = errors.New("workspace is not currently admitted by Orka core")
 
 // Driver is the provider-specific lifecycle seam exercised by the shared conformance suite.
 // Implementations must be idempotent: ReconcileWorkspace may be repeated after ambiguous

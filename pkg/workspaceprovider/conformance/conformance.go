@@ -15,6 +15,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/pkg/workspaceagent"
@@ -84,29 +85,365 @@ func Run(t *testing.T, driver workspaceprovider.Driver, fixtures Fixtures) {
 		}
 		runPoolObservation(t, driver, fixtures.Pool, timing)
 	})
+	t.Run("workspace admission gate", func(t *testing.T) {
+		for _, fixture := range workspaceAdmissionFixtures(fixtures) {
+			t.Run(fixture.name, func(t *testing.T) {
+				runWorkspaceAdmissionGate(t, driver, fixture.name, fixture.workspace, timing)
+			})
+		}
+	})
 	t.Run("workspace-agent data plane", func(t *testing.T) {
 		if !requiresDataPlane(metadata.Features) {
 			t.Skip("driver does not advertise workspace-agent data-plane features")
 		}
-		runDataPlaneConformance(t, driver, fixtures.DataPlane, metadata, timing)
+		providerObservation := runProviderObservation(t, driver, fixtures.Provider, metadata, timing)
+		runDataPlaneConformance(
+			t, driver, fixtures.Provider, fixtures.DataPlane, metadata, providerObservation, timing,
+		)
 	})
 	t.Run("interactive idempotency and lifecycle", func(t *testing.T) {
 		if !slices.Contains(metadata.Features, workspacev1alpha1.WorkspaceFeatureExec) {
 			t.Skip("driver does not advertise interactive exec support")
 		}
-		runInteractiveLifecycle(t, driver, fixtures.Interactive, metadata, timing)
+		providerObservation := runProviderObservation(t, driver, fixtures.Provider, metadata, timing)
+		runInteractiveLifecycle(
+			t, driver, fixtures.Provider, fixtures.Interactive, metadata, providerObservation, timing,
+		)
 	})
 	t.Run("service endpoint", func(t *testing.T) {
 		if !slices.Contains(metadata.Features, workspacev1alpha1.WorkspaceFeatureServicePorts) {
 			t.Skip("driver does not advertise service endpoint support")
 		}
-		runServiceEndpoint(t, driver, fixtures.Service, timing)
+		providerObservation := runProviderObservation(t, driver, fixtures.Provider, metadata, timing)
+		runServiceEndpoint(
+			t, driver, fixtures.Provider, fixtures.Service, metadata, providerObservation, timing,
+		)
 	})
+}
+
+type workspaceAdmissionConformanceFixture struct {
+	name      string
+	workspace *workspacev1alpha1.ExecutionWorkspace
+}
+
+func workspaceAdmissionFixtures(fixtures Fixtures) []workspaceAdmissionConformanceFixture {
+	var result []workspaceAdmissionConformanceFixture
+	if fixtures.DataPlane != nil && fixtures.DataPlane.Workspace != nil {
+		result = append(result, workspaceAdmissionConformanceFixture{
+			name: "data-plane", workspace: fixtures.DataPlane.Workspace,
+		})
+	}
+	if fixtures.Interactive != nil {
+		result = append(result, workspaceAdmissionConformanceFixture{name: "interactive", workspace: fixtures.Interactive})
+	}
+	if fixtures.Service != nil {
+		result = append(result, workspaceAdmissionConformanceFixture{name: "service", workspace: fixtures.Service})
+	}
+	return result
+}
+
+func runWorkspaceAdmissionGate(
+	t *testing.T,
+	driver workspaceprovider.Driver,
+	fixtureName string,
+	fixture *workspacev1alpha1.ExecutionWorkspace,
+	timing conformanceTiming,
+) {
+	t.Helper()
+	if fixture == nil {
+		t.Fatal("workspace fixture is required")
+	}
+	runID := time.Now().UnixNano()
+	tests := []struct {
+		name      string
+		configure func(*workspacev1alpha1.ExecutionWorkspace)
+	}{
+		{name: "missing core admission"},
+		{
+			name: "current marker without condition",
+			configure: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				setWorkspaceCoreAdmissionMarker(workspace, workspace.Generation)
+			},
+		},
+		{
+			name: "current marker with denied condition",
+			configure: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				setWorkspaceCoreAdmissionMarker(workspace, workspace.Generation)
+				setWorkspaceAdmissionConditionValue(
+					workspace, metav1.ConditionFalse, string(workspacev1alpha1.ReasonReady), workspace.Generation,
+				)
+			},
+		},
+		{
+			name: "current marker with wrong condition reason",
+			configure: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				setWorkspaceCoreAdmissionMarker(workspace, workspace.Generation)
+				setWorkspaceAdmissionConditionValue(
+					workspace, metav1.ConditionTrue, "NotReady", workspace.Generation,
+				)
+			},
+		},
+		{
+			name: "current marker with stale condition generation",
+			configure: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Generation++
+				setWorkspaceCoreAdmissionMarker(workspace, workspace.Generation)
+				setWorkspaceAdmissionCondition(workspace, workspace.Generation-1)
+			},
+		},
+		{
+			name: "forged adapter status without protected admission",
+			configure: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Status.ObservedGeneration = workspace.Generation
+				workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+				workspace.Status.ExternalID = "forged/external-id"
+				workspace.Status.ProviderBinding = &workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus{
+					ContractVersion: workspacev1alpha1.ContractVersionV1,
+				}
+				setWorkspaceAdmissionCondition(workspace, workspace.Generation)
+			},
+		},
+		{
+			name: "stale admitted generation with forged current condition",
+			configure: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
+				workspace.Generation++
+				setWorkspaceCoreAdmissionMarker(workspace, workspace.Generation-1)
+				setWorkspaceAdmissionCondition(workspace, workspace.Generation)
+			},
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := fixture.DeepCopy()
+			isolateWorkspaceConformanceIdentity(
+				workspace, fmt.Sprintf("%s-%d-admission-%d", fixtureName, runID, index),
+			)
+			if workspace.Generation == 0 {
+				workspace.Generation = 1
+			}
+			workspace.Spec.CoreAdmission = nil
+			removeWorkspaceAdmissionCondition(workspace)
+			if test.configure != nil {
+				test.configure(workspace)
+			}
+			probeTimeout := min(timing.timeout, 250*time.Millisecond)
+			for attempt := range 3 {
+				ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+				observation, err := driver.ReconcileWorkspace(ctx, workspace.DeepCopy())
+				cancel()
+				if validationErr := validateWorkspaceAdmissionProbeResult(
+					observation, err, test.name,
+				); validationErr != nil {
+					t.Fatal(validationErr)
+				}
+				if attempt < 2 {
+					time.Sleep(timing.pollInterval)
+				}
+			}
+		})
+	}
+	for index, maintenance := range []struct {
+		name        string
+		desired     workspacev1alpha1.ExecutionWorkspaceDesiredState
+		state       workspacev1alpha1.ExecutionWorkspaceState
+		staleMarker bool
+	}{
+		{
+			name:    "quarantine without admission",
+			desired: workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined,
+			state:   workspacev1alpha1.ExecutionWorkspaceStateQuarantined,
+		},
+		{
+			name:    "deletion without admission",
+			desired: workspacev1alpha1.ExecutionWorkspaceDesiredDeleted,
+			state:   workspacev1alpha1.ExecutionWorkspaceStateDeleted,
+		},
+		{
+			name:        "quarantine with stale admission",
+			desired:     workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined,
+			state:       workspacev1alpha1.ExecutionWorkspaceStateQuarantined,
+			staleMarker: true,
+		},
+		{
+			name:        "deletion with stale admission",
+			desired:     workspacev1alpha1.ExecutionWorkspaceDesiredDeleted,
+			state:       workspacev1alpha1.ExecutionWorkspaceStateDeleted,
+			staleMarker: true,
+		},
+	} {
+		t.Run(maintenance.name, func(t *testing.T) {
+			workspace := fixture.DeepCopy()
+			isolateWorkspaceConformanceIdentity(
+				workspace, fmt.Sprintf("%s-%d-maintenance-%d", fixtureName, runID, index),
+			)
+			if workspace.Generation == 0 {
+				workspace.Generation = 1
+			}
+			workspace.Spec.CoreAdmission = nil
+			removeWorkspaceAdmissionCondition(workspace)
+			workspace.Spec.Attachment = nil
+			workspace.Spec.DesiredState = maintenance.desired
+			if maintenance.staleMarker {
+				workspace.Generation = 2
+				setWorkspaceCoreAdmissionMarker(workspace, 1)
+			}
+			observation := reconcileWorkspaceUntil(
+				t, context.Background(), driver, workspace, maintenance.name, timing,
+				func(observation workspaceprovider.WorkspaceObservation) bool {
+					return observation.State == maintenance.state
+				},
+			)
+			if observation.ConnectionRef != nil || len(observation.Endpoints) > 0 || observation.AttachedEpoch != 0 {
+				t.Fatalf("%s exposed normal data-plane state: %#v", maintenance.name, observation)
+			}
+			if maintenance.state == workspacev1alpha1.ExecutionWorkspaceStateDeleted &&
+				!validDeletedDisposition(observation.Disposition, workspace.Spec.Lifecycle.DeletionPolicy) {
+				t.Fatalf("%s missing valid cleanup disposition: %#v", maintenance.name, observation)
+			}
+		})
+	}
+}
+
+func isolateWorkspaceConformanceIdentity(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	suffix string,
+) {
+	workspace.Name = "orka-conformance-" + suffix
+	workspace.UID = types.UID("orka-conformance-" + suffix)
+	workspace.ResourceVersion = ""
+	workspace.Generation = 1
+	workspace.Labels = nil
+	workspace.Annotations = nil
+	workspace.Finalizers = nil
+	workspace.OwnerReferences = nil
+	workspace.DeletionTimestamp = nil
+	workspace.Status = workspacev1alpha1.ExecutionWorkspaceStatus{}
+}
+
+func removeWorkspaceAdmissionCondition(workspace *workspacev1alpha1.ExecutionWorkspace) {
+	conditions := workspace.Status.Conditions[:0]
+	for _, condition := range workspace.Status.Conditions {
+		if condition.Type != string(workspacev1alpha1.ConditionWorkspaceAdmitted) {
+			conditions = append(conditions, condition)
+		}
+	}
+	workspace.Status.Conditions = conditions
+}
+
+func setWorkspaceCoreAdmissionMarker(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	admittedGeneration int64,
+) {
+	var poolBinding *workspacev1alpha1.ImmutableObjectBinding
+	if workspace.Spec.CoreAdmission != nil && workspace.Spec.CoreAdmission.PoolBinding != nil {
+		poolBinding = workspace.Spec.CoreAdmission.PoolBinding.DeepCopy()
+	}
+	workspace.Spec.CoreAdmission = &workspacev1alpha1.ExecutionWorkspaceCoreAdmission{
+		ClassBinding:       workspace.Spec.ClassBinding,
+		ProviderBinding:    workspace.Spec.ProviderBinding,
+		PoolBinding:        poolBinding,
+		AdmittedGeneration: admittedGeneration,
+	}
+}
+
+func setWorkspaceAdmissionCondition(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	observedGeneration int64,
+) {
+	setWorkspaceAdmissionConditionValue(
+		workspace, metav1.ConditionTrue, string(workspacev1alpha1.ReasonReady), observedGeneration,
+	)
+}
+
+func setWorkspaceAdmissionConditionValue(
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	status metav1.ConditionStatus,
+	reason string,
+	observedGeneration int64,
+) {
+	workspaceprovider.SetCondition(&workspace.Status.Conditions, metav1.Condition{
+		Type:               string(workspacev1alpha1.ConditionWorkspaceAdmitted),
+		Status:             status,
+		Reason:             reason,
+		Message:            "workspace admission condition from conformance core fixture",
+		ObservedGeneration: observedGeneration,
+	})
+}
+
+func validateWorkspaceAdmissionProbeResult(
+	observation workspaceprovider.WorkspaceObservation,
+	reconcileErr error,
+	transition string,
+) error {
+	if reconcileErr != nil && !errors.Is(reconcileErr, workspaceprovider.ErrWorkspaceNotAdmitted) {
+		return fmt.Errorf("%s returned a non-admission error: %w", transition, reconcileErr)
+	}
+	switch observation.State {
+	case "", workspacev1alpha1.ExecutionWorkspaceStateFailed, workspacev1alpha1.ExecutionWorkspaceStateQuarantined:
+	default:
+		return fmt.Errorf("%s progressed before current core admission: %#v", transition, observation)
+	}
+	if observation.ExternalID != "" || observation.ConnectionRef != nil ||
+		observation.ProviderBinding != nil || observation.AttachedEpoch != 0 || len(observation.Endpoints) > 0 {
+		return fmt.Errorf("%s published identity before current core admission: %#v", transition, observation)
+	}
+	return nil
+}
+
+func advanceWorkspaceGenerationAndReadmit(
+	t *testing.T,
+	driver workspaceprovider.Driver,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	transition string,
+	timing conformanceTiming,
+) {
+	t.Helper()
+	workspace.Generation++
+	ctx, cancel := context.WithTimeout(context.Background(), timing.timeout)
+	observation, err := driver.ReconcileWorkspace(ctx, workspace.DeepCopy())
+	cancel()
+	if validationErr := validateWorkspaceAdmissionProbeResult(
+		observation, err, transition+" stale-admission probe",
+	); validationErr != nil {
+		t.Fatal(validationErr)
+	}
+	// Core refreshes spec.coreAdmission in a second spec patch, which advances
+	// metadata.generation again before the adapter observes current admission.
+	workspace.Generation++
+	markWorkspaceCoreAdmitted(workspace)
+}
+
+func workspaceCurrentlyCoreAdmitted(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
+	if workspace == nil || workspace.Spec.CoreAdmission == nil ||
+		workspace.Spec.CoreAdmission.ClassBinding != workspace.Spec.ClassBinding ||
+		workspace.Spec.CoreAdmission.ProviderBinding != workspace.Spec.ProviderBinding ||
+		workspace.Spec.CoreAdmission.AdmittedGeneration != workspace.Generation {
+		return false
+	}
+	for _, condition := range workspace.Status.Conditions {
+		if condition.Type == string(workspacev1alpha1.ConditionWorkspaceAdmitted) {
+			return condition.Status == metav1.ConditionTrue &&
+				condition.Reason == string(workspacev1alpha1.ReasonReady) &&
+				condition.ObservedGeneration == workspace.Generation
+		}
+	}
+	return false
+}
+
+func markWorkspaceCoreAdmitted(workspace *workspacev1alpha1.ExecutionWorkspace) {
+	if workspace.Generation == 0 {
+		workspace.Generation = 1
+	}
+	setWorkspaceCoreAdmissionMarker(workspace, workspace.Generation)
+	setWorkspaceAdmissionCondition(workspace, workspace.Generation)
 }
 
 func validateAdapterMetadata(metadata workspaceprovider.AdapterMetadata) error {
 	if metadata.ControllerName == "" || metadata.Version == "" {
 		return fmt.Errorf("driver metadata is incomplete: %#v", metadata)
+	}
+	if err := validateContractList("driver metadata", metadata.Contracts); err != nil {
+		return err
 	}
 	if !contains(metadata.Contracts, workspacev1alpha1.ContractVersionV1) {
 		return fmt.Errorf("driver contracts = %v, want %s", metadata.Contracts, workspacev1alpha1.ContractVersionV1)
@@ -117,6 +454,15 @@ func validateAdapterMetadata(metadata workspaceprovider.AdapterMetadata) error {
 	if slices.Contains(metadata.Features, workspacev1alpha1.WorkspaceFeatureReset) &&
 		!slices.Contains(metadata.Features, workspacev1alpha1.WorkspaceFeatureFiles) {
 		return fmt.Errorf("driver metadata advertising reset must also advertise files")
+	}
+	return nil
+}
+
+func validateContractList(kind string, contracts []string) error {
+	for _, contract := range contracts {
+		if strings.TrimSpace(contract) == "" {
+			return fmt.Errorf("%s contains an empty contract", kind)
+		}
 	}
 	return nil
 }
@@ -167,6 +513,10 @@ func validateFixtures(metadata workspaceprovider.AdapterMetadata, fixtures Fixtu
 	if fixtures.Provider == nil {
 		return fmt.Errorf("provider fixture is required")
 	}
+	if fixtures.Interactive == nil && fixtures.Service == nil &&
+		(fixtures.DataPlane == nil || fixtures.DataPlane.Workspace == nil) {
+		return fmt.Errorf("at least one workspace fixture is required")
+	}
 	if slices.Contains(metadata.Features, workspacev1alpha1.WorkspaceFeaturePools) && fixtures.Pool == nil {
 		return fmt.Errorf("pool fixture is required when pool support is advertised")
 	}
@@ -194,7 +544,7 @@ func runProviderObservation(
 	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
 	metadata workspaceprovider.AdapterMetadata,
 	timing conformanceTiming,
-) {
+) workspaceprovider.ProviderObservation {
 	t.Helper()
 	if provider == nil {
 		t.Fatal("provider fixture is required")
@@ -208,6 +558,7 @@ func runProviderObservation(
 	if err := validateProviderObservation(metadata, observation); err != nil {
 		t.Fatalf("provider observation: %v", err)
 	}
+	return observation
 }
 
 func runPoolObservation(
@@ -236,9 +587,9 @@ func validatePoolObservation(observation workspaceprovider.PoolObservation) erro
 		observation.Suspended < 0 || observation.Total < 0 {
 		return fmt.Errorf("pool counters must be non-negative")
 	}
-	if observation.Total < observation.Available || observation.Total < observation.Allocated ||
-		observation.Total < observation.Suspended {
-		return fmt.Errorf("total capacity must cover every reported pool counter")
+	accounted := int64(observation.Available) + int64(observation.Allocated) + int64(observation.Suspended)
+	if accounted > int64(observation.Total) {
+		return fmt.Errorf("available plus allocated plus suspended capacity must not exceed total capacity")
 	}
 	return nil
 }
@@ -247,8 +598,10 @@ func validatePoolObservation(observation workspaceprovider.PoolObservation) erro
 func runDataPlaneConformance(
 	t *testing.T,
 	driver workspaceprovider.Driver,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
 	fixture *DataPlaneFixture,
 	metadata workspaceprovider.AdapterMetadata,
+	advertised workspaceprovider.ProviderObservation,
 	timing conformanceTiming,
 ) {
 	t.Helper()
@@ -256,6 +609,7 @@ func runDataPlaneConformance(
 		t.Fatal("data-plane workspace fixture is required")
 	}
 	workspace := fixture.Workspace.DeepCopy()
+	markWorkspaceCoreAdmitted(workspace)
 	observation := reconcileWorkspaceUntil(
 		t,
 		context.Background(),
@@ -271,6 +625,21 @@ func runDataPlaneConformance(
 	)
 	if observation.ConnectionRef == nil || observation.ConnectionRef.Name == "" {
 		t.Fatalf("data-plane observation = %#v", observation)
+	}
+	bindingValidator := &interactiveProviderBindingConformance{
+		provider: provider, metadata: metadata, advertised: advertised,
+	}
+	if err := bindingValidator.validate(observation); err != nil {
+		t.Fatalf("data-plane provider binding: %v", err)
+	}
+	second := reconcileWorkspaceOnce(t, context.Background(), driver, workspace, "data-plane idempotency", timing)
+	if err := bindingValidator.validate(second); err != nil {
+		t.Fatalf("data-plane idempotent provider binding: %v", err)
+	}
+	if second.State != workspacev1alpha1.ExecutionWorkspaceStateReady ||
+		second.ExternalID != observation.ExternalID || second.ConnectionRef == nil ||
+		second.ConnectionRef.Name != observation.ConnectionRef.Name {
+		t.Fatalf("data-plane idempotent observation changed identity: first=%#v second=%#v", observation, second)
 	}
 	if err := validateConformanceConnection(fixture.Connection); err != nil {
 		t.Fatalf("connection data: %v", err)
@@ -620,11 +989,165 @@ func runFileConformance(
 	}
 }
 
+type interactiveProviderBindingConformance struct {
+	provider   *workspacev1alpha1.ExecutionWorkspaceProvider
+	metadata   workspaceprovider.AdapterMetadata
+	advertised workspaceprovider.ProviderObservation
+	stable     *workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus
+}
+
+func (c *interactiveProviderBindingConformance) validate(
+	observation workspaceprovider.WorkspaceObservation,
+) error {
+	binding := observation.ProviderBinding
+	if binding == nil {
+		return fmt.Errorf("provider binding is required after the workspace reaches Ready")
+	}
+	if err := validateProviderBindingIdentity(binding, c.provider, c.metadata, c.advertised); err != nil {
+		return err
+	}
+	if c.stable == nil {
+		stable := *binding
+		c.stable = &stable
+		return nil
+	}
+	if *binding != *c.stable {
+		return fmt.Errorf("provider binding changed from %#v to %#v", *c.stable, *binding)
+	}
+	return nil
+}
+
+func validateProviderBindingIdentity(
+	binding *workspacev1alpha1.ExecutionWorkspaceProviderBindingStatus,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+	metadata workspaceprovider.AdapterMetadata,
+	advertised workspaceprovider.ProviderObservation,
+) error {
+	if binding == nil {
+		return fmt.Errorf("provider binding is required")
+	}
+	if strings.TrimSpace(binding.ContractVersion) == "" {
+		return fmt.Errorf("provider binding contract version is required")
+	}
+	if err := validateContractList("adapter metadata", metadata.Contracts); err != nil {
+		return err
+	}
+	if !contains(metadata.Contracts, binding.ContractVersion) {
+		return fmt.Errorf(
+			"provider binding contract %q is not advertised by adapter metadata %v",
+			binding.ContractVersion,
+			metadata.Contracts,
+		)
+	}
+	if provider != nil {
+		if err := validateContractList("provider required contracts", provider.Spec.RequiredContracts); err != nil {
+			return err
+		}
+		if err := validateContractList("provider supported contracts", provider.Status.SupportedContracts); err != nil {
+			return err
+		}
+		if len(provider.Spec.RequiredContracts) > 0 &&
+			!contains(provider.Spec.RequiredContracts, binding.ContractVersion) {
+			return fmt.Errorf(
+				"provider binding contract %q is not required by provider fixture %v",
+				binding.ContractVersion,
+				provider.Spec.RequiredContracts,
+			)
+		}
+		if len(provider.Status.SupportedContracts) > 0 &&
+			!contains(provider.Status.SupportedContracts, binding.ContractVersion) {
+			return fmt.Errorf(
+				"provider binding contract %q is not supported by provider fixture %v",
+				binding.ContractVersion,
+				provider.Status.SupportedContracts,
+			)
+		}
+	}
+
+	adapterVersions := []string{metadata.Version, advertised.Adapter.Version}
+	adapterDigests := []string{metadata.Digest, advertised.Adapter.Digest}
+	if provider != nil && provider.Status.Adapter != nil {
+		adapterVersions = append(adapterVersions, provider.Status.Adapter.Version)
+		adapterDigests = append(adapterDigests, provider.Status.Adapter.Digest)
+	}
+	expectedVersion, err := consistentAdvertisedValue("adapter version", adapterVersions...)
+	if err != nil {
+		return err
+	}
+	if binding.AdapterVersion != expectedVersion {
+		return fmt.Errorf(
+			"provider binding adapter version = %q, want advertised %q",
+			binding.AdapterVersion,
+			expectedVersion,
+		)
+	}
+	expectedDigest, err := consistentAdvertisedValue("adapter digest", adapterDigests...)
+	if err != nil {
+		return err
+	}
+	if binding.AdapterDigest != expectedDigest {
+		return fmt.Errorf(
+			"provider binding adapter digest = %q, want advertised %q",
+			binding.AdapterDigest,
+			expectedDigest,
+		)
+	}
+
+	backendAPIVersions := make([][]string, 0, 2)
+	if len(advertised.Backend.APIVersions) > 0 {
+		backendAPIVersions = append(backendAPIVersions, advertised.Backend.APIVersions)
+	}
+	if provider != nil && provider.Status.Backend != nil && len(provider.Status.Backend.APIVersions) > 0 {
+		backendAPIVersions = append(backendAPIVersions, provider.Status.Backend.APIVersions)
+	}
+	if len(backendAPIVersions) == 0 {
+		if binding.BackendAPIVersion != "" {
+			return fmt.Errorf(
+				"provider binding backend API version %q was not advertised",
+				binding.BackendAPIVersion,
+			)
+		}
+		return nil
+	}
+	if binding.BackendAPIVersion == "" {
+		return fmt.Errorf("provider binding backend API version is required when the provider advertises one")
+	}
+	for _, advertisedVersions := range backendAPIVersions {
+		if !contains(advertisedVersions, binding.BackendAPIVersion) {
+			return fmt.Errorf(
+				"provider binding backend API version %q is not advertised in %v",
+				binding.BackendAPIVersion,
+				advertisedVersions,
+			)
+		}
+	}
+	return nil
+}
+
+func consistentAdvertisedValue(kind string, values ...string) (string, error) {
+	expected := ""
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if expected == "" {
+			expected = value
+			continue
+		}
+		if value != expected {
+			return "", fmt.Errorf("provider fixture advertises conflicting %s values %q and %q", kind, expected, value)
+		}
+	}
+	return expected, nil
+}
+
 func runInteractiveLifecycle(
 	t *testing.T,
 	driver workspaceprovider.Driver,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	metadata workspaceprovider.AdapterMetadata,
+	advertised workspaceprovider.ProviderObservation,
 	timing conformanceTiming,
 ) {
 	t.Helper()
@@ -633,18 +1156,43 @@ func runInteractiveLifecycle(
 	}
 	ctx := context.Background()
 	workspace = workspace.DeepCopy()
+	markWorkspaceCoreAdmitted(workspace)
+	bindingConformance := &interactiveProviderBindingConformance{
+		provider: provider, metadata: metadata, advertised: advertised,
+	}
+	requireStableBinding := func(transition string, observation workspaceprovider.WorkspaceObservation) {
+		t.Helper()
+		if err := bindingConformance.validate(observation); err != nil {
+			t.Fatalf("%s provider binding: %v; observation = %#v", transition, err, observation)
+		}
+	}
+	withStableBinding := func(
+		transition string,
+		complete func(workspaceprovider.WorkspaceObservation) bool,
+	) func(workspaceprovider.WorkspaceObservation) bool {
+		return func(observation workspaceprovider.WorkspaceObservation) bool {
+			requireStableBinding(transition, observation)
+			return complete(observation)
+		}
+	}
+
 	first := reconcileWorkspaceUntil(t, ctx, driver, workspace, "initial provisioning", timing, func(
 		observation workspaceprovider.WorkspaceObservation,
 	) bool {
-		return observation.State == workspacev1alpha1.ExecutionWorkspaceStateReady &&
-			observation.ExternalID != ""
+		if observation.State != workspacev1alpha1.ExecutionWorkspaceStateReady {
+			return false
+		}
+		requireStableBinding("initial provisioning", observation)
+		return observation.ExternalID != ""
 	})
 	second := reconcileWorkspaceOnce(t, ctx, driver, workspace, "idempotency", timing)
+	requireStableBinding("idempotency", second)
 	if first.ExternalID == "" || first.ExternalID != second.ExternalID {
 		t.Fatalf("idempotent external IDs = %q and %q", first.ExternalID, second.ExternalID)
 	}
 
 	workspace.Spec.Attachment = conformanceAttachment()
+	advanceWorkspaceGenerationAndReadmit(t, driver, workspace, "attachment activation", timing)
 	attachmentController, controlsAttachment := driver.(workspaceprovider.AttachmentController)
 	if controlsAttachment {
 		operationCtx, cancel := context.WithTimeout(ctx, timing.timeout)
@@ -654,12 +1202,13 @@ func runInteractiveLifecycle(
 			t.Fatalf("ActivateAttachment: %v", err)
 		}
 	}
-	attached := reconcileWorkspaceUntil(t, ctx, driver, workspace, "attachment activation", timing, func(
-		observation workspaceprovider.WorkspaceObservation,
-	) bool {
-		return observation.State == workspacev1alpha1.ExecutionWorkspaceStateAttached &&
-			observation.AttachedEpoch == workspace.Spec.Attachment.Epoch
-	})
+	attached := reconcileWorkspaceUntil(
+		t, ctx, driver, workspace, "attachment activation", timing,
+		withStableBinding("attachment activation", func(observation workspaceprovider.WorkspaceObservation) bool {
+			return observation.State == workspacev1alpha1.ExecutionWorkspaceStateAttached &&
+				observation.AttachedEpoch == workspace.Spec.Attachment.Epoch
+		}),
+	)
 	if attached.State != workspacev1alpha1.ExecutionWorkspaceStateAttached || attached.AttachedEpoch != 1 {
 		t.Fatalf("attached observation = %#v", attached)
 	}
@@ -667,6 +1216,7 @@ func runInteractiveLifecycle(
 	detachedEpoch := workspace.Spec.Attachment.Epoch
 	workspace.Spec.Attachment = nil
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	workspace.Generation++
 	if controlsAttachment {
 		operationCtx, cancel := context.WithTimeout(ctx, timing.timeout)
 		err := attachmentController.RevokeAttachment(operationCtx, workspace.DeepCopy(), detachedEpoch)
@@ -675,39 +1225,49 @@ func runInteractiveLifecycle(
 			t.Fatalf("RevokeAttachment: %v", err)
 		}
 	}
-	reconcileWorkspaceUntil(t, ctx, driver, workspace, "attachment revocation", timing, func(
-		observation workspaceprovider.WorkspaceObservation,
-	) bool {
-		return observation.State == workspacev1alpha1.ExecutionWorkspaceStateReady &&
-			observation.AttachedEpoch == 0
-	})
+	reconcileWorkspaceUntil(
+		t, ctx, driver, workspace, "attachment revocation", timing,
+		withStableBinding("attachment revocation", func(observation workspaceprovider.WorkspaceObservation) bool {
+			return observation.State == workspacev1alpha1.ExecutionWorkspaceStateReady &&
+				observation.AttachedEpoch == 0
+		}),
+	)
+	// Core refreshes admission only after fail-closed revocation is observed.
+	workspace.Generation++
+	markWorkspaceCoreAdmitted(workspace)
 	suspendAllowed := slices.Contains(
 		workspace.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend,
 	)
 	if suspendAllowed && slices.Contains(metadata.Features, workspacev1alpha1.WorkspaceFeatureSuspend) {
 		workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-		reconcileWorkspaceUntil(t, ctx, driver, workspace, "suspension", timing, func(
-			observation workspaceprovider.WorkspaceObservation,
-		) bool {
-			return observation.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended &&
-				observation.AttachedEpoch == 0
-		})
+		advanceWorkspaceGenerationAndReadmit(t, driver, workspace, "suspension", timing)
+		reconcileWorkspaceUntil(
+			t, ctx, driver, workspace, "suspension", timing,
+			withStableBinding("suspension", func(observation workspaceprovider.WorkspaceObservation) bool {
+				return observation.State == workspacev1alpha1.ExecutionWorkspaceStateSuspended &&
+					observation.AttachedEpoch == 0
+			}),
+		)
 
 		workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
-		reconcileWorkspaceUntil(t, ctx, driver, workspace, "resume", timing, func(
-			observation workspaceprovider.WorkspaceObservation,
-		) bool {
-			return observation.State == workspacev1alpha1.ExecutionWorkspaceStateReady &&
-				observation.AttachedEpoch == 0
-		})
+		advanceWorkspaceGenerationAndReadmit(t, driver, workspace, "resume", timing)
+		reconcileWorkspaceUntil(
+			t, ctx, driver, workspace, "resume", timing,
+			withStableBinding("resume", func(observation workspaceprovider.WorkspaceObservation) bool {
+				return observation.State == workspacev1alpha1.ExecutionWorkspaceStateReady &&
+					observation.AttachedEpoch == 0
+			}),
+		)
 	}
 
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	deleted := reconcileWorkspaceUntil(t, ctx, driver, workspace, "deletion", timing, func(
-		observation workspaceprovider.WorkspaceObservation,
-	) bool {
-		return observation.State == workspacev1alpha1.ExecutionWorkspaceStateDeleted
-	})
+	workspace.Generation++
+	deleted := reconcileWorkspaceUntil(
+		t, ctx, driver, workspace, "deletion", timing,
+		withStableBinding("deletion", func(observation workspaceprovider.WorkspaceObservation) bool {
+			return observation.State == workspacev1alpha1.ExecutionWorkspaceStateDeleted
+		}),
+	)
 	if !validInteractiveDeletedDisposition(deleted.Disposition, workspace.Spec.Lifecycle.DeletionPolicy) {
 		t.Fatalf("deleted observation = %#v", deleted)
 	}
@@ -779,13 +1339,18 @@ func reconcileWorkspaceUntil(
 func runServiceEndpoint(
 	t *testing.T,
 	driver workspaceprovider.Driver,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
+	metadata workspaceprovider.AdapterMetadata,
+	advertised workspaceprovider.ProviderObservation,
 	timing conformanceTiming,
 ) {
 	t.Helper()
 	if workspace == nil {
 		t.Fatal("service fixture is required when service endpoint support is advertised")
 	}
+	workspace = workspace.DeepCopy()
+	markWorkspaceCoreAdmitted(workspace)
 	observation := reconcileWorkspaceUntil(
 		t,
 		context.Background(),
@@ -800,6 +1365,25 @@ func runServiceEndpoint(
 	)
 	if observation.ExternalID == "" {
 		t.Fatalf("service observation = %#v", observation)
+	}
+	bindingValidator := &interactiveProviderBindingConformance{
+		provider: provider, metadata: metadata, advertised: advertised,
+	}
+	if err := bindingValidator.validate(observation); err != nil {
+		t.Fatalf("service provider binding: %v", err)
+	}
+	second := reconcileWorkspaceOnce(t, context.Background(), driver, workspace, "service idempotency", timing)
+	if err := bindingValidator.validate(second); err != nil {
+		t.Fatalf("service idempotent provider binding: %v", err)
+	}
+	if second.State != workspacev1alpha1.ExecutionWorkspaceStateReady || second.ExternalID != observation.ExternalID {
+		t.Fatalf("service idempotent observation changed: first=%#v second=%#v", observation, second)
+	}
+	if err := workspaceprovider.ValidateEndpoints(second.Endpoints); err != nil {
+		t.Fatalf("service idempotent endpoints: %v", err)
+	}
+	if err := validateServiceEndpointCorrespondence(workspace, second.Endpoints); err != nil {
+		t.Fatalf("service idempotent endpoints: %v", err)
 	}
 	if err := workspaceprovider.ValidateEndpoints(observation.Endpoints); err != nil {
 		t.Fatalf("service endpoints: %v", err)
