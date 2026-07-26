@@ -58,12 +58,17 @@ describe('agentCLIRuntimeSchema', () => {
   })
 
   it('parses valid claude runtime', () => {
-    const data = { type: 'claude' }
+    const data = { type: 'claude', defaultReasoningEffort: 'max' }
     expect(agentCLIRuntimeSchema.parse(data)).toEqual(data)
   })
 
   it('parses valid codex runtime', () => {
     const data = { type: 'codex' }
+    expect(agentCLIRuntimeSchema.parse(data)).toEqual(data)
+  })
+
+  it('parses valid opencode runtime', () => {
+    const data = { type: 'opencode' }
     expect(agentCLIRuntimeSchema.parse(data)).toEqual(data)
   })
 
@@ -79,6 +84,7 @@ describe('agentCLIRuntimeSchema', () => {
   it('rejects wrong types for optional fields', () => {
     expect(() => agentCLIRuntimeSchema.parse({ type: 'copilot', defaultMaxTurns: 'many' })).toThrow()
     expect(() => agentCLIRuntimeSchema.parse({ type: 'copilot', defaultAllowBash: 'yes' })).toThrow()
+    expect(() => agentCLIRuntimeSchema.parse({ type: 'claude', defaultReasoningEffort: 'maximum' })).toThrow()
   })
 })
 

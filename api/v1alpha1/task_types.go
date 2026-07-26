@@ -307,6 +307,17 @@ type SessionReference struct {
 	// +kubebuilder:default=50
 	// +optional
 	MaxMessages int32 `json:"maxMessages,omitempty"`
+
+	// ThroughMessageID limits transcript loading to the logical history at and before this stable message ID.
+	// Gateway-created Tasks use it so later queued user messages cannot enter an earlier turn.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	ThroughMessageID string `json:"throughMessageId,omitempty"`
+
+	// PromptIncluded reports that the current Task prompt is already the final user message in the bounded transcript.
+	// Workers must not append prompt a second time when this is true.
+	// +optional
+	PromptIncluded bool `json:"promptIncluded,omitempty"`
 }
 
 // AgentReference references an Agent CRD
@@ -614,6 +625,7 @@ type ChildTaskStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:metadata:annotations=gateway.orka.ai/session-cutoff-schema=v1
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
@@ -639,7 +651,7 @@ type TaskList struct {
 }
 
 // AgentRuntimeType defines the agent runtime to use
-// +kubebuilder:validation:Enum=copilot;claude;codex
+// +kubebuilder:validation:Enum=copilot;claude;codex;opencode
 type AgentRuntimeType string
 
 const (
@@ -649,6 +661,8 @@ const (
 	AgentRuntimeClaude AgentRuntimeType = "claude"
 	// AgentRuntimeCodex uses OpenAI Codex CLI as the agent runtime
 	AgentRuntimeCodex AgentRuntimeType = "codex"
+	// AgentRuntimeOpencode uses OpenCode CLI as the agent runtime
+	AgentRuntimeOpencode AgentRuntimeType = "opencode"
 )
 
 // AgentRuntimeSpec defines task-level overrides for agent runtime configuration.

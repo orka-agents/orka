@@ -27,6 +27,11 @@ resources:
 - agent_viewer_role.yaml
 - agentruntime_admin_role.yaml
 - agentruntime_viewer_role.yaml
+- gatewayclass_admin_role.yaml
+- gatewayclass_viewer_role.yaml
+- gateway_admin_role.yaml
+- gateway_editor_role.yaml
+- gateway_viewer_role.yaml
 - tool_admin_role.yaml
 - tool_editor_role.yaml
 - tool_viewer_role.yaml

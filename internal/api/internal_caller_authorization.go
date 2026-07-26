@@ -27,14 +27,18 @@ import (
 )
 
 type internalCallerAuthorizer struct {
-	k8sClient client.Client
+	k8sReader client.Reader
 }
 
 func (h *InternalHandlers) internalCallerAuthorizer() internalCallerAuthorizer {
 	if h == nil {
 		return internalCallerAuthorizer{}
 	}
-	return internalCallerAuthorizer{k8sClient: h.k8sClient}
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.k8sClient
+	}
+	return internalCallerAuthorizer{k8sReader: reader}
 }
 
 // verifyNamespace checks that the authenticated caller's ServiceAccount namespace
@@ -97,7 +101,7 @@ func (a internalCallerAuthorizer) verifyHarnessWrapperArtifactUpload(
 	namespace string,
 	taskName string,
 ) error {
-	if a.k8sClient == nil || userInfo == nil {
+	if a.k8sReader == nil || userInfo == nil {
 		return fiber.NewError(fiber.StatusForbidden, "cross-namespace access denied")
 	}
 	if userInfo.AuthType != AuthTypeTokenReview {
@@ -119,7 +123,7 @@ func (a internalCallerAuthorizer) verifyHarnessWrapperArtifactUpload(
 	}
 
 	task := &corev1alpha1.Task{}
-	if err := a.k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
+	if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
 		return fiber.NewError(fiber.StatusForbidden, "target task not found")
 	}
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
@@ -140,11 +144,11 @@ func (a internalCallerAuthorizer) verifyExecutionEventStreamWriter(
 	streamType string,
 	streamID string,
 ) (*corev1alpha1.Task, error) {
-	if a.k8sClient == nil || streamType != events.ExecutionEventStreamTypeTask {
+	if a.k8sReader == nil || streamType != events.ExecutionEventStreamTypeTask {
 		return nil, nil
 	}
 	task := &corev1alpha1.Task{}
-	if err := a.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: streamID}, task); err != nil {
+	if err := a.k8sReader.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: streamID}, task); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
 		}
@@ -163,7 +167,7 @@ func (a internalCallerAuthorizer) verifyExecutionEventStreamWriter(
 }
 
 func (a internalCallerAuthorizer) verifyTaskWorker(ctx context.Context, userInfo *UserInfo, task *corev1alpha1.Task) error {
-	if a.k8sClient == nil || userInfo == nil || task == nil {
+	if a.k8sReader == nil || userInfo == nil || task == nil {
 		return fiber.NewError(fiber.StatusUnauthorized, "authentication required")
 	}
 	if userInfo.AuthType != AuthTypeTokenReview {
@@ -176,7 +180,7 @@ func (a internalCallerAuthorizer) verifyTaskWorker(ctx context.Context, userInfo
 	}
 
 	pod := &corev1.Pod{}
-	if err := a.k8sClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: podName}, pod); err != nil {
+	if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: podName}, pod); err != nil {
 		return fiber.NewError(fiber.StatusForbidden, "caller pod not found")
 	}
 	if string(pod.UID) != podUID {
@@ -191,14 +195,11 @@ func (a internalCallerAuthorizer) verifyTaskWorker(ctx context.Context, userInfo
 	}
 
 	for _, owner := range pod.OwnerReferences {
-		if owner.Kind != "Job" || owner.Name == "" {
-			continue
-		}
-		if owner.Name != currentJobName {
+		if owner.Kind != "Job" || owner.Name != currentJobName {
 			continue
 		}
 		job := &batchv1.Job{}
-		if err := a.k8sClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: owner.Name}, job); err != nil {
+		if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: owner.Name}, job); err != nil {
 			return fiber.NewError(fiber.StatusForbidden, "caller job not found")
 		}
 		if owner.UID != "" && owner.UID != job.UID {

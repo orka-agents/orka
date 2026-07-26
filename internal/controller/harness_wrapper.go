@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -29,6 +30,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
@@ -507,6 +509,11 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		if !hasFrames {
+			if r.ResultStore != nil {
+				if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+			}
 			if err := r.validateHarnessWrapperCapabilities(ctx, client, request); err != nil {
 				if target.RuntimeRefName != "" && harnessWrapperAuthError(err) {
 					if shouldWait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task); waitErr != nil {
@@ -1546,6 +1553,59 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 	return request, nil
 }
 
+func sessionMessagesPrompt(messages []store.SessionMessage) string {
+	const maxPromptBytes = 96 << 10
+	const header = "Canonical conversation transcript:\n\n"
+	const instruction = "\n\nRespond to the final user message."
+	chunks := make([]string, 0, len(messages))
+	used := len(header) + len(instruction)
+	for i := len(messages) - 1; i >= 0; i-- {
+		role := strings.ToUpper(strings.TrimSpace(messages[i].Role))
+		if role != "USER" && role != "ASSISTANT" {
+			continue
+		}
+		chunk := role + ":\n" + store.RuntimeSessionMessageContent(messages[i])
+		separator := 2
+		if used+separator+len(chunk) > maxPromptBytes && len(chunks) > 0 {
+			break
+		}
+		if used+separator+len(chunk) > maxPromptBytes {
+			remaining := maxPromptBytes - used - separator
+			if remaining <= len(role)+2 {
+				return ""
+			}
+			chunk = truncateHarnessPromptUTF8(chunk, remaining)
+		}
+		chunks = append(chunks, chunk)
+		used += separator + len(chunk)
+	}
+	if len(chunks) == 0 {
+		return ""
+	}
+	slices.Reverse(chunks)
+	for len(chunks) > 0 && strings.HasPrefix(chunks[0], "ASSISTANT:\n") {
+		chunks = chunks[1:]
+	}
+	if len(chunks) == 0 {
+		return ""
+	}
+	return header + strings.Join(chunks, "\n\n") + instruction
+}
+
+func truncateHarnessPromptUTF8(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
 func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1566,6 +1626,19 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	prompt := task.Spec.Prompt
 	if prompt == "" && task.Spec.AI != nil {
 		prompt = task.Spec.AI.Prompt
+	}
+	if task.Spec.SessionRef != nil && task.Spec.SessionRef.PromptIncluded {
+		if r.SessionManager == nil {
+			return harness.StartTurnRequest{}, fmt.Errorf("session manager is required for transcript-backed prompt")
+		}
+		messages, err := r.SessionManager.LoadTranscript(ctx, task)
+		if err != nil {
+			return harness.StartTurnRequest{}, fmt.Errorf("load transcript-backed prompt: %w", err)
+		}
+		prompt = sessionMessagesPrompt(messages)
+		if prompt == "" {
+			return harness.StartTurnRequest{}, fmt.Errorf("transcript-backed prompt is empty")
+		}
 	}
 	metadata, err := r.harnessWrapperTurnMetadata(ctx, task, agent, runtimeName)
 	if err != nil {
@@ -1690,6 +1763,11 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultMaxTurns != nil {
 		metadata["maxTurns"] = strconv.FormatInt(int64(*agent.Spec.Runtime.DefaultMaxTurns), 10)
 	}
+	if agent != nil && agent.Spec.Runtime != nil {
+		if effort := strings.ToLower(strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort)); effort != "" {
+			metadata["reasoningEffort"] = effort
+		}
+	}
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
 		metadata["maxTurns"] = strconv.FormatInt(int64(*task.Spec.AgentRuntime.MaxTurns), 10)
 	}
@@ -1706,6 +1784,9 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	disallowedTools := []string(nil)
 	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
 		disallowedTools = append(disallowedTools, task.Spec.AgentRuntime.DisallowedTools...)
+	}
+	if taskRequestsRuntimeAuthOnly(task) {
+		metadata["runtimeAuthOnly"] = scheduledRunLabelValue
 	}
 	if taskRequestsReadOnlyAgent(task) {
 		metadata["readOnly"] = scheduledRunLabelValue
@@ -1955,6 +2036,9 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) ([]harness.TurnEnvVar, error) {
+	if err := validateHarnessWrapperRestrictedAgentRuntime(task, agent); err != nil {
+		return nil, err
+	}
 	env, err := r.harnessWrapperBaseTurnEnv(ctx, task)
 	if err != nil {
 		return nil, err
@@ -1968,7 +2052,7 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 		return nil, err
 	}
 	env = append(env, agentSecretEnv...)
-	if !taskRequestsReadOnlyAgent(task) {
+	if !taskRequestsReadOnlyAgent(task) && !taskRequestsRuntimeAuthOnly(task) {
 		taskSecretEnv, err := r.harnessWrapperTaskSecretEnv(ctx, task)
 		if err != nil {
 			return nil, err
@@ -1979,6 +2063,19 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 	// must remain authoritative over broad runtime Secret keys such as GIT_TOKEN.
 	env = append(env, workspaceGitEnv...)
 	return env, nil
+}
+
+func validateHarnessWrapperRestrictedAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
+		return err
+	}
+	if !taskRequestsRuntimeAuthOnly(task) || agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return nil
+	}
+	if runtimeRefName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name); runtimeRefName != "" {
+		return fmt.Errorf("runtime-auth-only tasks do not support external runtimeRef %q", runtimeRefName)
+	}
+	return nil
 }
 
 func (r *TaskReconciler) harnessWrapperWorkspaceGitSecretEnv(
@@ -2019,6 +2116,39 @@ func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) ([]harness.TurnEnvVar, error) {
+	if taskRequestsRuntimeAuthOnly(task) {
+		if runtimeRefName := agentHarnessRuntimeRefName(agent); runtimeRefName != "" {
+			return nil, fmt.Errorf("runtime-auth-only tasks do not support external runtimeRef %q", runtimeRefName)
+		}
+		secretNamespace, secretName, err := scopedAgentRuntimeSecretCoordinates(task, agent)
+		if err != nil {
+			return nil, err
+		}
+		if secretName == "" {
+			return nil, nil
+		}
+		secret := &corev1.Secret{}
+		key := ctrlclient.ObjectKey{Name: secretName, Namespace: secretNamespace}
+		if err := r.Get(ctx, key, secret); err != nil {
+			return nil, fmt.Errorf("resolve harness runtime credential Secret %s/%s: %w", key.Namespace, key.Name, err)
+		}
+		if err := validateScopedAgentRuntimeBinding(task, agent, secret); err != nil {
+			return nil, err
+		}
+		env, err := harnessWrapperSecretEnvFromSecret(key, secret)
+		if err != nil {
+			return nil, err
+		}
+		allowedKeys, credentialKeys, err := scopedAgentRuntimeSecretKeys(agent)
+		if err != nil {
+			return nil, err
+		}
+		filtered := filterHarnessTurnEnv(env, allowedKeys)
+		if !harnessTurnEnvHasAny(filtered, credentialKeys) {
+			return nil, fmt.Errorf("runtime-auth-only agent secret contains no supported credentials")
+		}
+		return filtered, nil
+	}
 	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
 		return nil, nil
 	}
@@ -2044,6 +2174,10 @@ func (r *TaskReconciler) harnessWrapperSecretEnv(
 	if err := r.Get(ctx, key, secret); err != nil {
 		return nil, fmt.Errorf("resolve harness runtime credential Secret %s/%s: %w", key.Namespace, key.Name, err)
 	}
+	return harnessWrapperSecretEnvFromSecret(key, secret)
+}
+
+func harnessWrapperSecretEnvFromSecret(key ctrlclient.ObjectKey, secret *corev1.Secret) ([]harness.TurnEnvVar, error) {
 	env := make([]harness.TurnEnvVar, 0, len(secret.Data))
 	for name, raw := range secret.Data {
 		name = strings.TrimSpace(name)
@@ -2094,6 +2228,19 @@ func (r *TaskReconciler) harnessWrapperTaskSecretEnv(
 	return r.harnessWrapperSecretEnv(ctx, ctrlclient.ObjectKey{Name: task.Spec.SecretRef.Name, Namespace: namespace})
 }
 
+func harnessTurnEnvHasAny(env []harness.TurnEnvVar, names []string) bool {
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		wanted[strings.TrimSpace(name)] = struct{}{}
+	}
+	for _, item := range env {
+		if _, ok := wanted[item.Name]; ok && strings.TrimSpace(item.Value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func filterHarnessTurnEnv(env []harness.TurnEnvVar, allowedKeys []string) []harness.TurnEnvVar {
 	if len(env) == 0 || len(allowedKeys) == 0 {
 		return nil
@@ -2122,7 +2269,11 @@ func setHarnessTurnEnv(env []harness.TurnEnvVar, name, value string) []harness.T
 }
 
 func harnessWrapperReadOnlyEnvBlocked(name string) bool {
-	switch strings.TrimSpace(name) {
+	name = strings.TrimSpace(name)
+	if strings.HasPrefix(name, "GIT_CONFIG_") || strings.HasPrefix(name, "DYLD_") {
+		return true
+	}
+	switch name {
 	case workerenv.AgentReadOnly,
 		workerenv.ResultStdout,
 		workerenv.AllowBash,
@@ -2132,7 +2283,23 @@ func harnessWrapperReadOnlyEnvBlocked(name string) bool {
 		workerenv.ClaudeDisableSettingSources,
 		workerenv.ClaudePermissionMode,
 		workerenv.CodexDisableSandbox,
-		workerenv.CodexSandboxMode:
+		workerenv.CodexSandboxMode,
+		"NODE_OPTIONS",
+		"NODE_PATH",
+		"HOME",
+		"ZDOTDIR",
+		"CODEX_HOME",
+		"BASH_ENV",
+		"ENV",
+		"LD_PRELOAD",
+		"LD_AUDIT",
+		"LD_LIBRARY_PATH",
+		"PYTHONPATH",
+		"PERL5OPT",
+		"RUBYOPT",
+		"NPM_CONFIG_USERCONFIG",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME":
 		return true
 	default:
 		return false
@@ -2351,7 +2518,7 @@ func harnessWrapperRuntimeSessionIdentity(task *corev1alpha1.Task, agent *corev1
 		input.TaskUID = string(task.UID)
 		input.ActiveTask = task.Name
 		input.SessionName = ""
-		if task.Spec.SessionRef != nil {
+		if task.Spec.SessionRef != nil && !task.Spec.SessionRef.PromptIncluded {
 			input.SessionName = task.Spec.SessionRef.Name
 		}
 	}

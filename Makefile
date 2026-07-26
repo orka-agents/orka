@@ -47,6 +47,9 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	rm -rf charts/orka/crds
+	mkdir -p charts/orka/crds
+	cp config/crd/bases/*.yaml charts/orka/crds/
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -66,6 +69,23 @@ ensure-ui-embed: ## Create stub UI embed directory if not present (for go vet/bu
 .PHONY: vet
 vet: ensure-ui-embed ## Run go vet against code.
 	go vet ./...
+
+
+.PHONY: repository-monitor-fake-e2e
+repository-monitor-fake-e2e: ensure-ui-embed ## Run fake-GitHub RepositoryMonitor issue-to-PR E2E scenarios
+	bash scripts/repository-monitor-fake-e2e.sh
+
+.PHONY: repository-monitor-validate
+repository-monitor-validate: ensure-ui-embed ## Run full local RepositoryMonitor fake-E2E/docs/example validation
+	bash scripts/repository-monitor-validate.sh
+
+.PHONY: repository-monitor-live-preflight
+repository-monitor-live-preflight: ## Check prerequisites for live GitHub label trigger E2E without changing the cluster
+	bash scripts/live-github-label-trigger-e2e.sh --preflight-only
+
+.PHONY: repository-monitor-completion-audit
+repository-monitor-completion-audit: ensure-ui-embed ## Run local validation plus live preflight audit for RepositoryMonitor plan completion
+	bash scripts/repository-monitor-completion-audit.sh
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.

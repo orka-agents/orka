@@ -458,7 +458,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		// Clean up result data from store
-		if task.Status.ResultRef != nil && task.Status.ResultRef.Available && r.ResultStore != nil {
+		if r.ResultStore != nil {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete result from store", "task", task.Name)
 				// Continue with finalizer removal anyway
@@ -740,6 +740,10 @@ func (r *TaskReconciler) acquireSessionLock(ctx context.Context, task *corev1alp
 
 	locked, err := r.SessionManager.IsLocked(ctx, task)
 	if err != nil {
+		if errors.Is(err, store.ErrValidation) {
+			result, failErr := r.failTask(ctx, task, err.Error())
+			return result, failErr, true
+		}
 		log.Error(err, "failed to check session lock")
 		return ctrl.Result{}, err, true
 	}
@@ -754,7 +758,7 @@ func (r *TaskReconciler) acquireSessionLock(ctx context.Context, task *corev1alp
 			if getErr != nil {
 				return ctrl.Result{}, getErr, true
 			}
-			if session.ActiveTask == task.Name {
+			if session.ActiveTask == task.Name && (session.ActiveTaskUID == "" || session.ActiveTaskUID == string(task.UID)) {
 				return ctrl.Result{}, nil, false
 			}
 			if session.ActiveTask == "" {
@@ -762,8 +766,12 @@ func (r *TaskReconciler) acquireSessionLock(ctx context.Context, task *corev1alp
 			}
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
 		}
+		if errors.Is(err, store.ErrNotReady) {
+			log.Info("gateway session ownership linkage is pending", "session", task.Spec.SessionRef.Name)
+			return ctrl.Result{RequeueAfter: time.Second}, nil, true
+		}
 		log.Error(err, "failed to acquire session lock")
-		if errors.Is(err, store.ErrNotFound) {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrValidation) {
 			result, failErr := r.failTask(ctx, task, err.Error())
 			return result, failErr, true
 		}
@@ -2831,6 +2839,9 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 		if agent.Spec.Runtime.DefaultAllowBash != nil {
 			return fmt.Errorf("runtimeRef custom runtimes do not support defaultAllowBash policy metadata")
 		}
+		if strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort) != "" {
+			return fmt.Errorf("runtimeRef custom runtimes do not support defaultReasoningEffort policy metadata")
+		}
 	}
 	if task != nil && task.Spec.AgentRuntime != nil {
 		if len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
@@ -2890,16 +2901,7 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 			return err
 		}
 	case hasBuiltInRuntime:
-		if hasFrozenRuntimeRef {
-			if err := validateRuntimeRefAgentTaskRestrictions(task, agent); err != nil {
-				return err
-			}
-		}
-
-		if err := validateBuiltInAgentRuntime(agent.Spec.Runtime.Type); err != nil {
-			return err
-		}
-		if err := validateReadOnlyBuiltInAgentRuntime(task, agent.Spec.Runtime.Type); err != nil {
+		if err := validateBuiltInRuntimeTaskCompatibility(task, agent, hasFrozenRuntimeRef); err != nil {
 			return err
 		}
 	default:
@@ -2920,15 +2922,34 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 	if agent.Spec.Coordination != nil && len(agent.Spec.Coordination.ApprovalRequiredTools) > 0 {
 		return fmt.Errorf("agent %q approvalRequiredTools is only supported for type: ai autonomous tasks", agent.Name)
 	}
-	if task.Spec.Prompt == "" {
-		return fmt.Errorf("prompt is required for type: agent tasks")
+	if task.Spec.Prompt == "" && (task.Spec.SessionRef == nil || !task.Spec.SessionRef.PromptIncluded ||
+		strings.TrimSpace(task.Spec.SessionRef.ThroughMessageID) == "") {
+		return fmt.Errorf("prompt is required for type: agent tasks unless included in a bounded Session transcript")
 	}
 	return nil
 }
 
+func validateBuiltInRuntimeTaskCompatibility(
+	task *corev1alpha1.Task, agent *corev1alpha1.Agent, hasFrozenRuntimeRef bool,
+) error {
+	if hasFrozenRuntimeRef {
+		if err := validateRuntimeRefAgentTaskRestrictions(task, agent); err != nil {
+			return err
+		}
+	}
+	if err := validateBuiltInAgentRuntime(agent.Spec.Runtime.Type); err != nil {
+		return err
+	}
+	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode &&
+		(agent.Spec.Model == nil || strings.TrimSpace(agent.Spec.Model.Name) == "") {
+		return fmt.Errorf("agent %q opencode runtime requires spec.model.name", agent.Name)
+	}
+	return validateReadOnlyBuiltInAgentRuntime(task, agent.Spec.Runtime.Type)
+}
+
 func validateBuiltInAgentRuntime(runtimeType corev1alpha1.AgentRuntimeType) error {
 	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode:
 		return nil
 	default:
 		return fmt.Errorf("agent runtime %q does not have a harness adapter configured", runtimeType)
@@ -2940,10 +2961,10 @@ func validateReadOnlyBuiltInAgentRuntime(task *corev1alpha1.Task, runtimeType co
 		return nil
 	}
 	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCodex:
-		return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed")
 	case corev1alpha1.AgentRuntimeCopilot:
 		return fmt.Errorf("read-only agent tasks do not support copilot runtime because GitHub tokens can allow repository mutation")
+	case corev1alpha1.AgentRuntimeOpencode:
+		return fmt.Errorf("read-only agent tasks do not support opencode runtime because the OpenCode adapter pre-approves file edits")
 	default:
 		return nil
 	}

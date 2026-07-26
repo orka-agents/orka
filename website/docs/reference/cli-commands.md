@@ -26,6 +26,7 @@ Available Commands:
   auth        Inspect authentication
   completion  Generate the autocompletion script for the specified shell
   config      Manage CLI configuration
+  gateway     Inspect generic gateway resources and durable event delivery
   help        Help about any command
   login       Authenticate with the Orka dashboard
   memory      Manage durable memory
@@ -2648,15 +2649,26 @@ Usage:
   orka monitor [command]
 
 Available Commands:
-  create      Create a repository monitor resource from a manifest
-  delete      Delete a repository monitor resource
-  events      List repository monitor events
-  get         Get a repository monitor resource
-  items       List repository monitor items
-  list        List repository monitor resources
-  run         Trigger a manual repository monitor run
-  runs        List repository monitor runs
-  update      Update a repository monitor resource from a manifest
+  actions         Inspect repository monitor action records
+  commands        Inspect repository monitor command events
+  create          Create a repository monitor resource from a manifest
+  delete          Delete a repository monitor resource
+  doctor          Summarize monitor workflow health
+  events          List repository monitor events
+  get             Get a repository monitor resource
+  implementations Inspect repository monitor implementation jobs
+  issue           Control a repository monitor issue workflow
+  issues          Inspect repository monitor issue inventory
+  items           List repository monitor items
+  list            List repository monitor resources
+  mutations       Inspect controller-owned GitHub mutation records
+  pr              Control a repository monitor pull request workflow
+  run             Trigger a manual repository monitor run
+  runs            List repository monitor runs
+  trigger-labels  Validate monitor label trigger configuration
+  update          Update a repository monitor resource from a manifest
+  watch           Watch monitor status
+  work-actions    Inspect repository monitor workflow actions
 
 Flags:
   -h, --help   help for monitor
@@ -2789,7 +2801,7 @@ Usage:
 
 Flags:
   -h, --help                 help for run
-      --target-kind string   Target kind (e.g. pull_request)
+      --target-kind string   Target kind (pull_request or issue)
       --target-number int    Target number
       --target-sha string    Target commit SHA
 
@@ -2843,10 +2855,1213 @@ Flags:
   -h, --help                     help for items
       --kind string              Filter by item kind
       --limit int                Maximum number of results (default 50)
+      --number int               Filter by item number
   -o, --output string            Output format: table, json, yaml (default "table")
       --repair-state string      Filter by repair state
       --state string             Filter by state
       --verdict string           Filter by review verdict
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issues`
+
+```text
+Inspect repository monitor issue inventory
+
+Usage:
+  orka monitor issues [command]
+
+Available Commands:
+  get         Get a repository monitor issue item
+  list        List repository monitor issues
+
+Flags:
+  -h, --help   help for issues
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor issues [command] --help" for more information about a command.
+```
+
+## `orka monitor issues list`
+
+```text
+List repository monitor issues
+
+Usage:
+  orka monitor issues list <name> [flags]
+
+Flags:
+      --continue string   Continue token
+      --cursor string     Cursor token
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 50)
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --state string      Filter by state
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issues get`
+
+```text
+Get a repository monitor issue item
+
+Usage:
+  orka monitor issues get <name> <number> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor commands`
+
+```text
+Inspect repository monitor command events
+
+Usage:
+  orka monitor commands [command]
+
+Available Commands:
+  create      Create a repository monitor command
+  get         Get a repository monitor command
+  list        List repository monitor commands
+
+Flags:
+  -h, --help   help for commands
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor commands [command] --help" for more information about a command.
+```
+
+## `orka monitor commands list`
+
+```text
+List repository monitor commands
+
+Usage:
+  orka monitor commands list <name> [flags]
+
+Flags:
+      --continue string   Continue token
+      --cursor string     Cursor token
+  -h, --help              help for list
+      --intent string     Filter by command intent
+      --kind string       Filter by target kind
+      --limit int         Maximum number of results (default 50)
+      --number int        Filter by target number
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --status string     Filter by command status
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor commands get`
+
+```text
+Get a repository monitor command
+
+Usage:
+  orka monitor commands get <command-id> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor commands create`
+
+```text
+Create a repository monitor command
+
+Usage:
+  orka monitor commands create <name> [flags]
+
+Flags:
+  -h, --help                help for create
+      --intent string       Command intent
+      --kind string         Target kind (issue or pull_request) (default "issue")
+      --number int          Target issue or pull request number
+  -o, --output string       Output format: table, json, yaml (default "yaml")
+      --target-sha string   Target head SHA for pull request commands
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor actions`
+
+```text
+Inspect repository monitor action records
+
+Usage:
+  orka monitor actions [command]
+
+Available Commands:
+  get         Get a repository monitor action
+  list        List repository monitor actions
+
+Flags:
+  -h, --help   help for actions
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor actions [command] --help" for more information about a command.
+```
+
+## `orka monitor actions list`
+
+```text
+List repository monitor actions
+
+Usage:
+  orka monitor actions list <name> [flags]
+
+Flags:
+      --action-kind string   Filter by action kind
+      --continue string      Continue token
+      --cursor string        Cursor token
+  -h, --help                 help for list
+      --kind string          Filter by target kind
+      --limit int            Maximum number of results (default 50)
+      --number int           Filter by target number
+  -o, --output string        Output format: table, json, yaml (default "table")
+      --task-name string     Filter by task name
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor actions get`
+
+```text
+Get a repository monitor action
+
+Usage:
+  orka monitor actions get <action-id> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor work-actions`
+
+```text
+Inspect repository monitor workflow actions
+
+Usage:
+  orka monitor work-actions [command]
+
+Available Commands:
+  get         Get a repository monitor workflow action
+  list        List repository monitor workflow actions
+
+Flags:
+  -h, --help   help for work-actions
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor work-actions [command] --help" for more information about a command.
+```
+
+## `orka monitor work-actions list`
+
+```text
+List repository monitor workflow actions
+
+Usage:
+  orka monitor work-actions list <name> [flags]
+
+Flags:
+      --continue string         Continue token
+      --cursor string           Cursor token
+      --desired-action string   Filter by desired workflow action
+  -h, --help                    help for list
+      --intent string           Filter by command intent
+      --kind string             Filter by target kind
+      --limit int               Maximum number of results (default 50)
+      --number int              Filter by target number
+  -o, --output string           Output format: table, json, yaml (default "table")
+      --status string           Filter by workflow status
+      --task-name string        Filter by task name
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor work-actions get`
+
+```text
+Get a repository monitor workflow action
+
+Usage:
+  orka monitor work-actions get <action-id> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor implementations`
+
+```text
+Inspect repository monitor implementation jobs
+
+Usage:
+  orka monitor implementations [command]
+
+Available Commands:
+  get         Get a repository monitor implementation job
+  list        List repository monitor implementation jobs
+
+Flags:
+  -h, --help   help for implementations
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor implementations [command] --help" for more information about a command.
+```
+
+## `orka monitor implementations list`
+
+```text
+List repository monitor implementation jobs
+
+Usage:
+  orka monitor implementations list <name> [flags]
+
+Flags:
+      --continue string    Continue token
+      --cursor string      Cursor token
+  -h, --help               help for list
+      --issue-number int   Filter by issue number
+      --limit int          Maximum number of results (default 50)
+  -o, --output string      Output format: table, json, yaml (default "table")
+      --phase string       Filter by phase
+      --task-name string   Filter by implementation task name
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor implementations get`
+
+```text
+Get a repository monitor implementation job
+
+Usage:
+  orka monitor implementations get <job-id> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor mutations`
+
+```text
+Inspect controller-owned GitHub mutation records
+
+Usage:
+  orka monitor mutations [command]
+
+Available Commands:
+  get         Get a repository monitor GitHub mutation record
+  list        List repository monitor GitHub mutation records
+
+Flags:
+  -h, --help   help for mutations
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor mutations [command] --help" for more information about a command.
+```
+
+## `orka monitor mutations list`
+
+```text
+List repository monitor GitHub mutation records
+
+Usage:
+  orka monitor mutations list <name> [flags]
+
+Flags:
+      --continue string    Continue token
+      --cursor string      Cursor token
+  -h, --help               help for list
+      --kind string        Filter by target kind
+      --limit int          Maximum number of results (default 50)
+      --number int         Filter by target number
+      --operation string   Filter by GitHub operation
+  -o, --output string      Output format: table, json, yaml (default "table")
+      --status string      Filter by status
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor mutations get`
+
+```text
+Get a repository monitor GitHub mutation record
+
+Usage:
+  orka monitor mutations get <mutation-id> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issue`
+
+```text
+Control a repository monitor issue workflow
+
+Usage:
+  orka monitor issue [command]
+
+Available Commands:
+  approve-plan   Approve the current issue plan
+  decompose      Queue issue decomposition
+  implement      Queue issue implementation
+  implementation Inspect issue implementation jobs
+  patch          Inspect issue patch artifacts
+  plan           Queue issue planning
+  research       Queue issue research
+  resume         Resume issue automation
+  status         Show issue workflow status
+  stop           Stop issue automation
+  triage         Queue issue triage
+
+Flags:
+  -h, --help   help for issue
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor issue [command] --help" for more information about a command.
+```
+
+## `orka monitor issue triage`
+
+```text
+Queue issue triage
+
+Usage:
+  orka monitor issue triage <name> <number> [flags]
+
+Flags:
+  -h, --help            help for triage
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issue research`
+
+```text
+Queue issue research
+
+Usage:
+  orka monitor issue research <name> <number> [flags]
+
+Flags:
+  -h, --help            help for research
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issue plan`
+
+```text
+Queue issue planning
+
+Usage:
+  orka monitor issue plan <name> <number> [flags]
+
+Flags:
+  -h, --help            help for plan
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issue approve-plan`
+
+```text
+Approve the current issue plan
+
+Usage:
+  orka monitor issue approve-plan <name> <number> [flags]
+
+Flags:
+  -h, --help            help for approve-plan
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issue implement`
+
+```text
+Queue issue implementation
+
+Usage:
+  orka monitor issue implement <name> <number> [flags]
+
+Flags:
+  -h, --help            help for implement
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issue decompose`
+
+```text
+Queue issue decomposition
+
+Usage:
+  orka monitor issue decompose <name> <number> [flags]
+
+Flags:
+  -h, --help            help for decompose
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issue stop`
+
+```text
+Stop issue automation
+
+Usage:
+  orka monitor issue stop <name> <number> [flags]
+
+Flags:
+  -h, --help            help for stop
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issue resume`
+
+```text
+Resume issue automation
+
+Usage:
+  orka monitor issue resume <name> <number> [flags]
+
+Flags:
+  -h, --help            help for resume
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issue status`
+
+```text
+Show issue workflow status
+
+Usage:
+  orka monitor issue status <name> <number> [flags]
+
+Flags:
+  -h, --help            help for status
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issue implementation`
+
+```text
+Inspect issue implementation jobs
+
+Usage:
+  orka monitor issue implementation [command]
+
+Available Commands:
+  get         Show latest implementation jobs for an issue
+
+Flags:
+  -h, --help   help for implementation
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor issue implementation [command] --help" for more information about a command.
+```
+
+## `orka monitor issue implementation get`
+
+```text
+Show latest implementation jobs for an issue
+
+Usage:
+  orka monitor issue implementation get <name> <number> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor issue patch`
+
+```text
+Inspect issue patch artifacts
+
+Usage:
+  orka monitor issue patch [command]
+
+Available Commands:
+  preview     Show safe patch artifact metadata for an issue
+
+Flags:
+  -h, --help   help for patch
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor issue patch [command] --help" for more information about a command.
+```
+
+## `orka monitor issue patch preview`
+
+```text
+Show safe patch artifact metadata for an issue
+
+Usage:
+  orka monitor issue patch preview <name> <number> [flags]
+
+Flags:
+  -h, --help            help for preview
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor pr`
+
+```text
+Control a repository monitor pull request workflow
+
+Usage:
+  orka monitor pr [command]
+
+Available Commands:
+  automerge     Request head-bound automerge
+  fix           Queue PR finding repair
+  fix-ci        Queue PR CI repair
+  ready         Inspect merge-ready PRs
+  repairs       Inspect PR repair jobs
+  resume        Resume PR automation
+  review        Queue exact-head PR review
+  status        Show PR workflow status
+  stop          Stop PR automation
+  update-branch Queue PR branch update
+
+Flags:
+  -h, --help   help for pr
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor pr [command] --help" for more information about a command.
+```
+
+## `orka monitor pr review`
+
+```text
+Queue exact-head PR review
+
+Usage:
+  orka monitor pr review <name> <number> [flags]
+
+Flags:
+  -h, --help                help for review
+  -o, --output string       Output format: table, json, yaml (default "yaml")
+      --target-sha string   Current pull request head SHA for head-bound commands
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor pr fix`
+
+```text
+Queue PR finding repair
+
+Usage:
+  orka monitor pr fix <name> <number> [flags]
+
+Flags:
+  -h, --help                help for fix
+  -o, --output string       Output format: table, json, yaml (default "yaml")
+      --target-sha string   Current pull request head SHA for head-bound commands
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor pr fix-ci`
+
+```text
+Queue PR CI repair
+
+Usage:
+  orka monitor pr fix-ci <name> <number> [flags]
+
+Flags:
+  -h, --help                help for fix-ci
+  -o, --output string       Output format: table, json, yaml (default "yaml")
+      --target-sha string   Current pull request head SHA for head-bound commands
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor pr update-branch`
+
+```text
+Queue PR branch update
+
+Usage:
+  orka monitor pr update-branch <name> <number> [flags]
+
+Flags:
+  -h, --help                help for update-branch
+  -o, --output string       Output format: table, json, yaml (default "yaml")
+      --target-sha string   Current pull request head SHA for head-bound commands
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor pr automerge`
+
+```text
+Request head-bound automerge
+
+Usage:
+  orka monitor pr automerge <name> <number> [flags]
+
+Flags:
+  -h, --help                help for automerge
+  -o, --output string       Output format: table, json, yaml (default "yaml")
+      --target-sha string   Current pull request head SHA for head-bound commands
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor pr stop`
+
+```text
+Stop PR automation
+
+Usage:
+  orka monitor pr stop <name> <number> [flags]
+
+Flags:
+  -h, --help                help for stop
+  -o, --output string       Output format: table, json, yaml (default "yaml")
+      --target-sha string   Current pull request head SHA for head-bound commands
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor pr resume`
+
+```text
+Resume PR automation
+
+Usage:
+  orka monitor pr resume <name> <number> [flags]
+
+Flags:
+  -h, --help                help for resume
+  -o, --output string       Output format: table, json, yaml (default "yaml")
+      --target-sha string   Current pull request head SHA for head-bound commands
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor pr status`
+
+```text
+Show PR workflow status
+
+Usage:
+  orka monitor pr status <name> <number> [flags]
+
+Flags:
+  -h, --help            help for status
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor pr repairs`
+
+```text
+Inspect PR repair jobs
+
+Usage:
+  orka monitor pr repairs [command]
+
+Available Commands:
+  list        List repair jobs for a PR
+
+Flags:
+  -h, --help   help for repairs
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor pr repairs [command] --help" for more information about a command.
+```
+
+## `orka monitor pr repairs list`
+
+```text
+List repair jobs for a PR
+
+Usage:
+  orka monitor pr repairs list <name> <number> [flags]
+
+Flags:
+  -h, --help            help for list
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor pr ready`
+
+```text
+Inspect merge-ready PRs
+
+Usage:
+  orka monitor pr ready [command]
+
+Available Commands:
+  list        List merge-ready pull requests
+  readiness   Show readiness state for a pull request
+
+Flags:
+  -h, --help   help for ready
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor pr ready [command] --help" for more information about a command.
+```
+
+## `orka monitor pr ready list`
+
+```text
+List merge-ready pull requests
+
+Usage:
+  orka monitor pr ready list <name> [flags]
+
+Flags:
+  -h, --help            help for list
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor pr ready readiness`
+
+```text
+Show readiness state for a pull request
+
+Usage:
+  orka monitor pr ready readiness <name> <number> [flags]
+
+Flags:
+  -h, --help            help for readiness
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor doctor`
+
+```text
+Summarize monitor workflow health
+
+Usage:
+  orka monitor doctor <name> [flags]
+
+Flags:
+  -h, --help            help for doctor
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor watch`
+
+```text
+Watch monitor status
+
+Usage:
+  orka monitor watch <name> [flags]
+
+Flags:
+  -h, --help                help for watch
+      --interval duration   Watch refresh interval (default 5s)
+  -o, --output string       Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor trigger-labels`
+
+```text
+Validate monitor label trigger configuration
+
+Usage:
+  orka monitor trigger-labels [command]
+
+Available Commands:
+  validate    Validate monitor label trigger configuration
+
+Flags:
+  -h, --help   help for trigger-labels
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka monitor trigger-labels [command] --help" for more information about a command.
+```
+
+## `orka monitor trigger-labels validate`
+
+```text
+Validate monitor label trigger configuration
+
+Usage:
+  orka monitor trigger-labels validate <name> [flags]
+
+Flags:
+  -h, --help            help for validate
+  -o, --output string   Output format: table, json, yaml (default "yaml")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3037,6 +4252,398 @@ Usage:
 
 Flags:
   -h, --help   help for delete
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka gateway`
+
+```text
+Inspect generic gateway resources and durable event delivery
+
+Usage:
+  orka gateway [command]
+
+Available Commands:
+  binding     Inspect GatewayBinding routes
+  class       Inspect cluster-scoped GatewayClass profiles
+  deliveries  Inspect and retry durable gateway deliveries
+  events      Inspect durable normalized gateway ingress events
+  get         Get a gateway resource
+  list        List gateway resources
+
+Flags:
+  -h, --help   help for gateway
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka gateway [command] --help" for more information about a command.
+```
+
+## `orka gateway list`
+
+```text
+List gateway resources
+
+Usage:
+  orka gateway list [flags]
+
+Flags:
+      --continue string   Continue/cursor token for the next page
+      --cursor string     Cursor token for the next page
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 100)
+  -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka gateway get`
+
+```text
+Get a gateway resource
+
+Usage:
+  orka gateway get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka gateway class`
+
+```text
+Inspect cluster-scoped GatewayClass profiles
+
+Usage:
+  orka gateway class [command]
+
+Available Commands:
+  get         Get a gateway class resource
+  list        List gateway class resources
+
+Flags:
+  -h, --help   help for class
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka gateway class [command] --help" for more information about a command.
+```
+
+## `orka gateway class list`
+
+```text
+List gateway class resources
+
+Usage:
+  orka gateway class list [flags]
+
+Flags:
+      --continue string   Continue/cursor token for the next page
+      --cursor string     Cursor token for the next page
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 100)
+  -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka gateway class get`
+
+```text
+Get a gateway class resource
+
+Usage:
+  orka gateway class get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka gateway binding`
+
+```text
+Inspect GatewayBinding routes
+
+Usage:
+  orka gateway binding [command]
+
+Available Commands:
+  get         Get a gateway binding resource
+  list        List gateway binding resources
+
+Flags:
+  -h, --help   help for binding
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka gateway binding [command] --help" for more information about a command.
+```
+
+## `orka gateway binding list`
+
+```text
+List gateway binding resources
+
+Usage:
+  orka gateway binding list [flags]
+
+Flags:
+      --continue string   Continue/cursor token for the next page
+      --cursor string     Cursor token for the next page
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 100)
+  -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka gateway binding get`
+
+```text
+Get a gateway binding resource
+
+Usage:
+  orka gateway binding get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka gateway events`
+
+```text
+Inspect durable normalized gateway ingress events
+
+Usage:
+  orka gateway events [command]
+
+Available Commands:
+  get         Get a gateway event resource
+  list        List gateway event resources
+
+Flags:
+  -h, --help   help for events
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka gateway events [command] --help" for more information about a command.
+```
+
+## `orka gateway events list`
+
+```text
+List gateway event resources
+
+Usage:
+  orka gateway events list [flags]
+
+Flags:
+      --binding string    Filter by GatewayBinding name
+      --continue string   Continue/cursor token for the next page
+      --cursor string     Cursor token for the next page
+      --gateway string    Filter by Gateway name
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 100)
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --session string    Filter by Session name
+      --state string      Filter by comma-separated event state
+      --task string       Filter by Task name
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka gateway events get`
+
+```text
+Get a gateway event resource
+
+Usage:
+  orka gateway events get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka gateway deliveries`
+
+```text
+Inspect and retry durable gateway deliveries
+
+Usage:
+  orka gateway deliveries [command]
+
+Available Commands:
+  get         Get a gateway delivery resource
+  list        List gateway delivery resources
+  retry       Retry a dead-lettered gateway delivery
+
+Flags:
+  -h, --help   help for deliveries
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka gateway deliveries [command] --help" for more information about a command.
+```
+
+## `orka gateway deliveries list`
+
+```text
+List gateway delivery resources
+
+Usage:
+  orka gateway deliveries list [flags]
+
+Flags:
+      --binding string    Filter by GatewayBinding name
+      --continue string   Continue/cursor token for the next page
+      --cursor string     Cursor token for the next page
+      --event string      Filter by gateway event ID
+      --gateway string    Filter by Gateway name
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 100)
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --session string    Filter by Session name
+      --state string      Filter by comma-separated delivery state
+      --task string       Filter by Task name
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka gateway deliveries get`
+
+```text
+Get a gateway delivery resource
+
+Usage:
+  orka gateway deliveries get <name> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka gateway deliveries retry`
+
+```text
+Retry a dead-lettered gateway delivery
+
+Usage:
+  orka gateway deliveries retry <delivery-id> [flags]
+
+Flags:
+  -h, --help            help for retry
+  -o, --output string   Output format: table, json, yaml (default "json")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

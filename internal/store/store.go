@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ErrNotFound is returned when a requested resource does not exist.
@@ -12,8 +13,20 @@ var ErrNotFound = errors.New("not found")
 // ErrConflict is returned when a resource cannot be updated because it changed concurrently.
 var ErrConflict = errors.New("conflict")
 
+// ErrNotReady is returned when a durable prerequisite is expected to become ready shortly.
+var ErrNotReady = errors.New("not ready")
+
+// ErrDuplicateMismatch is returned when a stable external identifier is reused with a different payload.
+var ErrDuplicateMismatch = errors.New("duplicate payload mismatch")
+
+// ErrCapacity is returned when a bounded durable store quota is full.
+var ErrCapacity = errors.New("capacity exceeded")
+
 // ErrValidation is returned when supplied input fails store-level validation.
 var ErrValidation = errors.New("validation error")
+
+// ErrGatewayOwnedSession is returned when a generic deletion targets canonical gateway history.
+var ErrGatewayOwnedSession = errors.New("gateway-owned session")
 
 // ValidationError carries a client-safe validation message while remaining
 // comparable with ErrValidation via errors.Is.
@@ -54,17 +67,51 @@ type SessionStore interface {
 	DeleteSession(ctx context.Context, namespace, name string) error
 
 	// Locking
-	AcquireLock(ctx context.Context, namespace, name, taskName string) error
-	ReleaseLock(ctx context.Context, namespace, name, taskName string) error
-	IsLocked(ctx context.Context, namespace, name, currentTask string) (bool, error)
+	AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string) error
+	ReleaseLock(ctx context.Context, namespace, name, taskName, taskUID string) error
+	IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string) (bool, error)
 
 	// Transcript
 	AppendMessages(ctx context.Context, namespace, name string, messages []SessionMessage) error
 	LoadTranscript(ctx context.Context, namespace, name string, maxMessages int) ([]SessionMessage, error)
+	LoadTranscriptThrough(ctx context.Context, namespace, name, throughMessageID string, maxMessages int) ([]SessionMessage, error)
 	SearchTranscript(ctx context.Context, filter TranscriptSearchFilter) ([]TranscriptSearchResult, error)
 
 	// Token tracking
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
+}
+
+// GatewayEventStore handles durable normalized ingress records and atomic Session projection.
+type GatewayEventStore interface {
+	AdmitGatewayEvent(ctx context.Context, admission GatewayEventAdmission) (*GatewayEvent, bool, error)
+	GetGatewayEvent(ctx context.Context, namespace, id string) (*GatewayEvent, error)
+	GetGatewayEventDuplicate(ctx context.Context, candidate *GatewayEvent, now time.Time) (*GatewayEvent, error)
+	GetGatewayEventForTask(ctx context.Context, namespace, taskName, taskUID string) (*GatewayEvent, error)
+	HasGatewayTaskTombstone(ctx context.Context, namespace, taskName, taskUID string) (bool, error)
+	ListGatewayEvents(ctx context.Context, filter GatewayEventFilter) ([]GatewayEvent, error)
+	ClaimNextGatewayEvent(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*GatewayEvent, error)
+	RenewGatewayEventClaim(ctx context.Context, namespace, id, owner string, now time.Time, lease time.Duration) (*GatewayEvent, error)
+	MarkGatewayEventTaskCreated(ctx context.Context, namespace, id, taskName, taskUID, owner string, now time.Time) error
+	RetryGatewayEvent(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error
+	DeferGatewayEventProjection(ctx context.Context, namespace, id string, nextAttemptAt time.Time) error
+	ExpireGatewayEvent(ctx context.Context, namespace, id, owner, reason string, now time.Time) error
+	ExpireGatewayEventWithDelivery(ctx context.Context, projection GatewayExpiryProjection) (*GatewayDelivery, bool, error)
+	MarkExpiredGatewayEventDeadLettered(ctx context.Context, namespace, id, reason string, now time.Time) error
+	ProjectGatewayTerminal(ctx context.Context, projection GatewayTerminalProjection) (*GatewayDelivery, bool, error)
+	GetGatewayQueueStats(ctx context.Context, namespace string) (GatewayQueueStats, error)
+}
+
+// GatewayDeliveryStore handles durable adapter outbox records.
+type GatewayDeliveryStore interface {
+	CreateGatewayDelivery(ctx context.Context, delivery *GatewayDelivery) (*GatewayDelivery, bool, error)
+	GetGatewayDelivery(ctx context.Context, namespace, id string) (*GatewayDelivery, error)
+	ListGatewayDeliveries(ctx context.Context, filter GatewayDeliveryFilter) ([]GatewayDelivery, error)
+	ClaimNextGatewayDelivery(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*GatewayDelivery, error)
+	MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id, owner, providerMessageID string, now time.Time) error
+	ScheduleGatewayDeliveryRetry(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error
+	MarkGatewayDeliveryTerminal(ctx context.Context, namespace, id, owner string, state GatewayDeliveryState, reason string, now time.Time) error
+	RetryGatewayDelivery(ctx context.Context, namespace, id string, now, expiresAt time.Time) (*GatewayDelivery, error)
+	MaintainGatewayRecords(ctx context.Context, namespace string, now, terminalCutoff time.Time) (GatewayMaintenanceResult, error)
 }
 
 // MemoryStore handles durable namespace-scoped memory persistence.
@@ -148,6 +195,18 @@ type RepositoryMonitorStore interface {
 	GetMonitorItem(ctx context.Context, namespace, monitorName, kind, itemKey string) (*MonitorItem, error)
 	ListMonitorItems(ctx context.Context, filter MonitorItemFilter) ([]MonitorItem, string, error)
 
+	CreateWorkAction(ctx context.Context, action *WorkAction) error
+	UpdateWorkAction(ctx context.Context, action *WorkAction) error
+	GetWorkAction(ctx context.Context, namespace, id string) (*WorkAction, error)
+	ListWorkActions(ctx context.Context, filter WorkActionFilter) ([]WorkAction, string, error)
+	LeaseNextWorkAction(ctx context.Context, filter WorkActionFilter, leaseOwner string, leaseTTL time.Duration) (*WorkAction, error)
+	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error)
+
+	CreateActionRecord(ctx context.Context, record *ActionRecord) error
+	UpdateActionRecord(ctx context.Context, record *ActionRecord) error
+	GetActionRecord(ctx context.Context, namespace, id string) (*ActionRecord, error)
+	ListActionRecords(ctx context.Context, filter ActionRecordFilter) ([]ActionRecord, string, error)
+
 	CreateReviewRecord(ctx context.Context, record *ReviewRecord) error
 	GetReviewRecord(ctx context.Context, namespace, id string) (*ReviewRecord, error)
 	ListReviewRecords(ctx context.Context, filter ReviewRecordFilter) ([]ReviewRecord, string, error)
@@ -160,6 +219,18 @@ type RepositoryMonitorStore interface {
 	CreateCommandEvent(ctx context.Context, event *CommandEvent) error
 	UpdateCommandEvent(ctx context.Context, event *CommandEvent) error
 	GetCommandEvent(ctx context.Context, namespace, id string) (*CommandEvent, error)
+	ListCommandEvents(ctx context.Context, filter CommandEventFilter) ([]CommandEvent, string, error)
+
+	CreateImplementationJob(ctx context.Context, job *ImplementationJob) error
+	UpdateImplementationJob(ctx context.Context, job *ImplementationJob) error
+	GetImplementationJob(ctx context.Context, namespace, id string) (*ImplementationJob, error)
+	ListImplementationJobs(ctx context.Context, filter ImplementationJobFilter) ([]ImplementationJob, string, error)
+	CountImplementationJobs(ctx context.Context, filter ImplementationJobFilter) (int, error)
+
+	CreateGitHubMutationRecord(ctx context.Context, record *GitHubMutationRecord) error
+	UpdateGitHubMutationRecord(ctx context.Context, record *GitHubMutationRecord) error
+	GetGitHubMutationRecord(ctx context.Context, namespace, id string) (*GitHubMutationRecord, error)
+	ListGitHubMutationRecords(ctx context.Context, filter GitHubMutationRecordFilter) ([]GitHubMutationRecord, string, error)
 
 	CreateRepairJob(ctx context.Context, job *RepairJob) error
 	UpdateRepairJob(ctx context.Context, job *RepairJob) error

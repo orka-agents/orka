@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -30,6 +31,8 @@ import (
 	"github.com/orka-agents/orka/workers/common"
 	"github.com/orka-agents/orka/workers/harness/cliwrapper"
 )
+
+const testFalseValue = "false"
 
 func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
 	cfg := cliwrapper.DefaultConfig()
@@ -68,6 +71,29 @@ func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
 	}
 	if !hasExecutionEventType(eventsList, events.ExecutionEventTypeAgentRuntimeCompleted) {
 		t.Fatalf("events = %#v, want harness mapped runtime completed", eventsList)
+	}
+}
+
+func TestHarnessWrapperStartClearsStaleResult(t *testing.T) {
+	cfg := cliwrapper.DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := cliwrapper.NewServer(cfg, &cliwrapper.FakeAdapter{Behavior: cliwrapper.FakeBehaviorSuccess, RuntimeName: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(server.Handler())
+	defer srv.Close()
+	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
+
+	task, agent := harnessWrapperTaskAndAgent()
+	secret := attachHarnessWrapperRuntimeSecret(task, agent)
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
+	if err := r.ResultStore.SaveResult(context.Background(), task.Namespace, task.Name, []byte("stale")); err != nil {
+		t.Fatal(err)
+	}
+	_ = runHarnessWrapperTaskToRunning(t, r, task)
+	if _, err := r.ResultStore.GetResult(context.Background(), task.Namespace, task.Name); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetResult() after new turn start = %v, want ErrNotFound", err)
 	}
 }
 
@@ -1602,7 +1628,7 @@ func TestHarnessWrapperPlannedBuiltInRetryUsesFrozenRuntimeMetadata(t *testing.T
 		harnessWrapperRuntimeAnnotation: string(runtimeID),
 		harnessWrapperCorrelationIDAnno: string(task.UID),
 		harnessWrapperLastFrameSeqAnno:  "0",
-		harnessWrapperStartedAnno:       "false",
+		harnessWrapperStartedAnno:       testFalseValue,
 		harnessWrapperMetadataAnno:      `{"runtime":"codex","wrapper":"cli","contractVersion":"orka.harness.v1"}`,
 	}
 	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
@@ -1690,7 +1716,7 @@ func TestHarnessWrapperPendingFirstOnlyPlansTurn(t *testing.T) {
 	if taskHasHarnessWrapperTurn(&planned) {
 		t.Fatalf("harness turn marked started during planning: %#v", planned.Annotations)
 	}
-	if got := planned.Annotations[harnessWrapperStartedAnno]; got != "false" {
+	if got := planned.Annotations[harnessWrapperStartedAnno]; got != testFalseValue {
 		t.Fatalf("%s = %q, want false", harnessWrapperStartedAnno, got)
 	}
 
@@ -2381,8 +2407,8 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Annotations = map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}
 	task.Spec.Env = []corev1.EnvVar{
-		{Name: workerenv.AgentReadOnly, Value: "false"},
-		{Name: workerenv.ResultStdout, Value: "false"},
+		{Name: workerenv.AgentReadOnly, Value: testFalseValue},
+		{Name: workerenv.ResultStdout, Value: testFalseValue},
 		{Name: workerenv.AllowBash, Value: scheduledRunLabelValue},
 		{Name: workerenv.AllowedTools, Value: "Bash,Write"},
 	}
@@ -2395,8 +2421,9 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	agentSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime-secret", Namespace: agent.Namespace},
 		Data: map[string][]byte{
-			workerenv.AnthropicAPIKey: []byte("runtime-anthropic-key"),
-			workerenv.GitHubToken:     []byte("runtime-github-token"),
+			workerenv.AnthropicAPIKey:         []byte("runtime-anthropic-key"),
+			workerenv.AnthropicFoundryBaseURL: []byte("https://foundry.example.test/anthropic"),
+			workerenv.GitHubToken:             []byte("runtime-github-token"),
 		},
 	}
 	task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-runtime-secret"}
@@ -2419,6 +2446,9 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	}
 	if env[workerenv.AnthropicAPIKey] != "runtime-anthropic-key" {
 		t.Fatalf("%s = %q, want runtime credential", workerenv.AnthropicAPIKey, env[workerenv.AnthropicAPIKey])
+	}
+	if env[workerenv.AnthropicFoundryBaseURL] != "https://foundry.example.test/anthropic" {
+		t.Fatalf("%s = %q, want Foundry endpoint", workerenv.AnthropicFoundryBaseURL, env[workerenv.AnthropicFoundryBaseURL])
 	}
 	if env[workerenv.GitHubToken] == "runtime-github-token" {
 		t.Fatalf("read-only Claude runtime should not receive unrelated %s", workerenv.GitHubToken)
@@ -2736,7 +2766,7 @@ func TestCancelHarnessWrapperPlannedMissingTurnIsIgnored(t *testing.T) {
 		harnessWrapperTurnIDAnnotation:  string(request.TurnID),
 		harnessWrapperRuntimeAnnotation: string(request.RuntimeSessionID),
 		harnessWrapperCorrelationIDAnno: request.CorrelationID,
-		harnessWrapperStartedAnno:       "false",
+		harnessWrapperStartedAnno:       testFalseValue,
 	}
 	r := newUnitReconciler(newTestScheme(), task, agent)
 	if err := r.cancelHarnessWrapperTurn(context.Background(), task, "test"); err != nil {
@@ -2800,6 +2830,7 @@ func TestHarnessWrapperStartTurnErrorClassification(t *testing.T) {
 
 func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime.DefaultReasoningEffort = agentReasoningEffortHigh
 	r := newUnitReconciler(newTestScheme(), task, agent)
 	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
 	if err != nil {
@@ -2807,5 +2838,172 @@ func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 	}
 	if request.Metadata["maxTurns"] != "50" {
 		t.Fatalf("metadata maxTurns = %q, want 50", request.Metadata["maxTurns"])
+	}
+	if request.Metadata["reasoningEffort"] != "high" {
+		t.Fatalf("metadata reasoningEffort = %q, want high", request.Metadata["reasoningEffort"])
+	}
+}
+
+func TestHarnessWrapperTurnRequestFiltersRuntimeAuthOnlySecrets(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	immutable := true
+	task.Annotations = map[string]string{
+		labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
+		repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
+		repositoryMonitorIssueAnnotationRuntimeAgentUID:        "uid-harness-agent",
+		repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
+		repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-task-runtime",
+		repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
+	}
+	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCodex
+	agent.UID = "uid-harness-agent"
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-runtime"}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+		GitRepo:      "https://github.com/orka-agents/orka",
+		GitSecretRef: &corev1.LocalObjectReference{Name: "git-auth"},
+	}}
+	task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-runtime"}
+	agentSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime", Namespace: task.Namespace}, Data: map[string][]byte{
+		workerenv.OpenAIAPIKey: []byte("x"),
+		workerenv.GitHubToken:  []byte("y"),
+	}}
+	taskSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "task-runtime", Namespace: task.Namespace, UID: "uid-task-runtime"}, Data: map[string][]byte{
+		workerenv.OpenAIAPIKey:    []byte("z"),
+		workerenv.AnthropicAPIKey: []byte("task-only"),
+	}, Immutable: &immutable}
+	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-auth", Namespace: task.Namespace}, Data: map[string][]byte{"token": []byte("g")}}
+	r := newUnitReconciler(newTestScheme(), task, agent, agentSecret, taskSecret, gitSecret)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v", err)
+	}
+	env := map[string]string{}
+	for _, item := range request.Input.Env {
+		env[item.Name] = item.Value
+	}
+	if env[workerenv.OpenAIAPIKey] != "z" {
+		t.Fatalf("%s = %q, want task-pinned scoped model credential", workerenv.OpenAIAPIKey, env[workerenv.OpenAIAPIKey])
+	}
+	if _, ok := env[workerenv.GitHubToken]; ok {
+		t.Fatalf("runtime GitHub credential reached harness request: %#v", env)
+	}
+	if _, ok := env[workerenv.AnthropicAPIKey]; ok {
+		t.Fatalf("task secret reached runtime-auth-only harness request: %#v", env)
+	}
+	if env[workerenv.GitToken] != "g" {
+		t.Fatalf("%s = %q, want root-side workspace credential", workerenv.GitToken, env[workerenv.GitToken])
+	}
+	if request.Metadata["runtimeAuthOnly"] != scheduledRunLabelValue {
+		t.Fatalf("metadata = %#v, want runtimeAuthOnly", request.Metadata)
+	}
+}
+
+func TestHarnessWrapperTurnRequestRejectsRuntimeAuthOnlyRuntimeRef(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{GitSecretRef: &corev1.LocalObjectReference{Name: "git-auth"}}}
+	agent.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"}
+	agent.Spec.SecretRef = nil
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err == nil || !strings.Contains(err.Error(), "do not support external runtimeRef") {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v, want runtimeRef rejection", err)
+	}
+}
+
+func TestHarnessWrapperTurnRequestRejectsReadOnlyRuntimeRefWithoutSecret(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{GitSecretRef: &corev1.LocalObjectReference{Name: "git-auth"}}}
+	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
+	agent.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"}
+	agent.Spec.SecretRef = nil
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err == nil || !strings.Contains(err.Error(), "do not support external runtimeRef") {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v, want read-only runtimeRef rejection", err)
+	}
+}
+
+func TestHarnessWrapperReadOnlyEnvBlocksStartupInjection(t *testing.T) {
+	for _, name := range []string{
+		"NODE_OPTIONS", "NODE_PATH", "HOME", "ZDOTDIR", "CODEX_HOME", "BASH_ENV", "ENV",
+		"LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "PYTHONPATH",
+		"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "XDG_CONFIG_HOME",
+	} {
+		if !harnessWrapperReadOnlyEnvBlocked(name) {
+			t.Errorf("harnessWrapperReadOnlyEnvBlocked(%q) = false", name)
+		}
+	}
+	if harnessWrapperReadOnlyEnvBlocked("SAFE_REVIEW_SETTING") {
+		t.Fatal("ordinary review setting was unexpectedly blocked")
+	}
+}
+
+func TestSessionMessagesPromptIncludesCurrentTurnOnce(t *testing.T) {
+	prompt := sessionMessagesPrompt([]store.SessionMessage{
+		{Role: "user", Content: "first"},
+		{Role: "assistant", Content: "reply"},
+		{Role: "user", Content: "current"},
+	})
+	if strings.Count(prompt, "current") != 1 || !strings.Contains(prompt, "ASSISTANT:\nreply") {
+		t.Fatalf("sessionMessagesPrompt() = %q", prompt)
+	}
+}
+
+func TestSessionMessagesPromptIncludesGatewaySenderProvenance(t *testing.T) {
+	prompt := sessionMessagesPrompt([]store.SessionMessage{{
+		Role: "user", Content: "current", SourceType: "gateway-event",
+		Metadata: map[string]string{
+			"senderId": "user-1", "senderDisplayName": "User One", "accountId": "acct",
+			"contextId": "room", "threadId": "thread-1",
+		},
+	}})
+	for _, want := range []string{`senderId="user-1"`, `senderDisplayName="User One"`, `contextId="room"`, "current"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("sessionMessagesPrompt() = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestHarnessWrapperPromptIncludedUsesTaskScopedRuntimeSession(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{
+		Name: "canonical-session", PromptIncluded: true, ThroughMessageID: "message-1",
+	}
+	identity := harnessWrapperRuntimeSessionIdentity(task, agent, "codex")
+	if identity.Owner.SessionName == "canonical-session" || !strings.Contains(identity.Owner.SessionName, task.Name) {
+		t.Fatalf("runtime session owner = %#v, want task-scoped identity", identity.Owner)
+	}
+}
+
+func TestSessionMessagesPromptStaysBelowExecStringLimit(t *testing.T) {
+	prompt := sessionMessagesPrompt([]store.SessionMessage{
+		{Role: "user", Content: strings.Repeat("a", 64<<10)},
+		{Role: "assistant", Content: strings.Repeat("b", 64<<10)},
+		{Role: "user", Content: strings.Repeat("c", 64<<10)},
+	})
+	if len(prompt) == 0 || len(prompt) > 96<<10 {
+		t.Fatalf("prompt length = %d, want 1..%d", len(prompt), 96<<10)
+	}
+}
+
+func TestSessionMessagesPromptTruncatesOnUTF8Boundary(t *testing.T) {
+	prompt := sessionMessagesPrompt([]store.SessionMessage{{
+		Role: "user", Content: strings.Repeat("🙂", 30_000),
+	}})
+	if prompt == "" || !utf8.ValidString(prompt) {
+		t.Fatalf("sessionMessagesPrompt() produced invalid UTF-8")
+	}
+}
+
+func TestSessionMessagesPromptDropsLeadingOrphanAssistant(t *testing.T) {
+	prompt := sessionMessagesPrompt([]store.SessionMessage{
+		{Role: "user", Content: strings.Repeat("q", 64<<10)},
+		{Role: "assistant", Content: "orphaned reply"},
+		{Role: "user", Content: strings.Repeat("c", 64<<10)},
+	})
+	if strings.Contains(prompt, "orphaned reply") || !strings.Contains(prompt, "USER:\n") {
+		t.Fatalf("sessionMessagesPrompt() kept an orphan assistant turn: %q", prompt)
 	}
 }

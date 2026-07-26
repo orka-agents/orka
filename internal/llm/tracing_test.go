@@ -166,6 +166,44 @@ func (p *telemetryProvider) Complete(context.Context, *CompletionRequest) (*Comp
 }
 func (p *telemetryProvider) Stream(context.Context, *CompletionRequest) (<-chan StreamChunk, error) {
 	ch := make(chan StreamChunk, 2)
+	if p.name == "stream-missing-reason" {
+		ch <- StreamChunk{Done: true}
+		close(ch)
+		return ch, nil
+	}
+	if p.name == "stream-reason-then-done" {
+		ch <- StreamChunk{StopReason: "stop"}
+		ch <- StreamChunk{Done: true}
+		close(ch)
+		return ch, nil
+	}
+	if p.name == "stream-reason-then-close" {
+		ch <- StreamChunk{StopReason: "stop"}
+		close(ch)
+		return ch, nil
+	}
+	if p.name == "stream-error-then-done" {
+		ch <- StreamChunk{Error: &ProviderError{Message: "provider failed", StatusCode: 503}}
+		ch <- StreamChunk{Done: true}
+		close(ch)
+		return ch, nil
+	}
+	if p.name == "stream-closes-without-terminal" {
+		ch <- StreamChunk{Content: "partial"}
+		close(ch)
+		return ch, nil
+	}
+	if p.name == "stream-tool-reason-without-call" {
+		ch <- StreamChunk{Done: true, StopReason: "tool_calls"}
+		close(ch)
+		return ch, nil
+	}
+	if p.name == "stream-tool-reason-with-call" {
+		ch <- StreamChunk{ToolCall: &ToolCall{ID: "call-1", Name: "search"}}
+		ch <- StreamChunk{Done: true, StopReason: "tool_calls"}
+		close(ch)
+		return ch, nil
+	}
 	chunk := StreamChunk{Content: "hello"}
 	if p.name == "fallback(openai)" {
 		chunk.Provider = "azure-openai"
@@ -434,6 +472,72 @@ func TestTracingProviderCompleteFailureStopReasonSetsError(t *testing.T) {
 	assertStringAttr(t, attrs, genai.AttrErrorType, "failed")
 }
 
+func TestStopReasonErrorType(t *testing.T) {
+	for _, reason := range []string{"length", "max_tokens", "incomplete", "pause_turn", "content_filter", "refusal", "failed", "cancelled", "unexpected"} {
+		t.Run(reason, func(t *testing.T) {
+			if got := stopReasonErrorType(reason); got != reason {
+				t.Fatalf("stopReasonErrorType(%q) = %q, want %q", reason, got, reason)
+			}
+		})
+	}
+
+	if got := stopReasonErrorType(""); got != unknownStopReasonErrorType {
+		t.Fatalf("stopReasonErrorType(empty) = %q, want unknown_stop_reason", got)
+	}
+
+	for _, reason := range []string{"stop", "end_turn", "tool_use", "tool_calls"} {
+		t.Run("successful_"+reason, func(t *testing.T) {
+			if got := stopReasonErrorType(reason); got != "" {
+				t.Fatalf("stopReasonErrorType(%q) = %q, want empty", reason, got)
+			}
+		})
+	}
+}
+
+func TestCompletionResponseErrorType(t *testing.T) {
+	tests := []struct {
+		name string
+		resp *CompletionResponse
+		want string
+	}{
+		{name: "nil response", want: unknownStopReasonErrorType},
+		{name: "missing reason", resp: &CompletionResponse{}, want: unknownStopReasonErrorType},
+		{name: "unknown reason", resp: &CompletionResponse{StopReason: "unexpected"}, want: "unexpected"},
+		{name: "tool reason without calls", resp: &CompletionResponse{StopReason: "tool_calls"}, want: "tool_calls"},
+		{name: "completed", resp: &CompletionResponse{StopReason: "stop", Content: "done"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := completionResponseErrorType(tt.resp); got != tt.want {
+				t.Fatalf("completionResponseErrorType() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTracingProviderCompleteNilResponseSetsUnknownError(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{
+		name:          "openai",
+		telemetryName: "openai",
+	})
+
+	resp, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4o"})
+	if err != nil || resp != nil {
+		t.Fatalf("Complete() resp=%#v err=%v", resp, err)
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error || spans[0].Status().Description != unknownStopReasonErrorType {
+		t.Fatalf("status = %#v, want error %q", spans[0].Status(), unknownStopReasonErrorType)
+	}
+	attrs := spanAttrs(spans[0])
+	assertStringAttr(t, attrs, genai.AttrErrorType, unknownStopReasonErrorType)
+}
+
 func TestTracingProviderCompleteErrorPreservesWrappedProviderTelemetryName(t *testing.T) {
 	h := testutil.NewSpanHarness(t)
 	inner := &telemetryProvider{
@@ -523,6 +627,170 @@ func TestTracingProviderStreamFailureStopReasonSetsError(t *testing.T) {
 	}
 	attrs := spanAttrs(spans[0])
 	assertStringAttr(t, attrs, genai.AttrErrorType, "response.failed")
+}
+
+func TestTracingProviderStreamMissingStopReasonSetsError(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{name: "stream-missing-reason", telemetryName: "openai"})
+	ch, err := tp.Stream(context.Background(), &CompletionRequest{Model: "gpt"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	for range ch {
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error || spans[0].Status().Description != unknownStopReasonErrorType {
+		t.Fatalf("status = %#v, want error %q", spans[0].Status(), unknownStopReasonErrorType)
+	}
+	attrs := spanAttrs(spans[0])
+	assertStringAttr(t, attrs, genai.AttrErrorType, unknownStopReasonErrorType)
+}
+
+func TestTracingProviderStreamEmptyDonePreservesPriorStopReason(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{name: "stream-reason-then-done", telemetryName: "openai"})
+	ch, err := tp.Stream(context.Background(), &CompletionRequest{Model: "gpt"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	for range ch {
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code == codes.Error {
+		t.Fatalf("status = %#v, want non-error", spans[0].Status())
+	}
+	if value, ok := spanAttrs(spans[0])[genai.AttrErrorType]; ok {
+		t.Fatalf("error type = %q, want absent", value.AsString())
+	}
+}
+
+func TestTracingProviderStreamStopReasonWithoutTerminalSetsUnknownError(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{name: "stream-reason-then-close", telemetryName: "openai"})
+	ch, err := tp.Stream(context.Background(), &CompletionRequest{Model: "gpt"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	for range ch {
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error || spans[0].Status().Description != unknownStopReasonErrorType {
+		t.Fatalf("status = %#v, want error %q", spans[0].Status(), unknownStopReasonErrorType)
+	}
+	attrs := spanAttrs(spans[0])
+	assertStringAttr(t, attrs, genai.AttrErrorType, unknownStopReasonErrorType)
+}
+
+func TestTracingProviderStreamToolReasonWithoutCallSetsError(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{name: "stream-tool-reason-without-call", telemetryName: "openai"})
+	ch, err := tp.Stream(context.Background(), &CompletionRequest{Model: "gpt"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	for range ch {
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error {
+		t.Fatalf("status = %#v, want error", spans[0].Status())
+	}
+	attrs := spanAttrs(spans[0])
+	assertStringAttr(t, attrs, genai.AttrErrorType, "tool_calls")
+}
+
+func TestTracingProviderStreamToolReasonWithCallRemainsSuccessful(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{name: "stream-tool-reason-with-call", telemetryName: "openai"})
+	ch, err := tp.Stream(context.Background(), &CompletionRequest{Model: "gpt"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	for range ch {
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code == codes.Error {
+		t.Fatalf("status = %#v, want non-error", spans[0].Status())
+	}
+	if value, ok := spanAttrs(spans[0])[genai.AttrErrorType]; ok {
+		t.Fatalf("error type = %q, want absent", value.AsString())
+	}
+}
+
+func TestTracingProviderStreamEmptyDonePreservesPriorError(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{name: "stream-error-then-done", telemetryName: "openai"})
+	ch, err := tp.Stream(context.Background(), &CompletionRequest{Model: "gpt"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	for range ch {
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error {
+		t.Fatalf("status = %#v, want error", spans[0].Status())
+	}
+	attrs := spanAttrs(spans[0])
+	assertStringAttr(t, attrs, genai.AttrErrorType, "503")
+}
+
+func TestTracingProviderStreamCloseWithoutTerminalSetsUnknownError(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{name: "stream-closes-without-terminal", telemetryName: "openai"})
+	ch, err := tp.Stream(context.Background(), &CompletionRequest{Model: "gpt"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	for range ch {
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error || spans[0].Status().Description != unknownStopReasonErrorType {
+		t.Fatalf("status = %#v, want error %q", spans[0].Status(), unknownStopReasonErrorType)
+	}
+	attrs := spanAttrs(spans[0])
+	assertStringAttr(t, attrs, genai.AttrErrorType, unknownStopReasonErrorType)
+}
+
+func TestTracingProviderStreamCancellationPreservesContextError(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	tp := NewTracingProvider(cancelClosingStreamProvider{})
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := tp.Stream(ctx, &CompletionRequest{Model: "gpt"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	cancel()
+	for range ch {
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error || spans[0].Status().Description != context.Canceled.Error() {
+		t.Fatalf("status = %#v, want context cancellation", spans[0].Status())
+	}
+	attrs := spanAttrs(spans[0])
+	assertStringAttr(t, attrs, genai.AttrErrorType, errorType(context.Canceled))
 }
 
 func TestTracingProviderStreamEmitsFirstChunk(t *testing.T) {
@@ -649,5 +917,20 @@ func (p *bufferedStreamProvider) Stream(context.Context, *CompletionRequest) (<-
 	ch := make(chan StreamChunk, 1)
 	ch <- StreamChunk{Content: "hello"}
 	close(ch)
+	return ch, nil
+}
+
+type cancelClosingStreamProvider struct{}
+
+func (cancelClosingStreamProvider) Name() string { return "openai" }
+func (cancelClosingStreamProvider) Complete(context.Context, *CompletionRequest) (*CompletionResponse, error) {
+	return nil, nil
+}
+func (cancelClosingStreamProvider) Stream(ctx context.Context, _ *CompletionRequest) (<-chan StreamChunk, error) {
+	ch := make(chan StreamChunk)
+	go func() {
+		defer close(ch)
+		<-ctx.Done()
+	}()
 	return ch, nil
 }

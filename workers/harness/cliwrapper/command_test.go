@@ -101,6 +101,25 @@ func TestCommandRunnerUnsetsEnvAfterMerge(t *testing.T) {
 	}
 }
 
+func TestCommandRunnerCanClearInheritedEnv(t *testing.T) {
+	t.Setenv(envCommandRunnerKeepParent, "parent-value")
+	runner := CommandRunner{StdoutLimitBytes: 64, StderrLimitBytes: 64, CancelGrace: 10 * time.Millisecond}
+	result, err := runner.Run(context.Background(), &CommandSpec{
+		Path:     os.Args[0],
+		ClearEnv: true,
+		Env: []string{
+			envCommandRunnerEnvHelper + "=1",
+			envCommandRunnerKeepSpec + "=spec-value",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := result.ExactStdout(); got != "|spec-value" {
+		t.Fatalf("ExactStdout = %q, want inherited env cleared and spec env preserved", got)
+	}
+}
+
 func TestCommandRunnerFailure(t *testing.T) {
 	runner := CommandRunner{StdoutLimitBytes: 64, StderrLimitBytes: 64, CancelGrace: 10 * time.Millisecond}
 	result, err := runner.Run(context.Background(), &CommandSpec{

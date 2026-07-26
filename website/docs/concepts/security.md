@@ -131,3 +131,11 @@ Security-relevant events are logged at the API layer:
 - Authentication failures (missing/invalid tokens)
 - Namespace access denials (isolation violations, watch-namespace mismatches)
 - Cross-namespace worker access attempts
+
+## Generic gateway trust boundary
+
+Generic gateways keep provider credentials and raw provider requests outside Orka. Adapters submit only the bounded `orka.gateway.v1` envelope. Orka stores normalized text, stable external identity, allowlisted string metadata, and safe correlation; it never stores the original provider request or authorization header.
+
+Inbound and outbound traffic use separate Gateway-bound bearer Secrets. Secrets must explicitly opt in and bind to the Gateway name; outbound Secrets also bind to the exact resolved adapter endpoint. Direct and `serviceRef` endpoints require HTTPS. Direct endpoints are restricted to public unicast addresses on every dial, with local/private/link-local/reserved addresses, Kubernetes Service names, proxies, redirects, and DNS rebinding fail-closed. For `serviceRef`, the adapter certificate must be trusted by the controller and valid for the resolved Service DNS name, so changing a Service selector or Pod label cannot redirect bearer credentials to an unauthenticated workload.
+
+Unknown contexts, unauthorized senders, capability mismatches, unsafe endpoints, missing references, and equal-priority binding conflicts fail closed. Denial and terminal error replies are generic and do not expose stack traces, endpoints, tokens, provider identifiers, or controller internals. Queue, payload, retry, expiry, and retention bounds limit replay and exhaustion risk.

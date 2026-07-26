@@ -39,7 +39,9 @@ func TestCoordinatorSystemPrompt_CreateAgentInvariants(t *testing.T) {
 	for _, want := range []string{
 		"CREATE_AGENT INVARIANTS",
 		"MUTUALLY EXCLUSIVE",
-		"runtime.type=codex|claude|copilot",
+		"runtime.type=codex|claude|copilot|opencode",
+		"OpenCode requires model.name",
+		"runtime-backed Agent (codex/claude/copilot/opencode",
 		"resources.limits.memory:   \"2Gi\"",
 		"auto-discovery",
 	} {
@@ -112,7 +114,7 @@ func TestCoordinatorSystemPrompt_AgentRefSourcing(t *testing.T) {
 	}
 }
 
-// The Codex/Claude/Copilot worker stages, commits, and pushes the agent's
+// The Codex/Claude/Copilot/OpenCode worker stages, commits, and pushes the agent's
 // uncommitted changes to ORKA_PUSH_BRANCH after PHASE 4. If the IMPLEMENTATION
 // PROMPT tells the agent to push itself, the agent runs `git push origin HEAD`,
 // the commit lands on whatever branch is checked out (often main), and the

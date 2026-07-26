@@ -20,6 +20,7 @@ import { Route as TasksIndexRouteImport } from './routes/tasks/index'
 import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
 import { Route as SecurityIndexRouteImport } from './routes/security/index'
 import { Route as MonitorsIndexRouteImport } from './routes/monitors/index'
+import { Route as GatewaysIndexRouteImport } from './routes/gateways/index'
 import { Route as AgentsIndexRouteImport } from './routes/agents/index'
 import { Route as ToolsToolNameRouteImport } from './routes/tools/$toolName'
 import { Route as TasksNewRouteImport } from './routes/tasks/new'
@@ -28,10 +29,12 @@ import { Route as SessionsSessionIdRouteImport } from './routes/sessions/$sessio
 import { Route as SecurityNewRouteImport } from './routes/security/new'
 import { Route as SecurityRepoIdRouteImport } from './routes/security/$repoId'
 import { Route as MonitorsMonitorIdRouteImport } from './routes/monitors/$monitorId'
+import { Route as GatewaysGatewayIdRouteImport } from './routes/gateways/$gatewayId'
 import { Route as AgentsNewRouteImport } from './routes/agents/new'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
 import { Route as SecurityFindingsFindingIdRouteImport } from './routes/security/findings/$findingId'
 import { Route as MonitorsCreateNewRouteImport } from './routes/monitors/create/new'
+import { Route as GatewaysBindingsBindingIdRouteImport } from './routes/gateways/bindings/$bindingId'
 
 const RuntimeSimulatorRoute = RuntimeSimulatorRouteImport.update({
   id: '/runtime-simulator',
@@ -88,6 +91,11 @@ const MonitorsIndexRoute = MonitorsIndexRouteImport.update({
   path: '/monitors/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const GatewaysIndexRoute = GatewaysIndexRouteImport.update({
+  id: '/gateways/',
+  path: '/gateways/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AgentsIndexRoute = AgentsIndexRouteImport.update({
   id: '/agents/',
   path: '/agents/',
@@ -128,6 +136,11 @@ const MonitorsMonitorIdRoute = MonitorsMonitorIdRouteImport.update({
   path: '/monitors/$monitorId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const GatewaysGatewayIdRoute = GatewaysGatewayIdRouteImport.update({
+  id: '/gateways/$gatewayId',
+  path: '/gateways/$gatewayId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AgentsNewRoute = AgentsNewRouteImport.update({
   id: '/agents/new',
   path: '/agents/new',
@@ -149,6 +162,12 @@ const MonitorsCreateNewRoute = MonitorsCreateNewRouteImport.update({
   path: '/monitors/create/new',
   getParentRoute: () => rootRouteImport,
 } as any)
+const GatewaysBindingsBindingIdRoute =
+  GatewaysBindingsBindingIdRouteImport.update({
+    id: '/gateways/bindings/$bindingId',
+    path: '/gateways/bindings/$bindingId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -159,6 +178,7 @@ export interface FileRoutesByFullPath {
   '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
+  '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
   '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
@@ -167,11 +187,13 @@ export interface FileRoutesByFullPath {
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents/': typeof AgentsIndexRoute
+  '/gateways/': typeof GatewaysIndexRoute
   '/monitors/': typeof MonitorsIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/tasks/': typeof TasksIndexRoute
   '/tools/': typeof ToolsIndexRoute
+  '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
 }
@@ -184,6 +206,7 @@ export interface FileRoutesByTo {
   '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
+  '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
   '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
@@ -192,11 +215,13 @@ export interface FileRoutesByTo {
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents': typeof AgentsIndexRoute
+  '/gateways': typeof GatewaysIndexRoute
   '/monitors': typeof MonitorsIndexRoute
   '/security': typeof SecurityIndexRoute
   '/sessions': typeof SessionsIndexRoute
   '/tasks': typeof TasksIndexRoute
   '/tools': typeof ToolsIndexRoute
+  '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
 }
@@ -210,6 +235,7 @@ export interface FileRoutesById {
   '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
+  '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
   '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
@@ -218,11 +244,13 @@ export interface FileRoutesById {
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents/': typeof AgentsIndexRoute
+  '/gateways/': typeof GatewaysIndexRoute
   '/monitors/': typeof MonitorsIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/tasks/': typeof TasksIndexRoute
   '/tools/': typeof ToolsIndexRoute
+  '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
 }
@@ -237,6 +265,7 @@ export interface FileRouteTypes {
     | '/runtime-simulator'
     | '/agents/$agentId'
     | '/agents/new'
+    | '/gateways/$gatewayId'
     | '/monitors/$monitorId'
     | '/security/$repoId'
     | '/security/new'
@@ -245,11 +274,13 @@ export interface FileRouteTypes {
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents/'
+    | '/gateways/'
     | '/monitors/'
     | '/security/'
     | '/sessions/'
     | '/tasks/'
     | '/tools/'
+    | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
     | '/security/findings/$findingId'
   fileRoutesByTo: FileRoutesByTo
@@ -262,6 +293,7 @@ export interface FileRouteTypes {
     | '/runtime-simulator'
     | '/agents/$agentId'
     | '/agents/new'
+    | '/gateways/$gatewayId'
     | '/monitors/$monitorId'
     | '/security/$repoId'
     | '/security/new'
@@ -270,11 +302,13 @@ export interface FileRouteTypes {
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents'
+    | '/gateways'
     | '/monitors'
     | '/security'
     | '/sessions'
     | '/tasks'
     | '/tools'
+    | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
     | '/security/findings/$findingId'
   id:
@@ -287,6 +321,7 @@ export interface FileRouteTypes {
     | '/runtime-simulator'
     | '/agents/$agentId'
     | '/agents/new'
+    | '/gateways/$gatewayId'
     | '/monitors/$monitorId'
     | '/security/$repoId'
     | '/security/new'
@@ -295,11 +330,13 @@ export interface FileRouteTypes {
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents/'
+    | '/gateways/'
     | '/monitors/'
     | '/security/'
     | '/sessions/'
     | '/tasks/'
     | '/tools/'
+    | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
     | '/security/findings/$findingId'
   fileRoutesById: FileRoutesById
@@ -313,6 +350,7 @@ export interface RootRouteChildren {
   RuntimeSimulatorRoute: typeof RuntimeSimulatorRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRoute
   AgentsNewRoute: typeof AgentsNewRoute
+  GatewaysGatewayIdRoute: typeof GatewaysGatewayIdRoute
   MonitorsMonitorIdRoute: typeof MonitorsMonitorIdRoute
   SecurityRepoIdRoute: typeof SecurityRepoIdRoute
   SecurityNewRoute: typeof SecurityNewRoute
@@ -321,11 +359,13 @@ export interface RootRouteChildren {
   TasksNewRoute: typeof TasksNewRoute
   ToolsToolNameRoute: typeof ToolsToolNameRoute
   AgentsIndexRoute: typeof AgentsIndexRoute
+  GatewaysIndexRoute: typeof GatewaysIndexRoute
   MonitorsIndexRoute: typeof MonitorsIndexRoute
   SecurityIndexRoute: typeof SecurityIndexRoute
   SessionsIndexRoute: typeof SessionsIndexRoute
   TasksIndexRoute: typeof TasksIndexRoute
   ToolsIndexRoute: typeof ToolsIndexRoute
+  GatewaysBindingsBindingIdRoute: typeof GatewaysBindingsBindingIdRoute
   MonitorsCreateNewRoute: typeof MonitorsCreateNewRoute
   SecurityFindingsFindingIdRoute: typeof SecurityFindingsFindingIdRoute
 }
@@ -409,6 +449,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MonitorsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/gateways/': {
+      id: '/gateways/'
+      path: '/gateways'
+      fullPath: '/gateways/'
+      preLoaderRoute: typeof GatewaysIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/agents/': {
       id: '/agents/'
       path: '/agents'
@@ -465,6 +512,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MonitorsMonitorIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/gateways/$gatewayId': {
+      id: '/gateways/$gatewayId'
+      path: '/gateways/$gatewayId'
+      fullPath: '/gateways/$gatewayId'
+      preLoaderRoute: typeof GatewaysGatewayIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/agents/new': {
       id: '/agents/new'
       path: '/agents/new'
@@ -493,6 +547,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MonitorsCreateNewRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/gateways/bindings/$bindingId': {
+      id: '/gateways/bindings/$bindingId'
+      path: '/gateways/bindings/$bindingId'
+      fullPath: '/gateways/bindings/$bindingId'
+      preLoaderRoute: typeof GatewaysBindingsBindingIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -505,6 +566,7 @@ const rootRouteChildren: RootRouteChildren = {
   RuntimeSimulatorRoute: RuntimeSimulatorRoute,
   AgentsAgentIdRoute: AgentsAgentIdRoute,
   AgentsNewRoute: AgentsNewRoute,
+  GatewaysGatewayIdRoute: GatewaysGatewayIdRoute,
   MonitorsMonitorIdRoute: MonitorsMonitorIdRoute,
   SecurityRepoIdRoute: SecurityRepoIdRoute,
   SecurityNewRoute: SecurityNewRoute,
@@ -513,11 +575,13 @@ const rootRouteChildren: RootRouteChildren = {
   TasksNewRoute: TasksNewRoute,
   ToolsToolNameRoute: ToolsToolNameRoute,
   AgentsIndexRoute: AgentsIndexRoute,
+  GatewaysIndexRoute: GatewaysIndexRoute,
   MonitorsIndexRoute: MonitorsIndexRoute,
   SecurityIndexRoute: SecurityIndexRoute,
   SessionsIndexRoute: SessionsIndexRoute,
   TasksIndexRoute: TasksIndexRoute,
   ToolsIndexRoute: ToolsIndexRoute,
+  GatewaysBindingsBindingIdRoute: GatewaysBindingsBindingIdRoute,
   MonitorsCreateNewRoute: MonitorsCreateNewRoute,
   SecurityFindingsFindingIdRoute: SecurityFindingsFindingIdRoute,
 }

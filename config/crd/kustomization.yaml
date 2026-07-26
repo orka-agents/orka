@@ -12,6 +12,9 @@ resources:
 - bases/core.orka.ai_repositorymonitors.yaml
 - bases/core.orka.ai_substrateactorpools.yaml
 - bases/core.orka.ai_outboundaccesspolicies.yaml
+- bases/gateway.orka.ai_gatewayclasses.yaml
+- bases/gateway.orka.ai_gateways.yaml
+- bases/gateway.orka.ai_gatewaybindings.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

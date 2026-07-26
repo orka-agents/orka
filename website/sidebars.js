@@ -34,6 +34,7 @@ const sidebars = {
         'guides/repository-security-scanning',
         'guides/repository-monitors',
         'guides/github-label-triggers',
+        'guides/issue-to-pr-automation',
         'guides/ui',
         'guides/observability',
       ],
@@ -44,6 +45,7 @@ const sidebars = {
       collapsed: false,
       items: [
         'operations/agent-runtime-security',
+        'operations/gateways',
       ],
     },
     {
@@ -55,6 +57,7 @@ const sidebars = {
         'reference/cli',
         'reference/cli-commands',
         'reference/execution-events',
+        'reference/gateway-api',
         'reference/openai-compat',
         'reference/anthropic-compat',
       ],

@@ -463,8 +463,11 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
+	turnCtx.HomeDir = turnHome
 	turnCtx.Env = setEnv(turnCtx.Env, "HOME", turnHome)
-	if strings.EqualFold(strings.TrimSpace(turnCtx.Metadata["readOnly"]), "true") {
+	stripGitCredentials := strings.EqualFold(strings.TrimSpace(turnCtx.Metadata["readOnly"]), "true") ||
+		strings.EqualFold(strings.TrimSpace(turnCtx.Metadata["runtimeAuthOnly"]), "true")
+	if stripGitCredentials {
 		turnCtx.Env = removeTurnEnv(
 			turnCtx.Env,
 			workerenv.GitToken,
@@ -473,10 +476,24 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			workerenv.GitUsername,
 		)
 	}
+	turnCtx, closeRuntimeAuthProxy, err := protectRuntimeAuthTurn(turnCtx)
+	if err != nil {
+		turn.appendFrame(s.failedFrame(turn, "runtime_auth_proxy_failed", err.Error(), false))
+		return
+	}
+	defer closeRuntimeAuthProxy()
 	spec, err := s.adapter.BuildCommand(ctx, turnCtx)
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "build_command_failed", err.Error(), false))
 		return
+	}
+	if stripGitCredentials {
+		spec.UnsetEnv = append(spec.UnsetEnv,
+			workerenv.GitToken,
+			workerenv.GitHubToken,
+			workerenv.GitAskpass,
+			workerenv.GitUsername,
+		)
 	}
 	defer removeTempFiles(spec.TempFiles)
 	if spec.Dir != "" {

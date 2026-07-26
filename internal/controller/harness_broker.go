@@ -38,6 +38,7 @@ const (
 	harnessBrokeredToolCancelTask     = "cancel_task"
 	harnessBrokeredToolSendMessage    = "send_message"
 	harnessBrokeredToolCheckMessages  = "check_messages"
+	harnessBrokeredExecutionStarted   = "started"
 )
 
 var (
@@ -371,7 +372,7 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 		startedContent := brokeredToolEventContent(result, map[string]any{
 			"targetArgsDigest": argsDigest,
 			"brokeredClass":    string(corev1alpha1.AgentRuntimeBrokeredToolClassCoordination),
-			"executionState":   "started",
+			"executionState":   harnessBrokeredExecutionStarted,
 		})
 		if err := r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallStarted, "brokered coordination tool execution started", startedContent); err != nil {
 			return result, err
@@ -506,7 +507,7 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 			"approvalID":              approvalID,
 			"executionIdempotencyKey": execIdempotencyKey,
 			"brokeredClass":           string(tool.Spec.BrokeredToolClass),
-			"executionState":          "started",
+			"executionState":          harnessBrokeredExecutionStarted,
 		})
 		if err := r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallStarted, "brokered write tool execution started", content); err != nil {
 			return result, err
@@ -948,14 +949,14 @@ func (r *TaskReconciler) hasUnresolvedHarnessBrokeredToolExecution(
 			return true, nil
 		}
 		if payload.TargetArgsDigest != "" && argsDigest != "" && payload.TargetArgsDigest != argsDigest {
-			if event.Type == events.ExecutionEventTypeToolCallStarted && payload.ExecutionState == "started" {
+			if event.Type == events.ExecutionEventTypeToolCallStarted && payload.ExecutionState == harnessBrokeredExecutionStarted {
 				return true, nil
 			}
 			continue
 		}
 		switch event.Type {
 		case events.ExecutionEventTypeToolCallStarted:
-			if payload.ExecutionState == "started" {
+			if payload.ExecutionState == harnessBrokeredExecutionStarted {
 				started = true
 			}
 		case events.ExecutionEventTypeToolCallCompleted, events.ExecutionEventTypeToolCallFailed:

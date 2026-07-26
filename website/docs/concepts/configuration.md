@@ -290,7 +290,7 @@ spec:
 | `validation.mode` | string | No | Validation mode included in review task input. Defaults to `changed`; allowed values are `off`, `changed`, and `full`. |
 | `validation.commands` | list | No | Validation commands included in review task input for the reviewer. |
 
-`targets.issues`, `targets.commits`, `review.requireGreenCI`, repair, and automerge fields are present for the broader monitor API shape, but the current controller rejects issue/commit targets and `review.requireGreenCI`; repair and automerge are not active workflows in this implementation slice. Review tasks check out the exact PR head and receive generated read-only context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`. GitHub publishing, when enabled, happens later in the controller from the structured review result; the LLM never receives the GitHub mutation token and cannot choose the GitHub event.
+`targets.issues`, durable `orka:*` label commands, issue triage/research/planning/implementation, PR review/repair, `review.requireGreenCI`, and optional head-bound automerge are active RepositoryMonitor workflows. `targets.commits` remain rejected until commit inventory is implemented. Review tasks check out the exact PR head and receive generated read-only context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`. GitHub publishing, branch pushes, PR creation, label consumption, and automerge attempts are controller-owned and audited through mutation records; read-only agents never receive the GitHub mutation token.
 
 **Status fields:**
 
@@ -701,8 +701,6 @@ Key configuration values for the Helm chart:
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
-| `crds.install` | `true` | Install CRDs |
-| `crds.keep` | `true` | Keep CRDs on uninstall |
 | `monitoring.enabled` | `false` | Enable Prometheus ServiceMonitor |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
@@ -726,6 +724,8 @@ controller:
       monitorRead: orka:monitors:read
       monitorWrite: orka:monitors:write
       monitorOperate: orka:monitors:operate
+      gatewayRead: orka:gateways:read
+      gatewayOperate: orka:gateways:operate
     tts:
       endpoint: https://tts.example.com/oauth/token
       audience: orka-workers
@@ -747,7 +747,9 @@ The Helm keys mirror the controller flags: for example,
 `controller.contextToken.scopes.secretRead` renders
 `--context-token-secret-read-scopes`,
 `controller.contextToken.scopes.monitorRead` renders
-`--context-token-monitor-read-scopes`, and
+`--context-token-monitor-read-scopes`,
+`controller.contextToken.scopes.gatewayRead` renders
+`--context-token-gateway-read-scopes`, and
 `controller.contextToken.tts.toolTokenTTL` renders
 `--context-token-tool-token-ttl`.
 
@@ -758,6 +760,17 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--api-port` | `8080` | REST API server port |
+| `--gateway-enabled` | `true` | Enable generic gateway reconciliation and ingress |
+| `--gateway-pending-per-session` | `100` | Maximum pending gateway events per Session |
+| `--gateway-max-records-per-gateway` | `1000` | Maximum retained accepted/dead-letter event records per Gateway before ingress is throttled |
+| `--gateway-max-rejected-records-per-gateway` | `250` | Separate audit budget for rejected events so unauthorized traffic cannot consume operational capacity |
+| `--gateway-event-expiry` | `24h` | Queue and delivery retry expiry |
+| `--gateway-terminal-retention` | `720h` | Terminal event and delivery retention |
+| `--gateway-delivery-timeout` | `15s` | One synchronous adapter delivery timeout |
+| `--gateway-delivery-max-attempts` | `10` | Delivery attempts before dead-lettering |
+| `--gateway-claim-lease` | `1m` | Event and delivery claim lease |
+| `--gateway-poll-interval` | `500ms` | Dispatcher and delivery poll interval |
+| `--gateway-batch-size` | `25` | Maximum gateway records processed per iteration |
 | `--watch-namespace` | `""` | Namespace to watch (empty = all) |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
@@ -803,6 +816,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--context-token-monitor-operate-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_OPERATE_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor manual runs. Defaults to `orka:monitors:operate` |
 | `--context-token-skill-read-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Skill reads. Defaults to `orka:skills:read` |
 | `--context-token-skill-write-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Skill writes. Defaults to `orka:skills:write` |
+| `--context-token-gateway-read-scopes` | `ORKA_CONTEXT_TOKEN_GATEWAY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing gateway resource and ledger reads. Defaults to `orka:gateways:read` |
+| `--context-token-gateway-operate-scopes` | `ORKA_CONTEXT_TOKEN_GATEWAY_OPERATE_SCOPES` env or `""` | Comma-separated scopes authorizing dead-lettered delivery retries. Defaults to `orka:gateways:operate` |
 | `--context-token-tts-endpoint` | `ORKA_CONTEXT_TOKEN_TTS_ENDPOINT` env or `""` | Exact transaction-token TTS OAuth endpoint for optional exchange/replacement |
 | `--context-token-tts-audience` | `ORKA_CONTEXT_TOKEN_TTS_AUDIENCE` env or `""` | Audience requested from transaction-token TTS exchanges |
 | `--context-token-tts-timeout` | `ORKA_CONTEXT_TOKEN_TTS_TIMEOUT` env or `""` | Timeout for transaction-token TTS exchanges. Defaults to `5s` when TTS is enabled |

@@ -46,7 +46,7 @@ func (s *sequenceProvider) Complete(_ context.Context, _ *llm.CompletionRequest)
 	if idx < len(s.responses) {
 		return s.responses[idx], nil
 	}
-	return &llm.CompletionResponse{Content: "fallback"}, nil
+	return &llm.CompletionResponse{Content: "fallback", StopReason: "stop"}, nil
 }
 
 func (s *sequenceProvider) Stream(_ context.Context, _ *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {

@@ -1,16 +1,116 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
+set -f
 
-script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-harness="$script_dir/test-review-harness.py"
+find_checkout_root() {
+  candidate=$1
+  while :; do
+    if [ -e "$candidate/.git" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    [ "$candidate" = / ] && return 1
+    parent=${candidate%/*}
+    [ -n "$parent" ] || parent=/
+    [ "$parent" = "$candidate" ] && return 1
+    candidate=$parent
+  done
+}
 
-if command -v python3 >/dev/null 2>&1; then
-  exec python3 "$harness" "$@"
-fi
+is_in_checkout() {
+  candidate=$1
+  for checkout_root in "$cwd_root" "$script_root"; do
+    [ -n "$checkout_root" ] || continue
+    case $candidate in
+      "$checkout_root"|"$checkout_root"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
 
-if command -v python >/dev/null 2>&1; then
-  exec python "$harness" "$@"
-fi
+resolve_candidate() {
+  candidate=$1
+  depth=0
+  while [ -L "$candidate" ]; do
+    [ "$depth" -lt 40 ] || return 1
+    [ -n "$readlink_bin" ] || return 1
+    target=$($readlink_bin "$candidate") || return 1
+    case $target in
+      /*) candidate=$target ;;
+      *)
+        parent=${candidate%/*}
+        [ -n "$parent" ] || parent=/
+        candidate=$parent/$target
+        ;;
+    esac
+    candidate_parent=${candidate%/*}
+    candidate_name=${candidate##*/}
+    [ -n "$candidate_parent" ] || candidate_parent=/
+    physical_parent=$(CDPATH='' cd -P -- "$candidate_parent" 2>/dev/null && pwd -P) || return 1
+    candidate=$physical_parent/$candidate_name
+    depth=$((depth + 1))
+  done
+  [ -f "$candidate" ] && [ -x "$candidate" ] || return 1
+  candidate_parent=${candidate%/*}
+  candidate_name=${candidate##*/}
+  [ -n "$candidate_parent" ] || candidate_parent=/
+  physical_parent=$(CDPATH='' cd -P -- "$candidate_parent" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$physical_parent" "$candidate_name"
+}
 
-echo "Python 3 is required to run test-review-harness." >&2
+cwd_physical=$(CDPATH='' cd -P -- "${PWD:-.}" 2>/dev/null && pwd -P) || cwd_physical=${PWD:-.}
+script_path=$0
+case $script_path in
+  /*) script_dir_raw=${script_path%/*} ;;
+  */*) script_dir_raw=$cwd_physical/${script_path%/*} ;;
+  *) script_dir_raw=$cwd_physical ;;
+esac
+script_root_dir=$(CDPATH='' cd -P -- "$script_dir_raw" 2>/dev/null && pwd -P) || script_root_dir=$script_dir_raw
+cwd_root=$(find_checkout_root "$cwd_physical" || true)
+script_root=$(find_checkout_root "$script_root_dir" || true)
+harness=$script_root_dir/test-review-harness.py
+
+safe_path=""
+old_ifs=$IFS
+IFS=:
+for path_entry in ${PATH:-}; do
+  [ -n "$path_entry" ] || continue
+  case $path_entry in
+    /*) ;;
+    *) continue ;;
+  esac
+  physical_dir=$(CDPATH='' cd -P -- "$path_entry" 2>/dev/null && pwd -P) || continue
+  is_in_checkout "$physical_dir" && continue
+  case :$safe_path: in
+    *:"$physical_dir":*) ;;
+    *) safe_path=${safe_path:+$safe_path:}$physical_dir ;;
+  esac
+done
+IFS=$old_ifs
+PATH=$safe_path
+export PATH
+
+readlink_bin=""
+for candidate in /usr/bin/readlink /bin/readlink; do
+  if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+    readlink_bin=$candidate
+    break
+  fi
+done
+
+for interpreter_name in python3 python; do
+  old_ifs=$IFS
+  IFS=:
+  for path_entry in $PATH; do
+    candidate=$(resolve_candidate "$path_entry/$interpreter_name" || true)
+    [ -n "$candidate" ] || continue
+    is_in_checkout "$candidate" && continue
+    if "$candidate" -I -c 'import sys; raise SystemExit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+      exec "$candidate" -I "$harness" "$@"
+    fi
+  done
+  IFS=$old_ifs
+done
+
+echo "Python 3.9 or newer outside the reviewed checkout is required to run test-review-harness." >&2
 exit 127

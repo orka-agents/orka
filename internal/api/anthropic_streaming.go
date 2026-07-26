@@ -10,7 +10,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
@@ -90,84 +92,39 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				Temperature:  capturedReq.Temperature,
 			}
 
-			// Try streaming from provider
-			var toolCalls []llm.ToolCall
-			var textContent string
-
-			streamCh, err := capturedProvider.Stream(streamCtx, compReq)
-			if err != nil {
-				// Fallback to Complete
-				resp, completeErr := capturedProvider.Complete(streamCtx, compReq)
-				if completeErr != nil {
-					anthropicLog.Error(completeErr, "completion failed in tool loop")
-					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err == nil {
-						_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: "text_delta", Text: "Error: " + completeErr.Error()})
-						_ = writeContentBlockStop(w, blockIndex)
-					}
-					_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalOutputTokens)
-					_ = writeMessageStop(w)
+			// Aggregate a validated provider turn before exposing or executing it.
+			resp, streamErr := completeViaStream(streamCtx, capturedProvider, compReq)
+			usedStream := streamErr == nil
+			if streamErr != nil {
+				if !errors.Is(streamErr, errStreamUnavailable) {
+					anthropicLog.Error(streamErr, "invalid provider stream in tool loop")
+					_ = writeAnthropicStreamError(w, "provider_error")
 					return
 				}
+				var completeErr error
+				resp, completeErr = capturedProvider.Complete(streamCtx, compReq)
+				if completeErr != nil {
+					anthropicLog.Error(completeErr, "completion failed in tool loop")
+					_ = writeAnthropicStreamError(w, "provider_error")
+					return
+				}
+				if err := validateToolLoopCompletion(resp); err != nil {
+					anthropicLog.Error(err, "invalid completion in tool loop")
+					reason := ""
+					if resp != nil {
+						reason = resp.StopReason
+					}
+					_ = writeAnthropicStreamError(w, reason)
+					return
+				}
+			}
 
+			textContent := resp.Content
+			toolCalls := resp.ToolCalls
+			if resp.OutputTokens > 0 {
 				totalOutputTokens += resp.OutputTokens
-
-				// Capture text content. It is emitted after tool-call/final-state
-				// classification so control markers can be stripped first.
-				if resp.Content != "" {
-					textContent = resp.Content
-				}
-
-				// Capture tool calls for server-side execution (don't emit tool_use blocks
-				// to the client — the client must not see them or it will try to execute locally)
-				toolCalls = resp.ToolCalls
-			} else {
-				// Consume stream chunks. Text is buffered until this iteration's
-				// tool-call/final-state classification is known, so internal
-				// sentinels are never leaked to the client.
-				streamError := false
-				for chunk := range streamCh {
-					if chunk.Error != nil {
-						anthropicLog.Error(chunk.Error, "stream chunk error in tool loop")
-						streamError = true
-						break
-					}
-
-					// Handle text content
-					if chunk.Content != "" {
-						textContent += chunk.Content
-					}
-
-					// Handle tool calls — capture for server-side execution but don't
-					// emit tool_use blocks to the client stream
-					if chunk.ToolCall != nil {
-						toolCalls = append(toolCalls, *chunk.ToolCall)
-					}
-
-					if chunk.Done {
-						if chunk.OutputTokens > 0 {
-							totalOutputTokens += chunk.OutputTokens
-						} else {
-							totalOutputTokens += estimateTokens(textContent)
-						}
-						break
-					}
-				}
-
-				// If stream errored with no content, fall back to Complete
-				if streamError && textContent == "" && len(toolCalls) == 0 {
-					resp, completeErr := capturedProvider.Complete(streamCtx, compReq)
-					if completeErr != nil {
-						anthropicLog.Error(completeErr, "fallback completion also failed")
-						_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalOutputTokens)
-						_ = writeMessageStop(w)
-						return
-					}
-					totalOutputTokens += resp.OutputTokens
-					if resp.Content != "" {
-						textContent = resp.Content
-					}
-					toolCalls = resp.ToolCalls
-				}
+			} else if usedStream {
+				totalOutputTokens += estimateTokens(textContent)
 			}
 
 			// No tool calls — potentially final response. Guard against premature
@@ -366,11 +323,13 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		inTextBlock := false
 		hasToolCalls := false
 		outputTokens := 0
+		terminalStopReason := ""
 
 		for chunk := range streamCh {
 			if chunk.Error != nil {
 				anthropicLog.Error(chunk.Error, "stream chunk error")
-				break
+				_ = writeAnthropicStreamError(w, "provider_error")
+				return
 			}
 
 			if chunk.Content != "" {
@@ -414,6 +373,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 			}
 
 			if chunk.Done {
+				terminalStopReason = chunk.StopReason
 				if inTextBlock {
 					_ = writeContentBlockStop(w, blockIndex)
 					inTextBlock = false
@@ -426,10 +386,10 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 			_ = writeContentBlockStop(w, blockIndex)
 		}
 
-		// Use the correct stop reason — "tool_use" if tool calls were emitted
-		stopReason := oaiStopReasonEndTurn
-		if hasToolCalls {
-			stopReason = oaiStopReasonToolUse
+		stopReason, ok := mapAnthropicStreamStopReason(terminalStopReason, hasToolCalls)
+		if !ok {
+			_ = writeAnthropicStreamError(w, terminalStopReason)
+			return
 		}
 		_ = writeMessageDelta(w, stopReason, outputTokens)
 		_ = writeMessageStop(w)
@@ -439,6 +399,36 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 // estimateTokens provides a rough token count estimate from text length.
 func estimateTokens(text string) int {
 	return len(text) / 4
+}
+
+func mapAnthropicStreamStopReason(reason string, hasToolCalls bool) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case finishReasonStop, oaiStopReasonEndTurn, completionStatusCompleted, "response.completed":
+		if hasToolCalls {
+			return oaiStopReasonToolUse, true
+		}
+		return oaiStopReasonEndTurn, true
+	case finishReasonStopSequence:
+		if hasToolCalls {
+			return oaiStopReasonToolUse, true
+		}
+		return finishReasonStopSequence, true
+	case finishReasonToolCalls, oaiStopReasonToolUse, finishReasonFunctionCall:
+		if !hasToolCalls {
+			return "", false
+		}
+		return oaiStopReasonToolUse, true
+	case oaiParamMaxTokens, oaiStopReasonLength:
+		return oaiParamMaxTokens, true
+	case "pause_turn":
+		return "pause_turn", true
+	case "refusal":
+		return "refusal", true
+	case anthropicStopReasonModelContextWindowExceeded:
+		return anthropicStopReasonModelContextWindowExceeded, true
+	default:
+		return "", false
+	}
 }
 
 // handleStreamingFallback uses provider.Complete() and emits the result as a complete SSE sequence.
@@ -451,13 +441,16 @@ func (h *AnthropicCompatHandler) handleStreamingFallback(
 	resp, err := provider.Complete(ctx, req)
 	if err != nil {
 		anthropicLog.Error(err, "fallback complete failed")
-		// Emit an error as text content and close
-		_ = writeContentBlockStart(w, 0, AnthropicContentBlock{Type: "text", Text: ""})
-		_ = writeContentBlockDelta(w, 0, AnthropicDelta{Type: "text_delta", Text: "Error: " + err.Error()})
-		_ = writeContentBlockStop(w, 0)
-		stopReason := oaiStopReasonEndTurn
-		_ = writeMessageDelta(w, stopReason, 0)
-		_ = writeMessageStop(w)
+		_ = writeAnthropicStreamError(w, "provider_error")
+		return
+	}
+	stopReason, ok := mapAnthropicCompletionStopReason(resp)
+	if !ok {
+		reason := ""
+		if resp != nil {
+			reason = resp.StopReason
+		}
+		_ = writeAnthropicStreamError(w, reason)
 		return
 	}
 
@@ -511,14 +504,6 @@ func (h *AnthropicCompatHandler) handleStreamingFallback(
 		blockIndex++
 	}
 
-	stopReason := resp.StopReason
-	if stopReason == "" {
-		stopReason = oaiStopReasonEndTurn
-	}
-	if len(resp.ToolCalls) > 0 && stopReason == oaiStopReasonEndTurn {
-		stopReason = "tool_use"
-	}
-
 	_ = writeMessageDelta(w, stopReason, resp.OutputTokens)
 	_ = writeMessageStop(w)
 }
@@ -531,6 +516,20 @@ func writeAnthropicSSE(w *bufio.Writer, eventType string, data any) error {
 	}
 	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, jsonData)
 	return w.Flush()
+}
+
+func writeAnthropicStreamError(w *bufio.Writer, reason string) error {
+	message := "provider stream ended without a successful terminal outcome"
+	if strings.TrimSpace(reason) != "" {
+		message = fmt.Sprintf("provider stream ended with non-success outcome %q", reason)
+	}
+	return writeAnthropicSSE(w, "error", AnthropicError{
+		Type: "error",
+		Error: AnthropicErrorDetail{
+			Type:    "api_error",
+			Message: message,
+		},
+	})
 }
 
 func writeAnthropicTextProgress(w *bufio.Writer, blockIndex *int, text string) {

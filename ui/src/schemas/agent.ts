@@ -14,10 +14,11 @@ export const toolRefSchema = z.object({
 })
 
 export const agentCLIRuntimeSchema = z.object({
-  type: z.enum(['copilot', 'claude', 'codex']),
+  type: z.enum(['copilot', 'claude', 'codex', 'opencode']),
   defaultMaxTurns: z.number().optional(),
   defaultAllowedTools: z.array(z.string()).optional(),
   defaultAllowBash: z.boolean().optional(),
+  defaultReasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
 })
 
 export const agentSpecSchema = z.object({

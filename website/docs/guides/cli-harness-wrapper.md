@@ -90,7 +90,7 @@ Operators must set `ORKA_HARNESS_WRAPPER_ENDPOINT=<trusted wrapper URL>` on the 
 - The selected endpoint is operator-configured with `ORKA_HARNESS_WRAPPER_ENDPOINT`; tasks do not supply runtime endpoints.
 - Completed turns are retained in wrapper memory only for the configured retention TTL, so controller recovery must resume promptly or the task fails instead of silently duplicating work.
 - Terminal result frames are size-bounded to stay within the harness SSE envelope. Results that exceed the limit fail explicitly instead of being stored partially.
-- `codex`, `claude`, and `copilot` all run through the wrapper; there are no per-runtime agent-worker images.
+- `codex`, `claude`, `copilot`, and `opencode` all run through the wrapper; there are no per-runtime agent-worker images.
 - Durable execution workspaces are validated but not yet launched by the harness runtime path.
 
 The focused test matrix covers generic command success, result-file extraction, non-zero failure, timeout, cancellation including process-group cleanup, redaction, event-stream cursoring, harness conformance, Codex fake-CLI success/failure, and controller routing through the harness runtime.

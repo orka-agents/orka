@@ -65,6 +65,7 @@ func NewDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+//nolint:gocyclo // schema migrations intentionally keep ordered, fail-fast upgrade steps in one transaction boundary
 func migrate(db *sql.DB) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS results (
@@ -79,8 +80,11 @@ func migrate(db *sql.DB) error {
 			namespace     TEXT NOT NULL,
 			name          TEXT NOT NULL,
 			session_type  TEXT NOT NULL DEFAULT 'task',
-			active_task   TEXT NOT NULL DEFAULT '',
-			message_count INTEGER NOT NULL DEFAULT 0,
+			owner_type    TEXT NOT NULL DEFAULT '',
+			owner_ref     TEXT NOT NULL DEFAULT '',
+			active_task     TEXT NOT NULL DEFAULT '',
+			active_task_uid TEXT NOT NULL DEFAULT '',
+			message_count   INTEGER NOT NULL DEFAULT 0,
 			input_tokens  INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
 			cancelled     BOOLEAN NOT NULL DEFAULT FALSE,
@@ -92,12 +96,17 @@ func migrate(db *sql.DB) error {
 			id           INTEGER PRIMARY KEY AUTOINCREMENT,
 			namespace    TEXT NOT NULL,
 			session_name TEXT NOT NULL,
+			message_id   TEXT NOT NULL DEFAULT '',
+			sort_order   INTEGER NOT NULL DEFAULT 0,
 			role         TEXT NOT NULL,
 			content      TEXT NOT NULL DEFAULT '',
 			name         TEXT,
 			input        TEXT,
 			tool_calls   TEXT,
 			tool_call_id TEXT,
+			source_type  TEXT NOT NULL DEFAULT '',
+			source_ref   TEXT NOT NULL DEFAULT '',
+			metadata_json TEXT NOT NULL DEFAULT '{}',
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (namespace, session_name) REFERENCES sessions(namespace, name) ON DELETE CASCADE
 		)`,
@@ -392,6 +401,7 @@ func migrate(db *sql.DB) error {
 			target_kind        TEXT NOT NULL DEFAULT '',
 			target_number      INTEGER NOT NULL DEFAULT 0,
 			target_sha         TEXT NOT NULL DEFAULT '',
+			command_event_id   TEXT NOT NULL DEFAULT '',
 			phase              TEXT NOT NULL,
 			started_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			completed_at       TIMESTAMP,
@@ -417,9 +427,20 @@ func migrate(db *sql.DB) error {
 			number                INTEGER NOT NULL DEFAULT 0,
 			sha                   TEXT NOT NULL DEFAULT '',
 			title                 TEXT NOT NULL DEFAULT '',
+			body                  TEXT NOT NULL DEFAULT '',
+			html_url              TEXT NOT NULL DEFAULT '',
 			author                TEXT NOT NULL DEFAULT '',
 			state                 TEXT NOT NULL DEFAULT '',
 			labels_json           TEXT NOT NULL DEFAULT '[]',
+			snapshot_digest       TEXT NOT NULL DEFAULT '',
+			github_updated_at     TIMESTAMP NOT NULL DEFAULT '0001-01-01T00:00:00Z',
+			workflow_phase        TEXT NOT NULL DEFAULT '',
+			linked_pr_number      INTEGER NOT NULL DEFAULT 0,
+			last_command_id       TEXT NOT NULL DEFAULT '',
+			last_command_intent   TEXT NOT NULL DEFAULT '',
+			last_action_id        TEXT NOT NULL DEFAULT '',
+			last_action_kind      TEXT NOT NULL DEFAULT '',
+			last_action_task_name TEXT NOT NULL DEFAULT '',
 			base_branch           TEXT NOT NULL DEFAULT '',
 			head_branch           TEXT NOT NULL DEFAULT '',
 			head_sha              TEXT NOT NULL DEFAULT '',
@@ -445,6 +466,66 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_monitor_items_queue
 			ON monitor_items(monitor_namespace, monitor_name, kind, state, last_verdict, repair_state, automerge_state, updated_at DESC)`,
+
+		`CREATE TABLE IF NOT EXISTS work_actions (
+			id                     TEXT PRIMARY KEY,
+			monitor_namespace      TEXT NOT NULL,
+			monitor_name           TEXT NOT NULL,
+			run_id                 TEXT NOT NULL DEFAULT '',
+			command_event_id       TEXT NOT NULL DEFAULT '',
+			monitor_generation     INTEGER NOT NULL DEFAULT 0,
+			target_kind            TEXT NOT NULL DEFAULT '',
+			target_number          INTEGER NOT NULL DEFAULT 0,
+			target_sha             TEXT NOT NULL DEFAULT '',
+			target_snapshot_digest TEXT NOT NULL DEFAULT '',
+			intent                 TEXT NOT NULL DEFAULT '',
+			desired_action         TEXT NOT NULL DEFAULT '',
+			depends_on_action_id   TEXT NOT NULL DEFAULT '',
+			dedupe_key             TEXT NOT NULL DEFAULT '',
+			idempotency_key        TEXT NOT NULL DEFAULT '',
+			status                 TEXT NOT NULL DEFAULT '',
+			phase                  TEXT NOT NULL DEFAULT '',
+			attempt                INTEGER NOT NULL DEFAULT 0,
+			lease_owner            TEXT NOT NULL DEFAULT '',
+			lease_expires_at       TIMESTAMP,
+			task_name              TEXT NOT NULL DEFAULT '',
+			blocked_reason         TEXT NOT NULL DEFAULT '',
+			error                  TEXT NOT NULL DEFAULT '',
+			artifact_ids           TEXT NOT NULL DEFAULT '',
+			payload_digest         TEXT NOT NULL DEFAULT '',
+			metadata_json          TEXT NOT NULL DEFAULT '{}',
+			created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			completed_at           TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_actions_monitor
+			ON work_actions(monitor_namespace, monitor_name, target_kind, target_number, desired_action, status, updated_at DESC)`,
+		`DROP INDEX IF EXISTS idx_work_actions_dedupe`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_actions_dedupe
+			ON work_actions(monitor_namespace, monitor_name, dedupe_key)
+			WHERE dedupe_key <> '' AND status IN ('queued', 'leased', 'running')`,
+		`CREATE TABLE IF NOT EXISTS action_records (
+			id                 TEXT PRIMARY KEY,
+			monitor_namespace  TEXT NOT NULL,
+			monitor_name       TEXT NOT NULL,
+			kind               TEXT NOT NULL,
+			number             INTEGER NOT NULL DEFAULT 0,
+			action_kind        TEXT NOT NULL,
+			snapshot_digest    TEXT NOT NULL DEFAULT '',
+			head_sha           TEXT NOT NULL DEFAULT '',
+			task_name          TEXT NOT NULL DEFAULT '',
+			command_event_id   TEXT NOT NULL DEFAULT '',
+			work_action_id     TEXT NOT NULL DEFAULT '',
+			monitor_generation INTEGER NOT NULL DEFAULT 0,
+			verdict            TEXT NOT NULL DEFAULT '',
+			confidence         TEXT NOT NULL DEFAULT '',
+			summary            TEXT NOT NULL DEFAULT '',
+			payload_json       TEXT NOT NULL DEFAULT '{}',
+			payload_digest     TEXT NOT NULL DEFAULT '',
+			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_action_records_monitor
+			ON action_records(monitor_namespace, monitor_name, kind, number, action_kind, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS review_records (
 			id                 TEXT PRIMARY KEY,
 			monitor_namespace  TEXT NOT NULL,
@@ -508,6 +589,12 @@ func migrate(db *sql.DB) error {
 			repo                  TEXT NOT NULL DEFAULT '',
 			kind                  TEXT NOT NULL DEFAULT '',
 			number                INTEGER NOT NULL DEFAULT 0,
+			source                TEXT NOT NULL DEFAULT '',
+			delivery_id           TEXT NOT NULL DEFAULT '',
+			label                 TEXT NOT NULL DEFAULT '',
+			monitor_generation    INTEGER NOT NULL DEFAULT 0,
+			dedupe_key            TEXT NOT NULL DEFAULT '',
+			idempotency_key       TEXT NOT NULL DEFAULT '',
 			comment_id            TEXT NOT NULL DEFAULT '',
 			comment_url           TEXT NOT NULL DEFAULT '',
 			author                TEXT NOT NULL DEFAULT '',
@@ -516,6 +603,7 @@ func migrate(db *sql.DB) error {
 			command               TEXT NOT NULL DEFAULT '',
 			intent                TEXT NOT NULL DEFAULT '',
 			head_sha              TEXT NOT NULL DEFAULT '',
+			issue_snapshot_digest TEXT NOT NULL DEFAULT '',
 			status                TEXT NOT NULL DEFAULT '',
 			status_comment_id     TEXT NOT NULL DEFAULT '',
 			created_repair_job_id TEXT NOT NULL DEFAULT '',
@@ -526,6 +614,57 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_command_events_monitor
 			ON command_events(monitor_namespace, monitor_name, created_at DESC)`,
+
+		`CREATE TABLE IF NOT EXISTS implementation_jobs (
+			id                 TEXT PRIMARY KEY,
+			monitor_namespace  TEXT NOT NULL,
+			monitor_name       TEXT NOT NULL,
+			repo               TEXT NOT NULL DEFAULT '',
+			issue_number       INTEGER NOT NULL DEFAULT 0,
+			plan_id            TEXT NOT NULL DEFAULT '',
+			snapshot_digest    TEXT NOT NULL DEFAULT '',
+			phase              TEXT NOT NULL DEFAULT '',
+			attempt            INTEGER NOT NULL DEFAULT 0,
+			branch             TEXT NOT NULL DEFAULT '',
+			patch_artifact_id  TEXT NOT NULL DEFAULT '',
+			pr_number          INTEGER NOT NULL DEFAULT 0,
+			validation_state   TEXT NOT NULL DEFAULT '',
+			task_name          TEXT NOT NULL DEFAULT '',
+			mutation_task_name TEXT NOT NULL DEFAULT '',
+			command_event_id   TEXT NOT NULL DEFAULT '',
+			work_action_id     TEXT NOT NULL DEFAULT '',
+			monitor_generation INTEGER NOT NULL DEFAULT 0,
+			error              TEXT NOT NULL DEFAULT '',
+			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			completed_at       TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_implementation_jobs_monitor
+			ON implementation_jobs(monitor_namespace, monitor_name, issue_number, phase, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS github_mutation_records (
+			id                 TEXT PRIMARY KEY,
+			monitor_namespace  TEXT NOT NULL,
+			monitor_name       TEXT NOT NULL,
+			run_id             TEXT NOT NULL DEFAULT '',
+			command_event_id   TEXT NOT NULL DEFAULT '',
+			work_action_id     TEXT NOT NULL DEFAULT '',
+			monitor_generation INTEGER NOT NULL DEFAULT 0,
+			operation          TEXT NOT NULL,
+			target_kind        TEXT NOT NULL DEFAULT '',
+			target_number      INTEGER NOT NULL DEFAULT 0,
+			target_sha         TEXT NOT NULL DEFAULT '',
+			actor              TEXT NOT NULL DEFAULT '',
+			reason             TEXT NOT NULL DEFAULT '',
+			request_digest     TEXT NOT NULL DEFAULT '',
+			github_url         TEXT NOT NULL DEFAULT '',
+			github_request_id  TEXT NOT NULL DEFAULT '',
+			external_id        TEXT NOT NULL DEFAULT '',
+			status             TEXT NOT NULL DEFAULT '',
+			error              TEXT NOT NULL DEFAULT '',
+			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_github_mutation_records_monitor
+			ON github_mutation_records(monitor_namespace, monitor_name, target_kind, target_number, operation, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS repair_jobs (
 			id                  TEXT PRIMARY KEY,
 			monitor_namespace   TEXT NOT NULL,
@@ -567,12 +706,208 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_monitor_events_monitor
 			ON monitor_events(monitor_namespace, monitor_name, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS gateway_events (
+			id                    TEXT NOT NULL,
+			namespace             TEXT NOT NULL,
+			namespace_uid         TEXT NOT NULL DEFAULT '',
+			gateway_uid           TEXT NOT NULL,
+			gateway_generation    INTEGER NOT NULL DEFAULT 0,
+			gateway_name          TEXT NOT NULL,
+			binding_name          TEXT NOT NULL DEFAULT '',
+			binding_uid           TEXT NOT NULL DEFAULT '',
+			binding_generation    INTEGER NOT NULL DEFAULT 0,
+			agent_name            TEXT NOT NULL DEFAULT '',
+			agent_uid             TEXT NOT NULL DEFAULT '',
+			external_event_id     TEXT NOT NULL,
+			protocol_version      TEXT NOT NULL,
+			event_type            TEXT NOT NULL,
+			state                 TEXT NOT NULL,
+			state_message         TEXT NOT NULL DEFAULT '',
+			account_id            TEXT NOT NULL,
+			context_id            TEXT NOT NULL,
+			thread_id             TEXT NOT NULL DEFAULT '',
+			sender_id             TEXT NOT NULL,
+			sender_display_name   TEXT NOT NULL DEFAULT '',
+			text                  TEXT NOT NULL DEFAULT '',
+			reply_target          TEXT NOT NULL DEFAULT '',
+			metadata_json         TEXT NOT NULL DEFAULT '{}',
+			session_name          TEXT NOT NULL DEFAULT '',
+			 task_name             TEXT NOT NULL DEFAULT '',
+			 task_uid              TEXT NOT NULL DEFAULT '',
+			 delivery_id           TEXT NOT NULL DEFAULT '',
+			 provider_message_id    TEXT NOT NULL DEFAULT '',
+			 trace_parent          TEXT NOT NULL DEFAULT '',
+			 trace_state           TEXT NOT NULL DEFAULT '',
+			 transcript_order      INTEGER NOT NULL DEFAULT 0,
+			attempt_count         INTEGER NOT NULL DEFAULT 0,
+			claim_owner           TEXT NOT NULL DEFAULT '',
+			claim_until           TIMESTAMP,
+			next_attempt_at       TIMESTAMP NOT NULL,
+			occurred_at           TIMESTAMP,
+			received_at           TIMESTAMP NOT NULL,
+			expires_at            TIMESTAMP NOT NULL,
+			created_at            TIMESTAMP NOT NULL,
+			updated_at            TIMESTAMP NOT NULL,
+			completed_at          TIMESTAMP,
+			PRIMARY KEY (namespace, id),
+			UNIQUE(namespace, gateway_uid, external_event_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_events_dispatch
+			ON gateway_events(state, next_attempt_at, received_at, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_events_session
+			ON gateway_events(namespace, session_name, state, received_at, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_events_task_owner
+			ON gateway_events(namespace, session_name, task_name, created_at DESC, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_events_task_identity
+			ON gateway_events(namespace, task_name, task_uid, state, created_at DESC, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_events_gateway
+			ON gateway_events(namespace, gateway_name, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS gateway_event_tombstones (
+			namespace          TEXT NOT NULL,
+			gateway_uid        TEXT NOT NULL,
+			external_event_id  TEXT NOT NULL,
+			event_id           TEXT NOT NULL,
+			task_name          TEXT NOT NULL DEFAULT '',
+			task_uid           TEXT NOT NULL DEFAULT '',
+			envelope_digest    TEXT NOT NULL,
+			session_name       TEXT NOT NULL DEFAULT '',
+			transcript_order   INTEGER NOT NULL DEFAULT 0,
+			expires_at         TIMESTAMP NOT NULL,
+			created_at         TIMESTAMP NOT NULL,
+			PRIMARY KEY (namespace, gateway_uid, external_event_id),
+			UNIQUE(namespace, event_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_event_tombstones_expiry
+			ON gateway_event_tombstones(namespace, expires_at)`,
+		`CREATE TABLE IF NOT EXISTS gateway_deliveries (
+			id                    TEXT NOT NULL,
+			idempotency_id        TEXT NOT NULL,
+			namespace             TEXT NOT NULL,
+			namespace_uid         TEXT NOT NULL DEFAULT '',
+			gateway_uid           TEXT NOT NULL,
+			gateway_generation    INTEGER NOT NULL DEFAULT 0,
+			gateway_name          TEXT NOT NULL,
+			binding_name          TEXT NOT NULL DEFAULT '',
+			event_id              TEXT NOT NULL,
+			task_name             TEXT NOT NULL DEFAULT '',
+			session_name          TEXT NOT NULL DEFAULT '',
+			kind                  TEXT NOT NULL,
+			state                 TEXT NOT NULL,
+			account_id            TEXT NOT NULL,
+			context_id            TEXT NOT NULL,
+			thread_id             TEXT NOT NULL DEFAULT '',
+			reply_target          TEXT NOT NULL,
+			text                  TEXT NOT NULL,
+			metadata_json         TEXT NOT NULL DEFAULT '{}',
+			attempt_count         INTEGER NOT NULL DEFAULT 0,
+			max_attempts          INTEGER NOT NULL DEFAULT 10,
+			manual_retry_count    INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at       TIMESTAMP NOT NULL,
+			expires_at            TIMESTAMP NOT NULL,
+			 provider_message_id   TEXT NOT NULL DEFAULT '',
+			 trace_parent          TEXT NOT NULL DEFAULT '',
+			 trace_state           TEXT NOT NULL DEFAULT '',
+			 last_error            TEXT NOT NULL DEFAULT '',
+			claim_owner           TEXT NOT NULL DEFAULT '',
+			claim_until           TIMESTAMP,
+			created_at            TIMESTAMP NOT NULL,
+			updated_at            TIMESTAMP NOT NULL,
+			delivered_at          TIMESTAMP,
+			PRIMARY KEY (namespace, id),
+			UNIQUE(namespace, idempotency_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_deliveries_send
+			ON gateway_deliveries(state, next_attempt_at, created_at, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_deliveries_event
+			ON gateway_deliveries(namespace, event_id, created_at, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_deliveries_gateway
+			ON gateway_deliveries(namespace, gateway_name, created_at DESC)`,
 	}
 
 	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("migration failed: %w", err)
 		}
+	}
+
+	if err := ensureSQLiteColumns(db, "sessions", []sqliteColumnMigration{
+		{Name: "owner_type", Definition: "owner_type TEXT NOT NULL DEFAULT ''"},
+		{Name: "owner_ref", Definition: "owner_ref TEXT NOT NULL DEFAULT ''"},
+		{Name: "active_task_uid", Definition: "active_task_uid TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE sessions SET active_task_uid = COALESCE((
+		SELECT event.task_uid FROM gateway_events event
+		WHERE event.namespace = sessions.namespace AND event.session_name = sessions.name
+		  AND event.task_name = sessions.active_task AND event.state = 'TaskCreated' AND event.task_uid <> ''
+		ORDER BY event.created_at DESC, event.id DESC LIMIT 1
+	), '') WHERE active_task <> '' AND active_task_uid = ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if err := ensureSQLiteColumns(db, "gateway_events", []sqliteColumnMigration{
+		{Name: "namespace_uid", Definition: "namespace_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "gateway_generation", Definition: "gateway_generation INTEGER NOT NULL DEFAULT 0"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureGatewayEventTombstoneSchema(db); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "gateway_deliveries", []sqliteColumnMigration{
+		{Name: "namespace_uid", Definition: "namespace_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "gateway_generation", Definition: "gateway_generation INTEGER NOT NULL DEFAULT 0"},
+	}); err != nil {
+		return err
+	}
+
+	if err := ensureSQLiteColumns(db, "session_messages", []sqliteColumnMigration{
+		{Name: "message_id", Definition: "message_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "sort_order", Definition: "sort_order INTEGER NOT NULL DEFAULT 0"},
+		{Name: "source_type", Definition: "source_type TEXT NOT NULL DEFAULT ''"},
+		{Name: "source_ref", Definition: "source_ref TEXT NOT NULL DEFAULT ''"},
+		{Name: "metadata_json", Definition: "metadata_json TEXT NOT NULL DEFAULT '{}'"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE session_messages SET message_id = 'legacy:' || id WHERE message_id = ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE session_messages SET sort_order = id * 2 WHERE sort_order = 0`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_message_id
+		ON session_messages(namespace, session_name, message_id) WHERE message_id <> ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_session_messages_namespace_message_id
+		ON session_messages(namespace, message_id) WHERE message_id <> ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_sort_order
+		ON session_messages(namespace, session_name, sort_order) WHERE sort_order > 0`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+
+	if err := ensureSQLiteColumns(db, "gateway_events", []sqliteColumnMigration{
+		{Name: "transcript_order", Definition: "transcript_order INTEGER NOT NULL DEFAULT 0"},
+		{Name: "binding_uid", Definition: "binding_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "binding_generation", Definition: "binding_generation INTEGER NOT NULL DEFAULT 0"},
+		{Name: "agent_name", Definition: "agent_name TEXT NOT NULL DEFAULT ''"},
+		{Name: "agent_uid", Definition: "agent_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "task_uid", Definition: "task_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "delivery_id", Definition: "delivery_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "provider_message_id", Definition: "provider_message_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "trace_parent", Definition: "trace_parent TEXT NOT NULL DEFAULT ''"},
+		{Name: "trace_state", Definition: "trace_state TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "gateway_deliveries", []sqliteColumnMigration{
+		{Name: "trace_parent", Definition: "trace_parent TEXT NOT NULL DEFAULT ''"},
+		{Name: "trace_state", Definition: "trace_state TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
 	}
 
 	if err := ensureSQLiteColumns(db, "execution_events", []sqliteColumnMigration{
@@ -608,14 +943,49 @@ func migrate(db *sql.DB) error {
 	}); err != nil {
 		return err
 	}
+	if err := ensureSQLiteColumns(db, "monitor_runs", []sqliteColumnMigration{
+		{Name: "command_event_id", Definition: "command_event_id TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
 	if err := ensureSQLiteColumns(db, "monitor_items", []sqliteColumnMigration{
+		{Name: "body", Definition: "body TEXT NOT NULL DEFAULT ''"},
+		{Name: "html_url", Definition: "html_url TEXT NOT NULL DEFAULT ''"},
 		{Name: "skip_reason", Definition: "skip_reason TEXT NOT NULL DEFAULT ''"},
 		{Name: "last_publish_id", Definition: "last_publish_id TEXT NOT NULL DEFAULT ''"},
 		{Name: "last_publish_phase", Definition: "last_publish_phase TEXT NOT NULL DEFAULT ''"},
 		{Name: "last_publish_reason", Definition: "last_publish_reason TEXT NOT NULL DEFAULT ''"},
 		{Name: "last_publish_url", Definition: "last_publish_url TEXT NOT NULL DEFAULT ''"},
+		{Name: "snapshot_digest", Definition: "snapshot_digest TEXT NOT NULL DEFAULT ''"},
+		{Name: "github_updated_at", Definition: "github_updated_at TIMESTAMP NOT NULL DEFAULT '0001-01-01T00:00:00Z'"},
+		{Name: "workflow_phase", Definition: "workflow_phase TEXT NOT NULL DEFAULT ''"},
+		{Name: "linked_pr_number", Definition: "linked_pr_number INTEGER NOT NULL DEFAULT 0"},
+		{Name: "last_command_id", Definition: "last_command_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_command_intent", Definition: "last_command_intent TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_action_id", Definition: "last_action_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_action_kind", Definition: "last_action_kind TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_action_task_name", Definition: "last_action_task_name TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
+	}
+	if _, err := db.Exec(`UPDATE monitor_items SET github_updated_at = updated_at WHERE github_updated_at IS NULL OR github_updated_at = '0001-01-01T00:00:00Z'`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if err := ensureSQLiteColumns(db, "command_events", []sqliteColumnMigration{
+		{Name: "source", Definition: "source TEXT NOT NULL DEFAULT ''"},
+		{Name: "delivery_id", Definition: "delivery_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "label", Definition: "label TEXT NOT NULL DEFAULT ''"},
+		{Name: "monitor_generation", Definition: "monitor_generation INTEGER NOT NULL DEFAULT 0"},
+		{Name: "dedupe_key", Definition: "dedupe_key TEXT NOT NULL DEFAULT ''"},
+		{Name: "idempotency_key", Definition: "idempotency_key TEXT NOT NULL DEFAULT ''"},
+		{Name: "issue_snapshot_digest", Definition: "issue_snapshot_digest TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_events_dedupe
+		ON command_events(monitor_namespace, monitor_name, dedupe_key)
+		WHERE dedupe_key <> ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
 	}
 	if err := ensureSQLiteColumns(db, "security_scan_runs", []sqliteColumnMigration{
 		{Name: "slice_count", Definition: "slice_count INTEGER NOT NULL DEFAULT 0"},
@@ -688,6 +1058,20 @@ func backfillExecutionEventSessionCursors(db *sql.DB) error {
 				ELSE excluded.latest_seq
 			END`)
 	if err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	return nil
+}
+
+func ensureGatewayEventTombstoneSchema(db *sql.DB) error {
+	if err := ensureSQLiteColumns(db, "gateway_event_tombstones", []sqliteColumnMigration{
+		{Name: "task_name", Definition: "task_name TEXT NOT NULL DEFAULT ''"},
+		{Name: "task_uid", Definition: "task_uid TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_gateway_event_tombstones_task
+		ON gateway_event_tombstones(namespace, task_name, task_uid)`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 	return nil

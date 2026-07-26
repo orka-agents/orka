@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -758,6 +759,22 @@ func TestGetSessionTranscript(t *testing.T) {
 		require.Equal(t, "hi there", msg2.Content)
 	})
 
+	t.Run("escaped slash in session name", func(t *testing.T) {
+		require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+			Namespace: "default", Name: "team/a", SessionType: "task",
+		}))
+		require.NoError(t, ss.AppendMessages(context.Background(), "default", "team/a", []store.SessionMessage{{
+			Role: "user", Content: "escaped session history",
+		}}))
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/sessions/default/team%2Fa/transcript", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.Contains(t, string(body), "escaped session history")
+	})
+
 	t.Run("missing name", func(t *testing.T) {
 		app2 := fiber.New()
 		app2.Use(func(c fiber.Ctx) error {
@@ -806,6 +823,10 @@ func TestSearchTranscript(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
+	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: "default", Name: "gateway-private", SessionType: store.SessionTypeGateway,
+		CreatedAt: now.Add(3 * time.Second), UpdatedAt: now.Add(3 * time.Second),
+	}))
 
 	priorLong := strings.Repeat("prefix ", 20) + "needle migration detail" + strings.Repeat(" suffix", 20)
 	require.NoError(t, ss.AppendMessages(context.Background(), "default", "prior", []store.SessionMessage{
@@ -814,6 +835,9 @@ func TestSearchTranscript(t *testing.T) {
 	}))
 	require.NoError(t, ss.AppendMessages(context.Background(), "default", "current", []store.SessionMessage{
 		{Role: "assistant", Content: "needle from current session should be excluded", Timestamp: now.Add(2 * time.Second)},
+	}))
+	require.NoError(t, ss.AppendMessages(context.Background(), "default", "gateway-private", []store.SessionMessage{
+		{Role: "user", Content: "needle from a gateway conversation must remain private", Timestamp: now.Add(3 * time.Second)},
 	}))
 
 	t.Run("success", func(t *testing.T) {
@@ -1122,4 +1146,122 @@ func TestGetPlanAdditional(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
+}
+
+func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	ss := sqlite.NewStore(db, ":memory:")
+	ctx := context.Background()
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace: defaultNamespace, Name: "gateway-session", SessionType: "gateway",
+	}))
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gateway-task", Namespace: defaultNamespace, UID: "task-uid",
+			Annotations: map[string]string{
+				gatewayruntime.TaskGatewayEventAnnotation: "mutated-event",
+				gatewayruntime.TaskGatewaySession:         "mutated-session",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{
+			Name: "mutated-session", MaxMessages: 1, ThroughMessageID: "future-user", PromptIncluded: false,
+		}},
+		Status: corev1alpha1.TaskStatus{JobName: "gateway-task-job"},
+	}
+	now := time.Now().UTC()
+	if _, _, err := ss.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{Event: store.GatewayEvent{
+		ID: "event-1", Namespace: defaultNamespace, NamespaceUID: "namespace-uid", GatewayUID: "gateway-uid", GatewayGeneration: 1, GatewayName: "chat",
+		BindingName: "room", BindingUID: "binding-uid", ExternalEventID: "external-event-1",
+		ProtocolVersion: "orka.gateway.v1", EventType: "text", State: store.GatewayEventTaskCreated,
+		AccountID: "acct", ContextID: "room", SenderID: "sender", Text: "current",
+		ReplyTarget: "room", SessionName: "gateway-session", TaskName: task.Name, TaskUID: string(task.UID),
+		ReceivedAt: now, NextAttemptAt: now, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatalf("AdmitGatewayEvent: %v", err)
+	}
+	require.NoError(t, ss.AppendMessages(ctx, defaultNamespace, "gateway-session", []store.SessionMessage{
+		{ID: "prior-user", Order: 2, Role: "user", Content: "first"},
+		{ID: "prior-assistant", Order: 3, Role: "assistant", Content: "reply"},
+		{ID: "gateway:event-1:user", Order: 4, Role: "user", Content: "current"},
+		{ID: "future-user", Order: 6, Role: "user", Content: "future"},
+	}))
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace: defaultNamespace, Name: "mutated-session", SessionType: "task",
+	}))
+	require.NoError(t, ss.AppendMessages(ctx, defaultNamespace, "mutated-session", []store.SessionMessage{{
+		ID: "unrelated", Order: 2, Role: "user", Content: "unrelated private history",
+	}}))
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "gateway-task-job", Namespace: defaultNamespace, UID: "job-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: task.Name, UID: task.UID,
+		}},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "gateway-task-pod", Namespace: defaultNamespace, UID: "pod-uid",
+		Labels: map[string]string{labels.LabelTask: labels.SelectorValue(task.Name)},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: job.Name, UID: job.UID,
+		}},
+	}}
+	fabricated := task.DeepCopy()
+	fabricated.Name = "fabricated-task"
+	fabricated.UID = "fabricated-uid"
+	fabricated.Status.JobName = ""
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, fabricated, job, pod).Build()
+	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{Client: kubeClient, GatewayEventStore: ss})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, internalCallerAuthWorkerUser(pod.Name, string(pod.UID)))
+		return c.Next()
+	})
+	app.Get("/internal/v1/sessions/:namespace/:name/transcript", h.GetSessionTranscript)
+
+	missingIdentity := httptest.NewRequest(
+		http.MethodGet,
+		"/internal/v1/sessions/default/gateway-session/transcript",
+		nil,
+	)
+	missingResponse, err := app.Test(missingIdentity)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, missingResponse.StatusCode)
+
+	fabricatedRequest := httptest.NewRequest(
+		http.MethodGet,
+		"/internal/v1/sessions/default/gateway-session/transcript?taskName=fabricated-task",
+		nil,
+	)
+	fabricatedResponse, err := app.Test(fabricatedRequest)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, fabricatedResponse.StatusCode)
+
+	mutableSessionRequest := httptest.NewRequest(
+		http.MethodGet,
+		"/internal/v1/sessions/default/mutated-session/transcript?taskName=gateway-task",
+		nil,
+	)
+	mutableSessionResponse, err := app.Test(mutableSessionRequest)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, mutableSessionResponse.StatusCode)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/internal/v1/sessions/default/gateway-session/transcript?taskName=gateway-task",
+		nil,
+	)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	require.Len(t, lines, 3)
+	require.Contains(t, string(body), "current")
+	require.NotContains(t, string(body), "future")
 }
