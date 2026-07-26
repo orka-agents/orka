@@ -8,6 +8,8 @@ package worker
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -278,6 +280,81 @@ func TestToolExecutor_Execute_MCPSubstrateActorUsesStatusEndpointAndRouteHost(t 
 		if gotHost != "actor-1.actors.test" {
 			t.Fatalf("Host[%d] = %q, want actor route host", i, gotHost)
 		}
+	}
+}
+
+func TestToolExecutor_Execute_DirectMCPSubstrateActorAllowsTrustedStatusEndpoint(t *testing.T) {
+	const routeHost = "actor-1.actors.test"
+	var calls int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != routeHost {
+			t.Fatalf("Host = %q, want %q", r.Host, routeHost)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer resource-credential" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if got := r.Header.Get(transactiontoken.HeaderName); got != "" {
+			t.Fatalf("%s = %q, want empty", transactiontoken.HeaderName, got)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request %d: %v", calls, err)
+		}
+		switch calls {
+		case 0:
+			if got := body["method"]; got != mcpInitializeMethod {
+				t.Fatalf("first MCP method = %v, want %s", got, mcpInitializeMethod)
+			}
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`))
+		case 1:
+			if got := body["method"]; got != mcpInitializedNotificationMethod {
+				t.Fatalf("second MCP method = %v, want %s", got, mcpInitializedNotificationMethod)
+			}
+			w.WriteHeader(http.StatusAccepted)
+		case 2:
+			if got := body["method"]; got != mcpToolsCallMethod {
+				t.Fatalf("third MCP method = %v, want %s", got, mcpToolsCallMethod)
+			}
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"mcp"}]}}`))
+		default:
+			t.Fatalf("unexpected MCP request %d", calls)
+		}
+		calls++
+	}))
+	defer server.Close()
+
+	roots := x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	client := &http.Client{Transport: transport}
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter:          outboundaccess.AdapterDirect,
+		CredentialHeader: "Authorization",
+		CredentialValue:  "Bearer resource-credential",
+		SensitiveValues:  []string{"resource-credential"},
+	}}
+	executor := &ToolExecutor{client: client, namespace: "tenant", outboundResolver: resolver}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup", Namespace: "tenant"},
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "direct"}},
+			MCP: &corev1alpha1.MCPToolServer{SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+				TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+			}},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: server.URL + "/mcp",
+			Actor:    &corev1alpha1.ToolActorStatus{RouteHost: routeHost},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "mcp" || calls != 3 {
+		t.Fatalf("Execute() = %q calls=%d, want mcp and 3 calls", result, calls)
 	}
 }
 
@@ -3099,13 +3176,27 @@ func TestToolExecutorCredentialOnlyDirectPolicyDoesNotRequireTransactionExchange
 
 func TestDirectCredentialHTTPClientDisablesProxyAndValidatesDialAddresses(t *testing.T) {
 	base := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
-	client, err := directCredentialHTTPClient(base)
+	client, err := directCredentialHTTPClient(base, tokenexchange.PublicEndpointDialContext)
 	if err != nil {
 		t.Fatal(err)
 	}
 	transport := client.Transport.(*http.Transport)
 	if transport.Proxy != nil || transport.DialContext == nil || !transport.DisableKeepAlives {
 		t.Fatalf("direct transport proxy=%t dial=%t keepalives=%t", transport.Proxy != nil, transport.DialContext != nil, !transport.DisableKeepAlives)
+	}
+	if _, err := transport.DialContext(context.Background(), "tcp", "127.0.0.1:443"); err == nil {
+		t.Fatal("public direct transport allowed a private address")
+	}
+}
+
+func TestExactEndpointDialContextRejectsUnexpectedAuthority(t *testing.T) {
+	endpoint, err := neturl.Parse("https://router.ate-system.svc:8443/mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dial := exactEndpointDialContext(endpoint)
+	if _, err := dial(context.Background(), "tcp", "other.ate-system.svc:8443"); err == nil || !strings.Contains(err.Error(), "unexpected endpoint authority") {
+		t.Fatalf("DialContext() error = %v, want authority rejection", err)
 	}
 }
 

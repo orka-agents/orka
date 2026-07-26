@@ -229,7 +229,7 @@ func TestClientExchangeRejectsReservedParametersAndInvalidResponses(t *testing.T
 }
 
 func TestClientExchangeErrorAndResponseLimits(t *testing.T) {
-	t.Run("oauth error is redacted", func(t *testing.T) {
+	t.Run("oauth error payload is suppressed", func(t *testing.T) {
 		secret := "super-secret-token"
 		subject := "opaque-subject-assertion-value"
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -247,7 +247,7 @@ func TestClientExchangeErrorAndResponseLimits(t *testing.T) {
 			t.Fatalf("error leaked secret: %v", err)
 		}
 		var exchangeErr *ExchangeError
-		if !errors.As(err, &exchangeErr) || exchangeErr.StatusCode != http.StatusUnauthorized {
+		if !errors.As(err, &exchangeErr) || exchangeErr.StatusCode != http.StatusUnauthorized || exchangeErr.Code != "invalid_client" {
 			t.Fatalf("error = %#v", err)
 		}
 	})
@@ -284,6 +284,65 @@ func TestClientExchangeErrorAndResponseLimits(t *testing.T) {
 			t.Fatalf("cancellation error = %v", err)
 		}
 	})
+}
+
+func TestClientExchangeSuppressesEndpointErrorPayloads(t *testing.T) {
+	const opaqueSentinel = "opaque-endpoint-credential-abc123"
+	tests := []struct {
+		name     string
+		body     string
+		wantCode string
+	}{
+		{
+			name:     "allowlisted code suppresses description",
+			body:     `{"error":"invalid_grant","error_description":"` + opaqueSentinel + `"}`,
+			wantCode: "invalid_grant",
+		},
+		{
+			name: "plain text body is suppressed",
+			body: opaqueSentinel,
+		},
+		{
+			name: "missing code suppresses other fields",
+			body: `{"error_description":"` + opaqueSentinel + `","detail":"` + opaqueSentinel + `"}`,
+		},
+		{
+			name: "endpoint controlled code is suppressed",
+			body: `{"error":"` + opaqueSentinel + `"}`,
+		},
+		{
+			name:     "rfc8693 invalid target code is retained",
+			body:     `{"error":"invalid_target","error_description":"` + opaqueSentinel + `"}`,
+			wantCode: "invalid_target",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			_, err := NewClient(ClientOptions{HTTPClient: server.Client()}).Exchange(
+				context.Background(),
+				validResourceRequest(server.URL),
+			)
+			if err == nil {
+				t.Fatal("Exchange() error = nil")
+			}
+			if strings.Contains(err.Error(), opaqueSentinel) {
+				t.Fatalf("Exchange() error leaked endpoint payload: %v", err)
+			}
+			var exchangeErr *ExchangeError
+			if !errors.As(err, &exchangeErr) {
+				t.Fatalf("Exchange() error = %T, want *ExchangeError", err)
+			}
+			if exchangeErr.StatusCode != http.StatusBadRequest || exchangeErr.Code != tt.wantCode {
+				t.Fatalf("ExchangeError = %#v, want status=%d code=%q", exchangeErr, http.StatusBadRequest, tt.wantCode)
+			}
+		})
+	}
 }
 
 func TestClientCacheUsesDigestsCapsExpiryAndCollapsesConcurrentMisses(t *testing.T) {

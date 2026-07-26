@@ -41,7 +41,6 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/metrics"
-	"github.com/orka-agents/orka/internal/redact"
 )
 
 const (
@@ -156,23 +155,20 @@ type Result struct {
 	ExpiresAt       time.Time
 }
 
-// ExchangeError is a safe OAuth/HTTP failure. Description is redacted before
-// storage and never contains raw response bodies.
+// ExchangeError is a safe OAuth/HTTP failure. It retains only the HTTP
+// status and a fixed, low-cardinality OAuth error code; endpoint-controlled
+// descriptions and response bodies are never exposed.
 type ExchangeError struct {
-	StatusCode  int
-	Code        string
-	Description string
+	StatusCode int
+	Code       string
 }
 
 func (e *ExchangeError) Error() string {
 	if e == nil {
 		return "token exchange failed"
 	}
-	if e.Code != "" && e.Description != "" {
-		return fmt.Sprintf("token endpoint error %q: %s", e.Code, e.Description)
-	}
-	if e.Code != "" {
-		return fmt.Sprintf("token endpoint error %q", e.Code)
+	if e.StatusCode != 0 && e.Code != "" {
+		return fmt.Sprintf("token endpoint returned HTTP %d (OAuth error %q)", e.StatusCode, e.Code)
 	}
 	if e.StatusCode != 0 {
 		return fmt.Sprintf("token endpoint returned HTTP %d", e.StatusCode)
@@ -512,8 +508,7 @@ func (c *Client) exchange(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		secrets := []string{req.SubjectToken, req.ActorToken, req.ClientAuthentication.ClientSecret, form.Get("client_assertion")}
-		return Result{}, decodeOAuthError(resp.StatusCode, body, secrets...)
+		return Result{}, decodeOAuthError(resp.StatusCode, body)
 	}
 
 	var decoded struct {
@@ -910,32 +905,33 @@ func readResponse(reader io.Reader, contentLength, limit int64) ([]byte, error) 
 	return body, nil
 }
 
-func decodeOAuthError(status int, body []byte, secrets ...string) error {
+func decodeOAuthError(status int, body []byte) error {
 	var decoded struct {
-		Error            string `json:"error"`
-		ErrorDescription string `json:"error_description"`
+		Error string `json:"error"`
 	}
-	if json.Unmarshal(body, &decoded) == nil && strings.TrimSpace(decoded.Error) != "" {
-		return &ExchangeError{
-			StatusCode:  status,
-			Code:        safeOAuthField(decoded.Error, secrets...),
-			Description: safeOAuthField(decoded.ErrorDescription, secrets...),
-		}
+	code := ""
+	if json.Unmarshal(body, &decoded) == nil {
+		code = safeOAuthErrorCode(decoded.Error)
 	}
-	return &ExchangeError{StatusCode: status, Description: safeOAuthField(strings.TrimSpace(string(body)), secrets...)}
+	return &ExchangeError{StatusCode: status, Code: code}
 }
 
-func safeOAuthField(value string, secrets ...string) string {
-	for _, secret := range secrets {
-		if secret = strings.TrimSpace(secret); secret != "" {
-			value = strings.ReplaceAll(value, secret, "[REDACTED]")
-		}
+func safeOAuthErrorCode(value string) string {
+	switch strings.TrimSpace(value) {
+	case "invalid_request",
+		"invalid_client",
+		"invalid_grant",
+		"unauthorized_client",
+		"unsupported_grant_type",
+		"invalid_scope",
+		"invalid_target",
+		"access_denied",
+		"server_error",
+		"temporarily_unavailable":
+		return strings.TrimSpace(value)
+	default:
+		return ""
 	}
-	value = redact.SensitiveText(value)
-	if len(value) > 512 {
-		value = value[:512]
-	}
-	return value
 }
 
 func signClientAssertion(endpoint string, auth ClientAuthentication) (string, error) {

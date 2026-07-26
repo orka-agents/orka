@@ -365,7 +365,11 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 	}
 
 	if prepared.direct && !e.skipDirectPublicValidation {
-		httpClient, err = directCredentialHTTPClient(httpClient)
+		dialContext := tokenexchange.PublicEndpointDialContext
+		if prepared.trustedActorRoute {
+			dialContext = exactEndpointDialContext(prepared.request.URL)
+		}
+		httpClient, err = directCredentialHTTPClient(httpClient, dialContext)
 		if err != nil {
 			return "", err
 		}
@@ -387,7 +391,10 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 	return string(respBody), nil
 }
 
-func directCredentialHTTPClient(base *http.Client) (*http.Client, error) {
+func directCredentialHTTPClient(
+	base *http.Client,
+	dialContext func(context.Context, string, string) (net.Conn, error),
+) (*http.Client, error) {
 	if base == nil {
 		base = http.DefaultClient
 	}
@@ -400,12 +407,15 @@ func directCredentialHTTPClient(base *http.Client) (*http.Client, error) {
 	if !ok {
 		return nil, errors.New("direct outbound access requires an *http.Transport")
 	}
+	if dialContext == nil {
+		return nil, errors.New("direct outbound access requires a dial context")
+	}
 	clone := httpTransport.Clone()
 	clone.Proxy = nil
 	clone.DisableKeepAlives = true
 	clone.DialTLS = nil //nolint:staticcheck
 	clone.DialTLSContext = nil
-	clone.DialContext = tokenexchange.PublicEndpointDialContext
+	clone.DialContext = dialContext
 	if clone.TLSClientConfig != nil {
 		clone.TLSClientConfig = clone.TLSClientConfig.Clone()
 	} else {
@@ -415,6 +425,22 @@ func directCredentialHTTPClient(base *http.Client) (*http.Client, error) {
 	clone.TLSClientConfig.InsecureSkipVerify = false
 	client.Transport = clone
 	return &client, nil
+}
+
+func exactEndpointDialContext(endpoint *neturl.URL) func(context.Context, string, string) (net.Conn, error) {
+	expectedAuthority := normalizedHTTPHost(endpoint)
+	scheme := ""
+	if endpoint != nil {
+		scheme = strings.ToLower(endpoint.Scheme)
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		actual := &neturl.URL{Scheme: scheme, Host: address}
+		if expectedAuthority == "" || normalizedHTTPHost(actual) != expectedAuthority {
+			return nil, errors.New("direct outbound access refused an unexpected endpoint authority")
+		}
+		dialer := &net.Dialer{}
+		return dialer.DialContext(ctx, network, address)
+	}
 }
 
 func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS tokenexchange.TLSConfig, gateway bool) (*http.Client, error) {
@@ -657,15 +683,16 @@ func toolIdempotencyKeyFromContext(ctx context.Context) string {
 }
 
 type preparedToolRequest struct {
-	httpConfig       corev1alpha1.HTTPExecution
-	request          *http.Request
-	authToken        string
-	transactionToken string
-	redactionSecrets []string
-	gatewayTLS       tokenexchange.TLSConfig
-	gateway          bool
-	direct           bool
-	mcp              bool
+	httpConfig        corev1alpha1.HTTPExecution
+	request           *http.Request
+	authToken         string
+	transactionToken  string
+	redactionSecrets  []string
+	gatewayTLS        tokenexchange.TLSConfig
+	gateway           bool
+	direct            bool
+	mcp               bool
+	trustedActorRoute bool
 }
 
 func (p preparedToolRequest) secrets(extra ...string) []string {
@@ -793,12 +820,13 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	}
 
 	prepared := preparedToolRequest{
-		httpConfig:       httpConfig,
-		request:          req,
-		authToken:        authToken,
-		transactionToken: transactionToken,
-		redactionSecrets: compactToolSecrets(append(configuredSecrets, authToken, transactionToken)...),
-		mcp:              isMCP,
+		httpConfig:        httpConfig,
+		request:           req,
+		authToken:         authToken,
+		transactionToken:  transactionToken,
+		redactionSecrets:  compactToolSecrets(append(configuredSecrets, authToken, transactionToken)...),
+		mcp:               isMCP,
+		trustedActorRoute: isMCP && routeHost != "",
 	}
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil {
 		if err := e.applyOutboundAccessPolicy(ctx, tool, &prepared); err != nil {
