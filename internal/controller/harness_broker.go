@@ -832,6 +832,9 @@ func (r *TaskReconciler) continueHarnessBrokeredToolCall(
 	if err := r.clearHarnessBrokeredApprovalWaiting(ctx, task, frame.ToolName); err != nil {
 		return err
 	}
+	if err := r.patchHarnessWrapperBrokeredContinuationPending(ctx, task, true); err != nil {
+		return err
+	}
 	return nil
 }
 

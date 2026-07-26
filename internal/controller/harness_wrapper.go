@@ -67,6 +67,7 @@ const (
 	harnessWrapperOutputFetchRetriesAnno      = "orka.ai/harness-wrapper-output-fetch-retries"
 	harnessWrapperCancelDependencyRetriesAnno = "orka.ai/harness-wrapper-cancel-dependency-retries"
 	harnessWrapperAuthRetriesAnno             = "orka.ai/harness-wrapper-auth-retries"
+	harnessWrapperBrokeredContinuationAnno    = "orka.ai/harness-wrapper-brokered-continuation-pending"
 	harnessWrapperMaxOutputFetchRetries       = 3
 	harnessWrapperMaxCancelDependencyRetries  = 3
 	harnessWrapperMaxAuthRetries              = 3
@@ -712,6 +713,13 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 			return ctrl.Result{}, patchErr
 		}
 	}
+	if err == nil && !terminalFrameSeen && harnessWrapperBrokeredContinuationPending(task) {
+		// Some remote runtimes intentionally close the paused event stream before
+		// Orka's continuation request arrives. Reconnect from the persisted frame
+		// cursor instead of treating that clean EOF as a terminal turn with no
+		// result; the continuation may still be executing asynchronously.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if err != nil && result.Completed == nil && result.Failed == nil && !result.Cancelled {
 		if target.RuntimeRefName != "" && harnessWrapperAuthError(err) {
 			if wait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task); waitErr != nil {
@@ -1022,6 +1030,7 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
 	task.Annotations[harnessWrapperStartedAnno] = "false"
 	task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
+	delete(task.Annotations, harnessWrapperBrokeredContinuationAnno)
 	if runtimeRefName := strings.TrimSpace(request.Metadata["runtimeRef"]); runtimeRefName != "" {
 		task.Annotations[harnessWrapperRuntimeRefAnno] = runtimeRefName
 	} else {
@@ -1476,6 +1485,7 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 		delete(task.Annotations, harnessWrapperOutputFetchRetriesAnno)
 		delete(task.Annotations, harnessWrapperCancelDependencyRetriesAnno)
 		delete(task.Annotations, harnessWrapperAuthRetriesAnno)
+		delete(task.Annotations, harnessWrapperBrokeredContinuationAnno)
 	}
 	if err := r.Patch(ctx, task, patch); err != nil {
 		return err
@@ -2512,4 +2522,36 @@ func (r *TaskReconciler) patchHarnessWrapperLastFrameSeq(ctx context.Context, ta
 	}
 	task.Annotations[harnessWrapperLastFrameSeqAnno] = strconv.FormatInt(seq, 10)
 	return r.Patch(ctx, task, patch)
+}
+
+func harnessWrapperBrokeredContinuationPending(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(task.Annotations[harnessWrapperBrokeredContinuationAnno]), scheduledRunLabelValue)
+}
+
+func (r *TaskReconciler) patchHarnessWrapperBrokeredContinuationPending(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	pending bool,
+) error {
+	latest := &corev1alpha1.Task{}
+	if err := r.Get(ctx, ctrlclient.ObjectKey{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return err
+	}
+	patch := ctrlclient.MergeFrom(latest.DeepCopy())
+	if latest.Annotations == nil {
+		latest.Annotations = map[string]string{}
+	}
+	if pending {
+		latest.Annotations[harnessWrapperBrokeredContinuationAnno] = scheduledRunLabelValue
+	} else {
+		delete(latest.Annotations, harnessWrapperBrokeredContinuationAnno)
+	}
+	if err := r.Patch(ctx, latest, patch); err != nil {
+		return err
+	}
+	latest.DeepCopyInto(task)
+	return nil
 }

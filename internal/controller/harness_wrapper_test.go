@@ -350,6 +350,197 @@ func TestHarnessWrapperBrokeredReadToolExecutesAndContinuesRuntime(t *testing.T)
 	}
 }
 
+func TestHarnessWrapperBrokeredContinuationReconnectsAfterPauseStreamCloses(t *testing.T) {
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer toolServer.Close()
+
+	var started harness.StartTurnRequest
+	var continued atomic.Bool
+	var postContinuationPolls atomic.Int32
+	runtimeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case harness.CapabilitiesPath:
+			harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+				Version:                 harness.ProtocolVersion,
+				ProtocolVersion:         harness.ProtocolVersion,
+				Transport:               harness.HTTPTransport,
+				RuntimeName:             "async-runtime",
+				ProviderKind:            harness.ProviderKindRemote,
+				ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved, harness.ToolExecutionModeBrokered},
+				BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+				SupportsCancel:          true,
+				SupportsRuntimeSessions: true,
+				SupportsContinuation:    true,
+			})
+		case harness.TurnsPath:
+			if err := json.NewDecoder(r.Body).Decode(&started); err != nil {
+				t.Fatalf("decode start turn: %v", err)
+			}
+			eventsPath, _ := harness.EventStreamPath(started.TurnID)
+			harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
+				Version:          harness.ProtocolVersion,
+				Accepted:         true,
+				RuntimeSessionID: started.RuntimeSessionID,
+				TurnID:           started.TurnID,
+				CorrelationID:    started.CorrelationID,
+				EventStreamPath:  eventsPath,
+			})
+		default:
+			turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
+			if err != nil || turnID != started.TurnID {
+				harness.WriteError(w, http.StatusNotFound, "not found")
+				return
+			}
+			switch resource {
+			case harness.TurnResourceEvents:
+				w.Header().Set("Content-Type", "text/event-stream")
+				afterSeq := strings.TrimSpace(r.URL.Query().Get("afterSeq"))
+				if afterSeq == "" || afterSeq == "0" {
+					_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
+						Version:          harness.ProtocolVersion,
+						Type:             harness.FrameTurnStarted,
+						RuntimeSessionID: started.RuntimeSessionID,
+						TurnID:           started.TurnID,
+						CorrelationID:    started.CorrelationID,
+						Seq:              1,
+					})
+					_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
+						Version:          harness.ProtocolVersion,
+						Type:             harness.FrameToolCallRequested,
+						RuntimeSessionID: started.RuntimeSessionID,
+						TurnID:           started.TurnID,
+						CorrelationID:    started.CorrelationID,
+						Seq:              2,
+						ToolName:         "read_incident",
+						ToolCallID:       "call-read-async",
+						Content:          json.RawMessage(`{"incident":"quincy-north"}`),
+					})
+					_ = harness.WriteSSEDone(w)
+					return
+				}
+				if afterSeq == "2" && continued.Load() && postContinuationPolls.Add(1) > 1 {
+					_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
+						Version:          harness.ProtocolVersion,
+						Type:             harness.FrameToolResultReceived,
+						RuntimeSessionID: started.RuntimeSessionID,
+						TurnID:           started.TurnID,
+						CorrelationID:    started.CorrelationID,
+						Seq:              3,
+						ToolName:         "read_incident",
+						ToolCallID:       "call-read-async",
+						Content:          json.RawMessage(`{"success":true}`),
+					})
+					_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
+						Version:          harness.ProtocolVersion,
+						Type:             harness.FrameTurnCompleted,
+						RuntimeSessionID: started.RuntimeSessionID,
+						TurnID:           started.TurnID,
+						CorrelationID:    started.CorrelationID,
+						Seq:              4,
+						Completed:        &harness.TurnCompleted{Result: "done", FinalEventSeq: 4},
+					})
+				}
+				_ = harness.WriteSSEDone(w)
+			case harness.TurnResourceContinue:
+				var request harness.ContinueTurnRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatalf("decode continue turn: %v", err)
+				}
+				continued.Store(true)
+				harness.WriteJSON(w, http.StatusAccepted, harness.ContinueTurnResponse{
+					Version:          harness.ProtocolVersion,
+					Accepted:         true,
+					RuntimeSessionID: request.RuntimeSessionID,
+					TurnID:           request.TurnID,
+					CorrelationID:    request.CorrelationID,
+				})
+			default:
+				harness.WriteError(w, http.StatusNotFound, "not found")
+			}
+		}
+	}))
+	defer runtimeServer.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "async-runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
+	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, runtimeServer.URL)
+	runtime.Name = "async-runtime"
+	runtime.Status.ObservedCapabilities.RuntimeName = "async-runtime"
+	runtime.Status.ObservedCapabilities.ProviderKind = string(harness.ProviderKindRemote)
+	runtime.Status.ObservedCapabilities.ToolExecutionModes = []corev1alpha1.AgentRuntimeToolExecutionMode{
+		corev1alpha1.AgentRuntimeToolExecutionModeObserved,
+		corev1alpha1.AgentRuntimeToolExecutionModeBrokered,
+	}
+	runtime.Status.ObservedCapabilities.BrokeredToolClasses = []corev1alpha1.AgentRuntimeBrokeredToolClass{
+		corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+	}
+	runtime.Status.ObservedCapabilities.SupportsContinuation = true
+	token.Labels[agentRuntimeAuthRefNameLabel] = runtime.Name
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Read incident status",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP:              &corev1alpha1.HTTPExecution{URL: toolServer.URL},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, tool)
+	running := runHarnessWrapperTaskToRunning(t, r, task)
+
+	result, err := r.handleRunning(context.Background(), &running)
+	if err != nil {
+		t.Fatalf("first handleRunning: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("first handleRunning result = %#v, want requeue for continuation stream", result)
+	}
+	var afterFirst corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &afterFirst); err != nil {
+		t.Fatalf("get after first running: %v", err)
+	}
+	if afterFirst.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase after first stream = %s, want Running (message=%s)", afterFirst.Status.Phase, afterFirst.Status.Message)
+	}
+	if got := harnessWrapperLastFrameSeq(&afterFirst); got != 2 {
+		t.Fatalf("last frame seq after continuation = %d, want 2", got)
+	}
+	if !harnessWrapperBrokeredContinuationPending(&afterFirst) {
+		t.Fatal("brokered continuation pending annotation was not persisted")
+	}
+
+	secondResult, err := r.handleRunning(context.Background(), &afterFirst)
+	if err != nil {
+		t.Fatalf("second handleRunning: %v", err)
+	}
+	if secondResult.RequeueAfter <= 0 {
+		t.Fatalf("second handleRunning result = %#v, want continued polling", secondResult)
+	}
+	var afterSecond corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &afterSecond); err != nil {
+		t.Fatalf("get after second running: %v", err)
+	}
+	if afterSecond.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase after empty continuation poll = %s, want Running (message=%s)", afterSecond.Status.Phase, afterSecond.Status.Message)
+	}
+	if !harnessWrapperBrokeredContinuationPending(&afterSecond) {
+		t.Fatal("brokered continuation pending annotation was not retained")
+	}
+
+	if _, err := r.handleRunning(context.Background(), &afterSecond); err != nil {
+		t.Fatalf("third handleRunning: %v", err)
+	}
+	var completed corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &completed); err != nil {
+		t.Fatalf("get completed task: %v", err)
+	}
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("completed phase = %s, want Succeeded (message=%s)", completed.Status.Phase, completed.Status.Message)
+	}
+}
+
 func TestHarnessWrapperBrokeredRejectsToolCallIDReuseAcrossTools(t *testing.T) {
 	var readExecutions atomic.Int32
 	readServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
