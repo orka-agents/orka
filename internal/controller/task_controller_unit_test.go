@@ -15,6 +15,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -2424,6 +2425,54 @@ func TestEnsureWorkerRBAC_CreatesResources(t *testing.T) {
 				t.Errorf("unexpected subject: %#v", subject)
 			}
 		})
+	}
+}
+
+func TestEnsureWorkerRBAC_UsesConfiguredServiceAccountNames(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	r.AIWorkerServiceAccountName = testAIWorkerServiceAccountName
+	r.VendorWorkerServiceAccountName = testVendorWorkerServiceAccountName
+	r.ContainerWorkerServiceAccountName = testContainerWorkerServiceAccountName
+
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatalf("ensureWorkerRBAC() error = %v", err)
+	}
+
+	expected := []struct {
+		serviceAccount     string
+		clusterRoleBinding string
+	}{
+		{serviceAccount: testAIWorkerServiceAccountName, clusterRoleBinding: "orka-ai-worker-test-ns"},
+		{serviceAccount: testVendorWorkerServiceAccountName, clusterRoleBinding: "orka-vendor-worker-test-ns"},
+		{serviceAccount: testContainerWorkerServiceAccountName, clusterRoleBinding: "orka-container-worker-test-ns"},
+	}
+
+	for _, tt := range expected {
+		t.Run(tt.serviceAccount, func(t *testing.T) {
+			sa := &corev1.ServiceAccount{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.serviceAccount, Namespace: testNS}, sa); err != nil {
+				t.Fatalf("expected ServiceAccount %s/%s to exist: %v", testNS, tt.serviceAccount, err)
+			}
+
+			crb := &rbacv1.ClusterRoleBinding{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.clusterRoleBinding}, crb); err != nil {
+				t.Fatalf("expected ClusterRoleBinding %s to exist: %v", tt.clusterRoleBinding, err)
+			}
+			if len(crb.Subjects) != 1 {
+				t.Fatalf("ClusterRoleBinding %s subjects = %#v, want one subject", tt.clusterRoleBinding, crb.Subjects)
+			}
+			if got := crb.Subjects[0]; got.Kind != rbacv1.ServiceAccountKind || got.Name != tt.serviceAccount || got.Namespace != testNS {
+				t.Fatalf("ClusterRoleBinding %s subject = %#v, want ServiceAccount %s/%s", tt.clusterRoleBinding, got, testNS, tt.serviceAccount)
+			}
+		})
+	}
+
+	for _, name := range []string{AIWorkerServiceAccount, VendorWorkerServiceAccount, ContainerWorkerServiceAccount} {
+		sa := &corev1.ServiceAccount{}
+		if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: testNS}, sa); !apierrors.IsNotFound(err) {
+			t.Fatalf("default ServiceAccount %s/%s should not be created when a custom name is configured; err = %v", testNS, name, err)
+		}
 	}
 }
 
@@ -7490,30 +7539,10 @@ func TestTaskEventWriteFailureDoesNotBreakStatusUpdate(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkerRBACTokenRequestAlwaysUsesNamespacedRoleBinding(t *testing.T) {
-	scheme := newTestScheme()
-	r := newUnitReconciler(scheme)
-	r.EnforceNamespaceIsolation = false
-	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
-		t.Fatal(err)
-	}
-	name := workerClusterRoleBindingName("", "ai-tokenrequest", testNS)
-	rb := &rbacv1.RoleBinding{}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: testNS}, rb); err != nil {
-		t.Fatalf("get RoleBinding: %v", err)
-	}
-	if rb.RoleRef.Name != DefaultAIWorkerTokenRequestClusterRoleName {
-		t.Fatalf("roleRef=%q", rb.RoleRef.Name)
-	}
-	crb := &rbacv1.ClusterRoleBinding{}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: name}, crb); !apierrors.IsNotFound(err) {
-		t.Fatalf("unexpected ClusterRoleBinding: %v", err)
-	}
-}
-
 func TestEnsureWorkerRBACCreatesExactTrustedServiceReadBinding(t *testing.T) {
 	scheme := newTestScheme()
 	r := newUnitReconciler(scheme)
+	r.AIWorkerServiceAccountName = testAIWorkerServiceAccountName
 	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
 	if err != nil {
 		t.Fatal(err)
@@ -7522,7 +7551,7 @@ func TestEnsureWorkerRBACCreatesExactTrustedServiceReadBinding(t *testing.T) {
 	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
 		t.Fatal(err)
 	}
-	name := trustedServiceReadBindingName(testNS, "infra", "gateway")
+	name := trustedServiceReadBindingName(testNS, "infra", "gateway", testAIWorkerServiceAccountName)
 	role := &rbacv1.Role{}
 	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, role); err != nil {
 		t.Fatal(err)
@@ -7537,11 +7566,72 @@ func TestEnsureWorkerRBACCreatesExactTrustedServiceReadBinding(t *testing.T) {
 	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, rb); err != nil {
 		t.Fatal(err)
 	}
-	if len(rb.Subjects) != 1 || rb.Subjects[0].Namespace != testNS || rb.Subjects[0].Name != AIWorkerServiceAccount {
+	if len(rb.Subjects) != 1 || rb.Subjects[0].Namespace != testNS || rb.Subjects[0].Name != r.AIWorkerServiceAccountName {
 		t.Fatalf("subjects=%#v", rb.Subjects)
 	}
 	if rb.Labels[trustedServiceReaderLabelKey] != trustedServiceReaderLabelValue || rb.Labels[trustedServiceReaderTaskNamespaceLabelKey] != testNS {
 		t.Fatalf("RoleBinding labels=%#v", rb.Labels)
+	}
+}
+
+func TestEnsureTrustedServiceReadBindingsRejectsRoleCollision(t *testing.T) {
+	scheme := newTestScheme()
+	name := trustedServiceReadBindingName(testNS, "infra", "gateway")
+	collision := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra"},
+		Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get"}}},
+	}
+	r := newUnitReconciler(scheme, collision)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), testNS); err == nil || !strings.Contains(err.Error(), "unexpected ownership or permissions") {
+		t.Fatalf("ensureTrustedServiceReadBindings() error = %v", err)
+	}
+	current := &rbacv1.Role{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, current); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(current.Rules, collision.Rules) {
+		t.Fatalf("colliding Role was rewritten: %#v", current.Rules)
+	}
+}
+
+func TestEnsureTrustedServiceReadBindingsRejectsRoleBindingCollision(t *testing.T) {
+	scheme := newTestScheme()
+	name := trustedServiceReadBindingName(testNS, "infra", "gateway")
+	objectLabels := trustedServiceReadBindingLabels(testNS)
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""}, Resources: []string{"services"}, ResourceNames: []string{"gateway"}, Verbs: []string{"get"},
+		}},
+	}
+	collision := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name},
+		Subjects: []rbacv1.Subject{
+			{Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: testNS},
+			{Kind: rbacv1.ServiceAccountKind, Name: "attacker", Namespace: testNS},
+		},
+	}
+	r := newUnitReconciler(scheme, role, collision)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), testNS); err == nil || !strings.Contains(err.Error(), "unexpected ownership or subjects") {
+		t.Fatalf("ensureTrustedServiceReadBindings() error = %v", err)
+	}
+	current := &rbacv1.RoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Subjects) != 2 {
+		t.Fatalf("colliding RoleBinding was rewritten: %#v", current.Subjects)
 	}
 }
 

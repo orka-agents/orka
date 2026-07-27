@@ -9,13 +9,13 @@ metadata:
 rules:
   # Custom Resource permissions
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks", "tools", "agents", "providers", "skills", "repositorymonitors", "repositoryscans", "outboundaccesspolicies"]
+    resources: ["tasks", "tools", "agents", "agentruntimes", "providers", "skills", "repositorymonitors", "repositoryscans", "substrateactorpools"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/status", "tools/status", "agents/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "outboundaccesspolicies/status"]
+    resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers"]
+    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "agentruntimes/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers", "substrateactorpools/finalizers"]
     verbs: ["update"]
   - apiGroups: ["gateway.orka.ai"]
     resources: ["gatewayclasses", "gateways", "gatewaybindings"]
@@ -58,9 +58,6 @@ rules:
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "update"]
-  - apiGroups: [""]
-    resources: ["serviceaccounts/token"]
-    verbs: ["create"]
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]
@@ -125,7 +122,7 @@ rules:
     resources: ["clusterroles", "roles", "rolebindings"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles", "rolebindings"]
+    resources: ["rolebindings"]
     verbs: ["create", "update", "delete"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterrolebindings"]
@@ -134,7 +131,6 @@ rules:
     resources: ["clusterroles"]
     resourceNames:
       - {{ include "orka.aiWorkerClusterRoleName" . }}
-      - {{ include "orka.aiWorkerTokenRequestClusterRoleName" . }}
       - {{ include "orka.vendorWorkerClusterRoleName" . }}
       - {{ include "orka.containerWorkerClusterRoleName" . }}
     verbs: ["bind"]
@@ -285,7 +281,7 @@ rules:
     resources: ["secrets"]
     verbs: ["get", "create", "update", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tools", "outboundaccesspolicies"]
+    resources: ["tools"]
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
@@ -373,23 +369,8 @@ roleRef:
   name: {{ include "orka.aiWorkerClusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
-    name: orka-ai-worker
+    name: {{ include "orka.aiWorkerServiceAccountName" . }}
     namespace: {{ .Release.Namespace }}
----
-# Namespaced TokenRequest capability for AI workers. This ClusterRole is always
-# attached with a RoleBinding in the task namespace, even when other worker
-# permissions are cluster-wide.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: {{ include "orka.aiWorkerTokenRequestClusterRoleName" . }}
-  labels:
-    {{- include "orka.labels" . | nindent 4 }}
-rules:
-  - apiGroups: [""]
-    resources: ["serviceaccounts/token"]
-    verbs: ["create"]
-
 ---
 # Vendor Worker Role (restricted worker for external agent providers)
 apiVersion: rbac.authorization.k8s.io/v1
@@ -403,7 +384,7 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tools", "outboundaccesspolicies"]
+    resources: ["tools"]
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
@@ -482,7 +463,7 @@ roleRef:
   name: {{ include "orka.vendorWorkerClusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
-    name: orka-vendor-worker
+    name: {{ include "orka.vendorWorkerServiceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 ---
 # Container Worker Role (minimal worker for container tasks)
@@ -522,6 +503,6 @@ roleRef:
   name: {{ include "orka.containerWorkerClusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
-    name: orka-container-worker
+    name: {{ include "orka.containerWorkerServiceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}

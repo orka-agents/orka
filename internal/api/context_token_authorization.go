@@ -1416,7 +1416,7 @@ func contextTokenTaskToolCredentialFailures(
 }
 
 func outboundAccessPolicyReadyForContextAuthorization(policy *corev1alpha1.OutboundAccessPolicy) bool {
-	if policy == nil || policy.Status.ObservedGeneration != policy.Generation {
+	if policy == nil || !policy.DeletionTimestamp.IsZero() || policy.Status.ObservedGeneration != policy.Generation {
 		return false
 	}
 	for _, conditionType := range []string{

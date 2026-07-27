@@ -159,7 +159,11 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	if parsedURL.User != nil {
 		return fmt.Errorf("http.url must not contain embedded credentials")
 	}
-	for name := range parsedURL.Query() {
+	query, err := url.ParseQuery(parsedURL.RawQuery)
+	if err != nil {
+		return fmt.Errorf("invalid http.url query")
+	}
+	for name := range query {
 		if sensitiveURLParameter(name) {
 			return fmt.Errorf("http.url must not contain credential query parameters")
 		}
@@ -216,6 +220,9 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 				return fmt.Errorf("referenced outbound access policy %q not found", ref.Name)
 			}
 			return fmt.Errorf("failed to get outbound access policy %q: %w", ref.Name, err)
+		}
+		if !policy.DeletionTimestamp.IsZero() {
+			return fmt.Errorf("outbound access policy %q is terminating", ref.Name)
 		}
 		if policy.Status.ObservedGeneration != policy.Generation {
 			return fmt.Errorf("outbound access policy %q has not observed its current generation", ref.Name)
@@ -280,6 +287,14 @@ func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *cor
 		return fmt.Errorf("mcp.substrateActor.poolRef.name is required")
 	}
 	templateRequest := r.substrateMCPTemplateRequest(tool)
+	if r.EnforceNamespaceIsolation && templateRequest.TemplateNamespace != tool.Namespace {
+		return fmt.Errorf(
+			"cross-namespace MCP substrate actor templateRef not allowed when namespace isolation is enforced: template %q in namespace %q, tool in %q",
+			templateRequest.TemplateName,
+			templateRequest.TemplateNamespace,
+			tool.Namespace,
+		)
+	}
 	if err := validateSubstrateMCPActorTemplateResource(ctx, r.Client, templateRequest); err != nil {
 		return err
 	}
@@ -1479,13 +1494,33 @@ func safeToolURLIdentity(tool *corev1alpha1.Tool) string {
 func sensitiveURLParameter(name string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(name))
 	normalized = strings.ReplaceAll(normalized, "_", "-")
-	return strings.Contains(normalized, "token") ||
-		strings.Contains(normalized, "secret") ||
+	if slices.Contains([]string{
+		"awsaccesskeyid", "googleaccessid", "key-pair-id", "sig", "signature",
+		"x-amz-credential", "x-amz-security-token", "x-amz-signature",
+		"x-goog-credential", "x-goog-signature", "x-ms-signature",
+	}, normalized) {
+		return true
+	}
+	if strings.Contains(normalized, "secret") ||
 		strings.Contains(normalized, "password") ||
 		strings.Contains(normalized, "credential") ||
 		strings.Contains(normalized, "authorization") ||
 		strings.Contains(normalized, "api-key") ||
-		strings.Contains(normalized, "apikey")
+		strings.Contains(normalized, "apikey") {
+		return true
+	}
+	if normalized == "token" {
+		return true
+	}
+	if !strings.HasSuffix(normalized, "-token") {
+		return false
+	}
+	prefix := strings.TrimSuffix(normalized, "-token")
+	return slices.Contains([]string{
+		"access", "api", "auth", "bearer", "github", "gitlab", "id", "oauth",
+		"personal-access", "private", "refresh", "security", "session", "slack",
+		"transaction", "txn",
+	}, prefix)
 }
 
 func (r *ToolReconciler) healthCheckMCPActorEndpoint(ctx context.Context, endpoint string, routeHost string) error {

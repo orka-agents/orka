@@ -99,8 +99,10 @@ func main() {
 	var apiPort int
 	var watchNamespace string
 	var generalWorkerImage string
+	var aiWorkerServiceAccountName string
+	var vendorWorkerServiceAccountName string
+	var containerWorkerServiceAccountName string
 	var aiWorkerClusterRoleName string
-	var aiWorkerTokenRequestClusterRoleName string
 	var vendorWorkerClusterRoleName string
 	var containerWorkerClusterRoleName string
 	var workerClusterRoleBindingNamePrefix string
@@ -216,7 +218,7 @@ func main() {
 		"task-provenance-admission-trusted-service-accounts",
 		os.Getenv("ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS"),
 		"Comma-separated ServiceAccount names trusted in the target Task namespace to set "+
-			"Orka-managed Task provenance fields. Defaults to orka-ai-worker.")
+			"Orka-managed Task provenance fields. Defaults to the configured AI and vendor worker ServiceAccounts.")
 	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
@@ -229,11 +231,14 @@ func main() {
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
+	flag.StringVar(&aiWorkerServiceAccountName, "ai-worker-service-account-name",
+		controller.AIWorkerServiceAccount, "ServiceAccount name for AI worker tasks.")
+	flag.StringVar(&vendorWorkerServiceAccountName, "vendor-worker-service-account-name",
+		controller.VendorWorkerServiceAccount, "ServiceAccount name for vendor worker tasks.")
+	flag.StringVar(&containerWorkerServiceAccountName, "container-worker-service-account-name",
+		controller.ContainerWorkerServiceAccount, "ServiceAccount name for container worker tasks.")
 	flag.StringVar(&aiWorkerClusterRoleName, "ai-worker-cluster-role-name",
 		controller.DefaultAIWorkerClusterRoleName, "ClusterRole name for AI worker tasks.")
-	flag.StringVar(&aiWorkerTokenRequestClusterRoleName, "ai-worker-tokenrequest-cluster-role-name",
-		controller.DefaultAIWorkerTokenRequestClusterRoleName,
-		"Namespaced TokenRequest ClusterRole name for AI worker tasks.")
 	flag.StringVar(&vendorWorkerClusterRoleName, "vendor-worker-cluster-role-name",
 		controller.DefaultVendorWorkerClusterRoleName, "ClusterRole name for vendor worker tasks.")
 	flag.StringVar(&containerWorkerClusterRoleName, "container-worker-cluster-role-name",
@@ -503,6 +508,27 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	// Empty worker ServiceAccount flags retain the package defaults for callers that
+	// explicitly clear a flag, matching the zero-value fallback in the controller.
+	if aiWorkerServiceAccountName == "" {
+		aiWorkerServiceAccountName = controller.AIWorkerServiceAccount
+	}
+	if vendorWorkerServiceAccountName == "" {
+		vendorWorkerServiceAccountName = controller.VendorWorkerServiceAccount
+	}
+	if containerWorkerServiceAccountName == "" {
+		containerWorkerServiceAccountName = controller.ContainerWorkerServiceAccount
+	}
+	// Preserve explicit admission overrides, but keep its empty default aligned
+	// with the configured trusted worker ServiceAccounts. Container workers remain
+	// excluded, matching the existing admission default.
+	if len(workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts)) == 0 {
+		taskProvenanceAdmissionTrustedServiceAccounts = strings.Join([]string{
+			aiWorkerServiceAccountName,
+			vendorWorkerServiceAccountName,
+		}, ",")
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -792,6 +818,9 @@ func main() {
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
+	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
+	jobBuilder.VendorWorkerServiceAccountName = vendorWorkerServiceAccountName
+	jobBuilder.ContainerWorkerServiceAccountName = containerWorkerServiceAccountName
 	if contextTokenTTSConfig.Enabled() {
 		jobBuilder.ContextTokenTTSEndpoint = contextTokenTTSConfig.Endpoint
 		jobBuilder.ContextTokenTTSAudience = contextTokenTTSConfig.Audience
@@ -841,31 +870,33 @@ func main() {
 
 	// Setup Task controller with helper components
 	if err := (&controller.TaskReconciler{
-		Client:                              mgr.GetClient(),
-		Scheme:                              mgr.GetScheme(),
-		JobBuilder:                          jobBuilder,
-		SessionManager:                      sessionManager,
-		WebhookNotifier:                     webhookNotifier,
-		KubeClient:                          kubeClient,
-		OutboundAccessResolver:              outboundAccessResolver,
-		BrokeredTransactionExchange:         brokeredTransactionExchange,
-		ResultStore:                         sqliteStore,
-		PlanStore:                           sqliteStore,
-		MessageStore:                        sqliteStore,
-		ArtifactStore:                       sqliteStore,
-		ExecutionEventStore:                 sqliteStore,
-		EnforceNamespaceIsolation:           enforceNamespaceIsolation,
-		MaxTasksPerNamespace:                maxTasksPerNamespaceValue,
-		ExecutionWorkspaceDefaultProvider:   executionWorkspaceDefaultProvider,
-		AgentSandboxEnabled:                 agentSandboxEnabled,
-		AgentSandboxConfig:                  agentSandboxConfig,
-		SubstrateEnabled:                    substrateEnabled,
-		SubstrateConfig:                     substrateConfig,
-		AIWorkerClusterRoleName:             aiWorkerClusterRoleName,
-		VendorWorkerClusterRoleName:         vendorWorkerClusterRoleName,
-		ContainerWorkerClusterRoleName:      containerWorkerClusterRoleName,
-		WorkerClusterRoleBindingNamePrefix:  workerClusterRoleBindingNamePrefix,
-		AIWorkerTokenRequestClusterRoleName: aiWorkerTokenRequestClusterRoleName,
+		Client:                             mgr.GetClient(),
+		Scheme:                             mgr.GetScheme(),
+		JobBuilder:                         jobBuilder,
+		SessionManager:                     sessionManager,
+		WebhookNotifier:                    webhookNotifier,
+		KubeClient:                         kubeClient,
+		OutboundAccessResolver:             outboundAccessResolver,
+		BrokeredTransactionExchange:        brokeredTransactionExchange,
+		ResultStore:                        sqliteStore,
+		PlanStore:                          sqliteStore,
+		MessageStore:                       sqliteStore,
+		ArtifactStore:                      sqliteStore,
+		ExecutionEventStore:                sqliteStore,
+		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
+		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
+		ExecutionWorkspaceDefaultProvider:  executionWorkspaceDefaultProvider,
+		AgentSandboxEnabled:                agentSandboxEnabled,
+		AgentSandboxConfig:                 agentSandboxConfig,
+		SubstrateEnabled:                   substrateEnabled,
+		SubstrateConfig:                    substrateConfig,
+		AIWorkerServiceAccountName:         aiWorkerServiceAccountName,
+		VendorWorkerServiceAccountName:     vendorWorkerServiceAccountName,
+		ContainerWorkerServiceAccountName:  containerWorkerServiceAccountName,
+		AIWorkerClusterRoleName:            aiWorkerClusterRoleName,
+		VendorWorkerClusterRoleName:        vendorWorkerClusterRoleName,
+		ContainerWorkerClusterRoleName:     containerWorkerClusterRoleName,
+		WorkerClusterRoleBindingNamePrefix: workerClusterRoleBindingNamePrefix,
 		TransactionCredentialReadScopes: append(
 			[]string(nil),
 			contextTokenAuthzConfig.SecretCredentialReadScopes()...,
@@ -877,10 +908,11 @@ func main() {
 	}
 
 	if err := (&controller.OutboundAccessPolicyReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Scheme:    mgr.GetScheme(),
-		Trust:     outboundAccessTrust,
+		Client:                     mgr.GetClient(),
+		APIReader:                  mgr.GetAPIReader(),
+		Scheme:                     mgr.GetScheme(),
+		Trust:                      outboundAccessTrust,
+		AIWorkerServiceAccountName: aiWorkerServiceAccountName,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OutboundAccessPolicy")
 		os.Exit(1)

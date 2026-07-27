@@ -858,6 +858,14 @@ func TestContextTokenTaskToolCredentialFailuresRejectsStaleOrRejectedOutboundAcc
 				policy.Status.Conditions[0].ObservedGeneration--
 			},
 		},
+		{
+			name: "terminating",
+			mutate: func(policy *corev1alpha1.OutboundAccessPolicy) {
+				now := metav1.Now()
+				policy.DeletionTimestamp = &now
+				policy.Finalizers = []string{"test.orka.ai/finalizer"}
+			},
+		},
 	}
 
 	for _, tt := range tests {

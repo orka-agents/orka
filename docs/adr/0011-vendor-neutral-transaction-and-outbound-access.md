@@ -59,6 +59,10 @@ Direct mode supports RFC 8693 token exchange and RFC 7523 JWT bearer grants.
 
 Direct mode rejects reserved OAuth additional parameters, `Txn-Token` as the output header, `authSecretRef` coexistence, cross-namespace Secrets, empty credentials, missing/non-Bearer results, and mismatched issued-token types. Transaction-token requested scopes must be a subset of the parent transaction scopes.
 
+ServiceAccount subjects are authorized with policy-owned namespaced Roles. Each Role grants `serviceaccounts/token:create` only for the exact resolved `serviceAccountRef` names via `resourceNames`; the AI worker never receives an unrestricted TokenRequest ClusterRole. Invalid, unresolved, or deleted policies revoke their RoleBinding/Role grant.
+
+The in-process AI worker is an explicitly trusted Orka worker; arbitrary task code runs in separately created Jobs rather than inside that worker process. TokenRequest Roles are therefore shared across trusted AI tasks in the policy namespace. Deployments that treat compromise of the AI worker itself as in scope require a controller-side token broker or per-task worker identities, which are outside this contract.
+
 ### Gateway adapter
 
 Gateway mode selects an exact Kubernetes Service namespace/name/port, scheme, and optional TLS server name/CA Secret. Orka dials that Service while preserving the original Tool authority, path, query, method, body, protocol headers, idempotency key, transaction token, and explicit Tool authorization. Same-namespace Services are allowed automatically. Cross-namespace Services require an exact entry in the appropriate gateway allowlist; wildcards are forbidden.

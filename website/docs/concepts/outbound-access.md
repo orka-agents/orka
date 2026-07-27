@@ -30,6 +30,10 @@ Direct mode supports RFC 8693 and RFC 7523, optional actor tokens, arbitrary tok
 
 Resource responses must be non-empty Bearer tokens with the expected `issued_token_type` for RFC 8693 (RFC 7523 may omit it). `Txn-Token` cannot be the output header, direct mode cannot coexist with `authSecretRef`, and Secret references cannot cross namespaces. Transaction-token scopes cannot expand the parent scope. Context-token Task creation fails closed when a referenced policy is unresolved and requires `orka:secrets:credentials:read` when direct mode reads Secret credentials or mints a ServiceAccount token.
 
+For `ServiceAccount` sources, the controller creates a policy-owned namespaced `Role` whose `serviceaccounts/token` permission is restricted with `resourceNames` to the exact resolved ServiceAccount references. The AI worker is bound only to that Role. Invalid or unresolved policies revoke the binding before execution can mint a token.
+
+The in-process AI worker is a trusted Orka worker; arbitrary task code runs in separate Jobs. These policy grants are shared by trusted AI tasks in the policy namespace. If your threat model includes compromise of the AI worker process itself, use a controller-side credential broker or per-task worker identities rather than enabling ServiceAccount token sources.
+
 ## Trusted gateway routing
 
 ```yaml

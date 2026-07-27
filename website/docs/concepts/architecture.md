@@ -79,7 +79,7 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 
 ### Custom Resource Definitions (`api/v1alpha1/`)
 
-Orka uses eight core CRDs:
+Orka uses nine core CRDs:
 
 | CRD | Purpose |
 |-----|---------|
@@ -91,6 +91,7 @@ Orka uses eight core CRDs:
 | **Skill** | Reusable prompt content injected into agent system prompts |
 | **RepositoryScan** | Repository security scan configuration, scheduling, status, and finding counts |
 | **RepositoryMonitor** | GitHub pull request monitor configuration, scheduling, status, and queue counts |
+| **SubstrateActorPool** | Desired state and status for a pool of Agent Substrate actors used by workspace-backed execution |
 
 ### Worker Images (`workers/`)
 
@@ -123,7 +124,7 @@ Orka uses eight core CRDs:
 
 ```
 orka/
-├── api/v1alpha1/           # CRD type definitions (Task, Agent, Tool, Provider, Skill, RepositoryScan)
+├── api/v1alpha1/           # Type definitions for the nine Orka CRDs
 ├── cmd/
 │   ├── main.go                # Controller entrypoint
 │   ├── cli/                   # CLI tool (login, chat, agent, task, status)

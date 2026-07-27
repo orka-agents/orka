@@ -137,6 +137,19 @@ func TestKubernetesResolverRejectsPlaintextDirectTarget(t *testing.T) {
 	}
 }
 
+func TestKubernetesResolverRejectsTerminatingPolicy(t *testing.T) {
+	scheme := resolverScheme(t)
+	policy := readyPolicy("direct", corev1alpha1.OutboundAccessPolicySpec{Direct: validDirect()})
+	now := metav1.Now()
+	policy.DeletionTimestamp = &now
+	policy.Finalizers = []string{"test.orka.ai/finalizer"}
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build()
+	_, err := (&KubernetesResolver{Reader: reader}).Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https"})
+	if err == nil || !containsFold(err.Error(), "not accepted") {
+		t.Fatalf("Resolve() error = %v, want terminating policy rejection", err)
+	}
+}
+
 func TestKubernetesResolverGatewayPreservesExactServiceTuple(t *testing.T) {
 	scheme := resolverScheme(t)
 	policy := readyPolicy("gateway", corev1alpha1.OutboundAccessPolicySpec{Gateway: &corev1alpha1.GatewayOutboundAccess{

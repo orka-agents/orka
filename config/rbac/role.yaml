@@ -179,6 +179,7 @@ rules:
   resources:
   - agentruntimes/finalizers
   - agents/finalizers
+  - outboundaccesspolicies/finalizers
   - providers/finalizers
   - repositorymonitors/finalizers
   - repositoryscans/finalizers
@@ -340,7 +341,6 @@ rules:
   - rbac.authorization.k8s.io
   resourceNames:
   - ai-worker-role
-  - ai-worker-tokenrequest-role
   - container-worker-role
   - vendor-worker-role
   resources:

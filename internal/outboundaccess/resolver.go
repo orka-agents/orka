@@ -462,7 +462,7 @@ func normalizeScopes(scopes []string) []string {
 }
 
 func policyConditionCurrentTrue(policy *corev1alpha1.OutboundAccessPolicy, conditionType string) bool {
-	if policy == nil || policy.Status.ObservedGeneration != policy.Generation {
+	if policy == nil || !policy.DeletionTimestamp.IsZero() || policy.Status.ObservedGeneration != policy.Generation {
 		return false
 	}
 	for _, condition := range policy.Status.Conditions {

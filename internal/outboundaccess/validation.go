@@ -200,8 +200,15 @@ func validateTokenSource(source corev1alpha1.OutboundTokenSource, jwtBearer bool
 		if source.ServiceAccountRef == nil || source.SecretRef != nil {
 			return invalid("ServiceAccount source requires only serviceAccountRef")
 		}
-		if strings.TrimSpace(source.ServiceAccountRef.Name) == "" {
+		name := source.ServiceAccountRef.Name
+		if name == "" {
 			return invalid("serviceAccountRef.name is required")
+		}
+		if strings.TrimSpace(name) != name {
+			return invalid("serviceAccountRef.name must not contain surrounding whitespace")
+		}
+		if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+			return invalid("serviceAccountRef.name must be a valid DNS subdomain")
 		}
 	case corev1alpha1.OutboundTokenSourceSecretRef:
 		if source.SecretRef == nil || source.ServiceAccountRef != nil {

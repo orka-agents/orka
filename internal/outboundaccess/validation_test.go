@@ -54,6 +54,18 @@ func TestValidateSpecDirectSecurityRules(t *testing.T) {
 		{name: "secret source without type", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
 			d.Subject = corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceSecretRef, SecretRef: secretRef("subject", "token")}
 		}, want: "tokenType"},
+		{name: "service account surrounding whitespace", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			d.Subject = corev1alpha1.OutboundTokenSource{
+				Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
+				ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{Name: " workload"},
+			}
+		}, want: "whitespace"},
+		{name: "invalid service account name", mutate: func(d *corev1alpha1.DirectOutboundAccess) {
+			d.Subject = corev1alpha1.OutboundTokenSource{
+				Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
+				ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{Name: "INVALID_NAME"},
+			}
+		}, want: "DNS subdomain"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
