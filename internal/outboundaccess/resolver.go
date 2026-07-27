@@ -371,24 +371,24 @@ func (r *KubernetesResolver) resolveClientAuthentication(ctx context.Context, na
 	case corev1alpha1.OutboundClientAuthNone:
 		resolved.Method = tokenexchange.ClientAuthNone
 	case corev1alpha1.OutboundClientAuthSecretBasic, corev1alpha1.OutboundClientAuthSecretPost:
-		value, err := r.readSecret(ctx, namespace, *auth.ClientSecretRef)
+		value, err := r.readSecretBytes(ctx, namespace, *auth.ClientSecretRef)
 		if err != nil {
 			return tokenexchange.ClientAuthentication{}, nil, err
 		}
-		resolved.ClientSecret = value
-		secrets = append(secrets, value)
+		resolved.ClientSecret = string(value)
+		secrets = append(secrets, string(value))
 		if method == corev1alpha1.OutboundClientAuthSecretBasic {
 			resolved.Method = tokenexchange.ClientAuthSecretBasic
 		} else {
 			resolved.Method = tokenexchange.ClientAuthSecretPost
 		}
 	case corev1alpha1.OutboundClientAuthPrivateKeyJWT:
-		value, err := r.readSecret(ctx, namespace, *auth.PrivateKeyRef)
+		value, err := r.readSecretBytes(ctx, namespace, *auth.PrivateKeyRef)
 		if err != nil {
 			return tokenexchange.ClientAuthentication{}, nil, err
 		}
 		resolved.Method = tokenexchange.ClientAuthPrivateKeyJWT
-		resolved.PrivateKeyPEM = []byte(value)
+		resolved.PrivateKeyPEM = value
 	default:
 		return tokenexchange.ClientAuthentication{}, nil, errors.New("unsupported outbound client authentication method")
 	}
@@ -401,32 +401,40 @@ func (r *KubernetesResolver) resolveTLS(ctx context.Context, namespace string, c
 	}
 	resolved := tokenexchange.TLSConfig{ServerName: strings.TrimSpace(config.ServerName)}
 	if config.CASecretRef != nil {
-		value, err := r.readSecret(ctx, namespace, *config.CASecretRef)
+		value, err := r.readSecretBytes(ctx, namespace, *config.CASecretRef)
 		if err != nil {
 			return tokenexchange.TLSConfig{}, err
 		}
-		resolved.CAPEM = []byte(value)
+		resolved.CAPEM = value
 	}
 	return resolved, nil
 }
 
 func (r *KubernetesResolver) readSecret(ctx context.Context, policyNamespace string, ref corev1alpha1.NamespacedSecretKeySelector) (string, error) {
+	value, err := r.readSecretBytes(ctx, policyNamespace, ref)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(value)), nil
+}
+
+func (r *KubernetesResolver) readSecretBytes(ctx context.Context, policyNamespace string, ref corev1alpha1.NamespacedSecretKeySelector) ([]byte, error) {
 	namespace := strings.TrimSpace(ref.Namespace)
 	if namespace == "" {
 		namespace = policyNamespace
 	}
 	if namespace != policyNamespace {
-		return "", errors.New("cross-namespace Secret references are not allowed")
+		return nil, errors.New("cross-namespace Secret references are not allowed")
 	}
 	secret := &corev1.Secret{}
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, secret); err != nil {
-		return "", fmt.Errorf("read outbound access Secret: %w", err)
+		return nil, fmt.Errorf("read outbound access Secret: %w", err)
 	}
 	value, ok := secret.Data[ref.Key]
 	if !ok || len(value) == 0 {
-		return "", errors.New("outbound access Secret key is missing or empty")
+		return nil, errors.New("outbound access Secret key is missing or empty")
 	}
-	return strings.TrimSpace(string(value)), nil
+	return append([]byte(nil), value...), nil
 }
 
 func validateRequestedScopeSubset(requested, parent []string) error {
@@ -608,7 +616,7 @@ func compactSensitiveValues(values []string) []string {
 	seen := map[string]struct{}{}
 	out := make([]string, 0, len(values))
 	for _, value := range values {
-		if value = strings.TrimSpace(value); value == "" {
+		if value == "" {
 			continue
 		}
 		if _, ok := seen[value]; ok {

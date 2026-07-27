@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -68,6 +69,43 @@ func TestKubernetesResolverDirectSecretExchange(t *testing.T) {
 	}
 	if exchanger.request.RequiredTokenType != "Bearer" || exchanger.request.CacheNamespace == "" {
 		t.Fatalf("exchange validation/cache = %#v", exchanger.request)
+	}
+}
+
+func TestKubernetesResolverPreservesOAuthClientSecretBytes(t *testing.T) {
+	scheme := resolverScheme(t)
+	policy := readyPolicy("direct-client-auth", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+		Grant:         corev1alpha1.OutboundGrantTokenExchange,
+		TokenEndpoint: corev1alpha1.OutboundTokenEndpoint{URL: "https://issuer.example.test/token"},
+		Subject: corev1alpha1.OutboundTokenSource{
+			Source:    corev1alpha1.OutboundTokenSourceSecretRef,
+			TokenType: tokenexchange.TokenTypeAccessToken,
+			SecretRef: secretRef("subject", "token"),
+		},
+		ClientAuthentication: &corev1alpha1.OutboundClientAuthentication{
+			Method:          corev1alpha1.OutboundClientAuthSecretBasic,
+			ClientID:        "client",
+			ClientSecretRef: secretRef("client-auth", "secret"),
+		},
+		ExpectedIssuedTokenType: tokenexchange.TokenTypeAccessToken,
+	}})
+	const clientSecret = "  exact client secret  "
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		policy,
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "subject", Namespace: "tenant"}, Data: map[string][]byte{"token": []byte("assertion")}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "client-auth", Namespace: "tenant"}, Data: map[string][]byte{"secret": []byte(clientSecret)}},
+	).Build()
+	exchanger := &captureExchanger{result: tokenexchange.Result{AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer"}}
+	resolver := &KubernetesResolver{Reader: reader, Exchanger: exchanger}
+	resolution, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: policy.Name, TargetScheme: "https", CredentialScopeAllowed: true})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if exchanger.request.ClientAuthentication.ClientSecret != clientSecret {
+		t.Fatalf("client secret = %q, want exact bytes %q", exchanger.request.ClientAuthentication.ClientSecret, clientSecret)
+	}
+	if !slices.Contains(resolution.SensitiveValues, clientSecret) {
+		t.Fatalf("sensitive values = %#v, want exact client secret", resolution.SensitiveValues)
 	}
 }
 
