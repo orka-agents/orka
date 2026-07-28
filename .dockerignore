@@ -20,6 +20,8 @@
 !examples/harness/
 !examples/harness/echo/
 !examples/harness/echo/*.go
+!examples/harness/foundry-responses/
+!examples/harness/foundry-responses/*.go
 !*.go
 **/*_test.go
 

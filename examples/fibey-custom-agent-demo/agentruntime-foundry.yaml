@@ -1,20 +1,25 @@
-# Optional namespace-local facade for a Foundry hosted-agent adapter implementing orka.harness.v1.
-# Apply this with secret-foundry.yaml and point an Agent runtimeRef at fibey-foundry-runtime
-# after deploying the adapter Service named fibey-foundry-runtime.
+# Optional namespace-local facade for a Foundry hosted AgentKit Responses adapter
+# implementing orka.harness.v1. Apply this with secret-foundry.yaml and point an
+# Agent runtimeRef at fibey-agentkit-foundry-responses after deploying the
+# examples/harness/foundry-responses adapter Service with the same name.
 apiVersion: core.orka.ai/v1alpha1
 kind: AgentRuntime
 metadata:
-  name: fibey-foundry-runtime
+  name: fibey-agentkit-foundry-responses
 spec:
   contractVersion: orka.harness.v1
   deployment:
     mode: external-endpoint
-    endpoint: http://fibey-foundry-runtime.default.svc.cluster.local:8080
+    endpoint: http://fibey-agentkit-foundry-responses.default.svc.cluster.local:8080
   clientAuth:
     bearerTokenSecretRef:
-      name: fibey-foundry-runtime-token
+      name: fibey-agentkit-foundry-responses-token
       key: token
   capabilities:
+    # This sample assumes the hosted AgentKit deployment has static Fibey tool
+    # schemas plus probe-only conformance_read/conformance_write schemas, and
+    # has passed live AgentRuntime read/write conformance. Fake-server adapter
+    # tests alone are not sufficient. Narrow this list until each gate passes.
     toolExecutionModes:
     - observed
     - brokered

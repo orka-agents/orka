@@ -1,0 +1,6 @@
+{
+  "type": "function_call_output",
+  "call_id": "call-1",
+  "output": "{\"approved\":false,\"error\":{\"code\":\"approval_declined\",\"message\":\"tool call was not approved\"}}",
+  "status": "completed"
+}

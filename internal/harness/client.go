@@ -27,7 +27,8 @@ type Client struct {
 	authBearerValue string
 }
 
-const maxHarnessSSEFrameBytes = 1 << 20
+// MaxSSEFrameBytes is the largest single SSE data line the harness client accepts.
+const MaxSSEFrameBytes = 1 << 20
 
 var errSSEDone = errors.New("harness SSE stream done")
 
@@ -327,7 +328,7 @@ func (c *Client) resolve(rel string) *url.URL {
 
 func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxHarnessSSEFrameBytes)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxSSEFrameBytes)
 	var data strings.Builder
 	for scanner.Scan() {
 		line := scanner.Text()

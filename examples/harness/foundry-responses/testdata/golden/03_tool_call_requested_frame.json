@@ -1,0 +1,13 @@
+{
+  "version": "orka.harness.v1",
+  "type": "ToolCallRequested",
+  "runtimeSessionID": "foundry-brokered-runtime",
+  "turnID": "foundry-brokered-turn",
+  "correlationID": "foundry-brokered-corr",
+  "seq": 2,
+  "summary": "foundry hosted tool call requested",
+  "content": {"incident":"inc-1"},
+  "toolName": "support-ticket-lookup",
+  "toolCallID": "call-1",
+  "metadata": {"backend":"foundry-responses"}
+}

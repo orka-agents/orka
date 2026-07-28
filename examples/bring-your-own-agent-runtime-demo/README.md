@@ -90,7 +90,7 @@ examples/fibey-custom-agent-demo/switch-backend.sh http
 examples/fibey-custom-agent-demo/switch-backend.sh foundry
 ```
 
-The workflow, Tool CRDs, approval UX, and task/result APIs remain Orka-owned. Remote backends receive safe tool schemas and scoped turn metadata only; they do not receive downstream Tool credentials.
+The workflow, Tool CRDs, approval UX, and task/result APIs remain Orka-owned. Remote backends receive safe tool schemas and scoped turn metadata only; they do not receive downstream Tool credentials. For Foundry hosted AgentKit Responses, the adapter does not send request-level `tools`; AgentKit schemas must be configured statically and the facade capabilities must match the conformance-tested classes.
 
 ## Troubleshooting
 

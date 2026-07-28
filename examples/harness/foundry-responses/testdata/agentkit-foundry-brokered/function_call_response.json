@@ -1,0 +1,19 @@
+{
+  "id": "caresp_test",
+  "object": "response",
+  "created_at": 0,
+  "status": "completed",
+  "model": "gpt-4o-mini",
+  "output": [
+    {
+      "id": "fc_test",
+      "type": "function_call",
+      "call_id": "call_caresp_test_1",
+      "name": "conformance_read",
+      "arguments": "{\"probe\":true}",
+      "status": "completed",
+      "response_id": "caresp_test"
+    }
+  ],
+  "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+}

@@ -1,0 +1,85 @@
+# Optional Fibey brokered tools for a Foundry hosted AgentKit Responses demo.
+# These are not included in the default kustomization because the downstream
+# services are deployment-specific. Remote hosted AgentKit receives only safe
+# schemas; Orka owns execution, credentials, approvals, idempotency, and audit.
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: check-network-telemetry
+spec:
+  description: Read sanitized Fibey network telemetry for a site or asset.
+  brokeredToolClass: read
+  parameters:
+    type: object
+    properties:
+      site:
+        type: string
+      asset:
+        type: string
+    required:
+    - site
+  http:
+    url: http://fibey-telemetry.default.svc.cluster.local:8080/check
+    method: POST
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: get-active-incidents
+spec:
+  description: Read active Fibey incident records for a site.
+  brokeredToolClass: read
+  parameters:
+    type: object
+    properties:
+      site:
+        type: string
+    required:
+    - site
+  http:
+    url: http://fibey-incidents.default.svc.cluster.local:8080/active
+    method: POST
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: dispatch-work-order
+spec:
+  description: Dispatch an approved Fibey work order. Requires Orka approval and idempotency.
+  brokeredToolClass: write
+  parameters:
+    type: object
+    properties:
+      site:
+        type: string
+      action:
+        type: string
+      severity:
+        type: string
+    required:
+    - site
+    - action
+  http:
+    url: http://fibey-dispatch.default.svc.cluster.local:8080/work-orders
+    method: POST
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: escalate-incident
+spec:
+  description: Escalate an approved Fibey incident to an on-call owner. Requires Orka approval and idempotency.
+  brokeredToolClass: write
+  parameters:
+    type: object
+    properties:
+      incident:
+        type: string
+      reason:
+        type: string
+    required:
+    - incident
+    - reason
+  http:
+    url: http://fibey-dispatch.default.svc.cluster.local:8080/escalations
+    method: POST

@@ -1,0 +1,6 @@
+{
+  "type": "function_call_output",
+  "call_id": "call-1",
+  "output": "{\"approved\":false,\"error\":{\"code\":\"tool_policy_rejected\",\"message\":\"tool call was rejected by policy\"}}",
+  "status": "completed"
+}

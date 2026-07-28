@@ -1,0 +1,11 @@
+{
+  "previous_response_id": "caresp_test",
+  "input": [
+    {
+      "type": "function_call_output",
+      "call_id": "call_caresp_test_1",
+      "output": "{\"approved\":true,\"output\":{\"success\":true}}",
+      "status": "completed"
+    }
+  ]
+}

@@ -27,7 +27,7 @@ case "${backend}" in
     ;;
   foundry)
     agent="fibey-remote-foundry"
-    runtime="fibey-foundry-runtime"
+    runtime="fibey-agentkit-foundry-responses"
     ;;
   -h|--help|help|"")
     usage

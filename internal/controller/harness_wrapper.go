@@ -59,6 +59,7 @@ const (
 	harnessWrapperCorrelationIDAnno           = "orka.ai/harness-wrapper-correlation-id"
 	harnessWrapperLastFrameSeqAnno            = "orka.ai/harness-wrapper-last-frame-seq"
 	harnessWrapperStartedAnno                 = "orka.ai/harness-wrapper-started"
+	harnessWrapperSubmissionAttemptedAnno     = "orka.ai/harness-wrapper-submission-attempted"
 	harnessWrapperPlannedAtAnno               = "orka.ai/harness-wrapper-planned-at"
 	harnessWrapperMetadataAnno                = "orka.ai/harness-wrapper-metadata"
 	harnessWrapperRuntimeRefAnno              = "orka.ai/harness-wrapper-runtime-ref"
@@ -81,6 +82,16 @@ func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
 	}
 	return strings.EqualFold(strings.TrimSpace(task.Annotations[harnessWrapperStartedAnno]), scheduledRunLabelValue) &&
 		taskHasPlannedHarnessWrapperTurn(task)
+}
+
+func taskHasHarnessWrapperSubmissionAttempt(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	return strings.EqualFold(
+		strings.TrimSpace(task.Annotations[harnessWrapperSubmissionAttemptedAnno]),
+		scheduledRunLabelValue,
+	)
 }
 
 func taskHasPlannedHarnessWrapperTurn(task *corev1alpha1.Task) bool {
@@ -420,7 +431,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	var err error
 	startedPlannedTurn := false
 	if taskHasPlannedHarnessWrapperTurn(task) {
-		if taskHasHarnessWrapperTurn(task) {
+		if taskHasHarnessWrapperTurn(task) || taskHasHarnessWrapperSubmissionAttempt(task) {
 			startedPlannedTurn = true
 		}
 		request, err = r.plannedHarnessWrapperStartTurnRequest(ctx, task, agent, now.Time)
@@ -516,7 +527,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			}
 			if err := r.validateHarnessWrapperCapabilities(ctx, client, request); err != nil {
 				if target.RuntimeRefName != "" && harnessWrapperAuthError(err) {
-					if shouldWait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task); waitErr != nil {
+					if shouldWait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task, false); waitErr != nil {
 						return ctrl.Result{}, waitErr
 					} else if shouldWait {
 						return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -526,6 +537,9 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 					return ctrl.Result{RequeueAfter: time.Second}, nil
 				}
 				return r.failTask(ctx, task, err.Error())
+			}
+			if err := r.patchHarnessWrapperSubmissionAttempted(ctx, task); err != nil {
+				return ctrl.Result{}, err
 			}
 			if _, err := client.StartTurn(ctx, request); err != nil {
 				message := err.Error()
@@ -542,7 +556,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 					}
 					return ctrl.Result{RequeueAfter: time.Second}, nil
 				case target.RuntimeRefName != "" && harnessWrapperAuthError(err):
-					if wait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task); waitErr != nil {
+					if wait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task, true); waitErr != nil {
 						return ctrl.Result{}, waitErr
 					} else if wait {
 						return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -556,7 +570,14 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			}
 		}
 		turnAccepted = true
-		if err := r.patchHarnessWrapperStarted(ctx, task); err != nil {
+		if !taskHasHarnessWrapperTurn(task) {
+			if err := r.patchHarnessWrapperStarted(ctx, task, false); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	}
+	if startedPlannedTurn && !taskHasHarnessWrapperTurn(task) {
+		if err := r.patchHarnessWrapperStarted(ctx, task, taskHasHarnessWrapperSubmissionAttempt(task)); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -715,11 +736,19 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 	}
 	if err != nil && result.Completed == nil && result.Failed == nil && !result.Cancelled {
 		if target.RuntimeRefName != "" && harnessWrapperAuthError(err) {
-			if wait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task); waitErr != nil {
+			if wait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task, false); waitErr != nil {
 				return ctrl.Result{}, waitErr
 			} else if wait {
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
+		}
+		if harnessWrapperStreamErrorIsMissingTurn(err) && taskHasHarnessWrapperSubmissionAttempt(task) {
+			return r.completeTask(
+				ctx,
+				task,
+				corev1alpha1.TaskPhaseFailed,
+				"harness runtime lost a turn after StartTurn submission outcome became unknown",
+			)
 		}
 		if harnessWrapperStreamErrorIsMissingTurn(err) && r.shouldRetry(task) {
 			if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
@@ -933,7 +962,11 @@ func harnessWrapperAuthRetries(task *corev1alpha1.Task) int {
 	return retries
 }
 
-func (r *TaskReconciler) waitForHarnessWrapperAuthRetry(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+func (r *TaskReconciler) waitForHarnessWrapperAuthRetry(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	clearSubmissionAttempt bool,
+) (bool, error) {
 	retries := harnessWrapperAuthRetries(task)
 	if retries >= harnessWrapperMaxAuthRetries {
 		return false, nil
@@ -943,6 +976,9 @@ func (r *TaskReconciler) waitForHarnessWrapperAuthRetry(ctx context.Context, tas
 		task.Annotations = map[string]string{}
 	}
 	task.Annotations[harnessWrapperAuthRetriesAnno] = strconv.Itoa(retries + 1)
+	if clearSubmissionAttempt {
+		delete(task.Annotations, harnessWrapperSubmissionAttemptedAnno)
+	}
 	if err := r.Patch(ctx, task, patch); err != nil {
 		return false, err
 	}
@@ -1022,6 +1058,7 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	task.Annotations[harnessWrapperCorrelationIDAnno] = request.CorrelationID
 	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
 	task.Annotations[harnessWrapperStartedAnno] = "false"
+	delete(task.Annotations, harnessWrapperSubmissionAttemptedAnno)
 	task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
 	if runtimeRefName := strings.TrimSpace(request.Metadata["runtimeRef"]); runtimeRefName != "" {
 		task.Annotations[harnessWrapperRuntimeRefAnno] = runtimeRefName
@@ -1050,7 +1087,28 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	return r.Patch(ctx, task, patch)
 }
 
-func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *corev1alpha1.Task) error {
+func (r *TaskReconciler) patchHarnessWrapperSubmissionAttempted(ctx context.Context, task *corev1alpha1.Task) error {
+	latest := &corev1alpha1.Task{}
+	if err := r.Get(ctx, ctrlclient.ObjectKey{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return err
+	}
+	patch := ctrlclient.MergeFrom(latest.DeepCopy())
+	if latest.Annotations == nil {
+		latest.Annotations = map[string]string{}
+	}
+	latest.Annotations[harnessWrapperSubmissionAttemptedAnno] = scheduledRunLabelValue
+	if err := r.Patch(ctx, latest, patch); err != nil {
+		return err
+	}
+	latest.DeepCopyInto(task)
+	return nil
+}
+
+func (r *TaskReconciler) patchHarnessWrapperStarted(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	preserveSubmissionAttempt bool,
+) error {
 	latest := &corev1alpha1.Task{}
 	if err := r.Get(ctx, ctrlclient.ObjectKey{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
 		return err
@@ -1074,6 +1132,9 @@ func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *c
 		}
 	}
 	latest.Annotations[harnessWrapperStartedAnno] = scheduledRunLabelValue
+	if !preserveSubmissionAttempt {
+		delete(latest.Annotations, harnessWrapperSubmissionAttemptedAnno)
+	}
 	if err := r.Patch(ctx, latest, patch); err != nil {
 		return err
 	}
@@ -1409,7 +1470,9 @@ func harnessWrapperStartTurnErrorIsRetryable(err error) bool {
 		return false
 	}
 	message := err.Error()
-	for _, marker := range []string{"(400)", "(401)", "(403)", "unsupported version", "harness did not accept"} {
+	for _, marker := range []string{
+		"(400)", "(401)", "(403)", "(410)", "unsupported version", "harness did not accept",
+	} {
 		if strings.Contains(message, marker) {
 			return false
 		}
@@ -1441,6 +1504,7 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 		delete(task.Annotations, harnessWrapperCorrelationIDAnno)
 		delete(task.Annotations, harnessWrapperLastFrameSeqAnno)
 		delete(task.Annotations, harnessWrapperStartedAnno)
+		delete(task.Annotations, harnessWrapperSubmissionAttemptedAnno)
 		delete(task.Annotations, harnessWrapperPlannedAtAnno)
 		delete(task.Annotations, harnessWrapperMetadataAnno)
 		delete(task.Annotations, harnessWrapperRuntimeRefAnno)
@@ -1459,6 +1523,24 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 }
 
 func harnessWrapperStreamErrorIsMissingTurn(err error) bool {
+	if err == nil {
+		return false
+	}
+	var clientErr harness.ClientError
+	if errors.As(err, &clientErr) && clientErr.StatusCode > 0 {
+		return clientErr.StatusCode == 404
+	}
+	message := err.Error()
+	if strings.Contains(message, "(404)") {
+		return true
+	}
+	if strings.Contains(message, "(410)") {
+		return false
+	}
+	return strings.Contains(message, "turn not found")
+}
+
+func harnessWrapperCancelErrorIsMissingTurn(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -1489,7 +1571,7 @@ func harnessWrapperStreamErrorIsTerminal(err error) bool {
 }
 
 func harnessWrapperStreamErrorIsBrokeredPause(err error) bool {
-	if err == nil {
+	if err == nil || harnessWrapperStreamErrorIsTerminal(err) {
 		return false
 	}
 	return strings.Contains(err.Error(), "continue brokered tool call") || errors.Is(err, errHarnessBrokeredApprovalPending)
@@ -1520,7 +1602,7 @@ func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *cor
 		CorrelationID:    strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]),
 		Reason:           reason,
 	})
-	if err != nil && harnessWrapperStreamErrorIsMissingTurn(err) {
+	if err != nil && harnessWrapperCancelErrorIsMissingTurn(err) {
 		return nil
 	}
 	return err
