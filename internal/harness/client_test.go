@@ -5,12 +5,35 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
+
+func TestClientDecodesJSONEscapesBeforeBearerSanitization(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"\u0073ecret"}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithBearerToken("secret"))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.Health(context.Background())
+	if err == nil {
+		t.Fatal("Health() error = nil, want bad request")
+	}
+	if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), `\u0073ecret`) {
+		t.Fatalf("Health() error exposed encoded bearer: %v", err)
+	}
+}
 
 func TestClientSanitizesTransportErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -276,6 +299,56 @@ func TestClientStreamFramesSanitizesConfiguredBearerFromFrame(t *testing.T) {
 	}
 }
 
+func TestStreamFramesWithPayloadBytesReportsPreSanitizationSize(t *testing.T) {
+	sensitiveValue := strings.Repeat("s", 32<<10)
+	content, err := json.Marshal(map[string]string{"api_key": sensitiveValue})
+	if err != nil {
+		t.Fatalf("json.Marshal(content) error = %v", err)
+	}
+	frame := HarnessEventFrame{
+		Version:          ProtocolVersion,
+		Type:             FrameRuntimeOutput,
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Seq:              1,
+		Content:          content,
+	}
+	rawPayload, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatalf("json.Marshal(frame) error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_ = WriteSSEFrame(w, frame)
+		_ = WriteSSEDone(w)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	var got HarnessEventFrame
+	var payloadBytes int
+	err = StreamFramesWithPayloadBytes(client, context.Background(), frame.TurnID, 0, func(value HarnessEventFrame, size int) error {
+		got = value
+		payloadBytes = size
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamFramesWithPayloadBytes() error = %v", err)
+	}
+	if payloadBytes != len(rawPayload) {
+		t.Fatalf("payload bytes = %d, want %d", payloadBytes, len(rawPayload))
+	}
+	if bytes.Contains(got.Content, []byte(sensitiveValue)) {
+		t.Fatal("sanitized callback frame retained the sensitive value")
+	}
+	if len(got.Content) >= len(frame.Content) {
+		t.Fatalf("sanitized content bytes = %d, want less than raw %d", len(got.Content), len(frame.Content))
+	}
+}
+
 func TestSanitizeHarnessFramePreservesBrokeredToolArguments(t *testing.T) {
 	client := &Client{authBearerValue: "mock-token"}
 	original := json.RawMessage(` {"password":"keep-me", "pageToken":"cursor"} `)
@@ -504,9 +577,12 @@ func TestClientStreamFramesPreservesCallbackClientError(t *testing.T) {
 func TestRedactExactBearerValue(t *testing.T) {
 	t.Run("redacts embedded short token text", func(t *testing.T) {
 		got := RedactExactBearerValue("turn already exists; reflected x", "x")
-		want := "turn already e[REDACTED]ists; reflected [REDACTED]"
+		want := "turn already eists; reflected "
 		if got != want {
 			t.Fatalf("RedactExactBearerValue() = %q, want %q", got, want)
+		}
+		if len(got) > len("turn already exists; reflected x") {
+			t.Fatalf("RedactExactBearerValue() expanded short-token input to %d bytes", len(got))
 		}
 	})
 	t.Run("redacts key value assignment", func(t *testing.T) {
@@ -562,7 +638,7 @@ func TestClientErrorClassificationIncludesOperation(t *testing.T) {
 }
 
 func TestClientDuplicateTurnReasonRequiresConflictStatus(t *testing.T) {
-	for _, status := range []int{http.StatusBadRequest, http.StatusTooManyRequests, http.StatusInternalServerError} {
+	for _, status := range []int{http.StatusBadRequest, http.StatusGone, http.StatusTooManyRequests, http.StatusInternalServerError} {
 		err := safeClientError("post", status, "turn already exists")
 		var clientErr ClientError
 		if !errors.As(err, &clientErr) {
@@ -576,6 +652,49 @@ func TestClientDuplicateTurnReasonRequiresConflictStatus(t *testing.T) {
 	var clientErr ClientError
 	if !errors.As(err, &clientErr) || !clientErr.IsDuplicateTurn() {
 		t.Fatalf("safeClientError(409) = %#v, want duplicate turn", err)
+	}
+	err = safeClientError("post", http.StatusConflict, "conflict")
+	if !errors.As(err, &clientErr) || clientErr.IsDuplicateTurn() {
+		t.Fatalf("safeClientError(unrelated 409) = %#v, want non-duplicate", err)
+	}
+	for _, message := range []string{
+		"turn already exists with different payload",
+		"TURN ALREADY EXISTS",
+		" turn already exists ",
+	} {
+		err = safeClientError("post", http.StatusConflict, message)
+		if !errors.As(err, &clientErr) || clientErr.IsDuplicateTurn() {
+			t.Fatalf("safeClientError(non-canonical duplicate 409 %q) = %#v, want non-duplicate", message, err)
+		}
+	}
+	err = safeClientError("post", http.StatusConflict, `{"error":"turn already completed"}`)
+	if !errors.As(err, &clientErr) || !clientErr.IsDuplicateTurn() || !clientErr.IsCompletedDuplicateTurn() {
+		t.Fatalf("safeClientError(completed 409) = %#v, want completed duplicate", err)
+	}
+}
+
+func TestClientCapacityReasonRequiresCanonicalConflict(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		status  int
+		message string
+		want    bool
+	}{
+		{name: "canonical", status: http.StatusConflict, message: `{"error":"maximum concurrent turns reached"}`, want: true},
+		{name: "wrong status", status: http.StatusTooManyRequests, message: "maximum concurrent turns reached"},
+		{name: "non-canonical suffix", status: http.StatusConflict, message: "maximum concurrent turns reached upstream"},
+		{name: "server error", status: http.StatusInternalServerError, message: "maximum concurrent turns reached"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := safeClientError("post", tt.status, tt.message)
+			var clientErr ClientError
+			if !errors.As(err, &clientErr) {
+				t.Fatalf("safeClientError() = %T, want ClientError", err)
+			}
+			if clientErr.IsCapacityExceeded() != tt.want {
+				t.Fatalf("IsCapacityExceeded() = %t, want %t", clientErr.IsCapacityExceeded(), tt.want)
+			}
+		})
 	}
 }
 
@@ -599,6 +718,32 @@ func TestClientStartTurnRejectsSensitiveEventStreamPath(t *testing.T) {
 	_, err = client.StartTurn(context.Background(), validClientStartTurnRequest())
 	if err == nil || strings.Contains(err.Error(), value) {
 		t.Fatalf("StartTurn() error = %v, want sanitized eventStreamPath rejection", err)
+	}
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) || !clientErr.RemoteAccepted {
+		t.Fatalf("StartTurn() error = %#v, want accepted remote marker", err)
+	}
+}
+
+func TestClientStartTurnRejectsMismatchedEventStreamPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		WriteJSON(w, http.StatusAccepted, StartTurnResponse{
+			Version:          ProtocolVersion,
+			Accepted:         true,
+			RuntimeSessionID: "runtime-a",
+			TurnID:           "turn-a",
+			CorrelationID:    "corr-a",
+			EventStreamPath:  "/v1/turns/other/events",
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.StartTurn(context.Background(), validClientStartTurnRequest())
+	if err == nil || !strings.Contains(err.Error(), "eventStreamPath does not match requested turn") {
+		t.Fatalf("StartTurn() error = %v, want canonical eventStreamPath rejection", err)
 	}
 	var clientErr ClientError
 	if !errors.As(err, &clientErr) || !clientErr.RemoteAccepted {
@@ -963,6 +1108,69 @@ func TestClientContinueTurnMismatchedResponseIsError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "runtime session") {
 		t.Fatalf("ContinueTurn() error = %v, want identity mismatch", err)
 	}
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) || !clientErr.RemoteAccepted {
+		t.Fatalf("ContinueTurn() error = %#v, want accepted remote marker", err)
+	}
+}
+
+func TestClientContinueTurnMissingAcceptedMarksAcceptanceUnknown(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		accepted any
+		omit     bool
+	}{
+		{name: "omitted", omit: true},
+		{name: "null", accepted: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				body := map[string]any{
+					"version":          ProtocolVersion,
+					"runtimeSessionID": "runtime-a",
+					"turnID":           "turn-a",
+					"correlationID":    "corr-a",
+				}
+				if !tt.omit {
+					body["accepted"] = tt.accepted
+				}
+				WriteJSON(w, http.StatusAccepted, body)
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			_, err = client.ContinueTurn(context.Background(), validClientContinueTurnRequest())
+			if err == nil || !strings.Contains(err.Error(), "did not include accepted") {
+				t.Fatalf("ContinueTurn() error = %v, want missing accepted", err)
+			}
+			var clientErr ClientError
+			if !errors.As(err, &clientErr) || !clientErr.RemoteAcceptanceUnknown || clientErr.RemoteAccepted {
+				t.Fatalf("ContinueTurn() error = %#v, want unknown acceptance", err)
+			}
+		})
+	}
+}
+
+func validClientContinueTurnRequest() ContinueTurnRequest {
+	return ContinueTurnRequest{
+		Version:          ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task-a",
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		ToolResults: []ToolCallResult{{
+			Version:          ProtocolVersion,
+			RuntimeSessionID: "runtime-a",
+			TurnID:           "turn-a",
+			ToolCallID:       "tool-1",
+			IdempotencyKey:   "runtime-a:turn-a:tool-1",
+			Output:           []byte(`{"success":true}`),
+		}},
+	}
 }
 
 func TestNewClientDefaultDoesNotSetTotalHTTPTimeout(t *testing.T) {
@@ -1089,6 +1297,10 @@ func TestReadSSEFramesRejectsOversizedMultiLineEvent(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exceeds harness frame limit") {
 		t.Fatalf("readSSEFrames() error = %v, want cumulative size rejection", err)
 	}
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) || !clientErr.IsProtocolViolation() {
+		t.Fatalf("readSSEFrames() error = %#v, want protocol violation", err)
+	}
 	client := &Client{authBearerValue: "stream_frames"}
 	err = readSSEFramesWithSanitizer(
 		strings.NewReader(payload),
@@ -1097,6 +1309,141 @@ func TestReadSSEFramesRejectsOversizedMultiLineEvent(t *testing.T) {
 	)
 	if err == nil || strings.Contains(err.Error(), client.authBearerValue) {
 		t.Fatalf("sanitized readSSEFrames() error = %v, want operation bearer redacted", err)
+	}
+}
+
+func TestReadSSEFramesIgnoresSingleEmptyDataEvent(t *testing.T) {
+	emitted := false
+	err := readSSEFrames(strings.NewReader("data:\n\n"), func(HarnessEventFrame) error {
+		emitted = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("readSSEFrames() error = %v", err)
+	}
+	if emitted {
+		t.Fatal("readSSEFrames() emitted an empty SSE data event")
+	}
+}
+
+func TestReadSSEFramesDiscardsUnterminatedEventAtEOF(t *testing.T) {
+	frame := HarnessEventFrame{
+		Version:          ProtocolVersion,
+		Type:             FrameTurnCompleted,
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Seq:              1,
+		Completed:        &TurnCompleted{Result: "ok", FinalEventSeq: 1},
+	}
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatalf("json.Marshal(frame) error = %v", err)
+	}
+	emitted := false
+	err = readSSEFrames(strings.NewReader("data: "+string(encoded)), func(HarnessEventFrame) error {
+		emitted = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("readSSEFrames() error = %v", err)
+	}
+	if emitted {
+		t.Fatal("readSSEFrames() emitted unterminated EOF event")
+	}
+}
+
+func TestReadSSEFramesAcceptsCRDelimitedStreamAndLeadingBOM(t *testing.T) {
+	frame := HarnessEventFrame{
+		Version:          ProtocolVersion,
+		Type:             FrameRuntimeOutput,
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Seq:              1,
+	}
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatalf("json.Marshal(frame) error = %v", err)
+	}
+	var got []HarnessEventFrame
+	payload := "\uFEFFdata: " + string(encoded) + "\r\r"
+	err = readSSEFrames(strings.NewReader(payload), func(value HarnessEventFrame) error {
+		got = append(got, value)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("readSSEFrames() error = %v", err)
+	}
+	if len(got) != 1 || got[0].TurnID != frame.TurnID || got[0].Seq != frame.Seq {
+		t.Fatalf("frames = %#v, want one CR-delimited frame", got)
+	}
+}
+
+func TestReadSSEFramesCountsWhitespaceOnlyDataTowardEventLimit(t *testing.T) {
+	frame := HarnessEventFrame{
+		Version:          ProtocolVersion,
+		Type:             FrameRuntimeOutput,
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Seq:              1,
+	}
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatalf("json.Marshal(frame) error = %v", err)
+	}
+	paddingBytes := maxHarnessSSEEventBytes - len(encoded)
+	payload := "data: " + string(encoded) + "\n" + "data: " + strings.Repeat(" ", paddingBytes) + "\n\n"
+	emitted := false
+	err = readSSEFrames(strings.NewReader(payload), func(HarnessEventFrame) error {
+		emitted = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "SSE event exceeds harness frame limit") {
+		t.Fatalf("readSSEFrames() error = %v, want whitespace size rejection", err)
+	}
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) || !clientErr.IsProtocolViolation() {
+		t.Fatalf("readSSEFrames() error = %#v, want protocol violation", err)
+	}
+	if emitted {
+		t.Fatal("readSSEFrames() emitted oversized whitespace-padded event")
+	}
+}
+
+func TestStreamFramesWithPayloadBytesPreservesSSEWhitespaceAccounting(t *testing.T) {
+	frame := HarnessEventFrame{
+		Version:          ProtocolVersion,
+		Type:             FrameRuntimeOutput,
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Seq:              1,
+	}
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatalf("json.Marshal(frame) error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: %s  \ndata\n\n", encoded)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	payloadBytes := 0
+	err = StreamFramesWithPayloadBytes(client, context.Background(), frame.TurnID, 0, func(_ HarnessEventFrame, intValue int) error {
+		payloadBytes = intValue
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamFramesWithPayloadBytes() error = %v", err)
+	}
+	if want := len(encoded) + 3; payloadBytes != want {
+		t.Fatalf("payload bytes = %d, want %d", payloadBytes, want)
 	}
 }
 
@@ -1196,7 +1543,26 @@ func validClientStartTurnRequest() StartTurnRequest {
 	}
 }
 
-func TestReadSSEFramesDoesNotEmitBufferedDataAfterScannerFailure(t *testing.T) {
+func TestReadSSEFramesPreservesTransientReadErrorClassification(t *testing.T) {
+	transient := errors.New("transient stream read failure")
+	reader := io.MultiReader(
+		strings.NewReader(`data: {"version":"orka.harness.v1"}`),
+		iotest.ErrReader(transient),
+	)
+	err := readSSEFrames(reader, func(HarnessEventFrame) error { return nil })
+	if err == nil {
+		t.Fatal("readSSEFrames() error = nil, want transient read failure")
+	}
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) {
+		t.Fatalf("readSSEFrames() error = %T, want ClientError", err)
+	}
+	if clientErr.IsProtocolViolation() {
+		t.Fatalf("readSSEFrames() error = %#v, transient read failure marked as protocol violation", err)
+	}
+}
+
+func TestReadSSEFramesDoesNotEmitBufferedDataAfterLineLimitFailure(t *testing.T) {
 	frame := `{"version":"` + ProtocolVersion + `","type":"TurnStarted","runtimeSessionID":"r","turnID":"t","correlationID":"c","seq":1}`
 	payload := "data: " + frame + "\n" + strings.Repeat("x", maxHarnessSSELineBytes+1)
 	emitted := false
@@ -1206,6 +1572,10 @@ func TestReadSSEFramesDoesNotEmitBufferedDataAfterScannerFailure(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("readSSEFrames() error = nil, want scanner failure")
+	}
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) || !clientErr.IsProtocolViolation() {
+		t.Fatalf("readSSEFrames() error = %#v, want protocol violation", err)
 	}
 	if emitted {
 		t.Fatal("readSSEFrames() emitted a partial event after scanner failure")

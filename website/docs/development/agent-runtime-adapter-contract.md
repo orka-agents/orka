@@ -22,6 +22,10 @@
 
 Adapters can be brokered-only when they pass the advertised brokered conformance profile.
 
+## StartTurn idempotency
+
+Adapters must not execute the same `turnID` more than once. While a turn is active, a repeated identical `StartTurn` may return the identical accepted response or deterministic `409 Conflict` with the canonical error `turn already exists`. After any terminal frame, repeating `StartTurn` for that `turnID` must return deterministic `409 Conflict` with the canonical error `turn already completed` and must never re-execute the turn. These canonical errors let clients distinguish duplicate recovery from other conflicts such as capacity limits.
+
 ## StartTurn safe tool schemas
 
 When a Task exposes brokered tools, `StartTurnRequest.input.tools` carries safe definitions:

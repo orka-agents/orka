@@ -46,8 +46,9 @@ type FakeHarnessServer struct {
 	config FakeHarnessConfig
 	now    func() time.Time
 
-	mu    sync.Mutex
-	turns map[harness.HarnessTurnID]*fakeTurn
+	mu             sync.Mutex
+	turns          map[harness.HarnessTurnID]*fakeTurn
+	completedTurns map[harness.HarnessTurnID]struct{}
 }
 
 type fakeTurn struct {
@@ -85,7 +86,12 @@ func NewFakeHarnessServer(config FakeHarnessConfig) *FakeHarnessServer {
 	if now == nil {
 		now = time.Now
 	}
-	s := &FakeHarnessServer{config: config, now: now, turns: map[harness.HarnessTurnID]*fakeTurn{}}
+	s := &FakeHarnessServer{
+		config:         config,
+		now:            now,
+		turns:          map[harness.HarnessTurnID]*fakeTurn{},
+		completedTurns: map[harness.HarnessTurnID]struct{}{},
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, s.handleHealth)
 	mux.HandleFunc(harness.CapabilitiesPath, s.handleCapabilities)
@@ -172,6 +178,11 @@ func (s *FakeHarnessServer) handleStartTurn(w http.ResponseWriter, r *http.Reque
 	}
 	turn := &fakeTurn{request: request, cancelled: make(chan struct{})}
 	s.mu.Lock()
+	if _, completed := s.completedTurns[request.TurnID]; completed {
+		s.mu.Unlock()
+		harness.WriteError(w, http.StatusConflict, "turn already completed")
+		return
+	}
 	if _, exists := s.turns[request.TurnID]; exists {
 		s.mu.Unlock()
 		harness.WriteError(w, http.StatusConflict, "turn already exists")
@@ -265,6 +276,9 @@ func (s *FakeHarnessServer) handleEvents(w http.ResponseWriter, r *http.Request,
 	}
 
 	frames := s.framesFor(turn)
+	if framesHaveTerminal(frames) {
+		s.markCompleted(turn.request.TurnID)
+	}
 	for _, frame := range frames {
 		if !emit(frame) {
 			return
@@ -278,14 +292,32 @@ func (s *FakeHarnessServer) handleEvents(w http.ResponseWriter, r *http.Request,
 	if s.config.Behavior == BehaviorLongRunning || s.config.Behavior == BehaviorCancellation {
 		select {
 		case <-turn.cancelled:
+			s.markCompleted(turn.request.TurnID)
 			_ = emit(s.frame(turn, 2, harness.FrameTurnCancelled, "cancelled", nil))
 		case <-r.Context().Done():
 			return
 		case <-time.After(10 * time.Second):
+			s.markCompleted(turn.request.TurnID)
 			_ = emit(s.frame(turn, 2, harness.FrameTurnFailed, "turn timeout", &harness.TurnFailed{Reason: "timeout", Message: "fake long-running turn timed out"}))
 		}
 	}
 	_ = harness.WriteSSEDone(w)
+}
+
+func (s *FakeHarnessServer) markCompleted(turnID harness.HarnessTurnID) {
+	s.mu.Lock()
+	s.completedTurns[turnID] = struct{}{}
+	s.mu.Unlock()
+}
+
+func framesHaveTerminal(frames []harness.HarnessEventFrame) bool {
+	for _, frame := range frames {
+		switch frame.Type {
+		case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
+			return true
+		}
+	}
+	return false
 }
 
 func (s *FakeHarnessServer) framesFor(turn *fakeTurn) []harness.HarnessEventFrame {

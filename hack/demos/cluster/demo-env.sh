@@ -15,7 +15,6 @@
 # Override any value before sourcing, or edit here.
 
 # Cluster + namespace. Demos 10-60 read Agents/Tasks/secrets from DEMO_NAMESPACE
-# (demo-magic); kontxt + the orka-client API SA live in `default` (handled by
 # the installers). Select the unified cluster context.
 export DEMO_NAMESPACE="${DEMO_NAMESPACE:-demo-magic}"
 # Mint the Orka API token from the SA in DEMO_NAMESPACE (orka-client exists in

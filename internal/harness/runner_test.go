@@ -61,6 +61,7 @@ func TestTurnRunnerRejectsMismatchedHarnessFrameIdentity(t *testing.T) {
 				RuntimeSessionID: "runtime-a",
 				TurnID:           "turn-a",
 				CorrelationID:    "corr-a",
+				EventStreamPath:  "/v1/turns/turn-a/events",
 			})
 		case r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -117,6 +118,7 @@ func TestTurnRunnerRejectsNonMonotonicHarnessFrameSeq(t *testing.T) {
 				RuntimeSessionID: "runtime-a",
 				TurnID:           "turn-a",
 				CorrelationID:    "corr-a",
+				EventStreamPath:  "/v1/turns/turn-a/events",
 			})
 		case r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "text/event-stream")

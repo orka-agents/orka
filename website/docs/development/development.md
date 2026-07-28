@@ -15,7 +15,7 @@ slug: /development
 ## Build Commands
 
 ```bash
-# Generate CRD manifests and Go types
+# Generate Go types, the installer manifest, and the Helm staging chart
 make generate
 make manifests
 
@@ -28,6 +28,37 @@ make build-cli
 # Run locally
 make run
 ```
+
+## Helm Chart Generation and Releases
+
+Orka follows Gatekeeper's staged chart flow. The editable Helm generator and static chart inputs live under `cmd/build/helmify/`; canonical Kubernetes resources live under `config/`. Generated and promoted outputs are committed so pull requests and release preparation review the exact manifests that will ship.
+
+| Path | Purpose | Edit directly? |
+| --- | --- | --- |
+| `cmd/build/helmify/` | Helm generator, Kustomize input, and static chart files | Yes |
+| `manifest_staging/deploy/orka.yaml` | Generated next-release installer manifest | No |
+| `manifest_staging/charts/orka/` | Generated next-release Helm chart used by CI and upgrade tests | No |
+| `deploy/` and `charts/orka/` | Promoted release snapshots | No |
+
+For a normal manifest or chart contribution:
+
+1. Edit `config/` and/or the generator inputs under `cmd/build/helmify/`.
+2. Run `make manifests`.
+3. Review and commit the source changes together with all changes under `manifest_staging/`.
+4. Do not promote the chart in an ordinary feature PR. The root snapshots may intentionally remain at the current release while staging contains the next release.
+
+`make manifests` rebuilds staging from scratch, so direct changes in `manifest_staging/` are clobbered. CI reruns generation and requires a clean diff to detect stale output; run `make manifests` and inspect `git diff` for the same drift check locally.
+
+Release preparation runs the same targets as Gatekeeper's flow:
+
+```bash
+make release-manifest NEWVERSION=vX.Y.Z[-beta.N|-rc.N]
+make promote-staging-manifest
+```
+
+The first target updates release inputs and regenerates staging. The second copies the reviewed staging installer and chart into `deploy/` and `charts/orka/`. Normally `.github/workflows/release-pr.yml` runs both and opens the release-preparation PR. A matching `v*` tag packages and publishes those committed root snapshots; tag workflows do not regenerate or promote manifests.
+
+CRDs are generated from the canonical definitions in `config/crd/bases/`. Chart generation makes them available on fresh install, but Helm does not update them during upgrades. Apply the CRDs from the exact target chart before upgrading the controller, as documented in `charts/orka/README.md`.
 
 ## Testing
 
@@ -52,7 +83,7 @@ The repository has additional GitHub Actions workflows in addition to the normal
 - `Live Copilot Proxy E2E` — exercises live model-backed Orka paths through the copilot-proxy harness.
 - `Live Agent Sandbox E2E` — installs the pinned upstream `agent-sandbox` release in Kind, builds the PR controller plus fake Claude/sandbox-runtime and upstream router images, then validates workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing without model access.
 - `Live GitHub Label Trigger E2E` — builds the PR controller image, deploys it to Kind, configures a generated webhook secret and synthetic runtime Agent, then verifies signed label webhooks create scoped agent Tasks while invalid signatures and duplicate deliveries are handled correctly. This workflow is manual, model-free, and secret-free.
-- `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, then generates a real `kontxt` TxToken against an in-cluster JWKS endpoint. It verifies `spec.requestedBy` stamping for both auth modes, rejects client tampering, and rejects a tampered TxToken.
+- `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, and verifies `spec.requestedBy` stamping plus client provenance-tampering rejection.
 - `Gateway Live E2E` — runs on relevant pushes and pull requests or by manual dispatch. It creates a fresh Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid authentication, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. It is model-free and secret-free and does not use repository or provider credentials.
 - `Repository Monitor Smoke` — runs automatically on PRs and pushes touching monitor-relevant Go, CRD/config, worker, or dependency paths. It creates the UI embed stub and runs focused Go tests for monitor store/API/controller behavior, GitHub pull request event queueing, targeted single-PR inventory runs, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling.
 - `Agent Substrate E2E` — installs Agent Substrate and Orka into a fresh Kind cluster, creates Orka-compatible `WorkerPool`/`ActorTemplate` resources, validates direct Substrate actor execution, runs default and pooled Orka Tasks through the Substrate workspace provider, exercises pooled MCP actor-backed Tools, and checks workspace placement/density telemetry. This workflow is secret-free.
@@ -76,7 +107,7 @@ go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent
 
 The agent sandbox live script does not require provider credentials or model access. It uses a deterministic fake `claude` CLI in the sandbox runtime image so CI can verify Orka's sandbox plumbing independently from external LLM availability.
 
-The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. The `kontxt` portion is self-contained: it generates an ephemeral RSA key/JWKS and TxToken during the run, so no external kontxt service or secret is required.
+The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. Transaction-token provider E2E now lives in the external integration repository.
 
 Run the Agent Substrate E2E locally with:
 
@@ -161,8 +192,8 @@ For interactive presentations and asciinema recordings of `hack/demos/`,
 a one-shot bootstrap is available:
 
 ```bash
-make demo-cluster-up      # kind cluster + Orka + kontxt + agent-sandbox
-make demo-images          # build + load the kontxt-caller image (Demo 50)
+make demo-cluster-up      # kind cluster + Orka + agent-sandbox
+make demo-images          # build + load demo runtime images
 hack/demos/00-preflight.sh
 # ... run ./hack/demos/10-chat-pr.sh, 20-..., etc.
 make demo-cluster-down

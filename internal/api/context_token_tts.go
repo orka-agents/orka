@@ -17,24 +17,24 @@ const (
 	ContextTokenTTSTokenSourceIncoming = contexttoken.TTSTokenSourceIncoming
 )
 
-// ContextTokenTTSConfig controls optional kontxt TTS token exchange integration.
+// ContextTokenTTSConfig controls optional transaction-token TTS integration.
 type ContextTokenTTSConfig = contexttoken.TTSConfig
 
 // NewContextTokenTTSConfig builds TTS integration config from flag/env values.
-func NewContextTokenTTSConfig(url, audience, timeout, tokenSource, childTTL, toolTTL string) (ContextTokenTTSConfig, error) {
-	return contexttoken.NewTTSConfig(url, audience, timeout, tokenSource, childTTL, toolTTL)
+func NewContextTokenTTSConfig(endpoint, audience, timeout, tokenSource, childTTL, toolTTL string) (ContextTokenTTSConfig, error) {
+	return contexttoken.NewTTSConfig(endpoint, audience, timeout, tokenSource, childTTL, toolTTL)
 }
 
 // ContextTokenExchangeRequest describes a TTS exchange or replacement request.
 type ContextTokenExchangeRequest = contexttoken.ExchangeRequest
 
-// ContextTokenExchanger exchanges subject tokens for kontxt TxTokens.
+// ContextTokenExchanger exchanges subject tokens for transaction tokens.
 type ContextTokenExchanger = contexttoken.Exchanger
 
-// KontxtTTSClient is an RFC 8693 Token Transaction Service client.
-type KontxtTTSClient = contexttoken.KontxtTTSClient
+// ContextTokenTTSClient is a strict transaction-token TTS client.
+type ContextTokenTTSClient = contexttoken.TTSClient
 
-// NewKontxtTTSClient creates a TTS client for the configured endpoint.
-func NewKontxtTTSClient(cfg ContextTokenTTSConfig) (*KontxtTTSClient, error) {
-	return contexttoken.NewKontxtTTSClient(cfg)
+// NewContextTokenTTSClient creates a TTS client for the configured endpoint.
+func NewContextTokenTTSClient(cfg ContextTokenTTSConfig) (*ContextTokenTTSClient, error) {
+	return contexttoken.NewTTSClient(cfg)
 }

@@ -52,6 +52,7 @@ rules:
   - ""
   resources:
   - pods/portforward
+  - serviceaccounts/token
   verbs:
   - create
 - apiGroups:
@@ -178,6 +179,7 @@ rules:
   resources:
   - agentruntimes/finalizers
   - agents/finalizers
+  - outboundaccesspolicies/finalizers
   - providers/finalizers
   - repositorymonitors/finalizers
   - repositoryscans/finalizers
@@ -192,6 +194,7 @@ rules:
   resources:
   - agentruntimes/status
   - agents/status
+  - outboundaccesspolicies/status
   - providers/status
   - repositorymonitors/status
   - repositoryscans/status
@@ -203,6 +206,14 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - outboundaccesspolicies
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - discovery.k8s.io
   resources:
@@ -310,12 +321,21 @@ rules:
   resources:
   - clusterrolebindings
   - rolebindings
+  - roles
   verbs:
   - create
   - delete
   - get
   - list
   - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io
@@ -327,15 +347,6 @@ rules:
   - clusterroles
   verbs:
   - bind
-- apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
-  - clusterroles
-  - roles
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - storage.k8s.io
   resources:

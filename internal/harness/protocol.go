@@ -472,6 +472,8 @@ func (r ContinueTurnRequest) Validate() error {
 		if result.TurnID != r.TurnID {
 			return fmt.Errorf("tool result %d turn id %q does not match continue request %q", i, result.TurnID, r.TurnID)
 		}
+		// ToolRequestIdempotencyKey applies the same whitespace normalization, so
+		// duplicate detection and canonical key validation use one tool-call identity.
 		toolCallID := strings.TrimSpace(result.ToolCallID)
 		if _, exists := seenToolCallIDs[toolCallID]; exists {
 			return fmt.Errorf("tool result %d duplicates tool call id %q", i, toolCallID)

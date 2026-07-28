@@ -1,0 +1,304 @@
+# Orka Helm Chart Values
+
+# Controller configuration
+controller:
+  # Number of controller replicas
+  replicas: 1
+
+  # Controller image
+  image:
+    repository: ghcr.io/orka-agents/orka
+    tag: "0.1.1"
+    pullPolicy: IfNotPresent
+
+  # Resource limits
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+  # Watch namespace (empty for cluster-scoped)
+  watchNamespace: ""
+
+  # API server port
+  apiPort: 8080
+
+  # Metrics port
+  metricsPort: 8081
+
+  # Health probe port
+  healthPort: 8082
+
+  # Enable leader election for HA
+  leaderElect: true
+
+  # Log level (debug, info, warn, error)
+  logLevel: info
+
+  # Enforce namespace isolation (restrict users to their SA namespace)
+  enforceNamespaceIsolation: true
+
+  # Max active tasks per namespace (0 = unlimited)
+  maxTasksPerNamespace: 0
+
+  # Provider-neutral external gateway plane.
+  gateway:
+    enabled: true
+    # Disposable development only: allow gateways to acknowledge work on an emptyDir-backed store.
+    allowEphemeralStore: false
+    # Set true only when an offline renderer cannot use lookup and CRDs are applied separately.
+    crdsReadyOverride: false
+    pendingPerSession: 100
+    maxRecordsPerGateway: 1000
+    maxRejectedRecordsPerGateway: 250
+    eventExpiry: 24h
+    terminalRetention: 720h
+    deliveryTimeout: 15s
+    deliveryMaxAttempts: 10
+    claimLease: 1m
+    pollInterval: 500ms
+    batchSize: 25
+
+  # Experimental agent sandbox workspace support (disabled by default)
+  executionWorkspace:
+    # Default provider used when Task execution.workspace.provider is omitted.
+    defaultProvider: agent-sandbox
+
+  agentSandbox:
+    # Enables workspace-backed execution for agent Tasks that set Task execution.workspace.
+    enabled: false
+    # Optional upstream agent-sandbox router base URL used for workspace claims.
+    routerUrl: ""
+    # Optional default execution workspace template name used when a Task omits execution.workspace.templateRef.name.
+    defaultTemplate: ""
+    # Warm pool policy: disabled, template.
+    warmPoolPolicy: disabled
+    # Namespace strategy: task, controller.
+    namespaceStrategy: task
+    # Timeout for workspace claim and readiness operations.
+    claimTimeout: 2m
+    # Timeout for agent runtime execution inside the sandbox.
+    commandTimeout: 30m
+    # Default cleanup policy: delete, retain.
+    cleanupPolicy: delete
+
+  # Experimental Substrate execution workspace support (disabled by default)
+  substrate:
+    enabled: false
+    apiEndpoint: api.ate-system.svc:443
+    apiCAFile: ""
+    apiInsecureSkipVerify: false
+    routerUrl: http://atenet-router.ate-system.svc
+    actorDnsSuffix: actors.resources.substrate.ate.dev
+    defaultTemplate: ""
+    defaultTemplateNamespace: ""
+    bootstrapTokenSecretName: ""
+    bootstrapTokenSecretKey: token
+    claimTimeout: 2m
+    commandTimeout: 30m
+    cleanupPolicy: delete
+
+  # OIDC/JWT authentication for external API requests
+  oidc:
+    # Issuer URL expected in bearer tokens. Requires audience when set.
+    issuer: ""
+    # Audience expected in bearer tokens. Requires issuer when set.
+    audience: ""
+    # Optional JWKS URL. When empty, Orka discovers it from issuer.
+    jwksUrl: ""
+    # Required comma-separated subject allowlist patterns when OIDC is enabled.
+    allowedSubjects: ""
+    # Namespace assigned to authorized OIDC callers for namespace isolation. Empty uses controller default.
+    namespace: ""
+
+  # Transaction-token authentication, scoped authorization, and optional vendor-neutral TTS exchange.
+  # Empty values keep the controller defaults / corresponding environment variables.
+  contextToken:
+    # Profile for external context tokens (supported: transaction-token).
+    profile: ""
+    # Issuer URL expected in context tokens. Requires profile and audience when set.
+    issuer: ""
+    # Audience expected in context tokens. Requires profile and issuer when set.
+    audience: ""
+    # Optional JWKS URL. For transaction-token, defaults to <issuer>/.well-known/jwks.json.
+    jwksUrl: ""
+    # Comma-separated token headers, e.g. Txn-Token or Txn-Token,Authorization:Bearer.
+    headers: ""
+    # Authorization mode: off, audit, or enforce. Empty defaults to off.
+    authzMode: ""
+    scopes:
+      taskCreate: ""
+      taskRead: ""
+      taskList: ""
+      taskDelete: ""
+      taskUpdate: ""
+      toolRead: ""
+      toolUse: ""
+      providerUse: ""
+      secretRead: ""
+      secretCredentialRead: ""
+      agentRead: ""
+      agentWrite: ""
+      memoryRead: ""
+      memoryWrite: ""
+      sessionRead: ""
+      sessionWrite: ""
+      securityRead: ""
+      securityWrite: ""
+      monitorRead: ""
+      monitorWrite: ""
+      monitorOperate: ""
+      skillRead: ""
+      skillWrite: ""
+      gatewayRead: ""
+      gatewayOperate: ""
+    tts:
+      # Exact TTS OAuth endpoint for child/outbound transaction-token exchange.
+      endpoint: ""
+      # Optional exchange audience.
+      audience: ""
+      # Exchange timeout, e.g. 5s.
+      timeout: ""
+      # Subject token source: serviceAccount, incoming, or none.
+      tokenSource: ""
+      # Worker-side subject token type.
+      subjectTokenType: ""
+      # Requested scope for child delegated TxTokens.
+      childScope: ""
+      # Requested scope for outbound HTTP Tool TxTokens.
+      outboundScope: ""
+      # Requested TTLs, e.g. 5m and 2m.
+      childTokenTTL: ""
+      toolTokenTTL: ""
+
+  outboundAccess:
+    # Exact namespace/name:port tuples trusted for cross-namespace gateway refs.
+    trustedGatewayServices: []
+    # Exact namespace/name:port tuples trusted for cross-namespace token endpoint refs.
+    trustedTokenEndpointServices: []
+
+# Worker configuration
+workers:
+  ai:
+    image:
+      repository: ghcr.io/orka-agents/orka/ai-worker
+      tag: "0.1.1"
+      pullPolicy: IfNotPresent
+
+  general:
+    image:
+      repository: ghcr.io/orka-agents/orka/general-worker
+      tag: "0.1.1"
+
+  harnessWrapper:
+    image:
+      repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
+      tag: "0.1.1"
+      pullPolicy: IfNotPresent
+    auth:
+      # Existing Secret containing the shared wrapper bearer token.
+      # When existingSecret and token are both empty, Helm generates a release-local token.
+      existingSecret: ""
+      tokenKey: token
+      token: ""
+    # Optional Codex CLI sandbox mode for the Codex adapter.
+    codexSandboxMode: ""
+    resources: {}
+
+# GitHub webhook and label-trigger configuration.
+# Configure a repository webhook to POST to /webhooks/github with the secret below.
+github:
+  webhook:
+    # Kubernetes Secret containing the GitHub webhook shared secret.
+    secretName: ""
+    secretKey: secret
+  labelTrigger:
+    # Default runtime Agent CR used for labels such as agent:implement.
+    agent: ""
+    # Optional namespace for created Tasks; defaults to controller.watchNamespace or default.
+    namespace: ""
+    # Optional Secret name mounted into agent workspaces for git/GitHub auth.
+    gitSecret: ""
+    # Label prefix that marks an Orka trigger.
+    prefix: "agent:"
+    timeout: "30m"
+    maxTurns: 100
+    # Optional action-specific Agent overrides, e.g. implement: codex-agent.
+    agents: {}
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 8080
+
+# ServiceAccount configuration
+serviceAccount:
+  # Create the service account
+  create: true
+  # Name of the service account (auto-generated if not set)
+  name: ""
+  # Annotations to add to the service account
+  annotations: {}
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources
+  create: true
+
+# CRDs use Helm's static crds/ lifecycle and are not controlled by values.
+# Run `helm show readme <chart reference or archive>` before upgrading or
+# using --skip-crds.
+
+# Security context for pods
+podSecurityContext:
+  runAsNonRoot: true
+  fsGroup: 65532
+
+# Security context for containers
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Additional labels
+labels: {}
+
+# Additional annotations
+annotations: {}
+
+# SQLite store configuration
+store:
+  path: /data/orka.db
+  persistence:
+    enabled: true        # durable gateway inbox/outbox and Session history require a PVC
+    size: 1Gi
+    storageClass: ""     # use cluster default
+    accessMode: ReadWriteOnce
+
+# Client ServiceAccount for API access
+client:
+  # Create a client service account
+  create: true
+  # Name of the client service account
+  name: orka-client
+  # Namespace for the client service account. Empty defaults to controller.watchNamespace
+  # when namespace isolation is enforced and watchNamespace is set, otherwise the release namespace.
+  namespace: ""

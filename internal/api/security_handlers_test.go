@@ -93,7 +93,7 @@ func TestSecurityRepositoryActions_ContextTokenAuthorization(t *testing.T) {
 			app := setupSecurityHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			require.NoError(t, err)
@@ -256,7 +256,7 @@ func TestGenerateSecurityPatch_ContextTokenTransactionContextAuthorization(t *te
 				"tctx":  tt.tctx,
 			})
 			req := httptest.NewRequest(http.MethodPost, "/security/findings/finding-1/patch?namespace=demo", nil)
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			resp, err := app.Test(req)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, resp.StatusCode)
@@ -360,7 +360,7 @@ func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDen
 				"tctx":  tt.tctx,
 			})
 			req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			resp, err := app.Test(req)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -400,7 +400,7 @@ func TestCreateManualSecurityScan_ContextTokenAllowsRefOnlyWorkspaceWithBranchAn
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -483,7 +483,7 @@ func TestRepositoryScanMutations_ContextTokenTransactionContextAuthorizationDeni
 				},
 			})
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			require.NoError(t, err)
@@ -517,7 +517,7 @@ func TestCreateRepositoryScanPolicyRefs(t *testing.T) {
 		}
 	}`, securityTestRepoURL)
 	req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
@@ -544,7 +544,7 @@ func TestCreateRepositoryScanPolicyRefRequiresConfigMapReadScope(t *testing.T) {
 		}
 	}`, securityTestRepoURL)
 	req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
@@ -567,7 +567,7 @@ func TestCreateRepositoryScanPolicyRefMissingKeyFails(t *testing.T) {
 		}
 	}`, securityTestRepoURL)
 	req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
@@ -590,7 +590,7 @@ func TestCreateRepositoryScanPolicyRefOversizedFails(t *testing.T) {
 		}
 	}`, securityTestRepoURL)
 	req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
@@ -613,7 +613,7 @@ func TestCreateRepositoryScanPolicyRefOtherNamespaceFails(t *testing.T) {
 		}
 	}`, securityTestRepoURL)
 	req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
@@ -680,7 +680,7 @@ func TestRepositoryScanMutations_ContextTokenRefAuthorizationDenials(t *testing.
 			})
 
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			require.NoError(t, err)
@@ -755,7 +755,7 @@ func TestRepositoryScanMutations_ContextTokenBranchOnlyDeniesRef(t *testing.T) {
 			})
 
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			require.NoError(t, err)
@@ -815,7 +815,7 @@ func TestUpdateRepositoryScan_ContextTokenAuthorizesExistingScanBeforeRequestBod
 	})
 
 	req := httptest.NewRequest(http.MethodPut, "/security/repositories/scan-1?namespace=demo", strings.NewReader(string(bodyBytes)))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
@@ -842,7 +842,7 @@ func TestListRepositoryScans_ContextTokenFiltersMismatchedScansInEnforceMode(t *
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/security/repositories?namespace=demo", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -892,7 +892,7 @@ func TestRepositoryScanReadDelete_ContextTokenObjectAuthorizationDenials(t *test
 			})
 
 			req := httptest.NewRequest(tt.method, "/security/repositories/scan-1?namespace=demo", nil)
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			resp, err := app.Test(req)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -953,7 +953,7 @@ func TestThreatModel_ContextTokenRepositoryScanAuthorizationDenials(t *testing.T
 				body = strings.NewReader("")
 			}
 			req := httptest.NewRequest(tt.method, "/security/repositories/scan-1/threat-model?namespace=demo", body)
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			require.NoError(t, err)
@@ -1024,7 +1024,7 @@ func TestSecurityScanRunAndFindingLists_ContextTokenRepositoryScanAuthorizationD
 			})
 
 			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			resp, err := app.Test(req)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -1047,7 +1047,7 @@ func TestListSecurityFindingsReturnsEmptyItemsArray(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/security/repositories/scan-1/findings?namespace=demo", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -1084,7 +1084,7 @@ func TestGetSecurityFinding_ContextTokenAuthorizesFindingRepositoryScan(t *testi
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/security/findings/finding-1?namespace=demo", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -1122,7 +1122,7 @@ func TestListSecurityPatchProposals_ContextTokenUsesPatchAgentAuthorization(t *t
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/security/findings/finding-1/patches?namespace=demo", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -1192,7 +1192,7 @@ func TestSecurityFindingMutations_ContextTokenTransactionContextAuthorizationDen
 				},
 			})
 			req := httptest.NewRequest(http.MethodPost, tt.path, nil)
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			resp, err := app.Test(req)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -1247,7 +1247,7 @@ func TestCreateSecurityPullRequest_ContextTokenTransactionContextAuthorizationDe
 		},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/security/findings/finding-1/pull-request?namespace=demo", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -1276,7 +1276,7 @@ func TestCreateManualSecurityScan_ContextTokenStampsTaskRequesterAndTransaction(
 
 	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite + " " + ContextTokenScopeConfigMapsRead})
 	req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)

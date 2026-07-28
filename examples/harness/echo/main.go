@@ -33,11 +33,12 @@ const (
 )
 
 type server struct {
-	runtimeName string
-	bearerValue string
-	behavior    string
-	mu          sync.Mutex
-	turns       map[harness.HarnessTurnID]*turnState
+	runtimeName    string
+	bearerValue    string
+	behavior       string
+	mu             sync.Mutex
+	turns          map[harness.HarnessTurnID]*turnState
+	completedTurns map[harness.HarnessTurnID]struct{}
 }
 
 type turnState struct {
@@ -67,8 +68,9 @@ func main() {
 			os.Getenv(remoteRuntimeBearerEnv),
 			os.Getenv("ORKA_EXAMPLE_HARNESS_BEARER_TOKEN"),
 		)),
-		behavior: behavior,
-		turns:    map[harness.HarnessTurnID]*turnState{},
+		behavior:       behavior,
+		turns:          map[harness.HarnessTurnID]*turnState{},
+		completedTurns: map[harness.HarnessTurnID]struct{}{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, s.health)
@@ -223,6 +225,11 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	turn := &turnState{request: request, cancelled: make(chan struct{}), continued: make(chan struct{})}
 	s.mu.Lock()
+	if _, completed := s.completedTurns[request.TurnID]; completed {
+		s.mu.Unlock()
+		harness.WriteError(w, http.StatusConflict, "turn already completed")
+		return
+	}
 	if _, exists := s.turns[request.TurnID]; exists {
 		s.mu.Unlock()
 		harness.WriteError(w, http.StatusConflict, "turn already exists")
@@ -290,6 +297,9 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, turn *turn
 		return harness.WriteSSEFrame(w, frame) == nil
 	}
 	frames := s.initialFrames(turn)
+	if framesHaveTerminal(frames) {
+		s.markCompleted(turn.request.TurnID)
+	}
 	for _, frame := range frames {
 		if !write(frame) {
 			return
@@ -308,13 +318,18 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, turn *turn
 		}
 		select {
 		case <-turn.continued:
-			for _, frame := range s.continuedReadFrames(turn) {
+			continuedFrames := s.continuedReadFrames(turn)
+			if framesHaveTerminal(continuedFrames) {
+				s.markCompleted(turn.request.TurnID)
+			}
+			for _, frame := range continuedFrames {
 				if !write(frame) {
 					return
 				}
 			}
 			_ = harness.WriteSSEDone(w)
 		case <-turn.cancelled:
+			s.markCompleted(turn.request.TurnID)
 			_ = write(frame(turn.request, 4, harness.FrameTurnCancelled, "turn cancelled", nil))
 			_ = harness.WriteSSEDone(w)
 		case <-r.Context().Done():
@@ -327,13 +342,18 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, turn *turn
 		}
 		select {
 		case <-turn.continued:
-			for _, frame := range s.continuedFrames(turn) {
+			continuedFrames := s.continuedFrames(turn)
+			if framesHaveTerminal(continuedFrames) {
+				s.markCompleted(turn.request.TurnID)
+			}
+			for _, frame := range continuedFrames {
 				if !write(frame) {
 					return
 				}
 			}
 			_ = harness.WriteSSEDone(w)
 		case <-turn.cancelled:
+			s.markCompleted(turn.request.TurnID)
 			_ = write(frame(turn.request, 5, harness.FrameTurnCancelled, "turn cancelled", nil))
 			_ = harness.WriteSSEDone(w)
 		case <-r.Context().Done():
@@ -342,6 +362,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, turn *turn
 	case behaviorCancellation:
 		select {
 		case <-turn.cancelled:
+			s.markCompleted(turn.request.TurnID)
 			_ = write(frame(turn.request, 2, harness.FrameTurnCancelled, "turn cancelled", nil))
 			_ = harness.WriteSSEDone(w)
 		case <-r.Context().Done():
@@ -350,6 +371,22 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, turn *turn
 	default:
 		_ = harness.WriteSSEDone(w)
 	}
+}
+
+func (s *server) markCompleted(turnID harness.HarnessTurnID) {
+	s.mu.Lock()
+	s.completedTurns[turnID] = struct{}{}
+	s.mu.Unlock()
+}
+
+func framesHaveTerminal(frames []harness.HarnessEventFrame) bool {
+	for _, frame := range frames {
+		switch frame.Type {
+		case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) initialFrames(turn *turnState) []harness.HarnessEventFrame {

@@ -15,9 +15,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	cron "github.com/robfig/cron/v3"
@@ -43,9 +46,11 @@ import (
 	"github.com/orka-agents/orka/internal/approvals"
 	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	workerpkg "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/internal/workspace"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
@@ -85,7 +90,8 @@ const (
 	workerClusterRoleBindingRecreateInterval = 100 * time.Millisecond
 	workerClusterRoleBindingRecreateTimeout  = 5 * time.Second
 
-	scheduledRunLabelValue = "true"
+	booleanTrueValue       = "true"
+	scheduledRunLabelValue = booleanTrueValue
 	managedLabelValue      = scheduledRunLabelValue
 
 	workerRBACReconcileFailedReason = "WorkerRBACReconcileFailed"
@@ -101,6 +107,8 @@ type TaskReconciler struct {
 	WebhookNotifier                    *WebhookNotifier
 	Recorder                           record.EventRecorder
 	KubeClient                         kubernetes.Interface
+	OutboundAccessResolver             outboundaccess.Resolver
+	BrokeredTransactionExchange        *workerpkg.TransactionExchangeConfig
 	ResultStore                        store.ResultStore
 	PlanStore                          store.PlanStore
 	MessageStore                       store.MessageStore
@@ -114,10 +122,18 @@ type TaskReconciler struct {
 	SubstrateEnabled                   bool
 	SubstrateConfig                    SubstrateConfig
 	SubstrateExecutorFactory           func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
+	AIWorkerServiceAccountName         string
+	VendorWorkerServiceAccountName     string
+	ContainerWorkerServiceAccountName  string
 	AIWorkerClusterRoleName            string
 	VendorWorkerClusterRoleName        string
 	ContainerWorkerClusterRoleName     string
 	WorkerClusterRoleBindingNamePrefix string
+	EnforceTransactionCredentialAuth   bool
+	TransactionCredentialReadScopes    []string
+	OutboundAccessTrust                outboundaccess.TrustConfig
+	trustedServiceCleanupMu            sync.RWMutex
+	trustedServiceCleanupDone          bool
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -149,6 +165,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;roles;rolebindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
@@ -204,7 +221,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	task := &corev1alpha1.Task{}
 	if err := r.Get(ctx, req.NamespacedName, task); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Task was deleted, nothing to do
+			if cleanupErr := r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(ctx, req.Namespace); cleanupErr != nil {
+				return ctrl.Result{}, cleanupErr
+			}
 			return ctrl.Result{}, nil
 		}
 		log.Error(err, "unable to fetch Task")
@@ -524,15 +543,15 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 
 		// Remove finalizer
 		controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
-		if err := r.Update(ctx, task); err != nil {
-			if apierrors.IsNotFound(err) {
-				return ctrl.Result{}, nil
-			}
+		if err := r.Update(ctx, task); err != nil && !apierrors.IsNotFound(err) {
 			log.Error(err, "failed to remove finalizer")
 			return ctrl.Result{}, err
 		}
 	}
-
+	if err := r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(ctx, task.Namespace); err != nil {
+		log.Error(err, "failed to clean up trusted Service RBAC after Task removal")
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -2824,6 +2843,9 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 		if agent.Spec.Runtime.DefaultAllowBash != nil {
 			return fmt.Errorf("runtimeRef custom runtimes do not support defaultAllowBash policy metadata")
 		}
+		if strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort) != "" {
+			return fmt.Errorf("runtimeRef custom runtimes do not support defaultReasoningEffort policy metadata")
+		}
 	}
 	if task != nil && task.Spec.AgentRuntime != nil {
 		if len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
@@ -2943,8 +2965,6 @@ func validateReadOnlyBuiltInAgentRuntime(task *corev1alpha1.Task, runtimeType co
 		return nil
 	}
 	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCodex:
-		return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed")
 	case corev1alpha1.AgentRuntimeCopilot:
 		return fmt.Errorf("read-only agent tasks do not support copilot runtime because GitHub tokens can allow repository mutation")
 	case corev1alpha1.AgentRuntimeOpencode:
@@ -3233,11 +3253,31 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 	return nil
 }
 
+type trustedServiceReadCleanupRunnable struct {
+	reconciler *TaskReconciler
+}
+
+func (r *trustedServiceReadCleanupRunnable) Start(ctx context.Context) error {
+	if r == nil || r.reconciler == nil {
+		return errors.New("trusted Service RBAC cleanup reconciler is required")
+	}
+	if err := r.reconciler.pruneTrustedServiceReadBindingsOnce(ctx); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return nil
+}
+
+func (*trustedServiceReadCleanupRunnable) NeedLeaderElection() bool { return true }
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Recorder = mgr.GetEventRecorderFor("task-controller") //nolint:staticcheck
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
+	}
+	if err := mgr.Add(&trustedServiceReadCleanupRunnable{reconciler: r}); err != nil {
+		return fmt.Errorf("register trusted Service RBAC startup cleanup: %w", err)
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex); err != nil {
 		return err
@@ -3261,9 +3301,12 @@ const (
 	maxWorkerClusterRoleBindingNameLength = 253
 	workerClusterRoleBindingHashLength    = 10
 
-	managedByLabelKey     = "app.kubernetes.io/managed-by"
-	managedByLabelValue   = "orka"
-	orkaManagedByLabelKey = "orka.ai/managed-by"
+	managedByLabelKey                         = "app.kubernetes.io/managed-by"
+	managedByLabelValue                       = "orka"
+	orkaManagedByLabelKey                     = "orka.ai/managed-by"
+	trustedServiceReaderLabelKey              = "orka.ai/trusted-service-reader"
+	trustedServiceReaderTaskNamespaceLabelKey = "orka.ai/trusted-service-reader-for"
+	trustedServiceReaderLabelValue            = booleanTrueValue
 )
 
 type workerRBACSpec struct {
@@ -3277,20 +3320,24 @@ type workerRBACSpec struct {
 // backend creates per-job ServiceAccounts and Secrets; vendor and container
 // workers use separate, narrower roles so those cluster-wide capabilities are
 // not shared with less-trusted task types.
+func (r *TaskReconciler) aiWorkerServiceAccountName() string {
+	return workerServiceAccountName(r.AIWorkerServiceAccountName, AIWorkerServiceAccount)
+}
+
 func (r *TaskReconciler) workerRBACSpecs(namespace string) []workerRBACSpec {
 	return []workerRBACSpec{
 		{
-			serviceAccountName:     AIWorkerServiceAccount,
+			serviceAccountName:     r.aiWorkerServiceAccountName(),
 			clusterRoleName:        workerClusterRoleName(r.AIWorkerClusterRoleName, DefaultAIWorkerClusterRoleName),
 			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "ai", namespace),
 		},
 		{
-			serviceAccountName:     VendorWorkerServiceAccount,
+			serviceAccountName:     workerServiceAccountName(r.VendorWorkerServiceAccountName, VendorWorkerServiceAccount),
 			clusterRoleName:        workerClusterRoleName(r.VendorWorkerClusterRoleName, DefaultVendorWorkerClusterRoleName),
 			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "vendor", namespace),
 		},
 		{
-			serviceAccountName:     ContainerWorkerServiceAccount,
+			serviceAccountName:     workerServiceAccountName(r.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount),
 			clusterRoleName:        workerClusterRoleName(r.ContainerWorkerClusterRoleName, DefaultContainerWorkerClusterRoleName),
 			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "container", namespace),
 		},
@@ -3322,6 +3369,9 @@ func workerClusterRoleBindingName(prefix, tier, namespace string) string {
 // ensureWorkerRBAC ensures each worker ServiceAccount and worker role binding
 // exists in the given namespace so that task jobs have trust-tiered permissions.
 func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string) error {
+	if err := r.ensureTrustedServiceReadBindings(ctx, namespace); err != nil {
+		return err
+	}
 	for _, spec := range r.workerRBACSpecs(namespace) {
 		if err := r.ensureWorkerServiceAccount(ctx, namespace, spec.serviceAccountName); err != nil {
 			return err
@@ -3342,6 +3392,446 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string)
 	}
 
 	return nil
+}
+
+func (r *TaskReconciler) trustedServiceReadReader() client.Reader {
+	if r != nil && r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+func (r *TaskReconciler) ensureTrustedServiceReadBindings(ctx context.Context, taskNamespace string) error {
+	r.trustedServiceCleanupMu.RLock()
+	defer r.trustedServiceCleanupMu.RUnlock()
+	refs := append(r.OutboundAccessTrust.Gateways.References(), r.OutboundAccessTrust.TokenEndpoints.References()...)
+	desired := map[types.NamespacedName]struct{}{}
+	for _, ref := range refs {
+		if ref.Namespace == "" || ref.Namespace == taskNamespace {
+			continue
+		}
+		key := types.NamespacedName{
+			Namespace: ref.Namespace,
+			Name: trustedServiceReadBindingName(
+				taskNamespace,
+				ref.Namespace,
+				ref.Name,
+				r.aiWorkerServiceAccountName(),
+			),
+		}
+		if _, ok := desired[key]; ok {
+			continue
+		}
+		desired[key] = struct{}{}
+		objectLabels := trustedServiceReadBindingLabels(taskNamespace)
+		role := &rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Labels: maps.Clone(objectLabels)},
+			Rules: []rbacv1.PolicyRule{{
+				APIGroups: []string{""}, Resources: []string{"services"}, ResourceNames: []string{ref.Name}, Verbs: []string{"get"},
+			}},
+		}
+		if err := r.createOrUpdateTrustedServiceRole(ctx, role); err != nil {
+			return err
+		}
+		binding := &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Labels: maps.Clone(objectLabels)},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: key.Name},
+			Subjects: []rbacv1.Subject{{
+				Kind: rbacv1.ServiceAccountKind, Name: r.aiWorkerServiceAccountName(), Namespace: taskNamespace,
+			}},
+		}
+		if err := r.createOrUpdateTrustedServiceRoleBinding(ctx, binding); err != nil {
+			return err
+		}
+	}
+	return r.pruneTrustedServiceReadBindings(ctx, taskNamespace, desired)
+}
+
+func trustedServiceReadBindingName(taskNamespace, serviceNamespace, serviceName string, serviceAccountNames ...string) string {
+	serviceAccountName := AIWorkerServiceAccount
+	if len(serviceAccountNames) > 0 && strings.TrimSpace(serviceAccountNames[0]) != "" {
+		serviceAccountName = strings.TrimSpace(serviceAccountNames[0])
+	}
+	sum := sha256.Sum256([]byte(taskNamespace + "\x00" + serviceNamespace + "\x00" + serviceName + "\x00" + serviceAccountName))
+	return "orka-outbound-service-" + hex.EncodeToString(sum[:])[:16]
+}
+
+func legacyTrustedServiceReadBindingName(taskNamespace, serviceNamespace, serviceName string) string {
+	sum := sha256.Sum256([]byte(taskNamespace + "\x00" + serviceNamespace + "\x00" + serviceName))
+	return "orka-outbound-service-" + hex.EncodeToString(sum[:])[:16]
+}
+
+func trustedServiceReadBindingLabels(taskNamespace string) map[string]string {
+	return map[string]string{
+		orkaManagedByLabelKey:                     managedByLabelValue,
+		trustedServiceReaderLabelKey:              trustedServiceReaderLabelValue,
+		trustedServiceReaderTaskNamespaceLabelKey: taskNamespace,
+	}
+}
+
+func (r *TaskReconciler) pruneTrustedServiceReadBindings(
+	ctx context.Context,
+	taskNamespace string,
+	desired map[types.NamespacedName]struct{},
+) error {
+	selector := client.MatchingLabels{
+		orkaManagedByLabelKey:                     managedByLabelValue,
+		trustedServiceReaderLabelKey:              trustedServiceReaderLabelValue,
+		trustedServiceReaderTaskNamespaceLabelKey: taskNamespace,
+	}
+	bindings := &rbacv1.RoleBindingList{}
+	if err := r.trustedServiceReadReader().List(ctx, bindings, selector); err != nil {
+		return fmt.Errorf("listing trusted Service RoleBindings for namespace %q: %w", taskNamespace, err)
+	}
+	for i := range bindings.Items {
+		binding := &bindings.Items[i]
+		key := types.NamespacedName{Namespace: binding.Namespace, Name: binding.Name}
+		if _, ok := desired[key]; ok || !strings.HasPrefix(binding.Name, "orka-outbound-service-") {
+			continue
+		}
+		if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting stale trusted Service RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err)
+		}
+	}
+	roles := &rbacv1.RoleList{}
+	if err := r.trustedServiceReadReader().List(ctx, roles, selector); err != nil {
+		return fmt.Errorf("listing trusted Service Roles for namespace %q: %w", taskNamespace, err)
+	}
+	for i := range roles.Items {
+		role := &roles.Items[i]
+		key := types.NamespacedName{Namespace: role.Namespace, Name: role.Name}
+		if _, ok := desired[key]; ok || !strings.HasPrefix(role.Name, "orka-outbound-service-") {
+			continue
+		}
+		if err := r.Delete(ctx, role); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting stale trusted Service Role %s/%s: %w", role.Namespace, role.Name, err)
+		}
+	}
+	return nil
+}
+
+func (r *TaskReconciler) pruneTrustedServiceReadBindingsOnce(ctx context.Context) error {
+	r.trustedServiceCleanupMu.Lock()
+	defer r.trustedServiceCleanupMu.Unlock()
+	if r.trustedServiceCleanupDone {
+		return nil
+	}
+	activeTaskNamespaces, err := r.activeTaskNamespaces(ctx)
+	if err != nil {
+		return err
+	}
+	bindings := &rbacv1.RoleBindingList{}
+	if err := r.trustedServiceReadReader().List(ctx, bindings); err != nil {
+		return fmt.Errorf("listing trusted Service RoleBindings during startup cleanup: %w", err)
+	}
+	for i := range bindings.Items {
+		binding := &bindings.Items[i]
+		taskNamespace, ok := trustedServiceReadRoleBindingTaskNamespace(binding)
+		if !ok {
+			continue
+		}
+		key := types.NamespacedName{Namespace: binding.Namespace, Name: binding.Name}
+		_, active := activeTaskNamespaces[taskNamespace]
+		if active && r.trustedServiceReadBindingDesired(taskNamespace, key) {
+			continue
+		}
+		if err := r.deleteTrustedServiceReadGrant(ctx, binding, taskNamespace); err != nil {
+			return err
+		}
+	}
+	roles := &rbacv1.RoleList{}
+	if err := r.trustedServiceReadReader().List(ctx, roles, client.MatchingLabels{
+		orkaManagedByLabelKey:        managedByLabelValue,
+		trustedServiceReaderLabelKey: trustedServiceReaderLabelValue,
+	}); err != nil {
+		return fmt.Errorf("listing managed trusted Service Roles during startup cleanup: %w", err)
+	}
+	for i := range roles.Items {
+		role := &roles.Items[i]
+		taskNamespace := strings.TrimSpace(role.Labels[trustedServiceReaderTaskNamespaceLabelKey])
+		if taskNamespace == "" || !strings.HasPrefix(role.Name, "orka-outbound-service-") {
+			continue
+		}
+		key := types.NamespacedName{Namespace: role.Namespace, Name: role.Name}
+		_, active := activeTaskNamespaces[taskNamespace]
+		if active && r.trustedServiceReadBindingDesired(taskNamespace, key) {
+			continue
+		}
+		if err := r.Delete(ctx, role); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting stale managed trusted Service Role %s/%s: %w", role.Namespace, role.Name, err)
+		}
+	}
+	r.trustedServiceCleanupDone = true
+	return nil
+}
+
+func (r *TaskReconciler) activeTaskNamespaces(ctx context.Context) (map[string]struct{}, error) {
+	tasks := &corev1alpha1.TaskList{}
+	if err := r.trustedServiceReadReader().List(ctx, tasks); err != nil {
+		return nil, fmt.Errorf("listing Tasks during trusted Service RBAC startup cleanup: %w", err)
+	}
+	active := make(map[string]struct{}, len(tasks.Items))
+	for i := range tasks.Items {
+		if !tasks.Items[i].DeletionTimestamp.IsZero() {
+			continue
+		}
+		if namespace := strings.TrimSpace(tasks.Items[i].Namespace); namespace != "" {
+			active[namespace] = struct{}{}
+		}
+	}
+	return active, nil
+}
+
+func (r *TaskReconciler) cleanupTrustedServiceReadBindingsAfterTaskRemoval(
+	ctx context.Context,
+	taskNamespace string,
+) error {
+	taskNamespace = strings.TrimSpace(taskNamespace)
+	if taskNamespace == "" {
+		return nil
+	}
+	r.trustedServiceCleanupMu.Lock()
+	defer r.trustedServiceCleanupMu.Unlock()
+	tasks := &corev1alpha1.TaskList{}
+	if err := r.trustedServiceReadReader().List(ctx, tasks, client.InNamespace(taskNamespace)); err != nil {
+		return fmt.Errorf("listing Tasks before trusted Service RBAC cleanup for namespace %q: %w", taskNamespace, err)
+	}
+	for i := range tasks.Items {
+		if tasks.Items[i].DeletionTimestamp.IsZero() {
+			return nil
+		}
+	}
+	return r.deleteTrustedServiceReadBindingsForNamespaceLocked(ctx, taskNamespace)
+}
+
+func (r *TaskReconciler) deleteTrustedServiceReadBindingsForNamespaceLocked(
+	ctx context.Context,
+	taskNamespace string,
+) error {
+	selector := client.MatchingLabels{
+		orkaManagedByLabelKey:                     managedByLabelValue,
+		trustedServiceReaderLabelKey:              trustedServiceReaderLabelValue,
+		trustedServiceReaderTaskNamespaceLabelKey: taskNamespace,
+	}
+	bindings := &rbacv1.RoleBindingList{}
+	if err := r.trustedServiceReadReader().List(ctx, bindings, selector); err != nil {
+		return fmt.Errorf("listing trusted Service RoleBindings for inactive namespace %q: %w", taskNamespace, err)
+	}
+	for i := range bindings.Items {
+		binding := &bindings.Items[i]
+		if !strings.HasPrefix(binding.Name, "orka-outbound-service-") {
+			continue
+		}
+		if err := r.deleteTrustedServiceReadGrant(ctx, binding, taskNamespace); err != nil {
+			return err
+		}
+	}
+	roles := &rbacv1.RoleList{}
+	if err := r.trustedServiceReadReader().List(ctx, roles, selector); err != nil {
+		return fmt.Errorf("listing trusted Service Roles for inactive namespace %q: %w", taskNamespace, err)
+	}
+	for i := range roles.Items {
+		role := &roles.Items[i]
+		if !strings.HasPrefix(role.Name, "orka-outbound-service-") {
+			continue
+		}
+		if err := r.Delete(ctx, role); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting trusted Service Role %s/%s for inactive namespace %q: %w", role.Namespace, role.Name, taskNamespace, err)
+		}
+	}
+	return r.deleteLegacyTrustedServiceReadBindingsForNamespaceLocked(ctx, taskNamespace)
+}
+
+func (r *TaskReconciler) deleteLegacyTrustedServiceReadBindingsForNamespaceLocked(
+	ctx context.Context,
+	taskNamespace string,
+) error {
+	refs := append(r.OutboundAccessTrust.Gateways.References(), r.OutboundAccessTrust.TokenEndpoints.References()...)
+	seen := map[types.NamespacedName]struct{}{}
+	for _, ref := range refs {
+		if ref.Namespace == "" || ref.Namespace == taskNamespace {
+			continue
+		}
+		key := types.NamespacedName{
+			Namespace: ref.Namespace,
+			Name:      legacyTrustedServiceReadBindingName(taskNamespace, ref.Namespace, ref.Name),
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		binding := &rbacv1.RoleBinding{}
+		if err := r.trustedServiceReadReader().Get(ctx, key, binding); apierrors.IsNotFound(err) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("getting legacy trusted Service RoleBinding %s/%s: %w", key.Namespace, key.Name, err)
+		}
+		ownerNamespace, ok := legacyTrustedServiceReadRoleBindingTaskNamespace(binding)
+		if !ok || ownerNamespace != taskNamespace {
+			continue
+		}
+		if err := r.deleteTrustedServiceReadGrant(ctx, binding, taskNamespace); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *TaskReconciler) trustedServiceReadBindingDesired(
+	taskNamespace string,
+	key types.NamespacedName,
+) bool {
+	refs := append(r.OutboundAccessTrust.Gateways.References(), r.OutboundAccessTrust.TokenEndpoints.References()...)
+	for _, ref := range refs {
+		if ref.Namespace == "" || ref.Namespace == taskNamespace || ref.Namespace != key.Namespace {
+			continue
+		}
+		if key.Name == trustedServiceReadBindingName(taskNamespace, ref.Namespace, ref.Name, r.aiWorkerServiceAccountName()) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *TaskReconciler) deleteTrustedServiceReadGrant(
+	ctx context.Context,
+	binding *rbacv1.RoleBinding,
+	taskNamespace string,
+) error {
+	key := types.NamespacedName{Namespace: binding.Namespace, Name: binding.Name}
+	role := &rbacv1.Role{}
+	if err := r.trustedServiceReadReader().Get(ctx, key, role); err == nil {
+		serviceAccountName := ""
+		if len(binding.Subjects) == 1 {
+			subject := binding.Subjects[0]
+			if subject.Kind == rbacv1.ServiceAccountKind && subject.APIGroup == "" && subject.Namespace == taskNamespace {
+				serviceAccountName = subject.Name
+			}
+		}
+		if trustedServiceReadRoleOwned(role, taskNamespace, serviceAccountName) {
+			if err := r.Delete(ctx, role); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("deleting trusted Service Role %s/%s: %w", role.Namespace, role.Name, err)
+			}
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("getting trusted Service Role %s/%s: %w", key.Namespace, key.Name, err)
+	}
+	if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting trusted Service RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err)
+	}
+	return nil
+}
+
+func trustedServiceReadManaged(objectLabels map[string]string) bool {
+	return objectLabels[orkaManagedByLabelKey] == managedByLabelValue &&
+		objectLabels[trustedServiceReaderLabelKey] == trustedServiceReaderLabelValue
+}
+
+func trustedServiceReadRoleBindingTaskNamespace(binding *rbacv1.RoleBinding) (string, bool) {
+	if binding != nil && trustedServiceReadManaged(binding.Labels) &&
+		strings.HasPrefix(binding.Name, "orka-outbound-service-") {
+		taskNamespace := strings.TrimSpace(binding.Labels[trustedServiceReaderTaskNamespaceLabelKey])
+		if taskNamespace != "" {
+			return taskNamespace, true
+		}
+	}
+	return legacyTrustedServiceReadRoleBindingTaskNamespace(binding)
+}
+
+func legacyTrustedServiceReadRoleBindingTaskNamespace(binding *rbacv1.RoleBinding) (string, bool) {
+	if binding == nil || !legacyTrustedServiceReadName(binding.Name) ||
+		binding.RoleRef != (rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: binding.Name}) ||
+		len(binding.Subjects) != 1 {
+		return "", false
+	}
+	subject := binding.Subjects[0]
+	if subject.Kind != rbacv1.ServiceAccountKind || subject.APIGroup != "" ||
+		subject.Name != AIWorkerServiceAccount || strings.TrimSpace(subject.Namespace) == "" {
+		return "", false
+	}
+	return subject.Namespace, true
+}
+
+func legacyTrustedServiceReadName(name string) bool {
+	const prefix = "orka-outbound-service-"
+	suffix := strings.TrimPrefix(name, prefix)
+	if suffix == name || len(suffix) != 16 || suffix != strings.ToLower(suffix) {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
+}
+
+func trustedServiceReadRoleOwned(role *rbacv1.Role, taskNamespace string, serviceAccountNames ...string) bool {
+	if role != nil && trustedServiceReadManaged(role.Labels) &&
+		role.Labels[trustedServiceReaderTaskNamespaceLabelKey] == taskNamespace &&
+		strings.HasPrefix(role.Name, "orka-outbound-service-") {
+		return true
+	}
+	if len(serviceAccountNames) > 0 && trustedServiceReadRoleMatches(role, taskNamespace, serviceAccountNames[0]) {
+		return true
+	}
+	return legacyTrustedServiceReadRole(role, taskNamespace)
+}
+
+func trustedServiceReadRoleMatches(role *rbacv1.Role, taskNamespace, serviceAccountName string) bool {
+	if !trustedServiceReadRoleRuleValid(role) || strings.TrimSpace(serviceAccountName) == "" {
+		return false
+	}
+	return role.Name == trustedServiceReadBindingName(taskNamespace, role.Namespace, role.Rules[0].ResourceNames[0], serviceAccountName)
+}
+
+func legacyTrustedServiceReadRole(role *rbacv1.Role, taskNamespace string) bool {
+	if !trustedServiceReadRoleRuleValid(role) {
+		return false
+	}
+	return role.Name == legacyTrustedServiceReadBindingName(taskNamespace, role.Namespace, role.Rules[0].ResourceNames[0])
+}
+
+func trustedServiceReadRoleRuleValid(role *rbacv1.Role) bool {
+	if role == nil || !legacyTrustedServiceReadName(role.Name) || len(role.Rules) != 1 {
+		return false
+	}
+	rule := role.Rules[0]
+	if !slices.Equal(rule.APIGroups, []string{""}) ||
+		!slices.Equal(rule.Resources, []string{"services"}) ||
+		len(rule.ResourceNames) != 1 || strings.TrimSpace(rule.ResourceNames[0]) == "" ||
+		!slices.Equal(rule.Verbs, []string{"get"}) || len(rule.NonResourceURLs) != 0 {
+		return false
+	}
+	return true
+}
+
+func (r *TaskReconciler) createOrUpdateTrustedServiceRole(ctx context.Context, desired *rbacv1.Role) error {
+	current := &rbacv1.Role{}
+	err := r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
+	if apierrors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+	if reflect.DeepEqual(current.Rules, desired.Rules) && reflect.DeepEqual(current.Labels, desired.Labels) {
+		return nil
+	}
+	return fmt.Errorf("trusted Service Role %s/%s already exists with unexpected ownership or permissions", desired.Namespace, desired.Name)
+}
+
+func (r *TaskReconciler) createOrUpdateTrustedServiceRoleBinding(ctx context.Context, desired *rbacv1.RoleBinding) error {
+	current := &rbacv1.RoleBinding{}
+	err := r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
+	if apierrors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+	if current.RoleRef == desired.RoleRef &&
+		reflect.DeepEqual(current.Subjects, desired.Subjects) &&
+		reflect.DeepEqual(current.Labels, desired.Labels) {
+		return nil
+	}
+	return fmt.Errorf("trusted Service RoleBinding %s/%s already exists with unexpected ownership or subjects", desired.Namespace, desired.Name)
 }
 
 func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespace, name string) error {

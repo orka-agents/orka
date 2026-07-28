@@ -52,6 +52,7 @@ spec:
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           args:
             - --api-port={{ .Values.controller.apiPort }}
+            - --controller-url=http://{{ include "orka.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
             - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
             - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
             - --metrics-secure=false
@@ -214,6 +215,10 @@ spec:
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}
+            - --general-worker-image={{ .Values.workers.general.image.repository }}:{{ .Values.workers.general.image.tag }}
+            - --ai-worker-service-account-name={{ include "orka.aiWorkerServiceAccountName" . }}
+            - --vendor-worker-service-account-name={{ include "orka.vendorWorkerServiceAccountName" . }}
+            - --container-worker-service-account-name={{ include "orka.containerWorkerServiceAccountName" . }}
             - --ai-worker-cluster-role-name={{ include "orka.aiWorkerClusterRoleName" . }}
             - --vendor-worker-cluster-role-name={{ include "orka.vendorWorkerClusterRoleName" . }}
             - --container-worker-cluster-role-name={{ include "orka.containerWorkerClusterRoleName" . }}
@@ -278,11 +283,11 @@ spec:
             - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
               value: {{ include "orka.containerWorkerClusterRoleName" . | quote }}
             - name: ORKA_HARNESS_WRAPPER_ENDPOINT
-              value: http://{{ include "orka.fullname" . }}-agent-harness-wrapper:8080
+              value: http://{{ include "orka.harnessWrapperName" . }}:8080
             - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
               value: /var/run/orka/harness-wrapper/token
             - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
-              value: {{ printf "%s-agent-harness-wrapper" (include "orka.fullname" .) | quote }}
+              value: {{ include "orka.harnessWrapperName" . | quote }}
             {{- if .Values.github.webhook.secretName }}
             - name: ORKA_GITHUB_WEBHOOK_SECRET
               valueFrom:
@@ -363,7 +368,7 @@ spec:
           emptyDir: {}
         - name: harness-wrapper-auth
           secret:
-            secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (printf "%s-harness-wrapper-auth" (include "orka.fullname" .)) }}
+            secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (include "orka.harnessWrapperAuthSecretName" .) }}
             items:
               - key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
                 path: token

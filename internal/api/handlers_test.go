@@ -435,7 +435,7 @@ func TestHandlers_CreateTask_StampsRequestedByFromContextToken(t *testing.T) {
 	bodyBytes, _ := json.Marshal(body)
 
 	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	if err != nil {
@@ -464,8 +464,8 @@ func TestHandlers_CreateTask_StampsRequestedByFromContextToken(t *testing.T) {
 	if created.Spec.Transaction == nil {
 		t.Fatal("expected transaction metadata to be stamped")
 	}
-	if created.Spec.Transaction.Profile != ContextTokenProfileKontxt {
-		t.Fatalf("transaction.profile = %q, want %q", created.Spec.Transaction.Profile, ContextTokenProfileKontxt)
+	if created.Spec.Transaction.Profile != ContextTokenProfileTransactionToken {
+		t.Fatalf("transaction.profile = %q, want %q", created.Spec.Transaction.Profile, ContextTokenProfileTransactionToken)
 	}
 	if created.Spec.Transaction.ID != testContextTokenTransactionID {
 		t.Fatalf("transaction.id = %q, want txn-123", created.Spec.Transaction.ID)
@@ -505,7 +505,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken
 			"taskType":     "agent",
 			"agent":        "reviewer",
 			"repo":         "https://github.com/orka-agents/orka.git",
-			"branch":       "kontxt",
+			"branch":       "feature-branch",
 			"allowedTools": []string{"file_read", "code_exec", "Bash"},
 		},
 	})
@@ -517,7 +517,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken
 		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 			Workspace: &corev1alpha1.WorkspaceConfig{
 				GitRepo: "https://github.com/orka-agents/orka.git",
-				Branch:  "kontxt",
+				Branch:  "feature-branch",
 			},
 			AllowedTools: []string{"file_read"},
 		},
@@ -525,7 +525,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken
 	bodyBytes, _ := json.Marshal(body)
 
 	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	if err != nil {
@@ -553,7 +553,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceRejectsMissingScope
 	bodyBytes, _ := json.Marshal(body)
 
 	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	if err != nil {
@@ -584,7 +584,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceRejectsContextMisma
 	bodyBytes, _ := json.Marshal(body)
 
 	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	if err != nil {
@@ -612,7 +612,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationAuditAllowsFailures(t *tes
 	bodyBytes, _ := json.Marshal(body)
 
 	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	if err != nil {
@@ -894,7 +894,7 @@ func postCreateTaskWithContextToken(t *testing.T, app *fiber.App, token string, 
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req)
@@ -939,7 +939,7 @@ func TestHandlers_TaskActions_ContextTokenAuthorization(t *testing.T) {
 			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task)
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
 			req := httptest.NewRequest(tt.method, tt.path, nil)
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			resp, err := app.Test(req)
 			if err != nil {
 				t.Fatalf("Test request failed: %v", err)
@@ -1047,7 +1047,7 @@ func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameConte
 					},
 				})
 				req := httptest.NewRequest(http.MethodGet, tt.path, nil)
-				req.Header.Set(KontxtHeaderName, token)
+				req.Header.Set(TransactionTokenHeaderName, token)
 				resp, err := app.Test(req)
 				require.NoError(t, err)
 				require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -1067,7 +1067,7 @@ func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameConte
 					},
 				})
 				req := httptest.NewRequest(http.MethodGet, tt.path, nil)
-				req.Header.Set(KontxtHeaderName, token)
+				req.Header.Set(TransactionTokenHeaderName, token)
 				resp, err := app.Test(req)
 				require.NoError(t, err)
 				require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -1101,7 +1101,7 @@ func TestHandlers_GetTask_ContextTokenAuthorizationEnforcesLoadedTaskRepoContext
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks/repo-task", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -1146,7 +1146,7 @@ func TestHandlers_ListTasks_ContextTokenAuthorizationFiltersLoadedTaskContext(t 
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -1224,7 +1224,7 @@ func TestHandlers_GetTaskChildren_ContextTokenAuthorizationFiltersLoadedTaskCont
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks/parent-task/children", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -1262,7 +1262,7 @@ func TestHandlers_DeleteTask_ContextTokenAuthorizationEnforcesLoadedTaskRepoCont
 	})
 
 	req := httptest.NewRequest(http.MethodDelete, "/tasks/repo-task", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -1321,7 +1321,7 @@ func TestHandlers_GenericActions_ContextTokenAuthorizationEnforceRejectsNamespac
 				"tctx":  map[string]any{"namespace": "default"},
 			})
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			require.NoError(t, err)
@@ -1359,7 +1359,7 @@ func TestHandlers_ToolAndAgentActions_ContextTokenAuthorization(t *testing.T) {
 			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent.DeepCopyObject())
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			if err != nil {
@@ -1395,7 +1395,7 @@ func TestHandlers_MemoryActions_ContextTokenAuthorization(t *testing.T) {
 			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			if err != nil {
@@ -1484,7 +1484,7 @@ func TestHandlers_SessionActions_ContextTokenAuthorization(t *testing.T) {
 
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
 			req := httptest.NewRequest(tt.method, tt.path, nil)
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			resp, err := app.Test(req)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, resp.StatusCode)
@@ -1641,7 +1641,7 @@ func TestHandlers_SkillActions_ContextTokenAuthorization(t *testing.T) {
 			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, tt.mode, objs...)
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			require.NoError(t, err)
@@ -3508,7 +3508,7 @@ func TestHandlers_CreateAgent_ContextTokenAuthorizationRejectsDisallowedAgentSpe
 		},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/agents", bytes.NewReader(bodyBytes))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req)
@@ -3585,7 +3585,7 @@ func TestHandlers_UpdateAgent_ContextTokenAuthorizationRejectsDisallowedAgentSpe
 		},
 	})
 	req := httptest.NewRequest(http.MethodPut, "/agents/test-agent", bytes.NewReader(bodyBytes))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req)
@@ -3876,7 +3876,7 @@ func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceAllowsReadScop
 		},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/secrets", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -3896,7 +3896,7 @@ func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceRejectsMissing
 		"scope": ContextTokenScopeProvidersUse,
 	})
 	req := httptest.NewRequest(http.MethodGet, "/secrets", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -3914,7 +3914,7 @@ func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceRejectsNamespa
 		},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/secrets?namespace=default", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -4458,7 +4458,7 @@ func TestHandlers_ApplyMemoryProposal_ContextTokenAuthorization(t *testing.T) {
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
 			body, _ := json.Marshal(map[string]any{"appliedBy": "api-user"})
 			req := httptest.NewRequest(http.MethodPost, "/memory-proposals/"+proposal.ID+"/apply?namespace=default", bytes.NewReader(body))
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			require.NoError(t, err)

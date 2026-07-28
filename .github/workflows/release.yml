@@ -1,4 +1,4 @@
-name: Release Images
+name: Release
 
 on:
   push:
@@ -12,9 +12,193 @@ env:
 permissions:
   contents: read
 
+# Hold the publication lock from validation through the final gh-pages update so
+# concurrent runs cannot both validate an absent/older package and then overwrite it.
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
 jobs:
+  validate-release:
+    name: Validate release metadata and Helm chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate tag and promoted chart
+        run: |
+          set -euo pipefail
+
+          tag=${GITHUB_REF_NAME}
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
+            echo "Release tag must match vX.Y.Z, vX.Y.Z-beta.N, or vX.Y.Z-rc.N; got ${tag}." >&2
+            exit 1
+          fi
+
+          chart_field() {
+            local field=$1
+            local value
+            value=$(awk -v key="${field}:" '$1 == key { print $2; exit }' charts/orka/Chart.yaml)
+            value=${value#\"}
+            value=${value%\"}
+            value=${value#\'}
+            value=${value%\'}
+            if [[ -z "${value}" ]]; then
+              echo "Could not read ${field} from charts/orka/Chart.yaml." >&2
+              return 1
+            fi
+            printf '%s\n' "${value}"
+          }
+
+          expected_version=${tag#v}
+          chart_version=$(chart_field version)
+          app_version=$(chart_field appVersion)
+          if [[ "${chart_version}" != "${expected_version}" ]]; then
+            echo "Tag ${tag} requires charts/orka version ${expected_version}; found ${chart_version}." >&2
+            exit 1
+          fi
+          if [[ "${app_version}" != "${tag}" ]]; then
+            echo "Tag ${tag} requires charts/orka appVersion ${tag}; found ${app_version}." >&2
+            exit 1
+          fi
+
+          diff --no-dereference --recursive --unified manifest_staging/charts/orka charts/orka
+          diff --no-dereference --recursive --unified manifest_staging/deploy deploy
+          helm lint charts/orka
+          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 13
+
+          rendered_chart=$(mktemp)
+          trap 'rm -f "${rendered_chart}"' EXIT
+          helm template release-validation charts/orka \
+            --namespace orka-system \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            > "${rendered_chart}"
+
+          runtime_images=()
+          while IFS= read -r image_line; do
+            image_ref=${image_line#*image: }
+            image_ref=${image_ref#\"}
+            image_ref=${image_ref%\"}
+            runtime_images+=("${image_ref}")
+          done < <(grep -E '^[[:space:]]+image:[[:space:]]+' "${rendered_chart}")
+          if [[ ${#runtime_images[@]} -ne 2 ]]; then
+            echo "Expected two rendered runtime images; found ${#runtime_images[@]}." >&2
+            exit 1
+          fi
+          for image_ref in "${runtime_images[@]}"; do
+            if [[ "${image_ref##*:}" != "${expected_version}" ]]; then
+              echo "Tag ${tag} requires runtime image ${image_ref} to use ${expected_version}." >&2
+              exit 1
+            fi
+          done
+
+          for worker in ai general; do
+            worker_refs=()
+            while IFS= read -r worker_line; do
+              worker_refs+=("${worker_line#*=}")
+            done < <(grep -E "^[[:space:]]+- --${worker}-worker-image=" "${rendered_chart}")
+            if [[ ${#worker_refs[@]} -ne 1 || "${worker_refs[0]##*:}" != "${expected_version}" ]]; then
+              echo "Tag ${tag} requires exactly one rendered ${worker} worker image using ${expected_version}." >&2
+              exit 1
+            fi
+          done
+
+      - name: Package promoted chart
+        run: |
+          set -euo pipefail
+
+          mkdir -p cr-release-packages
+          helm package charts/orka --destination cr-release-packages
+
+          shopt -s nullglob
+          chart_packages=(cr-release-packages/orka-*.tgz)
+          if [[ ${#chart_packages[@]} -ne 1 ]]; then
+            echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
+            exit 1
+          fi
+          if [[ $(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$') -ne 13 ]]; then
+            echo "Packaged Orka chart must contain exactly 13 CRDs." >&2
+            exit 1
+          fi
+
+      - name: Verify immutable chart version
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          chart_packages=(cr-release-packages/orka-*.tgz)
+          if [[ ${#chart_packages[@]} -ne 1 ]]; then
+            echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
+            exit 1
+          fi
+          candidate=${chart_packages[0]}
+          package_name=$(basename "${candidate}")
+          comparison_dir=$(mktemp -d)
+          trap 'rm -rf "${comparison_dir}"' EXIT
+
+          set +e
+          git ls-remote --exit-code --heads origin refs/heads/gh-pages >/dev/null
+          probe_status=$?
+          set -e
+          case "${probe_status}" in
+            0)
+              git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages
+              ;;
+            2)
+              echo "No published Helm repository exists yet."
+              exit 0
+              ;;
+            *)
+              echo "Could not determine whether the gh-pages branch exists." >&2
+              exit "${probe_status}"
+              ;;
+          esac
+
+          for published_path in "charts/${package_name}" "${package_name}"; do
+            published_match=$(git ls-tree --name-only origin/gh-pages -- "${published_path}")
+            if [[ -z "${published_match}" ]]; then
+              continue
+            fi
+            if [[ "${published_match}" != "${published_path}" ]]; then
+              echo "Unexpected gh-pages path while checking ${published_path}: ${published_match}" >&2
+              exit 1
+            fi
+
+            published_archive="${comparison_dir}/$(basename "${published_path}")"
+            git show "origin/gh-pages:${published_path}" > "${published_archive}"
+            if cmp -s "${candidate}" "${published_archive}"; then
+              echo "Published ${published_path} has identical bytes."
+              continue
+            fi
+
+            set +e
+            python3 -I scripts/compare-helm-chart-packages.py "${candidate}" "${published_archive}"
+            comparison_status=$?
+            set -e
+            case "${comparison_status}" in
+              0)
+                echo "Published ${published_path} has identical normalized contents."
+                ;;
+              1)
+                echo "Chart ${package_name} already exists with different contents." >&2
+                echo "Prepare and promote a new chart version before tagging." >&2
+                exit 1
+                ;;
+              *)
+                echo "Could not compare ${package_name} with published ${published_path}." >&2
+                exit "${comparison_status}"
+                ;;
+            esac
+          done
+
   build-and-push:
     name: Build and Push Images
+    needs: validate-release
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -336,3 +520,24 @@ jobs:
           promote_image ai-worker "/ai-worker"
           promote_image general-worker "/general-worker"
           promote_image agent-harness-wrapper "/agent-harness-wrapper"
+
+
+  publish-helm-chart:
+    name: Publish promoted Helm chart
+    needs: promote-release-tags
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Publish Helm chart
+        uses: stefanprodan/helm-gh-pages@0ad2bb377311d61ac04ad9eb6f252fb68e207260 # v1.7.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          charts_dir: charts
+          target_dir: charts
+          linting: off

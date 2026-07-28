@@ -72,8 +72,8 @@ spec:
           - --store-backend=sqlite
           - --store-path=/data/orka.db
           - --controller-url=http://orka-api.orka-system.svc:8080
-          - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:latest
-          - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:latest
+          - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
+          - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
           - --gateway-enabled=true
           - --gateway-pending-per-session=100
           - --gateway-max-records-per-gateway=1000

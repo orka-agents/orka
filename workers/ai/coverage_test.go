@@ -915,3 +915,18 @@ func TestRun_AutonomousModeWithPlanContext(t *testing.T) {
 		t.Errorf("error = %q, want k8s client error", err)
 	}
 }
+
+func TestLoadCustomToolsSkipsToolWhenOutboundApprovalBindingFails(t *testing.T) {
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "secured", Namespace: "default"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL:                     "https://tools.example.test",
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "missing-policy"},
+		}},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(tool).Build()
+	got := loadCustomTools(context.Background(), fakeClient, "default", []string{tool.Name})
+	if len(got) != 0 {
+		t.Fatalf("loaded tools = %#v, want fail-closed omission", got)
+	}
+}

@@ -45,7 +45,11 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 
 	cmd := exec.Command(spec.Path, spec.Args...)
 	cmd.Dir = spec.Dir
-	cmd.Env = mergeCommandEnv(sanitizedProcessEnv(os.Environ()), spec.Env)
+	baseEnv := sanitizedProcessEnv(os.Environ())
+	if spec.ClearEnv {
+		baseEnv = nil
+	}
+	cmd.Env = mergeCommandEnv(baseEnv, spec.Env)
 	cmd.Env = unsetCommandEnv(cmd.Env, spec.UnsetEnv)
 	if len(spec.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(spec.Stdin)

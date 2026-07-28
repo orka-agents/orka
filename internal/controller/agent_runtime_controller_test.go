@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,6 +88,8 @@ func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeReadyWhenBrokeredConforma
 		continued chan harness.ContinueTurnRequest
 	}
 	turns := map[harness.HarnessTurnID]*turnState{}
+	completedTurns := map[harness.HarnessTurnID]struct{}{}
+	var turnsMu sync.Mutex
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, func(w http.ResponseWriter, r *http.Request) {
 		harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{
@@ -120,9 +123,25 @@ func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeReadyWhenBrokeredConforma
 			harness.WriteError(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		turns[request.TurnID] = &turnState{request: request, continued: make(chan harness.ContinueTurnRequest, 1)}
+		turnsMu.Lock()
+		if _, completed := completedTurns[request.TurnID]; completed {
+			turnsMu.Unlock()
+			harness.WriteError(w, http.StatusConflict, "turn already completed")
+			return
+		}
+		turn := turns[request.TurnID]
+		if turn != nil && turn.request.Input.Prompt != request.Input.Prompt {
+			turnsMu.Unlock()
+			harness.WriteError(w, http.StatusConflict, "turn already exists")
+			return
+		}
+		if turn == nil {
+			turn = &turnState{request: request, continued: make(chan harness.ContinueTurnRequest, 1)}
+			turns[request.TurnID] = turn
+		}
+		turnsMu.Unlock()
 		eventsPath, _ := harness.EventStreamPath(request.TurnID)
-		harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, EventStreamPath: eventsPath})
+		harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, EventStreamPath: eventsPath})
 	})
 	mux.HandleFunc(harness.TurnsPath+"/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
@@ -134,7 +153,9 @@ func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeReadyWhenBrokeredConforma
 			harness.WriteError(w, http.StatusNotFound, "not found")
 			return
 		}
+		turnsMu.Lock()
 		turn := turns[turnID]
+		turnsMu.Unlock()
 		if turn == nil {
 			harness.WriteError(w, http.StatusNotFound, "turn not found")
 			return
@@ -147,6 +168,9 @@ func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeReadyWhenBrokeredConforma
 			case continued := <-turn.continued:
 				_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameToolResultReceived, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, Seq: 3, ToolName: "conformance_read", ToolCallID: "call-1", Content: continued.ToolResults[0].Output})
 				_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameTurnCompleted, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, Seq: 4, Completed: &harness.TurnCompleted{Result: "ok", FinalEventSeq: 4}})
+				turnsMu.Lock()
+				completedTurns[turn.request.TurnID] = struct{}{}
+				turnsMu.Unlock()
 			case <-time.After(2 * time.Second):
 			}
 			_ = harness.WriteSSEDone(w)

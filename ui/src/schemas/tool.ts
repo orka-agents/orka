@@ -7,6 +7,7 @@ export const httpExecutionSchema = z.object({
   headers: z.record(z.string()).optional(),
   timeout: z.string().optional(),
   authSecretRef: z.object({ name: z.string(), key: z.string() }).optional(),
+  outboundAccessPolicyRef: z.object({ name: z.string().min(1) }).optional(),
   authInject: z.string().optional(),
   authBodyKey: z.string().optional(),
 })

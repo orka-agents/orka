@@ -1,3 +1,8 @@
+# Current application release version. Chart.yaml has its own version and may
+# advance independently for chart-only changes. Release preparation aligns both
+# versions for a tagged application release.
+VERSION := v0.1.1
+
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 AI_WORKER_IMG ?= ghcr.io/orka-agents/orka/ai-worker:latest
@@ -45,11 +50,68 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+manifests: controller-gen kustomize ## Generate canonical and Gatekeeper-style staging manifests.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
-	rm -rf charts/orka/crds
-	mkdir -p charts/orka/crds
-	cp config/crd/bases/*.yaml charts/orka/crds/
+	@set -euo pipefail; \
+		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \
+		backup=""; \
+		cleanup() { \
+			rc=$$?; \
+			trap - EXIT; \
+			[[ -z "$$tmp" ]] || rm -rf "$$tmp"; \
+			if [[ -n "$$backup" && -e "$$backup" && ! -e manifest_staging ]]; then mv "$$backup" manifest_staging; fi; \
+			exit $$rc; \
+		}; \
+		trap cleanup EXIT; \
+		mkdir -p "$$tmp/deploy" "$$tmp/charts/orka"; \
+		"$(KUSTOMIZE)" build config/default -o "$$tmp/deploy/orka.yaml"; \
+		"$(KUSTOMIZE)" build \
+			--load-restrictor LoadRestrictionsNone \
+			cmd/build/helmify | go run ./cmd/build/helmify -output-dir "$$tmp/charts/orka"; \
+		if [[ -e manifest_staging ]]; then \
+			backup="$$(mktemp -d .manifest_staging.backup.XXXXXX)"; \
+			rmdir "$$backup"; \
+			mv manifest_staging "$$backup"; \
+		fi; \
+		mv "$$tmp" manifest_staging; \
+		tmp=""; \
+		trap - EXIT; \
+		if [[ -n "$$backup" ]]; then rm -rf "$$backup"; fi
+
+.PHONY: release-manifest
+release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc.N].
+	@test -n "$(NEWVERSION)" || { echo "NEWVERSION is required" >&2; exit 2; }
+	python3 scripts/update-release-version.py "$(NEWVERSION)"
+	$(MAKE) manifests
+
+.PHONY: promote-staging-manifest
+promote-staging-manifest: ## Promote committed staging manifests into release snapshots.
+	test -f manifest_staging/deploy/orka.yaml
+	test -f manifest_staging/charts/orka/Chart.yaml
+	@set -euo pipefail; \
+		stage="$$(mktemp -d .promote-staging.tmp.XXXXXX)"; \
+		backup="$$(mktemp -d .promote-staging.backup.XXXXXX)"; \
+		installed_deploy=0; \
+		installed_charts=0; \
+		rollback() { \
+			rc=$$?; \
+			trap - EXIT; \
+			if [[ $$installed_deploy -eq 1 ]]; then rm -rf deploy; fi; \
+			if [[ $$installed_charts -eq 1 ]]; then rm -rf charts; fi; \
+			if [[ -e "$$backup/deploy" ]]; then mv "$$backup/deploy" deploy; fi; \
+			if [[ -e "$$backup/charts" ]]; then mv "$$backup/charts" charts; fi; \
+			rm -rf "$$stage" "$$backup"; \
+			exit $$rc; \
+		}; \
+		trap rollback EXIT; \
+		cp -R manifest_staging/deploy "$$stage/deploy"; \
+		cp -R manifest_staging/charts "$$stage/charts"; \
+		if [[ -e deploy ]]; then mv deploy "$$backup/deploy"; fi; \
+		if [[ -e charts ]]; then mv charts "$$backup/charts"; fi; \
+		mv "$$stage/deploy" deploy; installed_deploy=1; \
+		mv "$$stage/charts" charts; installed_charts=1; \
+		trap - EXIT; \
+		rm -rf "$$stage" "$$backup"
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -69,6 +131,23 @@ ensure-ui-embed: ## Create stub UI embed directory if not present (for go vet/bu
 .PHONY: vet
 vet: ensure-ui-embed ## Run go vet against code.
 	go vet ./...
+
+
+.PHONY: repository-monitor-fake-e2e
+repository-monitor-fake-e2e: ensure-ui-embed ## Run fake-GitHub RepositoryMonitor issue-to-PR E2E scenarios
+	bash scripts/repository-monitor-fake-e2e.sh
+
+.PHONY: repository-monitor-validate
+repository-monitor-validate: ensure-ui-embed ## Run full local RepositoryMonitor fake-E2E/docs/example validation
+	bash scripts/repository-monitor-validate.sh
+
+.PHONY: repository-monitor-live-preflight
+repository-monitor-live-preflight: ## Check prerequisites for live GitHub label trigger E2E without changing the cluster
+	bash scripts/live-github-label-trigger-e2e.sh --preflight-only
+
+.PHONY: repository-monitor-completion-audit
+repository-monitor-completion-audit: ensure-ui-embed ## Run local validation plus live preflight audit for RepositoryMonitor plan completion
+	bash scripts/repository-monitor-completion-audit.sh
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
@@ -130,9 +209,8 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 ##@ Demos
 
 .PHONY: demo-cluster-up
-demo-cluster-up: ## Bootstrap a kind cluster with Orka + kontxt + agent-sandbox
+demo-cluster-up: ## Bootstrap a kind cluster with Orka + agent-sandbox
 	hack/demos/cluster/cluster-up.sh
-	hack/demos/cluster/install-kontxt.sh
 	hack/demos/cluster/install-agent-sandbox.sh
 	hack/demos/cluster/install-demo-model.sh
 
@@ -149,9 +227,8 @@ demo-substrate-down: ## Tear down the Agent Substrate demo cluster (Demo 70)
 	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
 
 .PHONY: demo-cluster-up-all
-demo-cluster-up-all: ## ONE substrate-flavored kind cluster that runs ALL demos (00-70)
+demo-cluster-up-all: ## ONE substrate-flavored kind cluster that runs the local demos (00-40, 60-70)
 	hack/demos/cluster/install-substrate.sh
-	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-kontxt.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-demo-model.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-agent-sandbox.sh
 
@@ -160,9 +237,7 @@ demo-cluster-up-all-down: ## Tear down the unified demo cluster
 	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
 
 .PHONY: demo-images
-demo-images: ## Build + kind-load demo-only images (kontxt-caller + sandbox runtime)
-	docker build -t ghcr.io/orka-agents/orka/kontxt-caller:demo hack/demos/images/kontxt-caller
-	kind load docker-image ghcr.io/orka-agents/orka/kontxt-caller:demo --name $${ORKA_DEMO_CLUSTER:-orka-demo}
+demo-images: ## Build + kind-load demo-only sandbox runtime image
 	docker build -t orka-sandbox-runtime:demo -f hack/demos/images/sandbox-runtime/Dockerfile .
 	kind load docker-image orka-sandbox-runtime:demo --name $${ORKA_DEMO_CLUSTER:-orka-demo}
 
@@ -290,7 +365,11 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 		token="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
 		"$(KUBECTL)" -n orka-system create secret generic harness-wrapper-auth --from-literal=token="$$token"; \
 	fi
-	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
+	"$(KUSTOMIZE)" build config/default | \
+		sed -E \
+			-e 's|^([[:space:]]*- --ai-worker-image=).*$$|\1$(AI_WORKER_IMG)|' \
+			-e 's|^([[:space:]]*- --general-worker-image=).*$$|\1$(GENERAL_WORKER_IMG)|' | \
+		"$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.

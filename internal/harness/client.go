@@ -208,6 +208,10 @@ func (c *Client) StartTurn(ctx context.Context, request StartTurnRequest) (_ *St
 	if c.structuralValueContainsSensitiveData(response.EventStreamPath) {
 		return nil, acceptedClientError("start_turn", "harness start response eventStreamPath contains sensitive data")
 	}
+	expectedEventStreamPath, pathErr := EventStreamPath(request.TurnID)
+	if pathErr != nil || response.EventStreamPath != expectedEventStreamPath {
+		return nil, acceptedClientError("start_turn", "harness start response eventStreamPath does not match requested turn")
+	}
 	return &response, nil
 }
 
@@ -251,6 +255,11 @@ func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (_ *
 	return &response, nil
 }
 
+type continueTurnResponseWire struct {
+	ContinueTurnResponse
+	Accepted *bool `json:"accepted"`
+}
+
 func (c *Client) ContinueTurn(ctx context.Context, request ContinueTurnRequest) (_ *ContinueTurnResponse, err error) {
 	defer func() { err = c.sanitizeClientError(err) }()
 	if err := request.Validate(); err != nil {
@@ -260,11 +269,20 @@ func (c *Client) ContinueTurn(ctx context.Context, request ContinueTurnRequest) 
 	if err != nil {
 		return nil, safeClientError("continue_turn", 0, err.Error(), err)
 	}
-	var response ContinueTurnResponse
-	if err := c.postJSON(ctx, rel, request, &response); err != nil {
+	var decoded continueTurnResponseWire
+	if err := c.postJSON(ctx, rel, request, &decoded); err != nil {
 		return nil, err
 	}
+	response := decoded.ContinueTurnResponse
+	if decoded.Accepted != nil {
+		response.Accepted = *decoded.Accepted
+	} else {
+		return nil, unknownAcceptanceClientError("continue_turn", "harness response did not include accepted")
+	}
 	if err := response.ValidateFor(request); err != nil {
+		if response.Accepted {
+			return nil, acceptedClientError("continue_turn", err.Error())
+		}
 		return nil, safeClientError("continue_turn", 0, err.Error(), err)
 	}
 	response.Message = c.sanitizeClientMessage(response.Message)
@@ -314,12 +332,42 @@ func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outp
 }
 
 func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSeq int64, emit func(HarnessEventFrame) error) error {
+	if emit == nil {
+		return c.sanitizeClientError(safeClientError("stream_frames", 0, "emit callback is required"))
+	}
+	return c.streamFrames(ctx, turnID, afterSeq, func(frame HarnessEventFrame, _ int) error {
+		return emit(frame)
+	})
+}
+
+// StreamFramesWithPayloadBytes streams sanitized frames while reporting the
+// assembled SSE data payload size measured before frame sanitization. It is an
+// internal conformance hook and is intentionally not re-exported by pkg/harness.
+func StreamFramesWithPayloadBytes(
+	client *Client,
+	ctx context.Context,
+	turnID HarnessTurnID,
+	afterSeq int64,
+	emit func(HarnessEventFrame, int) error,
+) error {
+	if client == nil {
+		return safeClientError("stream_frames", 0, "client is required")
+	}
+	if emit == nil {
+		return client.sanitizeClientError(safeClientError("stream_frames", 0, "emit callback is required"))
+	}
+	return client.streamFrames(ctx, turnID, afterSeq, emit)
+}
+
+func (c *Client) streamFrames(
+	ctx context.Context,
+	turnID HarnessTurnID,
+	afterSeq int64,
+	emit func(HarnessEventFrame, int) error,
+) error {
 	rel, err := EventStreamPath(turnID)
 	if err != nil {
 		return c.sanitizeClientError(safeClientError("stream_frames", 0, err.Error(), err))
-	}
-	if emit == nil {
-		return c.sanitizeClientError(safeClientError("stream_frames", 0, "emit callback is required"))
 	}
 	u := c.resolve(rel)
 	q := u.Query()
@@ -827,7 +875,7 @@ func RedactExactBearerValue(message, token string) string {
 		return message
 	}
 	replacement := events.ExecutionEventRedactedValue
-	if strings.Contains(replacement, token) {
+	if len(replacement) > len(token) || strings.Contains(replacement, token) {
 		replacement = ""
 	}
 	message = strings.ReplaceAll(message, token, replacement)
@@ -858,12 +906,30 @@ func (c *Client) controlContext(ctx context.Context) (context.Context, context.C
 
 func (c *Client) statusError(op string, resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	message := strings.TrimSpace(string(body))
-	if message == "" {
-		message = resp.Status
-	}
+	message := decodeHTTPErrorMessage(body, resp.Status)
 	clientErr := ClientError{Op: op, StatusCode: resp.StatusCode, Message: events.RedactExecutionEventText(message)}
 	return classifyClientError(clientErr, message)
+}
+
+func decodeHTTPErrorMessage(body []byte, fallback string) string {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return fallback
+	}
+	var envelope struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(trimmed, &envelope) == nil {
+		if envelope.Error != "" {
+			return envelope.Error
+		}
+		if envelope.Message != "" {
+			return envelope.Message
+		}
+		return fallback
+	}
+	return string(trimmed)
 }
 
 func (c *Client) resolve(rel string) *url.URL {
@@ -883,69 +949,121 @@ func (c *Client) resolve(rel string) *url.URL {
 }
 
 func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
-	return readSSEFramesWithSanitizers(r, emit, nil, nil)
+	return readSSEFramesWithSanitizers(r, func(frame HarnessEventFrame, _ int) error {
+		return emit(frame)
+	}, nil, nil)
 }
 
 func readSSEFramesWithSanitizer(r io.Reader, emit func(HarnessEventFrame) error, sanitize func(error) error) error {
-	return readSSEFramesWithSanitizers(r, emit, sanitize, nil)
+	return readSSEFramesWithSanitizers(r, func(frame HarnessEventFrame, _ int) error {
+		return emit(frame)
+	}, sanitize, nil)
 }
 
 func readSSEFramesWithSanitizers(
 	r io.Reader,
-	emit func(HarnessEventFrame) error,
+	emit func(HarnessEventFrame, int) error,
 	sanitizeError func(error) error,
 	sanitizeFrame func(HarnessEventFrame) (HarnessEventFrame, error),
 ) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxHarnessSSELineBytes)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxHarnessSSELineBytes+2)
+	scanner.Split(splitSSELines)
 	var data strings.Builder
+	dataFields := 0
+	firstLine := true
 	for scanner.Scan() {
 		line := scanner.Text()
+		if firstLine {
+			line = strings.TrimPrefix(line, "\uFEFF")
+			firstLine = false
+		}
 		if line == "" {
-			if err := emitSSEData(data.String(), emit, sanitizeError, sanitizeFrame); err != nil {
-				if errors.Is(err, errSSEDone) {
-					return nil
+			if dataFields > 0 {
+				if err := emitSSEData(data.String(), emit, sanitizeError, sanitizeFrame); err != nil {
+					if errors.Is(err, errSSEDone) {
+						return nil
+					}
+					return err
 				}
-				return err
 			}
 			data.Reset()
+			dataFields = 0
 			continue
 		}
-		if strings.HasPrefix(line, ":") {
+		field, value, hasValue := strings.Cut(line, ":")
+		if field != "data" {
 			continue
 		}
-		if after, ok := strings.CutPrefix(line, "data:"); ok {
-			if err := appendSSEData(&data, strings.TrimSpace(after)); err != nil {
-				return sanitizeSSEClientError(sanitizeError, err)
-			}
+		if !hasValue {
+			value = ""
+		} else if strings.HasPrefix(value, " ") {
+			value = value[1:]
+		}
+		if err := appendSSEData(&data, &dataFields, value); err != nil {
+			return sanitizeSSEClientError(sanitizeError, err)
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		if errors.Is(err, errSSELineTooLarge) {
+			return sanitizeSSEClientError(
+				sanitizeError,
+				protocolViolationClientError("stream_frames", "SSE line exceeds harness frame limit"),
+			)
+		}
 		return sanitizeSSEClientError(sanitizeError, safeClientError("stream_frames", 0, err.Error(), err))
 	}
-	if data.Len() > 0 {
-		if err := emitSSEData(data.String(), emit, sanitizeError, sanitizeFrame); err != nil {
-			if errors.Is(err, errSSEDone) {
-				return nil
-			}
-			return err
-		}
-	}
+	// Per the SSE dispatch algorithm, buffered data without a blank-line event
+	// delimiter is discarded at EOF rather than emitted as a complete frame.
 	return nil
 }
 
-func appendSSEData(data *strings.Builder, value string) error {
+var errSSELineTooLarge = errors.New("SSE line exceeds harness frame limit")
+
+func splitSSELines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	for i, value := range data {
+		switch value {
+		case '\n':
+			if i > maxHarnessSSELineBytes {
+				return 0, nil, errSSELineTooLarge
+			}
+			return i + 1, data[:i], nil
+		case '\r':
+			if i > maxHarnessSSELineBytes {
+				return 0, nil, errSSELineTooLarge
+			}
+			if i+1 == len(data) && !atEOF {
+				return 0, nil, nil
+			}
+			advance := i + 1
+			if i+1 < len(data) && data[i+1] == '\n' {
+				advance++
+			}
+			return advance, data[:i], nil
+		}
+	}
+	if len(data) > maxHarnessSSELineBytes {
+		return 0, nil, errSSELineTooLarge
+	}
+	if atEOF && len(data) > 0 {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
+func appendSSEData(data *strings.Builder, dataFields *int, value string) error {
 	additional := len(value)
-	if data.Len() > 0 {
+	if *dataFields > 0 {
 		additional++
 	}
 	if data.Len()+additional > maxHarnessSSEEventBytes {
-		return safeClientError("stream_frames", 0, "SSE event exceeds harness frame limit")
+		return protocolViolationClientError("stream_frames", "SSE event exceeds harness frame limit")
 	}
-	if data.Len() > 0 {
+	if *dataFields > 0 {
 		data.WriteByte('\n')
 	}
 	data.WriteString(value)
+	*dataFields++
 	return nil
 }
 
@@ -958,11 +1076,10 @@ func sanitizeSSEClientError(sanitize func(error) error, err error) error {
 
 func emitSSEData(
 	raw string,
-	emit func(HarnessEventFrame) error,
+	emit func(HarnessEventFrame, int) error,
 	sanitizeError func(error) error,
 	sanitizeFrame func(HarnessEventFrame) (HarnessEventFrame, error),
 ) error {
-	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
 	}
@@ -983,7 +1100,7 @@ func emitSSEData(
 		}
 		frame = sanitized
 	}
-	if err := emit(frame); err != nil {
+	if err := emit(frame, len(raw)); err != nil {
 		return err
 	}
 	return nil
@@ -998,6 +1115,7 @@ type ClientError struct {
 	sanitizedDisplay        string
 	sanitizedDisplaySet     bool
 	duplicateTurn           bool
+	completedDuplicateTurn  bool
 	capacityExceeded        bool
 	unsupportedVersion      bool
 	remoteRejected          bool
@@ -1015,7 +1133,8 @@ func (e ClientError) Is(target error) bool {
 
 // IsDuplicateTurn reports whether the remote deterministically rejected an
 // already-started or already-completed turn identity.
-func (e ClientError) IsDuplicateTurn() bool { return e.duplicateTurn }
+func (e ClientError) IsDuplicateTurn() bool          { return e.duplicateTurn }
+func (e ClientError) IsCompletedDuplicateTurn() bool { return e.completedDuplicateTurn }
 
 func (e ClientError) IsCapacityExceeded() bool   { return e.capacityExceeded }
 func (e ClientError) IsUnsupportedVersion() bool { return e.unsupportedVersion }
@@ -1060,11 +1179,36 @@ func safeClientError(op string, status int, message string, causes ...error) err
 	return withClientErrorCause(classifyClientError(clientErr, message), causes)
 }
 
+func protocolViolationClientError(op, message string, causes ...error) error {
+	clientErr := ClientError{
+		Op:                op,
+		Message:           events.RedactExecutionEventText(message),
+		protocolViolation: true,
+	}
+	return withClientErrorCause(clientErr, causes)
+}
+
+func canonicalRemoteErrorMessage(message string) string {
+	var body struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(message)), &body) == nil && body.Error != "" {
+		return body.Error
+	}
+	return message
+}
+
 func classifyClientError(clientErr ClientError, message string) ClientError {
 	lower := strings.ToLower(clientErr.Op + " " + message)
+	// The harness contract uses 409 Conflict for both active-turn duplicates and
+	// completed-turn tombstones. Do not let duplicate-looking text on other status
+	// codes bypass normal retry or terminal-error handling.
+	duplicateMessage := canonicalRemoteErrorMessage(message)
 	clientErr.duplicateTurn = clientErr.StatusCode == http.StatusConflict &&
-		(strings.Contains(lower, "turn already exists") || strings.Contains(lower, "turn already completed"))
-	clientErr.capacityExceeded = strings.Contains(lower, "maximum concurrent turns")
+		(duplicateMessage == "turn already exists" || duplicateMessage == "turn already completed")
+	clientErr.completedDuplicateTurn = clientErr.StatusCode == http.StatusConflict && duplicateMessage == "turn already completed"
+	clientErr.capacityExceeded = clientErr.StatusCode == http.StatusConflict &&
+		duplicateMessage == "maximum concurrent turns reached"
 	clientErr.unsupportedVersion = strings.Contains(lower, "unsupported version") || strings.Contains(lower, "unsupported protocol version")
 	clientErr.remoteRejected = strings.Contains(lower, "harness did not accept")
 	clientErr.turnNotFound = strings.Contains(lower, "turn not found")

@@ -11,24 +11,25 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
-	kontxttoken "github.com/aramase/kontxt/pkg/token"
+	"github.com/orka-agents/orka/internal/transactiontoken"
 
 	"github.com/orka-agents/orka/internal/metrics"
 )
 
 func TestNewContextTokenTTSConfig(t *testing.T) {
-	cfg, err := NewContextTokenTTSConfig("https://tts.example.test/", "orka", "7s", ContextTokenTTSTokenSourceIncoming, "3m", "30s")
+	cfg, err := NewContextTokenTTSConfig("https://tts.example.test/token", "orka", "7s", ContextTokenTTSTokenSourceIncoming, "3m", "30s")
 	if err != nil {
 		t.Fatalf("NewContextTokenTTSConfig returned error: %v", err)
 	}
 	if !cfg.Enabled() {
 		t.Fatal("expected TTS config to be enabled")
 	}
-	if cfg.URL != "https://tts.example.test" {
-		t.Fatalf("URL = %q, want trimmed URL", cfg.URL)
+	if cfg.Endpoint != "https://tts.example.test/token" {
+		t.Fatalf("Endpoint = %q, want exact endpoint", cfg.Endpoint)
 	}
 	if cfg.Audience != "orka" || cfg.TokenSource != ContextTokenTTSTokenSourceIncoming {
 		t.Fatalf("unexpected config: %#v", cfg)
@@ -64,7 +65,7 @@ func TestNewContextTokenTTSConfigDefaultsToServiceAccountWithURL(t *testing.T) {
 	}
 }
 
-func TestKontxtTTSClientExchange(t *testing.T) {
+func TestContextTokenTTSClientExchange(t *testing.T) {
 	metrics.ContextTokenTTSExchangeTotal.Reset()
 	metrics.ContextTokenTTSExchangeDuration.Reset()
 
@@ -75,16 +76,16 @@ func TestKontxtTTSClientExchange(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm() error = %v", err)
 		}
-		if got := r.FormValue("grant_type"); got != kontxttoken.GrantType {
+		if got := r.FormValue("grant_type"); got != transactiontoken.GrantTypeTokenExchange {
 			t.Fatalf("grant_type = %q", got)
 		}
-		if got := r.FormValue("requested_token_type"); got != kontxttoken.RequestedTokenType {
+		if got := r.FormValue("requested_token_type"); got != transactiontoken.RequestedTokenType {
 			t.Fatalf("requested_token_type = %q", got)
 		}
 		if got := r.FormValue("subject_token"); got != "subject-token" {
 			t.Fatalf("subject_token = %q", got)
 		}
-		if got := r.FormValue("subject_token_type"); got != kontxttoken.SubjectTokenTypeTxnToken {
+		if got := r.FormValue("subject_token_type"); got != transactiontoken.SubjectTokenTypeTransactionToken {
 			t.Fatalf("subject_token_type = %q", got)
 		}
 		if got := r.FormValue("scope"); got != "orka:tasks:create" {
@@ -117,17 +118,17 @@ func TestKontxtTTSClientExchange(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg, err := NewContextTokenTTSConfig(server.URL, "orka", "", ContextTokenTTSTokenSourceIncoming, "", "")
+	cfg, err := NewContextTokenTTSConfig(server.URL+"/token_endpoint", "orka", "", ContextTokenTTSTokenSourceIncoming, "", "")
 	if err != nil {
 		t.Fatalf("NewContextTokenTTSConfig returned error: %v", err)
 	}
-	client, err := NewKontxtTTSClient(cfg)
+	client, err := NewContextTokenTTSClient(cfg)
 	if err != nil {
-		t.Fatalf("NewKontxtTTSClient returned error: %v", err)
+		t.Fatalf("NewContextTokenTTSClient returned error: %v", err)
 	}
 	token, err := client.Exchange(context.Background(), ContextTokenExchangeRequest{
 		SubjectToken:     "subject-token",
-		SubjectTokenType: kontxttoken.SubjectTokenTypeTxnToken,
+		SubjectTokenType: transactiontoken.SubjectTokenTypeTransactionToken,
 		Scope:            ContextTokenScopeTaskCreate,
 		RequestDetails:   map[string]any{"operation": "createTask"},
 		RequestContext:   map[string]any{"source": "test"},
@@ -141,5 +142,47 @@ func TestKontxtTTSClientExchange(t *testing.T) {
 	}
 	if count := testCounterValue(t, metrics.ContextTokenTTSExchangeTotal, "success", "ok"); count != 1 {
 		t.Fatalf("TTS exchange success metric = %v, want 1", count)
+	}
+}
+
+func TestNewContextTokenTTSConfigRejectsCredentialBearingEndpoint(t *testing.T) {
+	_, err := NewContextTokenTTSConfig("https://client:secret@issuer.example.test/token", "", "", "", "", "")
+	if err == nil || !strings.Contains(err.Error(), "without userinfo") {
+		t.Fatalf("NewContextTokenTTSConfig() error = %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "secret") {
+		t.Fatalf("NewContextTokenTTSConfig() leaked endpoint credentials: %v", err)
+	}
+}
+
+func TestContextTokenTTSClientRejectsNonTransactionResponses(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "bearer result", body: `{"access_token":"token","issued_token_type":"urn:ietf:params:oauth:token-type:txn_token","token_type":"Bearer"}`, want: "token_type"},
+		{name: "missing issued type", body: `{"access_token":"token","token_type":"N_A"}`, want: "issued_token_type"},
+		{name: "empty token", body: `{"access_token":"","issued_token_type":"urn:ietf:params:oauth:token-type:txn_token","token_type":"N_A"}`, want: "access_token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+			cfg, err := NewContextTokenTTSConfig(server.URL, "", "", ContextTokenTTSTokenSourceIncoming, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := NewContextTokenTTSClient(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.Exchange(context.Background(), ContextTokenExchangeRequest{SubjectToken: "subject", Scope: "read"})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Exchange() error = %v, want containing %q", err, tt.want)
+			}
+		})
 	}
 }

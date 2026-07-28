@@ -3,6 +3,14 @@ Orka has been installed.
 Controller: {{ include "orka.fullname" . }}-controller
 Namespace:  {{ .Release.Namespace }}
 
+CRD lifecycle:
+  - A fresh install creates Orka's twelve cluster-scoped CRDs unless --skip-crds is used.
+  - Helm does not update CRDs during helm upgrade. Apply the CRDs from the exact
+    target chart before upgrading the release.
+  - helm uninstall retains the CRDs and all Orka custom resources.
+
+Upgrade guidance: helm show readme <the same chart reference or archive>
+
 {{- if not .Values.store.persistence.enabled }}
 
 ⚠️  STORAGE WARNING: SQLite store is using ephemeral storage (emptyDir).
@@ -29,6 +37,9 @@ Generic Gateway CRD upgrade:
 
     helm repo add orka https://orka-agents.github.io/orka/charts
     helm repo update orka
-    helm show crds orka/orka --version {{ .Chart.Version }} | kubectl apply -f -
+    helm show readme orka/orka --version {{ .Chart.Version }}
 
-  The controller remains gateway-disabled until all three Gateway CRDs and the Task session-cutoff schema are observed.
+  Follow the README's guarded exact-spec replacement procedure (or the matching
+  source checkout's scripts/apply-helm-crds.sh) before upgrading. The controller
+  remains gateway-disabled until all three Gateway CRDs and the Task
+  session-cutoff schema are observed.

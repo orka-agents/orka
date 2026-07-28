@@ -1,21 +1,29 @@
 package conformance
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/harness/harnesstest"
+)
+
+const (
+	conformanceTestToolCallID = "tool-call-1"
+	conformanceTestBadVersion = "orka.harness.invalid"
 )
 
 func TestCheckReadinessPassesForFakeHarness(t *testing.T) {
@@ -249,6 +257,35 @@ func TestCheckReadinessValidatesCapabilitiesWithExplicitProbe(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsBearerOverlapInTypedCapabilities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case harness.HealthPath:
+			harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{
+				Version: harness.ProtocolVersion, Status: harness.HealthStatusOK, Ready: true, CheckedAt: time.Now().UTC(),
+			})
+		case harness.CapabilitiesPath:
+			harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+				Version: harness.ProtocolVersion, ProtocolVersion: harness.ProtocolVersion, Transport: harness.HTTPTransport,
+				RuntimeName: "typed-overlap", ProviderKind: harness.ProviderKindRemote,
+				ToolExecutionModes: []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+				MaxOutputBytes:     12345,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "12345"})
+	if result.Passed || !strings.Contains(result.Message, "maxOutputBytes") {
+		t.Fatalf("result = %#v, want typed capability bearer overlap", result)
+	}
+	if result.ObservedCapabilities != nil {
+		t.Fatalf("ObservedCapabilities = %#v, want omitted on bearer overlap", result.ObservedCapabilities)
+	}
+}
+
 func TestCheckReadinessFailsUnsupportedProtocolVersion(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{ProtocolVersion: "orka.harness.v0", AuthToken: "mock-token"})
 	defer server.Close()
@@ -348,6 +385,114 @@ func TestCheckFailsWhenDuplicateStartAccepted(t *testing.T) {
 	}
 }
 
+func TestCheckFailsWhenCompletedTurnIsReaccepted(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.forgetCompletedTurn = true
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "completed turn accepted duplicate start") {
+		t.Fatalf("Message = %q, want completed duplicate rejection failure", result.Message)
+	}
+}
+
+func TestCheckFailsWhenActiveDuplicateResponseIsNotIdentical(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.allowDuplicateStart = true
+	server.omitDuplicateResponseCorrelation = true
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "non-identical response") {
+		t.Fatalf("Message = %q, want active duplicate response mismatch", result.Message)
+	}
+}
+
+func TestCompletedDuplicateMalformedAcceptanceIsCancelled(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassRead
+	server.completedStartResponseVersion = conformanceTestBadVersion
+	defer server.Close()
+
+	result := Check(context.Background(), Target{
+		BaseURL:           server.URL,
+		BearerToken:       "mock-token",
+		RequireAuth:       true,
+		ProbeBrokeredRead: true,
+	})
+	if result.Passed || !strings.Contains(result.Message, "deterministic 409 rejection") {
+		t.Fatalf("result = %#v, want malformed completed duplicate failure", result)
+	}
+	server.mu.Lock()
+	cancelCount := server.cancelCount
+	server.mu.Unlock()
+	if cancelCount != 1 {
+		t.Fatalf("cancel count = %d, want 1", cancelCount)
+	}
+}
+
+func TestCheckFailsWhenCompletedTurnUsesActiveDuplicateError(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.completedStartError = "turn already exists"
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "deterministic 409 rejection") {
+		t.Fatalf("Message = %q, want completed duplicate kind failure", result.Message)
+	}
+}
+
+func TestCheckFailsWhenActiveTurnAcceptsChangedRequestBody(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.allowDuplicateStart = true
+	server.allowModifiedDuplicateStart = true
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
+	if result.Passed || !strings.Contains(result.Message, "active turn accepted duplicate start with changed request body") {
+		t.Fatalf("result = %#v, want changed active duplicate failure", result)
+	}
+}
+
+func TestCheckFailsWhenCompletedTombstoneUsesRequestBody(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.acceptModifiedCompletedStart = true
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
+	if result.Passed || !strings.Contains(result.Message, "completed changed-body turn accepted duplicate start") {
+		t.Fatalf("result = %#v, want changed completed duplicate failure", result)
+	}
+}
+
+func TestBrokeredProbeReplaysContinuationIdempotently(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassRead
+	defer server.Close()
+
+	result := Check(context.Background(), Target{
+		BaseURL: server.URL, BearerToken: "mock-token", RequireAuth: true, ProbeBrokeredRead: true,
+	})
+	if !result.Passed {
+		t.Fatalf("result = %#v, want idempotent continuation replay", result)
+	}
+	server.mu.Lock()
+	continueCalls := server.continueCalls
+	server.mu.Unlock()
+	if continueCalls != 2 {
+		t.Fatalf("continue calls = %d, want 2", continueCalls)
+	}
+}
+
 func TestCheckFailsWhenProbeFrameLimitExceeded(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	server.outputFrames = maxProbeFrames + 1
@@ -377,6 +522,45 @@ func TestCheckFailsWhenProbeFrameByteLimitExceeded(t *testing.T) {
 	}
 }
 
+func TestCheckCountsSensitivePayloadBytesBeforeSanitization(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.outputFrames = 2
+	server.outputText = strings.Repeat("s", maxProbeFrameBytes/2+1024)
+	server.sensitiveOutput = true
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{
+		BaseURL:        server.URL,
+		BearerToken:    "mock-token",
+		ControlTimeout: time.Minute,
+	})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "frame bytes exceeded") {
+		t.Fatalf("Message = %q, want raw frame byte limit", result.Message)
+	}
+}
+
+func TestCheckCountsPreservedSSEWhitespaceTowardFrameBudget(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.outputFrames = 2
+	server.outputPaddingBytes = maxProbeFrameBytes/2 + 1024
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{
+		BaseURL:        server.URL,
+		BearerToken:    "mock-token",
+		ControlTimeout: time.Minute,
+	})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "frame bytes exceeded") {
+		t.Fatalf("Message = %q, want preserved whitespace byte limit", result.Message)
+	}
+}
+
 func TestCheckFailsWhenStartTurnResponseOmitsEventStreamPath(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	server.omitEventStreamPath = true
@@ -388,6 +572,20 @@ func TestCheckFailsWhenStartTurnResponseOmitsEventStreamPath(t *testing.T) {
 	}
 	if !strings.Contains(result.Message, "eventStreamPath") {
 		t.Fatalf("Message = %q, want eventStreamPath failure", result.Message)
+	}
+}
+
+func TestCheckFailsWhenStartTurnResponseEventStreamPathMismatchesTurn(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.mismatchedEventStreamPath = true
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "eventStreamPath does not match requested turn") {
+		t.Fatalf("Message = %q, want mismatched eventStreamPath failure", result.Message)
 	}
 }
 
@@ -524,17 +722,27 @@ type agentKitOrkaFixture struct {
 	runtimeVersion                   string
 	authValue                        string
 	omitEventStreamPath              bool
+	mismatchedEventStreamPath        bool
 	startResponseVersion             string
 	rejectStartResponse              bool
 	omitStartResponseCorrelation     bool
+	omitDuplicateResponseCorrelation bool
+	completedStartResponseVersion    string
+	completedStartError              string
 	disableCancel                    bool
 	disableRuntimeSessions           bool
 	frameType                        harness.FrameType
 	allowDuplicateStart              bool
+	allowModifiedDuplicateStart      bool
+	acceptModifiedCompletedStart     bool
 	duplicateStartMismatch           bool
+	forgetCompletedTurn              bool
 	outputFrames                     int
 	outputText                       string
+	outputPaddingBytes               int
+	sensitiveOutput                  bool
 	cancelCount                      int
+	continueCalls                    int
 	brokeredClass                    harness.BrokeredToolClass
 	brokeredClasses                  []harness.BrokeredToolClass
 	brokeredOnly                     bool
@@ -544,6 +752,7 @@ type agentKitOrkaFixture struct {
 	brokeredPostTerminalFrame        bool
 	mu                               sync.Mutex
 	turns                            map[harness.HarnessTurnID]harness.StartTurnRequest
+	completedTurns                   map[harness.HarnessTurnID]struct{}
 	continued                        map[harness.HarnessTurnID]harness.ToolCallResult
 	continueCh                       map[harness.HarnessTurnID]chan struct{}
 }
@@ -551,13 +760,14 @@ type agentKitOrkaFixture struct {
 func newAgentKitOrkaFixture(t *testing.T) *agentKitOrkaFixture {
 	t.Helper()
 	fixture := &agentKitOrkaFixture{
-		runtimeName:  "fibey-agentkit",
-		authValue:    "mock-token",
-		frameType:    harness.FrameRuntimeOutput,
-		outputFrames: 1,
-		turns:        map[harness.HarnessTurnID]harness.StartTurnRequest{},
-		continued:    map[harness.HarnessTurnID]harness.ToolCallResult{},
-		continueCh:   map[harness.HarnessTurnID]chan struct{}{},
+		runtimeName:    "fibey-agentkit",
+		authValue:      "mock-token",
+		frameType:      harness.FrameRuntimeOutput,
+		outputFrames:   1,
+		turns:          map[harness.HarnessTurnID]harness.StartTurnRequest{},
+		completedTurns: map[harness.HarnessTurnID]struct{}{},
+		continued:      map[harness.HarnessTurnID]harness.ToolCallResult{},
+		continueCh:     map[harness.HarnessTurnID]chan struct{}{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, fixture.health)
@@ -644,14 +854,50 @@ func (f *agentKitOrkaFixture) startTurn(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	f.mu.Lock()
-	_, duplicate := f.turns[request.TurnID]
-	if duplicate && !f.allowDuplicateStart {
+	_, completed := f.completedTurns[request.TurnID]
+	original, duplicate := f.turns[request.TurnID]
+	changedRequest := duplicate && !reflect.DeepEqual(original, request)
+	if completed && f.acceptModifiedCompletedStart && changedRequest {
+		delete(f.completedTurns, request.TurnID)
+		delete(f.turns, request.TurnID)
+		delete(f.continueCh, request.TurnID)
+		completed = false
+		duplicate = false
+	}
+	if completed {
+		f.mu.Unlock()
+		if f.completedStartResponseVersion != "" {
+			harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
+				Version:          f.completedStartResponseVersion,
+				Accepted:         true,
+				RuntimeSessionID: request.RuntimeSessionID,
+				TurnID:           request.TurnID,
+				CorrelationID:    request.CorrelationID,
+				EventStreamPath:  eventStreamPath,
+			})
+			return
+		}
+		if f.completedStartError != "" {
+			harness.WriteError(w, http.StatusConflict, f.completedStartError)
+			return
+		}
+		harness.WriteError(w, http.StatusConflict, "turn already completed")
+		return
+	}
+	if duplicate && changedRequest && !f.allowModifiedDuplicateStart {
 		f.mu.Unlock()
 		harness.WriteError(w, http.StatusConflict, "turn already exists")
 		return
 	}
-	f.turns[request.TurnID] = request
-	f.continueCh[request.TurnID] = make(chan struct{})
+	if duplicate && !changedRequest && !f.allowDuplicateStart {
+		f.mu.Unlock()
+		harness.WriteError(w, http.StatusConflict, "turn already exists")
+		return
+	}
+	if !duplicate {
+		f.turns[request.TurnID] = request
+		f.continueCh[request.TurnID] = make(chan struct{})
+	}
 	f.mu.Unlock()
 	version := harness.ProtocolVersion
 	if f.startResponseVersion != "" {
@@ -665,13 +911,15 @@ func (f *agentKitOrkaFixture) startTurn(w http.ResponseWriter, r *http.Request) 
 		CorrelationID:    request.CorrelationID,
 		EventStreamPath:  eventStreamPath,
 	}
-	if f.omitStartResponseCorrelation {
+	if f.omitStartResponseCorrelation || (duplicate && f.omitDuplicateResponseCorrelation) {
 		response.CorrelationID = ""
 	} else if duplicate && f.duplicateStartMismatch {
 		response.CorrelationID = "duplicate-mismatch"
 	}
 	if f.omitEventStreamPath {
 		response.EventStreamPath = ""
+	} else if f.mismatchedEventStreamPath {
+		response.EventStreamPath = "/v1/turns/other/events"
 	}
 	harness.WriteJSON(w, http.StatusAccepted, response)
 }
@@ -729,10 +977,15 @@ func (f *agentKitOrkaFixture) continueTurn(w http.ResponseWriter, r *http.Reques
 	}
 	f.mu.Lock()
 	f.continued[request.TurnID] = body.ToolResults[0]
+	f.continueCalls++
 	ch := f.continueCh[request.TurnID]
 	f.mu.Unlock()
 	if ch != nil {
-		close(ch)
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
 	}
 	harness.WriteJSON(w, http.StatusAccepted, harness.ContinueTurnResponse{
 		Version:          harness.ProtocolVersion,
@@ -741,6 +994,16 @@ func (f *agentKitOrkaFixture) continueTurn(w http.ResponseWriter, r *http.Reques
 		TurnID:           request.TurnID,
 		CorrelationID:    request.CorrelationID,
 	})
+}
+
+func (f *agentKitOrkaFixture) recordCompleted(request harness.StartTurnRequest) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.forgetCompletedTurn {
+		delete(f.turns, request.TurnID)
+		return
+	}
+	f.completedTurns[request.TurnID] = struct{}{}
 }
 
 func (f *agentKitOrkaFixture) events(w http.ResponseWriter, request harness.StartTurnRequest) {
@@ -761,13 +1024,24 @@ func (f *agentKitOrkaFixture) events(w http.ResponseWriter, request harness.Star
 		if outputText == "" {
 			outputText = "AgentKit Orka fixture output"
 		}
-		output.ContentText = outputText
-		output.Content = json.RawMessage(fmt.Sprintf(`{"message":%q}`, outputText))
-		_ = harness.WriteSSEFrame(w, output)
+		if f.sensitiveOutput {
+			output.ContentText = "sensitive output redacted"
+			output.Content = json.RawMessage(fmt.Sprintf(`{"api_key":%q}`, outputText))
+		} else {
+			output.ContentText = outputText
+			output.Content = json.RawMessage(fmt.Sprintf(`{"message":%q}`, outputText))
+		}
+		if f.outputPaddingBytes > 0 {
+			encoded, _ := json.Marshal(output)
+			_, _ = fmt.Fprintf(w, "data: %s\ndata: %s\n\n", encoded, strings.Repeat(" ", f.outputPaddingBytes))
+		} else {
+			_ = harness.WriteSSEFrame(w, output)
+		}
 	}
 	completedSeq := int64(outputFrames + 2)
 	completed := &harness.TurnCompleted{Result: "ok", FinalEventSeq: completedSeq}
 	_ = harness.WriteSSEFrame(w, agentKitFrame(request, completedSeq, harness.FrameTurnCompleted, "turn completed", completed))
+	f.recordCompleted(request)
 	_ = harness.WriteSSEDone(w)
 }
 
@@ -778,7 +1052,7 @@ func (f *agentKitOrkaFixture) brokeredEvents(w http.ResponseWriter, request harn
 	if f.brokeredToolNameOverride != "" {
 		tool.ToolName = f.brokeredToolNameOverride
 	}
-	tool.ToolCallID = "tool-call-1"
+	tool.ToolCallID = conformanceTestToolCallID
 	tool.Content = json.RawMessage(`{"probe":true}`)
 	_ = harness.WriteSSEFrame(w, tool)
 	if f.brokeredEagerResult {
@@ -789,6 +1063,7 @@ func (f *agentKitOrkaFixture) brokeredEvents(w http.ResponseWriter, request harn
 		_ = harness.WriteSSEFrame(w, result)
 		completed := &harness.TurnCompleted{Result: "ok", FinalEventSeq: 4}
 		_ = harness.WriteSSEFrame(w, agentKitFrame(request, 4, harness.FrameTurnCompleted, "turn completed", completed))
+		f.recordCompleted(request)
 		_ = harness.WriteSSEDone(w)
 		return
 	}
@@ -822,6 +1097,7 @@ func (f *agentKitOrkaFixture) brokeredEvents(w http.ResponseWriter, request harn
 	if f.brokeredPostTerminalFrame {
 		_ = harness.WriteSSEFrame(w, agentKitFrame(request, 5, harness.FrameRuntimeOutput, "late output", nil))
 	}
+	f.recordCompleted(request)
 	_ = harness.WriteSSEDone(w)
 }
 
@@ -855,6 +1131,18 @@ func (f *agentKitOrkaFixture) authorized(w http.ResponseWriter, r *http.Request)
 	return true
 }
 
+func TestValidateBrokeredToolResultFramesRejectsUnexpectedAndDuplicateResults(t *testing.T) {
+	result := Result{Passed: true}
+	validateBrokeredToolResultFrames(&result, []harness.HarnessEventFrame{
+		{Type: harness.FrameToolResultReceived, ToolCallID: conformanceTestToolCallID},
+		{Type: harness.FrameToolResultReceived, ToolCallID: "unexpected-call"},
+	}, conformanceTestToolCallID)
+	failures := strings.Join(result.Failures, "\n")
+	if !strings.Contains(failures, "unexpected tool call id") || !strings.Contains(failures, "frame count = 2") {
+		t.Fatalf("failures = %q, want unexpected-id and duplicate-count failures", failures)
+	}
+}
+
 func TestValidateProbeFramesRejectsNonIncreasingSequences(t *testing.T) {
 	request := defaultStartTurnRequest("sequence")
 	frames := []harness.HarnessEventFrame{
@@ -867,6 +1155,144 @@ func TestValidateProbeFramesRejectsNonIncreasingSequences(t *testing.T) {
 	validateProbeFrames(&result, request, frames)
 	if !strings.Contains(strings.Join(result.Failures, "\n"), "not strictly greater") {
 		t.Fatalf("failures = %#v", result.Failures)
+	}
+}
+
+func TestStreamBrokeredContinuationFramesReconnectsUntilTerminal(t *testing.T) {
+	request := defaultStartTurnRequest("continuation-reconnect")
+	requested := sequenceProbeFrame(request, harness.FrameToolCallRequested, 2)
+	requested.ToolName = "conformance_read"
+	requested.ToolCallID = conformanceTestToolCallID
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch requests.Add(1) {
+		case 1:
+			if got := r.URL.Query().Get("afterSeq"); got != "2" {
+				t.Errorf("first afterSeq = %q, want 2", got)
+			}
+			resultFrame := sequenceProbeFrame(request, harness.FrameToolResultReceived, 3)
+			resultFrame.ToolName = requested.ToolName
+			resultFrame.ToolCallID = requested.ToolCallID
+			_ = harness.WriteSSEFrame(w, resultFrame)
+			_ = harness.WriteSSEDone(w)
+		case 2:
+			if got := r.URL.Query().Get("afterSeq"); got != "3" {
+				t.Errorf("second afterSeq = %q, want 3", got)
+			}
+			completed := &harness.TurnCompleted{Result: "ok", FinalEventSeq: 4}
+			_ = harness.WriteSSEFrame(w, agentKitFrame(request, 4, harness.FrameTurnCompleted, "turn completed", completed))
+			_ = harness.WriteSSEDone(w)
+		default:
+			http.Error(w, "unexpected reconnect", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	client, err := harness.NewClient(server.URL, harness.WithControlTimeout(time.Second))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	frames, sawToolResult, sawTerminal, err := streamBrokeredContinuationFrames(
+		ctx,
+		client,
+		request,
+		requested,
+		2,
+		0,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("streamBrokeredContinuationFrames() error = %v", err)
+	}
+	if !sawToolResult || !sawTerminal {
+		t.Fatalf("sawToolResult=%t sawTerminal=%t, want both true", sawToolResult, sawTerminal)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("requests = %d, want 2", requests.Load())
+	}
+	if len(frames) != 2 || frames[0].Seq != 3 || frames[1].Seq != 4 {
+		t.Fatalf("frames = %#v, want seq 3 and 4", frames)
+	}
+}
+
+func TestStreamBrokeredContinuationFramesSharesRawByteBudgetAcrossReconnects(t *testing.T) {
+	request := defaultStartTurnRequest("continuation-raw-byte-budget")
+	requested := sequenceProbeFrame(request, harness.FrameToolCallRequested, 2)
+	requested.ToolName = "conformance_read"
+	requested.ToolCallID = conformanceTestToolCallID
+	sensitiveValue := strings.Repeat("s", 4<<10)
+	content, err := json.Marshal(map[string]string{"api_key": sensitiveValue})
+	if err != nil {
+		t.Fatalf("json.Marshal(content) error = %v", err)
+	}
+	first := sequenceProbeFrame(request, harness.FrameToolResultReceived, 3)
+	first.ToolName = requested.ToolName
+	first.ToolCallID = requested.ToolCallID
+	first.Content = content
+	second := sequenceProbeFrame(request, harness.FrameRuntimeOutput, 4)
+	second.Content = content
+	firstPayload, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("json.Marshal(first frame) error = %v", err)
+	}
+	secondPayload, err := json.Marshal(second)
+	if err != nil {
+		t.Fatalf("json.Marshal(second frame) error = %v", err)
+	}
+	initialStreamBytes := maxProbeFrameBytes - len(firstPayload) - len(secondPayload) + 1
+	if initialStreamBytes <= 0 {
+		t.Fatalf("initial stream bytes = %d, want positive", initialStreamBytes)
+	}
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch requests.Add(1) {
+		case 1:
+			if got := r.URL.Query().Get("afterSeq"); got != "2" {
+				t.Errorf("first afterSeq = %q, want 2", got)
+			}
+			_ = harness.WriteSSEFrame(w, first)
+			_ = harness.WriteSSEDone(w)
+		case 2:
+			if got := r.URL.Query().Get("afterSeq"); got != "3" {
+				t.Errorf("second afterSeq = %q, want 3", got)
+			}
+			_ = harness.WriteSSEFrame(w, second)
+			_ = harness.WriteSSEDone(w)
+		default:
+			http.Error(w, "unexpected reconnect", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	client, err := harness.NewClient(server.URL, harness.WithControlTimeout(time.Second))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	frames, _, _, err := streamBrokeredContinuationFrames(
+		ctx,
+		client,
+		request,
+		requested,
+		2,
+		2,
+		initialStreamBytes,
+	)
+	if err == nil || !strings.Contains(err.Error(), "frame bytes exceeded") {
+		t.Fatalf("streamBrokeredContinuationFrames() error = %v, want raw byte budget rejection", err)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("requests = %d, want 2", requests.Load())
+	}
+	if len(frames) != 1 || frames[0].Seq != first.Seq {
+		t.Fatalf("frames = %d, want only the first reconnect frame", len(frames))
+	}
+	if bytes.Contains(frames[0].Content, []byte(sensitiveValue)) {
+		t.Fatal("sanitized reconnect frame retained the sensitive value")
 	}
 }
 
@@ -1148,7 +1574,7 @@ func TestBrokeredProbeAcceptsIdempotentDuplicateWithoutCorrelation(t *testing.T)
 func TestBrokeredProbeCancelsAfterInvalidStartResponse(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	server.brokeredClass = harness.BrokeredToolClassRead
-	server.startResponseVersion = "orka.harness.invalid"
+	server.startResponseVersion = conformanceTestBadVersion
 	defer server.Close()
 	result := Check(context.Background(), Target{
 		BaseURL:           server.URL,
@@ -1210,7 +1636,7 @@ func TestTurnProbeCancelsAfterLostStartResponse(t *testing.T) {
 func TestBrokeredProbeDoesNotCancelRejectedInvalidStartResponse(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	server.brokeredClass = harness.BrokeredToolClassRead
-	server.startResponseVersion = "orka.harness.invalid"
+	server.startResponseVersion = conformanceTestBadVersion
 	server.rejectStartResponse = true
 	defer server.Close()
 	result := Check(context.Background(), Target{
@@ -1302,11 +1728,11 @@ func TestBrokeredProbeStreamPreservesDecodedTerminalDuringCancellation(t *testin
 	errCh := make(chan error, 1)
 	decoded := make(chan struct{})
 	producerDone := make(chan struct{})
-	emitFrame := newBrokeredProbeFrameEmitter(framesCh)
+	emitFrame, _ := newBrokeredProbeFrameEmitter(framesCh)
 	go func() {
 		defer close(producerDone)
 		close(decoded)
-		if err := emitFrame(harness.HarnessEventFrame{Type: harness.FrameTurnCompleted}); err != nil {
+		if err := emitFrame(harness.HarnessEventFrame{Type: harness.FrameTurnCompleted}, 1); err != nil {
 			errCh <- err
 			return
 		}
@@ -1349,11 +1775,11 @@ func TestBrokeredProbeStreamPreservesDecodedToolRequestDuringTimeoutDrain(t *tes
 	decoded := make(chan struct{})
 	cancelInvoked := make(chan struct{})
 	producerDone := make(chan struct{})
-	emitFrame := newBrokeredProbeFrameEmitter(framesCh)
+	emitFrame, _ := newBrokeredProbeFrameEmitter(framesCh)
 	go func() {
 		defer close(producerDone)
 		close(decoded)
-		if err := emitFrame(harness.HarnessEventFrame{Type: harness.FrameToolCallRequested}); err != nil {
+		if err := emitFrame(harness.HarnessEventFrame{Type: harness.FrameToolCallRequested}, 1); err != nil {
 			errCh <- err
 			return
 		}
@@ -1425,6 +1851,11 @@ func TestStartTurnMayHaveBeenAccepted(t *testing.T) {
 	}
 	if !startTurnMayHaveBeenAccepted(harness.ClientError{RemoteAcceptanceUnknown: true}) {
 		t.Fatal("transport failure was not treated as potentially accepted")
+	}
+	for _, status := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway} {
+		if !startTurnMayHaveBeenAccepted(harness.ClientError{StatusCode: status}) {
+			t.Fatalf("status %d was not treated as potentially accepted", status)
+		}
 	}
 }
 

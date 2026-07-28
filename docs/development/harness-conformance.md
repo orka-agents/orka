@@ -79,8 +79,8 @@ AGENTKIT_SERVE_ROOT=/path/to/agentkit.serve \
 
 The observed test starts `agentkit_serve_common.orka.create_orka_app` with an
 offline echo `RuntimeSession`, requires bearer auth on turn endpoints, starts a
-native Orka `StartTurnRequest`, verifies duplicate-start behavior, streams Orka
-`HarnessEventFrame` values, and asserts AgentKit's default capabilities remain
+native Orka `StartTurnRequest`, verifies duplicate-start behavior both while the
+turn is active and after terminal completion, streams Orka `HarnessEventFrame` values, and asserts AgentKit's default capabilities remain
 observed only. The brokered-read, brokered-write, and brokered-coordination tests start the same
 AgentKit Orka skin with the corresponding conformance gate enabled and run Orka
 `ProbeBrokeredRead`, `ProbeBrokeredWrite`, or `ProbeBrokeredCoordination`, proving
