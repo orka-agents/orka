@@ -208,6 +208,7 @@ func NewToolExecutor() *ToolExecutor {
 	if len(requiredCredentialScopes) == 0 {
 		requiredCredentialScopes = []string{outboundaccess.DefaultCredentialReadScope}
 	}
+	authorityConstraint := strings.TrimSpace(os.Getenv(workerenv.TransactionCredentialSecret))
 	return &ToolExecutor{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -218,7 +219,7 @@ func NewToolExecutor() *ToolExecutor {
 		outboundResolver:            resolver,
 		credentialAuthorityEnforced: strings.TrimSpace(os.Getenv(workerenv.TransactionID)) != "",
 		credentialScopeAllowed:      containsAnyString(credentialScopes, requiredCredentialScopes),
-		credentialSecret:            strings.TrimSpace(os.Getenv(workerenv.TransactionCredentialSecret)),
+		credentialSecret:            authorityConstraint,
 	}
 }
 
