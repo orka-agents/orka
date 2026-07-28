@@ -1274,18 +1274,6 @@ func TestApprovalTargetSpecDigestRequiresAuthSecretVersion(t *testing.T) {
 	}
 }
 
-func TestApprovalTargetSpecDigestReadsLegacyAuthRefAnnotations(t *testing.T) {
-	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
-	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
-	tool.Annotations = map[string]string{
-		legacyApprovalAuthRefUIDAnnotation:             "legacy-uid-1",
-		legacyApprovalAuthRefResourceVersionAnnotation: "10",
-	}
-	if _, err := approvalTargetSpecDigest(tool); err != nil {
-		t.Fatalf("approvalTargetSpecDigest() error = %v", err)
-	}
-}
-
 func TestApprovalTargetSpecDigestIncludesAuthSecretVersion(t *testing.T) {
 	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
 	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}

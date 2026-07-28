@@ -39,8 +39,6 @@ const (
 	approvalOutboundPolicyGenerationAnnotation      = "orka.ai/approval-outbound-policy-generation"
 	approvalOutboundPolicyResourceVersionAnnotation = "orka.ai/approval-outbound-policy-resource-version"
 	approvalOutboundPolicySecretsDigestAnnotation   = "orka.ai/approval-outbound-policy-secrets-digest"
-	legacyApprovalAuthRefUIDAnnotation              = "orka.fibey.io/approval-auth-ref-uid"
-	legacyApprovalAuthRefResourceVersionAnnotation  = "orka.fibey.io/approval-auth-ref-resource-version"
 	approvalTargetURLField                          = "__orkaApprovalURL"
 )
 
@@ -651,13 +649,8 @@ func approvalAuthRefVersion(customTool *corev1alpha1.Tool) (string, string) {
 	if customTool == nil || customTool.Spec.HTTP == nil || customTool.Spec.HTTP.AuthSecretRef == nil {
 		return "", ""
 	}
-	uid := strings.TrimSpace(customTool.Annotations[approvalAuthRefUIDAnnotation])
-	resourceVersion := strings.TrimSpace(customTool.Annotations[approvalAuthRefResourceVersionAnnotation])
-	if uid != "" || resourceVersion != "" {
-		return uid, resourceVersion
-	}
-	return strings.TrimSpace(customTool.Annotations[legacyApprovalAuthRefUIDAnnotation]),
-		strings.TrimSpace(customTool.Annotations[legacyApprovalAuthRefResourceVersionAnnotation])
+	return strings.TrimSpace(customTool.Annotations[approvalAuthRefUIDAnnotation]),
+		strings.TrimSpace(customTool.Annotations[approvalAuthRefResourceVersionAnnotation])
 }
 
 func approvalTargetSpecDigestFromCustomTools(
