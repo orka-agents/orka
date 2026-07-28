@@ -66,9 +66,20 @@ func TestNewToolExecutorUsesConfiguredCredentialReadScopes(t *testing.T) {
 	t.Setenv(workerenv.TransactionID, "txn-1")
 	t.Setenv(workerenv.TransactionScopes, "tenant:outbound-credentials:read")
 	t.Setenv(workerenv.TransactionCredentialReadScopes, "tenant:outbound-credentials:read")
+	t.Setenv(workerenv.TransactionCredentialAuthorizationEnforced, "true")
 	executor := NewToolExecutor()
 	if !executor.credentialAuthorityEnforced || !executor.credentialScopeAllowed {
 		t.Fatalf("credential authority = enforced %t allowed %t", executor.credentialAuthorityEnforced, executor.credentialScopeAllowed)
+	}
+}
+
+func TestNewToolExecutorDoesNotEnforceCredentialAuthorityFromTransactionIDAlone(t *testing.T) {
+	t.Setenv(workerenv.TransactionID, "txn-1")
+	t.Setenv(workerenv.TransactionScopes, "tenant:outbound-credentials:read")
+	t.Setenv(workerenv.TransactionCredentialReadScopes, "tenant:outbound-credentials:read")
+	executor := NewToolExecutor()
+	if executor.credentialAuthorityEnforced {
+		t.Fatal("credential authority enforced outside context-token enforce mode")
 	}
 }
 

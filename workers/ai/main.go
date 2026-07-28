@@ -326,9 +326,10 @@ func run() (err error) {
 			k8sClient,
 			taskNamespace,
 			taskName,
-			workerEnv.TransactionID,
+			workerEnv.EnforceTransactionCredentialAuth,
+			workerEnv.TransactionCredentialReadScopes,
 		),
-		RequireSecretReadAuthorization: workerEnv.TransactionID != "",
+		RequireSecretReadAuthorization: workerEnv.EnforceTransactionCredentialAuth,
 	}
 
 	// Execute the agent loop
@@ -1619,10 +1620,11 @@ func workerSecretReadAuthorizer(
 	k8sClient client.Client,
 	taskNamespace string,
 	taskName string,
-	transactionID string,
+	credentialAuthorizationEnforced bool,
+	credentialReadScopes []string,
 ) func(context.Context, string, string) *tools.ChatToolError {
 	return func(ctx context.Context, namespace, secretName string) *tools.ChatToolError {
-		if strings.TrimSpace(transactionID) == "" {
+		if !credentialAuthorizationEnforced {
 			return nil
 		}
 		if k8sClient == nil {
@@ -1645,11 +1647,22 @@ func workerSecretReadAuthorizer(
 				"Use a transaction token that grants credential access",
 			)
 		}
-		if !tools.TransactionHasScope(tx, secretCredentialReadScope) {
+		requiredScopes := credentialReadScopes
+		if len(requiredScopes) == 0 {
+			requiredScopes = []string{secretCredentialReadScope}
+		}
+		allowed := false
+		for _, scope := range requiredScopes {
+			if tools.TransactionHasScope(tx, scope) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
 			return workerSecretReadError(
 				fmt.Sprintf(
-					"missing required scope %q for git secret %s/%s",
-					secretCredentialReadScope,
+					"missing one of required scopes %q for git secret %s/%s",
+					strings.Join(requiredScopes, ","),
 					namespace,
 					secretName,
 				),

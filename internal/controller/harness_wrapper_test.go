@@ -384,6 +384,7 @@ func TestHarnessWrapperBrokeredPropagatesTransactionCredentialAuthority(t *testi
 	}
 	resolver := &captureBrokeredOutboundResolver{}
 	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	r.EnforceTransactionCredentialAuth = true
 	r.TransactionCredentialReadScopes = []string{"tenant:outbound-credentials:read"}
 	r.OutboundAccessResolver = resolver
 	frame := harness.HarnessEventFrame{
@@ -426,6 +427,7 @@ func TestHarnessWrapperBrokeredRejectsUnauthorizedAuthSecretBeforeRead(t *testin
 		},
 	}
 	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	r.EnforceTransactionCredentialAuth = true
 	frame := harness.HarnessEventFrame{
 		Version:          harness.ProtocolVersion,
 		Type:             harness.FrameToolCallRequested,
@@ -444,6 +446,20 @@ func TestHarnessWrapperBrokeredRejectsUnauthorizedAuthSecretBeforeRead(t *testin
 	if result.Error == nil || result.Error.Code != "credential_authority_unavailable" ||
 		!strings.Contains(result.Error.Message, "not authorized") {
 		t.Fatalf("result = %#v, want pre-read credential authority rejection", result)
+	}
+}
+
+func TestHarnessBrokeredTransactionCredentialAuthorityDisabledOutsideEnforceMode(t *testing.T) {
+	task, _ := harnessWrapperTaskAndAgent()
+	task.Spec.Transaction = &corev1alpha1.TaskTransaction{
+		ID:     "txn-1",
+		Scopes: []string{"tenant:outbound-credentials:read"},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	r.TransactionCredentialReadScopes = []string{"tenant:outbound-credentials:read"}
+	enforced, allowed, secret := r.harnessBrokeredTransactionCredentialAuthority(task)
+	if enforced || !allowed || secret != "" {
+		t.Fatalf("credential authority = enforced %t allowed %t secret %q", enforced, allowed, secret)
 	}
 }
 

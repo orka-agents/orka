@@ -294,7 +294,7 @@ func (r *TaskReconciler) harnessBrokeredTransactionCredentialAuthority(task *cor
 	if tx.Context != nil {
 		constraint = strings.TrimSpace(tx.Context["secret"])
 	}
-	return strings.TrimSpace(tx.ID) != "", allowed, constraint
+	return r.EnforceTransactionCredentialAuth, allowed, constraint
 }
 
 //nolint:gocyclo // Brokered tool handling is a compact policy/approval/idempotency state machine.

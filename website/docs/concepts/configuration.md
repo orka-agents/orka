@@ -735,6 +735,7 @@ controller:
       taskCreate: orka:tasks:create
       providerUse: orka:providers:use
       toolUse: orka:tools:use
+      secretCredentialRead: orka:secrets:credentials:read
       monitorRead: orka:monitors:read
       monitorWrite: orka:monitors:write
       monitorOperate: orka:monitors:operate
@@ -760,6 +761,8 @@ The Helm keys mirror the controller flags: for example,
 `controller.contextToken.jwksUrl` renders `--context-token-jwks-url`,
 `controller.contextToken.scopes.secretRead` renders
 `--context-token-secret-read-scopes`,
+`controller.contextToken.scopes.secretCredentialRead` renders
+`--context-token-secret-credential-read-scopes`,
 `controller.contextToken.scopes.monitorRead` renders
 `--context-token-monitor-read-scopes`,
 `controller.contextToken.scopes.gatewayRead` renders

@@ -25,17 +25,19 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 			TransactionID:      "txn-123",
 			TransactionProfile: "transaction-token",
 		},
-		Provider:        "openai",
-		Model:           "gpt-5",
-		Prompt:          "do work",
-		SystemPrompt:    "be concise",
-		BaseURL:         "https://example.test/v1",
-		AzureAPIVersion: "2024-10-21",
-		Tools:           []string{"delegate_task", "wait_for_tasks"},
-		EnableTelemetry: true,
-		TraceParent:     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
-		TraceState:      "vendor=value",
-		TraceBaggage:    "tenant=acme",
+		Provider:                         "openai",
+		Model:                            "gpt-5",
+		Prompt:                           "do work",
+		SystemPrompt:                     "be concise",
+		BaseURL:                          "https://example.test/v1",
+		AzureAPIVersion:                  "2024-10-21",
+		Tools:                            []string{"delegate_task", "wait_for_tasks"},
+		EnforceTransactionCredentialAuth: true,
+		TransactionCredentialReadScopes:  []string{"tenant:outbound-credentials:read"},
+		EnableTelemetry:                  true,
+		TraceParent:                      "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		TraceState:                       "vendor=value",
+		TraceBaggage:                     "tenant=acme",
 		Fallbacks: []FallbackProviderEnv{{
 			Provider:        "anthropic",
 			APIKey:          "secret",
@@ -62,6 +64,11 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	}
 	if len(parsed.Tools) != 2 || parsed.Tools[0] != "delegate_task" || parsed.Tools[1] != "wait_for_tasks" {
 		t.Fatalf("tools = %#v", parsed.Tools)
+	}
+	if !parsed.EnforceTransactionCredentialAuth ||
+		len(parsed.TransactionCredentialReadScopes) != 1 ||
+		parsed.TransactionCredentialReadScopes[0] != "tenant:outbound-credentials:read" {
+		t.Fatalf("transaction credential env mismatch: got %#v", parsed)
 	}
 	if !parsed.EnableTelemetry || parsed.TraceParent != env.TraceParent || parsed.TraceState != env.TraceState || parsed.TraceBaggage != env.TraceBaggage {
 		t.Fatalf("telemetry env mismatch: got %#v, want parent=%q state=%q baggage=%q", parsed, env.TraceParent, env.TraceState, env.TraceBaggage)

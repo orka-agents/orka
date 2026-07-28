@@ -47,6 +47,7 @@ const (
 	TransactionRequesterContextDigest          = "ORKA_TRANSACTION_REQUESTER_CONTEXT_DIGEST"
 	TransactionCredentialSecret                = "ORKA_TRANSACTION_CREDENTIAL_SECRET"
 	TransactionCredentialReadScopes            = "ORKA_TRANSACTION_CREDENTIAL_READ_SCOPES"
+	TransactionCredentialAuthorizationEnforced = "ORKA_TRANSACTION_CREDENTIAL_AUTHORIZATION_ENFORCED"
 	TransactionTokenFile                       = "ORKA_TRANSACTION_TOKEN_FILE"
 	ContextTokenTTSEndpoint                    = "ORKA_CONTEXT_TOKEN_TTS_ENDPOINT"
 	ContextTokenTTSAudience                    = "ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"
@@ -442,18 +443,20 @@ func ParseFallbacks(getenv func(string) string) []FallbackProviderEnv {
 // AI worker binary.
 type AIWorkerEnv struct {
 	BaseEnv
-	Provider        string
-	Model           string
-	Prompt          string
-	SystemPrompt    string
-	BaseURL         string
-	AzureAPIVersion string
-	Tools           []string
-	Fallbacks       []FallbackProviderEnv
-	EnableTelemetry bool
-	TraceParent     string
-	TraceState      string
-	TraceBaggage    string
+	Provider                         string
+	Model                            string
+	Prompt                           string
+	SystemPrompt                     string
+	BaseURL                          string
+	AzureAPIVersion                  string
+	Tools                            []string
+	Fallbacks                        []FallbackProviderEnv
+	EnforceTransactionCredentialAuth bool
+	TransactionCredentialReadScopes  []string
+	EnableTelemetry                  bool
+	TraceParent                      string
+	TraceState                       string
+	TraceBaggage                     string
 }
 
 // EnvVars renders AI worker env vars. Fallback API keys are included only when
@@ -474,6 +477,12 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	if len(e.Tools) > 0 {
 		envVars = append(envVars, Env(AITools, JoinCSV(e.Tools)))
 	}
+	if e.EnforceTransactionCredentialAuth {
+		envVars = append(envVars, Env(TransactionCredentialAuthorizationEnforced, "true"))
+	}
+	if len(e.TransactionCredentialReadScopes) > 0 {
+		envVars = append(envVars, Env(TransactionCredentialReadScopes, JoinCSV(e.TransactionCredentialReadScopes)))
+	}
 	if e.EnableTelemetry {
 		envVars = append(envVars, Env(EnableTelemetry, "true"))
 	}
@@ -492,19 +501,21 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 // ParseAIWorkerEnv reads the AI worker environment.
 func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 	return AIWorkerEnv{
-		BaseEnv:         ParseBaseEnv(getenv),
-		Provider:        getenv(AIProvider),
-		Model:           getenv(AIModel),
-		Prompt:          getenv(AIPrompt),
-		SystemPrompt:    getenv(AISystemPrompt),
-		BaseURL:         getenv(AIBaseURL),
-		AzureAPIVersion: getenv(AIAzureAPIVersion),
-		Tools:           SplitCSV(getenv(AITools)),
-		Fallbacks:       ParseFallbacks(getenv),
-		EnableTelemetry: IsTrue(getenv(EnableTelemetry)),
-		TraceParent:     getenv(TraceParent),
-		TraceState:      getenv(TraceState),
-		TraceBaggage:    getenv(TraceBaggage),
+		BaseEnv:                          ParseBaseEnv(getenv),
+		Provider:                         getenv(AIProvider),
+		Model:                            getenv(AIModel),
+		Prompt:                           getenv(AIPrompt),
+		SystemPrompt:                     getenv(AISystemPrompt),
+		BaseURL:                          getenv(AIBaseURL),
+		AzureAPIVersion:                  getenv(AIAzureAPIVersion),
+		Tools:                            SplitCSV(getenv(AITools)),
+		Fallbacks:                        ParseFallbacks(getenv),
+		EnforceTransactionCredentialAuth: IsTrue(getenv(TransactionCredentialAuthorizationEnforced)),
+		TransactionCredentialReadScopes:  SplitCSV(getenv(TransactionCredentialReadScopes)),
+		EnableTelemetry:                  IsTrue(getenv(EnableTelemetry)),
+		TraceParent:                      getenv(TraceParent),
+		TraceState:                       getenv(TraceState),
+		TraceBaggage:                     getenv(TraceBaggage),
 	}
 }
 

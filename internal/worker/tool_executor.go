@@ -217,7 +217,7 @@ func NewToolExecutor() *ToolExecutor {
 		namespace:                   namespace,
 		k8sClient:                   k8sClient,
 		outboundResolver:            resolver,
-		credentialAuthorityEnforced: strings.TrimSpace(os.Getenv(workerenv.TransactionID)) != "",
+		credentialAuthorityEnforced: workerenv.IsTrue(os.Getenv(workerenv.TransactionCredentialAuthorizationEnforced)),
 		credentialScopeAllowed:      containsAnyString(credentialScopes, requiredCredentialScopes),
 		credentialSecret:            authorityConstraint,
 	}

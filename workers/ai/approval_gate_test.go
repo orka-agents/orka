@@ -1295,6 +1295,42 @@ func TestApprovalTargetSpecDigestIncludesAuthSecretVersion(t *testing.T) {
 	}
 }
 
+func TestWorkerSecretReadAuthorizerDisabledOutsideEnforceMode(t *testing.T) {
+	authorize := workerSecretReadAuthorizer(
+		nil,
+		"default",
+		"task-1",
+		false,
+		[]string{"tenant:outbound-credentials:read"},
+	)
+	if err := authorize(context.Background(), "default", "resource-auth"); err != nil {
+		t.Fatalf("workerSecretReadAuthorizer() error = %#v, want authorization disabled", err)
+	}
+}
+
+func TestWorkerSecretReadAuthorizerUsesConfiguredCredentialScopes(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add Orka scheme: %v", err)
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-1", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{Transaction: &corev1alpha1.TaskTransaction{
+			Scopes: []string{"tenant:outbound-credentials:read"},
+		}},
+	}
+	authorize := workerSecretReadAuthorizer(
+		ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build(),
+		"default",
+		"task-1",
+		true,
+		[]string{"tenant:outbound-credentials:read"},
+	)
+	if err := authorize(context.Background(), "default", "resource-auth"); err != nil {
+		t.Fatalf("workerSecretReadAuthorizer() error = %#v", err)
+	}
+}
+
 func TestApprovalTargetSpecDigestIncludesMCPStatusEndpoint(t *testing.T) {
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{

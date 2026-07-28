@@ -844,6 +844,8 @@ func main() {
 	)
 	jobBuilder.ControllerURL = controllerURL
 	jobBuilder.EnableTelemetry = enableTracing
+	jobBuilder.EnforceTransactionCredentialAuth =
+		contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce
 	jobBuilder.TransactionCredentialReadScopes = append(
 		[]string(nil),
 		contextTokenAuthzConfig.SecretCredentialReadScopes()...,
@@ -897,6 +899,7 @@ func main() {
 		VendorWorkerClusterRoleName:        vendorWorkerClusterRoleName,
 		ContainerWorkerClusterRoleName:     containerWorkerClusterRoleName,
 		WorkerClusterRoleBindingNamePrefix: workerClusterRoleBindingNamePrefix,
+		EnforceTransactionCredentialAuth:   contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
 		TransactionCredentialReadScopes: append(
 			[]string(nil),
 			contextTokenAuthzConfig.SecretCredentialReadScopes()...,

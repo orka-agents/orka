@@ -136,6 +136,9 @@ spec:
             {{- if .secretRead }}
             - {{ printf "--context-token-secret-read-scopes=%s" .secretRead | quote }}
             {{- end }}
+            {{- if .secretCredentialRead }}
+            - {{ printf "--context-token-secret-credential-read-scopes=%s" .secretCredentialRead | quote }}
+            {{- end }}
             {{- if .agentRead }}
             - {{ printf "--context-token-agent-read-scopes=%s" .agentRead | quote }}
             {{- end }}

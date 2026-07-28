@@ -129,6 +129,7 @@ type TaskReconciler struct {
 	VendorWorkerClusterRoleName        string
 	ContainerWorkerClusterRoleName     string
 	WorkerClusterRoleBindingNamePrefix string
+	EnforceTransactionCredentialAuth   bool
 	TransactionCredentialReadScopes    []string
 	OutboundAccessTrust                outboundaccess.TrustConfig
 	trustedServiceCleanupMu            sync.RWMutex

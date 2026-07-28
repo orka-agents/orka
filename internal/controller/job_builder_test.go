@@ -339,6 +339,7 @@ func TestJobBuilder_Build_GeneralContainerWorkerAutomountsTokenForCallback(t *te
 
 func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 	builder := setupJobBuilder()
+	builder.EnforceTransactionCredentialAuth = true
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
@@ -350,6 +351,7 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 			Env: []corev1.EnvVar{
 				{Name: workerenv.TransactionScope, Value: "spoofed"},
 				{Name: workerenv.TransactionScopes, Value: "spoofed"},
+				{Name: workerenv.TransactionCredentialAuthorizationEnforced, Value: testFalseValue},
 			},
 			Transaction: &corev1alpha1.TaskTransaction{
 				Profile:                "transaction-token",
@@ -390,15 +392,16 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 
 	envVars := job.Spec.Template.Spec.Containers[0].Env
 	wantEnv := map[string]string{
-		workerenv.TransactionID:                     testTransactionID,
-		workerenv.TransactionProfile:                "transaction-token",
-		workerenv.TransactionIssuer:                 "https://issuer.example.test",
-		workerenv.TransactionSubject:                "spiffe://example.test/ns/default/sa/client",
-		workerenv.TransactionRequestingWorkload:     "spiffe://example.test/ns/default/sa/client",
-		workerenv.TransactionScope:                  "read write",
-		workerenv.TransactionScopes:                 "read,write",
-		workerenv.TransactionContextDigest:          "sha256:context",
-		workerenv.TransactionRequesterContextDigest: "sha256:requester",
+		workerenv.TransactionID:                              testTransactionID,
+		workerenv.TransactionProfile:                         "transaction-token",
+		workerenv.TransactionIssuer:                          "https://issuer.example.test",
+		workerenv.TransactionSubject:                         "spiffe://example.test/ns/default/sa/client",
+		workerenv.TransactionRequestingWorkload:              "spiffe://example.test/ns/default/sa/client",
+		workerenv.TransactionScope:                           "read write",
+		workerenv.TransactionScopes:                          "read,write",
+		workerenv.TransactionContextDigest:                   "sha256:context",
+		workerenv.TransactionRequesterContextDigest:          "sha256:requester",
+		workerenv.TransactionCredentialAuthorizationEnforced: booleanTrueValue,
 	}
 	for name, want := range wantEnv {
 		env, ok := findEnvVar(envVars, name)
@@ -3170,6 +3173,22 @@ func TestAddTransactionEnvVarsIncludesCredentialAuthority(t *testing.T) {
 	got, ok = findEnvVar(env, workerenv.TransactionCredentialReadScopes)
 	if !ok || got.Value != "tenant:outbound-credentials:read" {
 		t.Fatalf("credential scopes env = %#v", env)
+	}
+}
+
+func TestSetTransactionCredentialAuthorizationEnvDisablesOutsideEnforceMode(t *testing.T) {
+	env := []corev1.EnvVar{{
+		Name:  workerenv.TransactionCredentialAuthorizationEnforced,
+		Value: booleanTrueValue,
+	}}
+	env = setTransactionCredentialAuthorizationEnv(
+		env,
+		&corev1alpha1.TaskTransaction{ID: "txn-1"},
+		false,
+	)
+	got, ok := findEnvVar(env, workerenv.TransactionCredentialAuthorizationEnforced)
+	if !ok || got.Value != testFalseValue {
+		t.Fatalf("credential authorization enforcement env = %#v, want false", env)
 	}
 }
 

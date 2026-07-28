@@ -108,6 +108,7 @@ type JobBuilder struct {
 	ContextTokenOutboundScope                  string
 	ContextTokenChildTokenTTL                  string
 	ContextTokenToolTokenTTL                   string
+	EnforceTransactionCredentialAuth           bool
 	TransactionCredentialReadScopes            []string
 	OutboundAccessTrustedGatewayServices       string
 	OutboundAccessTrustedTokenEndpointServices string
@@ -640,7 +641,16 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnvValue(envVars, workerenv.AutonomousMode, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, "")
-	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction, b.TransactionCredentialReadScopes)
+	envVars = setTransactionCredentialAuthorizationEnv(
+		envVars,
+		task.Spec.Transaction,
+		b.EnforceTransactionCredentialAuth,
+	)
+	envVars = addTransactionEnvVars(
+		envVars,
+		task.Spec.Transaction,
+		b.TransactionCredentialReadScopes,
+	)
 
 	// Add prior task env vars for iterative coordination
 	if task.Spec.PriorTaskRef != nil {
@@ -920,6 +930,18 @@ func addTransactionEnvVars(
 		workerenv.JoinCSV(credentialReadScopes),
 	)
 	return envVars
+}
+
+func setTransactionCredentialAuthorizationEnv(
+	envVars []corev1.EnvVar,
+	tx *corev1alpha1.TaskTransaction,
+	enforced bool,
+) []corev1.EnvVar {
+	return setControllerEnvValue(
+		envVars,
+		workerenv.TransactionCredentialAuthorizationEnforced,
+		strconv.FormatBool(tx != nil && enforced),
+	)
 }
 
 // aiConfig holds resolved AI configuration from provider, agent, and task.

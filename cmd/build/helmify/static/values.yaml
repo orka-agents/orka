@@ -139,6 +139,7 @@ controller:
       toolUse: ""
       providerUse: ""
       secretRead: ""
+      secretCredentialRead: ""
       agentRead: ""
       agentWrite: ""
       memoryRead: ""
