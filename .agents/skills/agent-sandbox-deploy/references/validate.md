@@ -2,24 +2,29 @@
 
 Validation steps for `$agent-sandbox-deploy`. Read after the standard workflow completes.
 
-> **Known gate (verified live 2026-06): agent Tasks with an execution workspace
-> are rejected by the current service-backed harness runtime.** Any Task that
-> sets `spec.execution.workspace` fails immediately with
+> **Known gate (verified live 2026-06): valid enabled provider-based agent
+> workspace requests are rejected during execution planning by the current
+> service-backed harness runtime.** After workspace validation/resolution, the
+> provider-based request documented below fails with
 > `status.executionWorkspace.reason=WorkspaceValidationFailed` and message
-> `execution workspace is not supported by harness runtime yet` — an
-> unconditional gate in `internal/controller/agent_execution_plan.go`
-> (`planAgentExecution`), not a misconfiguration. The agent CLI runtimes now
+> `execution workspace is not supported by harness runtime yet`. The gate is in
+> `internal/controller/agent_execution_plan.go` (`planAgentExecution`), not a
+> misconfiguration. The agent CLI runtimes now
 > run through the long-lived `agent-harness-wrapper` service, and the
 > Task→sandbox-workspace path for agents is not wired through it yet. A **plain**
 > agent Task (no `execution.workspace`) runs fine through the harness + model
-> proxy, so use that to confirm the model path. The model-free e2e currently
-> confirms installation/configuration only; it deliberately skips the
-> execution-workspace Task smoke while the harness gate is present. Treat only
-> the execution-workspace YAML in the optional expected-failure check as the
-> intended future API once the harness wires workspaces.
+> proxy, so use that to confirm the model path. The model-free e2e confirms
+> installation/configuration and exercises the direct workspace adapter through
+> SandboxClaim readiness, router exec, delete, retained release/reuse, and final
+> claim cleanup. It skips only the full execution-workspace Task smoke while the
+> harness gate is present. Treat the execution-workspace YAML in the optional
+> expected-failure check as the intended future Task API once the harness wires
+> workspaces.
 
 Do **not** use an execution-workspace agent Task as the success criterion yet.
-Validate the two currently wired paths separately:
+Validate the three current surfaces separately: installation/configuration,
+direct workspace-adapter lifecycle, and the model path through a plain agent
+Task.
 
 - **Model path through the harness** (requires the optional `AGENTIC=1` step and
   vekil ready): run a plain agent Task with no `execution.workspace` and wait
@@ -61,11 +66,14 @@ YAML
   wait --for=jsonpath='{.status.phase}'=Succeeded task/orka-live-model-smoke --timeout=10m
 ```
 
-- **Installation/configuration parity**: run `scripts/live-agent-sandbox-e2e.sh`
-  from the `Model-free CI parity` section when you want a self-contained cluster
-  bring-up with fake model
-  credentials. It verifies the install/config path, but it does **not** exercise
-  claim → ready → exec → cleanup while the harness gate is present.
+- **Model-free installation/configuration and direct workspace-adapter
+  paths**: run `scripts/live-agent-sandbox-e2e.sh` from the `Model-free CI
+  parity` section for a self-contained cluster bring-up with a model-free/
+  no-network runtime. It verifies provider installation, applies the controller
+  flags and confirms rollout, then exercises claim → ready → router exec →
+  delete and retained release/reuse → claim cleanup through
+  `AgentSandboxExecutor`. It skips only the full Orka agent Task
+  workspace path while the harness gate is present.
 
 If you need to demonstrate the intended API shape before harness workspace
 support lands, run it only as an **expected-failure** check and wait for the gate
@@ -125,15 +133,19 @@ resources for lifecycle detail.
 ## Model-free CI parity
 
 `scripts/live-agent-sandbox-e2e.sh` (run by the `Live Agent Sandbox E2E`
-workflow) stands up a clean kind cluster with fake model credentials and **no
-model access**. Because the current harness-wrapper runtime is service-backed,
-the script logs `Skipping agent-sandbox Task smoke...` and does not create a
-SandboxClaim or exercise the router exec data path. Use it for installation and
-controller-flag CI parity, not as proof of workspace execution:
+workflow) uses a model-free/no-network runtime. It creates the named kind cluster
+when absent or reuses it when present. After validating installation, router
+health, and controller-flag rollout, it runs a direct `AgentSandboxExecutor`
+smoke that creates SandboxClaims, waits for readiness, executes through the
+router, deletes one claim, retains and reuses another, and performs final claim
+cleanup. It skips only the full Orka agent Task workspace smoke, so it proves the
+provider-adapter path but not Task-to-workspace controller routing, Task status/
+result wiring, harness execution, or model access:
 
 ```bash
 bash scripts/live-agent-sandbox-e2e.sh
 ```
 
-That script owns its own cluster lifecycle; do not run it against a kindctl
-cluster you want to keep.
+If the script creates the cluster, it deletes it on exit. If the named cluster
+already exists, the script reuses it and leaves its changes in place. Do not run
+it against a cluster you need to keep untouched.

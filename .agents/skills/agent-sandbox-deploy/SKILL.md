@@ -1,14 +1,15 @@
 ---
 name: agent-sandbox-deploy
-description: Stand up the upstream kubernetes-sigs agent-sandbox workspace provider on a local kind cluster, validate the currently supported install/config and plain-agent paths, and treat workspace-backed Orka agent Tasks as expected-failure/future API checks until harness support lands. Use when the user asks to install, enable, deploy, configure, validate, demo, or troubleshoot agent-sandbox execution workspaces for Orka (Task.spec.execution.workspace with provider agent-sandbox).
+description: Stand up the upstream kubernetes-sigs agent-sandbox workspace provider on a local kind cluster, validate the currently supported install/config, direct workspace-adapter, and plain-agent paths, and treat workspace-backed Orka agent Tasks as expected-failure/future API checks until harness support lands. Use when the user asks to install, enable, deploy, configure, validate, demo, or troubleshoot agent-sandbox execution workspaces for Orka (Task.spec.execution.workspace with provider agent-sandbox).
 ---
 
 # Agent Sandbox Deploy
 
 Stand up the experimental [`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox)
 workspace provider against an Orka controller on a local kind cluster. Today,
-validate install/config and the plain harness-backed agent path; treat a
-`type: agent` Task with `spec.execution.workspace` as an expected-failure check
+validate install/config, the direct workspace-adapter lifecycle, and the plain
+harness-backed agent path; treat a `type: agent` Task with
+`spec.execution.workspace` as an expected-failure check
 for the documented harness gate until workspace-backed agent Tasks are wired.
 
 This skill is for **local/kind evaluation and validation**, not production.
@@ -35,10 +36,13 @@ What the script does:
    `--agent-sandbox-cleanup-policy`, and
    `--execution-workspace-default-provider=agent-sandbox`.
 2. **Agentic layer (`AGENTIC=1`, default):** builds + pushes the
-   `sandbox-runtime` image (real `codex` + `git` + `gh`) and the upstream
-   `sandbox-router` image to the local registry, deploys the router, deploys the
-   vekil model proxy (device-code login), and creates the model + git Secrets and
-   the Orka API client ServiceAccount.
+   `sandbox-runtime` image (real `codex` + `git` + `gh`). When the pinned
+   `sandbox-router` source is present in the Go module cache, it also builds,
+   pushes, and deploys the router; otherwise it logs operator guidance. It
+   reuses an existing vekil deployment, otherwise attempts helper-based deployment when
+   available (or logs operator guidance when not), creates the model Secret,
+   creates the Git Secret only when a token is available, and ensures the Orka
+   API client ServiceAccount.
 
 ## Ordering matters — the script assumes Orka is already deployed
 
@@ -50,7 +54,7 @@ skipped and the feature never turns on. So the correct sequence is:
 1. **Cluster** — via `$kindctl` (see below) or an existing kind cluster.
 2. **Orka controller** — via `$orka-kind-deploy`.
 3. **agent-sandbox** — this skill's script.
-4. **Model proxy** — vekil, with a **human-in-the-loop device-code login**.
+4. **Model proxy** (model-backed smoke only) — reuse or deploy vekil; a human completes device-code login when required.
 
 ## Standard workflow (kindctl-scoped)
 
@@ -81,7 +85,8 @@ test -x "$kindctl"
    >   `"$kindctl" create`; if the cluster already exists, delete/recreate it after
    >   adding those files, **or**
    > - run with `AGENTIC=0` for a base-layer-only install (no router/model run).
-   > `AGENTIC=1` always builds and `docker push`es the runtime and router images;
+   > `AGENTIC=1` always builds and `docker push`es the runtime image. With the
+   > pinned router source present, it also builds and pushes the router image;
    > `ORKA_SANDBOX_RUNTIME_IMAGE` only changes the runtime image tag/reference and
    > there is no router-image override in the installer. Confirm the registry path
    > with the user before assuming `AGENTIC=1` works on a bare kindctl cluster.
@@ -103,8 +108,9 @@ test -x "$kindctl"
    "$orka_kind_deploy"
    ```
 
-   The harness wrapper image must be present too — sandbox runs re-exec the
-   agent CLI inside the sandbox.
+   The harness-wrapper image must be present for the separate plain-agent model
+   smoke. The model-free direct workspace-adapter smoke bypasses the Task/harness
+   path.
 
 3. **Install agent-sandbox** by driving the canonical script against the kindctl
    kubeconfig. Export `KUBECONFIG` from kindctl so the script's `kubectl` calls
@@ -128,8 +134,11 @@ test -x "$kindctl"
 4. **Optional: add the agentic/model layer (vekil) — pause for the human.**
    Skip this step for base-layer-only or model-free validation. For a
    model-backed smoke, first satisfy the registry/image precondition above, then
-   rerun the installer with `AGENTIC=1` so it deploys the sandbox runtime/router,
-   vekil, model/git Secrets, and the API client ServiceAccount:
+   rerun the installer with `AGENTIC=1` so it deploys the sandbox runtime and
+   pre-verified router, reuses existing vekil or attempts helper-based deployment
+   when available,
+   creates the model Secret, conditionally creates the Git Secret when a token
+   is available, and ensures the API client ServiceAccount:
 
    ```bash
    eval "$("$kindctl" env)"
@@ -142,11 +151,16 @@ test -x "$kindctl"
      bash hack/demos/cluster/install-agent-sandbox.sh
    ```
 
-   The agentic layer calls the vekil deploy script with `--skip-wait`, which
-   starts a GitHub device-code login. **Surface the login URL and code to the
-   user and wait for their confirmation; never complete the login on their
-   behalf.** This mirrors the `$vekil-reverse-proxy-deploy` guardrail. First
-   disarm the liveness race below; then read and surface the device-code prompt.
+   When no vekil deployment exists and the deploy helper is available, the
+   installer calls it with `--skip-wait`, which attempts to start a GitHub
+   device-code login. If the helper is unavailable, the installer only logs
+   operator guidance. An existing deployment is reused, and deploy-helper
+   failure is tolerated, so verify `deployment/vekil` exists before continuing.
+   If login is
+   required, **surface the login URL and code to the user and wait for their
+   confirmation; never complete the login on their behalf.** This mirrors the
+   `$vekil-reverse-proxy-deploy` guardrail. First disarm the liveness race below;
+   then read and surface the device-code prompt.
 
    > **Login race (verified live 2026-06): disarm vekil's liveness probe before
    > surfacing the code.** vekil binds its port only after the Copilot login
@@ -195,9 +209,11 @@ test -x "$kindctl"
    ```
 
    If you only need model-free confidence, run the CI parity script from the
-   `Model-free CI parity` section of `references/validate.md`. It
-   validates installation/configuration only while workspace-backed agent Tasks
-   remain gated; it is not a claim/readiness/exec/cleanup smoke.
+   `Model-free CI parity` section of `references/validate.md`. It validates
+   installation/configuration plus the direct workspace-adapter lifecycle
+   (SandboxClaim readiness, router exec, delete, retained reuse, and claim
+   cleanup);
+   only the full workspace-backed agent Task path remains gated.
 
 ## Guardrails
 
@@ -219,12 +235,13 @@ test -x "$kindctl"
 ## Validate
 
 Read `references/validate.md` before treating anything as proven. The model-free
-e2e confirms installation and configuration only; the two currently wired paths
-(install/config, and the model path via a **plain** agent Task with no
-`execution.workspace`) are validated separately there.
+e2e confirms installation/configuration and the direct workspace-adapter
+lifecycle. The model path via a **plain** agent Task with no
+`execution.workspace` is validated separately there.
 
-Agent Tasks that set `spec.execution.workspace` are still rejected by an
-unconditional harness-runtime gate. Do not use a workspace-backed Task as a
+Valid enabled provider-based `spec.execution.workspace` requests are still
+rejected during agent execution planning by the current harness-runtime gate. Do
+not use a workspace-backed Task as a
 success criterion; `references/validate.md` covers it only as an
 expected-failure/future-API check, alongside model-free CI parity.
 

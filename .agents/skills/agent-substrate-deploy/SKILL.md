@@ -26,9 +26,10 @@ the CI-proven `scripts/agent-substrate-e2e.sh`. **Drive the installer in place;
 do not copy either script into the skill.** They pin the Substrate revision
 (`SUBSTRATE_REF`, default `b80031d260959b1fc5c6f61e3099fe2a6d368af1`) and own the
 heavy lifting: clone Substrate at the pinned ref, create the kind cluster + local
-registry, deploy the `ate-system` control plane, build/push the controller +
-codex-worker + workspace-agent images via `docker` + `ko`, create a `WorkerPool`
-+ gVisor `ActorTemplate`, initialize the RustFS snapshot bucket, and deploy Orka
+registry, deploy the `ate-system` control plane, build/push the controller,
+agent-harness-wrapper, workspace-agent, MCP server, and tool-client images;
+publish the Substrate `ateom-gvisor` image; create a `WorkerPool` + gVisor
+`ActorTemplate`, initialize the RustFS snapshot bucket, and deploy Orka
 wired with `--substrate-*`. Re-pin by overriding `SUBSTRATE_REF`, not by editing
 a copy. The installer also applies the reviewed
 `hack/agent-substrate/atelet-root-supervisor-capabilities.patch` compatibility
@@ -37,9 +38,12 @@ blob first, scopes the extra capabilities to the `/orka-workspace-agent`
 entrypoint, and fails closed on changed context, so a `SUBSTRATE_REF` override
 may require reviewing and updating or removing that patch.
 
-The base standup is **secret-free**. The agentic layer (`AGENTIC=1`, default)
-additionally builds a codex-capable Actor image, deploys the vekil model proxy
-(device-code login), and creates the model + git Secrets.
+The base standup needs no externally supplied model or Git credentials, but
+it generates local bootstrap and harness-auth tokens and stores them in cluster
+Secrets. The agentic layer (`AGENTIC=1`, default) additionally builds a
+codex-capable Actor image, deploys the vekil model proxy (device-code login),
+creates the model Secret, and creates the Git Secret only when a token is
+available from `GIT_TOKEN`, `GITHUB_TOKEN`, or authenticated `gh`.
 
 ## Why kindctl cannot host this cluster (the honest exception)
 
@@ -76,8 +80,9 @@ is a larger task; confirm scope before attempting it.
    ```
 
 2. **Stand up Substrate + Orka.** For a fresh cluster, start with the base
-   standup (secret-free, no model run). It builds four images and the Substrate
-   control plane — several minutes.
+   standup (no external model/Git credentials and no model run). It builds five
+   Orka images, publishes `ateom-gvisor`, and deploys the Substrate control plane
+   — several minutes.
 
    ```bash
    AGENTIC=0 bash hack/demos/cluster/install-substrate.sh
@@ -102,7 +107,8 @@ is a larger task; confirm scope before attempting it.
 4. **Add the model proxy (vekil) — pause for the human.** For model-backed
    validation, rerun the installer against the exported/reused cluster with the
    agentic layer enabled (the default). It builds the codex Actor image, deploys
-   vekil with `--skip-wait`, and creates the model/git Secrets. vekil starts a
+   vekil with `--skip-wait`, creates the model Secret, and creates the Git Secret
+   only when a token is available. vekil starts a
    GitHub device-code login: **surface the login URL and code to the user and
    wait for their confirmation; never complete the login on their behalf** (the
    `$vekil-reverse-proxy-deploy` guardrail). Install/readiness flow:
@@ -204,13 +210,15 @@ is a larger task; confirm scope before attempting it.
 
 ## Validate
 
-Read `references/validate.md` before treating anything as proven. What is
-validated end-to-end today is the **direct** Substrate path (actor
-create/resume/router/daemon exec/suspend/delete), Substrate-backed MCP tool
-lifecycle, and a **plain** agent Task with no `execution.workspace`.
+Read `references/validate.md` before treating anything as proven. The bundled
+e2e validates the **direct** Substrate path (actor create/resume/router/daemon
+exec/suspend/delete) and Substrate-backed MCP tool lifecycle. A **plain** agent
+Task with no `execution.workspace` can validate the harness/model path separately
+after the model setup in step 4; the bundled e2e does not run that Task.
 
-Agent Tasks that set `spec.execution.workspace` are still rejected by an
-unconditional harness-runtime gate, and the e2e skips those checks. Do not use
+Valid enabled provider-based `spec.execution.workspace` requests are still
+rejected during agent execution planning by the current harness-runtime gate,
+and the e2e skips those checks. Do not use
 a workspace-backed Task as a success criterion; `references/validate.md` covers
 it only as an expected-failure/future-API check.
 
