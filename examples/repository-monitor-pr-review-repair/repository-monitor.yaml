@@ -1,0 +1,62 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: RepositoryMonitor
+metadata:
+  name: pr-review-repair
+  namespace: default
+spec:
+  provider: github
+  repoURL: https://github.com/example-org/example-repo
+  branch: main
+  gitSecretRef:
+    name: git-credentials
+  targets:
+    pullRequests:
+      enabled: true
+      includeDrafts: false
+      maxPerRun: 20
+  triggers:
+    github:
+      labels:
+        enabled: true
+        consumeCommandLabels: true
+        requireActorPermission: write
+        pullRequests:
+          review: orka:review
+          fix: orka:fix
+          fixCI: orka:fix-ci
+          updateBranch: orka:update-branch
+          automerge: orka:automerge
+          stop: orka:stop
+          resume: orka:resume
+  agents:
+    reviewer:
+      name: pr-reviewer
+    repairer:
+      name: pr-repairer
+  review:
+    exactEventEnabled: true
+    publish:
+      enabled: true
+      event: COMMENT
+      mode: summary_with_inline_findings
+  repair:
+    enabled: true
+    requireMaintainerOptIn: true
+    maxRepairsPerPR: 5
+    maxRepairsPerHead: 2
+  automerge:
+    enabled: false
+    requireGlobalMergeGate: true
+    allowedMergeMethods:
+      - squash
+  policy:
+    protectedLabels:
+      - security
+      - security-sensitive
+    pauseLabels:
+      - orka:pause
+      - blocked
+  validation:
+    mode: changed
+    commands:
+      - make test

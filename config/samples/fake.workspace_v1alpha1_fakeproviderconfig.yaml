@@ -1,0 +1,5 @@
+apiVersion: fake.workspace.orka.ai/v1alpha1
+kind: FakeProviderConfig
+metadata:
+  name: local
+spec: {}

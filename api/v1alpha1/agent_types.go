@@ -12,6 +12,7 @@ import (
 )
 
 // AgentSpec defines the desired state of Agent
+// +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)",message="execution.workspace.classRef is only supported on Task specs"
 type AgentSpec struct {
 	// ProviderRef references a Provider CRD for LLM configuration
 	// If set, model.provider is optional (inherited from Provider)
@@ -97,6 +98,12 @@ type AgentCLIRuntime struct {
 	// Defaults to true if not specified.
 	// +optional
 	DefaultAllowBash *bool `json:"defaultAllowBash,omitempty"`
+
+	// DefaultReasoningEffort configures the CLI runtime reasoning effort for tasks using this Agent.
+	// Runtime adapters reject values they do not support (for example, Codex does not support max).
+	// +kubebuilder:validation:Enum=low;medium;high;xhigh;max
+	// +optional
+	DefaultReasoningEffort string `json:"defaultReasoningEffort,omitempty"`
 }
 
 // ModelFallback defines a fallback provider configuration

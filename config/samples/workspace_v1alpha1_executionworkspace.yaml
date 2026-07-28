@@ -1,0 +1,30 @@
+apiVersion: workspace.orka.ai/v1alpha1
+kind: ExecutionWorkspace
+metadata:
+  name: example-workspace
+  namespace: default
+spec:
+  mode: Interactive
+  classBinding:
+    name: secure-coding-v1
+    uid: 00000000-0000-0000-0000-000000000001
+    generation: 1
+    profileHash: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  providerBinding:
+    name: fake-local
+    uid: 00000000-0000-0000-0000-000000000002
+    generation: 1
+  slot: default
+  desiredState: Ready
+  lifecycle:
+    defaultOnDetach: Suspend
+    allowedOnDetach:
+      - Suspend
+      - Delete
+    detachTimeout: 2m
+    idleTimeout: 30m
+    maxLifetime: 24h
+    deletionPolicy:
+      providerResources: Delete
+      persistentVolumes: Retain
+      checkpoints: Delete

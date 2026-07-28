@@ -31,7 +31,7 @@ OpenCode CLI session continuation is not wired initially. Each Orka turn starts 
 
 ## Bring-your-own AgentRuntime
 
-`AgentRuntime` is the Orka-facing interface for remote execution backends. The backend can be a generic self-hosted HTTP runtime, AgentKit Serve, Foundry, or a future adapter. Orka keeps task lifecycle, approvals, tool governance, idempotency, events, lineage, and results.
+`AgentRuntime` is the Orka-facing interface for remote execution backends. The backend can be a generic self-hosted HTTP runtime, AgentKit Serve, the separately maintained Microsoft Foundry Hosted Agents Responses adapter [`orka-agents/agent-runtime-foundry`](https://github.com/orka-agents/agent-runtime-foundry), or a future adapter. Provider-specific adapter implementations live outside the Orka source tree; Orka keeps task lifecycle, approvals, tool governance, idempotency, events, lineage, and results.
 
 Remote backends must not receive production Orka Tool credentials. In brokered mode, they request tool calls and Orka authorizes, approves, executes or brokers, injects idempotency, and audits them.
 
@@ -89,7 +89,7 @@ kubectl create secret generic opencode-credentials \
 
 ### Azure AI Foundry for Claude Code CLI
 
-Claude Code CLI supports Azure AI Foundry as an alternative to direct Anthropic API access. This is the Claude Code CLI credential path. A Foundry hosted-agent adapter is a separate remote execution backend behind `AgentRuntime`. To use Azure AI Foundry with Claude Code CLI, include the Foundry-specific environment variables in the secret:
+Claude Code CLI supports Azure AI Foundry as an alternative to direct Anthropic API access. This is the Claude Code CLI credential path and is separate from the external [`agent-runtime-foundry`](https://github.com/orka-agents/agent-runtime-foundry) adapter, which invokes a deployed Microsoft Foundry Hosted Agent through the Responses API behind `AgentRuntime`. To use Azure AI Foundry with Claude Code CLI, include the Foundry-specific environment variables in the secret:
 
 ```bash
 kubectl create secret generic claude-credentials \
@@ -407,7 +407,7 @@ agentRuntime:
 
 > **Note**: For the Copilot runtime, `GITHUB_TOKEN` from the Agent's `secretRef` can authenticate both the CLI and git clone operations. For the Claude, Codex, and OpenCode runtimes, a separate `gitSecretRef` is usually needed because their API keys do not authenticate git operations.
 
-> **Codex caveat**: The current Codex runtime implementation requires `defaultAllowBash: true` (or task-level `allowBash: true`). If bash is disabled, the wrapper fails fast instead of launching Codex, because the current Codex CLI does not expose a reliable shell-disable mode.
+> **Codex caveat**: Ordinary Codex tasks require `defaultAllowBash: true` (or task-level `allowBash: true`). Controller-managed read-only tasks are the exception: Orka forces Codex's read-only Landlock sandbox, strips inherited environment state, and brokers model credentials through a short-lived loopback proxy.
 
 ### SubPath
 
@@ -520,7 +520,7 @@ Writable directories are provided via `emptyDir` volumes:
 
 All tools are allowed by default for autonomous operation. To restrict high-risk tools, set `defaultAllowBash: false` on the Agent or `allowBash: false` on individual Tasks.
 
-For Codex specifically, bash-disabled tasks are not currently supported. Use `defaultAllowBash: true` for Codex Agents until the upstream CLI exposes a reliable shell-disable mode.
+For ordinary Codex tasks, bash-disabled execution is not supported. Use `defaultAllowBash: true` unless the task is controller-managed read-only work, where Orka forces the hardened read-only sandbox and ignores broader shell policy.
 
 ### Secrets
 

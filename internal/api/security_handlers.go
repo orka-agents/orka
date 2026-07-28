@@ -102,7 +102,7 @@ func (h *Handlers) hasActiveSecurityScanPipelineTask(ctx context.Context, scan *
 			continue
 		}
 		switch task.Status.Phase {
-		case corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseScheduled:
+		case corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing, corev1alpha1.TaskPhaseScheduled:
 			return true, nil
 		}
 	}

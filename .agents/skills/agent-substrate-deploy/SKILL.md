@@ -30,7 +30,12 @@ registry, deploy the `ate-system` control plane, build/push the controller +
 codex-worker + workspace-agent images via `docker` + `ko`, create a `WorkerPool`
 + gVisor `ActorTemplate`, initialize the RustFS snapshot bucket, and deploy Orka
 wired with `--substrate-*`. Re-pin by overriding `SUBSTRATE_REF`, not by editing
-a copy.
+a copy. The installer also applies the reviewed
+`hack/agent-substrate/atelet-root-supervisor-capabilities.patch` compatibility
+patch before installation. It verifies the pinned upstream `atelet` OCI source
+blob first, scopes the extra capabilities to the `/orka-workspace-agent`
+entrypoint, and fails closed on changed context, so a `SUBSTRATE_REF` override
+may require reviewing and updating or removing that patch.
 
 The base standup is **secret-free**. The agentic layer (`AGENTIC=1`, default)
 additionally builds a codex-capable Actor image, deploys the vekil model proxy

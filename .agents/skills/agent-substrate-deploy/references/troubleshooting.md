@@ -12,6 +12,12 @@
   wrapper image. See the ActorTemplate contract in the concept doc.
 - `ActorTemplate ... is not Ready`: inspect Substrate `WorkerPool`, snapshot
   config, image pulls, and `runsc` configuration.
+- Direct workspace-agent exec returns exit code 1 with empty output: confirm the
+  installer applied the reviewed compatibility patch. It adds
+  `CAP_SETUID`/`CAP_SETGID` and makes only the workspace-agent rootfs traversable
+  after the UID/GID 1000 credential drop. The workspace agent stays a root
+  supervisor; do not work around a capability or rootfs-permission mismatch by
+  running task commands as root.
 - Task `Failed` with `WorkspaceCleanupFailed` after `resultRef.available=true`:
   command + result succeeded but Substrate failed to checkpoint/delete the actor
   (a known pinned-revision `runsc delete` flake in GitHub-hosted kind). Inspect

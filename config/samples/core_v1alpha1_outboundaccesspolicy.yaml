@@ -1,0 +1,19 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  name: example-resource-api
+  namespace: default
+spec:
+  direct:
+    grant: TokenExchange
+    tokenEndpoint:
+      url: https://identity.example.test/oauth/token
+    subject:
+      source: TransactionToken
+    scopes:
+      - api.read
+    requestedTokenType: urn:ietf:params:oauth:token-type:access_token
+    expectedIssuedTokenType: urn:ietf:params:oauth:token-type:access_token
+    output:
+      header: Authorization
+      prefix: "Bearer "

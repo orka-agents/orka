@@ -270,7 +270,7 @@ func isScanPipelineStage(stage string) bool {
 
 func isActiveTaskPhase(phase corev1alpha1.TaskPhase) bool {
 	switch phase {
-	case corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseScheduled:
+	case corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing, corev1alpha1.TaskPhaseScheduled:
 		return true
 	default:
 		return false

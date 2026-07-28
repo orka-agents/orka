@@ -13,7 +13,13 @@ import (
 )
 
 func authorizeKubernetesTaskCreate(ctx context.Context, clientset kubernetes.Interface, userInfo *UserInfo, task *corev1alpha1.Task) error {
-	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview || task == nil {
+	if task == nil {
+		return nil
+	}
+	if err := authorizeTaskWorkspaceClassUse(ctx, clientset, userInfo, task); err != nil {
+		return err
+	}
+	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview {
 		return nil
 	}
 	if kubernetesClientsetIsNil(clientset) {

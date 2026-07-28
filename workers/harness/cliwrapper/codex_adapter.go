@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -15,6 +16,7 @@ const (
 	defaultCodexSandboxMode       = "workspace-write"
 	defaultCodexAutoCompactTokens = "240000"
 	codexWebSearchDisabled        = "disabled"
+	codexReasoningEffortEnv       = "ORKA_CODEX_REASONING_EFFORT"
 )
 
 type CodexAdapter struct {
@@ -27,11 +29,20 @@ func (a *CodexAdapter) Name() string { return RuntimeCodex }
 
 func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*CommandSpec, error) {
 	agentCfg := agentConfigFromTurn(turn)
-	if !agentCfg.AllowBash {
+	readOnly := strings.EqualFold(strings.TrimSpace(turn.Metadata["readOnly"]), "true")
+	readOnlyHome := strings.TrimSpace(turn.HomeDir)
+	if !agentCfg.AllowBash && !readOnly {
 		return nil, fmt.Errorf(
-			"codex runtime requires %s=true because the Codex CLI cannot disable shell execution",
+			"codex runtime requires %s=true unless trusted read-only metadata forces the read-only sandbox",
 			workerenv.AllowBash,
 		)
+	}
+	if readOnly && readOnlyHome == "" {
+		return nil, fmt.Errorf("read-only Codex requires a wrapper-managed home directory")
+	}
+	reasoningEffort, err := codexReasoningEffort(turn.Metadata)
+	if err != nil {
+		return nil, err
 	}
 
 	outputFile, err := os.CreateTemp("", "codex-last-message-*")
@@ -80,11 +91,28 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 	}
 
 	baseURL := firstNonEmpty(codexOpenAIBaseURL(), envEntryValue(turn.Env, workerenv.OpenAIBaseURL))
+	if readOnly || strings.EqualFold(strings.TrimSpace(turn.Metadata["runtimeAuthOnly"]), "true") {
+		baseURL = firstNonEmpty(envEntryValue(turn.Env, workerenv.OpenAIBaseURL), codexOpenAIBaseURL())
+	}
+	if readOnly {
+		codexHome := filepath.Join(readOnlyHome, ".codex")
+		if err := os.MkdirAll(codexHome, 0o700); err != nil {
+			_ = os.Remove(outputPath)
+			cleanupInstructions()
+			return nil, fmt.Errorf("create read-only Codex home: %w", err)
+		}
+		if err := prepareHomeForChild(codexHome); err != nil {
+			_ = os.Remove(outputPath)
+			cleanupInstructions()
+			return nil, fmt.Errorf("prepare read-only Codex home: %w", err)
+		}
+	}
 	return &CommandSpec{
 		Path:       firstNonEmpty(a.config.Path, os.Getenv(workerenv.CodexCLIPath), defaultCodexPath),
-		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false, baseURL),
-		Env:        buildCodexEnv(turn.Env),
-		UnsetEnv:   []string{workerenv.Prompt},
+		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false, baseURL, reasoningEffort, readOnly),
+		Env:        buildCodexEnv(turn.Env, baseURL, readOnly, readOnlyHome),
+		UnsetEnv:   codexUnsetEnv(readOnly),
+		ClearEnv:   readOnly,
 		Dir:        dir,
 		Stdin:      []byte(turn.Prompt),
 		ResultFile: outputPath,
@@ -111,6 +139,8 @@ func buildCodexArgs(
 	instructionsPath string,
 	bypassSandbox bool,
 	baseURL string,
+	reasoningEffort string,
+	forceReadOnly bool,
 ) []string {
 	args := []string{
 		"exec",
@@ -122,7 +152,26 @@ func buildCodexArgs(
 		"--config", "model_auto_compact_token_limit=" + codexAutoCompactTokenLimit(),
 	}
 	disableSandbox := os.Getenv(workerenv.CodexDisableSandbox)
-	if bypassSandbox || workerenv.IsTrue(disableSandbox) {
+	if forceReadOnly {
+		args = append(args,
+			"--sandbox", "read-only",
+			// Restricted Kubernetes pods commonly block bubblewrap user namespaces.
+			// Codex's explicit legacy backend preserves the read-only filesystem and
+			// network policy with Landlock/seccomp without requiring those namespaces.
+			"--config", "use_legacy_landlock=true",
+			"--ignore-user-config",
+			"--ignore-rules",
+			"--disable", "hooks",
+			"--disable", "shell_snapshot",
+			"--disable", "apps",
+			"--disable", "plugins",
+			"--disable", "remote_plugin",
+			"--disable", "enable_mcp_apps",
+			"--disable", "skill_mcp_dependency_install",
+			"--disable", "tool_call_mcp_elicitation",
+			"--config", "project_doc_max_bytes=0",
+		)
+	} else if bypassSandbox || workerenv.IsTrue(disableSandbox) {
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	} else {
 		sandboxMode := codexSandboxMode()
@@ -133,6 +182,9 @@ func buildCodexArgs(
 	}
 	if cfg != nil && strings.TrimSpace(cfg.Model) != "" {
 		args = append(args, "--model", strings.TrimSpace(cfg.Model))
+	}
+	if reasoningEffort != "" {
+		args = append(args, "--config", "model_reasoning_effort="+reasoningEffort)
 	}
 	if instructionsPath != "" {
 		args = append(args, "--config", "model_instructions_file="+instructionsPath)
@@ -214,8 +266,10 @@ func buildCodexInstructions(cfg *agentEnvConfig) string {
 	return strings.TrimSpace(strings.Join(sections, "\n\n"))
 }
 
-func buildCodexEnv(extra []string) []string {
-	baseURL := firstNonEmpty(codexOpenAIBaseURL(), envEntryValue(extra, workerenv.OpenAIBaseURL))
+func buildCodexEnv(extra []string, baseURL string, readOnly bool, readOnlyHome string) []string {
+	if readOnly {
+		return buildReadOnlyCodexEnv(extra, baseURL, readOnlyHome)
+	}
 	// Codex receives the turn prompt on stdin. Remove the explicit copy here;
 	// BuildCommand also unsets any inherited copy after the final environment merge.
 	env := removeTurnEnv(
@@ -223,7 +277,8 @@ func buildCodexEnv(extra []string) []string {
 		workerenv.OpenAIBaseURL,
 		workerenv.Prompt,
 	)
-	env = setEnv(env, "HOME", firstNonEmpty(envEntryValue(env, "HOME"), "/home/worker"))
+	home := firstNonEmpty(envEntryValue(env, "HOME"), "/home/worker")
+	env = setEnv(env, "HOME", home)
 	if baseURL != "" {
 		env = setEnv(env, workerenv.OpenAIBaseURL, baseURL)
 	}
@@ -235,8 +290,64 @@ func buildCodexEnv(extra []string) []string {
 	return env
 }
 
+func buildReadOnlyCodexEnv(extra []string, baseURL, home string) []string {
+	env := []string{
+		"HOME=" + home,
+		"CODEX_HOME=" + filepath.Join(home, ".codex"),
+		"PATH=" + wrapperSafeCommandPath,
+		"TMPDIR=/tmp",
+		"USER=node",
+		"LOGNAME=node",
+		"SHELL=/bin/sh",
+		"TERM=dumb",
+		"GIT_TERMINAL_PROMPT=0",
+		"NO_PROXY=127.0.0.1,localhost",
+		"no_proxy=127.0.0.1,localhost",
+	}
+	if baseURL = strings.TrimSpace(baseURL); baseURL != "" {
+		env = setEnv(env, workerenv.OpenAIBaseURL, baseURL)
+	}
+	if value := strings.TrimSpace(envEntryValue(extra, workerenv.OpenAIAPIKey)); value != "" {
+		env = setEnv(env, workerenv.OpenAIAPIKey, value)
+	}
+	if value := strings.TrimSpace(envEntryValue(extra, workerenv.CodexAPIKey)); value != "" {
+		env = setEnv(env, workerenv.CodexAPIKey, value)
+	}
+	return env
+}
+
 func codexOpenAIBaseURL() string {
 	return strings.TrimSpace(os.Getenv(workerenv.OpenAIBaseURL))
+}
+
+func codexReasoningEffort(metadata map[string]string) (string, error) {
+	effort := strings.ToLower(strings.TrimSpace(firstNonEmpty(
+		metadata["reasoningEffort"],
+		os.Getenv(codexReasoningEffortEnv),
+	)))
+	if effort == "" {
+		return "", nil
+	}
+	switch effort {
+	case "low", "medium", "high", "xhigh":
+		return effort, nil
+	default:
+		return "", fmt.Errorf("invalid %s %q: expected low, medium, high, or xhigh", codexReasoningEffortEnv, effort)
+	}
+}
+
+func codexUnsetEnv(readOnly bool) []string {
+	unset := []string{workerenv.Prompt}
+	if !readOnly {
+		return unset
+	}
+	return append(unset,
+		"NODE_OPTIONS", "NODE_PATH", "BASH_ENV", "ENV", "ZDOTDIR",
+		"LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+		"PYTHONPATH", "PERL5OPT", "RUBYOPT", "NPM_CONFIG_USERCONFIG",
+		"GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+		"XDG_CONFIG_HOME", "XDG_DATA_HOME",
+	)
 }
 
 func codexAutoCompactTokenLimit() string {

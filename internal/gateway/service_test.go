@@ -768,7 +768,55 @@ func TestMissingLinkedTaskTerminalizesWithoutReexecution(t *testing.T) {
 	}
 }
 
-func TestDispatchOnceHonorsNamespaceTaskLimitAcrossSessions(t *testing.T) {
+func TestNamespaceTaskCapacityAvailableCountsFinalizingButNotTerminalTasks(t *testing.T) {
+	tests := []struct {
+		phase         corev1alpha1.TaskPhase
+		wantAvailable bool
+	}{
+		{phase: "", wantAvailable: false},
+		{phase: corev1alpha1.TaskPhasePending, wantAvailable: false},
+		{phase: corev1alpha1.TaskPhaseRunning, wantAvailable: false},
+		{phase: corev1alpha1.TaskPhaseFinalizing, wantAvailable: false},
+		{phase: corev1alpha1.TaskPhaseSucceeded, wantAvailable: true},
+		{phase: corev1alpha1.TaskPhaseFailed, wantAvailable: true},
+		{phase: corev1alpha1.TaskPhaseCancelled, wantAvailable: true},
+	}
+
+	for _, tt := range tests {
+		name := string(tt.phase)
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			service, _, _ := newGatewayServiceFixture(t)
+			service.Config.MaxTasksPerNamespace = 1
+			ctx := context.Background()
+			existing := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "existing-task", Namespace: "default"},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+			}
+			if err := service.Client.Create(ctx, existing); err != nil {
+				t.Fatal(err)
+			}
+			if tt.phase != "" {
+				existing.Status.Phase = tt.phase
+				if err := service.Client.Status().Update(ctx, existing); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			available, err := service.namespaceTaskCapacityAvailable(ctx, "default", "new-task")
+			if err != nil {
+				t.Fatalf("namespaceTaskCapacityAvailable() error = %v", err)
+			}
+			if available != tt.wantAvailable {
+				t.Fatalf("namespaceTaskCapacityAvailable() = %t, want %t", available, tt.wantAvailable)
+			}
+		})
+	}
+}
+
+func TestDispatchOnceCountsFinalizingTaskTowardNamespaceLimitAcrossSessions(t *testing.T) {
 	service, sqliteStore, _ := newGatewayServiceFixture(t)
 	service.Config.MaxTasksPerNamespace = 1
 	ctx := context.Background()
@@ -793,12 +841,25 @@ func TestDispatchOnceHonorsNamespaceTaskLimitAcrossSessions(t *testing.T) {
 		}
 	}
 
-	for i := 1; i <= 2; i++ {
-		if err := service.DispatchOnce(ctx); err != nil {
-			t.Fatalf("DispatchOnce(%d) error = %v", i, err)
-		}
+	if err := service.DispatchOnce(ctx); err != nil {
+		t.Fatalf("DispatchOnce(1) error = %v", err)
 	}
 	var tasks corev1alpha1.TaskList
+	if err := service.freshReader().List(ctx, &tasks, client.InNamespace("default")); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 1 {
+		t.Fatalf("gateway Tasks after first dispatch = %d, want 1", len(tasks.Items))
+	}
+	created := tasks.Items[0].DeepCopy()
+	created.Status.Phase = corev1alpha1.TaskPhaseFinalizing
+	if err := service.Client.Status().Update(ctx, created); err != nil {
+		t.Fatalf("mark first gateway Task Finalizing: %v", err)
+	}
+
+	if err := service.DispatchOnce(ctx); err != nil {
+		t.Fatalf("DispatchOnce(2) error = %v", err)
+	}
 	if err := service.freshReader().List(ctx, &tasks, client.InNamespace("default")); err != nil {
 		t.Fatal(err)
 	}

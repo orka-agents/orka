@@ -159,7 +159,7 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			}
 			if bearerContextToken {
 				log.Info("authentication failed: authorization bearer context token is not configured", "ip", ctx.IP())
-				return fiber.NewError(fiber.StatusUnauthorized, "kontxt TxTokens must be sent via the Txn-Token header unless Authorization: Bearer is explicitly enabled")
+				return fiber.NewError(fiber.StatusUnauthorized, "transaction tokens must be sent via the Txn-Token header unless Authorization: Bearer is explicitly enabled")
 			}
 
 			var token string

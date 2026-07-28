@@ -1,0 +1,72 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-task-workspace-class-use
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["core.orka.ai"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["tasks"]
+  validations:
+    - expression: >-
+        !has(object.spec.execution) ||
+        !has(object.spec.execution.workspace) ||
+        !has(object.spec.execution.workspace.classRef) ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaceclasses')
+          .namespace(request.namespace)
+          .name(object.spec.execution.workspace.classRef.name)
+          .check('use').allowed()
+      message: caller is not authorized to use the selected ExecutionWorkspaceClass
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-task-workspace-class-use
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "orka.fullname" . }}-task-workspace-class-use
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-tool-workspace-class-use
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["core.orka.ai"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["tools"]
+  validations:
+    - expression: >-
+        !has(object.spec.mcp) ||
+        !has(object.spec.mcp.workspace) ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaceclasses')
+          .namespace(request.namespace)
+          .name(object.spec.mcp.workspace.classRef.name)
+          .check('use').allowed()
+      message: caller is not authorized to use the selected ExecutionWorkspaceClass
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-tool-workspace-class-use
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "orka.fullname" . }}-tool-workspace-class-use
+  validationActions: [Deny]

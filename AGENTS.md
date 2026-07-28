@@ -8,7 +8,7 @@ Orka is a Kubernetes-native task execution platform that manages Jobs and Pods f
 - **No binaries in the repository** — put build artifacts in `bin/` (gitignored) or CI release pipelines.
 - **Scope discipline** — implement exactly what was asked, nothing more.
 - **Never push to `main`.** Push to the current branch after a change when it is not `main`.
-- **Kontxt is fail-closed** — never store raw TxTokens in Task specs/status/logs. Use owner-referenced Secrets for child tokens, safe metadata/digests for audit, subset checks for child scopes, and fail-closed TTS exchanges for outbound scopes.
+- **Transaction-token integration is fail-closed** — never store raw TxTokens in Task specs/status/logs. Use owner-referenced Secrets for child tokens, safe metadata/digests for audit, subset checks for child scopes, and fail-closed TTS exchanges for outbound scopes.
 - **Never edit generated files** (below), and never delete `// +kubebuilder:scaffold:*` comments.
 
 ## Generated — do not edit
@@ -16,6 +16,8 @@ Orka is a Kubernetes-native task execution platform that manages Jobs and Pods f
 | Path | Regenerate with |
 | --- | --- |
 | `config/crd/bases/*.yaml`, `config/rbac/role.yaml` | `make manifests` |
+| `manifest_staging/deploy/orka.yaml`, `manifest_staging/charts/orka/**` | `make manifests` |
+| `deploy/**`, `charts/orka/**` | `make promote-staging-manifest` (release-preparation flow only) |
 | `**/zz_generated.*.go` | `make generate` |
 | `PROJECT` | kubebuilder CLI |
 | `ui/src/routeTree.gen.ts` | TanStack Router |
@@ -46,13 +48,21 @@ Memory and coordination:
 
 Auth and telemetry:
 
-- Kontxt TxTokens are accepted via `Txn-Token` by default. `Authorization: Bearer` context-token support is opt-in so ServiceAccount/OIDC auth can coexist.
-- Live GitHub OIDC/kontxt E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`. Redact JWTs, TxTokens, and request tokens in logs.
+- Transaction tokens are accepted via `Txn-Token` by default. `Authorization: Bearer` context-token support is opt-in so ServiceAccount/OIDC auth can coexist.
+- Live GitHub OIDC E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`. Redact JWTs, TxTokens, and request tokens in logs.
 - OpenTelemetry GenAI constants are hand-rolled in `internal/tracing/genai` because the GenAI conventions are still Development-stage. Telemetry is enabled with `--enable-telemetry`/`--enable-tracing`, workers honor `ORKA_ENABLE_TELEMETRY`, and prompt/completion content capture stays default-off and fail-closed.
 
 Build:
 
 - `make build` requires UI assets — run `make ui-build` first, or `ensure-ui-embed` creates a stub and the embedded UI won't work.
+
+Helm manifests and release snapshots:
+
+- Helm generator inputs live under `cmd/build/helmify/`; canonical Kubernetes inputs remain under `config/`.
+- `make manifests` regenerates the committed next-release outputs in `manifest_staging/deploy/orka.yaml` and `manifest_staging/charts/orka/`. Edit the source inputs, not generated staging files, and commit both source and regenerated output.
+- Root `deploy/` and `charts/orka/` are promoted release snapshots. Do not edit them directly; only the release-preparation flow runs `make release-manifest` and `make promote-staging-manifest`. Staging may intentionally be ahead of the root snapshots.
+- A pushed `v*` tag packages and publishes the already-reviewed root snapshot. Tag publication must not regenerate or promote manifests.
+- Chart CRDs are generated from `config/crd/bases/`. Helm does not update them during `helm upgrade`; apply the CRDs from the exact target chart before upgrading the release.
 
 ## Code style
 
@@ -63,7 +73,8 @@ Build:
 ## Build and verify
 
 ```bash
-make manifests generate   # After *_types.go or marker edits
+make manifests            # After CRD/RBAC/Kustomize or Helm generator input changes
+make generate             # After generated Go type input changes
 make lint-fix && make test # After any *.go edits
 make build                 # Includes UI; see ui-build gotcha above
 make docker-build-all      # Controller, AI/general workers, harness wrapper

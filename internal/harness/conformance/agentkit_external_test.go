@@ -132,7 +132,7 @@ func TestExternalAgentKitServeObservedConformance(t *testing.T) {
 		"python", fixturePath,
 		"--host", "127.0.0.1",
 		"--port", strconv.Itoa(port),
-		"--token", "x",
+		"--token", "mock-token",
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stderr bytes.Buffer
@@ -147,7 +147,7 @@ func TestExternalAgentKitServeObservedConformance(t *testing.T) {
 
 	result := Check(context.Background(), Target{
 		BaseURL:        baseURL,
-		BearerToken:    "x",
+		BearerToken:    "mock-token",
 		RequireAuth:    true,
 		ProbeTurn:      true,
 		ControlTimeout: 10 * time.Second,
@@ -176,7 +176,7 @@ func TestExternalAgentKitServeBrokeredReadConformance(t *testing.T) {
 
 	result := Check(context.Background(), Target{
 		BaseURL:           baseURL,
-		BearerToken:       "x",
+		BearerToken:       "mock-token",
 		RequireAuth:       true,
 		ProbeBrokeredRead: true,
 		ControlTimeout:    10 * time.Second,
@@ -205,7 +205,7 @@ func TestExternalAgentKitServeBrokeredWriteConformance(t *testing.T) {
 
 	result := Check(context.Background(), Target{
 		BaseURL:            baseURL,
-		BearerToken:        "x",
+		BearerToken:        "mock-token",
 		RequireAuth:        true,
 		ProbeBrokeredWrite: true,
 		ControlTimeout:     10 * time.Second,
@@ -234,7 +234,7 @@ func TestExternalAgentKitServeBrokeredCoordinationConformance(t *testing.T) {
 
 	result := Check(context.Background(), Target{
 		BaseURL:                   baseURL,
-		BearerToken:               "x",
+		BearerToken:               "mock-token",
 		RequireAuth:               true,
 		ProbeBrokeredCoordination: true,
 		ControlTimeout:            10 * time.Second,
@@ -282,7 +282,7 @@ func startAgentKitFixture(t *testing.T, extraArgs ...string) (string, *bytes.Buf
 		"python", fixturePath,
 		"--host", "127.0.0.1",
 		"--port", strconv.Itoa(port),
-		"--token", "x",
+		"--token", "mock-token",
 	}
 	args = append(args, extraArgs...)
 	cmd := exec.CommandContext(ctx, "uv", args...)

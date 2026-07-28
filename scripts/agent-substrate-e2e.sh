@@ -7,6 +7,9 @@ KIND_REGISTRY_NAME="${KIND_REGISTRY_NAME:-kind-registry}"
 KIND_REGISTRY_PORT="${KIND_REGISTRY_PORT:-5001}"
 SUBSTRATE_REPO="${SUBSTRATE_REPO:-https://github.com/agent-substrate/substrate.git}"
 SUBSTRATE_REF="${SUBSTRATE_REF:-b80031d260959b1fc5c6f61e3099fe2a6d368af1}"
+# Git blob ID for cmd/servers/atelet/oci.go at the reviewed default pin.
+SUBSTRATE_ATELET_OCI_BLOB="a2ae14c0a264d8ff2fdc9527f5894901d913c0a4"
+SUBSTRATE_ATELET_CAPABILITY_PATCH="${ROOT_DIR}/hack/agent-substrate/atelet-root-supervisor-capabilities.patch"
 IMAGE_TAG="${IMAGE_TAG:-agent-substrate-ci}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 TASK_TIMEOUT_SECONDS="${TASK_TIMEOUT_SECONDS:-900}"
@@ -393,6 +396,62 @@ patch_substrate_kind_registry_script() {
     echo "failed to patch Substrate kind registry script for registry override" >&2
     exit 1
   fi
+}
+
+apply_substrate_workspace_agent_capability_patch() {
+  local target="cmd/servers/atelet/oci.go"
+  local actual_blob changed_files checkout_status
+
+  if [[ ! -f "${SUBSTRATE_ATELET_CAPABILITY_PATCH}" ]]; then
+    echo "missing reviewed Substrate compatibility patch: ${SUBSTRATE_ATELET_CAPABILITY_PATCH}" >&2
+    exit 1
+  fi
+  checkout_status="$(git -C "${SUBSTRATE_DIR}" status --porcelain --untracked-files=all)"
+  if [[ -n "${checkout_status}" ]]; then
+    echo "refusing to patch a dirty Substrate checkout" >&2
+    exit 1
+  fi
+  if ! actual_blob="$(git -C "${SUBSTRATE_DIR}" rev-parse "HEAD:${target}" 2>/dev/null)"; then
+    echo "Substrate ref ${SUBSTRATE_REF} does not contain expected OCI source ${target}" >&2
+    exit 1
+  fi
+  if [[ "${actual_blob}" != "${SUBSTRATE_ATELET_OCI_BLOB}" ]]; then
+    echo "Substrate ref ${SUBSTRATE_REF} has unreviewed OCI capability context in ${target}" >&2
+    echo "expected blob ${SUBSTRATE_ATELET_OCI_BLOB}, got ${actual_blob}; review the provider contract before updating the patch" >&2
+    exit 1
+  fi
+  if ! git -C "${SUBSTRATE_DIR}" apply --check --whitespace=error-all "${SUBSTRATE_ATELET_CAPABILITY_PATCH}"; then
+    echo "reviewed Substrate workspace-agent capability patch no longer applies cleanly" >&2
+    exit 1
+  fi
+
+  git -C "${SUBSTRATE_DIR}" apply --whitespace=error-all "${SUBSTRATE_ATELET_CAPABILITY_PATCH}"
+
+  if ! git -C "${SUBSTRATE_DIR}" apply --reverse --check "${SUBSTRATE_ATELET_CAPABILITY_PATCH}"; then
+    echo "failed to verify the applied Substrate workspace-agent capability patch" >&2
+    exit 1
+  fi
+  if ! git -C "${SUBSTRATE_DIR}" diff --check -- "${target}"; then
+    echo "applied Substrate workspace-agent capability patch introduced an invalid diff" >&2
+    exit 1
+  fi
+  changed_files="$(git -C "${SUBSTRATE_DIR}" diff --name-only)"
+  if [[ "${changed_files}" != "${target}" ]]; then
+    echo "Substrate capability patch changed unexpected files: ${changed_files:-<none>}" >&2
+    exit 1
+  fi
+  for capability in CAP_SETGID CAP_SETUID; do
+    if [[ "$(grep -Fc "\"${capability}\"" "${SUBSTRATE_DIR}/${target}" || true)" -ne 1 ]]; then
+      echo "Substrate capability patch did not scope ${capability} to the workspace-agent supervisor" >&2
+      exit 1
+    fi
+  done
+  if [[ "$(grep -Fc 'os.Chmod(rootPath, 0o755)' "${SUBSTRATE_DIR}/${target}" || true)" -ne 1 ]]; then
+    echo "Substrate capability patch did not make the workspace-agent rootfs traversable after credential drop" >&2
+    exit 1
+  fi
+
+  log "Applied reviewed Substrate root-supervisor capability compatibility patch"
 }
 
 publish_ateom_image() {
@@ -1172,6 +1231,7 @@ main() {
   log "Cloning Substrate ${SUBSTRATE_REF}"
   git clone --quiet "${SUBSTRATE_REPO}" "${SUBSTRATE_DIR}"
   git -C "${SUBSTRATE_DIR}" checkout --quiet "${SUBSTRATE_REF}"
+  apply_substrate_workspace_agent_capability_patch
   patch_substrate_kind_registry_script
 
   log "Creating kind cluster and installing Substrate"

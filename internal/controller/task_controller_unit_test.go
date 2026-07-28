@@ -12,9 +12,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,6 +46,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
@@ -1154,13 +1159,14 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                string
-		agentSandboxEnabled bool
-		substrateEnabled    bool
-		task                *corev1alpha1.Task
-		agentSandboxConfig  AgentSandboxConfig
-		substrateConfig     SubstrateConfig
-		wantErr             string
+		name                        string
+		agentSandboxEnabled         bool
+		substrateEnabled            bool
+		workspaceProviderAPIEnabled bool
+		task                        *corev1alpha1.Task
+		agentSandboxConfig          AgentSandboxConfig
+		substrateConfig             SubstrateConfig
+		wantErr                     string
 	}{
 		{
 			name: "nil execution",
@@ -1176,6 +1182,27 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 					Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: false},
 				},
 			}},
+		},
+		{
+			name: "classRef workspace provider API disabled",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "coding-v1"},
+				}},
+			}},
+			wantErr: "requires the workspace provider API",
+		},
+		{
+			name:                        "classRef controller integration pending",
+			workspaceProviderAPIEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "coding-v1"},
+				}},
+			}},
+			wantErr: "controller-first Task workspace integration",
 		},
 		{
 			name: "feature gate disabled",
@@ -1408,10 +1435,11 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &TaskReconciler{
-				AgentSandboxEnabled: tt.agentSandboxEnabled,
-				SubstrateEnabled:    tt.substrateEnabled,
-				AgentSandboxConfig:  tt.agentSandboxConfig,
-				SubstrateConfig:     tt.substrateConfig,
+				AgentSandboxEnabled:         tt.agentSandboxEnabled,
+				SubstrateEnabled:            tt.substrateEnabled,
+				WorkspaceProviderAPIEnabled: tt.workspaceProviderAPIEnabled,
+				AgentSandboxConfig:          tt.agentSandboxConfig,
+				SubstrateConfig:             tt.substrateConfig,
 			}
 
 			err := r.validateExecutionWorkspace(tt.task)
@@ -1973,53 +2001,73 @@ func TestValidateCoordinationConstraints_DynamicallyCreatedAgent(t *testing.T) {
 }
 
 func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
-	scheme := newTestScheme()
-	parentTask := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
-		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeAI,
-			AgentRef: &corev1alpha1.AgentReference{Name: "parent-agent"},
-		},
-	}
-	parentAgent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "parent-agent", Namespace: "default"},
-		Spec: corev1alpha1.AgentSpec{
-			Coordination: &corev1alpha1.CoordinationConfig{
-				Enabled:               true,
-				MaxConcurrentChildren: 1,
-			},
-		},
-	}
-	// An active sibling
-	sibling := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sibling",
-			Namespace: "default",
-			Labels:    map[string]string{labels.LabelParentTask: "parent"},
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
-	}
-	childTask := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "child",
-			Namespace: "default",
-			Annotations: map[string]string{
-				labels.AnnotationCoordinationDepth: "1",
-			},
-			Labels: map[string]string{
-				labels.LabelParentTask: "parent",
-			},
-		},
-		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	tests := []struct {
+		phase       corev1alpha1.TaskPhase
+		wantLimited bool
+	}{
+		{phase: corev1alpha1.TaskPhaseRunning, wantLimited: true},
+		{phase: corev1alpha1.TaskPhaseFinalizing, wantLimited: true},
+		{phase: corev1alpha1.TaskPhaseSucceeded, wantLimited: false},
+		{phase: corev1alpha1.TaskPhaseFailed, wantLimited: false},
+		{phase: corev1alpha1.TaskPhaseCancelled, wantLimited: false},
 	}
 
-	r := newUnitReconciler(scheme, parentTask, parentAgent, sibling, childTask)
-	result, _, done := r.validateCoordinationConstraints(context.Background(), childTask)
-	if !done {
-		t.Error("expected done=true when concurrency limit reached")
-	}
-	if result.RequeueAfter != 10*time.Second {
-		t.Errorf("expected 10s requeue, got %v", result.RequeueAfter)
+	for _, tt := range tests {
+		t.Run(string(tt.phase), func(t *testing.T) {
+			scheme := newTestScheme()
+			parentTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeAI,
+					AgentRef: &corev1alpha1.AgentReference{Name: "parent-agent"},
+				},
+			}
+			parentAgent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "parent-agent", Namespace: "default"},
+				Spec: corev1alpha1.AgentSpec{
+					Coordination: &corev1alpha1.CoordinationConfig{
+						Enabled:               true,
+						MaxConcurrentChildren: 1,
+					},
+				},
+			}
+			sibling := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sibling",
+					Namespace: "default",
+					Labels:    map[string]string{labels.LabelParentTask: "parent"},
+				},
+				Status: corev1alpha1.TaskStatus{Phase: tt.phase},
+			}
+			childTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "child",
+					Namespace: "default",
+					Annotations: map[string]string{
+						labels.AnnotationCoordinationDepth: "1",
+					},
+					Labels: map[string]string{
+						labels.LabelParentTask: "parent",
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			}
+
+			r := newUnitReconciler(scheme, parentTask, parentAgent, sibling, childTask)
+			result, err, done := r.validateCoordinationConstraints(context.Background(), childTask)
+			if err != nil {
+				t.Fatalf("validateCoordinationConstraints() error = %v", err)
+			}
+			if done != tt.wantLimited {
+				t.Fatalf("done = %t, want %t", done, tt.wantLimited)
+			}
+			if tt.wantLimited && result.RequeueAfter != 10*time.Second {
+				t.Errorf("expected 10s requeue, got %v", result.RequeueAfter)
+			}
+			if !tt.wantLimited && result.RequeueAfter != 0 {
+				t.Errorf("unexpected requeue for terminal sibling: %v", result.RequeueAfter)
+			}
+		})
 	}
 }
 
@@ -2420,6 +2468,54 @@ func TestEnsureWorkerRBAC_CreatesResources(t *testing.T) {
 				t.Errorf("unexpected subject: %#v", subject)
 			}
 		})
+	}
+}
+
+func TestEnsureWorkerRBAC_UsesConfiguredServiceAccountNames(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	r.AIWorkerServiceAccountName = testAIWorkerServiceAccountName
+	r.VendorWorkerServiceAccountName = testVendorWorkerServiceAccountName
+	r.ContainerWorkerServiceAccountName = testContainerWorkerServiceAccountName
+
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatalf("ensureWorkerRBAC() error = %v", err)
+	}
+
+	expected := []struct {
+		serviceAccount     string
+		clusterRoleBinding string
+	}{
+		{serviceAccount: testAIWorkerServiceAccountName, clusterRoleBinding: "orka-ai-worker-test-ns"},
+		{serviceAccount: testVendorWorkerServiceAccountName, clusterRoleBinding: "orka-vendor-worker-test-ns"},
+		{serviceAccount: testContainerWorkerServiceAccountName, clusterRoleBinding: "orka-container-worker-test-ns"},
+	}
+
+	for _, tt := range expected {
+		t.Run(tt.serviceAccount, func(t *testing.T) {
+			sa := &corev1.ServiceAccount{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.serviceAccount, Namespace: testNS}, sa); err != nil {
+				t.Fatalf("expected ServiceAccount %s/%s to exist: %v", testNS, tt.serviceAccount, err)
+			}
+
+			crb := &rbacv1.ClusterRoleBinding{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.clusterRoleBinding}, crb); err != nil {
+				t.Fatalf("expected ClusterRoleBinding %s to exist: %v", tt.clusterRoleBinding, err)
+			}
+			if len(crb.Subjects) != 1 {
+				t.Fatalf("ClusterRoleBinding %s subjects = %#v, want one subject", tt.clusterRoleBinding, crb.Subjects)
+			}
+			if got := crb.Subjects[0]; got.Kind != rbacv1.ServiceAccountKind || got.Name != tt.serviceAccount || got.Namespace != testNS {
+				t.Fatalf("ClusterRoleBinding %s subject = %#v, want ServiceAccount %s/%s", tt.clusterRoleBinding, got, testNS, tt.serviceAccount)
+			}
+		})
+	}
+
+	for _, name := range []string{AIWorkerServiceAccount, VendorWorkerServiceAccount, ContainerWorkerServiceAccount} {
+		sa := &corev1.ServiceAccount{}
+		if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: testNS}, sa); !apierrors.IsNotFound(err) {
+			t.Fatalf("default ServiceAccount %s/%s should not be created when a custom name is configured; err = %v", testNS, name, err)
+		}
 	}
 }
 
@@ -5017,39 +5113,69 @@ func TestHandleScheduled_MissedDeadline(t *testing.T) {
 }
 
 func TestHandleScheduled_ConcurrencyForbid(t *testing.T) {
-	scheme := newTestScheme()
-	// Create a parent task that is due and has an active child
-	activeChild := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "active-child",
-			Namespace: "default",
-			Labels:    map[string]string{labels.LabelParentTask: "sched-concur"},
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	tests := []struct {
+		phase       corev1alpha1.TaskPhase
+		wantBlocked bool
+	}{
+		{phase: corev1alpha1.TaskPhaseRunning, wantBlocked: true},
+		{phase: corev1alpha1.TaskPhaseFinalizing, wantBlocked: true},
+		{phase: corev1alpha1.TaskPhaseSucceeded, wantBlocked: false},
 	}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "sched-concur",
-			Namespace:         "default",
-			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type:              corev1alpha1.TaskTypeContainer,
-			Schedule:          "* * * * *",
-			ConcurrencyPolicy: corev1alpha1.ForbidConcurrent,
-		},
-		Status: corev1alpha1.TaskStatus{
-			Phase:            corev1alpha1.TaskPhaseScheduled,
-			LastScheduleTime: new(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
-		},
-	}
-	r := newUnitReconciler(scheme, task, activeChild)
-	result, err := r.handleScheduled(context.Background(), task)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.RequeueAfter <= 0 {
-		t.Error("expected positive RequeueAfter when concurrency is forbidden")
+
+	for _, tt := range tests {
+		t.Run(string(tt.phase), func(t *testing.T) {
+			scheme := newTestScheme()
+			parentName := "sched-concur-" + strings.ToLower(string(tt.phase))
+			activeChild := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      parentName + "-child",
+					Namespace: "default",
+					Labels:    map[string]string{labels.LabelParentTask: parentName},
+				},
+				Status: corev1alpha1.TaskStatus{Phase: tt.phase},
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              parentName,
+					Namespace:         "default",
+					UID:               types.UID("uid-" + strings.ToLower(string(tt.phase))),
+					CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:                    corev1alpha1.TaskTypeContainer,
+					Schedule:                "* * * * *",
+					ConcurrencyPolicy:       corev1alpha1.ForbidConcurrent,
+					StartingDeadlineSeconds: new(int64(300)),
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase:            corev1alpha1.TaskPhaseScheduled,
+					LastScheduleTime: new(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
+				},
+			}
+			r := newUnitReconciler(scheme, task, activeChild)
+			result, err := r.handleScheduled(context.Background(), task)
+			if err != nil {
+				t.Fatalf("handleScheduled() error = %v", err)
+			}
+			if result.RequeueAfter <= 0 {
+				t.Error("expected positive RequeueAfter")
+			}
+
+			children := &corev1alpha1.TaskList{}
+			if err := r.List(context.Background(), children,
+				client.InNamespace(task.Namespace),
+				client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(task.Name)},
+			); err != nil {
+				t.Fatalf("list scheduled children: %v", err)
+			}
+			wantChildren := 2
+			if tt.wantBlocked {
+				wantChildren = 1
+			}
+			if len(children.Items) != wantChildren {
+				t.Fatalf("scheduled children = %d, want %d", len(children.Items), wantChildren)
+			}
+		})
 	}
 }
 
@@ -5961,6 +6087,34 @@ func assertNoJobsForTask(t *testing.T, r *TaskReconciler, task *corev1alpha1.Tas
 // handlePending — namespace task limit
 // ---------------------------------------------------------------------------
 
+func TestTaskPhaseCountsTowardConcurrency(t *testing.T) {
+	tests := []struct {
+		phase corev1alpha1.TaskPhase
+		want  bool
+	}{
+		{phase: "", want: false},
+		{phase: corev1alpha1.TaskPhasePending, want: true},
+		{phase: corev1alpha1.TaskPhaseScheduled, want: false},
+		{phase: corev1alpha1.TaskPhaseRunning, want: true},
+		{phase: corev1alpha1.TaskPhaseFinalizing, want: true},
+		{phase: corev1alpha1.TaskPhaseSucceeded, want: false},
+		{phase: corev1alpha1.TaskPhaseFailed, want: false},
+		{phase: corev1alpha1.TaskPhaseCancelled, want: false},
+	}
+
+	for _, tt := range tests {
+		name := string(tt.phase)
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			if got := taskPhaseCountsTowardConcurrency(tt.phase); got != tt.want {
+				t.Fatalf("taskPhaseCountsTowardConcurrency(%q) = %t, want %t", tt.phase, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
 	scheme := newTestScheme()
 	// Create active tasks to hit the limit
@@ -5992,6 +6146,35 @@ func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
 	if result.RequeueAfter != 10*time.Second {
 		t.Errorf("expected 10s requeue at limit, got %v", result.RequeueAfter)
 	}
+}
+
+func TestHandlePending_NamespaceTaskLimitCountsFinalizing(t *testing.T) {
+	scheme := newTestScheme()
+	finalizing := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "finalizing", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFinalizing},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "pending-finalizing-limit",
+			Namespace:  "default",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, finalizing)
+	r.MaxTasksPerNamespace = 1
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != 10*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 10s", result.RequeueAfter)
+	}
+	assertNoJobsForTask(t, r, task)
 }
 
 // ---------------------------------------------------------------------------
@@ -7411,6 +7594,58 @@ func TestHandleCompletedCleansJobWhenTerminalEventAppendFails(t *testing.T) {
 	}
 }
 
+func TestHandleFinalizingCompletesRecordedOutcome(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "finalizing-complete", Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseFinalizing,
+			ExecutionOutcome: &corev1alpha1.TaskExecutionOutcome{
+				Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1, RecordedAt: metav1.Now(), Message: "done",
+			},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	if _, err := reconciler.handleFinalizing(context.Background(), task); err != nil {
+		t.Fatalf("handleFinalizing() error = %v", err)
+	}
+	updated := &corev1alpha1.Task{}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
+	if err := reconciler.Get(context.Background(), key, updated); err != nil {
+		t.Fatalf("get finalizing task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("phase = %s, want Succeeded", updated.Status.Phase)
+	}
+}
+
+func TestHandleFinalizingWaitsForAttachmentRevocation(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "finalizing-attached", Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseFinalizing,
+			ExecutionOutcome: &corev1alpha1.TaskExecutionOutcome{
+				Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1, RecordedAt: metav1.Now(), Message: "done",
+			},
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				AttachedEpoch: 2,
+				Conditions:    []metav1.Condition{{Type: "Attached", Status: metav1.ConditionTrue}},
+			},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	result, err := reconciler.handleFinalizing(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleFinalizing() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("result = %#v, want requeue", result)
+	}
+}
+
 func TestCompleteTaskRequeuesWhenTerminalEventAppendFails(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -7432,6 +7667,28 @@ func TestCompleteTaskRequeuesWhenTerminalEventAppendFails(t *testing.T) {
 	}
 	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
 		t.Fatalf("phase = %s, want Succeeded despite event write failure", updated.Status.Phase)
+	}
+}
+
+func TestCompleteTaskDoesNotRecordOutcomeBeforeExecutionAttempt(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "pre-execution-failure", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	if _, err := reconciler.completeTask(
+		context.Background(), task, corev1alpha1.TaskPhaseFailed, "validation failed",
+	); err != nil {
+		t.Fatalf("completeTask() error = %v", err)
+	}
+	updated := &corev1alpha1.Task{}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
+	if err := reconciler.Get(context.Background(), key, updated); err != nil {
+		t.Fatalf("get completed task: %v", err)
+	}
+	if updated.Status.ExecutionOutcome != nil {
+		t.Fatalf("pre-execution failure recorded outcome %#v", updated.Status.ExecutionOutcome)
 	}
 }
 
@@ -7483,5 +7740,594 @@ func TestTaskEventWriteFailureDoesNotBreakStatusUpdate(t *testing.T) {
 	}
 	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Fatalf("phase = %s, want Pending despite event write failure", updated.Status.Phase)
+	}
+}
+
+func TestEnsureWorkerRBACCreatesExactTrustedServiceReadBinding(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	r.AIWorkerServiceAccountName = testAIWorkerServiceAccountName
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(testNS, "infra", "gateway", testAIWorkerServiceAccountName)
+	role := &rbacv1.Role{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, role); err != nil {
+		t.Fatal(err)
+	}
+	if len(role.Rules) != 1 || !slices.Equal(role.Rules[0].ResourceNames, []string{"gateway"}) || !slices.Equal(role.Rules[0].Verbs, []string{"get"}) {
+		t.Fatalf("rules=%#v", role.Rules)
+	}
+	if role.Labels[trustedServiceReaderLabelKey] != trustedServiceReaderLabelValue || role.Labels[trustedServiceReaderTaskNamespaceLabelKey] != testNS {
+		t.Fatalf("role labels=%#v", role.Labels)
+	}
+	rb := &rbacv1.RoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, rb); err != nil {
+		t.Fatal(err)
+	}
+	if len(rb.Subjects) != 1 || rb.Subjects[0].Namespace != testNS || rb.Subjects[0].Name != r.AIWorkerServiceAccountName {
+		t.Fatalf("subjects=%#v", rb.Subjects)
+	}
+	if rb.Labels[trustedServiceReaderLabelKey] != trustedServiceReaderLabelValue || rb.Labels[trustedServiceReaderTaskNamespaceLabelKey] != testNS {
+		t.Fatalf("RoleBinding labels=%#v", rb.Labels)
+	}
+}
+
+func TestEnsureTrustedServiceReadBindingsRejectsRoleCollision(t *testing.T) {
+	scheme := newTestScheme()
+	name := trustedServiceReadBindingName(testNS, "infra", "gateway")
+	collision := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra"},
+		Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get"}}},
+	}
+	r := newUnitReconciler(scheme, collision)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), testNS); err == nil || !strings.Contains(err.Error(), "unexpected ownership or permissions") {
+		t.Fatalf("ensureTrustedServiceReadBindings() error = %v", err)
+	}
+	current := &rbacv1.Role{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, current); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(current.Rules, collision.Rules) {
+		t.Fatalf("colliding Role was rewritten: %#v", current.Rules)
+	}
+}
+
+func TestEnsureTrustedServiceReadBindingsRejectsRoleBindingCollision(t *testing.T) {
+	scheme := newTestScheme()
+	name := trustedServiceReadBindingName(testNS, "infra", "gateway")
+	objectLabels := trustedServiceReadBindingLabels(testNS)
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""}, Resources: []string{"services"}, ResourceNames: []string{"gateway"}, Verbs: []string{"get"},
+		}},
+	}
+	collision := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name},
+		Subjects: []rbacv1.Subject{
+			{Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: testNS},
+			{Kind: rbacv1.ServiceAccountKind, Name: "attacker", Namespace: testNS},
+		},
+	}
+	r := newUnitReconciler(scheme, role, collision)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), testNS); err == nil || !strings.Contains(err.Error(), "unexpected ownership or subjects") {
+		t.Fatalf("ensureTrustedServiceReadBindings() error = %v", err)
+	}
+	current := &rbacv1.RoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Subjects) != 2 {
+		t.Fatalf("colliding RoleBinding was rewritten: %#v", current.Subjects)
+	}
+}
+
+func TestEnsureTrustedServiceReadBindingsUsesAPIReaderForCrossNamespaceRBAC(t *testing.T) {
+	scheme := newTestScheme()
+	base := fake.NewClientBuilder().WithScheme(scheme).Build()
+	cachedRBACRead := false
+	restrictedCache := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			switch obj.(type) {
+			case *rbacv1.Role, *rbacv1.RoleBinding:
+				cachedRBACRead = true
+				return errors.New("cross-namespace RBAC read attempted through restricted cache")
+			default:
+				return c.Get(ctx, key, obj, opts...)
+			}
+		},
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			switch list.(type) {
+			case *rbacv1.RoleList, *rbacv1.RoleBindingList:
+				cachedRBACRead = true
+				return errors.New("cross-namespace RBAC list attempted through restricted cache")
+			default:
+				return c.List(ctx, list, opts...)
+			}
+		},
+	})
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &TaskReconciler{
+		Client:              restrictedCache,
+		APIReader:           base,
+		OutboundAccessTrust: outboundaccess.TrustConfig{Gateways: trusted},
+	}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), testNS); err != nil {
+		t.Fatal(err)
+	}
+	if cachedRBACRead {
+		t.Fatal("trusted Service RBAC used the restricted cached reader")
+	}
+	name := trustedServiceReadBindingName(testNS, "infra", "gateway")
+	if err := base.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); err != nil {
+		t.Fatalf("uncached reader did not resolve created Role: %v", err)
+	}
+	if err := base.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("uncached reader did not resolve created RoleBinding: %v", err)
+	}
+}
+
+func startTrustedServiceReadCleanupRunnableForTest(
+	t *testing.T,
+	runnable *trustedServiceReadCleanupRunnable,
+	condition func() bool,
+) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runnable.Start(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for !condition() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !condition() {
+		cancel()
+		t.Fatal("startup cleanup condition did not become true")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("startup cleanup runnable returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup cleanup runnable did not stop after cancellation")
+	}
+}
+
+func TestTrustedServiceReadCleanupAfterFinalTaskRemovalDeletesGrant(t *testing.T) {
+	scheme := newTestScheme()
+	const namespace = "final-task-tenant"
+	removed := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "final-task", Namespace: namespace}}
+	r := newUnitReconciler(scheme, removed)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(namespace, "infra", "gateway")
+	if err := r.Delete(context.Background(), removed); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("final Task removal left trusted Service Role: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("final Task removal left trusted Service RoleBinding: %v", err)
+	}
+}
+
+func TestTrustedServiceReadCleanupAfterTaskRemovalPreservesGrantForRemainingTask(t *testing.T) {
+	scheme := newTestScheme()
+	const namespace = "multi-task-tenant"
+	removed := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "removed-task", Namespace: namespace}}
+	remaining := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "remaining-task", Namespace: namespace}}
+	r := newUnitReconciler(scheme, removed, remaining)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(namespace, "infra", "gateway")
+	if err := r.Delete(context.Background(), removed); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); err != nil {
+		t.Fatalf("remaining Task lost trusted Service Role: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("remaining Task lost trusted Service RoleBinding: %v", err)
+	}
+}
+
+func TestTrustedServiceReadCleanupPreservesSameNameReplacementTaskGrant(t *testing.T) {
+	scheme := newTestScheme()
+	const namespace = "replacement-task-tenant"
+	oldTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "replaceable-task", Namespace: namespace, UID: types.UID("old-task-uid")},
+	}
+	r := newUnitReconciler(scheme, oldTask)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(namespace, "infra", "gateway")
+	if err := r.Delete(context.Background(), oldTask); err != nil {
+		t.Fatal(err)
+	}
+	replacement := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: oldTask.Name, Namespace: namespace, UID: types.UID("replacement-task-uid")},
+	}
+	if err := r.Create(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); err != nil {
+		t.Fatalf("same-name replacement Task lost trusted Service Role: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("same-name replacement Task lost trusted Service RoleBinding: %v", err)
+	}
+}
+
+func TestTaskReconcileNotFoundCleansTrustedServiceGrant(t *testing.T) {
+	scheme := newTestScheme()
+	const namespace = "not-found-tenant"
+	r := newUnitReconciler(scheme)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(namespace, "infra", "gateway")
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: namespace,
+		Name:      "already-deleted-task",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("NotFound reconciliation left trusted Service Role: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("NotFound reconciliation left trusted Service RoleBinding: %v", err)
+	}
+}
+
+func TestTrustedServiceReadStartupCleanupSerializesFreshGrantReconciliation(t *testing.T) {
+	scheme := newTestScheme()
+	base := fake.NewClientBuilder().WithScheme(scheme).Build()
+	taskSnapshotDone := make(chan struct{})
+	cleanupAtBindings := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	var taskSnapshotOnce sync.Once
+	var bindingListOnce sync.Once
+	intercepted := interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			switch list.(type) {
+			case *corev1alpha1.TaskList:
+				err := c.List(ctx, list, opts...)
+				if err == nil {
+					taskSnapshotOnce.Do(func() { close(taskSnapshotDone) })
+				}
+				return err
+			case *rbacv1.RoleBindingList:
+				bindingListOnce.Do(func() {
+					close(cleanupAtBindings)
+					<-releaseCleanup
+				})
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	r := &TaskReconciler{Client: intercepted}
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	cleanupDone := make(chan error, 1)
+	go func() { cleanupDone <- r.pruneTrustedServiceReadBindingsOnce(context.Background()) }()
+	select {
+	case <-taskSnapshotDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup cleanup did not snapshot Task namespaces")
+	}
+	select {
+	case <-cleanupAtBindings:
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup cleanup did not reach RoleBinding discovery")
+	}
+
+	const newNamespace = "new-tenant"
+	if err := base.Create(context.Background(), &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: newNamespace},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	grantDone := make(chan error, 1)
+	go func() { grantDone <- r.ensureTrustedServiceReadBindings(context.Background(), newNamespace) }()
+	select {
+	case err := <-grantDone:
+		t.Fatalf("grant reconciliation bypassed startup cleanup lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseCleanup)
+	if err := <-cleanupDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-grantDone; err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(newNamespace, "infra", "gateway")
+	if err := base.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); err != nil {
+		t.Fatalf("fresh trusted Service Role missing after startup cleanup: %v", err)
+	}
+	if err := base.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("fresh trusted Service RoleBinding missing after startup cleanup: %v", err)
+	}
+}
+
+func TestTrustedServiceReadCleanupRunnablePrunesWithoutTaskReconciliation(t *testing.T) {
+	scheme := newTestScheme()
+	const inactiveNamespace = "inactive-no-task"
+	name := trustedServiceReadBindingName(inactiveNamespace, "infra", "gateway")
+	objectLabels := trustedServiceReadBindingLabels(inactiveNamespace)
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""}, Resources: []string{"services"}, ResourceNames: []string{"gateway"}, Verbs: []string{"get"},
+		}},
+	}
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name},
+		Subjects: []rbacv1.Subject{{
+			Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: inactiveNamespace,
+		}},
+	}
+	r := newUnitReconciler(scheme, role, binding)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	runnable := &trustedServiceReadCleanupRunnable{reconciler: r}
+	if !runnable.NeedLeaderElection() {
+		t.Fatal("startup cleanup must run only on the elected manager")
+	}
+	startTrustedServiceReadCleanupRunnableForTest(t, runnable, func() bool {
+		roleErr := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{})
+		bindingErr := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{})
+		return apierrors.IsNotFound(roleErr) && apierrors.IsNotFound(bindingErr)
+	})
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("startup cleanup left stale Role without any Task reconciliation: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("startup cleanup left stale RoleBinding without any Task reconciliation: %v", err)
+	}
+}
+
+func TestTrustedServiceReadCleanupRunnablePreservesActiveTaskNamespaceGrant(t *testing.T) {
+	scheme := newTestScheme()
+	const activeNamespace = "active-tenant"
+	name := trustedServiceReadBindingName(activeNamespace, "infra", "gateway")
+	objectLabels := trustedServiceReadBindingLabels(activeNamespace)
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""}, Resources: []string{"services"}, ResourceNames: []string{"gateway"}, Verbs: []string{"get"},
+		}},
+	}
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name},
+		Subjects: []rbacv1.Subject{{
+			Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: activeNamespace,
+		}},
+	}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "active-task", Namespace: activeNamespace}}
+	r := newUnitReconciler(scheme, role, binding, task)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	startTrustedServiceReadCleanupRunnableForTest(t, &trustedServiceReadCleanupRunnable{reconciler: r}, func() bool {
+		r.trustedServiceCleanupMu.RLock()
+		cleanupDone := r.trustedServiceCleanupDone
+		r.trustedServiceCleanupMu.RUnlock()
+		if !cleanupDone {
+			return false
+		}
+		roleErr := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{})
+		bindingErr := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{})
+		return roleErr == nil && bindingErr == nil
+	})
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); err != nil {
+		t.Fatalf("startup cleanup removed active namespace Role: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("startup cleanup removed active namespace RoleBinding: %v", err)
+	}
+}
+
+func TestEnsureWorkerRBACStartupPrunesManagedTrustedServiceGrantForInactiveNamespace(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const inactiveNamespace = "inactive-tenant"
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureWorkerRBAC(context.Background(), inactiveNamespace); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(inactiveNamespace, "infra", "gateway")
+
+	restarted := &TaskReconciler{Client: r.Client, OutboundAccessTrust: outboundaccess.TrustConfig{}}
+	if err := restarted.pruneTrustedServiceReadBindingsOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	role := &rbacv1.Role{}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, role); !apierrors.IsNotFound(err) {
+		t.Fatalf("inactive namespace stale Role still exists: %v", err)
+	}
+	binding := &rbacv1.RoleBinding{}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, binding); !apierrors.IsNotFound(err) {
+		t.Fatalf("inactive namespace stale RoleBinding still exists: %v", err)
+	}
+}
+
+func TestEnsureWorkerRBACPrunesRemovedTrustedServiceReadBindingAfterRestart(t *testing.T) {
+	scheme := newTestScheme()
+	activeTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "active-task", Namespace: testNS}}
+	r := newUnitReconciler(scheme, activeTask)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(testNS, "infra", "gateway")
+	legacyRole := &rbacv1.Role{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, legacyRole); err != nil {
+		t.Fatal(err)
+	}
+	legacyRole.Labels = nil
+	if err := r.Update(context.Background(), legacyRole); err != nil {
+		t.Fatal(err)
+	}
+	legacyBinding := &rbacv1.RoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, legacyBinding); err != nil {
+		t.Fatal(err)
+	}
+	legacyBinding.Labels = nil
+	if err := r.Update(context.Background(), legacyBinding); err != nil {
+		t.Fatal(err)
+	}
+	unrelatedName := "orka-outbound-service-unrelated"
+	unrelatedRole := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: unrelatedName, Namespace: "infra"},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""}, Resources: []string{"services"}, ResourceNames: []string{"unrelated"}, Verbs: []string{"get"},
+		}},
+	}
+	if err := r.Create(context.Background(), unrelatedRole); err != nil {
+		t.Fatal(err)
+	}
+	unrelatedBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: unrelatedName, Namespace: "infra"},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: unrelatedName},
+		Subjects: []rbacv1.Subject{{
+			Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: testNS,
+		}},
+	}
+	if err := r.Create(context.Background(), unrelatedBinding); err != nil {
+		t.Fatal(err)
+	}
+	missingName := trustedServiceReadBindingName(testNS, "infra", "missing")
+	missingBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: missingName, Namespace: "infra"},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: missingName},
+		Subjects: []rbacv1.Subject{{
+			Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: testNS,
+		}},
+	}
+	if err := r.Create(context.Background(), missingBinding); err != nil {
+		t.Fatal(err)
+	}
+	driftedName := trustedServiceReadBindingName(testNS, "infra", "drifted")
+	driftedRole := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: driftedName, Namespace: "infra"},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""}, Resources: []string{"services", "secrets"}, Verbs: []string{"get"},
+		}},
+	}
+	if err := r.Create(context.Background(), driftedRole); err != nil {
+		t.Fatal(err)
+	}
+	driftedBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: driftedName, Namespace: "infra"},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: driftedName},
+		Subjects: []rbacv1.Subject{{
+			Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: testNS,
+		}},
+	}
+	if err := r.Create(context.Background(), driftedBinding); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := &TaskReconciler{Client: r.Client, OutboundAccessTrust: outboundaccess.TrustConfig{}}
+	if err := restarted.pruneTrustedServiceReadBindingsOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	role := &rbacv1.Role{}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, role); !apierrors.IsNotFound(err) {
+		t.Fatalf("stale Role still exists: %v", err)
+	}
+	rb := &rbacv1.RoleBinding{}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, rb); !apierrors.IsNotFound(err) {
+		t.Fatalf("stale RoleBinding still exists: %v", err)
+	}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: missingName, Namespace: "infra"}, missingBinding); !apierrors.IsNotFound(err) {
+		t.Fatalf("legacy RoleBinding with missing Role still exists: %v", err)
+	}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: driftedName, Namespace: "infra"}, driftedBinding); !apierrors.IsNotFound(err) {
+		t.Fatalf("legacy RoleBinding with drifted Role still exists: %v", err)
+	}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: driftedName, Namespace: "infra"}, driftedRole); err != nil {
+		t.Fatalf("drifted legacy Role was removed: %v", err)
+	}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: unrelatedName, Namespace: "infra"}, unrelatedRole); err != nil {
+		t.Fatalf("unrelated prefixed Role was removed: %v", err)
+	}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: unrelatedName, Namespace: "infra"}, unrelatedBinding); err != nil {
+		t.Fatalf("unrelated prefixed RoleBinding was removed: %v", err)
 	}
 }

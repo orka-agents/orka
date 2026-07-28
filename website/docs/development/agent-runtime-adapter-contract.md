@@ -22,6 +22,10 @@
 
 Adapters can be brokered-only when they pass the advertised brokered conformance profile.
 
+## StartTurn idempotency
+
+Adapters must not execute the same `turnID` more than once. While a turn is active, a repeated identical `StartTurn` may return the identical accepted response or deterministic `409 Conflict` with the canonical error `turn already exists`. After any terminal frame, repeating `StartTurn` for that `turnID` must return deterministic `409 Conflict` with the canonical error `turn already completed` and must never re-execute the turn. These canonical errors let clients distinguish duplicate recovery from other conflicts such as capacity limits.
+
 ## StartTurn safe tool schemas
 
 When a Task exposes brokered tools, `StartTurnRequest.input.tools` carries safe definitions:
@@ -60,4 +64,4 @@ Orka stores this as the standard structured result envelope so parent tasks can 
 
 ## Local validation
 
-Run the reusable conformance package against your adapter. The generic HTTP fixture in `examples/harness/echo` is the reference implementation for observed and brokered read/write profiles.
+Go adapters can import `github.com/orka-agents/orka/pkg/harness` and `github.com/orka-agents/orka/pkg/harness/conformance`. The generic HTTP fixture in `examples/harness/echo` is the reference implementation for observed and brokered read/write profiles. Provider-specific adapters live in separate repositories. Microsoft Foundry users can choose the [Hosted Agents Responses adapter](https://github.com/orka-agents/agent-runtime-foundry) or the [classic Agent Service Threads/Runs adapter](https://github.com/orka-agents/agent-runtime-foundry-classic).

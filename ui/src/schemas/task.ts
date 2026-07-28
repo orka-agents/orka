@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 export const taskTypeSchema = z.enum(['container', 'ai', 'agent'])
-export const taskPhaseSchema = z.enum(['Pending', 'Running', 'Succeeded', 'Failed', 'Scheduled', 'Cancelled'])
+export const taskPhaseSchema = z.enum(['Pending', 'Running', 'Finalizing', 'Succeeded', 'Failed', 'Scheduled', 'Cancelled'])
 
 export const conditionSchema = z.object({
   type: z.string(),

@@ -21,7 +21,9 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -33,20 +35,27 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+
+	fakeworkspacev1alpha1 "github.com/orka-agents/orka/api/fake.workspace/v1alpha1"
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/api"
+	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	_ "github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
-	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -62,6 +71,8 @@ func init() {
 	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(gatewayv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(sandboxextv1beta1.AddToScheme(scheme))
+	utilruntime.Must(workspacev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(fakeworkspacev1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -80,12 +91,37 @@ func splitCommaList(raw string) []string {
 	return out
 }
 
+func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled bool) error {
+	if apiEnabled && !classUseAdmissionEnabled {
+		return fmt.Errorf("workspace provider API requires workspace class use admission")
+	}
+	return nil
+}
+
+func workspaceCleanupAPIsInstalled(mapper meta.RESTMapper) (bool, error) {
+	for _, gvk := range []schema.GroupVersionKind{
+		workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceProvider"),
+		workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspacePool"),
+		workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceClass"),
+		workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"),
+	} {
+		if _, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+			if meta.IsNoMatchError(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("discover %s: %w", gvk.String(), err)
+		}
+	}
+	return true, nil
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var taskProvenanceAdmissionEnabled bool
+	var workspaceClassUseAdmissionEnabled bool
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
@@ -95,6 +131,9 @@ func main() {
 	var apiPort int
 	var watchNamespace string
 	var generalWorkerImage string
+	var aiWorkerServiceAccountName string
+	var vendorWorkerServiceAccountName string
+	var containerWorkerServiceAccountName string
 	var aiWorkerClusterRoleName string
 	var vendorWorkerClusterRoleName string
 	var containerWorkerClusterRoleName string
@@ -165,7 +204,7 @@ func main() {
 	var contextTokenSkillWriteScopes string
 	var contextTokenGatewayReadScopes string
 	var contextTokenGatewayOperateScopes string
-	var contextTokenTTSURL string
+	var contextTokenTTSEndpoint string
 	var contextTokenTTSAudience string
 	var contextTokenTTSTimeout string
 	var contextTokenTTSTokenSource string
@@ -174,7 +213,11 @@ func main() {
 	var contextTokenOutboundScope string
 	var contextTokenChildTokenTTL string
 	var contextTokenToolTokenTTL string
+	var outboundAccessTrustedGatewayServices string
+	var outboundAccessTrustedTokenEndpointServices string
 	var enableTracing bool
+	var workspaceProviderAPIEnabled bool
+	var fakeWorkspaceProviderEnabled bool
 	var tlsOpts []func(*tls.Config)
 
 	executionWorkspaceDefaultProvider := controller.ExecutionWorkspaceDefaultProviderFromEnv(os.Getenv)
@@ -198,7 +241,7 @@ func main() {
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.BoolVar(&taskProvenanceAdmissionEnabled, "task-provenance-admission-enabled",
-		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED", false),
+		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED"),
 		"Enable validating admission that rejects untrusted direct Task writes to Orka-managed "+
 			"provenance fields.")
 	flag.StringVar(&taskProvenanceAdmissionTrustedUsers, "task-provenance-admission-trusted-users",
@@ -209,7 +252,7 @@ func main() {
 		"task-provenance-admission-trusted-service-accounts",
 		os.Getenv("ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS"),
 		"Comma-separated ServiceAccount names trusted in the target Task namespace to set "+
-			"Orka-managed Task provenance fields. Defaults to orka-ai-worker.")
+			"Orka-managed Task provenance fields. Defaults to the configured AI and vendor worker ServiceAccounts.")
 	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
@@ -218,10 +261,25 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.IntVar(&apiPort, "api-port", 8080, "The port the REST API server binds to.")
 	flag.StringVar(&watchNamespace, "watch-namespace", "", "Namespace to watch for resources. Empty for all namespaces.")
+	flag.BoolVar(&workspaceProviderAPIEnabled, "enable-workspace-provider-api",
+		envBool("ORKA_ENABLE_WORKSPACE_PROVIDER_API"),
+		"Enable workspace.orka.ai provider/class/pool/workspace coordination controllers.")
+	flag.BoolVar(&workspaceClassUseAdmissionEnabled, "workspace-class-use-admission-enabled",
+		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED"),
+		"Enable fail-closed Task and Tool admission checks for ExecutionWorkspaceClass use.")
+	flag.BoolVar(&fakeWorkspaceProviderEnabled, "enable-fake-workspace-provider",
+		envBool("ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER"),
+		"Enable the development-only fake.workspace.orka.ai/v1 adapter; requires --enable-workspace-provider-api.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
+	flag.StringVar(&aiWorkerServiceAccountName, "ai-worker-service-account-name",
+		controller.AIWorkerServiceAccount, "ServiceAccount name for AI worker tasks.")
+	flag.StringVar(&vendorWorkerServiceAccountName, "vendor-worker-service-account-name",
+		controller.VendorWorkerServiceAccount, "ServiceAccount name for vendor worker tasks.")
+	flag.StringVar(&containerWorkerServiceAccountName, "container-worker-service-account-name",
+		controller.ContainerWorkerServiceAccount, "ServiceAccount name for container worker tasks.")
 	flag.StringVar(&aiWorkerClusterRoleName, "ai-worker-cluster-role-name",
 		controller.DefaultAIWorkerClusterRoleName, "ClusterRole name for AI worker tasks.")
 	flag.StringVar(&vendorWorkerClusterRoleName, "vendor-worker-cluster-role-name",
@@ -360,17 +418,17 @@ func main() {
 	flag.StringVar(&oidcNamespace, "oidc-namespace", os.Getenv("ORKA_OIDC_NAMESPACE"),
 		"Namespace assigned to authorized OIDC callers for namespace isolation. Defaults to default.")
 	flag.StringVar(&contextTokenProfile, "context-token-profile", os.Getenv("ORKA_CONTEXT_TOKEN_PROFILE"),
-		"Context-token profile for external API requests (supported: kontxt).")
+		"Context-token profile for external API requests (supported: transaction-token).")
 	flag.StringVar(&contextTokenIssuer, "context-token-issuer", os.Getenv("ORKA_CONTEXT_TOKEN_ISSUER"),
 		"Context-token issuer URL. Requires --context-token-profile and --context-token-audience when set.")
 	flag.StringVar(&contextTokenAudience, "context-token-audience", os.Getenv("ORKA_CONTEXT_TOKEN_AUDIENCE"),
 		"Context-token audience expected in external API tokens. "+
 			"Requires --context-token-profile and --context-token-issuer when set.")
 	flag.StringVar(&contextTokenJWKSURL, "context-token-jwks-url", os.Getenv("ORKA_CONTEXT_TOKEN_JWKS_URL"),
-		"Optional context-token JWKS URL. For kontxt, defaults to <issuer>/.well-known/jwks.json.")
+		"Optional context-token JWKS URL. For transaction-token, defaults to <issuer>/.well-known/jwks.json.")
 	flag.StringVar(&contextTokenHeaders, "context-token-headers", os.Getenv("ORKA_CONTEXT_TOKEN_HEADERS"),
 		"Comma-separated context-token headers. Use Header for raw tokens or Header:Scheme for scheme-prefixed "+
-			"tokens (default for kontxt: Txn-Token; bearer opt-in: Txn-Token,Authorization:Bearer).")
+			"tokens (default for transaction-token: Txn-Token; bearer opt-in: Txn-Token,Authorization:Bearer).")
 	flag.StringVar(&contextTokenAuthzMode, "context-token-authz-mode", os.Getenv("ORKA_CONTEXT_TOKEN_AUTHZ_MODE"),
 		"Context-token authorization mode: off, audit, or enforce. Empty defaults to off.")
 	flag.StringVar(&contextTokenTaskCreateScopes, "context-token-task-create-scopes",
@@ -402,8 +460,8 @@ func main() {
 		"Comma-separated context-token scopes that authorize Secret metadata reads. Defaults to orka:secrets:read.")
 	flag.StringVar(&contextTokenSecretCredentialReadScopes, "context-token-secret-credential-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SECRET_CREDENTIAL_READ_SCOPES"),
-		"Comma-separated context-token scopes that authorize using Secret data as outbound credentials. "+
-			"Defaults to orka:secrets:credentials:read.")
+		"Comma-separated context-token scopes that authorize using Secret data or ServiceAccount tokens "+
+			"as outbound credentials. Defaults to orka:secrets:credentials:read.")
 	flag.StringVar(&contextTokenConfigMapReadScopes, "context-token-configmap-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_CONFIGMAP_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize ConfigMap reads used as operation inputs. "+
@@ -454,18 +512,18 @@ func main() {
 	flag.StringVar(&contextTokenGatewayOperateScopes, "context-token-gateway-operate-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_GATEWAY_OPERATE_SCOPES"),
 		"Comma-separated context-token scopes that authorize delivery retries. Defaults to orka:gateways:operate.")
-	flag.StringVar(&contextTokenTTSURL, "context-token-tts-url", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_URL"),
-		"kontxt TTS base URL for optional token exchange/replacement.")
+	flag.StringVar(&contextTokenTTSEndpoint, "context-token-tts-endpoint", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_ENDPOINT"),
+		"Exact transaction-token TTS OAuth endpoint for optional token exchange/replacement.")
 	flag.StringVar(&contextTokenTTSAudience, "context-token-tts-audience", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"),
-		"Audience to request from kontxt TTS exchanges.")
+		"Audience to request from transaction-token TTS exchanges.")
 	flag.StringVar(&contextTokenTTSTimeout, "context-token-tts-timeout", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_TIMEOUT"),
-		"Timeout for kontxt TTS exchanges. Defaults to 5s when TTS is enabled.")
+		"Timeout for transaction-token TTS exchanges. Defaults to 5s when TTS is enabled.")
 	flag.StringVar(&contextTokenTTSTokenSource, "context-token-tts-token-source",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE"),
-		"Subject token source for kontxt TTS exchanges: serviceAccount, incoming, or none.")
+		"Subject token source for transaction-token TTS exchanges: serviceAccount, incoming, or none.")
 	flag.StringVar(&contextTokenSubjectTokenType, "context-token-subject-token-type",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE"),
-		"Subject token type for worker-side kontxt TTS exchanges. Defaults from token source when empty.")
+		"Subject token type for worker-side transaction-token TTS exchanges. Defaults from token source when empty.")
 	flag.StringVar(&contextTokenChildScope, "context-token-child-scope", os.Getenv("ORKA_CONTEXT_TOKEN_CHILD_SCOPE"),
 		"Scope workers request for child delegated TxTokens when TTS is configured.")
 	flag.StringVar(&contextTokenOutboundScope, "context-token-outbound-scope",
@@ -477,6 +535,12 @@ func main() {
 	flag.StringVar(&contextTokenToolTokenTTL, "context-token-tool-token-ttl",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL"),
 		"Requested TTL for outbound tool TxTokens. Defaults to 2m when TTS is enabled.")
+	flag.StringVar(&outboundAccessTrustedGatewayServices, "outbound-access-trusted-gateway-services",
+		os.Getenv("ORKA_OUTBOUND_ACCESS_TRUSTED_GATEWAY_SERVICES"),
+		"Comma-separated exact namespace/name:port Service references allowed for cross-namespace outbound gateways.")
+	flag.StringVar(&outboundAccessTrustedTokenEndpointServices, "outbound-access-trusted-token-endpoint-services",
+		os.Getenv("ORKA_OUTBOUND_ACCESS_TRUSTED_TOKEN_ENDPOINT_SERVICES"),
+		"Comma-separated exact namespace/name:port Service references allowed for cross-namespace token endpoints.")
 	flag.BoolVar(&enableTracing, "enable-telemetry", false,
 		"Enable OpenTelemetry tracing and metrics. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
@@ -487,6 +551,27 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	// Empty worker ServiceAccount flags retain the package defaults for callers that
+	// explicitly clear a flag, matching the zero-value fallback in the controller.
+	if aiWorkerServiceAccountName == "" {
+		aiWorkerServiceAccountName = controller.AIWorkerServiceAccount
+	}
+	if vendorWorkerServiceAccountName == "" {
+		vendorWorkerServiceAccountName = controller.VendorWorkerServiceAccount
+	}
+	if containerWorkerServiceAccountName == "" {
+		containerWorkerServiceAccountName = controller.ContainerWorkerServiceAccount
+	}
+	// Preserve explicit admission overrides, but keep its empty default aligned
+	// with the configured trusted worker ServiceAccounts. Container workers remain
+	// excluded, matching the existing admission default.
+	if len(workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts)) == 0 {
+		taskProvenanceAdmissionTrustedServiceAccounts = strings.Join([]string{
+			aiWorkerServiceAccountName,
+			vendorWorkerServiceAccountName,
+		}, ",")
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -566,7 +651,7 @@ func main() {
 		os.Exit(1)
 	}
 	contextTokenTTSConfig, err := api.NewContextTokenTTSConfig(
-		contextTokenTTSURL,
+		contextTokenTTSEndpoint,
 		contextTokenTTSAudience,
 		contextTokenTTSTimeout,
 		contextTokenTTSTokenSource,
@@ -575,6 +660,25 @@ func main() {
 	)
 	if err != nil {
 		setupLog.Error(err, "invalid context token TTS configuration")
+		os.Exit(1)
+	}
+	trustedGateways, err := outboundaccess.ParseTrustedServiceReferences(outboundAccessTrustedGatewayServices)
+	if err != nil {
+		setupLog.Error(err, "invalid trusted outbound gateway Service references")
+		os.Exit(1)
+	}
+	trustedTokenEndpoints, err := outboundaccess.ParseTrustedServiceReferences(outboundAccessTrustedTokenEndpointServices)
+	if err != nil {
+		setupLog.Error(err, "invalid trusted token endpoint Service references")
+		os.Exit(1)
+	}
+	outboundAccessTrust := outboundaccess.TrustConfig{Gateways: trustedGateways, TokenEndpoints: trustedTokenEndpoints}
+
+	if err := validateWorkspaceProviderSecurityConfig(
+		workspaceProviderAPIEnabled,
+		workspaceClassUseAdmissionEnabled,
+	); err != nil {
+		setupLog.Error(err, "invalid workspace provider security configuration")
 		os.Exit(1)
 	}
 
@@ -679,6 +783,15 @@ func main() {
 		}
 	}
 
+	if workspaceClassUseAdmissionEnabled {
+		orkaadmission.RegisterWorkspaceClassUseWebhooks(
+			mgr.GetWebhookServer(),
+			mgr.GetScheme(),
+			controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
+		)
+		setupLog.Info("registered Task and Tool workspace class use admission")
+	}
+
 	if taskProvenanceAdmissionEnabled {
 		admissionConfig := orkaadmission.NewTaskProvenanceConfig(
 			true,
@@ -698,6 +811,26 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "unable to create kubernetes clientset")
 		os.Exit(1)
+	}
+	outboundAccessResolver := &outboundaccess.KubernetesResolver{
+		Reader:     mgr.GetAPIReader(),
+		KubeClient: kubeClient,
+		Trust:      outboundAccessTrust,
+		Exchanger:  tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+	}
+	var brokeredTransactionExchange *worker.TransactionExchangeConfig
+	if contextTokenTTSConfig.Enabled() {
+		sharedTTSClient, clientErr := contexttoken.NewTTSClient(contextTokenTTSConfig)
+		if clientErr != nil {
+			setupLog.Error(clientErr, "unable to create brokered transaction-token exchanger")
+			os.Exit(1)
+		}
+		brokeredTransactionExchange = &worker.TransactionExchangeConfig{
+			TTS:              contextTokenTTSConfig,
+			Exchanger:        sharedTTSClient,
+			SubjectTokenType: contextTokenSubjectTokenType,
+			OutboundScope:    contextTokenOutboundScope,
+		}
 	}
 
 	// Create SQLite store
@@ -745,8 +878,11 @@ func main() {
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
+	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
+	jobBuilder.VendorWorkerServiceAccountName = vendorWorkerServiceAccountName
+	jobBuilder.ContainerWorkerServiceAccountName = containerWorkerServiceAccountName
 	if contextTokenTTSConfig.Enabled() {
-		jobBuilder.ContextTokenTTSURL = contextTokenTTSConfig.URL
+		jobBuilder.ContextTokenTTSEndpoint = contextTokenTTSConfig.Endpoint
 		jobBuilder.ContextTokenTTSAudience = contextTokenTTSConfig.Audience
 		jobBuilder.ContextTokenTTSTokenSource = contextTokenTTSConfig.TokenSource
 		if contextTokenTTSConfig.Timeout > 0 {
@@ -768,6 +904,14 @@ func main() {
 	)
 	jobBuilder.ControllerURL = controllerURL
 	jobBuilder.EnableTelemetry = enableTracing
+	jobBuilder.EnforceTransactionCredentialAuth =
+		contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce
+	jobBuilder.TransactionCredentialReadScopes = append(
+		[]string(nil),
+		contextTokenAuthzConfig.SecretCredentialReadScopes()...,
+	)
+	jobBuilder.OutboundAccessTrustedGatewayServices = outboundAccessTrustedGatewayServices
+	jobBuilder.OutboundAccessTrustedTokenEndpointServices = outboundAccessTrustedTokenEndpointServices
 	// Auto-discover controller URL from in-cluster service if not explicitly set
 	if jobBuilder.ControllerURL == "" {
 		ns := os.Getenv(workerenv.PodNamespace)
@@ -794,6 +938,8 @@ func main() {
 		SessionManager:                     sessionManager,
 		WebhookNotifier:                    webhookNotifier,
 		KubeClient:                         kubeClient,
+		OutboundAccessResolver:             outboundAccessResolver,
+		BrokeredTransactionExchange:        brokeredTransactionExchange,
 		ResultStore:                        sqliteStore,
 		PlanStore:                          sqliteStore,
 		MessageStore:                       sqliteStore,
@@ -802,25 +948,48 @@ func main() {
 		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
 		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
 		ExecutionWorkspaceDefaultProvider:  executionWorkspaceDefaultProvider,
+		WorkspaceProviderAPIEnabled:        workspaceProviderAPIEnabled,
 		AgentSandboxEnabled:                agentSandboxEnabled,
 		AgentSandboxConfig:                 agentSandboxConfig,
 		SubstrateEnabled:                   substrateEnabled,
 		SubstrateConfig:                    substrateConfig,
+		AIWorkerServiceAccountName:         aiWorkerServiceAccountName,
+		VendorWorkerServiceAccountName:     vendorWorkerServiceAccountName,
+		ContainerWorkerServiceAccountName:  containerWorkerServiceAccountName,
 		AIWorkerClusterRoleName:            aiWorkerClusterRoleName,
 		VendorWorkerClusterRoleName:        vendorWorkerClusterRoleName,
 		ContainerWorkerClusterRoleName:     containerWorkerClusterRoleName,
 		WorkerClusterRoleBindingNamePrefix: workerClusterRoleBindingNamePrefix,
+		EnforceTransactionCredentialAuth:   contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
+		TransactionCredentialReadScopes: append(
+			[]string(nil),
+			contextTokenAuthzConfig.SecretCredentialReadScopes()...,
+		),
+		OutboundAccessTrust: outboundAccessTrust,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
 	}
 
+	if err := (&controller.OutboundAccessPolicyReconciler{
+		Client:                     mgr.GetClient(),
+		APIReader:                  mgr.GetAPIReader(),
+		Scheme:                     mgr.GetScheme(),
+		Trust:                      outboundAccessTrust,
+		AIWorkerServiceAccountName: aiWorkerServiceAccountName,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "OutboundAccessPolicy")
+		os.Exit(1)
+	}
+
 	if err := (&controller.ToolReconciler{
-		Client:                    mgr.GetClient(),
-		Scheme:                    mgr.GetScheme(),
-		SubstrateEnabled:          substrateEnabled,
-		SubstrateConfig:           substrateConfig,
-		EnforceNamespaceIsolation: enforceNamespaceIsolation,
+		Client:                      mgr.GetClient(),
+		Scheme:                      mgr.GetScheme(),
+		SubstrateEnabled:            substrateEnabled,
+		SubstrateConfig:             substrateConfig,
+		EnforceNamespaceIsolation:   enforceNamespaceIsolation,
+		WorkspaceProviderAPIEnabled: workspaceProviderAPIEnabled,
+		OutboundAccessTrust:         outboundAccessTrust,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Tool")
 		os.Exit(1)
@@ -834,6 +1003,80 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SubstrateActorPool")
 		os.Exit(1)
+	}
+
+	if fakeWorkspaceProviderEnabled && !workspaceProviderAPIEnabled {
+		setupLog.Error(
+			fmt.Errorf("fake workspace provider requires workspace provider API"),
+			"invalid workspace provider feature gates",
+		)
+		os.Exit(1)
+	}
+	registerWorkspaceCoreControllers := workspaceProviderAPIEnabled
+	if !workspaceProviderAPIEnabled {
+		workspaceAPIsInstalled, err := workspaceCleanupAPIsInstalled(mgr.GetRESTMapper())
+		if err != nil {
+			setupLog.Error(err, "unable to discover workspace cleanup APIs")
+			os.Exit(1)
+		}
+		registerWorkspaceCoreControllers = workspaceAPIsInstalled
+		if !workspaceAPIsInstalled {
+			setupLog.Info("workspace CRDs are not installed; skipping cleanup-only workspace controllers")
+		}
+	}
+	if registerWorkspaceCoreControllers {
+		if err := (&controller.ExecutionWorkspaceProviderReconciler{
+			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
+			RESTMapper:  mgr.GetRESTMapper(),
+			CleanupOnly: !workspaceProviderAPIEnabled,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ExecutionWorkspaceProviderCore")
+			os.Exit(1)
+		}
+		if err := (&controller.ExecutionWorkspaceReconciler{
+			Client:                  mgr.GetClient(),
+			APIReader:               mgr.GetAPIReader(),
+			RESTMapper:              mgr.GetRESTMapper(),
+			AdmissionLeaseNamespace: currentPodNamespace(),
+			CleanupOnly:             !workspaceProviderAPIEnabled,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ExecutionWorkspaceCore")
+			os.Exit(1)
+		}
+		if err := (&controller.ExecutionWorkspaceClassReconciler{
+			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
+			RESTMapper:  mgr.GetRESTMapper(),
+			CleanupOnly: !workspaceProviderAPIEnabled,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ExecutionWorkspaceClassCore")
+			os.Exit(1)
+		}
+	}
+	if workspaceProviderAPIEnabled {
+		if fakeWorkspaceProviderEnabled {
+			if err := (&controller.FakeExecutionWorkspaceProviderReconciler{
+				Client: mgr.GetClient(),
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "FakeExecutionWorkspaceProvider")
+				os.Exit(1)
+			}
+			if err := (&controller.FakeExecutionWorkspacePoolReconciler{
+				Client: mgr.GetClient(),
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "FakeExecutionWorkspacePool")
+				os.Exit(1)
+			}
+			if err := (&controller.FakeExecutionWorkspaceReconciler{
+				Client:     mgr.GetClient(),
+				APIReader:  mgr.GetAPIReader(),
+				RESTMapper: mgr.GetRESTMapper(),
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "FakeExecutionWorkspace")
+				os.Exit(1)
+			}
+		}
 	}
 
 	if err := (&controller.AgentReconciler{
@@ -905,6 +1148,7 @@ func main() {
 		Scheme:                    mgr.GetScheme(),
 		Store:                     sqliteStore,
 		ResultStore:               sqliteStore,
+		ArtifactStore:             sqliteStore,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
@@ -985,10 +1229,10 @@ func main() {
 	}
 }
 
-func envBool(name string, fallback bool) bool {
+func envBool(name string) bool {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
-		return fallback
+		return false
 	}
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {

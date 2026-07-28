@@ -497,7 +497,7 @@ func TestEventAuthListAndStream(t *testing.T) {
 		"tctx":  map[string]any{"namespace": "default", "taskName": "task-auth"},
 	})
 	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/task-auth/events?namespace=default", nil)
-	listReq.Header.Set(KontxtHeaderName, token)
+	listReq.Header.Set(TransactionTokenHeaderName, token)
 	resp, err = app.Test(listReq)
 	if err != nil {
 		t.Fatalf("auth list app.Test: %v", err)
@@ -507,7 +507,7 @@ func TestEventAuthListAndStream(t *testing.T) {
 	}
 
 	streamReq := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/task-auth/stream?namespace=default", nil)
-	streamReq.Header.Set(KontxtHeaderName, token)
+	streamReq.Header.Set(TransactionTokenHeaderName, token)
 	resp, err = app.Test(streamReq, fiber.TestConfig{Timeout: 500 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("auth stream app.Test: %v", err)
@@ -531,7 +531,7 @@ func TestEventNamespaceIsolationPublicAndInternal(t *testing.T) {
 		"tctx":  map[string]any{"namespace": "default", "taskName": "task-other"},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/task-other/events?namespace=other", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("namespace list app.Test: %v", err)

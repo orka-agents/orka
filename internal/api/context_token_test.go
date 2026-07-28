@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	kontxttoken "github.com/aramase/kontxt/pkg/token"
 	"github.com/gofiber/fiber/v3"
 )
 
@@ -37,7 +36,7 @@ func issueTestContextToken(t *testing.T, provider *testOIDCProvider, headerOverr
 	now := time.Now()
 	header := map[string]any{
 		"alg": "RS256",
-		"typ": KontxtJWTType,
+		"typ": TransactionTokenJWTType,
 		"kid": provider.kid,
 	}
 	claims := map[string]any{
@@ -86,39 +85,23 @@ func issueTestContextToken(t *testing.T, provider *testOIDCProvider, headerOverr
 
 func testContextTokenConfig(t *testing.T, provider *testOIDCProvider, headers string) ContextTokenConfig {
 	t.Helper()
-	cfg, err := NewContextTokenConfig(ContextTokenProfileKontxt, provider.server.URL, provider.aud, provider.server.URL+"/jwks", headers)
+	cfg, err := NewContextTokenConfig(ContextTokenProfileTransactionToken, provider.server.URL, provider.aud, provider.server.URL+"/jwks", headers)
 	if err != nil {
 		t.Fatalf("NewContextTokenConfig returned error: %v", err)
 	}
 	return cfg
 }
 
-func TestContextToken_KontxtGeneratedTokenCompatibility(t *testing.T) {
+func TestContextToken_TransactionTokenConformanceFixture(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	profile := testContextTokenConfig(t, provider, "").Profiles[0]
-
-	tokenString, err := kontxttoken.New(kontxttoken.Claims{
-		Issuer:             provider.server.URL,
-		Audience:           provider.aud,
-		Subject:            testContextTokenSubject,
-		Scope:              "read write",
-		RequestingWorkload: "spiffe://example.test/ns/default/sa/client",
-		TransactionContext: map[string]any{
-			"trace_id": testContextTokenTraceID,
-		},
-		RequesterContext: map[string]any{
-			"user": "alice",
-		},
-	}, provider.key, provider.kid, time.Hour)
-	if err != nil {
-		t.Fatalf("kontxt token.New returned error: %v", err)
-	}
+	tokenString := issueTestContextToken(t, provider, nil, nil)
 
 	ctxToken, err := validateContextToken(context.Background(), tokenString, profile)
 	if err != nil {
-		t.Fatalf("validateContextToken returned error for kontxt-generated token: %v", err)
+		t.Fatalf("validateContextToken returned error for transaction-token fixture: %v", err)
 	}
-	if ctxToken.Profile != ContextTokenProfileKontxt || ctxToken.Type != kontxttoken.TypeHeader {
+	if ctxToken.Profile != ContextTokenProfileTransactionToken || ctxToken.Type != TransactionTokenJWTType {
 		t.Fatalf("unexpected profile/type: %#v", ctxToken)
 	}
 	if ctxToken.Subject != testContextTokenSubject ||
@@ -145,7 +128,7 @@ func TestContextToken_KontxtGeneratedTokenCompatibility(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set(kontxttoken.HeaderName, tokenString)
+	req.Header.Set(TransactionTokenHeaderName, tokenString)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
@@ -155,7 +138,7 @@ func TestContextToken_KontxtGeneratedTokenCompatibility(t *testing.T) {
 	}
 }
 
-func TestContextToken_KontxtValidViaTxnTokenHeader(t *testing.T) {
+func TestContextToken_TransactionTokenValidViaTxnTokenHeader(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	cfg := testContextTokenConfig(t, provider, "")
 	token := issueTestContextToken(t, provider, nil, nil)
@@ -177,7 +160,7 @@ func TestContextToken_KontxtValidViaTxnTokenHeader(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
@@ -210,7 +193,7 @@ func TestContextToken_UserInfoNamespaceFromTransactionContext(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
@@ -220,7 +203,7 @@ func TestContextToken_UserInfoNamespaceFromTransactionContext(t *testing.T) {
 	}
 }
 
-func TestContextToken_KontxtValidViaAuthorizationBearerWhenConfigured(t *testing.T) {
+func TestContextToken_TransactionTokenValidViaAuthorizationBearerWhenConfigured(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	cfg := testContextTokenConfig(t, provider, "Txn-Token,Authorization:Bearer")
 	token := issueTestContextToken(t, provider, nil, nil)
@@ -298,7 +281,7 @@ func TestContextToken_AuthorizationBearerPreservesOIDCFallback(t *testing.T) {
 	}
 }
 
-func TestValidateContextToken_Kontxt(t *testing.T) {
+func TestValidateContextToken_TransactionToken(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	profile := testContextTokenConfig(t, provider, "").Profiles[0]
 	token := issueTestContextToken(t, provider, nil, nil)
@@ -307,7 +290,7 @@ func TestValidateContextToken_Kontxt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validateContextToken returned error: %v", err)
 	}
-	if ctxToken.Profile != ContextTokenProfileKontxt || ctxToken.Type != KontxtJWTType {
+	if ctxToken.Profile != ContextTokenProfileTransactionToken || ctxToken.Type != TransactionTokenJWTType {
 		t.Fatalf("unexpected profile/type: %#v", ctxToken)
 	}
 	if ctxToken.TransactionID != testContextTokenTransactionID || ctxToken.Scope != "read write" || ctxToken.RequestingWorkload == "" {
@@ -318,15 +301,15 @@ func TestValidateContextToken_Kontxt(t *testing.T) {
 	}
 }
 
-func TestValidateContextToken_KontxtUsesDefaultJWKSURL(t *testing.T) {
+func TestValidateContextToken_TransactionTokenUsesDefaultJWKSURL(t *testing.T) {
 	provider := newTestOIDCProvider(t)
-	cfg, err := NewContextTokenConfig(ContextTokenProfileKontxt, provider.server.URL, provider.aud, "", "")
+	cfg, err := NewContextTokenConfig(ContextTokenProfileTransactionToken, provider.server.URL, provider.aud, "", "")
 	if err != nil {
 		t.Fatalf("NewContextTokenConfig returned error: %v", err)
 	}
 	profile := cfg.Profiles[0]
 	if profile.JWKSURL != provider.server.URL+"/.well-known/jwks.json" {
-		t.Fatalf("JWKSURL = %q, want kontxt default JWKS endpoint", profile.JWKSURL)
+		t.Fatalf("JWKSURL = %q, want transaction-token default JWKS endpoint", profile.JWKSURL)
 	}
 
 	token := issueTestContextToken(t, provider, nil, nil)
@@ -334,14 +317,14 @@ func TestValidateContextToken_KontxtUsesDefaultJWKSURL(t *testing.T) {
 		t.Fatalf("validateContextToken returned error: %v", err)
 	}
 	if provider.discoveryHits.Load() != 0 {
-		t.Fatalf("discoveryHits = %d, want 0 for kontxt default JWKS URL", provider.discoveryHits.Load())
+		t.Fatalf("discoveryHits = %d, want 0 for transaction-token default JWKS URL", provider.discoveryHits.Load())
 	}
 	if provider.jwksHits.Load() == 0 {
-		t.Fatal("expected kontxt default JWKS endpoint to be fetched")
+		t.Fatal("expected transaction-token default JWKS endpoint to be fetched")
 	}
 }
 
-func TestValidateContextToken_KontxtFailures(t *testing.T) {
+func TestValidateContextToken_TransactionTokenFailures(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	profile := testContextTokenConfig(t, provider, "").Profiles[0]
 	now := time.Now()
@@ -388,7 +371,7 @@ func TestAllowedCORSHeadersIncludesContextTokenHeaders(t *testing.T) {
 	cfg := testContextTokenConfig(t, provider, "Txn-Token,X-Txn-Token,Authorization:Bearer")
 	headers := allowedCORSHeaders(cfg)
 
-	for _, want := range []string{KontxtHeaderName, AuthHeader, XAPIKeyHeader, "X-Txn-Token"} {
+	for _, want := range []string{TransactionTokenHeaderName, AuthHeader, XAPIKeyHeader, "X-Txn-Token"} {
 		if !slices.Contains(headers, want) {
 			t.Fatalf("allowedCORSHeaders() = %#v, want %q", headers, want)
 		}
@@ -397,12 +380,19 @@ func TestAllowedCORSHeadersIncludesContextTokenHeaders(t *testing.T) {
 
 func TestAllowedCORSHeadersOmitsContextTokenHeadersWhenDisabled(t *testing.T) {
 	headers := allowedCORSHeaders(ContextTokenConfig{})
-	if slices.Contains(headers, KontxtHeaderName) {
-		t.Fatalf("allowedCORSHeaders() = %#v, did not want %q when context-token auth is disabled", headers, KontxtHeaderName)
+	if slices.Contains(headers, TransactionTokenHeaderName) {
+		t.Fatalf("allowedCORSHeaders() = %#v, did not want %q when context-token auth is disabled", headers, TransactionTokenHeaderName)
 	}
 	for _, want := range []string{AuthHeader, XAPIKeyHeader} {
 		if !slices.Contains(headers, want) {
 			t.Fatalf("allowedCORSHeaders() = %#v, want %q", headers, want)
 		}
+	}
+}
+
+func TestNewContextTokenConfigRejectsLegacyProviderProfile(t *testing.T) {
+	_, err := NewContextTokenConfig("kont"+"xt", "https://issuer.example.test", "orka", "https://issuer.example.test/jwks", "")
+	if err == nil || !strings.Contains(err.Error(), "unsupported context-token profile") {
+		t.Fatalf("NewContextTokenConfig() error = %v, want unsupported profile", err)
 	}
 }

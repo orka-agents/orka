@@ -8,6 +8,7 @@ rules:
   - ""
   resources:
   - configmaps
+  - secrets
   verbs:
   - create
   - delete
@@ -52,19 +53,9 @@ rules:
   - ""
   resources:
   - pods/portforward
+  - serviceaccounts/token
   verbs:
   - create
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - update
-  - watch
 - apiGroups:
   - ""
   resources:
@@ -113,6 +104,12 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
 - apiGroups:
   - autoscaling
   resources:
@@ -178,6 +175,7 @@ rules:
   resources:
   - agentruntimes/finalizers
   - agents/finalizers
+  - outboundaccesspolicies/finalizers
   - providers/finalizers
   - repositorymonitors/finalizers
   - repositoryscans/finalizers
@@ -192,6 +190,7 @@ rules:
   resources:
   - agentruntimes/status
   - agents/status
+  - outboundaccesspolicies/status
   - providers/status
   - repositorymonitors/status
   - repositoryscans/status
@@ -203,6 +202,14 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - outboundaccesspolicies
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - discovery.k8s.io
   resources:
@@ -310,12 +317,21 @@ rules:
   resources:
   - clusterrolebindings
   - rolebindings
+  - roles
   verbs:
   - create
   - delete
   - get
   - list
   - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io
@@ -328,19 +344,73 @@ rules:
   verbs:
   - bind
 - apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
-  - clusterroles
-  - roles
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - storage.k8s.io
   resources:
   - storageclasses
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - use
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses/finalizers
+  - executionworkspaceproviders/finalizers
+  - executionworkspaces/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses/status
+  - executionworkspacepools/status
+  - executionworkspaceproviders/status
+  - executionworkspaces/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacepools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaces
+  verbs:
+  - admit
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch

@@ -18,13 +18,13 @@ Authentication modes:
 
 - **Kubernetes ServiceAccount token** — default mode. Tokens are validated with the Kubernetes TokenReview API.
 - **OIDC JWT** — enabled when the controller is configured with `--oidc-issuer` and `--oidc-audience` (or `ORKA_OIDC_ISSUER` / `ORKA_OIDC_AUDIENCE`). Tokens are validated against the issuer, audience, expiration, RS256 signature, and `--oidc-allowed-subjects`; authorized OIDC callers are assigned `--oidc-namespace` for namespace isolation. If `--oidc-jwks-url` is omitted, Orka discovers the JWKS URL from the issuer metadata.
-- **Context token / `kontxt` TxToken** — enabled with `--context-token-profile=kontxt`, `--context-token-issuer`, and `--context-token-audience` (or the matching `ORKA_CONTEXT_TOKEN_*` env vars). The built-in profile validates RS256 TxTokens with `typ: txntoken+jwt`, issuer/audience/time claims, `kid`, and required `iat`, `txn`, `scope`, and `req_wl` claims. By default tokens are read from the raw `Txn-Token` header; `Authorization: Bearer` support is opt-in with `--context-token-headers=Txn-Token,Authorization:Bearer`.
+- **Context token / `transaction-token` TxToken** — enabled with `--context-token-profile=transaction-token`, `--context-token-issuer`, and `--context-token-audience` (or the matching `ORKA_CONTEXT_TOKEN_*` env vars). The built-in profile validates RS256 TxTokens with `typ: txntoken+jwt`, issuer/audience/time claims, `kid`, and required `iat`, `txn`, `scope`, and `req_wl` claims. By default tokens are read from the raw `Txn-Token` header; `Authorization: Bearer` support is opt-in with `--context-token-headers=Txn-Token,Authorization:Bearer`.
 
 ```http
 Txn-Token: <txntoken+jwt>
 ```
 
-When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. See [Kontxt TxToken integration](../concepts/kontxt.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
+When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. See [Transaction Token integration](../concepts/transaction-tokens.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
 
 ## Webhooks
 
@@ -234,7 +234,8 @@ spec:
 | `spec.http.method` | string | default `POST`; allowed `GET`, `POST`, `PUT`, `PATCH`, `DELETE` | HTTP method for plain HTTP tools. MCP actor-backed tools use `POST`. |
 | `spec.http.headers` | map | empty | Static headers sent with the request. Reserved token propagation headers cannot be overridden when outbound TxToken propagation is enabled. |
 | `spec.http.timeout` | duration | default `30s` | Per-call request timeout. |
-| `spec.http.authSecretRef` | Secret key selector | empty | Secret value used as the auth token. |
+| `spec.http.authSecretRef` | Secret key selector | empty | Secret value used as the auth token. Cannot coexist with a direct OutboundAccessPolicy. |
+| `spec.http.outboundAccessPolicyRef.name` | string | empty | Same-namespace `OutboundAccessPolicy` required to be Accepted with ResolvedRefs. |
 | `spec.http.authInject` | string | default `header`; allowed `header`, `body` | `header` sends `Authorization: Bearer <token>`. `body` injects the token into the JSON request body and is invalid for MCP actor-backed tools. |
 | `spec.http.authBodyKey` | string | empty | JSON key used when `authInject: body`. |
 | `spec.mcp.path` | string | `/mcp` | HTTP path exposed by the MCP server inside the actor. |
@@ -248,6 +249,30 @@ spec:
 | `status.actor` | object | empty | Safe actor metadata, including provider, actor ID, route host, resolved template, and pool reference. |
 
 MCP actor-backed tools require Substrate support to be enabled on the controller. If transport auth is needed for an MCP endpoint, set `spec.http.authSecretRef`, keep `authInject` as `header` or omit it, and omit `spec.http.url`.
+
+## OutboundAccessPolicy
+
+`OutboundAccessPolicy` is namespaced and selects exactly one adapter. Direct mode performs RFC 8693/RFC 7523 exchange and injects a validated Bearer resource credential. Gateway mode dials a trusted Kubernetes Service while preserving the original Tool authority, path, query, method, body, and protocol headers.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  name: resource-api
+  namespace: default
+spec:
+  direct:
+    grant: TokenExchange
+    tokenEndpoint:
+      url: https://identity.example.test/oauth/token
+    subject:
+      source: TransactionToken
+    scopes: [api.read]
+    requestedTokenType: urn:ietf:params:oauth:token-type:access_token
+    expectedIssuedTokenType: urn:ietf:params:oauth:token-type:access_token
+```
+
+Policy status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. Secret references are key-specific and same-namespace. Cross-namespace Service refs require exact controller allowlist entries. See [Outbound Access Policies](../concepts/outbound-access.md).
 
 ## Security
 
@@ -339,7 +364,7 @@ Review slice and dropped-output inspection:
 
 ## Repository Monitors
 
-Repository monitor endpoints manage `RepositoryMonitor` configurations and their durable monitor runs, PR queue items, review state, and audit events. The current implementation supports GitHub pull request monitoring and read-only review task creation.
+Repository monitor endpoints manage `RepositoryMonitor` configurations and their durable monitor runs, issue/PR inventory, command events, workflow actions, typed action records, implementation jobs, GitHub mutation audit records, review/repair state, readiness state, and audit events.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -351,6 +376,17 @@ Repository monitor endpoints manage `RepositoryMonitor` configurations and their
 | `/api/v1/monitors/repositories/:name/runs` | POST | Trigger a manual monitor run |
 | `/api/v1/monitors/repositories/:name/runs` | GET | List monitor runs |
 | `/api/v1/monitors/repositories/:name/items` | GET | List current monitor items |
+| `/api/v1/monitors/repositories/:name/commands` | POST | Create an explicit issue/PR workflow command |
+| `/api/v1/monitors/commands` | GET | List durable command events |
+| `/api/v1/monitors/commands/:id` | GET | Get a command event |
+| `/api/v1/monitors/work-actions` | GET | List durable workflow actions and leases |
+| `/api/v1/monitors/work-actions/:id` | GET | Get a workflow action |
+| `/api/v1/monitors/actions` | GET | List typed action records |
+| `/api/v1/monitors/actions/:id` | GET | Get a typed action record |
+| `/api/v1/monitors/implementation-jobs` | GET | List issue implementation jobs |
+| `/api/v1/monitors/implementation-jobs/:id` | GET | Get an issue implementation job |
+| `/api/v1/monitors/mutations` | GET | List controller-owned GitHub mutation audit records |
+| `/api/v1/monitors/mutations/:id` | GET | Get a GitHub mutation audit record |
 | `/api/v1/monitors/events` | GET | List monitor audit events |
 
 Common query parameters:
@@ -358,7 +394,7 @@ Common query parameters:
 - `namespace` - Kubernetes namespace to operate in.
 - `limit` - page size for list endpoints.
 - `continue` or `cursor` - pagination cursor for store-backed list endpoints.
-- `kind`, `state`, `verdict`, `repairState`, and `automergeState` - filters for `GET /api/v1/monitors/repositories/:name/items`.
+- `kind`, `number`, `state`, `verdict`, `repairState`, and `automergeState` - filters for `GET /api/v1/monitors/repositories/:name/items`.
 - `name`, `runID`, `itemKind`, `itemNumber`, and `eventType` - filters for `GET /api/v1/monitors/events`; `name` is required.
 
 Context-token authorization scopes are `orka:monitors:read` for list/get endpoints, `orka:monitors:write` for create/update/delete, and `orka:monitors:operate` for manual run creation.
@@ -409,7 +445,7 @@ Context-token authorization scopes are `orka:monitors:read` for list/get endpoin
 
 Required fields are `name`, `spec.repoURL`, and `spec.agents.reviewer.name` when pull request monitoring is enabled. The API defaults or infers provider, owner, repository, branch, pull request enablement, pull request `maxPerRun`, `review.event`, and validation mode where possible. `spec.repoURL` must be a credential-free GitHub repository root URL such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`; pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected.
 
-Only GitHub pull request monitoring is supported in this slice. Requests that enable issue or commit targets, disable pull request monitoring, use a non-GitHub provider, set `review.requireGreenCI`, reference a missing/non-Claude reviewer runtime, or reference a reviewer Agent without usable Claude credentials are rejected with `400`. The reviewer Agent must use `runtime.type: claude`, must reference a Secret in the monitor namespace, and that Secret must contain a non-empty `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY` key. When `gitSecretRef` is set, the Git Secret must exist in the monitor namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
+GitHub pull request and issue targets are supported. Commit targets are rejected. `review.requireGreenCI` is supported for gating review selection on green CI. Pull request monitoring requires `spec.agents.reviewer.name`; the reviewer Agent must use `runtime.type: claude`, must reference a Secret in the monitor namespace, and that Secret must contain a non-empty `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY` key. Issue-only monitors can set `targets.pullRequests.enabled: false` and `targets.issues.enabled: true`. When `gitSecretRef` is set, the Git Secret must exist in the monitor namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
 
 ### Trigger Manual Monitor Run
 
@@ -424,7 +460,41 @@ Only GitHub pull request monitoring is supported in this slice. Requests that en
 }
 ```
 
-The request body can be omitted to run a full pull request inventory pass. `targetKind` must be empty or `pull_request`; `targetNumber` and `targetSHA` narrow the run to one PR or exact head. When `targetNumber` is set, the controller fetches that pull request directly from GitHub and does not retire unrelated monitor items from the repository-wide inventory. The API returns `409` when the monitor already has a queued or running run.
+The request body can be omitted to run a full inventory pass. `targetKind` may be empty, `pull_request`, or `issue`; `targetNumber` and `targetSHA` narrow the run to one issue, one PR, or an exact PR head. When `targetNumber` is set, the controller fetches that target directly from GitHub and does not retire unrelated monitor items. The API returns `409` when the monitor already has a queued or running run.
+
+### Create Monitor Command
+
+**Endpoint:** `POST /api/v1/monitors/repositories/{name}/commands`
+
+**Request Body:**
+```json
+{
+  "kind": "issue",
+  "number": 123,
+  "intent": "plan",
+  "targetSHA": ""
+}
+```
+
+Supported issue intents are `triage`, `research`, `plan`, `approve_plan`, `implement`, `decompose`, `stop`, and `resume`. Supported pull request intents are `review`, `fix`, `fix_ci`, `update_branch`, `automerge`, `stop`, and `resume`. Head-bound pull request commands (`review`, `fix`, `fix_ci`, `update_branch`, and `automerge`) must include `targetSHA`; `stop` and `resume` can omit it. The command creation endpoint always requires `orka:monitors:operate`. Mutating intents (including approve, implement, repair, update-branch, automerge, stop, and resume) additionally require `orka:monitors:write`; `review` also requires monitor-write when review publishing is enabled. The endpoint validates that the target kind is enabled, records a durable command event, and queues a targeted monitor run.
+
+### List Monitor Commands, Actions, Implementations, and Mutations
+
+**Endpoints:**
+
+- `GET /api/v1/monitors/commands?namespace=&name=&kind=&number=&intent=&status=`
+- `GET /api/v1/monitors/commands/{id}`
+- `GET /api/v1/monitors/work-actions?namespace=&name=&kind=&number=&intent=&desiredAction=&status=&taskName=`
+- `GET /api/v1/monitors/work-actions/{id}`
+- `GET /api/v1/monitors/actions?namespace=&name=&kind=&number=&actionKind=&taskName=`
+- `GET /api/v1/monitors/actions/{id}`
+- `GET /api/v1/monitors/implementation-jobs?namespace=&name=&issueNumber=&phase=&taskName=`
+- `GET /api/v1/monitors/implementation-jobs/{id}`
+- `GET /api/v1/monitors/implementation-jobs/{id}/patch-preview`
+- `GET /api/v1/monitors/mutations?namespace=&name=&kind=&number=&operation=&status=`
+- `GET /api/v1/monitors/mutations/{id}`
+
+Command events record label/API intake, actor/source authorization, target SHA/snapshot bindings, status, and errors. Work actions are the durable queue/lease view for prerequisites and follow-up work. Action records store typed triage/research/plan/implementation/review/repair/automerge outcomes. Implementation jobs track issue coding attempts, patch artifacts, validation state, branches, and linked PRs. Mutation records audit every controller-owned GitHub write such as label consumption, review submission, branch pushes, PR creation, and automerge attempts.
 
 See [Repository Monitors](../guides/repository-monitors.md) for the full workflow and CRD example.
 

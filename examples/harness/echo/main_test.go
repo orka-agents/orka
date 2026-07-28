@@ -72,6 +72,32 @@ func TestEchoHarnessRejectsDuplicateStartTurn(t *testing.T) {
 	}
 }
 
+func TestEchoHarnessRejectsCompletedStartTurn(t *testing.T) {
+	s := newTestServer(behaviorSuccess)
+	srv := httptest.NewServer(s.handler())
+	defer srv.Close()
+	client, err := harness.NewClient(srv.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	request := validStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn() error = %v", err)
+	}
+	if err := client.StreamFrames(
+		context.Background(),
+		request.TurnID,
+		0,
+		func(harness.HarnessEventFrame) error { return nil },
+	); err != nil {
+		t.Fatalf("StreamFrames() error = %v", err)
+	}
+	_, err = client.StartTurn(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "turn already completed") {
+		t.Fatalf("completed StartTurn() error = %v, want tombstone rejection", err)
+	}
+}
+
 func TestSupportLookupEndpoint(t *testing.T) {
 	s := newTestServer(behaviorSuccess)
 	srv := httptest.NewServer(s.handler())
@@ -191,9 +217,10 @@ func TestGenericHTTPRuntimePassesBrokeredWriteConformance(t *testing.T) {
 
 func newTestServer(behavior string) *server {
 	return &server{
-		runtimeName: "orka-generic-http-runtime",
-		behavior:    normalizeBehavior(behavior),
-		turns:       map[harness.HarnessTurnID]*turnState{},
+		runtimeName:    "orka-generic-http-runtime",
+		behavior:       normalizeBehavior(behavior),
+		turns:          map[harness.HarnessTurnID]*turnState{},
+		completedTurns: map[harness.HarnessTurnID]struct{}{},
 	}
 }
 

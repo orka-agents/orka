@@ -21,9 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aramase/kontxt/pkg/keys"
-	kontxttoken "github.com/aramase/kontxt/pkg/token"
-	sdkverify "github.com/aramase/kontxt/sdk/verify"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +35,8 @@ import (
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/genai"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
+	"github.com/orka-agents/orka/internal/transactiontoken"
+	txtest "github.com/orka-agents/orka/internal/transactiontoken/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -78,7 +77,7 @@ func parentTask() *corev1alpha1.Task {
 				Roles:   []string{"orka:agents:delegate", childTransactionScope},
 			},
 			Transaction: &corev1alpha1.TaskTransaction{
-				Profile:            "kontxt",
+				Profile:            transactiontoken.ProfileName,
 				ID:                 parentTransactionID,
 				Issuer:             "https://issuer.example.test",
 				Subject:            "parent-subject",
@@ -381,7 +380,7 @@ func TestDelegateTaskTool_Execute_CleansUpChildTaskWhenTokenSecretAdoptionFails(
 	}))
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
@@ -437,24 +436,17 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 		t.Fatalf("failed to write subject token fixture: %v", err)
 	}
 
-	keyManager, err := keys.NewManager(2048, time.Hour)
-	if err != nil {
-		t.Fatalf("failed to create kontxt key manager: %v", err)
-	}
-	jwksServer := httptest.NewServer(keyManager.JWKSHandler())
+	issuer := txtest.NewIssuer(t)
+	jwksServer := httptest.NewServer(issuer.JWKSHandler())
 	defer jwksServer.Close()
-	signingKey, kid := keyManager.SigningKey()
-	childToken, err := kontxttoken.New(kontxttoken.Claims{
+	childToken := issuer.Sign(t, transactiontoken.Claims{
 		Issuer:             "https://tts.example.test",
 		Audience:           "child.example.test",
 		TransactionID:      parentTransactionID,
 		Subject:            "spiffe://example.test/ns/default/sa/child",
 		Scope:              childTransactionScope,
 		RequestingWorkload: "spiffe://example.test/ns/default/sa/orka-worker",
-	}, signingKey, kid, time.Minute)
-	if err != nil {
-		t.Fatalf("failed to create child TxToken: %v", err)
-	}
+	}, time.Minute)
 
 	var requestDetails map[string]any
 	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -479,7 +471,7 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	}))
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
@@ -550,7 +542,7 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	if owner.BlockOwnerDeletion != nil {
 		t.Fatalf("secret owner BlockOwnerDeletion = %#v, want nil", owner.BlockOwnerDeletion)
 	}
-	claims, err := sdkverify.New(jwksServer.URL, "child.example.test").Verify(context.Background(), string(secret.Data["token"]))
+	claims, err := txtest.Verify(context.Background(), jwksServer.URL, "child.example.test", string(secret.Data["token"]))
 	if err != nil {
 		t.Fatalf("failed to verify child TxToken from secret: %v", err)
 	}
@@ -585,7 +577,7 @@ func TestDelegateTaskTool_Execute_CleansUpPreparedChildTokenWhenTaskCreateFails(
 	}))
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
@@ -641,7 +633,7 @@ func TestDelegateTaskTool_Execute_DoesNotExchangeChildTokenForNonTransactionalPa
 	}))
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
 

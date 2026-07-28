@@ -41,7 +41,25 @@ helm install orka charts/orka \
   --create-namespace
 ```
 
+A normal fresh install creates Orka's twelve cluster-scoped CRDs before the
+controller resources. Use `--skip-crds` only when one designated platform or
+release owner already manages compatible Orka CRDs for the cluster; all other
+Orka releases should use that flag.
+
+:::important[CRDs before every upgrade]
+Helm does not create or update files from `crds/` during `helm upgrade`.
+Apply the CRDs from the exact target chart before **every** upgrade. This also
+applies when upgrading from a chart that installed no CRDs. Helm retains CRDs
+and Orka custom resources on uninstall.
+:::
+
+Follow the complete commands and ownership guidance in
+[`charts/orka/README.md`](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md).
+
 ### Using kubectl
+
+The development target creates the required harness-wrapper authentication
+Secret without replacing an existing value:
 
 ```bash
 # Install CRDs
@@ -49,6 +67,22 @@ make install
 
 # Deploy controller
 make deploy IMG=ghcr.io/orka-agents/orka:latest
+```
+
+When applying the promoted installer directly, pre-create that Secret because
+raw manifests cannot safely contain a shared bearer token:
+
+```bash
+set -euo pipefail
+
+kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
+if ! kubectl -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then
+  openssl rand -hex 32 | \
+    kubectl -n orka-system create secret generic harness-wrapper-auth \
+      --from-file=token=/dev/stdin
+fi
+
+kubectl apply -f deploy/orka.yaml
 ```
 
 ## Quick Start
@@ -281,7 +315,7 @@ The CLI supports token extraction from bearer tokens, token files, exec-based au
 - [Architecture](concepts/architecture.md) — Controller, workers, CRDs, and task lifecycle
 - [Configuration](concepts/configuration.md) — Helm values, controller flags, and metrics
 - [Memory](concepts/memory.md) — Namespace-scoped durable memory and reviewable proposals
-- [Kontxt TxToken Integration](concepts/kontxt.md) — Request-scoped transaction-token auth
+- [Transaction Token Integration](concepts/transaction-tokens.md) — Request-scoped transaction-token auth
 - [Agent Sandbox Workspaces](concepts/agent-sandbox.md) / [Substrate](concepts/substrate.md) — Durable, reusable execution workspaces
 - [Security](concepts/security.md) — Pod hardening, authentication, and multi-tenancy
 

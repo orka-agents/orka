@@ -5,7 +5,7 @@ import { useUIStore } from '@/stores/ui'
 import type { TaskPhase } from '@/schemas/task'
 
 function isRunningPhase(phase?: TaskPhase): boolean {
-  return phase === 'Running' || phase === 'Pending'
+  return phase === 'Running' || phase === 'Finalizing' || phase === 'Pending'
 }
 
 export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhase) {

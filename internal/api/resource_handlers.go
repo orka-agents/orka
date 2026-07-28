@@ -82,7 +82,7 @@ func toolSpecHasProtectedAuth(spec corev1alpha1.ToolSpec) bool {
 	if spec.HTTP == nil {
 		return false
 	}
-	if spec.HTTP.AuthSecretRef != nil {
+	if spec.HTTP.AuthSecretRef != nil || spec.HTTP.OutboundAccessPolicyRef != nil {
 		return true
 	}
 	for name := range spec.HTTP.Headers {
@@ -101,6 +101,12 @@ func validateToolRESTMutation(spec corev1alpha1.ToolSpec) error {
 		return fiber.NewError(
 			fiber.StatusBadRequest,
 			"spec.http.authSecretRef is not allowed through the REST API; create tools with Kubernetes RBAC instead",
+		)
+	}
+	if spec.HTTP.OutboundAccessPolicyRef != nil {
+		return fiber.NewError(
+			fiber.StatusBadRequest,
+			"spec.http.outboundAccessPolicyRef is not allowed through the REST API; create tools with Kubernetes RBAC instead",
 		)
 	}
 	if err := validateToolRESTURL(spec.HTTP.URL); err != nil {
@@ -394,6 +400,9 @@ func (h *Handlers) CreateTool(c fiber.Ctx) error {
 		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
 		Spec:       req.Spec,
 	}
+	if err := authorizeToolWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), tool); err != nil {
+		return err
+	}
 	if err := h.client.Create(c.Context(), tool); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "tool already exists")
@@ -430,6 +439,9 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 		return err
 	}
 	tool.Spec = req.Spec
+	if err := authorizeToolWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), tool); err != nil {
+		return err
+	}
 	if err := h.client.Update(c.Context(), tool); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update tool: %v", err))
 	}

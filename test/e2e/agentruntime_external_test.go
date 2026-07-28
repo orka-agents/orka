@@ -25,7 +25,7 @@ import (
 var _ = Describe("AgentRuntime external endpoint", Ordered, func() {
 	const (
 		runtimeName        = "fibey-agentkit-e2e"
-		harnessToken       = "x"
+		harnessToken       = "mock-token"
 		goodSecretName     = runtimeName + "-harness-token"
 		badSecretName      = runtimeName + "-unlabeled-token"
 		deploymentName     = runtimeName

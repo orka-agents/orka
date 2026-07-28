@@ -1,0 +1,3 @@
+resources:
+- workspace_class_use_policy.yaml
+- workspace_core_admission_policy.yaml

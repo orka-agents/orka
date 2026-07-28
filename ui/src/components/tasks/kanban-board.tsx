@@ -12,6 +12,7 @@ const columns: { phase: TaskPhase; label: string }[] = [
   { phase: 'Pending', label: 'Pending' },
   { phase: 'Scheduled', label: 'Scheduled' },
   { phase: 'Running', label: 'Running' },
+  { phase: 'Finalizing', label: 'Finalizing' },
   { phase: 'Succeeded', label: 'Succeeded' },
   { phase: 'Failed', label: 'Failed' },
   { phase: 'Cancelled', label: 'Cancelled' },

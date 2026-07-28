@@ -711,9 +711,9 @@ func (s *Service) namespaceTaskCapacityAvailable(ctx context.Context, namespace,
 			return true, nil
 		}
 		switch task.Status.Phase {
-		case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning:
+		case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing:
 			// The controller initializes an empty phase to Pending. Count that brief window so
-			// one dispatch batch cannot create more Pending Tasks than the limiter can admit.
+			// one dispatch batch cannot create more non-terminal Tasks than the limiter can admit.
 			active++
 		}
 	}

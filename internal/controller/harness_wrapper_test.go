@@ -19,12 +19,15 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/harness/harnesstest"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
@@ -97,9 +100,9 @@ func TestHarnessWrapperStartClearsStaleResult(t *testing.T) {
 }
 
 func TestHarnessWrapperControllerSendsBearerToken(t *testing.T) {
-	t.Setenv(harnessWrapperAuthValueEnv, "x")
+	t.Setenv(harnessWrapperAuthValueEnv, "mock-token")
 	cfg := cliwrapper.DefaultConfig()
-	cfg.AuthValue = "x"
+	cfg.AuthValue = "mock-token"
 	server, err := cliwrapper.NewServer(cfg, &cliwrapper.FakeAdapter{Behavior: cliwrapper.FakeBehaviorSuccess, RuntimeName: "codex"})
 	if err != nil {
 		t.Fatal(err)
@@ -347,6 +350,474 @@ func TestHarnessWrapperBrokeredReadToolExecutesAndContinuesRuntime(t *testing.T)
 	}
 	if !hasExecutionEventType(listed, events.ExecutionEventTypeToolCallCompleted) {
 		t.Fatalf("events = %#v, want brokered ToolCallCompleted", listed)
+	}
+}
+
+func TestHarnessWrapperBrokeredContinuationReconnectsAfterPauseStreamCloses(t *testing.T) {
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer toolServer.Close()
+
+	var started harness.StartTurnRequest
+	var continued atomic.Bool
+	var postContinuationPolls atomic.Int32
+	runtimeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case harness.CapabilitiesPath:
+			harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+				Version:                 harness.ProtocolVersion,
+				ProtocolVersion:         harness.ProtocolVersion,
+				Transport:               harness.HTTPTransport,
+				RuntimeName:             "async-runtime",
+				ProviderKind:            harness.ProviderKindRemote,
+				ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved, harness.ToolExecutionModeBrokered},
+				BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+				SupportsCancel:          true,
+				SupportsRuntimeSessions: true,
+				SupportsContinuation:    true,
+			})
+		case harness.TurnsPath:
+			if err := json.NewDecoder(r.Body).Decode(&started); err != nil {
+				t.Fatalf("decode start turn: %v", err)
+			}
+			eventsPath, _ := harness.EventStreamPath(started.TurnID)
+			harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
+				Version:          harness.ProtocolVersion,
+				Accepted:         true,
+				RuntimeSessionID: started.RuntimeSessionID,
+				TurnID:           started.TurnID,
+				CorrelationID:    started.CorrelationID,
+				EventStreamPath:  eventsPath,
+			})
+		default:
+			turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
+			if err != nil || turnID != started.TurnID {
+				harness.WriteError(w, http.StatusNotFound, "not found")
+				return
+			}
+			switch resource {
+			case harness.TurnResourceEvents:
+				w.Header().Set("Content-Type", "text/event-stream")
+				afterSeq := strings.TrimSpace(r.URL.Query().Get("afterSeq"))
+				if afterSeq == "" || afterSeq == "0" {
+					_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
+						Version:          harness.ProtocolVersion,
+						Type:             harness.FrameTurnStarted,
+						RuntimeSessionID: started.RuntimeSessionID,
+						TurnID:           started.TurnID,
+						CorrelationID:    started.CorrelationID,
+						Seq:              1,
+					})
+					_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
+						Version:          harness.ProtocolVersion,
+						Type:             harness.FrameToolCallRequested,
+						RuntimeSessionID: started.RuntimeSessionID,
+						TurnID:           started.TurnID,
+						CorrelationID:    started.CorrelationID,
+						Seq:              2,
+						ToolName:         "read_incident",
+						ToolCallID:       "call-read-async",
+						Content:          json.RawMessage(`{"incident":"quincy-north"}`),
+					})
+					_ = harness.WriteSSEDone(w)
+					return
+				}
+				if afterSeq == "2" && continued.Load() && postContinuationPolls.Add(1) > 1 {
+					_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
+						Version:          harness.ProtocolVersion,
+						Type:             harness.FrameToolResultReceived,
+						RuntimeSessionID: started.RuntimeSessionID,
+						TurnID:           started.TurnID,
+						CorrelationID:    started.CorrelationID,
+						Seq:              3,
+						ToolName:         "read_incident",
+						ToolCallID:       "call-read-async",
+						Content:          json.RawMessage(`{"success":true}`),
+					})
+					_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
+						Version:          harness.ProtocolVersion,
+						Type:             harness.FrameTurnCompleted,
+						RuntimeSessionID: started.RuntimeSessionID,
+						TurnID:           started.TurnID,
+						CorrelationID:    started.CorrelationID,
+						Seq:              4,
+						Completed:        &harness.TurnCompleted{Result: "done", FinalEventSeq: 4},
+					})
+				}
+				_ = harness.WriteSSEDone(w)
+			case harness.TurnResourceContinue:
+				var request harness.ContinueTurnRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatalf("decode continue turn: %v", err)
+				}
+				continued.Store(true)
+				harness.WriteJSON(w, http.StatusAccepted, harness.ContinueTurnResponse{
+					Version:          harness.ProtocolVersion,
+					Accepted:         true,
+					RuntimeSessionID: request.RuntimeSessionID,
+					TurnID:           request.TurnID,
+					CorrelationID:    request.CorrelationID,
+				})
+			default:
+				harness.WriteError(w, http.StatusNotFound, "not found")
+			}
+		}
+	}))
+	defer runtimeServer.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "async-runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
+	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, runtimeServer.URL)
+	runtime.Name = "async-runtime"
+	runtime.Status.ObservedCapabilities.RuntimeName = "async-runtime"
+	runtime.Status.ObservedCapabilities.ProviderKind = string(harness.ProviderKindRemote)
+	runtime.Status.ObservedCapabilities.ToolExecutionModes = []corev1alpha1.AgentRuntimeToolExecutionMode{
+		corev1alpha1.AgentRuntimeToolExecutionModeObserved,
+		corev1alpha1.AgentRuntimeToolExecutionModeBrokered,
+	}
+	runtime.Status.ObservedCapabilities.BrokeredToolClasses = []corev1alpha1.AgentRuntimeBrokeredToolClass{
+		corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+	}
+	runtime.Status.ObservedCapabilities.SupportsContinuation = true
+	token.Labels[agentRuntimeAuthRefNameLabel] = runtime.Name
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Read incident status",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP:              &corev1alpha1.HTTPExecution{URL: toolServer.URL},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, tool)
+	running := runHarnessWrapperTaskToRunning(t, r, task)
+
+	result, err := r.handleRunning(context.Background(), &running)
+	if err != nil {
+		t.Fatalf("first handleRunning: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("first handleRunning result = %#v, want requeue for continuation stream", result)
+	}
+	var afterFirst corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &afterFirst); err != nil {
+		t.Fatalf("get after first running: %v", err)
+	}
+	if afterFirst.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase after first stream = %s, want Running (message=%s)", afterFirst.Status.Phase, afterFirst.Status.Message)
+	}
+	if got := harnessWrapperLastFrameSeq(&afterFirst); got != 2 {
+		t.Fatalf("last frame seq after continuation = %d, want 2", got)
+	}
+	if !harnessWrapperBrokeredContinuationPending(&afterFirst) {
+		t.Fatal("brokered continuation pending annotation was not persisted")
+	}
+
+	secondResult, err := r.handleRunning(context.Background(), &afterFirst)
+	if err != nil {
+		t.Fatalf("second handleRunning: %v", err)
+	}
+	if secondResult.RequeueAfter <= 0 {
+		t.Fatalf("second handleRunning result = %#v, want continued polling", secondResult)
+	}
+	var afterSecond corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &afterSecond); err != nil {
+		t.Fatalf("get after second running: %v", err)
+	}
+	if afterSecond.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase after empty continuation poll = %s, want Running (message=%s)", afterSecond.Status.Phase, afterSecond.Status.Message)
+	}
+	if !harnessWrapperBrokeredContinuationPending(&afterSecond) {
+		t.Fatal("brokered continuation pending annotation was not retained")
+	}
+
+	if _, err := r.handleRunning(context.Background(), &afterSecond); err != nil {
+		t.Fatalf("third handleRunning: %v", err)
+	}
+	var completed corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &completed); err != nil {
+		t.Fatalf("get completed task: %v", err)
+	}
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("completed phase = %s, want Succeeded (message=%s)", completed.Status.Phase, completed.Status.Message)
+	}
+}
+
+type captureBrokeredOutboundResolver struct {
+	request outboundaccess.ResolveRequest
+}
+
+func (r *captureBrokeredOutboundResolver) Resolve(_ context.Context, req outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
+	r.request = req
+	return outboundaccess.Resolution{}, errors.New("captured outbound resolution")
+}
+
+func TestHarnessWrapperBrokeredPropagatesTransactionCredentialAuthority(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
+	task.Spec.Transaction = &corev1alpha1.TaskTransaction{
+		ID:     "txn-1",
+		Scopes: []string{"tenant:outbound-credentials:read"},
+		Context: map[string]string{
+			"secret": "resource-subject",
+		},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Read incident",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL:                     "https://api.example.test/incidents",
+				OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+			},
+		},
+	}
+	resolver := &captureBrokeredOutboundResolver{}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	r.EnforceTransactionCredentialAuth = true
+	r.TransactionCredentialReadScopes = []string{"tenant:outbound-credentials:read"}
+	r.OutboundAccessResolver = resolver
+	frame := harness.HarnessEventFrame{
+		Version:          harness.ProtocolVersion,
+		Type:             harness.FrameToolCallRequested,
+		RuntimeSessionID: "runtime-session",
+		TurnID:           "turn-1",
+		CorrelationID:    "corr-1",
+		Seq:              1,
+		ToolName:         tool.Name,
+		ToolCallID:       "call-1",
+		Content:          json.RawMessage(`{"incident":"inc-1"}`),
+	}
+	result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame)
+	if err != nil {
+		t.Fatalf("handleHarnessBrokeredToolCall() error = %v", err)
+	}
+	if result.Error == nil || result.Error.Code != "tool_execution_failed" {
+		t.Fatalf("result = %#v, want captured tool_execution_failed", result)
+	}
+	if !resolver.request.CredentialAuthorityEnforced || !resolver.request.CredentialScopeAllowed || resolver.request.CredentialSecret != "resource-subject" {
+		t.Fatalf("resolver credential authority = enforced %t allowed %t secret %q", resolver.request.CredentialAuthorityEnforced, resolver.request.CredentialScopeAllowed, resolver.request.CredentialSecret)
+	}
+}
+
+func TestHarnessWrapperBrokeredRejectsUnauthorizedAuthSecretBeforeRead(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
+	task.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-1"}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Read incident",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL:           "https://api.example.test/incidents",
+				AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "resource-auth", Key: "token"},
+			},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	r.EnforceTransactionCredentialAuth = true
+	frame := harness.HarnessEventFrame{
+		Version:          harness.ProtocolVersion,
+		Type:             harness.FrameToolCallRequested,
+		RuntimeSessionID: "runtime-session",
+		TurnID:           "turn-1",
+		CorrelationID:    "corr-1",
+		Seq:              1,
+		ToolName:         tool.Name,
+		ToolCallID:       "call-1",
+		Content:          json.RawMessage(`{"incident":"inc-1"}`),
+	}
+	result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame)
+	if err != nil {
+		t.Fatalf("handleHarnessBrokeredToolCall() error = %v", err)
+	}
+	if result.Error == nil || result.Error.Code != "credential_authority_unavailable" ||
+		!strings.Contains(result.Error.Message, "not authorized") {
+		t.Fatalf("result = %#v, want pre-read credential authority rejection", result)
+	}
+}
+
+func TestHarnessBrokeredTransactionCredentialAuthorityDisabledOutsideEnforceMode(t *testing.T) {
+	task, _ := harnessWrapperTaskAndAgent()
+	task.Spec.Transaction = &corev1alpha1.TaskTransaction{
+		ID:     "txn-1",
+		Scopes: []string{"tenant:outbound-credentials:read"},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	r.TransactionCredentialReadScopes = []string{"tenant:outbound-credentials:read"}
+	enforced, allowed, secret := r.harnessBrokeredTransactionCredentialAuthority(task)
+	if enforced || !allowed || secret != "" {
+		t.Fatalf("credential authority = enforced %t allowed %t secret %q", enforced, allowed, secret)
+	}
+}
+
+func TestHarnessWrapperBrokeredContinuationMarkerIsWriteAhead(t *testing.T) {
+	var toolCalls atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		toolCalls.Add(1)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer toolServer.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{
+		harnessWrapperMetadataAnno: `{"toolExecutionMode":"brokered","brokeredToolClassMap":"{\"read_incident\":\"read\"}"}`,
+	}
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Read incident",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP:              &corev1alpha1.HTTPExecution{URL: toolServer.URL},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+
+	var markerPatchAttempts atomic.Int32
+	baseClient, ok := r.Client.(ctrlclient.WithWatch)
+	if !ok {
+		t.Fatalf("test client type = %T, want client.WithWatch", r.Client)
+	}
+	r.Client = interceptor.NewClient(baseClient, interceptor.Funcs{
+		Patch: func(ctx context.Context, c ctrlclient.WithWatch, obj ctrlclient.Object, patch ctrlclient.Patch, opts ...ctrlclient.PatchOption) error {
+			if current, ok := obj.(*corev1alpha1.Task); ok && harnessWrapperBrokeredContinuationPending(current) {
+				if markerPatchAttempts.Add(1) == 1 {
+					return errors.New("injected continuation marker patch failure")
+				}
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	var continueCalls atomic.Int32
+	var reconcilerForHandler = r
+	runtimeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		continueCalls.Add(1)
+		var stored corev1alpha1.Task
+		if err := reconcilerForHandler.Get(req.Context(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &stored); err != nil {
+			t.Errorf("get task during continue: %v", err)
+		} else if !harnessWrapperBrokeredContinuationPending(&stored) {
+			t.Error("continue request arrived before continuation marker was persisted")
+		}
+		harness.WriteJSON(w, http.StatusAccepted, harness.ContinueTurnResponse{
+			Version:          harness.ProtocolVersion,
+			Accepted:         true,
+			RuntimeSessionID: "runtime-session",
+			TurnID:           "turn-1",
+			CorrelationID:    "corr-1",
+		})
+	}))
+	defer runtimeServer.Close()
+	client, err := harness.NewClient(runtimeServer.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	frame := harness.HarnessEventFrame{
+		Version:          harness.ProtocolVersion,
+		Type:             harness.FrameToolCallRequested,
+		RuntimeSessionID: "runtime-session",
+		TurnID:           "turn-1",
+		CorrelationID:    "corr-1",
+		Seq:              1,
+		ToolName:         tool.Name,
+		ToolCallID:       "call-1",
+		Content:          json.RawMessage(`{"incident":"inc-1"}`),
+	}
+
+	err = r.continueHarnessBrokeredToolCall(context.Background(), client, task, agent, frame)
+	if err == nil || !strings.Contains(err.Error(), "injected continuation marker patch failure") {
+		t.Fatalf("first continueHarnessBrokeredToolCall() error = %v, want marker patch failure", err)
+	}
+	if continueCalls.Load() != 0 {
+		t.Fatalf("continue calls after failed marker patch = %d, want 0", continueCalls.Load())
+	}
+	if toolCalls.Load() != 1 {
+		t.Fatalf("tool calls after failed marker patch = %d, want 1", toolCalls.Load())
+	}
+
+	if err := r.continueHarnessBrokeredToolCall(context.Background(), client, task, agent, frame); err != nil {
+		t.Fatalf("second continueHarnessBrokeredToolCall() error = %v", err)
+	}
+	if continueCalls.Load() != 1 {
+		t.Fatalf("continue calls after retry = %d, want 1", continueCalls.Load())
+	}
+	if toolCalls.Load() != 1 {
+		t.Fatalf("tool calls after retry = %d, want replay without re-execution", toolCalls.Load())
+	}
+	if markerPatchAttempts.Load() != 2 {
+		t.Fatalf("marker patch attempts = %d, want 2", markerPatchAttempts.Load())
+	}
+}
+
+func TestHarnessWrapperBrokeredContinuationMarkerClearsOnDefinitiveRejection(t *testing.T) {
+	var toolCalls atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		toolCalls.Add(1)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer toolServer.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{
+		harnessWrapperMetadataAnno: `{"toolExecutionMode":"brokered","brokeredToolClassMap":"{\"read_incident\":\"read\"}"}`,
+	}
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Read incident",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP:              &corev1alpha1.HTTPExecution{URL: toolServer.URL},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+
+	var continueCalls atomic.Int32
+	runtimeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		continueCalls.Add(1)
+		harness.WriteError(w, http.StatusBadRequest, "continuation rejected")
+	}))
+	defer runtimeServer.Close()
+	client, err := harness.NewClient(runtimeServer.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	frame := harness.HarnessEventFrame{
+		Version:          harness.ProtocolVersion,
+		Type:             harness.FrameToolCallRequested,
+		RuntimeSessionID: "runtime-session",
+		TurnID:           "turn-1",
+		CorrelationID:    "corr-1",
+		Seq:              1,
+		ToolName:         tool.Name,
+		ToolCallID:       "call-1",
+		Content:          json.RawMessage(`{"incident":"inc-1"}`),
+	}
+
+	err = r.continueHarnessBrokeredToolCall(context.Background(), client, task, agent, frame)
+	if err == nil || !strings.Contains(err.Error(), "continuation rejected") {
+		t.Fatalf("continueHarnessBrokeredToolCall() error = %v, want rejection", err)
+	}
+	if continueCalls.Load() != 1 {
+		t.Fatalf("continue calls = %d, want 1", continueCalls.Load())
+	}
+	if toolCalls.Load() != 1 {
+		t.Fatalf("tool calls = %d, want 1", toolCalls.Load())
+	}
+	var stored corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &stored); err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if harnessWrapperBrokeredContinuationPending(&stored) {
+		t.Fatal("definitively rejected continuation retained pending marker")
 	}
 }
 
@@ -946,7 +1417,7 @@ func TestHarnessWrapperBrokeredCoordinationMessagingToolsUseMessageStore(t *test
 }
 
 func TestHarnessWrapperBrokeredRunningTaskFailsClosedWhenAgentMissing(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "mock-token"})
 	defer server.Close()
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
@@ -1215,6 +1686,37 @@ func TestHarnessWrapperBrokeredContinueFailureRetriesToolRequest(t *testing.T) {
 	}
 	if toolCalls.Load() != 1 {
 		t.Fatalf("tool calls = %d, want 1 despite continuation retry", toolCalls.Load())
+	}
+}
+
+func TestHarnessWrapperDuplicateTurnErrorUsesTypedReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		harness.WriteError(w, http.StatusConflict, "turn already exists")
+	}))
+	defer server.Close()
+	client, err := harness.NewClient(server.URL, harness.WithBearerToken("turn already"))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.StartTurn(context.Background(), harness.StartTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task-a",
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Deadline:         time.Now().UTC().Add(time.Minute),
+		AuthIdentity:     harness.AuthIdentity{Subject: "user:test"},
+	})
+	if err == nil {
+		t.Fatal("StartTurn() error = nil, want duplicate conflict")
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "turn already") {
+		t.Fatalf("StartTurn() error = %v, configured bearer leaked", err)
+	}
+	if !harnessWrapperDuplicateTurnError(err) {
+		t.Fatal("typed duplicate-turn error was not recognized for recovery")
 	}
 }
 
@@ -1578,12 +2080,18 @@ func TestHarnessWrapperPendingFirstOnlyPlansTurn(t *testing.T) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			eventStreamPath, err := harness.EventStreamPath(request.TurnID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
 				Version:          harness.ProtocolVersion,
 				Accepted:         true,
 				RuntimeSessionID: request.RuntimeSessionID,
 				TurnID:           request.TurnID,
 				CorrelationID:    request.CorrelationID,
+				EventStreamPath:  eventStreamPath,
 			})
 		default:
 			http.NotFound(w, r)
@@ -1949,7 +2457,7 @@ func harnessWrapperReadyAgentRuntime(namespace, endpoint string) (*corev1alpha1.
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: name + "-token", Namespace: namespace, ResourceVersion: "1", Labels: map[string]string{agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: name}, Annotations: map[string]string{agentRuntimeAuthEndpointAnnotation: endpoint}},
-		Data:       map[string][]byte{"token": []byte("x")},
+		Data:       map[string][]byte{"token": []byte("mock-token")},
 	}
 	return runtime, secret
 }
@@ -2324,8 +2832,9 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	agentSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime-secret", Namespace: agent.Namespace},
 		Data: map[string][]byte{
-			workerenv.AnthropicAPIKey: []byte("runtime-anthropic-key"),
-			workerenv.GitHubToken:     []byte("runtime-github-token"),
+			workerenv.AnthropicAPIKey:         []byte("runtime-anthropic-key"),
+			workerenv.AnthropicFoundryBaseURL: []byte("https://foundry.example.test/anthropic"),
+			workerenv.GitHubToken:             []byte("runtime-github-token"),
 		},
 	}
 	task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-runtime-secret"}
@@ -2348,6 +2857,9 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	}
 	if env[workerenv.AnthropicAPIKey] != "runtime-anthropic-key" {
 		t.Fatalf("%s = %q, want runtime credential", workerenv.AnthropicAPIKey, env[workerenv.AnthropicAPIKey])
+	}
+	if env[workerenv.AnthropicFoundryBaseURL] != "https://foundry.example.test/anthropic" {
+		t.Fatalf("%s = %q, want Foundry endpoint", workerenv.AnthropicFoundryBaseURL, env[workerenv.AnthropicFoundryBaseURL])
 	}
 	if env[workerenv.GitHubToken] == "runtime-github-token" {
 		t.Fatalf("read-only Claude runtime should not receive unrelated %s", workerenv.GitHubToken)
@@ -2622,6 +3134,70 @@ func TestHarnessWrapperStreamTerminalErrorClassification(t *testing.T) {
 	}
 }
 
+func TestHarnessMutationAcceptanceClassification(t *testing.T) {
+	for _, status := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway} {
+		if !harnessMutationMayHaveBeenAccepted(harness.ClientError{StatusCode: status}) {
+			t.Fatalf("status %d should retain ambiguous continuation state", status)
+		}
+	}
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusConflict, http.StatusUnprocessableEntity} {
+		if harnessMutationMayHaveBeenAccepted(harness.ClientError{StatusCode: status}) {
+			t.Fatalf("status %d should be a definitive continuation rejection", status)
+		}
+	}
+	for _, message := range []string{
+		"post failed: connection reset",
+		"post failed (500): unsupported version",
+		"post failed (408): timeout",
+		"connection reset while parsing note (422)",
+		"connection reset calling https://unauthorized.example",
+		"start_turn failed: unsupported version",
+		"continue_turn failed: unauthorized",
+		"post failed (429): rate limited",
+	} {
+		if !harnessMutationMayHaveBeenAccepted(fmt.Errorf("%s", message)) {
+			t.Fatalf("legacy error %q should retain ambiguous state", message)
+		}
+	}
+	for _, message := range []string{"post failed (400): invalid request", "post failed (401): unauthorized", "continue_turn failed: harness did not accept continuation"} {
+		if harnessMutationMayHaveBeenAccepted(fmt.Errorf("%s", message)) {
+			t.Fatalf("legacy error %q should be definitive", message)
+		}
+	}
+}
+
+func TestHarnessContinuationMarkerClearClassification(t *testing.T) {
+	rejected := harness.ClientError{StatusCode: http.StatusBadRequest}
+	if !harnessContinuationMarkerShouldClear(false, rejected) {
+		t.Fatal("new marker should clear after definitive rejection")
+	}
+	if harnessContinuationMarkerShouldClear(true, rejected) {
+		t.Fatal("pre-existing ambiguous marker should not clear after replay rejection")
+	}
+	if harnessContinuationMarkerShouldClear(false, harness.ClientError{StatusCode: http.StatusBadGateway}) {
+		t.Fatal("ambiguous server failure should retain marker")
+	}
+}
+
+func TestHarnessWrapperStreamSizeLimitErrorIsTerminal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + strings.Repeat("x", (8<<20)+1) + "\n\n"))
+	}))
+	defer server.Close()
+	client, err := harness.NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	err = client.StreamFrames(context.Background(), "turn-a", 0, func(harness.HarnessEventFrame) error { return nil })
+	if err == nil || !harnessWrapperStreamErrorIsTerminal(err) {
+		t.Fatalf("StreamFrames() error = %v, want terminal size-limit error", err)
+	}
+	if harnessWrapperStreamErrorIsTerminal(harness.ClientError{Message: "temporary stream read failure"}) {
+		t.Fatal("ordinary typed stream error should remain retryable")
+	}
+}
+
 func TestHarnessWrapperRuntimeSessionIdentityUsesUIDWithoutExplicitSession(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	identity := harnessWrapperRuntimeSessionIdentity(task, agent, string(corev1alpha1.AgentRuntimeClaude))
@@ -2719,16 +3295,142 @@ func TestCancelHarnessWrapperStartedMissingTurnIsIgnored(t *testing.T) {
 }
 
 func TestHarnessWrapperStartTurnErrorClassification(t *testing.T) {
-	if !harnessWrapperStartTurnErrorIsRetryable(fmt.Errorf("post failed: connection refused")) {
-		t.Fatal("expected transport start error to be retryable")
+	for _, message := range []string{
+		"post failed: connection refused",
+		"harness post failed (408): unsupported version",
+		"harness post failed (500): unsupported version",
+		"start_turn failed: unsupported version",
+		"harness post failed (429): rate limited",
+	} {
+		if !harnessWrapperStartTurnErrorIsRetryable(fmt.Errorf("%s", message)) {
+			t.Fatalf("%q should remain retryable", message)
+		}
 	}
-	if harnessWrapperStartTurnErrorIsRetryable(fmt.Errorf("start_turn failed (401): unauthorized")) {
-		t.Fatal("expected auth start error to remain terminal")
+	for _, message := range []string{
+		"start_turn failed (401): unauthorized",
+		"start_turn failed (400): unsupported version",
+		"start_turn failed: harness did not accept turn",
+	} {
+		if harnessWrapperStartTurnErrorIsRetryable(fmt.Errorf("%s", message)) {
+			t.Fatalf("%q should remain terminal", message)
+		}
 	}
+}
+
+func TestHarnessWrapperLegacyMutationConflictClassification(t *testing.T) {
+	if !harnessWrapperDuplicateTurnError(fmt.Errorf(`harness post failed (409): {"error":"turn already exists"}`)) {
+		t.Fatal("canonical legacy duplicate was not recognized")
+	}
+	if harnessWrapperDuplicateTurnError(fmt.Errorf(`harness post failed (409): {"error":"turn already exists upstream"}`)) {
+		t.Fatal("non-canonical legacy duplicate was recognized")
+	}
+	if !harnessWrapperDuplicateTurnError(fmt.Errorf(`harness post failed (409): {"message":"turn already completed"}`)) {
+		t.Fatal("canonical legacy message-envelope duplicate was not recognized")
+	}
+	if !harnessWrapperCapacityError(fmt.Errorf(`harness post failed (409): {"error":"maximum concurrent turns reached"}`)) {
+		t.Fatal("canonical legacy capacity conflict was not recognized")
+	}
+	if !harnessWrapperCapacityError(fmt.Errorf(`harness post failed (409): {"message":"maximum concurrent turns reached"}`)) {
+		t.Fatal("canonical legacy message-envelope capacity conflict was not recognized")
+	}
+	if harnessWrapperCapacityError(fmt.Errorf(`harness post failed (500): upstream (409): maximum concurrent turns reached`)) {
+		t.Fatal("nested legacy capacity text overrode top-level ambiguous status")
+	}
+}
+
+func TestHarnessWrapperTypedClientErrorClassificationSurvivesRedaction(t *testing.T) {
+	if harnessWrapperStartTurnErrorIsRetryable(harness.ClientError{StatusCode: http.StatusBadRequest, Message: "[REDACTED]"}) {
+		t.Fatal("typed 400 start error should remain terminal")
+	}
+	if !harnessWrapperAuthError(harness.ClientError{StatusCode: http.StatusUnauthorized, Message: "[REDACTED]"}) {
+		t.Fatal("typed 401 error should remain an auth error")
+	}
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusConflict, http.StatusUnprocessableEntity} {
+		if harnessWrapperStartTurnErrorIsRetryable(harness.ClientError{StatusCode: status, Message: "[REDACTED]"}) {
+			t.Fatalf("typed %d start rejection should remain terminal", status)
+		}
+	}
+	wrappedNotFound := fmt.Errorf("read harness runtime capabilities: %w", harness.ClientError{StatusCode: http.StatusNotFound, Message: "[REDACTED]"})
+	if harnessWrapperCapabilitiesErrorIsRetryable(wrappedNotFound) {
+		t.Fatal("typed capabilities 404 should remain terminal")
+	}
+
+	request := harness.StartTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task-a",
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Deadline:         time.Now().UTC().Add(time.Minute),
+		AuthIdentity:     harness.AuthIdentity{Subject: "user:test"},
+	}
+	t.Run("unsupported version", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{Version: "unsupported-version", Accepted: false})
+		}))
+		defer server.Close()
+		client, err := harness.NewClient(server.URL, harness.WithBearerToken("unsupported"))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.StartTurn(context.Background(), request)
+		if err == nil || harnessWrapperStartTurnErrorIsRetryable(err) {
+			t.Fatalf("StartTurn() error = %v, want typed terminal version error", err)
+		}
+	})
+	t.Run("accepted unsupported version is retryable", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
+				Version: "unsupported-version", Accepted: true,
+			})
+		}))
+		defer server.Close()
+		client, err := harness.NewClient(server.URL)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.StartTurn(context.Background(), request)
+		if err == nil || !harnessWrapperStartTurnErrorIsRetryable(err) {
+			t.Fatalf("StartTurn() error = %v, want retryable accepted version error", err)
+		}
+	})
+	t.Run("unknown acceptance unsupported version is retryable", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			harness.WriteJSON(w, http.StatusAccepted, map[string]any{
+				"version": "unsupported-version",
+			})
+		}))
+		defer server.Close()
+		client, err := harness.NewClient(server.URL)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.StartTurn(context.Background(), request)
+		if err == nil || !harnessWrapperStartTurnErrorIsRetryable(err) {
+			t.Fatalf("StartTurn() error = %v, want retryable unknown-acceptance version error", err)
+		}
+	})
+	t.Run("capacity", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			harness.WriteError(w, http.StatusConflict, "maximum concurrent turns reached")
+		}))
+		defer server.Close()
+		client, err := harness.NewClient(server.URL, harness.WithBearerToken("concurrent"))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.StartTurn(context.Background(), request)
+		if err == nil || !harnessWrapperCapacityError(err) {
+			t.Fatalf("StartTurn() error = %v, want typed capacity error", err)
+		}
+	})
 }
 
 func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime.DefaultReasoningEffort = agentReasoningEffortHigh
 	r := newUnitReconciler(newTestScheme(), task, agent)
 	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
 	if err != nil {
@@ -2736,6 +3438,105 @@ func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 	}
 	if request.Metadata["maxTurns"] != "50" {
 		t.Fatalf("metadata maxTurns = %q, want 50", request.Metadata["maxTurns"])
+	}
+	if request.Metadata["reasoningEffort"] != "high" {
+		t.Fatalf("metadata reasoningEffort = %q, want high", request.Metadata["reasoningEffort"])
+	}
+}
+
+func TestHarnessWrapperTurnRequestFiltersRuntimeAuthOnlySecrets(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	immutable := true
+	task.Annotations = map[string]string{
+		labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
+		repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
+		repositoryMonitorIssueAnnotationRuntimeAgentUID:        "uid-harness-agent",
+		repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
+		repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-task-runtime",
+		repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
+	}
+	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCodex
+	agent.UID = "uid-harness-agent"
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-runtime"}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+		GitRepo:      "https://github.com/orka-agents/orka",
+		GitSecretRef: &corev1.LocalObjectReference{Name: "git-auth"},
+	}}
+	task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-runtime"}
+	agentSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime", Namespace: task.Namespace}, Data: map[string][]byte{
+		workerenv.OpenAIAPIKey: []byte("x"),
+		workerenv.GitHubToken:  []byte("y"),
+	}}
+	taskSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "task-runtime", Namespace: task.Namespace, UID: "uid-task-runtime"}, Data: map[string][]byte{
+		workerenv.OpenAIAPIKey:    []byte("z"),
+		workerenv.AnthropicAPIKey: []byte("task-only"),
+	}, Immutable: &immutable}
+	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-auth", Namespace: task.Namespace}, Data: map[string][]byte{"token": []byte("g")}}
+	r := newUnitReconciler(newTestScheme(), task, agent, agentSecret, taskSecret, gitSecret)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v", err)
+	}
+	env := map[string]string{}
+	for _, item := range request.Input.Env {
+		env[item.Name] = item.Value
+	}
+	if env[workerenv.OpenAIAPIKey] != "z" {
+		t.Fatalf("%s = %q, want task-pinned scoped model credential", workerenv.OpenAIAPIKey, env[workerenv.OpenAIAPIKey])
+	}
+	if _, ok := env[workerenv.GitHubToken]; ok {
+		t.Fatalf("runtime GitHub credential reached harness request: %#v", env)
+	}
+	if _, ok := env[workerenv.AnthropicAPIKey]; ok {
+		t.Fatalf("task secret reached runtime-auth-only harness request: %#v", env)
+	}
+	if env[workerenv.GitToken] != "g" {
+		t.Fatalf("%s = %q, want root-side workspace credential", workerenv.GitToken, env[workerenv.GitToken])
+	}
+	if request.Metadata["runtimeAuthOnly"] != scheduledRunLabelValue {
+		t.Fatalf("metadata = %#v, want runtimeAuthOnly", request.Metadata)
+	}
+}
+
+func TestHarnessWrapperTurnRequestRejectsRuntimeAuthOnlyRuntimeRef(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{GitSecretRef: &corev1.LocalObjectReference{Name: "git-auth"}}}
+	agent.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"}
+	agent.Spec.SecretRef = nil
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err == nil || !strings.Contains(err.Error(), "do not support external runtimeRef") {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v, want runtimeRef rejection", err)
+	}
+}
+
+func TestHarnessWrapperTurnRequestRejectsReadOnlyRuntimeRefWithoutSecret(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{GitSecretRef: &corev1.LocalObjectReference{Name: "git-auth"}}}
+	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
+	agent.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"}
+	agent.Spec.SecretRef = nil
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err == nil || !strings.Contains(err.Error(), "do not support external runtimeRef") {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v, want read-only runtimeRef rejection", err)
+	}
+}
+
+func TestHarnessWrapperReadOnlyEnvBlocksStartupInjection(t *testing.T) {
+	for _, name := range []string{
+		"NODE_OPTIONS", "NODE_PATH", "HOME", "ZDOTDIR", "CODEX_HOME", "BASH_ENV", "ENV",
+		"LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "PYTHONPATH",
+		"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "XDG_CONFIG_HOME",
+	} {
+		if !harnessWrapperReadOnlyEnvBlocked(name) {
+			t.Errorf("harnessWrapperReadOnlyEnvBlocked(%q) = false", name)
+		}
+	}
+	if harnessWrapperReadOnlyEnvBlocked("SAFE_REVIEW_SETTING") {
+		t.Fatal("ordinary review setting was unexpectedly blocked")
 	}
 }
 

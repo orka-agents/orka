@@ -10,7 +10,7 @@ import type { ExecutionEvent } from '@/schemas/execution-event'
 import type { TaskPhase } from '@/schemas/task'
 
 function isRunning(phase?: TaskPhase): boolean {
-  return phase === 'Running' || phase === 'Pending'
+  return phase === 'Running' || phase === 'Finalizing' || phase === 'Pending'
 }
 
 function isTerminal(phase?: TaskPhase): boolean {

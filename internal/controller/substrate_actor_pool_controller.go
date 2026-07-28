@@ -229,7 +229,7 @@ func (r *SubstrateActorPoolReconciler) updateSubstrateActorPoolStatus(
 		condition.Message = "Substrate actor pool is ready"
 	} else {
 		condition.Status = metav1.ConditionFalse
-		condition.Reason = "PoolNotReady"
+		condition.Reason = reasonPoolNotReady
 		condition.Message = pool.Status.Message
 	}
 	meta.SetStatusCondition(&pool.Status.Conditions, condition)

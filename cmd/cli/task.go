@@ -263,7 +263,7 @@ func newTaskListCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (client-side scan; may page through many tasks)")
-	cmd.Flags().StringVar(&transactionID, "transaction", "", "Filter by kontxt transaction ID (client-side scan)")
+	cmd.Flags().StringVar(&transactionID, "transaction", "", "Filter by transaction ID (client-side scan)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of results")
 	cmd.Flags().StringVar(&continueToken, "continue", "", "Continue token for the next page")
 	cmd.Flags().StringVar(&continueToken, "cursor", "", "Cursor token for the next page")

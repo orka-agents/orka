@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -76,6 +77,41 @@ func newTestScheme() *runtime.Scheme {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	return scheme
+}
+
+func TestChatHandlerHasRunningTasksExcludesTerminalAndScheduledPhases(t *testing.T) {
+	tests := []struct {
+		name   string
+		phase  corev1alpha1.TaskPhase
+		active bool
+	}{
+		{name: "uninitialized", phase: "", active: true},
+		{name: "pending", phase: corev1alpha1.TaskPhasePending, active: true},
+		{name: "running", phase: corev1alpha1.TaskPhaseRunning, active: true},
+		{name: "finalizing", phase: corev1alpha1.TaskPhaseFinalizing, active: true},
+		{name: "scheduled", phase: corev1alpha1.TaskPhaseScheduled, active: false},
+		{name: "succeeded", phase: corev1alpha1.TaskPhaseSucceeded, active: false},
+		{name: "failed", phase: corev1alpha1.TaskPhaseFailed, active: false},
+		{name: "cancelled", phase: corev1alpha1.TaskPhaseCancelled, active: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const sessionID = "chat-session"
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "child-task",
+					Namespace: "default",
+					Labels:    map[string]string{labels.LabelChatSession: sessionID},
+				},
+				Status: corev1alpha1.TaskStatus{Phase: tt.phase},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(task).Build()
+			handler := &ChatHandler{client: fakeClient}
+
+			require.Equal(t, tt.active, handler.hasRunningTasks(context.Background(), "default", sessionID))
+		})
+	}
 }
 
 func newTestSessionStore(t *testing.T) store.SessionStore {
@@ -1368,7 +1404,7 @@ func TestChatHandler_ContextTokenAuthorizationRejectsDisallowedModel(t *testing.
 	})
 	body, _ := json.Marshal(ChatRequest{Message: "hello", Model: "gpt-4"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := app.Test(req)
@@ -1399,7 +1435,7 @@ func TestChatHandler_ContextTokenAuthorizationRejectsDisallowedAgentRef(t *testi
 	})
 	body, _ := json.Marshal(ChatRequest{Message: "hello", AgentRef: "other-agent"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := app.Test(req)
@@ -1430,7 +1466,7 @@ func TestChatHandler_ContextTokenAuthorizationRejectsMissingAgentRefWhenTokenReq
 	})
 	body, _ := json.Marshal(ChatRequest{Message: "hello"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := app.Test(req)
