@@ -107,7 +107,7 @@ export function useRunSecurityScan(name: string) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
   return useMutation({
-    mutationFn: () => api.post<ScanRun>(`/security/repositories/${name}/scans`, { namespace }),
+    mutationFn: () => api.post<ScanRun>(`/security/repositories/${name}/scans`, undefined, { namespace }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security', 'scans', namespace, name] })
       queryClient.invalidateQueries({ queryKey: ['security', 'repository', namespace, name] })
@@ -165,7 +165,7 @@ export function useDismissFinding(id: string) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
   return useMutation({
-    mutationFn: () => api.post<void>(`/security/findings/${id}/dismiss`, { namespace }),
+    mutationFn: () => api.post<void>(`/security/findings/${id}/dismiss`, undefined, { namespace }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security', 'finding', namespace, id] })
       queryClient.invalidateQueries({ queryKey: ['security', 'findings'] })
@@ -178,7 +178,7 @@ export function useReopenFinding(id: string) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
   return useMutation({
-    mutationFn: () => api.post<void>(`/security/findings/${id}/reopen`, { namespace }),
+    mutationFn: () => api.post<void>(`/security/findings/${id}/reopen`, undefined, { namespace }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security', 'finding', namespace, id] })
       queryClient.invalidateQueries({ queryKey: ['security', 'findings'] })
@@ -191,7 +191,7 @@ export function useGeneratePatch(id: string) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
   return useMutation({
-    mutationFn: () => api.post<PatchProposal>(`/security/findings/${id}/patch`, { namespace }),
+    mutationFn: () => api.post<PatchProposal>(`/security/findings/${id}/patch`, undefined, { namespace }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security', 'finding', namespace, id] })
       queryClient.invalidateQueries({ queryKey: ['security', 'patches', namespace, id] })
@@ -204,7 +204,7 @@ export function useValidateFinding(id: string) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
   return useMutation({
-    mutationFn: () => api.post<void>(`/security/findings/${id}/validate`, { namespace }),
+    mutationFn: () => api.post<void>(`/security/findings/${id}/validate`, undefined, { namespace }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security', 'finding', namespace, id] })
       queryClient.invalidateQueries({ queryKey: ['security', 'findings'] })
@@ -227,7 +227,7 @@ export function useCreatePullRequest(id: string) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
   return useMutation({
-    mutationFn: () => api.post<{ prURL: string; prNumber: number; status: string }>(`/security/findings/${id}/pull-request`, { namespace }),
+    mutationFn: () => api.post<{ prURL: string; prNumber: number; status: string }>(`/security/findings/${id}/pull-request`, undefined, { namespace }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security', 'finding', namespace, id] })
       queryClient.invalidateQueries({ queryKey: ['security', 'patches', namespace, id] })

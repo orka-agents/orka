@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,17 +37,85 @@ import (
 	chattools "github.com/orka-agents/orka/internal/tools"
 )
 
+const (
+	testToolCallSSEEvent   = "tool_call"
+	testToolResultSSEEvent = "tool_result"
+)
+
 // chatMockProvider implements llm.Provider for testing.
 type chatMockProvider struct {
-	name      string
-	responses []*llm.CompletionResponse
-	callCount int
-	err       error
-	streamCh  chan llm.StreamChunk
-	streamErr error
+	name       string
+	responses  []*llm.CompletionResponse
+	callCount  int
+	err        error
+	streamCh   chan llm.StreamChunk
+	streamErr  error
+	completeFn func(context.Context, *llm.CompletionRequest) (*llm.CompletionResponse, error)
 }
 
-func (m *chatMockProvider) Complete(_ context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+type failingWriter struct {
+	err     error
+	failAt  int
+	writes  int
+	written bytes.Buffer
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.failAt == 0 || w.writes >= w.failAt {
+		return 0, w.err
+	}
+	return w.written.Write(p)
+}
+
+type chatSessionStore interface {
+	store.SessionStore
+	store.SessionTurnCommitter
+}
+
+type sessionStoreWithoutTurnCommitter struct {
+	store.SessionStore
+}
+
+type failingTurnSessionStore struct {
+	chatSessionStore
+	err              error
+	tokenUpdateCalls int
+}
+
+type failNthTurnSessionStore struct {
+	chatSessionStore
+	err    error
+	failAt int
+	calls  int
+}
+
+func (s *failNthTurnSessionStore) CommitSessionTurn(ctx context.Context, session *store.SessionRecord, turnID string, expectedMessageCount int, messages []store.SessionMessage, inputTokens, outputTokens int) error {
+	s.calls++
+	if s.calls == s.failAt {
+		return s.err
+	}
+	return s.chatSessionStore.CommitSessionTurn(ctx, session, turnID, expectedMessageCount, messages, inputTokens, outputTokens)
+}
+
+func (s *failingTurnSessionStore) AppendMessages(context.Context, string, string, []store.SessionMessage) error {
+	return s.err
+}
+
+func (s *failingTurnSessionStore) UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error {
+	s.tokenUpdateCalls++
+	return s.chatSessionStore.UpdateTokenCounts(ctx, namespace, name, inputTokens, outputTokens)
+}
+
+func (s *failingTurnSessionStore) CommitSessionTurn(context.Context, *store.SessionRecord, string, int, []store.SessionMessage, int, int) error {
+	return s.err
+}
+
+func (m *chatMockProvider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	if m.completeFn != nil {
+		m.callCount++
+		return m.completeFn(ctx, req)
+	}
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -78,7 +148,7 @@ func newTestScheme() *runtime.Scheme {
 	return scheme
 }
 
-func newTestSessionStore(t *testing.T) store.SessionStore {
+func newTestSessionStore(t *testing.T) chatSessionStore {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
@@ -147,6 +217,111 @@ func TestWriteSSE(t *testing.T) {
 			assert.Equal(t, tt.want, buf.String())
 		})
 	}
+}
+
+func TestWriteChatSSEStreamStopsBeforeToolAndReleasesSemaphore(t *testing.T) {
+	scheme := newTestScheme()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	cfg := DefaultChatConfig()
+	cfg.MaxConcurrent = 1
+	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+	provider := &chatMockProvider{
+		responses: []*llm.CompletionResponse{
+			{
+				ToolCalls: []llm.ToolCall{{
+					ID:        "create-1",
+					Name:      "create_ai_task",
+					Arguments: json.RawMessage(`{"name":"side-effect","prompt":"must not run"}`),
+				}},
+			},
+			{Content: "must not make a second model call"},
+		},
+	}
+	executor := NewToolExecutor(fakeClient, nil, "default", "stream-write-fail", "", false, 5, 60*time.Second, rs)
+	authorizeCalls := 0
+	executor.SetTaskCreateAuthorizer(func(context.Context, *corev1alpha1.Task) error {
+		authorizeCalls++
+		return nil
+	})
+	writeErr := errors.New("client disconnected")
+	fw := &failingWriter{err: writeErr, failAt: 2}
+	turnID := "chat-turn-stream-write-fail"
+	now := time.Now()
+	require.NoError(t, ss.AcquireChatTurn(context.Background(), &store.SessionRecord{
+		Namespace: "default", Name: "stream-write-fail", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
+	}, turnID, now.Add(time.Hour)))
+
+	ch.semaphore <- struct{}{}
+	ch.writeChatSSEStream(bufio.NewWriter(fw), chatSSEStream{
+		parentCtx:      context.Background(),
+		provider:       provider,
+		messages:       []llm.Message{{Role: "user", Content: "create a task"}},
+		systemPrompt:   "system prompt",
+		tools:          executor.registry.ToLLMTools(chattools.ChatToolNames()),
+		executor:       executor,
+		sessionID:      "stream-write-fail",
+		turnID:         turnID,
+		deadline:       now.Add(time.Hour),
+		namespace:      "default",
+		model:          "test-model",
+		maxOutput:      4096,
+		persistedCount: 0,
+		span:           trace.SpanFromContext(context.Background()),
+	})
+
+	assert.Equal(t, 2, fw.writes)
+	assert.Contains(t, fw.written.String(), "event: status")
+	assert.NotContains(t, fw.written.String(), "event: tool_call")
+	assert.NotContains(t, fw.written.String(), "event: done")
+	assert.Zero(t, authorizeCalls)
+	assert.Equal(t, 1, provider.callCount)
+	assert.Empty(t, ch.semaphore, "SSE write failure must release the concurrency slot")
+	retryTurnID := "chat-turn-after-stream-write-fail"
+	require.NoError(t, ss.AcquireChatTurn(context.Background(), &store.SessionRecord{
+		Namespace: "default", Name: "stream-write-fail", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
+	}, retryTurnID, now.Add(time.Hour)), "SSE write failure must release the chat reservation")
+	require.NoError(t, ss.ReleaseChatTurn(context.Background(), "default", "stream-write-fail", retryTurnID))
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, fakeClient.List(context.Background(), &tasks))
+	assert.Empty(t, tasks.Items)
+}
+
+func TestWriteChatSSEStreamHonorsReservedDeadline(t *testing.T) {
+	scheme := newTestScheme()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	cfg := DefaultChatConfig()
+	cfg.MaxConcurrent = 1
+	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+	provider := &chatMockProvider{responses: []*llm.CompletionResponse{{Content: "must not run"}}}
+	executor := NewToolExecutor(fakeClient, nil, "default", "expired-stream", "", false, 5, 60*time.Second, rs)
+	var output bytes.Buffer
+
+	ch.semaphore <- struct{}{}
+	ch.writeChatSSEStream(bufio.NewWriter(&output), chatSSEStream{
+		parentCtx:      context.Background(),
+		provider:       provider,
+		messages:       []llm.Message{{Role: "user", Content: "hello"}},
+		systemPrompt:   "system prompt",
+		tools:          executor.registry.ToLLMTools(chattools.ChatToolNames()),
+		executor:       executor,
+		sessionID:      "expired-stream",
+		deadline:       time.Now().Add(-time.Second),
+		namespace:      "default",
+		model:          "test-model",
+		maxOutput:      4096,
+		persistedCount: 0,
+		span:           trace.SpanFromContext(context.Background()),
+	})
+
+	assert.Zero(t, provider.callCount, "stream callback must not restart the full turn duration")
+	assert.Contains(t, output.String(), "event: status")
+	assert.Contains(t, output.String(), "event: error")
+	assert.NotContains(t, output.String(), "event: done")
+	assert.Empty(t, ch.semaphore)
 }
 
 // --- hashArgs ---
@@ -391,13 +566,15 @@ func TestSaveChatSession(t *testing.T) {
 			{Role: "user", Content: "hello"},
 			{Role: "assistant", Content: "hi"},
 		}
-		err := ch.saveChatSession(ctx, "default", "new-session", messages, 0, ChatUsage{})
+		err := ch.saveChatSession(ctx, "default", "new-session", messages, 0, ChatUsage{InputTokens: 10, OutputTokens: 20})
 		require.NoError(t, err)
 
 		// Verify session was created
 		sess, err := ss.GetSession(ctx, "default", "new-session")
 		require.NoError(t, err)
 		assert.Equal(t, "chat", sess.SessionType)
+		assert.Equal(t, 10, sess.InputTokens)
+		assert.Equal(t, 20, sess.OutputTokens)
 
 		// Verify messages were stored
 		stored, err := ss.LoadTranscript(ctx, "default", "new-session", 0)
@@ -441,6 +618,13 @@ func TestSaveChatSession(t *testing.T) {
 		}
 		err := ch.saveChatSession(ctx, "default", "noop-session", messages, 1, ChatUsage{})
 		require.NoError(t, err)
+	})
+
+	t.Run("rejects usage without new messages", func(t *testing.T) {
+		messages := []llm.Message{{Role: "user", Content: "already saved"}}
+		err := ch.saveChatSession(ctx, "default", "usage-without-messages", messages, 1, ChatUsage{InputTokens: 1})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "without new transcript messages")
 	})
 }
 
@@ -862,6 +1046,11 @@ func TestRunToolLoop(t *testing.T) {
 		assert.Equal(t, 2, usage.LLMCalls)
 		assert.Len(t, toolCalls, 1)
 		assert.Equal(t, "list_tasks", toolCalls[0].Name)
+		sess, err := ss.GetSession(context.Background(), "default", "test-sess2")
+		require.NoError(t, err)
+		assert.Equal(t, 5, sess.MessageCount)
+		assert.Equal(t, 20, sess.InputTokens)
+		assert.Equal(t, 35, sess.OutputTokens)
 	})
 
 	t.Run("respects context cancellation", func(t *testing.T) {
@@ -885,8 +1074,8 @@ func TestRunToolLoop(t *testing.T) {
 			nil, NewToolExecutor(fakeClient, nil, "default", "test-sess3", "", false, 5, 60*time.Second, rs),
 			"test-sess3", "default", "test-model", 0.7, 4096, 0, nil,
 		)
-		require.NoError(t, err)
-		assert.Contains(t, content, "ran out of time")
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, content)
 	})
 
 	t.Run("respects max iterations", func(t *testing.T) {
@@ -921,6 +1110,81 @@ func TestRunToolLoop(t *testing.T) {
 		assert.GreaterOrEqual(t, usage.LLMCalls, 1)
 	})
 
+	t.Run("carries retry-truncated model context into later iterations", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		cfg := DefaultChatConfig()
+		cfg.MaxSessionSize = 0
+		ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+		now := time.Now()
+		oldMiddle := strings.Repeat("old-middle ", 300)
+		require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+			Namespace: "default", Name: "retry-context", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
+		}))
+		require.NoError(t, ss.AppendMessages(context.Background(), "default", "retry-context", []store.SessionMessage{
+			{Role: "user", Content: "first", Timestamp: now},
+			{Role: "assistant", Content: oldMiddle, Timestamp: now},
+		}))
+
+		var containedOldMiddle []bool
+		finalToolIntentCount := 0
+		provider := &chatMockProvider{}
+		provider.completeFn = func(_ context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+			hasOldMiddle := false
+			hasToolResult := false
+			toolIntentCount := 0
+			for _, message := range req.Messages {
+				hasOldMiddle = hasOldMiddle || strings.Contains(message.Content, "old-middle")
+				hasToolResult = hasToolResult || message.Role == testRoleTool
+				for _, toolCall := range message.ToolCalls {
+					if toolCall.ID == "list-1" {
+						toolIntentCount++
+					}
+				}
+			}
+			if hasToolResult {
+				finalToolIntentCount = toolIntentCount
+			}
+			containedOldMiddle = append(containedOldMiddle, hasOldMiddle)
+			if hasOldMiddle {
+				return nil, &llm.ProviderError{StatusCode: http.StatusBadRequest, Message: "context too long"}
+			}
+			if !hasToolResult {
+				return &llm.CompletionResponse{
+					ToolCalls:    []llm.ToolCall{{ID: "list-1", Name: "list_tasks", Arguments: json.RawMessage(`{}`)}},
+					InputTokens:  2,
+					OutputTokens: 3,
+				}, nil
+			}
+			return &llm.CompletionResponse{Content: "done", InputTokens: 4, OutputTokens: 5}, nil
+		}
+
+		messages := []llm.Message{
+			{Role: "user", Content: "first"},
+			{Role: "assistant", Content: oldMiddle},
+			{Role: "user", Content: "latest request"},
+		}
+		executor := NewToolExecutor(fakeClient, nil, "default", "retry-context", "", false, 5, 60*time.Second, rs)
+		content, usage, _, err := ch.runToolLoop(
+			context.Background(), provider, messages, "system prompt",
+			executor.registry.ToLLMTools(chattools.ChatToolNames()), executor,
+			"retry-context", "default", "test-model", 0.7, 4096, 2, nil,
+		)
+
+		require.NoError(t, err)
+		assert.Equal(t, "done", content)
+		assert.Equal(t, 3, provider.callCount)
+		assert.Equal(t, []bool{true, false, false}, containedOldMiddle)
+		assert.Equal(t, 1, finalToolIntentCount)
+		assert.Equal(t, 2, usage.LLMCalls)
+		sess, err := ss.GetSession(context.Background(), "default", "retry-context")
+		require.NoError(t, err)
+		assert.Equal(t, 7, sess.MessageCount)
+		assert.Equal(t, 6, sess.InputTokens)
+		assert.Equal(t, 8, sess.OutputTokens)
+	})
+
 	t.Run("LLM error returns error", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		ss := newTestSessionStore(t)
@@ -941,6 +1205,288 @@ func TestRunToolLoop(t *testing.T) {
 		assert.Contains(t, err.Error(), "LLM completion failed")
 	})
 
+	t.Run("stops before tool execution when SSE write fails", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+
+		provider := &chatMockProvider{
+			responses: []*llm.CompletionResponse{
+				{
+					ToolCalls: []llm.ToolCall{{
+						ID:        "create-1",
+						Name:      "create_ai_task",
+						Arguments: json.RawMessage(`{"name":"side-effect","prompt":"must not run"}`),
+					}},
+				},
+				{Content: "should not make a second model call"},
+			},
+		}
+		executor := NewToolExecutor(fakeClient, nil, "default", "write-fail-sess", "", false, 5, 60*time.Second, rs)
+		authorizeCalls := 0
+		executor.SetTaskCreateAuthorizer(func(context.Context, *corev1alpha1.Task) error {
+			authorizeCalls++
+			return nil
+		})
+
+		writeErr := errors.New("client disconnected")
+		w := bufio.NewWriter(&failingWriter{err: writeErr})
+		var observedWriteErr error
+		emitSSE := func(event, data string) error {
+			observedWriteErr = writeSSE(w, event, data)
+			return observedWriteErr
+		}
+
+		_, _, _, err := ch.runToolLoop(
+			context.Background(), provider, []llm.Message{{Role: "user", Content: "create a task"}}, "system prompt",
+			executor.registry.ToLLMTools(chattools.ChatToolNames()), executor,
+			"write-fail-sess", "default", "test-model", 0.7, 4096, 0, emitSSE,
+		)
+
+		assert.ErrorIs(t, observedWriteErr, writeErr)
+		assert.Error(t, err, "SSE write failure must stop the tool loop")
+		assert.Zero(t, authorizeCalls, "tool authorization proves execution was not entered")
+		assert.Equal(t, 1, provider.callCount, "write failure must prevent extra model calls")
+		var tasks corev1alpha1.TaskList
+		require.NoError(t, fakeClient.List(context.Background(), &tasks))
+		assert.Empty(t, tasks.Items)
+	})
+
+	t.Run("emits every tool call before executing any tool", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+		provider := &chatMockProvider{responses: []*llm.CompletionResponse{{
+			ToolCalls: []llm.ToolCall{
+				{ID: "create-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"name":"first","prompt":"must not run"}`)},
+				{ID: "create-2", Name: "create_ai_task", Arguments: json.RawMessage(`{"name":"second","prompt":"must not run"}`)},
+			},
+		}}}
+		executor := NewToolExecutor(fakeClient, nil, "default", "multi-write-fail", "", false, 5, 60*time.Second, rs)
+		authorizeCalls := 0
+		executor.SetTaskCreateAuthorizer(func(context.Context, *corev1alpha1.Task) error {
+			authorizeCalls++
+			return nil
+		})
+		writeErr := errors.New("client disconnected")
+		toolCallEvents := 0
+		emitSSE := func(event, _ string) error {
+			if event == testToolCallSSEEvent {
+				toolCallEvents++
+				if toolCallEvents == 2 {
+					return writeErr
+				}
+			}
+			return nil
+		}
+
+		_, _, _, err := ch.runToolLoop(
+			context.Background(), provider, []llm.Message{{Role: "user", Content: "create tasks"}}, "system prompt",
+			executor.registry.ToLLMTools(chattools.ChatToolNames()), executor,
+			"multi-write-fail", "default", "test-model", 0.7, 4096, 0, emitSSE,
+		)
+
+		assert.ErrorIs(t, err, writeErr)
+		assert.Equal(t, 2, toolCallEvents)
+		assert.Zero(t, authorizeCalls, "all tool_call frames must flush before the first side effect")
+		assert.Equal(t, 1, provider.callCount)
+		var tasks corev1alpha1.TaskList
+		require.NoError(t, fakeClient.List(context.Background(), &tasks))
+		assert.Empty(t, tasks.Items)
+	})
+
+	t.Run("stops remaining tools after tool result write failure", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+		provider := &chatMockProvider{responses: []*llm.CompletionResponse{{
+			ToolCalls: []llm.ToolCall{
+				{ID: "create-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"name":"first","prompt":"run once"}`)},
+				{ID: "create-2", Name: "create_ai_task", Arguments: json.RawMessage(`{"name":"second","prompt":"must not run"}`)},
+			},
+			InputTokens:  5,
+			OutputTokens: 7,
+		}}}
+		executor := NewToolExecutor(fakeClient, nil, "default", "result-batch-write-fail", "", false, 5, 60*time.Second, rs)
+		authorizeCalls := 0
+		executor.SetTaskCreateAuthorizer(func(context.Context, *corev1alpha1.Task) error {
+			authorizeCalls++
+			return nil
+		})
+		writeErr := errors.New("client disconnected")
+		toolCallEvents := 0
+		toolResultEvents := 0
+		emitSSE := func(event, _ string) error {
+			switch event {
+			case testToolCallSSEEvent:
+				toolCallEvents++
+			case testToolResultSSEEvent:
+				toolResultEvents++
+				return writeErr
+			}
+			return nil
+		}
+
+		_, _, _, err := ch.runToolLoop(
+			context.Background(), provider, []llm.Message{{Role: "user", Content: "create tasks"}}, "system prompt",
+			executor.registry.ToLLMTools(chattools.ChatToolNames()), executor,
+			"result-batch-write-fail", "default", "test-model", 0.7, 4096, 0, emitSSE,
+		)
+
+		assert.ErrorIs(t, err, writeErr)
+		assert.Equal(t, 2, toolCallEvents)
+		assert.Equal(t, 1, toolResultEvents)
+		assert.Equal(t, 1, authorizeCalls, "write failure must stop before the second side effect")
+		assert.Equal(t, 1, provider.callCount)
+		var tasks corev1alpha1.TaskList
+		require.NoError(t, fakeClient.List(context.Background(), &tasks))
+		assert.Len(t, tasks.Items, 1)
+		sess, getErr := ss.GetSession(context.Background(), "default", "result-batch-write-fail")
+		require.NoError(t, getErr)
+		assert.Equal(t, 4, sess.MessageCount)
+		assert.Equal(t, 5, sess.InputTokens)
+		assert.Equal(t, 7, sess.OutputTokens)
+		require.Len(t, sess.Messages, 4)
+		assert.Equal(t, "assistant", sess.Messages[2].Role)
+		toolCalls, ok := sess.Messages[2].ToolCalls.([]any)
+		if !ok {
+			// SQLite decodes the stored JSON into []interface{} through SessionMessage.ToolCalls.
+			toolCalls = nil
+		}
+		require.Len(t, toolCalls, 1, "partial batch checkpoint must contain only the completed call")
+		assert.Equal(t, testRoleTool, sess.Messages[3].Role)
+		assert.Equal(t, "create-1", sess.Messages[3].ToolCallID)
+	})
+
+	t.Run("persists tool intent before entering the executor", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		baseStore := newTestSessionStore(t)
+		ss := &failingTurnSessionStore{chatSessionStore: baseStore, err: errors.New("injected intent commit failure")}
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+		provider := &chatMockProvider{responses: []*llm.CompletionResponse{{
+			ToolCalls: []llm.ToolCall{{
+				ID:        "create-1",
+				Name:      "create_ai_task",
+				Arguments: json.RawMessage(`{"name":"side-effect","prompt":"must not run"}`),
+			}},
+			InputTokens:  5,
+			OutputTokens: 7,
+		}}}
+		executor := NewToolExecutor(fakeClient, nil, "default", "intent-fail", "", false, 5, 60*time.Second, rs)
+		authorizeCalls := 0
+		executor.SetTaskCreateAuthorizer(func(context.Context, *corev1alpha1.Task) error {
+			authorizeCalls++
+			return nil
+		})
+
+		_, _, _, err := ch.runToolLoop(
+			context.Background(), provider, []llm.Message{{Role: "user", Content: "create a task"}}, "system prompt",
+			executor.registry.ToLLMTools(chattools.ChatToolNames()), executor,
+			"intent-fail", "default", "test-model", 0.7, 4096, 0, nil,
+		)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to persist tool intent")
+		assert.Zero(t, authorizeCalls)
+		assert.Equal(t, 1, provider.callCount)
+		var tasks corev1alpha1.TaskList
+		require.NoError(t, fakeClient.List(context.Background(), &tasks))
+		assert.Empty(t, tasks.Items)
+	})
+
+	t.Run("leaves a valid pending checkpoint when tool result persistence fails", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		baseStore := newTestSessionStore(t)
+		ss := &failNthTurnSessionStore{chatSessionStore: baseStore, failAt: 2, err: errors.New("injected result commit failure")}
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+		provider := &chatMockProvider{responses: []*llm.CompletionResponse{{
+			ToolCalls: []llm.ToolCall{{
+				ID:        "create-1",
+				Name:      "create_ai_task",
+				Arguments: json.RawMessage(`{"name":"side-effect","prompt":"run once"}`),
+			}},
+			InputTokens:  5,
+			OutputTokens: 7,
+		}}}
+		executor := NewToolExecutor(fakeClient, nil, "default", "result-commit-fail", "", false, 5, 60*time.Second, rs)
+
+		_, _, _, err := ch.runToolLoop(
+			context.Background(), provider, []llm.Message{{Role: "user", Content: "create a task"}}, "system prompt",
+			executor.registry.ToLLMTools(chattools.ChatToolNames()), executor,
+			"result-commit-fail", "default", "test-model", 0.7, 4096, 0, nil,
+		)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to checkpoint executed tools")
+		sess, getErr := baseStore.GetSession(context.Background(), "default", "result-commit-fail")
+		require.NoError(t, getErr)
+		assert.Equal(t, 2, sess.MessageCount)
+		assert.Equal(t, 5, sess.InputTokens)
+		assert.Equal(t, 7, sess.OutputTokens)
+		require.Len(t, sess.Messages, 2)
+		assert.Equal(t, "user", sess.Messages[0].Role)
+		assert.Contains(t, sess.Messages[1].Content, "durably pending")
+		assert.Contains(t, sess.Messages[1].Content, `"prompt":"run once"`)
+		assert.Empty(t, sess.Messages[1].ToolCalls)
+		var tasks corev1alpha1.TaskList
+		require.NoError(t, fakeClient.List(context.Background(), &tasks))
+		assert.Len(t, tasks.Items, 1)
+	})
+
+	t.Run("commits an executed tool before propagating tool result write failure", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+		provider := &chatMockProvider{responses: []*llm.CompletionResponse{
+			{
+				ToolCalls: []llm.ToolCall{{
+					ID:        "create-1",
+					Name:      "create_ai_task",
+					Arguments: json.RawMessage(`{"name":"persisted-side-effect","prompt":"run once"}`),
+				}},
+				InputTokens:  5,
+				OutputTokens: 7,
+			},
+			{Content: "must not make a second model call"},
+		}}
+		executor := NewToolExecutor(fakeClient, nil, "default", "result-write-fail", "", false, 5, 60*time.Second, rs)
+		writeErr := errors.New("client disconnected")
+		emitSSE := func(event, _ string) error {
+			if event == testToolResultSSEEvent {
+				return writeErr
+			}
+			return nil
+		}
+
+		_, _, _, err := ch.runToolLoop(
+			context.Background(), provider, []llm.Message{{Role: "user", Content: "create a task"}}, "system prompt",
+			executor.registry.ToLLMTools(chattools.ChatToolNames()), executor,
+			"result-write-fail", "default", "test-model", 0.7, 4096, 0, emitSSE,
+		)
+
+		assert.ErrorIs(t, err, writeErr)
+		assert.Equal(t, 1, provider.callCount)
+		sess, getErr := ss.GetSession(context.Background(), "default", "result-write-fail")
+		require.NoError(t, getErr)
+		assert.Equal(t, 4, sess.MessageCount)
+		assert.Equal(t, 5, sess.InputTokens)
+		assert.Equal(t, 7, sess.OutputTokens)
+		require.Len(t, sess.Messages, 4)
+		assert.Equal(t, "user", sess.Messages[0].Role)
+		assert.Contains(t, sess.Messages[1].Content, "durably pending")
+		assert.Equal(t, "assistant", sess.Messages[2].Role)
+		assert.Equal(t, testRoleTool, sess.Messages[3].Role)
+		var tasks corev1alpha1.TaskList
+		require.NoError(t, fakeClient.List(context.Background(), &tasks))
+		assert.Len(t, tasks.Items, 1)
+	})
+
 	t.Run("emits SSE events for tool calls and final message", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		ss := newTestSessionStore(t)
@@ -959,8 +1505,9 @@ func TestRunToolLoop(t *testing.T) {
 		}
 
 		var sseEvents []string
-		emitSSE := func(event, data string) {
+		emitSSE := func(event, data string) error {
 			sseEvents = append(sseEvents, fmt.Sprintf("%s:%s", event, data))
+			return nil
 		}
 
 		messages := []llm.Message{{Role: "user", Content: "do it"}}
@@ -978,10 +1525,10 @@ func TestRunToolLoop(t *testing.T) {
 		hasToolResult := false
 		hasMessage := false
 		for _, e := range sseEvents {
-			if strings.HasPrefix(e, "tool_call:") {
+			if strings.HasPrefix(e, testToolCallSSEEvent+":") {
 				hasToolCall = true
 			}
-			if strings.HasPrefix(e, "tool_result:") {
+			if strings.HasPrefix(e, testToolResultSSEEvent+":") {
 				hasToolResult = true
 			}
 			if strings.HasPrefix(e, "message:") {
@@ -1079,6 +1626,29 @@ func TestHandleChat(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
 
+	t.Run("session store without turn committer fails closed", func(t *testing.T) {
+		objs := providerCRD("default", "default", "test-type", "test-model")
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+		baseStore := newTestSessionStore(t)
+		ss := &sessionStoreWithoutTurnCommitter{SessionStore: baseStore}
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+
+		app := fiber.New()
+		app.Post("/api/v1/chat", ch.HandleChat)
+
+		body, _ := json.Marshal(ChatRequest{Message: "hello", SessionID: "unsupported-turn-store"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		assert.Empty(t, ch.semaphore)
+		_, err = baseStore.GetSession(context.Background(), "default", "unsupported-turn-store")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
 	t.Run("too many concurrent requests returns 429", func(t *testing.T) {
 		objs := providerCRD("default", "default", "test-type", "test-model")
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
@@ -1121,6 +1691,114 @@ func TestHandleChat(t *testing.T) {
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&chatResp))
 		assert.NotEmpty(t, chatResp.SessionID)
 		assert.NotEmpty(t, chatResp.Message)
+
+		sess, err := ss.GetSession(context.Background(), "default", chatResp.SessionID)
+		require.NoError(t, err)
+		assert.Equal(t, 2, sess.MessageCount)
+		assert.Equal(t, 10, sess.InputTokens)
+		assert.Equal(t, 20, sess.OutputTokens)
+		assert.Empty(t, sess.ActiveTask)
+	})
+
+	t.Run("JSON mode returns error and preserves usage when turn persistence fails", func(t *testing.T) {
+		objs := providerCRD("default", "default", "test-type", "test-model")
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+		baseStore := newTestSessionStore(t)
+		now := time.Now()
+		require.NoError(t, baseStore.CreateSession(context.Background(), &store.SessionRecord{
+			Namespace: "default", Name: "persist-fail-json", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
+		}))
+		require.NoError(t, baseStore.AppendMessages(context.Background(), "default", "persist-fail-json", []store.SessionMessage{{
+			Role: "assistant", Content: "previous", Timestamp: now,
+		}}))
+		require.NoError(t, baseStore.UpdateTokenCounts(context.Background(), "default", "persist-fail-json", 3, 4))
+		ss := &failingTurnSessionStore{chatSessionStore: baseStore, err: errors.New("injected turn commit failure")}
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+
+		app := fiber.New()
+		app.Post("/api/v1/chat", ch.HandleChat)
+
+		body, _ := json.Marshal(ChatRequest{Message: "hello", SessionID: "persist-fail-json"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+		sess, err := baseStore.GetSession(context.Background(), "default", "persist-fail-json")
+		require.NoError(t, err)
+		assert.Equal(t, 1, sess.MessageCount)
+		assert.Equal(t, 3, sess.InputTokens)
+		assert.Equal(t, 4, sess.OutputTokens)
+		assert.Empty(t, sess.ActiveTask)
+		assert.Zero(t, ss.tokenUpdateCalls, "failed turn must not update usage separately")
+		assert.Empty(t, ch.semaphore, "JSON failure must release the concurrency slot")
+		retryNow := time.Now()
+		require.NoError(t, baseStore.AcquireChatTurn(context.Background(), &store.SessionRecord{
+			Namespace: "default", Name: "persist-fail-json", SessionType: "chat", CreatedAt: retryNow, UpdatedAt: retryNow,
+		}, "chat-turn-json-retry", retryNow.Add(time.Hour)), "JSON persistence failure must release the chat reservation")
+		require.NoError(t, baseStore.ReleaseChatTurn(context.Background(), "default", "persist-fail-json", "chat-turn-json-retry"))
+	})
+
+	t.Run("SSE persistence failure emits error without done and releases semaphore", func(t *testing.T) {
+		objs := providerCRD("default", "default", "test-type", "test-model")
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+		baseStore := newTestSessionStore(t)
+		ss := &failingTurnSessionStore{chatSessionStore: baseStore, err: errors.New("injected turn commit failure")}
+		rs := newTestResultStore(t)
+		cfg := DefaultChatConfig()
+		cfg.MaxConcurrent = 1
+		ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+
+		app := fiber.New()
+		app.Post("/api/v1/chat", ch.HandleChat)
+
+		body, _ := json.Marshal(ChatRequest{Message: "hello", SessionID: "persist-fail-sse"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		data, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		stream := string(data)
+		assert.Contains(t, stream, "event: error")
+		assert.NotContains(t, stream, "event: done")
+		assert.Empty(t, ch.semaphore, "SSE failure must release the concurrency slot")
+		sess, err := baseStore.GetSession(context.Background(), "default", "persist-fail-sse")
+		require.NoError(t, err)
+		assert.Empty(t, sess.ActiveTask)
+		retryNow := time.Now()
+		require.NoError(t, baseStore.AcquireChatTurn(context.Background(), &store.SessionRecord{
+			Namespace: "default", Name: "persist-fail-sse", SessionType: "chat", CreatedAt: retryNow, UpdatedAt: retryNow,
+		}, "chat-turn-sse-retry", retryNow.Add(time.Hour)), "SSE persistence failure must release the chat reservation")
+		require.NoError(t, baseStore.ReleaseChatTurn(context.Background(), "default", "persist-fail-sse", "chat-turn-sse-retry"))
+	})
+
+	t.Run("active session turn returns conflict before model execution", func(t *testing.T) {
+		objs := providerCRD("default", "default", "test-type", "test-model")
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+		ss := newTestSessionStore(t)
+		now := time.Now()
+		require.NoError(t, ss.AcquireChatTurn(context.Background(), &store.SessionRecord{
+			Namespace: "default", Name: "busy-session", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
+		}, "chat-turn-existing", now.Add(time.Hour)))
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+		app := fiber.New()
+		app.Post("/api/v1/chat", ch.HandleChat)
+
+		body, _ := json.Marshal(ChatRequest{Message: "hello", SessionID: "busy-session"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusConflict, resp.StatusCode)
+		assert.Empty(t, ch.semaphore)
 	})
 
 	t.Run("SSE mode returns event stream", func(t *testing.T) {

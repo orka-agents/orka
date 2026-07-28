@@ -11,6 +11,25 @@
 - `POST /v1/turns/{turnID}/cancel` when `supportsCancel=true`
 - `POST /v1/turns/{turnID}/continue` when brokered profiles are advertised
 
+## Transport and client authentication
+
+- Set `AgentRuntime.spec.deployment.transportSecurity` explicitly for new
+  manifests. An unmarked omission is treated as `tls`. The supported CRD
+  migration handles schemas that predate the field and the legacy read-time
+  default, publishes the omission-safe target schema before marking
+  pre-transition stored omissions, and lets the controller backfill marked HTTPS
+  or safe cluster-local HTTP endpoints without weakening new creates.
+- `insecure-cluster-local-http` must be paired with `http://` and is limited to
+  a selector-backed, non-`ExternalName` Service in the same namespace as the
+  `AgentRuntime`.
+- Orka rejects redirects for registered `AgentRuntime` requests. Adapters must
+  expose the contract directly at the configured base URL.
+- Orka disables HTTP proxy use for `insecure-cluster-local-http` so authenticated
+  requests use the validated cluster-local Service connection directly.
+- `GET /v1/health` and `GET /v1/capabilities` are intentionally unauthenticated;
+  Orka does not attach the runtime bearer token to those requests. Turn start,
+  stream, output, continuation, and cancellation endpoints remain authenticated.
+
 ## Capability profiles
 
 | Profile | Capabilities | Required behavior |

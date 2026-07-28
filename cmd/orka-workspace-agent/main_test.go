@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/orka-agents/orka/internal/workspace/daemonprotocol"
 )
 
 const testBootstrapHandoffToken = "secret"
@@ -156,12 +158,57 @@ func TestWorkspaceAgentDetachedExecCanBePolled(t *testing.T) {
 		)
 	}
 
-	statusReq := httptest.NewRequest(http.MethodGet, "/v1/exec/"+started.ExecID, nil)
-	statusReq.Header.Set("Authorization", "Bearer secret")
-	statusResp := httptest.NewRecorder()
-	server.routes().ServeHTTP(statusResp, statusReq)
-	if statusResp.Code != http.StatusNotFound {
-		t.Fatalf("completed detached exec status after poll = %d, want %d", statusResp.Code, http.StatusNotFound)
+	for poll := 2; poll <= 3; poll++ {
+		statusReq := httptest.NewRequest(http.MethodGet, "/v1/exec/"+started.ExecID, nil)
+		statusReq.Header.Set("Authorization", "Bearer secret")
+		statusResp := httptest.NewRecorder()
+		server.routes().ServeHTTP(statusResp, statusReq)
+		if statusResp.Code != http.StatusOK {
+			t.Fatalf(
+				"completed detached exec status poll %d = %d, want %d: %s",
+				poll,
+				statusResp.Code,
+				http.StatusOK,
+				statusResp.Body.String(),
+			)
+		}
+		var repeated execResponse
+		if err := json.NewDecoder(statusResp.Body).Decode(&repeated); err != nil {
+			t.Fatalf("decode repeated status response: %v", err)
+		}
+		if repeated != got {
+			t.Fatalf("completed detached exec poll %d = %#v, want %#v", poll, repeated, got)
+		}
+	}
+}
+
+func TestCompletedExecutionRetainedUntilExpiry(t *testing.T) {
+	server := newWorkspaceAgentServer()
+	finishedAt := time.Now().UTC()
+	want := execResponse{
+		ExecID:     "completed-exec",
+		Stdout:     "done",
+		ExitCode:   0,
+		StartedAt:  finishedAt.Add(-time.Second),
+		FinishedAt: finishedAt,
+	}
+	server.storeExecution(want)
+
+	for read := 1; read <= 2; read++ {
+		got, ok := server.loadExecution(want.ExecID)
+		if !ok {
+			t.Fatalf("load %d missing completed execution before retention expires", read)
+		}
+		if got != want {
+			t.Fatalf("load %d = %#v, want %#v", read, got, want)
+		}
+	}
+
+	server.mu.Lock()
+	server.evictCompletedExecutionsLocked(finishedAt.Add(completedExecutionRetention))
+	server.mu.Unlock()
+	if got, ok := server.loadExecution(want.ExecID); ok {
+		t.Fatalf("expired completed execution still present: %#v", got)
 	}
 }
 
@@ -333,6 +380,165 @@ func TestWorkspaceAgentAllowsOnlyHandoffTokenBootstrap(t *testing.T) {
 	}
 	if strings.TrimSpace(string(data)) != testBootstrapHandoffToken {
 		t.Fatalf("token file = %q, want %s", string(data), testBootstrapHandoffToken)
+	}
+}
+
+func TestWorkspaceAgentSerializesBootstrapMutationWithFileAuthentication(t *testing.T) {
+	dir := t.TempDir()
+	tokenFile := filepath.Join(dir, "handoff-token")
+	t.Setenv(envHandoffTokenFile, tokenFile)
+	t.Setenv(envBootstrapToken, "bootstrap-secret")
+	server := newWorkspaceAgentServer()
+
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan struct{})
+	secondDone := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseFirst)
+		}
+	}()
+
+	handler := server.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer bootstrap-secret" {
+			close(firstEntered)
+			<-releaseFirst
+			if err := os.WriteFile(tokenFile, []byte("minted-secret"), 0o600); err != nil {
+				t.Errorf("write minted token: %v", err)
+				http.Error(w, "write failed", http.StatusInternalServerError)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
+		Path: tokenFile,
+		Data: []byte("minted-secret"),
+		Mode: 0o600,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal upload: %v", err)
+	}
+	firstReq := httptest.NewRequest(http.MethodPut, daemonprotocol.FilesPath, bytes.NewReader(body))
+	firstReq.Header.Set("Authorization", "Bearer bootstrap-secret")
+	firstResp := httptest.NewRecorder()
+	go func() {
+		handler(firstResp, firstReq)
+		close(firstDone)
+	}()
+	<-firstEntered
+
+	secondReq := httptest.NewRequest(http.MethodPut, daemonprotocol.FilesPath, bytes.NewReader(body))
+	secondReq.Header.Set("Authorization", "Bearer minted-secret")
+	secondResp := httptest.NewRecorder()
+	go func() {
+		handler(secondResp, secondReq)
+		close(secondDone)
+	}()
+
+	select {
+	case <-secondDone:
+		t.Fatal("second file request authenticated before bootstrap mutation completed")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseFirst)
+	released = true
+	<-firstDone
+	<-secondDone
+	if firstResp.Code != http.StatusNoContent {
+		t.Fatalf("first status = %d, want %d: %s", firstResp.Code, http.StatusNoContent, firstResp.Body.String())
+	}
+	if secondResp.Code != http.StatusNoContent {
+		t.Fatalf("second status = %d, want %d: %s", secondResp.Code, http.StatusNoContent, secondResp.Body.String())
+	}
+}
+
+func TestWorkspaceAgentSerializesScrubAfterFileMutation(t *testing.T) {
+	dir := t.TempDir()
+	tokenFile := filepath.Join(dir, "handoff-token")
+	if err := os.WriteFile(tokenFile, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write initial token: %v", err)
+	}
+	t.Setenv(envHandoffToken, "")
+	t.Setenv(envHandoffTokenFile, tokenFile)
+	server := newWorkspaceAgentServer()
+
+	uploadEntered := make(chan struct{})
+	releaseUpload := make(chan struct{})
+	uploadDone := make(chan struct{})
+	scrubDone := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseUpload)
+		}
+	}()
+
+	handler := server.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == daemonprotocol.FilesPath:
+			close(uploadEntered)
+			<-releaseUpload
+			if err := os.WriteFile(tokenFile, []byte("secret"), 0o600); err != nil {
+				t.Errorf("write handoff token: %v", err)
+				http.Error(w, "write failed", http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == daemonprotocol.ScrubPath:
+			if err := os.Remove(tokenFile); err != nil && !os.IsNotExist(err) {
+				t.Errorf("remove handoff token: %v", err)
+				http.Error(w, "scrub failed", http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	uploadReq := httptest.NewRequest(http.MethodPut, daemonprotocol.FilesPath, bytes.NewReader([]byte(`{"files":[]}`)))
+	uploadReq.Header.Set("Authorization", "Bearer secret")
+	uploadResp := httptest.NewRecorder()
+	go func() {
+		handler(uploadResp, uploadReq)
+		close(uploadDone)
+	}()
+	<-uploadEntered
+
+	scrubReq := httptest.NewRequest(http.MethodPost, daemonprotocol.ScrubPath, bytes.NewReader([]byte(`{"paths":[]}`)))
+	scrubReq.Header.Set("Authorization", "Bearer secret")
+	scrubResp := httptest.NewRecorder()
+	go func() {
+		handler(scrubResp, scrubReq)
+		close(scrubDone)
+	}()
+
+	scrubCompletedBeforeUpload := false
+	select {
+	case <-scrubDone:
+		scrubCompletedBeforeUpload = true
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseUpload)
+	released = true
+	<-uploadDone
+	<-scrubDone
+
+	if scrubCompletedBeforeUpload {
+		t.Fatal("scrub completed before the in-flight file mutation")
+	}
+	if uploadResp.Code != http.StatusNoContent {
+		t.Fatalf("upload status = %d, want %d: %s", uploadResp.Code, http.StatusNoContent, uploadResp.Body.String())
+	}
+	if scrubResp.Code != http.StatusNoContent {
+		t.Fatalf("scrub status = %d, want %d: %s", scrubResp.Code, http.StatusNoContent, scrubResp.Body.String())
+	}
+	if _, err := os.Stat(tokenFile); !os.IsNotExist(err) {
+		t.Fatalf("handoff token exists after serialized scrub: %v", err)
 	}
 }
 

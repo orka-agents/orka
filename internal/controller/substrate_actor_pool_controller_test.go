@@ -117,6 +117,44 @@ func TestSubstrateActorPoolReconcilerPrecreatesActorsAndUpdatesDensity(t *testin
 	}
 }
 
+func TestSubstrateActorPoolReconcilerSkipsUnchangedStatusUpdateButKeepsPeriodicRequeue(t *testing.T) {
+	scheme := newSubstrateActorPoolTestScheme(t)
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "disabled-pool", Namespace: "default"},
+	}
+	countingClient := &statusUpdateCountingClient{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).
+			WithObjects(pool).
+			Build(),
+	}
+	reconciler := &SubstrateActorPoolReconciler{Client: countingClient, Scheme: scheme}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}}
+
+	first, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+	if first.RequeueAfter != substrateActorPoolRequeue {
+		t.Fatalf("first RequeueAfter = %v, want %v", first.RequeueAfter, substrateActorPoolRequeue)
+	}
+	if countingClient.statusUpdateCount != 1 {
+		t.Fatalf("status updates after first reconcile = %d, want 1", countingClient.statusUpdateCount)
+	}
+
+	second, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+	if second.RequeueAfter != substrateActorPoolRequeue {
+		t.Fatalf("second RequeueAfter = %v, want %v", second.RequeueAfter, substrateActorPoolRequeue)
+	}
+	if countingClient.statusUpdateCount != 1 {
+		t.Fatalf("status updates after second reconcile = %d, want no additional update", countingClient.statusUpdateCount)
+	}
+}
+
 func TestSubstrateActorPoolReconcilerAcceptsMCPOnlyTemplate(t *testing.T) {
 	scheme := newSubstrateActorPoolTestScheme(t)
 	pool := &corev1alpha1.SubstrateActorPool{

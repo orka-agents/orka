@@ -7,18 +7,70 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestUpdatePlanTool_Name(t *testing.T) {
 	tool := NewUpdatePlanTool()
 	if got := tool.Name(); got != updatePlanToolName {
 		t.Errorf("Name() = %q, want %q", got, updatePlanToolName)
+	}
+}
+
+func TestNewUpdatePlanTool_DoesNotAssumeDefaultTransportType(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("unused")
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+	tool := NewUpdatePlanTool()
+	if tool.client == nil || tool.client.Transport == nil {
+		t.Fatal("NewUpdatePlanTool() did not configure an HTTP transport")
+	}
+}
+
+func TestNewUpdatePlanTool_ConfiguresBoundedClientAndContext(t *testing.T) {
+	tool := NewUpdatePlanTool()
+	if tool.requestTimeout != updatePlanRequestTimeout {
+		t.Fatalf("requestTimeout = %s, want %s", tool.requestTimeout, updatePlanRequestTimeout)
+	}
+	if tool.client == nil {
+		t.Fatal("HTTP client is nil")
+	}
+	if tool.client.Timeout != 0 {
+		t.Fatalf("HTTP client timeout = %s, want request context to own overall timeout", tool.client.Timeout)
+	}
+
+	transport, ok := tool.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("HTTP client transport = %T, want *http.Transport", tool.client.Transport)
+	}
+	if transport.DialContext == nil {
+		t.Fatal("transport DialContext is nil")
+	}
+	if transport.TLSHandshakeTimeout <= 0 {
+		t.Fatalf("TLSHandshakeTimeout = %s, want positive timeout", transport.TLSHandshakeTimeout)
+	}
+	if transport.ResponseHeaderTimeout != updatePlanResponseHeaderTimeout {
+		t.Fatalf(
+			"ResponseHeaderTimeout = %s, want %s",
+			transport.ResponseHeaderTimeout,
+			updatePlanResponseHeaderTimeout,
+		)
+	}
+	if transport.IdleConnTimeout <= 0 {
+		t.Fatalf("IdleConnTimeout = %s, want positive timeout", transport.IdleConnTimeout)
 	}
 }
 
@@ -314,4 +366,192 @@ func TestUpdatePlanTool_Execute_RequestBodyValid(t *testing.T) {
 	if received.PlanDocument != "# My Plan" {
 		t.Errorf("body plan_document = %q, want %q", received.PlanDocument, "# My Plan")
 	}
+}
+
+func TestUpdatePlanTool_Execute_ResponseHeaderStallIsBounded(t *testing.T) {
+	const requestTimeout = 25 * time.Millisecond
+
+	requestStarted := make(chan struct{})
+	tool := &UpdatePlanTool{
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			close(requestStarted)
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		})},
+		requestTimeout: requestTimeout,
+	}
+	t.Setenv(envOrkaControllerURL, localhostURL)
+	t.Setenv(envOrkaTaskName, "task")
+	t.Setenv(envOrkaTaskNamespace, "ns")
+	t.Setenv("ORKA_SA_TOKEN", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := tool.Execute(ctx, json.RawMessage(testPlanJSON))
+		done <- err
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("update_plan request did not start")
+	}
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+			t.Fatalf("Execute() error = %v, want context deadline exceeded", err)
+		}
+	case <-time.After(10 * requestTimeout):
+		cancel()
+		<-done
+		t.Fatalf("Execute() did not return within bounded request timeout %s", requestTimeout)
+	}
+}
+
+func TestUpdatePlanTool_Execute_ResponseDrainHasTimeBound(t *testing.T) {
+	for _, statusCode := range []int{http.StatusOK, http.StatusInternalServerError} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			body := newBlockingReadCloser()
+			tool := &UpdatePlanTool{
+				client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					go func() {
+						<-req.Context().Done()
+						_ = body.Close()
+					}()
+					return &http.Response{
+						StatusCode: statusCode,
+						Header:     make(http.Header),
+						Body:       body,
+					}, nil
+				})},
+				requestTimeout: time.Second,
+			}
+			t.Setenv(envOrkaControllerURL, localhostURL)
+			t.Setenv(envOrkaTaskName, "task")
+			t.Setenv(envOrkaTaskNamespace, "ns")
+			t.Setenv("ORKA_SA_TOKEN", "")
+
+			done := make(chan error, 1)
+			go func() {
+				_, err := tool.Execute(t.Context(), json.RawMessage(testPlanJSON))
+				done <- err
+			}()
+
+			select {
+			case <-body.readStarted:
+			case <-time.After(time.Second):
+				t.Fatal("response drain did not start")
+			}
+
+			select {
+			case err := <-done:
+				if statusCode == http.StatusOK && err != nil {
+					t.Fatalf("Execute() error = %v", err)
+				}
+				if statusCode != http.StatusOK && err == nil {
+					t.Fatal("Execute() error = nil, want status error")
+				}
+			case <-time.After(500 * time.Millisecond):
+				_ = body.Close()
+				<-done
+				t.Fatal("response drain did not return within a bounded interval")
+			}
+		})
+	}
+}
+
+func TestUpdatePlanTool_Execute_BoundsIgnoredResponseDrain(t *testing.T) {
+	const (
+		responseBodyBytes     = 1 << 20
+		maxExpectedDrainBytes = 64 << 10
+	)
+
+	for _, statusCode := range []int{http.StatusOK, http.StatusInternalServerError} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", responseBodyBytes))}
+			tool := &UpdatePlanTool{
+				client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: statusCode,
+						Header:     make(http.Header),
+						Body:       body,
+					}, nil
+				})},
+				requestTimeout: time.Second,
+			}
+			t.Setenv(envOrkaControllerURL, localhostURL)
+			t.Setenv(envOrkaTaskName, "task")
+			t.Setenv(envOrkaTaskNamespace, "ns")
+			t.Setenv("ORKA_SA_TOKEN", "")
+
+			_, err := tool.Execute(t.Context(), json.RawMessage(testPlanJSON))
+			if statusCode == http.StatusOK && err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if statusCode != http.StatusOK && err == nil {
+				t.Fatal("Execute() error = nil, want status error")
+			}
+			if !body.closed {
+				t.Fatal("response body was not closed")
+			}
+			if body.bytesRead == 0 {
+				t.Fatal("ignored response body was not drained")
+			}
+			if body.bytesRead > maxExpectedDrainBytes {
+				t.Fatalf("ignored response drain read %d bytes, want at most %d", body.bytesRead, maxExpectedDrainBytes)
+			}
+		})
+	}
+}
+
+type trackingReadCloser struct {
+	reader    io.Reader
+	bytesRead int
+	closed    bool
+}
+
+func (r *trackingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.bytesRead += n
+	return n, err
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type blockingReadCloser struct {
+	readStarted chan struct{}
+	closed      chan struct{}
+	readOnce    sync.Once
+	closeOnce   sync.Once
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{
+		readStarted: make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+}
+
+func (r *blockingReadCloser) Read([]byte) (int, error) {
+	r.readOnce.Do(func() { close(r.readStarted) })
+	<-r.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *blockingReadCloser) Close() error {
+	r.closeOnce.Do(func() { close(r.closed) })
+	return nil
 }

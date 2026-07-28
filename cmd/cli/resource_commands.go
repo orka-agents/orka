@@ -10,18 +10,24 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	toolResourceName    = "tool"
+	sessionResourceName = "session"
+)
+
 type crudResourceSpec struct {
-	Use       string
-	Short     string
-	BasePath  string
-	Name      string
-	ReadOnly  bool
-	NoGet     bool
-	NoCreate  bool
-	NoUpdate  bool
-	NoDelete  bool
-	ListFlags func(*cobra.Command)
-	ListQuery func(*cobra.Command) map[string]string
+	Use                     string
+	Short                   string
+	BasePath                string
+	Name                    string
+	ReadOnly                bool
+	NoGet                   bool
+	NoCreate                bool
+	NoUpdate                bool
+	NoDelete                bool
+	SurfaceListContinuation bool
+	ListFlags               func(*cobra.Command)
+	ListQuery               func(*cobra.Command) map[string]string
 }
 
 func newCRUDResourceCmd(spec crudResourceSpec) *cobra.Command {
@@ -69,7 +75,19 @@ func newCRUDListCmd(spec crudResourceSpec) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			if err := printStructured(cmd, result); err != nil {
+				return err
+			}
+			if spec.SurfaceListContinuation {
+				format, err := outputFormat(cmd)
+				if err != nil {
+					return err
+				}
+				if format == outputTable {
+					warnListContinuation(cmd, spec.Name, result)
+				}
+			}
+			return nil
 		},
 	}
 	addOutputFlag(cmd, outputTable)
@@ -80,6 +98,28 @@ func newCRUDListCmd(spec crudResourceSpec) *cobra.Command {
 		spec.ListFlags(cmd)
 	}
 	return cmd
+}
+
+func warnListContinuation(cmd *cobra.Command, resourceName string, result any) {
+	response, ok := result.(map[string]any)
+	if !ok {
+		return
+	}
+	metadata, ok := response["metadata"].(map[string]any)
+	if !ok {
+		return
+	}
+	continuation, _ := metadata["continue"].(string)
+	if continuation == "" {
+		return
+	}
+	_, _ = fmt.Fprintf(
+		cmd.ErrOrStderr(),
+		"More %s resources are available; this command displays one page. Continuation token: %q. "+
+			"Re-run with --continue using that token.\n",
+		resourceName,
+		continuation,
+	)
 }
 
 func newCRUDGetCmd(spec crudResourceSpec) *cobra.Command {
@@ -203,21 +243,23 @@ func newProviderCmd() *cobra.Command {
 
 func newToolCmd() *cobra.Command {
 	return newCRUDResourceCmd(crudResourceSpec{
-		Use:      "tool",
-		Short:    "Manage tools",
-		BasePath: "/api/v1/tools",
-		Name:     "tool",
+		Use:                     toolResourceName,
+		Short:                   "Manage tools",
+		BasePath:                "/api/v1/tools",
+		Name:                    toolResourceName,
+		SurfaceListContinuation: true,
 	})
 }
 
 func newSessionCmd() *cobra.Command {
 	cmd := newCRUDResourceCmd(crudResourceSpec{
-		Use:      "session",
-		Short:    "Manage sessions",
-		BasePath: "/api/v1/sessions",
-		Name:     "session",
-		NoCreate: true,
-		NoUpdate: true,
+		Use:                     sessionResourceName,
+		Short:                   "Manage sessions",
+		BasePath:                "/api/v1/sessions",
+		Name:                    sessionResourceName,
+		NoCreate:                true,
+		NoUpdate:                true,
+		SurfaceListContinuation: true,
 	})
 	cmd.AddCommand(newSessionEventsCmd())
 	cmd.AddCommand(newSessionFollowCmd())

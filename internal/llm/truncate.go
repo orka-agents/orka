@@ -18,6 +18,184 @@ func estimateTokens(text string) int {
 	return (len(text) + 3) / 4
 }
 
+// CompletionRequestSize describes the serialized size and approximate token
+// count of a complete provider request.
+type CompletionRequestSize struct {
+	SerializedBytes int
+	EstimatedTokens int
+}
+
+const currentUserTaskTruncationMarker = "\n\n[Current user task truncated for context recovery.]\n\n"
+
+// EstimateCompletionRequestSize estimates the complete serialized request,
+// including system prompts, tool schemas, messages, and tool-call arguments.
+func EstimateCompletionRequestSize(req *CompletionRequest) (CompletionRequestSize, error) {
+	serialized, err := json.Marshal(req)
+	if err != nil {
+		return CompletionRequestSize{}, fmt.Errorf("marshal completion request: %w", err)
+	}
+	return CompletionRequestSize{
+		SerializedBytes: len(serialized),
+		EstimatedTokens: (len(serialized) + 3) / 4,
+	}, nil
+}
+
+// TruncateCompletionRequest returns a copy of req reduced toward tokenBudget.
+// The newest user message is mandatory; if it alone is oversized, its middle
+// is replaced with an explicit recovery marker while preserving both ends.
+func TruncateCompletionRequest(req *CompletionRequest, tokenBudget int) (*CompletionRequest, error) {
+	if req == nil {
+		return nil, fmt.Errorf("completion request is nil")
+	}
+
+	size, err := EstimateCompletionRequestSize(req)
+	if err != nil {
+		return nil, err
+	}
+	truncated, err := cloneCompletionRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if size.EstimatedTokens <= tokenBudget || len(truncated.Messages) == 0 {
+		return truncated, nil
+	}
+
+	currentUserIndex := newestUserMessageIndex(truncated.Messages)
+	if currentUserIndex < 0 {
+		return truncated, nil
+	}
+
+	blocks, mandatoryBlock := groupRecoveryMessageBlocks(truncated.Messages, currentUserIndex)
+	kept := make([]bool, len(blocks))
+	for i := range kept {
+		kept[i] = true
+	}
+	for size.EstimatedTokens > tokenBudget {
+		drop := -1
+		for i := range blocks {
+			if kept[i] && i != mandatoryBlock {
+				drop = i
+				break
+			}
+		}
+		if drop < 0 {
+			break
+		}
+		kept[drop] = false
+		truncated.Messages = messagesFromKeptBlocks(blocks, kept)
+		size, err = EstimateCompletionRequestSize(truncated)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if size.EstimatedTokens <= tokenBudget {
+		return truncated, nil
+	}
+
+	currentUserIndex = newestUserMessageIndex(truncated.Messages)
+	if _, err := truncateCurrentUserPrompt(truncated, currentUserIndex, tokenBudget); err != nil {
+		return nil, err
+	}
+	return truncated, nil
+}
+
+func messagesFromKeptBlocks(blocks []messageBlock, kept []bool) []Message {
+	messages := make([]Message, 0)
+	for i, block := range blocks {
+		if kept[i] {
+			messages = append(messages, block.messages...)
+		}
+	}
+	return messages
+}
+
+func groupRecoveryMessageBlocks(messages []Message, currentUserIndex int) ([]messageBlock, int) {
+	blocks := make([]messageBlock, 0)
+	for i := 0; i < currentUserIndex; {
+		start := i
+		i++
+		for i < currentUserIndex && messages[i].Role != "user" {
+			i++
+		}
+		blocks = append(blocks, messageBlock{messages: messages[start:i]})
+	}
+
+	mandatoryBlock := len(blocks)
+	blocks = append(blocks, messageBlock{messages: []Message{messages[currentUserIndex]}})
+	blocks = append(blocks, groupMessageBlocks(messages[currentUserIndex+1:])...)
+	return blocks, mandatoryBlock
+}
+
+func cloneCompletionRequest(req *CompletionRequest) (*CompletionRequest, error) {
+	serialized, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal completion request copy: %w", err)
+	}
+	var cloned CompletionRequest
+	if err := json.Unmarshal(serialized, &cloned); err != nil {
+		return nil, fmt.Errorf("unmarshal completion request copy: %w", err)
+	}
+	return &cloned, nil
+}
+
+func newestUserMessageIndex(messages []Message) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return i
+		}
+	}
+	return -1
+}
+
+func truncateCurrentUserPrompt(req *CompletionRequest, messageIndex, tokenBudget int) (bool, error) {
+	original := req.Messages[messageIndex].Content
+	originalRunes := []rune(original)
+	if len(originalRunes) < 3 {
+		return false, nil
+	}
+
+	setContent := func(content string) (CompletionRequestSize, error) {
+		req.Messages[messageIndex].Content = content
+		return EstimateCompletionRequestSize(req)
+	}
+
+	const minimumRetainedRunes = 2
+	bestContent := balancedTruncatedCurrentTask(originalRunes, minimumRetainedRunes)
+	bestSize, err := setContent(bestContent)
+	if err != nil {
+		return false, err
+	}
+	if bestSize.EstimatedTokens > tokenBudget {
+		req.Messages[messageIndex].Content = original
+		return false, nil
+	}
+
+	for low, high := minimumRetainedRunes, len(originalRunes)-1; low <= high; {
+		mid := low + (high-low)/2
+		content := balancedTruncatedCurrentTask(originalRunes, mid)
+		size, sizeErr := setContent(content)
+		if sizeErr != nil {
+			return false, sizeErr
+		}
+		if size.EstimatedTokens <= tokenBudget {
+			bestContent = content
+			low = mid + 1
+		} else {
+			high = mid - 1
+		}
+	}
+
+	req.Messages[messageIndex].Content = bestContent
+	return true, nil
+}
+
+func balancedTruncatedCurrentTask(original []rune, retained int) string {
+	prefixRunes := (retained + 1) / 2
+	suffixRunes := retained / 2
+	return string(original[:prefixRunes]) + currentUserTaskTruncationMarker +
+		string(original[len(original)-suffixRunes:])
+}
+
 // estimateMessageTokens returns approximate tokens for a Message including tool call content.
 func estimateMessageTokens(m Message) int {
 	tokens := estimateTokens(m.Content)

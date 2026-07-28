@@ -31,10 +31,12 @@ func TestNewServer(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	config := ServerConfig{
 		Port:           8080,
 		MetricsPort:    9090,
+		APIReader:      apiReader,
 		WatchNamespace: "default",
 	}
 
@@ -48,6 +50,9 @@ func TestNewServer(t *testing.T) {
 	}
 	if server.handlers == nil {
 		t.Error("handlers is nil")
+	}
+	if server.handlers.apiReader != apiReader {
+		t.Error("APIReader was not wired to handlers")
 	}
 	if server.config.Port != 8080 {
 		t.Errorf("Port = %d, want 8080", server.config.Port)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -25,11 +26,19 @@ type Client struct {
 	httpClient      *http.Client
 	controlTimeout  time.Duration
 	authBearerValue string
+	publicDiscovery bool
 }
 
 const maxHarnessSSEFrameBytes = 1 << 20
 
 var errSSEDone = errors.New("harness SSE stream done")
+
+var errAgentRuntimeRedirect = errors.New("AgentRuntime redirects are not allowed")
+
+var (
+	agentRuntimeTLSHTTPClientTemplate      = newAgentRuntimeHTTPClient(false)
+	agentRuntimeInsecureHTTPClientTemplate = newAgentRuntimeHTTPClient(true)
+)
 
 type ClientOption func(*Client)
 
@@ -55,6 +64,91 @@ func WithBearerToken(token string) ClientOption {
 	}
 }
 
+// WithPublicDiscovery omits bearer authentication from the intentionally
+// unauthenticated health and capabilities endpoints.
+func WithPublicDiscovery() ClientOption {
+	return func(c *Client) {
+		c.publicDiscovery = true
+	}
+}
+
+// NewAgentRuntimeHTTPClient returns an HTTP client with the redirect policy used
+// for registered AgentRuntime endpoints. Insecure HTTP endpoints additionally
+// bypass all configured proxies so bearer-authenticated requests cannot leave the
+// cluster-local direct connection selected by the controller.
+func NewAgentRuntimeHTTPClient(insecureHTTP bool) *http.Client {
+	template := agentRuntimeTLSHTTPClientTemplate
+	if insecureHTTP {
+		template = agentRuntimeInsecureHTTPClientTemplate
+	}
+	client := *template
+	return &client
+}
+
+// NewPinnedAgentRuntimeHTTPClient returns an insecure AgentRuntime client whose
+// connections are pinned to one controller-validated Pod IP and target port.
+// Request URLs retain the Service authority for the HTTP Host header.
+func NewPinnedAgentRuntimeHTTPClient(dialAddress string) (*http.Client, error) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(dialAddress))
+	if err != nil {
+		return nil, fmt.Errorf("parse pinned AgentRuntime dial address: %w", err)
+	}
+	if net.ParseIP(strings.Trim(host, "[]")) == nil {
+		return nil, fmt.Errorf("pinned AgentRuntime dial address must use an IP literal")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return nil, fmt.Errorf("pinned AgentRuntime dial address has invalid port")
+	}
+	return newAgentRuntimeHTTPClient(true, net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(portNumber))), nil
+}
+
+func newAgentRuntimeHTTPClient(insecureHTTP bool, pinnedDialAddress ...string) *http.Client {
+	transport := cloneDefaultHTTPTransport()
+	if insecureHTTP {
+		transport.Proxy = nil
+		dialContext := transport.DialContext
+		if dialContext == nil {
+			dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+			dialContext = dialer.DialContext
+		}
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if len(pinnedDialAddress) > 0 && pinnedDialAddress[0] != "" {
+				return dialContext(ctx, network, pinnedDialAddress[0])
+			}
+			rootedAddress, err := rootAgentRuntimeDialAddress(address)
+			if err != nil {
+				return nil, err
+			}
+			return dialContext(ctx, network, rootedAddress)
+		}
+	}
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return errAgentRuntimeRedirect
+		},
+	}
+}
+
+func rootAgentRuntimeDialAddress(address string) (string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", err
+	}
+	if net.ParseIP(host) == nil && !strings.HasSuffix(host, ".") {
+		host += "."
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+func cloneDefaultHTTPTransport() *http.Transport {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
+		return transport.Clone()
+	}
+	return (&http.Transport{Proxy: http.ProxyFromEnvironment}).Clone()
+}
+
 func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
@@ -74,7 +168,7 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 
 func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 	var response HealthResponse
-	if err := c.getJSON(ctx, HealthPath, &response); err != nil {
+	if err := c.getJSON(ctx, HealthPath, &response, !c.publicDiscovery); err != nil {
 		return nil, err
 	}
 	if err := response.Validate(); err != nil {
@@ -85,7 +179,7 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 
 func (c *Client) Capabilities(ctx context.Context) (*CapabilitiesResponse, error) {
 	var response CapabilitiesResponse
-	if err := c.getJSON(ctx, CapabilitiesPath, &response); err != nil {
+	if err := c.getJSON(ctx, CapabilitiesPath, &response, !c.publicDiscovery); err != nil {
 		return nil, err
 	}
 	if err := response.Validate(); err != nil {
@@ -239,7 +333,7 @@ func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSe
 	return readSSEFrames(resp.Body, emit)
 }
 
-func (c *Client) getJSON(ctx context.Context, rel string, out any) error {
+func (c *Client) getJSON(ctx context.Context, rel string, out any, authenticated bool) error {
 	ctx, cancel := c.controlContext(ctx)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resolve(rel).String(), nil)
@@ -247,7 +341,9 @@ func (c *Client) getJSON(ctx context.Context, rel string, out any) error {
 		return safeClientError("get", 0, err.Error())
 	}
 	req.Header.Set("Accept", "application/json")
-	c.setAuthHeader(req)
+	if authenticated {
+		c.setAuthHeader(req)
+	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return safeClientError("get", 0, err.Error())

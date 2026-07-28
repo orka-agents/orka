@@ -81,6 +81,15 @@ type SessionStore interface {
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
 }
 
+// SessionTurnCommitter reserves chat turns and atomically commits transcript
+// messages with their token usage. expectedMessageCount is an optimistic guard
+// for the session revision owned by turnID. expiresAt bounds crash recovery.
+type SessionTurnCommitter interface {
+	AcquireChatTurn(ctx context.Context, session *SessionRecord, turnID string, expiresAt time.Time) error
+	ReleaseChatTurn(ctx context.Context, namespace, name, turnID string) error
+	CommitSessionTurn(ctx context.Context, session *SessionRecord, turnID string, expectedMessageCount int, messages []SessionMessage, inputTokens, outputTokens int) error
+}
+
 // GatewayEventStore handles durable normalized ingress records and atomic Session projection.
 type GatewayEventStore interface {
 	AdmitGatewayEvent(ctx context.Context, admission GatewayEventAdmission) (*GatewayEvent, bool, error)

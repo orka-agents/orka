@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,13 +18,139 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
+
+func TestRun_SIGTERMStopsResultDeliveryWithoutLateEvents(t *testing.T) {
+	testGeneralWorkerSIGTERM(t, "success")
+}
+
+func TestRun_SIGTERMStopsFailedCommandResultDeliveryWithoutLateEvents(t *testing.T) {
+	testGeneralWorkerSIGTERM(t, "failure")
+}
+
+func testGeneralWorkerSIGTERM(t *testing.T, commandMode string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGTERM subprocess behavior is Unix-specific")
+	}
+	var mu sync.Mutex
+	var eventTypes []string
+	resultStarted := make(chan struct{})
+	releaseResult := make(chan struct{})
+	var startedOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/internal/v1/results/default/sigterm-task"):
+			startedOnce.Do(func() { close(resultStarted) })
+			<-releaseResult
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasPrefix(r.URL.Path, "/internal/v1/events/default/task/sigterm-task"):
+			defer r.Body.Close() //nolint:errcheck
+			var body struct {
+				Type string `json:"type"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			eventTypes = append(eventTypes, body.Type)
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	defer close(releaseResult)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestGeneralWorkerSIGTERMHelper$", "-test.v")
+	cmd.Env = append(os.Environ(),
+		"ORKA_TEST_GENERAL_SIGTERM_HELPER=1",
+		"ORKA_TEST_GENERAL_SIGTERM_COMMAND="+commandMode,
+		workerenv.ControllerURL+"="+server.URL,
+		workerenv.ResultEndpoint+"=",
+		workerenv.TaskNamespace+"=default",
+		workerenv.TaskName+"=sigterm-task",
+		workerenv.GitRepo+"=",
+		workerenv.PriorTask+"=",
+		workerenv.ResultStdout+"=",
+		"ORKA_ARTIFACTS_DIR="+filepath.Join(t.TempDir(), "artifacts"),
+	)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper worker: %v", err)
+	}
+
+	select {
+	case <-resultStarted:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("timed out waiting for result submission; helper output:\n%s", output.String())
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("signal helper worker: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("helper worker exited with %v; output:\n%s", err, output.String())
+		}
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+		t.Fatalf("helper worker did not exit promptly after SIGTERM; output:\n%s", output.String())
+	}
+
+	mu.Lock()
+	gotEvents := append([]string(nil), eventTypes...)
+	mu.Unlock()
+	lateEventTypes := []string{
+		"ResultSubmitted", "ArtifactUploadCompleted", "ArtifactUploadFailed", "WorkerCompleted",
+	}
+	for _, lateType := range lateEventTypes {
+		if slices.Contains(gotEvents, lateType) {
+			t.Fatalf("events after SIGTERM = %#v, must not contain %s", gotEvents, lateType)
+		}
+	}
+}
+
+func TestGeneralWorkerSIGTERMHelper(t *testing.T) {
+	if os.Getenv("ORKA_TEST_GENERAL_SIGTERM_HELPER") != "1" {
+		return
+	}
+	originalArgs := os.Args
+	switch os.Getenv("ORKA_TEST_GENERAL_SIGTERM_COMMAND") {
+	case "failure":
+		os.Args = []string{"worker", "sh", "-c", "printf failed-result; exit 7"}
+	default:
+		os.Args = []string{"worker", "printf", "result ready"}
+	}
+	defer func() { os.Args = originalArgs }()
+
+	err := run()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("run() error = %v, want context canceled", err)
+	}
+}
 
 func TestRun_Success(t *testing.T) {
 	os.Args = []string{"worker", "echo", "hello"}

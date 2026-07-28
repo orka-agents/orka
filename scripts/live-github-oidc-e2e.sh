@@ -21,6 +21,9 @@ require_cmd() {
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+script_path="${script_dir}/$(basename "${BASH_SOURCE[0]}")"
+e2e_kind_helper="${script_dir}/e2e-kind-cluster.sh"
+e2e_kind_scoped_arg="--e2e-kind-scoped"
 
 kind_cluster="${KIND_CLUSTER:-orka-live-github-oidc-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
@@ -66,19 +69,155 @@ kontxt_tts_parent_task_name=""
 kontxt_tts_child_task_name=""
 kontxt_tts_coordinator_agent="live-tts-coordinator"
 kontxt_tts_worker_agent="live-tts-worker"
-work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-github-oidc-e2e.XXXXXX")"
-api_pf_log="${work_dir}/api-port-forward.log"
-kontxt_tts_pf_log="${work_dir}/kontxt-tts-port-forward.log"
-kontxt_downstream_pf_log="${work_dir}/kontxt-downstream-port-forward.log"
-kontxt_jwks_file="${work_dir}/kontxt-jwks.json"
-kontxt_token_file="${work_dir}/kontxt-token.txt"
-kontxt_key_file="${work_dir}/kontxt-key.pem"
-kontxt_kid_file="${work_dir}/kontxt-kid.txt"
-kontxt_fixture_generator="${work_dir}/generate-kontxt-fixture.go"
-kontxt_tts_parent_token_file="${work_dir}/kontxt-tts-parent-token.txt"
-kontxt_child_token_file="${work_dir}/kontxt-child-token.txt"
+work_dir=""
+api_pf_log=""
+kontxt_tts_pf_log=""
+kontxt_downstream_pf_log=""
+kontxt_jwks_file=""
+kontxt_token_file=""
+kontxt_key_file=""
+kontxt_kid_file=""
+kontxt_fixture_generator=""
+kontxt_tts_parent_token_file=""
+kontxt_child_token_file=""
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
-manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
+manager_kustomization_backup=""
+
+initialize_work_dir() {
+  work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-github-oidc-e2e.XXXXXX")" ||
+    die "failed to create temporary work directory"
+  api_pf_log="${work_dir}/api-port-forward.log"
+  kontxt_tts_pf_log="${work_dir}/kontxt-tts-port-forward.log"
+  kontxt_downstream_pf_log="${work_dir}/kontxt-downstream-port-forward.log"
+  kontxt_jwks_file="${work_dir}/kontxt-jwks.json"
+  kontxt_token_file="${work_dir}/kontxt-token.txt"
+  kontxt_key_file="${work_dir}/kontxt-key.pem"
+  kontxt_kid_file="${work_dir}/kontxt-kid.txt"
+  kontxt_fixture_generator="${work_dir}/generate-kontxt-fixture.go"
+  kontxt_tts_parent_token_file="${work_dir}/kontxt-tts-parent-token.txt"
+  kontxt_child_token_file="${work_dir}/kontxt-child-token.txt"
+  manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
+}
+
+hash_text() {
+  local value="$1"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "${value}" | sha256sum | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "${value}" | shasum -a 256 | awk '{print $1}'
+    return
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    printf '%s' "${value}" | openssl dgst -sha256 | awk '{print $NF}'
+    return
+  fi
+
+  die "no SHA-256 tool available (need sha256sum, shasum, or openssl)"
+}
+
+validate_scoped_target() {
+  local expected_context="kind-${kind_cluster}"
+  local state_dir="${E2E_CLUSTER_STATE_DIR:-}"
+  local lock_root="${E2E_CLUSTER_LOCK_ROOT:-}"
+  local operation_token="${E2E_KIND_OPERATION_TOKEN:-}"
+  local lock_dir
+  local current_context
+  local current_cluster
+  local identity_material
+  local server
+  local certificate_authority_data
+  local fingerprint
+  local state_fingerprint
+
+  [[ "${E2E_KIND_TARGET_READY:-}" == "1" ]] ||
+    die "refusing to run outside e2e-kind-cluster.sh run: target is not ready"
+  [[ -n "${KUBECONFIG:-}" && "${KUBECONFIG}" != *:* ]] ||
+    die "refusing to run without one isolated KUBECONFIG"
+  [[ -n "${state_dir}" && -n "${lock_root}" && -n "${operation_token}" ]] ||
+    die "refusing to run without helper state and operation lock metadata"
+  [[ -d "${state_dir}" && ! -L "${state_dir}" ]] ||
+    die "helper state directory is missing or unsafe"
+  [[ "${E2E_KIND_EXPECTED_CONTEXT:-}" == "${expected_context}" ]] ||
+    die "helper expected context does not match ${expected_context}"
+  [[ "${E2E_KIND_EXPECTED_CLUSTER:-}" == "${expected_context}" ]] ||
+    die "helper expected cluster does not match ${expected_context}"
+  [[ "${KUBECONFIG}" == "${state_dir}/target.kubeconfig" ]] ||
+    die "KUBECONFIG is not the helper-owned target kubeconfig"
+  [[ -f "${KUBECONFIG}" && ! -L "${KUBECONFIG}" ]] ||
+    die "helper-owned target kubeconfig is missing or unsafe"
+
+  local state_file
+  for state_file in cluster context kubeconfig fingerprint status; do
+    [[ -f "${state_dir}/${state_file}" && ! -L "${state_dir}/${state_file}" ]] ||
+      die "helper state is missing safe ${state_file} metadata"
+  done
+  [[ "$(<"${state_dir}/cluster")" == "${kind_cluster}" ]] ||
+    die "helper state cluster does not match ${kind_cluster}"
+  [[ "$(<"${state_dir}/context")" == "${expected_context}" ]] ||
+    die "helper state context does not match ${expected_context}"
+  [[ "$(<"${state_dir}/kubeconfig")" == "${KUBECONFIG}" ]] ||
+    die "helper state kubeconfig does not match KUBECONFIG"
+  [[ "$(<"${state_dir}/status")" == "ready" ]] ||
+    die "helper target state is not ready"
+
+  lock_dir="${lock_root}/kind-${kind_cluster}.operation"
+  [[ -d "${lock_dir}" && ! -L "${lock_dir}" ]] ||
+    die "helper operation lock is not held"
+  [[ -f "${lock_dir}/token" && ! -L "${lock_dir}/token" ]] ||
+    die "helper operation lock token is missing or unsafe"
+  [[ "$(<"${lock_dir}/token")" == "${operation_token}" ]] ||
+    die "helper operation lock token does not match"
+  [[ -f "${lock_dir}/state_dir" && ! -L "${lock_dir}/state_dir" ]] ||
+    die "helper operation lock state metadata is missing or unsafe"
+  [[ "$(<"${lock_dir}/state_dir")" == "${state_dir}" ]] ||
+    die "helper operation lock targets different state"
+
+  current_context="$(kubectl --kubeconfig "${KUBECONFIG}" config current-context)" ||
+    die "failed to read scoped Kubernetes context"
+  current_cluster="$(kubectl --kubeconfig "${KUBECONFIG}" config view --minify -o 'jsonpath={.contexts[0].context.cluster}')" ||
+    die "failed to read scoped Kubernetes cluster"
+  [[ "${current_context}" == "${expected_context}" ]] ||
+    die "scoped Kubernetes context ${current_context} does not match ${expected_context}"
+  [[ "${current_cluster}" == "${expected_context}" ]] ||
+    die "scoped Kubernetes cluster ${current_cluster} does not match ${expected_context}"
+
+  identity_material="$(kubectl --kubeconfig "${KUBECONFIG}" config view --raw --minify -o 'jsonpath={.clusters[0].cluster.server}{"\n"}{.clusters[0].cluster.certificate-authority-data}')" ||
+    die "failed to read scoped Kubernetes target identity"
+  server="${identity_material%%$'\n'*}"
+  [[ "${identity_material}" == *$'\n'* ]] ||
+    die "scoped Kubernetes target identity is incomplete"
+  certificate_authority_data="${identity_material#*$'\n'}"
+  [[ -n "${server}" && -n "${certificate_authority_data}" ]] ||
+    die "scoped Kubernetes target identity is incomplete"
+  fingerprint="$(hash_text "${identity_material}")"
+  state_fingerprint="$(<"${state_dir}/fingerprint")"
+  [[ "${fingerprint}" == "${state_fingerprint}" ]] ||
+    die "scoped Kubernetes target identity does not match helper state"
+}
+
+run_under_e2e_kind_helper() {
+  [[ -x "${e2e_kind_helper}" ]] || die "missing executable E2E Kind helper: ${e2e_kind_helper}"
+  log "Running live GitHub OIDC e2e through isolated Kind helper"
+  exec env KIND_CLUSTER="${kind_cluster}" \
+    "${e2e_kind_helper}" run --create --cleanup -- \
+    "${script_path}" "${e2e_kind_scoped_arg}" "$@"
+}
+
+preflight() {
+  require_cmd make
+  require_cmd go
+  require_cmd docker
+  require_cmd kind
+  require_cmd kubectl
+  require_cmd curl
+  require_cmd jq
+
+  require_github_oidc_token_source
+  [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
+}
 
 redact() {
   local text
@@ -215,8 +354,9 @@ on_exit() {
   kubectl delete configmap "${kontxt_jwks_name}" -n default --ignore-not-found=true >/dev/null 2>&1 || true
 
   restore_manager_kustomization
-  make cleanup-test-e2e KIND_CLUSTER="${kind_cluster}" >/dev/null 2>&1 || true
-  rm -rf "${work_dir}" >/dev/null 2>&1 || true
+  if [[ -n "${work_dir}" ]]; then
+    rm -rf "${work_dir}" >/dev/null 2>&1 || true
+  fi
 
   if [[ "${status}" -ne 0 ]]; then
     log "Live GitHub OIDC e2e failed"
@@ -306,7 +446,6 @@ require_github_oidc_token_source() {
     return 0
   fi
 
-  rm -rf "${work_dir}" >/dev/null 2>&1 || true
   die "GitHub OIDC token source is required: run in GitHub Actions with id-token: write or set ORKA_GITHUB_OIDC_TOKEN"
 }
 
@@ -1035,28 +1174,21 @@ expect_http_status() {
   fi
 }
 
-main() {
-  require_cmd make
-  require_cmd go
-  require_cmd docker
-  require_cmd kind
-  require_cmd kubectl
-  require_cmd curl
-  require_cmd jq
-
-  require_github_oidc_token_source
+run_e2e() {
+  preflight
+  validate_scoped_target
 
   cd "${repo_root}"
-  [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
-  cp "${manager_kustomization}" "${manager_kustomization_backup}"
+  initialize_work_dir
+  if ! cp "${manager_kustomization}" "${manager_kustomization_backup}"; then
+    rm -rf "${work_dir}" >/dev/null 2>&1 || true
+    die "failed to back up ${manager_kustomization}"
+  fi
 
-  trap 'status=$?; on_exit "${status}"; exit "${status}"' EXIT
+  trap 'status=$?; trap - EXIT; on_exit "${status}"; exit "${status}"' EXIT
 
+  log "Using validated Kind cluster ${kind_cluster}"
   generate_kontxt_jwks_fixture
-
-  log "Creating or reusing Kind cluster ${kind_cluster}"
-  run make setup-test-e2e KIND_CLUSTER="${kind_cluster}"
-  run kubectl config use-context "kind-${kind_cluster}"
 
   deploy_kontxt_jwks
 
@@ -1315,6 +1447,15 @@ main() {
   verify_live_tokens_absent_from_logs
 
   log "Live GitHub OIDC, kontxt, and TTS-backed delegation e2e passed"
+}
+
+main() {
+  if [[ "${1:-}" != "${e2e_kind_scoped_arg}" ]]; then
+    preflight
+    run_under_e2e_kind_helper "$@"
+  fi
+  shift
+  run_e2e "$@"
 }
 
 main "$@"

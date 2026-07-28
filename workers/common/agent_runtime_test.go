@@ -7,9 +7,11 @@ MIT License - see LICENSE file for details.
 package common
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -19,9 +21,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1322,6 +1327,154 @@ func TestRunAgent_ManagedExecutionWorkspaceReusesExistingGitCheckout(t *testing.
 	}
 }
 
+func TestUploadAgentArtifacts_ReturnsCancellationDuringFailureEvent(t *testing.T) {
+	prepareArtifactsDir(t)
+	writeArtifactFile(t, "evidence.txt", []byte("evidence"))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "artifact-failure-task")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	err := uploadAgentArtifacts(ctx, cancelOnRecordEventRecorder{cancel: cancel}, "agent", "artifact-failure-task")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("uploadAgentArtifacts() error = %v, want context canceled", err)
+	}
+}
+
+type cancelOnRecordEventRecorder struct {
+	cancel context.CancelFunc
+}
+
+func (r cancelOnRecordEventRecorder) Record(context.Context, string, ...EventOption) {
+	r.cancel()
+}
+
+func TestRunAgent_SIGTERMStopsArtifactDeliveryWithoutLateEvents(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGTERM subprocess behavior is Unix-specific")
+	}
+	var mu sync.Mutex
+	var eventTypes []string
+	artifactStarted := make(chan struct{})
+	releaseArtifact := make(chan struct{})
+	var startedOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/result":
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasPrefix(r.URL.Path, "/internal/v1/artifacts/default/sigterm-agent-task/"):
+			startedOnce.Do(func() { close(artifactStarted) })
+			<-releaseArtifact
+			w.WriteHeader(http.StatusCreated)
+		case strings.HasPrefix(r.URL.Path, "/internal/v1/events/default/task/sigterm-agent-task"):
+			defer r.Body.Close() //nolint:errcheck
+			var body struct {
+				Type string `json:"type"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			eventTypes = append(eventTypes, body.Type)
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	defer close(releaseArtifact)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunAgentSIGTERMHelper$", "-test.v")
+	cmd.Env = append(os.Environ(),
+		"ORKA_TEST_RUN_AGENT_SIGTERM_HELPER=1",
+		"ORKA_TEST_RUN_AGENT_WORKSPACE="+t.TempDir(),
+		workerenv.ControllerURL+"="+server.URL,
+		workerenv.ResultEndpoint+"="+server.URL+"/result",
+		workerenv.TaskNamespace+"=default",
+		workerenv.TaskName+"=sigterm-agent-task",
+		workerenv.Prompt+"=test prompt",
+		workerenv.GitRepo+"=",
+		workerenv.PriorTask+"=",
+		workerenv.ExecutionWorkspaceEnabled+"=",
+		workerenv.AgentSandboxEnabled+"=",
+		workerenv.ResultStdout+"=",
+		workerenv.EnableTelemetry+"=",
+		artifactsDirEnv+"="+filepath.Join(t.TempDir(), "artifacts"),
+	)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper agent: %v", err)
+	}
+
+	select {
+	case <-artifactStarted:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("timed out waiting for artifact upload; helper output:\n%s", output.String())
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("signal helper agent: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("helper agent exited with %v; output:\n%s", err, output.String())
+		}
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+		t.Fatalf("helper agent did not exit promptly after SIGTERM; output:\n%s", output.String())
+	}
+
+	mu.Lock()
+	gotEvents := append([]string(nil), eventTypes...)
+	mu.Unlock()
+	if !slices.Contains(gotEvents, events.ExecutionEventTypeResultSubmitted) {
+		t.Fatalf("events before SIGTERM = %#v, want ResultSubmitted before artifact upload", gotEvents)
+	}
+	lateEvents := map[string]bool{
+		events.ExecutionEventTypeArtifactUploadCompleted: true,
+		events.ExecutionEventTypeArtifactUploadFailed:    true,
+		events.ExecutionEventTypeWorkerCompleted:         true,
+	}
+	for _, eventType := range gotEvents {
+		if lateEvents[eventType] {
+			t.Fatalf("events after SIGTERM = %#v, must not contain %s", gotEvents, eventType)
+		}
+	}
+}
+
+func TestRunAgentSIGTERMHelper(t *testing.T) {
+	if os.Getenv("ORKA_TEST_RUN_AGENT_SIGTERM_HELPER") != "1" {
+		return
+	}
+	workspaceDir := os.Getenv("ORKA_TEST_RUN_AGENT_WORKSPACE")
+	err := RunAgent("test-agent", workspaceDir, 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		if err := WriteArtifactFile("evidence.txt", []byte("evidence")); err != nil {
+			return "", err
+		}
+		return "result ready", nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunAgent() error = %v, want context canceled", err)
+	}
+}
+
 func TestRunAgent_ExecutorEmptyResultSubmitsPlaceholder(t *testing.T) {
 	t.Setenv("ORKA_PROMPT", "test prompt")
 	t.Setenv("ORKA_TASK_NAME", "t1")
@@ -1684,7 +1837,7 @@ func TestRunAgent_SubstratePreHandoffRetainFailureDeletesNewWorkspace(t *testing
 
 	recorder := newRecordingWorkspaceExecutor()
 	recorder.waitReadyErr = fmt.Errorf("not ready")
-	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder, nil)
+	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder)
 	t.Cleanup(restoreExecutor)
 
 	err := runAgentInWorkspace(
@@ -1854,7 +2007,7 @@ func TestRunAgent_SubstratePreHandoffRetainFailureDeletesPooledWorkspace(t *test
 
 	recorder := newRecordingWorkspaceExecutor()
 	recorder.waitReadyErr = fmt.Errorf("not ready")
-	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder, nil)
+	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder)
 	t.Cleanup(restoreExecutor)
 
 	err := runAgentInWorkspace(
@@ -1923,7 +2076,7 @@ func TestRunAgent_SubstratePreHandoffRetainFailurePreservesReusedWorkspace(t *te
 		t.Fatalf("retain seeded workspace: %v", err)
 	}
 	recorder.waitReadyErr = fmt.Errorf("not ready")
-	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder, nil)
+	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder)
 	t.Cleanup(restoreExecutor)
 
 	err = runAgentInWorkspace(

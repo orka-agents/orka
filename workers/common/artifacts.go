@@ -7,7 +7,7 @@ MIT License - see LICENSE file for details.
 package common
 
 import (
-	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -29,6 +29,12 @@ const (
 	maxFileSize               = 10 << 20 // 10 MB
 	artifactPath              = "internal/v1/artifacts"
 )
+
+type pendingArtifact struct {
+	filename    string
+	data        []byte
+	contentType string
+}
 
 func artifactsDir() string {
 	if dir := strings.TrimSpace(os.Getenv(artifactsDirEnv)); dir != "" {
@@ -153,9 +159,23 @@ func artifactFilename(filename string) (string, error) {
 }
 
 // UploadArtifacts scans /tmp/artifacts and uploads each file to the controller.
+// It preserves the legacy background-context behavior for callers without a
+// worker lifecycle context.
+func UploadArtifacts() error {
+	return UploadArtifactsContext(context.Background())
+}
+
+// UploadArtifactsContext scans /tmp/artifacts and uploads each file to the controller.
 // It is called after SubmitResult to persist any files the agent wrote.
 // Returns nil if the artifacts directory does not exist or is empty.
-func UploadArtifacts() error {
+func UploadArtifactsContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	artifactRoot := artifactsDir()
 	info, err := os.Lstat(artifactRoot)
 	if os.IsNotExist(err) {
@@ -199,15 +219,12 @@ func UploadArtifacts() error {
 
 	saToken := workerServiceAccountToken()
 
-	type pendingArtifact struct {
-		filename    string
-		data        []byte
-		contentType string
-	}
-
 	pending := make([]pendingArtifact, 0, len(entries))
 	var uploadErrors []string
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if e.IsDir() {
 			continue
 		}
@@ -283,16 +300,35 @@ func UploadArtifacts() error {
 		})
 	}
 
+	return uploadPendingArtifacts(ctx, baseEndpoint, saToken, pending, uploadErrors)
+}
+
+func uploadPendingArtifacts(
+	ctx context.Context,
+	baseEndpoint, saToken string,
+	pending []pendingArtifact,
+	uploadErrors []string,
+) error {
 	for _, artifact := range pending {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		endpoint := fmt.Sprintf("%s/%s", baseEndpoint, url.PathEscape(artifact.filename))
-		if err := doPostWithContentType(endpoint, artifact.data, saToken, artifact.contentType); err != nil {
+		if err := doPostWithRetryContext(
+			ctx, "artifact upload", endpoint, artifact.data, saToken, artifact.contentType, 30*time.Second,
+		); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("artifact upload canceled: %w", ctxErr)
+			}
 			fmt.Fprintf(os.Stderr, "artifact: failed to upload %s: %v\n", artifact.filename, err)
 			uploadErrors = append(uploadErrors, fmt.Sprintf("%s: %v", artifact.filename, err))
-		} else {
-			fmt.Printf("artifact: uploaded %s (%d bytes, %s)\n", artifact.filename, len(artifact.data), artifact.contentType)
+			continue
 		}
+		fmt.Printf(
+			"artifact: uploaded %s (%d bytes, %s)\n",
+			artifact.filename, len(artifact.data), artifact.contentType,
+		)
 	}
-
 	if len(uploadErrors) > 0 {
 		return fmt.Errorf("some artifacts failed to upload: %s", strings.Join(uploadErrors, "; "))
 	}
@@ -358,42 +394,4 @@ func detectContentType(filename string, data []byte) string {
 	}
 
 	return http.DetectContentType(data)
-}
-
-func doPostWithContentType(endpoint string, data []byte, saToken, contentType string) error {
-	var lastErr error
-	for attempt := range maxRetries {
-		if attempt > 0 {
-			backoff := time.Duration(1<<uint(attempt)) * time.Second
-			time.Sleep(backoff)
-		}
-
-		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
-		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
-		}
-		req.Header.Set("Content-Type", contentType)
-		if saToken != "" {
-			req.Header.Set("Authorization", "Bearer "+saToken)
-		}
-
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = fmt.Errorf("HTTP request failed: %w", err)
-			fmt.Fprintf(os.Stderr, "artifact upload attempt %d/%d failed: %v\n", attempt+1, maxRetries, lastErr)
-			continue
-		}
-
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close() //nolint:errcheck
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil
-		}
-
-		lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-		fmt.Fprintf(os.Stderr, "artifact upload attempt %d/%d failed: %v\n", attempt+1, maxRetries, lastErr)
-	}
-
-	return fmt.Errorf("all %d artifact upload attempts failed: %w", maxRetries, lastErr)
 }

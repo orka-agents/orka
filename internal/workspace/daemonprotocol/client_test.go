@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -150,4 +153,155 @@ func TestClientUploadNoResponseAcceptsNoContent(t *testing.T) {
 	if err := client.UploadNoResponse(context.Background(), ActorRequest{ActorID: "actor-1"}, UploadRequest{Files: []UploadFile{{Path: "file"}}}); err != nil {
 		t.Fatalf("UploadNoResponse() error = %v", err)
 	}
+}
+
+func TestClientReusesConnectionAfterIgnoredJSONResponse(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			if r.Method != http.MethodPut || r.URL.Path != FilesPath {
+				t.Errorf("first request = %s %s, want PUT %s", r.Method, r.URL.Path, FilesPath)
+			}
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"ignored":true}`)
+		case 2:
+			if r.Method != http.MethodGet || r.URL.Path != HealthPath {
+				t.Errorf("second request = %s %s, want GET %s", r.Method, r.URL.Path, HealthPath)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %d: %s %s", requestCount, r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var traceMu sync.Mutex
+	gotConnections := make([]httptrace.GotConnInfo, 0, 2)
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			traceMu.Lock()
+			gotConnections = append(gotConnections, info)
+			traceMu.Unlock()
+		},
+	})
+	client := HTTPClient{RouterURL: server.URL, ActorDNSSuffix: "actors.test", HTTPClient: server.Client()}
+	actor := ActorRequest{ActorID: "actor-1"}
+	if err := client.UploadNoResponse(ctx, actor, UploadRequest{Files: []UploadFile{{Path: "file"}}}); err != nil {
+		t.Fatalf("UploadNoResponse() error = %v", err)
+	}
+	if err := client.Health(ctx, actor); err != nil {
+		t.Fatalf("Health() error = %v", err)
+	}
+
+	traceMu.Lock()
+	connections := append([]httptrace.GotConnInfo(nil), gotConnections...)
+	traceMu.Unlock()
+	if len(connections) != 2 {
+		t.Fatalf("GotConn callbacks = %d, want 2", len(connections))
+	}
+	if !connections[1].Reused {
+		t.Fatal("second daemon request did not reuse the first connection")
+	}
+}
+
+func TestClientReusesConnectionAfterLargeErrorResponse(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.Method != http.MethodGet || r.URL.Path != HealthPath {
+			t.Errorf("request = %s %s, want GET %s", r.Method, r.URL.Path, HealthPath)
+		}
+		if requestCount == 1 {
+			http.Error(w, strings.Repeat("x", 16<<10), http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	var traceMu sync.Mutex
+	gotConnections := make([]httptrace.GotConnInfo, 0, 2)
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			traceMu.Lock()
+			gotConnections = append(gotConnections, info)
+			traceMu.Unlock()
+		},
+	})
+	client := HTTPClient{RouterURL: server.URL, ActorDNSSuffix: "actors.test", HTTPClient: server.Client()}
+	actor := ActorRequest{ActorID: "actor-1"}
+	if err := client.Health(ctx, actor); err == nil {
+		t.Fatal("first Health() error = nil, want status error")
+	}
+	if err := client.Health(ctx, actor); err != nil {
+		t.Fatalf("second Health() error = %v", err)
+	}
+
+	traceMu.Lock()
+	connections := append([]httptrace.GotConnInfo(nil), gotConnections...)
+	traceMu.Unlock()
+	if len(connections) != 2 {
+		t.Fatalf("GotConn callbacks = %d, want 2", len(connections))
+	}
+	if !connections[1].Reused {
+		t.Fatal("request after large daemon error did not reuse the first connection")
+	}
+}
+
+func TestClientBoundsIgnoredResponseDrain(t *testing.T) {
+	const (
+		bodyBytes             = 1 << 20
+		maxExpectedDrainBytes = 64 << 10
+	)
+	body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", bodyBytes))}
+	client := HTTPClient{
+		RouterURL:      "http://router.test",
+		ActorDNSSuffix: "actors.test",
+		HTTPClient: httpDoerFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Header:     make(http.Header),
+				Body:       body,
+			}, nil
+		}),
+	}
+
+	if err := client.Health(t.Context(), ActorRequest{ActorID: "actor-1"}); err != nil {
+		t.Fatalf("Health() error = %v", err)
+	}
+	if !body.closed {
+		t.Fatal("response body was not closed")
+	}
+	if body.bytesRead == 0 {
+		t.Fatal("ignored response body was not drained")
+	}
+	if body.bytesRead > maxExpectedDrainBytes {
+		t.Fatalf("ignored response drain read %d bytes, want at most %d", body.bytesRead, maxExpectedDrainBytes)
+	}
+}
+
+type httpDoerFunc func(*http.Request) (*http.Response, error)
+
+func (f httpDoerFunc) Do(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type trackingReadCloser struct {
+	reader    io.Reader
+	bytesRead int
+	closed    bool
+}
+
+func (r *trackingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.bytesRead += n
+	return n, err
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
 }

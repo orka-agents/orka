@@ -10,6 +10,7 @@ import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -112,13 +113,10 @@ func (e *ValidationError) Error() string {
 // updateStatus updates the provider status
 func (r *ProviderReconciler) updateStatus(ctx context.Context, provider *corev1alpha1.Provider, ready bool, message string) (ctrl.Result, error) {
 	now := metav1.Now()
+	original := provider.Status.DeepCopy()
 
 	provider.Status.Ready = ready
 	provider.Status.Message = message
-
-	if ready {
-		provider.Status.LastValidated = &now
-	}
 
 	// Update condition
 	condition := metav1.Condition{
@@ -138,6 +136,13 @@ func (r *ProviderReconciler) updateStatus(ctx context.Context, provider *corev1a
 	}
 
 	meta.SetStatusCondition(&provider.Status.Conditions, condition)
+	statusChanged := !apiequality.Semantic.DeepEqual(*original, provider.Status)
+	if !statusChanged && (!ready || provider.Status.LastValidated != nil) {
+		return ctrl.Result{}, nil
+	}
+	if ready {
+		provider.Status.LastValidated = &now
+	}
 
 	if err := r.Status().Update(ctx, provider); err != nil {
 		return ctrl.Result{}, err

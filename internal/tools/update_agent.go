@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -59,16 +58,13 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 
 	// Update specified fields
-	if modelProvider := chatGetStringArg(a, modelField); modelProvider != "" {
-		parts := strings.SplitN(modelProvider, "/", 2)
-		if agent.Spec.Model == nil {
-			agent.Spec.Model = &corev1alpha1.ModelConfig{}
-		}
-		if len(parts) == 2 {
-			agent.Spec.Model.Provider = parts[0]
-			agent.Spec.Model.Name = parts[1]
-		} else {
-			agent.Spec.Model.Name = modelProvider
+	if modelValue, ok := a[modelField]; ok {
+		if err := applyAgentModelUpdate(agent, modelValue); err != nil {
+			return ChatToolErrorResult(
+				"invalid_arguments",
+				err.Error(),
+				"Provide model as an object with string provider/name fields and a numeric temperature",
+			)
 		}
 	}
 
@@ -100,4 +96,70 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 
 	return ChatToolSuccess(map[string]any{nameField: agent.Name, messageField: "Agent updated"})
+}
+
+func applyAgentModelUpdate(agent *corev1alpha1.Agent, value any) error {
+	switch model := value.(type) {
+	case map[string]any:
+		var provider *string
+		if value, ok := model["provider"]; ok {
+			providerValue, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("model.provider must be a string")
+			}
+			provider = &providerValue
+		}
+
+		var name *string
+		if value, ok := model[nameField]; ok {
+			nameValue, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("model.name must be a string")
+			}
+			name = &nameValue
+		}
+
+		var temperature *float64
+		if value, ok := model["temperature"]; ok {
+			temperatureValue, ok := value.(float64)
+			if !ok {
+				return fmt.Errorf("model.temperature must be a number")
+			}
+			temperature = &temperatureValue
+		}
+
+		if provider == nil && name == nil && temperature == nil {
+			return nil
+		}
+		if agent.Spec.Model == nil {
+			agent.Spec.Model = &corev1alpha1.ModelConfig{}
+		}
+		if provider != nil {
+			agent.Spec.Model.Provider = *provider
+		}
+		if name != nil {
+			agent.Spec.Model.Name = *name
+		}
+		if temperature != nil {
+			agent.Spec.Model.Temperature = temperature
+		}
+		return nil
+
+	case string:
+		if model == "" {
+			return nil
+		}
+		provider, name := splitModelString(model)
+		if agent.Spec.Model == nil {
+			agent.Spec.Model = &corev1alpha1.ModelConfig{}
+		}
+		if provider != "" {
+			agent.Spec.Model.Provider = provider
+		}
+		agent.Spec.Model.Name = name
+		return nil
+
+	default:
+		return fmt.Errorf("model must be an object or legacy provider/name string")
+	}
 }

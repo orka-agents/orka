@@ -3,18 +3,27 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/orka-agents/orka/internal/cli/client"
 )
 
 const (
-	statusError  = "error"
-	tasksAPIPath = "/api/v1/tasks"
+	statusContinueKey  = "continue"
+	statusError        = "error"
+	statusHealthPath   = "/healthz"
+	statusNextContinue = "next"
+	statusReadyPath    = "/readyz"
+	statusTaskOne      = "task-1"
+	tasksAPIPath       = "/api/v1/tasks"
 )
 
 func TestNewStatusCmd_Structure(t *testing.T) {
@@ -31,13 +40,13 @@ func TestNewStatusCmd_Structure(t *testing.T) {
 func statusServer(healthy, ready bool, tasks []client.TaskSummary, agents []client.AgentSummary) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz":
+		case statusHealthPath:
 			status := "ok"
 			if !healthy {
 				status = statusError
 			}
 			json.NewEncoder(w).Encode(map[string]any{"status": status}) //nolint:errcheck
-		case "/readyz":
+		case statusReadyPath:
 			status := "ok"
 			if !ready {
 				status = statusError
@@ -91,6 +100,117 @@ func TestNewStatusCmd_HealthyServer(t *testing.T) {
 	}
 }
 
+func TestNewStatusCmdCountsSelectedNamespaceAcrossAllTaskAndAgentPages(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	const (
+		selectedNamespace = "pagination-live"
+		taskContinuation  = "task-cursor+/=? segment"
+		agentContinuation = "agent-cursor+/=? segment"
+	)
+	var taskRequests, agentRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case statusHealthPath, statusReadyPath:
+			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
+		case tasksAPIPath:
+			taskRequests++
+			if got := r.URL.Query().Get("namespace"); got != selectedNamespace {
+				json.NewEncoder(w).Encode(map[string]any{"items": []any{}}) //nolint:errcheck
+				return
+			}
+			if got := r.URL.Query().Get("limit"); got != "100" {
+				t.Errorf("task limit query = %q, want 100", got)
+			}
+			switch taskRequests {
+			case 1:
+				items := make([]map[string]any, 100)
+				for i := range items {
+					items[i] = map[string]any{
+						"metadata": map[string]any{"name": fmt.Sprintf("task-%03d", i+1)},
+						"status":   map[string]any{"phase": "Running"},
+					}
+				}
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"items":    items,
+					"metadata": map[string]any{statusContinueKey: taskContinuation},
+				})
+			case 2:
+				if got := r.URL.Query().Get("continue"); got != taskContinuation {
+					t.Errorf("task continue query = %q, want %q", got, taskContinuation)
+				}
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"items": []map[string]any{
+						{
+							"metadata": map[string]any{"name": "task-101"},
+							"status":   map[string]any{"phase": "Succeeded"},
+						},
+					},
+					"metadata": map[string]any{},
+				})
+			default:
+				t.Errorf("unexpected task request %d", taskRequests)
+				w.WriteHeader(http.StatusBadRequest)
+			}
+		case agentsAPIPath:
+			agentRequests++
+			if got := r.URL.Query().Get("namespace"); got != selectedNamespace {
+				json.NewEncoder(w).Encode(map[string]any{"items": []any{}}) //nolint:errcheck
+				return
+			}
+			switch agentRequests {
+			case 1:
+				items := make([]map[string]any, 100)
+				for i := range items {
+					items[i] = map[string]any{
+						"metadata": map[string]any{"name": fmt.Sprintf("agent-%03d", i+1)},
+					}
+				}
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"items":    items,
+					"metadata": map[string]any{statusContinueKey: agentContinuation},
+				})
+			case 2:
+				if got := r.URL.Query().Get("continue"); got != agentContinuation {
+					t.Errorf("agent continue query = %q, want %q", got, agentContinuation)
+				}
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"items": []map[string]any{
+						{"metadata": map[string]any{"name": "agent-101"}},
+					},
+					"metadata": map[string]any{},
+				})
+			default:
+				t.Errorf("unexpected agent request %d", agentRequests)
+				w.WriteHeader(http.StatusBadRequest)
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"status", "--server", srv.URL, "--namespace", selectedNamespace})
+
+	stdout, err := captureOutput(t, root.Execute)
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if taskRequests != 2 {
+		t.Fatalf("task requests = %d, want 2", taskRequests)
+	}
+	if agentRequests != 2 {
+		t.Fatalf("agent requests = %d, want 2", agentRequests)
+	}
+	for _, want := range []string{"Running:    100", "Succeeded:  1", "Agents:    101"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout = %q, want %q", stdout, want)
+		}
+	}
+}
+
 func TestNewStatusCmd_UnhealthyServer(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -123,15 +243,83 @@ func TestNewStatusCmd_UnreachableServer(t *testing.T) {
 	}
 }
 
+func TestNewStatusCmd_HonorsCommandContextCancellation(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"status", "--server", srv.URL})
+	if err := root.ExecuteContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExecuteContext() error = %v, want context canceled", err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
+
+func TestNewStatusCmd_PropagatesCancellationDuringPagination(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var agentRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case statusHealthPath, statusReadyPath:
+			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
+		case tasksAPIPath:
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{"name": statusTaskOne},
+						"status":   map[string]any{"phase": "Running"},
+					},
+				},
+				"metadata": map[string]any{statusContinueKey: statusNextContinue},
+			})
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			cancel()
+		case agentsAPIPath:
+			agentRequests++
+			json.NewEncoder(w).Encode(map[string]any{"items": []any{}}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"status", "--server", srv.URL})
+	if err := root.ExecuteContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExecuteContext() error = %v, want context canceled", err)
+	}
+	if agentRequests != 0 {
+		t.Fatalf("agent requests = %d, want 0 after task pagination cancellation", agentRequests)
+	}
+}
+
 func TestNewStatusCmd_TaskErrors(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz":
+		case statusHealthPath:
 			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
-		case "/readyz":
+		case statusReadyPath:
 			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
 		case tasksAPIPath:
 			w.WriteHeader(http.StatusInternalServerError)
@@ -153,6 +341,60 @@ func TestNewStatusCmd_TaskErrors(t *testing.T) {
 	// Errors are printed to stderr, not returned
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestNewStatusCmdReportsPartialInventoryErrorInsteadOfUndercount(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	var agentRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case statusHealthPath, statusReadyPath:
+			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
+		case tasksAPIPath:
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items":    []any{},
+				"metadata": map[string]any{},
+			})
+		case agentsAPIPath:
+			agentRequests++
+			if agentRequests == 1 {
+				items := make([]map[string]any, 100)
+				for i := range items {
+					items[i] = map[string]any{
+						"metadata": map[string]any{"name": fmt.Sprintf("agent-%03d", i+1)},
+					}
+				}
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"items":    items,
+					"metadata": map[string]any{statusContinueKey: statusNextContinue},
+				})
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, "second page failed") //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	var stderr bytes.Buffer
+	root := newRootCmd()
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"status", "--server", srv.URL})
+
+	stdout, err := captureOutput(t, root.Execute)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if strings.Contains(stdout, "Agents:    100") {
+		t.Fatalf("stdout = %q, must not report a partial count as complete", stdout)
+	}
+	if !strings.Contains(stderr.String(), "after 100 items on page 2") {
+		t.Fatalf("stderr = %q, want partial inventory error", stderr.String())
 	}
 }
 

@@ -318,6 +318,160 @@ func TestValidateContextToken_Kontxt(t *testing.T) {
 	}
 }
 
+func TestNewAuthMiddleware_ContextTokenRepeatedInvalidSignatureReusesJWKS(t *testing.T) {
+	provider := newCacheTestOIDCProvider(t)
+	snapshot := provider.snapshot()
+	cfg := testContextTokenConfig(t, snapshot, "")
+	cfg.Profiles[0].JWKSURL = ""
+	token := tamperJWTSignature(t, issueTestContextToken(t, snapshot, nil, nil))
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(nil, AuthConfig{ContextTokens: cfg}))
+	app.Get("/test", func(ctx fiber.Ctx) error {
+		return ctx.SendStatus(http.StatusOK)
+	})
+
+	for i := range 8 {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.Header.Set(KontxtHeaderName, token)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("request %d failed: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("request %d status = %d, want %d", i, resp.StatusCode, http.StatusUnauthorized)
+		}
+	}
+
+	if got := provider.jwksHits.Load(); got != 1 {
+		t.Fatalf("JWKS fetches = %d, want 1 for repeated invalid context tokens", got)
+	}
+	if got := provider.discoveryHits.Load(); got != 1 {
+		t.Fatalf("OIDC discovery fetches = %d, want 1 for repeated invalid context tokens", got)
+	}
+}
+
+func TestValidateContextToken_KontxtAuthorizationClaimCompatibility(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	profile := testContextTokenConfig(t, provider, "").Profiles[0]
+
+	tests := []struct {
+		name string
+		tctx map[string]any
+	}{
+		{
+			name: "string and list forms",
+			tctx: map[string]any{
+				"namespace":        "team-a",
+				"taskType":         "agent",
+				"taskName":         "task-1",
+				"task":             "team-a/task-1",
+				"agent":            "team-a/coder",
+				"repo":             "https://github.com/orka-agents/orka",
+				"branch":           "main",
+				"ref":              "refs/heads/main",
+				"configMap":        "agent-policy",
+				"secret":           "git-credentials",
+				"provider":         "openai",
+				"model":            "gpt-5.4",
+				"allowedAgents":    "team-a/coder,team-a/reviewer",
+				"allowedTools":     []any{"file_read", "web_search"},
+				"allowedProviders": "openai,anthropic",
+				"allowedModels":    []any{"gpt-5.4", "claude-sonnet-4"},
+			},
+		},
+		{
+			name: "empty deny-all lists and unknown extensions",
+			tctx: map[string]any{
+				"allowedAgents":    []any{},
+				"allowedTools":     []any{},
+				"allowedProviders": []any{},
+				"allowedModels":    []any{},
+				"customPolicy": map[string]any{
+					"mixed": []any{"value", 42, true},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token := issueTestContextToken(t, provider, nil, map[string]any{"tctx": tt.tctx})
+			ctxToken, err := validateContextToken(context.Background(), token, profile)
+			if err != nil {
+				t.Fatalf("validateContextToken returned error: %v", err)
+			}
+			if _, ok := tt.tctx["customPolicy"]; ok {
+				if _, ok := ctxToken.TransactionContext["customPolicy"]; !ok {
+					t.Fatal("validateContextToken dropped unknown transaction-context extension")
+				}
+			}
+		})
+	}
+}
+
+func TestValidateContextToken_KontxtRejectsMalformedAuthorizationClaims(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	profile := testContextTokenConfig(t, provider, "").Profiles[0]
+
+	for _, claim := range []string{
+		"namespace",
+		"taskType",
+		"taskName",
+		"task",
+		"agent",
+		"repo",
+		"branch",
+		"ref",
+		"configMap",
+		"secret",
+		"provider",
+		"model",
+	} {
+		t.Run("wrong type "+claim, func(t *testing.T) {
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"tctx": map[string]any{claim: 42},
+			})
+			_, err := validateContextToken(context.Background(), token, profile)
+			if err == nil || !strings.Contains(err.Error(), claim) {
+				t.Fatalf("validateContextToken error = %v, want invalid %s claim", err, claim)
+			}
+		})
+	}
+
+	for _, claim := range []string{"allowedAgents", "allowedTools", "allowedProviders", "allowedModels"} {
+		t.Run("mixed type "+claim, func(t *testing.T) {
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"tctx": map[string]any{claim: []any{"allowed", 42}},
+			})
+			_, err := validateContextToken(context.Background(), token, profile)
+			if err == nil || !strings.Contains(err.Error(), claim) {
+				t.Fatalf("validateContextToken error = %v, want invalid %s claim", err, claim)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name  string
+		claim string
+		value any
+	}{
+		{name: "blank scalar", claim: "namespace", value: " "},
+		{name: "blank list string", claim: "allowedTools", value: " "},
+		{name: "invalid secret name", claim: "secret", value: "Invalid_Secret"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"tctx": map[string]any{tt.claim: tt.value},
+			})
+			_, err := validateContextToken(context.Background(), token, profile)
+			if err == nil || !strings.Contains(err.Error(), tt.claim) {
+				t.Fatalf("validateContextToken error = %v, want invalid %s claim", err, tt.claim)
+			}
+		})
+	}
+}
+
 func TestValidateContextToken_KontxtUsesDefaultJWKSURL(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	cfg, err := NewContextTokenConfig(ContextTokenProfileKontxt, provider.server.URL, provider.aud, "", "")

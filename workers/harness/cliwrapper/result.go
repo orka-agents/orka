@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
@@ -88,6 +90,9 @@ func PrepareTurnContext(
 	if turn == nil {
 		return nil, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	cfg := agentConfigForTurn(*turn)
 	root := strings.TrimSpace(workspaceRoot)
 	if root == "" {
@@ -107,21 +112,36 @@ func PrepareTurnContext(
 				return cfg, fmt.Errorf("validate PR base repo: %w", err)
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return cfg, err
+		}
 		if err := common.EnsureWorkspaceArtifactsLink(root); err != nil {
 			return cfg, err
 		}
-		if err := materializeTurnSkillFiles(skillsRoot, turn.Metadata[turnMetadataSkillsFiles]); err != nil {
+		if err := ctx.Err(); err != nil {
 			return cfg, err
 		}
-		if err := common.PrepareWorkspace(root); err != nil {
+		if err := materializeTurnSkillFiles(ctx, skillsRoot, turn.Metadata[turnMetadataSkillsFiles]); err != nil {
 			return cfg, err
 		}
-		if err := common.PreparePullRequestReviewContext(root, cfg); err != nil {
+		if err := common.PrepareWorkspace(ctx, root); err != nil {
+			return cfg, err
+		}
+		if err := common.PreparePullRequestReviewContext(ctx, root, cfg); err != nil {
+			return cfg, err
+		}
+		if err := ctx.Err(); err != nil {
 			return cfg, err
 		}
 		if err := common.PrepareSecurityReviewContext(root, cfg); err != nil {
 			return cfg, err
 		}
+		if err := ctx.Err(); err != nil {
+			return cfg, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return cfg, err
 	}
 	turn.Prompt = cfg.Prompt
 	turn.Env = setEnv(turn.Env, workerenv.Prompt, cfg.Prompt)
@@ -132,6 +152,22 @@ func PrepareTurnContext(
 		turn.Env = setEnv(turn.Env, workerenv.SkillsDir, skillsRoot)
 	}
 	return cfg, nil
+}
+
+func appendWorkspacePreparationFailure(
+	server *Server,
+	turn *turnState,
+	ctx context.Context,
+	err error,
+) {
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded), errors.Is(err, context.DeadlineExceeded):
+		turn.appendFrame(server.failedFrame(turn, "timeout", "workspace preparation timed out", true))
+	case errors.Is(ctx.Err(), context.Canceled), errors.Is(err, context.Canceled):
+		turn.appendFrame(server.frame(turn, harness.FrameTurnCancelled, "turn cancelled", nil))
+	default:
+		turn.appendFrame(server.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+	}
 }
 
 func turnSkillsRoot(turn *TurnContext, _ string) string {
@@ -148,7 +184,10 @@ func turnSkillsRoot(turn *TurnContext, _ string) string {
 	return filepath.Join(os.TempDir(), "orka-harness-skills", hex.EncodeToString(sum[:8]))
 }
 
-func materializeTurnSkillFiles(skillsRoot, raw string) error {
+func materializeTurnSkillFiles(ctx context.Context, skillsRoot, raw string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	skillsRoot = strings.TrimSpace(skillsRoot)
 	raw = strings.TrimSpace(raw)
 	if skillsRoot == "" || raw == "" {
@@ -158,13 +197,22 @@ func materializeTurnSkillFiles(skillsRoot, raw string) error {
 	if err := json.Unmarshal([]byte(raw), &files); err != nil {
 		return fmt.Errorf("parse turn skill files: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := removeAllForChild(skillsRoot); err != nil {
 		return fmt.Errorf("clear turn skills directory: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(skillsRoot, 0o755); err != nil {
 		return fmt.Errorf("create turn skills directory: %w", err)
 	}
 	for rel, content := range files {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		clean := filepath.Clean(strings.TrimSpace(rel))
 		if clean == "." || clean == "" || filepath.IsAbs(clean) ||
 			strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
@@ -174,11 +222,14 @@ func materializeTurnSkillFiles(skillsRoot, raw string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return fmt.Errorf("create turn skill file directory: %w", err)
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
 			return fmt.Errorf("write turn skill file %q: %w", rel, err)
 		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 func EnsureTurnRequiredSecurityArtifacts(

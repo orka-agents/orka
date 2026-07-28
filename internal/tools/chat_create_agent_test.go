@@ -473,7 +473,7 @@ func TestParseRuntimeConfig_RejectsOpencodeWithoutModel(t *testing.T) {
 	if err := json.Unmarshal([]byte(errResult), &result); err != nil {
 		t.Fatalf("unmarshal error result: %v", err)
 	}
-	if result.ErrorType != "invalid_arguments" || !strings.Contains(result.Error, "model.name is required for opencode") {
+	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "model.name is required for opencode") {
 		t.Fatalf("error result = %#v, want invalid_arguments for missing model", result)
 	}
 }

@@ -633,6 +633,14 @@ func TestCountActiveTasks(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
 	}
+	cancelledTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-cancelled", Namespace: testNS},
+		Spec: corev1alpha1.TaskSpec{
+			AgentRef: &corev1alpha1.AgentReference{Name: "count-agent"},
+			Prompt:   "do something",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
+	}
 	otherAgentTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "task-other", Namespace: testNS},
 		Spec: corev1alpha1.TaskSpec{
@@ -675,7 +683,7 @@ func TestCountActiveTasks(t *testing.T) {
 		},
 		{
 			name: "all terminal - zero active",
-			objs: []runtime.Object{succeededTask, failedTask},
+			objs: []runtime.Object{succeededTask, failedTask, cancelledTask},
 			want: 0,
 		},
 	}
@@ -996,6 +1004,79 @@ func TestAgentReconcile_WithActiveTasks(t *testing.T) {
 	_ = fc.Get(context.Background(), types.NamespacedName{Name: "reconcile-active", Namespace: testNS}, updated)
 	if updated.Status.ActiveTasks != 1 {
 		t.Errorf("expected ActiveTasks=1, got %d", updated.Status.ActiveTasks)
+	}
+}
+
+func TestAgentReconcileSkipsUnchangedActiveStatusUpdate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("reconcile-active-stable")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "active-stable-task", Namespace: testNS},
+		Spec: corev1alpha1.TaskSpec{
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	countingClient := &statusUpdateCountingClient{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(agent, task).
+			WithStatusSubresource(agent).
+			Build(),
+	}
+	reconciler := &AgentReconciler{Client: countingClient, Scheme: scheme}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}}
+
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+	if countingClient.statusUpdateCount != 1 {
+		t.Fatalf("status updates after first reconcile = %d, want 1", countingClient.statusUpdateCount)
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+	if countingClient.statusUpdateCount != 1 {
+		t.Fatalf("status updates after second reconcile = %d, want no additional update", countingClient.statusUpdateCount)
+	}
+}
+
+func TestAgentReconcileFinalActiveTaskTransitionStartsIdleTTL(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("reconcile-idle-transition")
+	agent.Spec.TTLAfterLastTask = &metav1.Duration{Duration: 10 * time.Minute}
+	staleLastUsed := metav1.NewTime(time.Now().Add(-time.Hour))
+	agent.Status.ActiveTasks = 1
+	agent.Status.LastUsed = &staleLastUsed
+	fc := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(agent).
+		WithStatusSubresource(agent).
+		Build()
+	reconciler := &AgentReconciler{Client: fc, Scheme: scheme}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("RequeueAfter = %v, want idle TTL requeue", result.RequeueAfter)
+	}
+	updated := &corev1alpha1.Agent{}
+	if err := fc.Get(context.Background(), req.NamespacedName, updated); err != nil {
+		t.Fatalf("Get(Agent) error = %v, want agent retained for idle TTL", err)
+	}
+	if updated.Status.ActiveTasks != 0 {
+		t.Fatalf("ActiveTasks = %d, want 0", updated.Status.ActiveTasks)
+	}
+	if updated.Status.LastUsed == nil || !updated.Status.LastUsed.After(staleLastUsed.Time) {
+		t.Fatalf("LastUsed = %v, want timestamp after stale active value %v", updated.Status.LastUsed, staleLastUsed.Time)
 	}
 }
 

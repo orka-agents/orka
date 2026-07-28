@@ -161,10 +161,33 @@ spec:
                     enum:
                     - external-endpoint
                     type: string
+                  transportSecurity:
+                    description: |-
+                      TransportSecurity declares the required endpoint transport. An unmarked
+                      omitted value is treated as TLS. The supported CRD upgrade helper marks
+                      objects created before transport policy existed so the controller can
+                      backfill HTTPS as tls and validated same-namespace HTTP as
+                      insecure-cluster-local-http.
+                      insecure-cluster-local-http is an explicit opt-in limited to a selector-backed,
+                      non-ExternalName Service in the same namespace as the AgentRuntime, addressed
+                      with its service.namespace.svc.<cluster-domain> FQDN.
+                    enum:
+                    - tls
+                    - insecure-cluster-local-http
+                    type: string
                 required:
                 - endpoint
                 - mode
                 type: object
+                x-kubernetes-validations:
+                - message: deployment.endpoint must use https when transportSecurity
+                    is tls
+                  rule: '!has(self.transportSecurity) || self.transportSecurity !=
+                    ''tls'' || self.endpoint.startsWith(''https://'')'
+                - message: deployment.endpoint must use http when transportSecurity
+                    is insecure-cluster-local-http
+                  rule: '!has(self.transportSecurity) || self.transportSecurity !=
+                    ''insecure-cluster-local-http'' || self.endpoint.startsWith(''http://'')'
             required:
             - clientAuth
             - contractVersion
@@ -1715,6 +1738,17 @@ spec:
                     maximum: 1000
                     minimum: 1
                     type: integer
+                  defaultReasoningEffort:
+                    description: |-
+                      DefaultReasoningEffort configures the CLI runtime reasoning effort for tasks using this Agent.
+                      Runtime adapters reject values they do not support (for example, Codex does not support max).
+                    enum:
+                    - low
+                    - medium
+                    - high
+                    - xhigh
+                    - max
+                    type: string
                   runtimeRef:
                     description: RuntimeRef selects an admin-governed AgentRuntime
                       for custom/BYO harness runtimes.
@@ -3017,12 +3051,25 @@ spec:
             description: RepositoryMonitorSpec defines the desired state of RepositoryMonitor.
             properties:
               agents:
-                description: Agents configures the agents used by monitor review and
-                  repair tasks.
+                description: Agents configures the agents used by monitor review,
+                  issue, and repair tasks.
                 properties:
                   implementer:
                     description: Implementer is the agent used for guarded issue implementation
                       tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  planner:
+                    description: Planner is the agent used for issue planning tasks.
                     properties:
                       name:
                         description: Name is the name of the Agent
@@ -3047,9 +3094,35 @@ spec:
                     required:
                     - name
                     type: object
+                  researcher:
+                    description: Researcher is the agent used for issue research tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
                   reviewer:
                     description: Reviewer is the agent used for pull-request review
                       tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  triager:
+                    description: Triager is the agent used for issue triage tasks.
                     properties:
                       name:
                         description: Name is the name of the Agent
@@ -3110,6 +3183,87 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
+              issueWorkflow:
+                description: IssueWorkflow controls issue triage, research, planning,
+                  and implementation behavior.
+                properties:
+                  implementation:
+                    description: Implementation controls bounded implementation tasks.
+                    properties:
+                      allowedPaths:
+                        description: |-
+                          AllowedPaths optionally restricts implementation patch files to these path globs/prefixes.
+                          Examples: api/**, internal/**, docs/**.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                      branchPrefix:
+                        description: BranchPrefix is the branch prefix for implementation
+                          push branches. Defaults to orka/issue.
+                        type: string
+                      enabled:
+                        description: Enabled enables implementation. Defaults to true
+                          when an implementer agent is configured and a command requests
+                          it.
+                        type: boolean
+                      maxActive:
+                        description: MaxActive bounds concurrently active issue implementation/mutation
+                          jobs per monitor. Defaults to 2.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      maxAttemptsPerIssue:
+                        description: MaxAttemptsPerIssue bounds implementation attempts
+                          for one issue. Defaults to 2.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      maxChangedFiles:
+                        description: MaxChangedFiles bounds changed files in an implementation
+                          patch. Defaults to 12.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      requireApprovedPlan:
+                        description: RequireApprovedPlan blocks implementation unless
+                          the latest plan was approved.
+                        type: boolean
+                    type: object
+                  planning:
+                    description: Planning controls read-only implementation plan generation.
+                    properties:
+                      enabled:
+                        description: Enabled enables planning. Defaults to true when
+                          a planner agent is configured and a command requests it.
+                        type: boolean
+                      requireHumanApprovalFor:
+                        description: RequireHumanApprovalFor names risk levels or
+                          plan categories that require explicit approval.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                    type: object
+                  research:
+                    description: Research controls read-only issue research.
+                    properties:
+                      enabled:
+                        description: Enabled enables this phase. Defaults to true
+                          when the corresponding agent is configured and a command
+                          requests it.
+                        type: boolean
+                    type: object
+                  triage:
+                    description: Triage controls read-only issue classification.
+                    properties:
+                      enabled:
+                        description: Enabled enables this phase. Defaults to true
+                          when the corresponding agent is configured and a command
+                          requests it.
+                        type: boolean
+                    type: object
+                type: object
               owner:
                 description: Owner is the repository owner or organization.
                 type: string
@@ -3347,6 +3501,20 @@ spec:
                       enabled:
                         description: Enabled enables issue monitoring.
                         type: boolean
+                      excludeLabels:
+                        description: ExcludeLabels excludes matching issues from actionable
+                          inventory.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                      includeLabels:
+                        description: IncludeLabels optionally restricts issue inventory
+                          to issues with any of these labels.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
                       maxPerRun:
                         description: MaxPerRun limits issues selected by one background
                           run.
@@ -3379,6 +3547,79 @@ spec:
               timeZone:
                 description: TimeZone is the IANA time zone for the schedule.
                 type: string
+              triggers:
+                description: Triggers configures external events that create durable
+                  monitor commands.
+                properties:
+                  github:
+                    description: GitHub configures GitHub webhook triggers.
+                    properties:
+                      labels:
+                        description: Labels maps GitHub labels to durable RepositoryMonitor
+                          commands.
+                        properties:
+                          consumeCommandLabels:
+                            description: ConsumeCommandLabels removes accepted one-shot
+                              command labels after durable intake.
+                            type: boolean
+                          enabled:
+                            description: Enabled enables durable command intake for
+                              configured GitHub labels.
+                            type: boolean
+                          issues:
+                            description: Issues maps issue command intents to label
+                              names. Empty fields use the default orka:* labels.
+                            properties:
+                              approvePlan:
+                                type: string
+                              decompose:
+                                type: string
+                              implement:
+                                type: string
+                              plan:
+                                type: string
+                              research:
+                                type: string
+                              resume:
+                                type: string
+                              stop:
+                                type: string
+                              triage:
+                                type: string
+                            type: object
+                          pullRequests:
+                            description: PullRequests maps pull-request command intents
+                              to label names. Empty fields use the default orka:*
+                              labels.
+                            properties:
+                              automerge:
+                                type: string
+                              fix:
+                                type: string
+                              fixCI:
+                                type: string
+                              resume:
+                                type: string
+                              review:
+                                type: string
+                              stop:
+                                type: string
+                              updateBranch:
+                                type: string
+                            type: object
+                          requireActorPermission:
+                            default: write
+                            description: |-
+                              RequireActorPermission is the minimum GitHub permission for mutating/code-executing commands.
+                              Supported values are write, maintain, and admin. Defaults to write.
+                            enum:
+                            - write
+                            - maintain
+                            - admin
+                            type: string
+                        type: object
+                    type: object
+                type: object
               validation:
                 description: Validation configures deterministic validation commands
                   for repair.
@@ -3406,6 +3647,11 @@ spec:
             properties:
               activeRepairs:
                 description: ActiveRepairs is the count of repair jobs currently active.
+                format: int32
+                type: integer
+              blockedIssues:
+                description: BlockedIssues is the count of issues blocked by guard
+                  labels or workflow policy.
                 format: int32
                 type: integer
               blockedItems:
@@ -3497,9 +3743,19 @@ spec:
                   in status.
                 format: int64
                 type: integer
+              openIssues:
+                description: OpenIssues is the current count of open issues seen by
+                  the monitor.
+                format: int32
+                type: integer
               openPullRequests:
                 description: OpenPullRequests is the current count of open pull requests
                   seen by the monitor.
+                format: int32
+                type: integer
+              pendingIssueActions:
+                description: PendingIssueActions is the count of issues waiting for
+                  a queued workflow action.
                 format: int32
                 type: integer
               pendingReviews:
@@ -6331,6 +6587,17 @@ spec:
                     description: AuthRefResourceVersion is the auth Secret resourceVersion
                       validated before starting the turn.
                     type: string
+                  backendAddress:
+                    description: BackendAddress is the non-secret Pod IP and target
+                      port pinned for the turn.
+                    type: string
+                  backendPodName:
+                    description: BackendPodName is the selector-matched Pod chosen
+                      for an insecure cluster-local HTTP turn.
+                    type: string
+                  backendPodUID:
+                    description: BackendPodUID is the immutable UID of BackendPodName.
+                    type: string
                   contractVersion:
                     description: ContractVersion is the Orka harness contract version
                       used for the turn.
@@ -6351,6 +6618,14 @@ spec:
                   runtimeRefName:
                     description: RuntimeRefName is the AgentRuntime name for custom
                       runtimeRef turns. Empty means built-in CLI wrapper.
+                    type: string
+                  transportSecurity:
+                    description: |-
+                      TransportSecurity is the AgentRuntime transport policy selected when the turn started.
+                      Empty is interpreted as tls for compatibility with tasks created before this field existed.
+                    enum:
+                    - tls
+                    - insecure-cluster-local-http
                     type: string
                 type: object
               iteration:

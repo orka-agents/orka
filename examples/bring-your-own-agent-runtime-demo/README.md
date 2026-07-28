@@ -53,7 +53,7 @@ kubectl get task support-escalation-demo -o yaml
 
 Expected flow:
 
-1. `AgentRuntime/support-http-runtime` probes `/v1/health`, `/v1/capabilities`, observed turn conformance, and the advertised brokered read profile.
+1. `AgentRuntime/support-http-runtime` explicitly opts into cluster-local HTTP, validates the same-namespace selector-backed Service, then probes `/v1/health`, `/v1/capabilities`, observed turn conformance, and the advertised brokered read profile.
 2. `Task/support-escalation-demo` starts a remote turn through the namespace-local facade.
 3. The runtime emits `ToolCallRequested` for `support-ticket-lookup`.
 4. Orka validates `Task.spec.agentRuntime.allowedTools`, loads the same-namespace `Tool`, resolves any downstream credentials inside Orka, executes it, records brokered events, and returns a `ToolCallResult` via `/v1/turns/{turnID}/continue`.
@@ -97,6 +97,7 @@ The workflow, Tool CRDs, approval UX, and task/result APIs remain Orka-owned. Re
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | `AgentRuntime` Ready=False mentioning `orka.ai/agent-runtime-auth` | bearer Secret missing opt-in label | add `orka.ai/agent-runtime-auth: "true"` |
+| Ready=False mentions `transportSecurity` or HTTPS | an HTTP endpoint omitted the explicit cluster-local opt-in, used a cross-namespace/external target, or points at an unsafe Service | use HTTPS, or set `insecure-cluster-local-http` only for a same-namespace selector-backed non-`ExternalName` Service |
 | Ready=False endpoint binding error | Secret annotation does not match `spec.deployment.endpoint` | update `orka.ai/agent-runtime-endpoint` |
 | Ready=False brokered class missing | runtime did not advertise a required `brokeredToolClasses` value | fix adapter capabilities or narrow `spec.capabilities` |
 | Task fails `tool not allowed` | remote requested a tool not in `Task.spec.agentRuntime.allowedTools` | add the intended tool or reject the backend behavior |

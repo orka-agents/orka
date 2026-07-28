@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -210,6 +211,7 @@ func (r *SubstrateActorPoolReconciler) updateSubstrateActorPoolStatus(
 	message string,
 ) (ctrl.Result, error) {
 	now := metav1.Now()
+	original := pool.Status.DeepCopy()
 	pool.Status.Phase = phase
 	pool.Status.ObservedGeneration = pool.Generation
 	pool.Status.WorkerCount = int32(max(density.WorkerCount, 0))
@@ -233,6 +235,9 @@ func (r *SubstrateActorPoolReconciler) updateSubstrateActorPoolStatus(
 		condition.Message = pool.Status.Message
 	}
 	meta.SetStatusCondition(&pool.Status.Conditions, condition)
+	if apiequality.Semantic.DeepEqual(*original, pool.Status) {
+		return ctrl.Result{RequeueAfter: substrateActorPoolRequeue}, nil
+	}
 	if err := r.Status().Update(ctx, pool); err != nil {
 		return ctrl.Result{}, err
 	}

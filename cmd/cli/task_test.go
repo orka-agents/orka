@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+const testTaskLogsPath = "/api/v1/tasks/my-task/logs"
+
 func TestFormatAge(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -204,7 +206,7 @@ func taskAPIServer() *httptest.Server {
 				},
 				"status": map[string]any{"phase": "Succeeded"},
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/my-task/logs":
+		case r.Method == http.MethodGet && r.URL.Path == testTaskLogsPath:
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 				"logs": "line1\nline2\n",
 			})
@@ -561,7 +563,7 @@ func TestNewTaskLogsCmd_Follow(t *testing.T) {
 	t.Setenv("HOME", tmp)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/tasks/my-task/logs" && r.URL.Query().Get("follow") == "true" {
+		if r.URL.Path == testTaskLogsPath && r.URL.Query().Get("follow") == "true" {
 			w.Header().Set("Content-Type", "text/event-stream")
 			flusher, ok := w.(http.Flusher)
 			fmt.Fprint(w, "event: log\ndata: {\"line\":\"log line 1\"}\n\n") //nolint:errcheck
@@ -580,6 +582,29 @@ func TestNewTaskLogsCmd_Follow(t *testing.T) {
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestNewTaskLogsCmd_FollowReturnsStreamError(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testTaskLogsPath || r.URL.Query().Get("follow") != "true" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: error\ndata: {\"error\":\"failed to read task logs: unexpected EOF\"}\n\n") //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "logs", "--server", srv.URL, "--follow", "my-task"})
+
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "failed to read task logs: unexpected EOF") {
+		t.Fatalf("Execute() error = %v, want streamed task-log error", err)
 	}
 }
 

@@ -1367,6 +1367,17 @@ spec:
                     maximum: 1000
                     minimum: 1
                     type: integer
+                  defaultReasoningEffort:
+                    description: |-
+                      DefaultReasoningEffort configures the CLI runtime reasoning effort for tasks using this Agent.
+                      Runtime adapters reject values they do not support (for example, Codex does not support max).
+                    enum:
+                    - low
+                    - medium
+                    - high
+                    - xhigh
+                    - max
+                    type: string
                   runtimeRef:
                     description: RuntimeRef selects an admin-governed AgentRuntime
                       for custom/BYO harness runtimes.
