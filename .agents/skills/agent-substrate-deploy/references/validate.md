@@ -7,8 +7,8 @@ Validation steps for `$agent-substrate-deploy`. Read after the standard workflow
 > `provider: substrate` (or `agent-sandbox`) agent Task fails immediately with
 > `status.executionWorkspace.reason=WorkspaceValidationFailed` and message
 > `execution workspace is not supported by harness runtime yet`. This is an
-> unconditional gate in `internal/controller/harness_wrapper.go`
-> (`runHarnessWrapperTask`), not a misconfiguration — the agent CLI runtimes now
+> unconditional gate in `internal/controller/agent_execution_plan.go`
+> (`planAgentExecution`), not a misconfiguration — the agent CLI runtimes now
 > run through the long-lived `agent-harness-wrapper` service, and the
 > Task→workspace path for agents is not wired through it yet. The bundled e2e
 > reflects this: it prints `Skipping agent Task execution-workspace checks:

@@ -7,8 +7,8 @@ Validation steps for `$agent-sandbox-deploy`. Read after the standard workflow c
 > sets `spec.execution.workspace` fails immediately with
 > `status.executionWorkspace.reason=WorkspaceValidationFailed` and message
 > `execution workspace is not supported by harness runtime yet` — an
-> unconditional gate in `internal/controller/harness_wrapper.go`
-> (`runHarnessWrapperTask`), not a misconfiguration. The agent CLI runtimes now
+> unconditional gate in `internal/controller/agent_execution_plan.go`
+> (`planAgentExecution`), not a misconfiguration. The agent CLI runtimes now
 > run through the long-lived `agent-harness-wrapper` service, and the
 > Task→sandbox-workspace path for agents is not wired through it yet. A **plain**
 > agent Task (no `execution.workspace`) runs fine through the harness + model
