@@ -8,7 +8,7 @@ controller:
   # Controller image
   image:
     repository: ghcr.io/orka-agents/orka
-    tag: latest
+    tag: "0.1.1"
     pullPolicy: IfNotPresent
 
   # Resource limits
@@ -43,25 +43,6 @@ controller:
 
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
-
-  # Provider-neutral workspace.orka.ai control plane (disabled by default during rollout).
-  # Before enabling it during a Helm upgrade, apply the current chart CRDs explicitly;
-  # Helm does not upgrade CRDs from the crds/ directory and the chart fails closed otherwise.
-  workspaceProvider:
-    # Enable generic provider/class/pool/workspace coordination controllers.
-    apiEnabled: false
-    # Offline helm template --is-upgrade cannot use lookup. Set this only after
-    # independently verifying/applying the current workspace CRD schema.
-    crdUpgradeSchemaVerified: false
-    # Enable the development-only fake provider adapter.
-    fakeProviderEnabled: false
-    # Fail-closed Kubernetes admission required whenever apiEnabled is true.
-    classUseAdmission:
-      enabled: false
-      # Existing TLS Secret with tls.crt and tls.key for the webhook Service DNS name.
-      existingSecret: ""
-      # Base64-encoded PEM CA bundle trusted by the API server.
-      caBundle: ""
 
   # Provider-neutral external gateway plane.
   gateway:
@@ -197,13 +178,18 @@ workers:
   ai:
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
-      tag: latest
+      tag: "0.1.1"
       pullPolicy: IfNotPresent
+
+  general:
+    image:
+      repository: ghcr.io/orka-agents/orka/general-worker
+      tag: "0.1.1"
 
   harnessWrapper:
     image:
       repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
-      tag: latest
+      tag: "0.1.1"
       pullPolicy: IfNotPresent
     auth:
       # Existing Secret containing the shared wrapper bearer token.
@@ -255,7 +241,10 @@ rbac:
   # Create RBAC resources
   create: true
 
-# CRD configuration
+# CRDs use Helm's static crds/ lifecycle and are not controlled by values.
+# Run `helm show readme <chart reference or archive>` before upgrading or
+# using --skip-crds.
+
 # Security context for pods
 podSecurityContext:
   runAsNonRoot: true

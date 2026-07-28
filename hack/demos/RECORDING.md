@@ -9,7 +9,6 @@ underlying source of truth.
 Status: design ready for implementation. Phases 1, 2, and 3 (see §11.5)
 can begin without resolving any [Open questions](#open-questions). Phase 4
 requires resolving Q1 (default request preset) and Q2 (committed artifact
-format). Q3 and Q4 are decided: both kontxt and agent-sandbox are
 provisioned by a shared `make demo-cluster-up` kind target built in Phase
 1. Q5 is dissolved by §11.5 — both polish and infra get done, in that
 order.
@@ -24,7 +23,6 @@ order.
   legible thing per artifact.
 - Reuse the existing `hack/demos/*.sh` scripts as the recording source rather
   than maintaining a second, parallel "demo for the camera" tree.
-- Add two new scenarios — `kontxt` and `agent-sandbox` — alongside the four
   existing ones, recorded the same way.
 - Keep every recording deterministic enough that a re-record after a code
   change produces visually similar output.
@@ -71,14 +69,12 @@ Six demos total. Four exist; two are new.
 | 20 | YAML workflow | `20-manual-workflow.sh` | exists, needs polish | Same payload, declarative `Task` CR — GitOps-friendly |
 | 30 | Scheduled workflow | `30-cron-workflow.sh` | exists, needs polish | Cron-scheduled stale-PR triage report |
 | 40 | Security remediation | `40-security-scanning.sh` | exists, needs polish | Finding → patch proposal → reviewable PR |
-| 50 | **Kontxt transaction tokens** | `50-kontxt.sh` | **new** | Caller Pod proves identity → kontxt mints TxToken → Orka stamps immutable provenance |
 | 60 | **Agent sandbox workspaces** | `60-agent-sandbox.sh` | **new** | One session, two agents, three turns — Scout, Builder, and a CI fixup share one warm sandbox |
 | 70 | **Agent Substrate workspaces** | `70-agent-substrate.sh` | **new** | Real gpt-5.5 agent in a gVisor Actor clones + edits + opens a PR; warm reuse with no cold start |
 
 Demos 50 and 60 are designed in [§7](#7-new-scenario-storyboards).
 
 The README hero is **always Demo 10**. Docs pages embed the matching demo
-(`docs/chat.md` → 10, `docs/anthropic-compat.md` → 10, `docs/kontxt.md` → 50,
 `docs/agent-sandbox.md` → 60, etc.). Social posts pick whichever demo we're
 launching that week.
 
@@ -305,10 +301,8 @@ on the rendered body. Wraps lines to fit the 110-column cast width.
 
 Exit codes: 1 if `--pr` is empty (every payoff requires a URL); 0 otherwise.
 
-### `payoff_card_kontxt` — kontxt scenario card
 
 ```
-payoff_card_kontxt --task <name> --denied-job <name>
 ```
 
 Reads the safe transaction ID off `task/<name>` annotation
@@ -365,14 +359,12 @@ existing four scripts are migrated lazily as each script is tightened.
 ### Logging discipline
 
 None of the above helpers may log raw secrets. Specifically forbidden in
-log output (and enforced by `grep -v` guards in the kontxt helpers):
 
 - `Txn-Token:` header values
 - `Authorization: Bearer` values
 - Subject token file *contents* (paths are fine)
 - Anything matching `eyJ[A-Za-z0-9_=-]{20,}` (JWT prefix)
 
-This matches the redaction rules in `docs/kontxt.md` §"Redaction rules" and
 `AGENTS.md` "Constraints".
 
 ---
@@ -503,7 +495,6 @@ on its own.
 Both new demos follow the same six-beat rhythm. Each is sketched here at the
 level of detail an implementer would need to write the script.
 
-### Demo 50 — Kontxt transaction tokens (`50-kontxt.sh`)
 
 **Why this matters.** Today the README and chat demos show *what* Orka does.
 Demo 50 shows *who is allowed to ask it*, and proves the answer is
@@ -515,13 +506,8 @@ demos.
 transaction token, and gets shut down the instant it asks for something
 outside its scope."*
 
-**Prerequisites the recording assumes.** kontxt TTS already installed in
-`kontxt-system` (see `docs/kontxt-quickstart.md`). Orka already configured
-with `ORKA_CONTEXT_TOKEN_PROFILE=kontxt` **and
 `ORKA_CONTEXT_TOKEN_AUTHZ_MODE=enforce`**. The demo does *not* re-install
-kontxt or restart Orka — that's a setup exercise, not a demo.
 
-**Why enforce, not audit.** The kontxt-quickstart guide recommends rolling
 out in audit mode first, and that's correct for production. For *this
 recording* we run enforce-only because:
 
@@ -544,11 +530,6 @@ pre-warm, then leaves it there.
 | # | Chapter | Show | Run | Visible payoff |
 |---|---|---|---|---|
 | 1 | Brief | One-line: *"Zero-secret Pod earns a transaction token. Then watch us try to abuse it."* | — | `gum` panel |
-| 2 | Show identity | `kubectl get sa orka-kontxt-caller -o yaml` | — | Audience sees zero secrets attached |
-| 3 | Show config | `kubectl -n orka-system get deploy ... \| grep CONTEXT_TOKEN` | — | One line proving `PROFILE=kontxt` and `AUTHZ_MODE=enforce` |
-| 4 | Run valid caller | `kubectl apply -f kontxt-caller-job.yaml`; tail logs | wait for Job | The 3-step caller output: `1/3 exchange... 2/3 create task... 3/3 wait for result...` |
-| 5 | Inspect provenance | One combined view: `spec.transaction` on the Task **and** the same `orka.ai/transaction-id` label on the worker Pod | — | Compact `transaction { id, profile: kontxt, contextDigest: sha256:... }` plus matching Pod label |
-| 6 | Try to abuse it | `kubectl apply -f kontxt-denied-caller-job.yaml`; same identity, but asks for a Task in `namespace: not-default` | wait for Job (fast — no worker spawns) | `denied status=403` printed by the caller |
 | 7 | Payoff | — | — | Payoff card: `Valid scope → sealed Task. Wrong scope → 403. Same identity, both times.` |
 
 Beat 6 is intentionally fast. The denied caller never spawns a worker Pod —
@@ -563,30 +544,18 @@ chapter "1/7 Brief"
 p "A Pod with no Orka token will earn one — then we'll see what happens when it asks for too much."
 
 chapter "2/7 The caller has no secrets"
-pe "kubectl -n default get sa orka-kontxt-caller -o yaml | yq '.secrets, .imagePullSecrets'"
 
-chapter "3/7 Orka enforces kontxt scopes"
 pe "kubectl -n orka-system get deploy orka-controller-manager -o jsonpath='{.spec.template.spec.containers[0].env[*]}' | jq -r 'select(.name | startswith(\"ORKA_CONTEXT_TOKEN_\")) | \"\\(.name)=\\(.value)\"'"
 
 chapter "4/7 Run the in-cluster caller"
-pe "kubectl apply -f \${DEMO_WORKDIR}/kontxt-caller-job.yaml"
-pe "kubectl -n default wait --for=condition=complete job/orka-kontxt-caller --timeout=5m"
-pe "kubectl -n default logs job/orka-kontxt-caller | grep -E '^[0-9]/3|status=|task=|transactionID='"
 
 chapter "5/7 Provenance is stamped end-to-end"
-pe "kubectl -n default get task kontxt-mit-license-check -o json | jq '{transaction: .spec.transaction, podLabels: .metadata.labels}'"
-pe "kubectl -n default get pods -l orka.ai/task=kontxt-mit-license-check -o jsonpath='{.items[0].metadata.labels.orka\\.ai/transaction-id}'"
 
 chapter "6/7 Try to abuse the same identity"
-pe "kubectl apply -f \${DEMO_WORKDIR}/kontxt-denied-caller-job.yaml"
-pe "kubectl -n default wait --for=condition=complete job/orka-kontxt-denied-caller --timeout=2m"
-pe "kubectl -n default logs job/orka-kontxt-denied-caller | grep 'denied status='"
 
 chapter "7/7 Summary"
-payoff_card_kontxt
 ```
 
-`payoff_card_kontxt` is a small helper that pulls the transaction ID from
 the successful Task and renders:
 
 ```
@@ -595,7 +564,6 @@ the successful Task and renders:
 │  txn-1a2b3c4d   ✓ scoped ok   → Task sealed                 │
 │  txn-5e6f7a8b   ✗ wrong namespace → 403 in 1.2s             │
 │                                                             │
-│  ServiceAccount → kontxt → Txn-Token → Orka                 │
 │                                                             │
 ╰─────────────────────────────────────────────────────────────╯
 ```
@@ -806,34 +774,24 @@ guess at. The render functions live in `lib/manifests.sh` (alongside the
 existing `render_security_repository_scan_manifest`) so the same single file
 owns all CR templating.
 
-### Kontxt manifests (Demo 50)
 
-**`lib/manifests.sh: render_kontxt_caller_sa()`** — emits a ServiceAccount
 with zero secrets and zero image pull secrets:
 
 ```yaml
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: orka-kontxt-caller
   namespace: default
   labels:
-    orka.ai/demo: kontxt
 automountServiceAccountToken: true
 ```
 
 Plus a projected token Volume the Job will mount with audience
-`${ORKA_CONTEXT_TOKEN_TTS_AUDIENCE:-kontxt-tts}`. The audience is what makes
-this a *kontxt* subject token, not a Kubernetes bearer.
 
-**`lib/manifests.sh: render_kontxt_caller_job()`** — the valid caller. Runs
-a busybox-shaped image (use `ghcr.io/orka-agents/orka/kontxt-demo:latest`,
-built from `hack/demos/images/kontxt-caller/`) with the literal 3-step
 loop that beat 4's grep expects:
 
 ```
 1/3 exchange subject token for TxToken... ok status=200 transactionID=<id>
-2/3 create task kontxt-mit-license-check... ok status=201 task=kontxt-mit-license-check
 3/3 wait for result... ok result="MIT"
 ```
 
@@ -842,25 +800,22 @@ default` with `prompt: "Read LICENSE from sozercan/vekil@main and reply
 with the SPDX identifier only."` — a deterministic, fast, model-call-free
 prompt that the existing `claude-agent` can answer in one turn.
 
-**`lib/manifests.sh: render_kontxt_denied_caller_job()`** — identical to
 the valid caller in *every way except* the body asks for `namespace:
 not-default`, violating the signed `tctx.namespace` constraint. Expected
 output (the literal string the beat-6 grep matches):
 
 ```
 1/3 exchange subject token for TxToken... ok status=200 transactionID=<id>
-2/3 create task kontxt-cross-ns-attempt... denied status=403 reason=context_token_namespace_mismatch
 ```
 
 No turn-3 line — the job exits non-zero after the deny, but the Job
 `spec.backoffLimit: 0` prevents retry and the `kubectl wait` in beat 6 is
 `--for=jsonpath='{.status.failed}'=1` instead of `complete`.
 
-**Image.** A new `hack/demos/images/kontxt-caller/` directory ships:
 
 - `Dockerfile` — Alpine + curl + jq + the 30-line `caller.sh` script
 - `caller.sh` — reads `${SUBJECT_TOKEN_PATH}`, POSTs to
-  `${ORKA_CONTEXT_TOKEN_TTS_URL}/token`, attaches the returned TxToken as
+  `${ORKA_CONTEXT_TOKEN_TTS_ENDPOINT}`, attaches the returned TxToken as
   `Txn-Token` to the Orka API call, prints the literal lines above
 
 The image is built and pushed by `make demo-images` (new Makefile target,
@@ -1036,7 +991,6 @@ are defined as constants in `internal/labels/labels.go`:
 
 | Selector | Constant | Used by | Resources |
 |---|---|---|---|
-| `orka.ai/demo=kontxt` | (new, demo-only) | reset.sh | SA, Job, Task |
 | `orka.ai/demo=sandbox` | (new, demo-only) | reset.sh | Agent, Task, SandboxClaim |
 | `orka.ai/session=vekil-metrics-77` | (new, demo-only) | beat 4, pre-warm | SandboxClaim |
 | `orka.ai/task=demo-scout-turn-1` (etc.) | `labels.LabelTask` | beat 3,5,6 log greps | Pod |
@@ -1047,7 +1001,6 @@ label is shipped — `LabelTask = "orka.ai/task"`. Render functions set it
 explicitly on every Task CR they emit so worker Pods inherit it.
 
 `reset.sh` extends its existing cleanup to delete every resource with
-`orka.ai/demo` in `(kontxt, sandbox)`.
 
 ---
 
@@ -1061,7 +1014,6 @@ hack/demos/
 ├── cluster/               # NEW — kind bootstrap for recording-grade env
 │   ├── cluster-up.sh      # creates kind cluster, builds + loads Orka image, helm install
 │   ├── cluster-down.sh    # kind delete cluster --name orka-demo
-│   ├── install-kontxt.sh  # in-cluster kontxt-TTS + Orka env vars
 │   ├── install-agent-sandbox.sh   # upstream operator + SandboxTemplate
 │   ├── install-substrate.sh       # Agent Substrate on a dedicated kind cluster (Demo 70)
 │   ├── install-demo-model.sh      # Provider + model/git Secrets for demos 10/20/30/40
@@ -1069,7 +1021,6 @@ hack/demos/
 │   └── templates/
 │       └── orka-live-template.yaml
 ├── images/                # NEW — demo-only container images
-│   └── kontxt-caller/
 │       ├── Dockerfile
 │       └── caller.sh
 ├── prompts/               # NEW — sandbox turn prompt files
@@ -1079,7 +1030,6 @@ hack/demos/
 ├── lib/
 │   ├── common.sh          # existing; gains chapter(), payoff_card(), profile dispatch
 │   ├── demo-magic.sh      # existing; unchanged
-│   ├── manifests.sh       # existing; gains render_kontxt_*, render_sandbox_*
 │   ├── style.sh           # NEW — color palette, gum helpers, prompt
 │   └── test/              # NEW — bash -e smoke tests for helpers
 ├── 00-preflight.sh        # existing
@@ -1087,10 +1037,8 @@ hack/demos/
 ├── 20-manual-workflow.sh  # existing, tightened
 ├── 30-cron-workflow.sh    # existing, tightened
 ├── 40-security-scanning.sh# existing, tightened
-├── 50-kontxt.sh           # NEW
 ├── 60-agent-sandbox.sh    # NEW
 ├── 70-agent-substrate.sh  # NEW (runs on its own kind cluster)
-├── reset.sh               # existing, extended for kontxt/sandbox/substrate resources
 └── out/                   # gitignored; .cast/.gif/.svg artifacts land here
 ```
 
@@ -1103,7 +1051,6 @@ docs/images/demos/
 ├── 20-yaml.svg
 ├── 30-cron.svg
 ├── 40-security.svg
-├── 50-kontxt.svg          # embedded in docs/kontxt.md
 └── 60-agent-sandbox.svg   # embedded in docs/agent-sandbox.md
 ```
 
@@ -1228,7 +1175,6 @@ and by the payoff cards):
 | 20 | "GitOps workflow" | "Same workflow from YAML. The agent isn't magic — it's a CR." |
 | 30 | "Scheduled work" | "Recurring AI triage queue — same auditable Task model, just add a `schedule:`." |
 | 40 | "Security remediation" | "Finding → patch proposal → reviewable PR. No human triage required." |
-| 50 | "Kontxt transaction tokens" | "Zero-secret caller, one-shot transaction token, sealed Kubernetes provenance." |
 | 60 | "Warm agent sandboxes" | "One session, two agents, three turns. Scout, Builder, CI fixup — one warm workspace." |
 | 70 | "Agent Substrate workspaces" | "A real agent clones, edits, and opens a PR from inside a gVisor sandbox — then reuses the warm workspace with no cold start." |
 
@@ -1305,7 +1251,6 @@ writing the relevant render functions:
       `demo_profile_is`, `demo_pe`, `demo_show`). See §5.5.
 - [ ] `lib/common.sh` — append `DEMO_REQUEST_PRESET` resolution, register
       the three preset strings (`quiet-flag`, `readme-fix`, `vekil-metrics`).
-- [ ] `lib/manifests.sh` — add stubs for `render_kontxt_*` and
       `render_sandbox_*` (empty body, just the function signatures), so
       Phase 3 can fill them without re-touching the file structure.
 - [ ] `hack/demos/record.sh` — full CLI per §8 "`record.sh` CLI contract".
@@ -1314,8 +1259,6 @@ writing the relevant render functions:
      and loads the Orka controller image, installs Orka via the existing
      Helm chart with `controller.agentSandbox.enabled=true` and
      `defaultTemplate: orka-live-template`.
-   - `install-kontxt.sh` — installs kontxt-TTS into `kontxt-system`
-     namespace, configures Orka with `ORKA_CONTEXT_TOKEN_PROFILE=kontxt`,
      `ORKA_CONTEXT_TOKEN_AUTHZ_MODE=enforce`, issuer + audience pointed
      at the in-cluster TTS service. Reuses the ephemeral RSA key/JWKS
      pattern from `scripts/live-github-oidc-e2e.sh` so no external secrets
@@ -1328,7 +1271,6 @@ writing the relevant render functions:
 - [ ] Makefile — add `demo-record-%`, `demo-record-hero`, `demo-record-all`,
       `demo-diff`, `demo-images`, **`demo-cluster-up`**, **`demo-cluster-down`**
       targets. `demo-cluster-up` invokes the three install scripts in
-      order: cluster → kontxt → agent-sandbox. Idempotent — re-running
       against an existing `orka-demo` cluster only re-applies what changed.
 - [ ] `hack/demos/README.md` — add a short "Recording" section pointing at
       `RECORDING.md` for design, at `record.sh --help` for usage, and at
@@ -1343,7 +1285,6 @@ assert exit codes and stdout patterns). `make demo-record-10
 reachable, exits 64 on bad arguments, and prints `--help`.
 
 **Acceptance (cluster-available).** `make demo-cluster-up` brings up a
-fresh kind cluster from zero in under 10 minutes with Orka + kontxt-TTS +
 agent-sandbox all running and healthy. `make demo-record-10` then runs
 the existing `10-chat-pr.sh` end-to-end and writes
 `out/10-docs.{gif,svg,manifest}`. The recording looks the same as today
@@ -1377,29 +1318,22 @@ helper errors. Casts under 4 minutes in `docs` profile; under 75 seconds in
 ### Phase 3 — New scenarios
 
 The kind cluster from Phase 1's `make demo-cluster-up` already provides
-kontxt-TTS and agent-sandbox; no extra environment setup needed.
 
 - [ ] Run the **Known unknowns** checks above against the bootstrapped
       cluster and update §7.5 placeholders (provider name, claim name
       shape) accordingly. The template name `orka-live-template` is fixed
       by Phase 1's `install-agent-sandbox.sh`.
-- [ ] `lib/manifests.sh` — fill in `render_kontxt_*` and
       `render_sandbox_*` per §7.5.
-- [ ] `hack/demos/images/kontxt-caller/{Dockerfile,caller.sh}` per §7.5.
       Build with `make demo-images` (publishes to the kind cluster's
       local registry; no external registry push required).
 - [ ] `hack/demos/prompts/sandbox-turn-{1-scout,2-builder,3-fixup}.txt`
       with the literal strings in §7.5.
-- [ ] `50-kontxt.sh` per §7 storyboard. Includes the
-      `payoff_card_kontxt` helper (new addition to `lib/style.sh` since
       it's scenario-specific but reuses generic gum framing).
 - [ ] `60-agent-sandbox.sh` per §7 storyboard. Includes the
       `payoff_card_sandbox` helper.
 - [ ] `reset.sh` — extend the existing cleanup to delete
-      `orka.ai/demo in (kontxt, sandbox)` per §7.5 label-selector table.
 
 **Acceptance:** `make demo-record-50` and `make demo-record-60` both
-produce green `.svg` artifacts. Kontxt's deny path actually denies
 (beat 6 logs `denied status=403`). Sandbox claim names are byte-identical
 across the three sandbox turns (asserted by `payoff_card_sandbox`). Both
 demos run against a fresh `make demo-cluster-up` cluster with no manual
@@ -1412,7 +1346,6 @@ request preset) and 2 (committed artifact format).
 
 - [ ] Copy the six "canonical" recordings into `docs/images/demos/` in the
       format chosen by Q2 (`.svg` only, `.gif` + `.svg`, or both + `.cast`).
-- [ ] Update `docs/chat.md`, `docs/kontxt.md`, `docs/agent-sandbox.md`,
       and `README.md` with the embeds.
 - [ ] Add a one-paragraph "How these were recorded" note to
       `docs/development.md` pointing at `RECORDING.md`.
@@ -1452,14 +1385,10 @@ and have been folded into §11.5.
    files are tiny and lossless but require the asciinema player to view.
    `.gif`/`.svg` render anywhere but are opaque artifacts. *Open — blocks
    Phase 4 only.*
-3. **kontxt setup approach.** **Decided: kind bootstrap.** Phase 1 ships a
    `make demo-cluster-up` target that builds a self-contained kind cluster
-   with kontxt-TTS installed and configured. Recording runs against that
-   cluster; no external/manually-managed kontxt is required. See §11.5
    Phase 1 for the deliverable.
 4. **agent-sandbox setup approach.** **Decided: kind bootstrap.** Same
    `make demo-cluster-up` target also installs the upstream `agent-sandbox`
    operator and provisions an `orka-live-template` `SandboxTemplate`. One
-   `make` target brings up Orka + kontxt + agent-sandbox in one go.
 5. **Order of work.** *Dissolved by §11.5* — both polish and infra are
    sequenced (infra first, then polish, then new scenarios).

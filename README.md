@@ -61,10 +61,10 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 🔎 **Repository Monitors** — Durable GitHub PR review queues with scheduled and webhook-triggered review runs
 - 🧰 **Agent Sandbox Workspaces** — Experimental durable, reusable coding workspaces through `agent-sandbox`
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
-- 📦 **Declarative CRDs** — Task, Agent, Tool, Provider, Skill, RepositoryScan, and RepositoryMonitor custom resources for GitOps workflows
+- 📦 **Declarative CRDs** — Task, Agent, AgentRuntime, Tool, Provider, Skill, RepositoryScan, RepositoryMonitor, and SubstrateActorPool custom resources for GitOps workflows
 - ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
 - 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/openai/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
-- 🔐 **Kubernetes, OIDC & Kontxt TxToken Auth** — ServiceAccount tokens by default, with optional OIDC and scoped `kontxt` transaction-token flows
+- 🔐 **Kubernetes, OIDC & Transaction-Token Auth** — ServiceAccount tokens by default, with optional OIDC and scoped vendor-neutral transaction governance
 - 🔮 **Anthropic-Compatible API** — `/anthropic/v1/messages` endpoint for Claude Code and other Anthropic-native clients
 - 📊 **Observability** — Prometheus metrics, structured logging, health probes, and optional OpenTelemetry traces + GenAI OTLP metrics
 - 🔒 **Hardened by Default** — Non-root containers, read-only rootfs, ServiceAccount token auth
@@ -78,6 +78,36 @@ helm install orka charts/orka \
   --namespace orka-system \
   --create-namespace
 ```
+
+A fresh install creates all twelve cluster-scoped Orka CRDs. Use `--skip-crds`
+only when one designated platform or release owner already manages compatible
+Orka CRDs for the cluster.
+
+> [!IMPORTANT]
+> Helm does not create or update files from `crds/` during `helm upgrade`.
+> Apply the CRDs from the exact target chart before
+> **every** upgrade, including an upgrade from the previous chart that installed
+> zero CRDs. Helm retains CRDs
+> on uninstall. See the [Helm CRD lifecycle guide](charts/orka/README.md).
+
+For the promoted raw installer, pre-create the harness-wrapper authentication
+Secret before applying the manifest; the token is intentionally not committed:
+
+```bash
+set -euo pipefail
+
+kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
+if ! kubectl -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then
+  openssl rand -hex 32 | \
+    kubectl -n orka-system create secret generic harness-wrapper-auth \
+      --from-file=token=/dev/stdin
+fi
+
+kubectl apply -f deploy/orka.yaml
+```
+
+See [`config/harness-wrapper/README.md`](config/harness-wrapper/README.md) for
+the canonical installer prerequisite.
 
 ### Set Up a Provider
 
@@ -134,10 +164,10 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Operating Gateways](website/docs/operations/gateways.md)                      | Gateway readiness, TLS, recovery, upgrades, and operations |
 | [Web Dashboard](website/docs/guides/ui.md)                                  | Frontend architecture and pages                       |
 | [Security](website/docs/concepts/security.md)                                 | Security model and hardening                          |
-| [Kontxt Quickstart](website/docs/guides/kontxt-quickstart.md)               | Use OIDC identity to call Orka without long-lived tokens |
-| [Kontxt TxToken Integration](website/docs/concepts/kontxt.md)                 | TxToken verification, authorization, TTS, and audit guidance |
+| [Transaction Tokens](website/docs/concepts/transaction-tokens.md)             | Configure strict transaction governance and TTS |
+| [Outbound Access Policies](website/docs/concepts/outbound-access.md)           | Exchange resource credentials or route Tools through a trusted gateway |
 | [Repository Security Scanning](website/docs/guides/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
 | [Repository Monitors](website/docs/guides/repository-monitors.md) | Durable GitHub pull request monitor runs, review tasks, and dashboard state |
 | [GitHub Label Triggers](website/docs/guides/github-label-triggers.md) | Trigger Orka agent tasks from GitHub labels such as `agent:implement` and `agent:review` |
-| [Development](website/docs/development/development.md)                           | Building, testing, and contributing                   |
+| [Development](website/docs/development/development.md)                           | Building, generated charts, releases, and contributing |
 | [Testing](website/docs/development/testing.md)                                   | Test structure, patterns, and commands                |

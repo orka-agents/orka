@@ -30,31 +30,37 @@ const (
 	AgentName         = "ORKA_AGENT_NAME"
 
 	// Task relationship env vars.
-	PriorTask          = "ORKA_PRIOR_TASK"
-	PriorTaskNamespace = "ORKA_PRIOR_TASK_NAMESPACE"
-	ParentTask         = "ORKA_PARENT_TASK"
+	PriorTask           = "ORKA_PRIOR_TASK"
+	PriorTaskNamespace  = "ORKA_PRIOR_TASK_NAMESPACE"
+	PriorTaskDiffSHA256 = "ORKA_PRIOR_TASK_DIFF_SHA256"
+	ParentTask          = "ORKA_PARENT_TASK"
 
 	// Transaction context env vars.
-	TransactionID                     = "ORKA_TRANSACTION_ID"
-	TransactionProfile                = "ORKA_TRANSACTION_PROFILE"
-	TransactionIssuer                 = "ORKA_TRANSACTION_ISSUER"
-	TransactionSubject                = "ORKA_TRANSACTION_SUBJECT"
-	TransactionRequestingWorkload     = "ORKA_TRANSACTION_REQUESTING_WORKLOAD"
-	TransactionScope                  = "ORKA_TRANSACTION_SCOPE"
-	TransactionScopes                 = "ORKA_TRANSACTION_SCOPES"
-	TransactionContextDigest          = "ORKA_TRANSACTION_CONTEXT_DIGEST"
-	TransactionRequesterContextDigest = "ORKA_TRANSACTION_REQUESTER_CONTEXT_DIGEST"
-	TransactionTokenFile              = "ORKA_TRANSACTION_TOKEN_FILE"
-	ContextTokenTTSURL                = "ORKA_CONTEXT_TOKEN_TTS_URL"
-	ContextTokenTTSAudience           = "ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"
-	ContextTokenTTSTimeout            = "ORKA_CONTEXT_TOKEN_TTS_TIMEOUT"
-	ContextTokenTTSTokenSource        = "ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE"
-	ContextTokenSubjectTokenFile      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE"
-	ContextTokenSubjectTokenType      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE"
-	ContextTokenOutboundScope         = "ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE"
-	ContextTokenChildScope            = "ORKA_CONTEXT_TOKEN_CHILD_SCOPE"
-	ContextTokenChildTokenTTL         = "ORKA_CONTEXT_TOKEN_CHILD_TOKEN_TTL"
-	ContextTokenToolTokenTTL          = "ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL"
+	TransactionID                              = "ORKA_TRANSACTION_ID"
+	TransactionProfile                         = "ORKA_TRANSACTION_PROFILE"
+	TransactionIssuer                          = "ORKA_TRANSACTION_ISSUER"
+	TransactionSubject                         = "ORKA_TRANSACTION_SUBJECT"
+	TransactionRequestingWorkload              = "ORKA_TRANSACTION_REQUESTING_WORKLOAD"
+	TransactionScope                           = "ORKA_TRANSACTION_SCOPE"
+	TransactionScopes                          = "ORKA_TRANSACTION_SCOPES"
+	TransactionContextDigest                   = "ORKA_TRANSACTION_CONTEXT_DIGEST"
+	TransactionRequesterContextDigest          = "ORKA_TRANSACTION_REQUESTER_CONTEXT_DIGEST"
+	TransactionCredentialSecret                = "ORKA_TRANSACTION_CREDENTIAL_SECRET"
+	TransactionCredentialReadScopes            = "ORKA_TRANSACTION_CREDENTIAL_READ_SCOPES"
+	TransactionCredentialAuthorizationEnforced = "ORKA_TRANSACTION_CREDENTIAL_AUTHORIZATION_ENFORCED"
+	TransactionTokenFile                       = "ORKA_TRANSACTION_TOKEN_FILE"
+	ContextTokenTTSEndpoint                    = "ORKA_CONTEXT_TOKEN_TTS_ENDPOINT"
+	ContextTokenTTSAudience                    = "ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"
+	ContextTokenTTSTimeout                     = "ORKA_CONTEXT_TOKEN_TTS_TIMEOUT"
+	ContextTokenTTSTokenSource                 = "ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE"
+	ContextTokenSubjectTokenFile               = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE"
+	ContextTokenSubjectTokenType               = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE"
+	ContextTokenOutboundScope                  = "ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE"
+	ContextTokenChildScope                     = "ORKA_CONTEXT_TOKEN_CHILD_SCOPE"
+	ContextTokenChildTokenTTL                  = "ORKA_CONTEXT_TOKEN_CHILD_TOKEN_TTL"
+	ContextTokenToolTokenTTL                   = "ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL"
+	OutboundAccessTrustedGatewayServices       = "ORKA_OUTBOUND_ACCESS_TRUSTED_GATEWAY_SERVICES"
+	OutboundAccessTrustedTokenEndpointServices = "ORKA_OUTBOUND_ACCESS_TRUSTED_TOKEN_ENDPOINT_SERVICES"
 
 	// AI worker env vars.
 	AIProvider        = "ORKA_AI_PROVIDER"
@@ -437,18 +443,20 @@ func ParseFallbacks(getenv func(string) string) []FallbackProviderEnv {
 // AI worker binary.
 type AIWorkerEnv struct {
 	BaseEnv
-	Provider        string
-	Model           string
-	Prompt          string
-	SystemPrompt    string
-	BaseURL         string
-	AzureAPIVersion string
-	Tools           []string
-	Fallbacks       []FallbackProviderEnv
-	EnableTelemetry bool
-	TraceParent     string
-	TraceState      string
-	TraceBaggage    string
+	Provider                         string
+	Model                            string
+	Prompt                           string
+	SystemPrompt                     string
+	BaseURL                          string
+	AzureAPIVersion                  string
+	Tools                            []string
+	Fallbacks                        []FallbackProviderEnv
+	EnforceTransactionCredentialAuth bool
+	TransactionCredentialReadScopes  []string
+	EnableTelemetry                  bool
+	TraceParent                      string
+	TraceState                       string
+	TraceBaggage                     string
 }
 
 // EnvVars renders AI worker env vars. Fallback API keys are included only when
@@ -469,6 +477,12 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	if len(e.Tools) > 0 {
 		envVars = append(envVars, Env(AITools, JoinCSV(e.Tools)))
 	}
+	if e.EnforceTransactionCredentialAuth {
+		envVars = append(envVars, Env(TransactionCredentialAuthorizationEnforced, "true"))
+	}
+	if len(e.TransactionCredentialReadScopes) > 0 {
+		envVars = append(envVars, Env(TransactionCredentialReadScopes, JoinCSV(e.TransactionCredentialReadScopes)))
+	}
 	if e.EnableTelemetry {
 		envVars = append(envVars, Env(EnableTelemetry, "true"))
 	}
@@ -487,19 +501,21 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 // ParseAIWorkerEnv reads the AI worker environment.
 func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 	return AIWorkerEnv{
-		BaseEnv:         ParseBaseEnv(getenv),
-		Provider:        getenv(AIProvider),
-		Model:           getenv(AIModel),
-		Prompt:          getenv(AIPrompt),
-		SystemPrompt:    getenv(AISystemPrompt),
-		BaseURL:         getenv(AIBaseURL),
-		AzureAPIVersion: getenv(AIAzureAPIVersion),
-		Tools:           SplitCSV(getenv(AITools)),
-		Fallbacks:       ParseFallbacks(getenv),
-		EnableTelemetry: IsTrue(getenv(EnableTelemetry)),
-		TraceParent:     getenv(TraceParent),
-		TraceState:      getenv(TraceState),
-		TraceBaggage:    getenv(TraceBaggage),
+		BaseEnv:                          ParseBaseEnv(getenv),
+		Provider:                         getenv(AIProvider),
+		Model:                            getenv(AIModel),
+		Prompt:                           getenv(AIPrompt),
+		SystemPrompt:                     getenv(AISystemPrompt),
+		BaseURL:                          getenv(AIBaseURL),
+		AzureAPIVersion:                  getenv(AIAzureAPIVersion),
+		Tools:                            SplitCSV(getenv(AITools)),
+		Fallbacks:                        ParseFallbacks(getenv),
+		EnforceTransactionCredentialAuth: IsTrue(getenv(TransactionCredentialAuthorizationEnforced)),
+		TransactionCredentialReadScopes:  SplitCSV(getenv(TransactionCredentialReadScopes)),
+		EnableTelemetry:                  IsTrue(getenv(EnableTelemetry)),
+		TraceParent:                      getenv(TraceParent),
+		TraceState:                       getenv(TraceState),
+		TraceBaggage:                     getenv(TraceBaggage),
 	}
 }
 

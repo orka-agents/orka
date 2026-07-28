@@ -92,21 +92,28 @@ const (
 // JobBuilder builds Kubernetes Jobs for Tasks
 type JobBuilder struct {
 	client.Client
-	AIWorkerImage                string
-	GeneralWorkerImage           string
-	InitImage                    string
-	ControllerURL                string // e.g. http://orka-controller.orka-system.svc:8080
-	ContextTokenTTSURL           string
-	ContextTokenTTSAudience      string
-	ContextTokenTTSTimeout       string
-	ContextTokenTTSTokenSource   string
-	ContextTokenSubjectTokenType string
-	ContextTokenChildScope       string
-	ContextTokenOutboundScope    string
-	ContextTokenChildTokenTTL    string
-	ContextTokenToolTokenTTL     string
-	EnableTelemetry              bool
-	directSecrets                directRuntimeSecretPolicy
+	AIWorkerImage                              string
+	GeneralWorkerImage                         string
+	InitImage                                  string
+	AIWorkerServiceAccountName                 string
+	VendorWorkerServiceAccountName             string
+	ContainerWorkerServiceAccountName          string
+	ControllerURL                              string // e.g. http://orka-controller.orka-system.svc:8080
+	ContextTokenTTSEndpoint                    string
+	ContextTokenTTSAudience                    string
+	ContextTokenTTSTimeout                     string
+	ContextTokenTTSTokenSource                 string
+	ContextTokenSubjectTokenType               string
+	ContextTokenChildScope                     string
+	ContextTokenOutboundScope                  string
+	ContextTokenChildTokenTTL                  string
+	ContextTokenToolTokenTTL                   string
+	EnforceTransactionCredentialAuth           bool
+	TransactionCredentialReadScopes            []string
+	OutboundAccessTrustedGatewayServices       string
+	OutboundAccessTrustedTokenEndpointServices string
+	EnableTelemetry                            bool
+	directSecrets                              directRuntimeSecretPolicy
 }
 
 type directRuntimeSecretPolicy struct {
@@ -118,10 +125,13 @@ type directRuntimeSecretPolicy struct {
 // NewJobBuilder creates a new JobBuilder
 func NewJobBuilder(c client.Client) *JobBuilder {
 	return &JobBuilder{
-		Client:             c,
-		AIWorkerImage:      DefaultAIWorkerImage,
-		GeneralWorkerImage: DefaultGeneralWorkerImage,
-		InitImage:          DefaultInitImage,
+		Client:                            c,
+		AIWorkerImage:                     DefaultAIWorkerImage,
+		GeneralWorkerImage:                DefaultGeneralWorkerImage,
+		InitImage:                         DefaultInitImage,
+		AIWorkerServiceAccountName:        AIWorkerServiceAccount,
+		VendorWorkerServiceAccountName:    VendorWorkerServiceAccount,
+		ContainerWorkerServiceAccountName: ContainerWorkerServiceAccount,
 		directSecrets: directRuntimeSecretPolicy{
 			providerSecrets: envFlagEnabled(directProviderSecretsEnvVar),
 			secretMounts:    envFlagEnabled(directSecretMountsEnvVar),
@@ -130,20 +140,30 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 	}
 }
 
-func workerServiceAccountForTask(task *corev1alpha1.Task) string {
+func workerServiceAccountName(configured, fallback string) string {
+	if configured != "" {
+		return configured
+	}
+	return fallback
+}
+
+func (b *JobBuilder) workerServiceAccountForTask(task *corev1alpha1.Task) string {
 	if task == nil {
-		return ContainerWorkerServiceAccount
+		return workerServiceAccountName(b.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount)
+	}
+	if taskRequestsRuntimeAuthOnly(task) {
+		return workerServiceAccountName(b.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount)
 	}
 
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
-		return AIWorkerServiceAccount
+		return workerServiceAccountName(b.AIWorkerServiceAccountName, AIWorkerServiceAccount)
 	case corev1alpha1.TaskTypeAgent:
-		return VendorWorkerServiceAccount
+		return workerServiceAccountName(b.VendorWorkerServiceAccountName, VendorWorkerServiceAccount)
 	case corev1alpha1.TaskTypeContainer:
-		return ContainerWorkerServiceAccount
+		return workerServiceAccountName(b.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount)
 	default:
-		return ContainerWorkerServiceAccount
+		return workerServiceAccountName(b.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount)
 	}
 }
 
@@ -341,7 +361,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                corev1.RestartPolicyNever,
-					ServiceAccountName:           workerServiceAccountForTask(task),
+					ServiceAccountName:           b.workerServiceAccountForTask(task),
 					AutomountServiceAccountToken: workerAutomountServiceAccountTokenWithOptions(task, opts),
 					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
@@ -621,7 +641,16 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnvValue(envVars, workerenv.AutonomousMode, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, "")
-	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction)
+	envVars = setTransactionCredentialAuthorizationEnv(
+		envVars,
+		task.Spec.Transaction,
+		b.EnforceTransactionCredentialAuth,
+	)
+	envVars = addTransactionEnvVars(
+		envVars,
+		task.Spec.Transaction,
+		b.TransactionCredentialReadScopes,
+	)
 
 	// Add prior task env vars for iterative coordination
 	if task.Spec.PriorTaskRef != nil {
@@ -877,7 +906,11 @@ func isReservedTraceContextEnv(name string) bool {
 	}
 }
 
-func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransaction) []corev1.EnvVar {
+func addTransactionEnvVars(
+	envVars []corev1.EnvVar,
+	tx *corev1alpha1.TaskTransaction,
+	credentialReadScopes []string,
+) []corev1.EnvVar {
 	if tx == nil {
 		return envVars
 	}
@@ -890,7 +923,25 @@ func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransac
 	envVars = setControllerEnv(envVars, workerenv.TransactionScopes, workerenv.JoinCSV(tx.Scopes))
 	envVars = setControllerEnv(envVars, workerenv.TransactionContextDigest, tx.ContextDigest)
 	envVars = setControllerEnv(envVars, workerenv.TransactionRequesterContextDigest, tx.RequesterContextDigest)
+	envVars = setControllerEnv(envVars, workerenv.TransactionCredentialSecret, tx.Context["secret"])
+	envVars = setControllerEnv(
+		envVars,
+		workerenv.TransactionCredentialReadScopes,
+		workerenv.JoinCSV(credentialReadScopes),
+	)
 	return envVars
+}
+
+func setTransactionCredentialAuthorizationEnv(
+	envVars []corev1.EnvVar,
+	tx *corev1alpha1.TaskTransaction,
+	enforced bool,
+) []corev1.EnvVar {
+	return setControllerEnvValue(
+		envVars,
+		workerenv.TransactionCredentialAuthorizationEnforced,
+		strconv.FormatBool(tx != nil && enforced),
+	)
 }
 
 // aiConfig holds resolved AI configuration from provider, agent, and task.
@@ -1135,8 +1186,10 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 	injectTTS := b.shouldInjectContextTokenTTS(task, secretName)
 	for i := range job.Spec.Template.Spec.Containers {
 		container := &job.Spec.Template.Spec.Containers[i]
+		container.Env = setControllerEnv(container.Env, workerenv.OutboundAccessTrustedGatewayServices, b.OutboundAccessTrustedGatewayServices)
+		container.Env = setControllerEnv(container.Env, workerenv.OutboundAccessTrustedTokenEndpointServices, b.OutboundAccessTrustedTokenEndpointServices)
 		if injectTTS {
-			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSURL, b.ContextTokenTTSURL)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSEndpoint, b.ContextTokenTTSEndpoint)
 			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSAudience, b.ContextTokenTTSAudience)
 			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTimeout, b.ContextTokenTTSTimeout)
 			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTokenSource, b.ContextTokenTTSTokenSource)
@@ -1196,7 +1249,7 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 }
 
 func (b *JobBuilder) shouldInjectContextTokenTTS(task *corev1alpha1.Task, secretName string) bool {
-	if b.ContextTokenTTSURL == "" {
+	if b.ContextTokenTTSEndpoint == "" {
 		return false
 	}
 	if secretName != "" {
@@ -1210,7 +1263,7 @@ func (b *JobBuilder) shouldInjectContextTokenTTS(task *corev1alpha1.Task, secret
 
 func contextTokenTTSEnvNames() []string {
 	return []string{
-		workerenv.ContextTokenTTSURL,
+		workerenv.ContextTokenTTSEndpoint,
 		workerenv.ContextTokenTTSAudience,
 		workerenv.ContextTokenTTSTimeout,
 		workerenv.ContextTokenTTSTokenSource,
@@ -1229,6 +1282,11 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 
 	if taskRequestsReadOnlyAgent(task) {
 		if err := b.addReadOnlyAgentRuntimeSecretEnv(ctx, job, task, agent); err != nil {
+			return err
+		}
+	}
+	if taskRequestsRuntimeAuthOnly(task) {
+		if err := b.addScopedAgentRuntimeSecretEnv(ctx, job, task, agent); err != nil {
 			return err
 		}
 	}
@@ -1310,7 +1368,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add task secret
-	if allowDirectSecretMounts && task.Spec.SecretRef != nil {
+	if allowDirectSecretMounts && !taskRequestsRuntimeAuthOnly(task) && task.Spec.SecretRef != nil {
 		secretName := task.Spec.SecretRef.Name
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 			Name: "task-secrets",
@@ -1331,7 +1389,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add agent secret
-	if allowDirectSecretMounts && agent != nil && agent.Spec.SecretRef != nil {
+	if allowDirectSecretMounts && !taskRequestsRuntimeAuthOnly(task) && agent != nil && agent.Spec.SecretRef != nil {
 		secretName := agent.Spec.SecretRef.Name
 		// Inject all secret keys as environment variables
 		job.Spec.Template.Spec.Containers[0].EnvFrom = append(
@@ -1429,8 +1487,8 @@ func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.A
 	if !taskRequestsReadOnlyAgent(task) || agent == nil || agent.Spec.Runtime == nil {
 		return nil
 	}
-	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCodex {
-		return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed as environment variables")
+	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return fmt.Errorf("read-only agent tasks do not support external runtimeRef %q", agent.Spec.Runtime.RuntimeRef.Name)
 	}
 	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCopilot {
 		return fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
@@ -1439,6 +1497,155 @@ func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.A
 		return fmt.Errorf("read-only agent tasks do not support opencode runtime because the OpenCode adapter pre-approves file edits")
 	}
 	return nil
+}
+
+func scopedAgentRuntimeSecretCoordinates(task *corev1alpha1.Task, agent *corev1alpha1.Agent) (namespace, name string, err error) {
+	if task == nil {
+		return "", "", nil
+	}
+	if repositoryMonitorTaskUsesPinnedRuntimeAuth(task) {
+		namespace = strings.TrimSpace(task.Spec.SecretRef.Namespace)
+		if namespace == "" {
+			namespace = task.Namespace
+		}
+		if namespace != task.Namespace {
+			return "", "", fmt.Errorf("runtime-auth-only task secretRef namespace %q does not match task namespace %q", namespace, task.Namespace)
+		}
+		return namespace, strings.TrimSpace(task.Spec.SecretRef.Name), nil
+	}
+	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
+		return "", "", nil
+	}
+	return task.Namespace, strings.TrimSpace(agent.Spec.SecretRef.Name), nil
+}
+
+func repositoryMonitorTaskUsesPinnedRuntimeAuth(task *corev1alpha1.Task) bool {
+	return task != nil && taskRequestsRuntimeAuthOnly(task) && task.Spec.SecretRef != nil &&
+		strings.TrimSpace(task.Spec.SecretRef.Name) != "" &&
+		strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationActionKind]) == repositoryMonitorIssueActionImplementation &&
+		strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAgentGeneration]) != "" &&
+		strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthFields]) != ""
+}
+
+func validateScopedAgentRuntimeBinding(task *corev1alpha1.Task, agent *corev1alpha1.Agent, secret *corev1.Secret) error {
+	if task == nil || !taskRequestsRuntimeAuthOnly(task) {
+		return nil
+	}
+	if expectedUID := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAgentUID]); expectedUID != "" {
+		if agent == nil || string(agent.UID) != expectedUID {
+			return fmt.Errorf("%w: runtime agent UID changed", errRepositoryMonitorRuntimeAuthBindingInvalid)
+		}
+	}
+	if expectedGeneration := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAgentGeneration]); expectedGeneration != "" {
+		generation, err := strconv.ParseInt(expectedGeneration, 10, 64)
+		if err != nil || agent == nil || agent.Generation != generation {
+			return fmt.Errorf("%w: runtime agent generation changed", errRepositoryMonitorRuntimeAuthBindingInvalid)
+		}
+	}
+	return validateScopedRuntimeSecretBinding(task, secret)
+}
+
+func validateScopedRuntimeSecretBinding(task *corev1alpha1.Task, secret *corev1.Secret) error {
+	if task == nil || !taskRequestsRuntimeAuthOnly(task) {
+		return nil
+	}
+	expectedUID := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthUID])
+	pinnedFields := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthFields])
+	if expectedUID == "" && pinnedFields == "" {
+		return nil
+	}
+	if secret == nil {
+		return fmt.Errorf("%w: runtime auth snapshot is missing", errRepositoryMonitorRuntimeAuthBindingInvalid)
+	}
+	if expectedUID != "" && string(secret.UID) != expectedUID {
+		return fmt.Errorf("%w: runtime credential Secret UID changed", errRepositoryMonitorRuntimeAuthBindingInvalid)
+	}
+	if secret.Immutable == nil || !*secret.Immutable {
+		return fmt.Errorf("%w: runtime credential Secret is not immutable", errRepositoryMonitorRuntimeAuthBindingInvalid)
+	}
+	return nil
+}
+
+func repositoryMonitorPinnedRuntimeAuthFields(task *corev1alpha1.Task) []string {
+	if task == nil {
+		return nil
+	}
+	var keys []string
+	for key := range strings.SplitSeq(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthFields], ",") {
+		if key = strings.TrimSpace(key); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func (b *JobBuilder) addScopedAgentRuntimeSecretEnv(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	secretNamespace, secretName, err := scopedAgentRuntimeSecretCoordinates(task, agent)
+	if err != nil {
+		return err
+	}
+	if secretName == "" {
+		return nil
+	}
+	keys, _, err := scopedAgentRuntimeSecretKeys(agent)
+	if err != nil {
+		return err
+	}
+	var secret corev1.Secret
+	if err := b.Get(ctx, client.ObjectKey{Name: secretName, Namespace: secretNamespace}, &secret); err != nil {
+		return fmt.Errorf("get scoped agent runtime secret %q: %w", secretName, err)
+	}
+	if err := validateScopedAgentRuntimeBinding(task, agent, &secret); err != nil {
+		return err
+	}
+	if !scopedAgentRuntimeSecretHasCredential(&secret, agent) {
+		return fmt.Errorf("scoped agent runtime secret %q contains no supported credentials for runtime %q", secretName, readOnlyAgentRuntimeType(agent))
+	}
+	for _, key := range keys {
+		if _, ok := secret.Data[key]; !ok {
+			continue
+		}
+		job.Spec.Template.Spec.Containers[0].Env = append(job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+			Name: key,
+			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+				Key:                  key,
+			}},
+		})
+	}
+	return nil
+}
+
+func scopedAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) (keys, credentialKeys []string, err error) {
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support external runtimeRef %q", agent.Spec.Runtime.RuntimeRef.Name)
+	}
+	switch readOnlyAgentRuntimeType(agent) {
+	case corev1alpha1.AgentRuntimeCodex:
+		return []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey, workerenv.OpenAIBaseURL}, []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey}, nil
+	case corev1alpha1.AgentRuntimeClaude:
+		return []string{workerenv.AnthropicAPIKey, workerenv.AnthropicBaseURL}, []string{workerenv.AnthropicAPIKey}, nil
+	case corev1alpha1.AgentRuntimeCopilot:
+		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support copilot because %s can mutate GitHub", workerenv.GitHubToken)
+	default:
+		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support runtime %q", readOnlyAgentRuntimeType(agent))
+	}
+}
+
+func scopedAgentRuntimeSecretHasCredential(secret *corev1.Secret, agent *corev1alpha1.Agent) bool {
+	if secret == nil {
+		return false
+	}
+	_, credentialKeys, err := scopedAgentRuntimeSecretKeys(agent)
+	if err != nil {
+		return false
+	}
+	for _, key := range credentialKeys {
+		if strings.TrimSpace(string(secret.Data[key])) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *JobBuilder) addReadOnlyAgentRuntimeSecretEnv(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
@@ -1492,6 +1699,13 @@ func readOnlyAgentRuntimeSecretHasCredential(secret *corev1.Secret, agent *corev
 		return false
 	}
 	switch readOnlyAgentRuntimeType(agent) {
+	case corev1alpha1.AgentRuntimeCodex:
+		for _, key := range []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey} {
+			if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
+				return true
+			}
+		}
+		return false
 	case corev1alpha1.AgentRuntimeClaude:
 		for _, key := range []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"} {
 			if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
@@ -1507,13 +1721,14 @@ func readOnlyAgentRuntimeSecretHasCredential(secret *corev1.Secret, agent *corev
 func readOnlyAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) ([]string, error) {
 	switch readOnlyAgentRuntimeType(agent) {
 	case corev1alpha1.AgentRuntimeCodex:
-		return nil, fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed as environment variables")
+		return []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey, workerenv.OpenAIBaseURL}, nil
 	case corev1alpha1.AgentRuntimeClaude:
 		return []string{
 			workerenv.AnthropicAPIKey,
 			workerenv.AnthropicBaseURL,
 			"CLAUDE_CODE_USE_FOUNDRY",
 			"ANTHROPIC_FOUNDRY_API_KEY",
+			workerenv.AnthropicFoundryBaseURL,
 			"ANTHROPIC_FOUNDRY_RESOURCE",
 			"ANTHROPIC_DEFAULT_SONNET_MODEL",
 			"ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -2088,6 +2303,10 @@ func taskRequestsReadOnlyAgent(task *corev1alpha1.Task) bool {
 	return task != nil && task.Annotations[labels.AnnotationAgentReadOnly] == scheduledRunLabelValue
 }
 
+func taskRequestsRuntimeAuthOnly(task *corev1alpha1.Task) bool {
+	return task != nil && task.Annotations[labels.AnnotationAgentRuntimeAuthOnly] == scheduledRunLabelValue
+}
+
 func readOnlyAgentAllowedTools() []string {
 	return []string{
 		"Read(/workspace/**)",
@@ -2099,19 +2318,16 @@ func readOnlyAgentAllowedTools() []string {
 
 func readOnlyAgentDisallowedTools() []string {
 	deniedReadPaths := []string{
-		"/proc/**",
-		"/var/run/secrets/**",
-		"/secrets/**",
-		"/home/worker/**",
+		"//proc/**",
+		"//var/run/secrets/**",
+		"//secrets/**",
+		"//home/worker/**",
 	}
-	disallowed := []string{"Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"}
+	disallowed := []string{"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"}
 	for _, deniedPath := range deniedReadPaths {
-		disallowed = append(disallowed,
-			"Read("+deniedPath+")",
-			"Glob("+deniedPath+")",
-			"Grep("+deniedPath+")",
-			"LS("+deniedPath+")",
-		)
+		// Claude Code applies Read(path) deny rules to all file-reading tools.
+		// A double slash denotes an absolute filesystem path.
+		disallowed = append(disallowed, "Read("+deniedPath+")")
 	}
 	return disallowed
 }

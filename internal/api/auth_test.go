@@ -676,7 +676,7 @@ func TestNewAuthMiddleware_MalformedConfiguredNonAuthorizationContextTokenHeader
 	})
 
 	provider := newTestOIDCProvider(t)
-	ctxTokenConfig := testContextTokenConfig(t, provider, "X-Kontxt:Bearer")
+	ctxTokenConfig := testContextTokenConfig(t, provider, "X-TransactionToken:Bearer")
 
 	scheme := runtime.NewScheme()
 	_ = authenticationv1.AddToScheme(scheme)
@@ -717,7 +717,7 @@ func TestNewAuthMiddleware_MalformedConfiguredNonAuthorizationContextTokenHeader
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("X-Kontxt", "Basic malformed-context-token-header")
+	req.Header.Set("X-TransactionToken", "Basic malformed-context-token-header")
 	req.Header.Set("Authorization", "Bearer "+serviceAccountToken)
 
 	resp, err := app.Test(req)

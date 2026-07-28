@@ -195,6 +195,18 @@ type RepositoryMonitorStore interface {
 	GetMonitorItem(ctx context.Context, namespace, monitorName, kind, itemKey string) (*MonitorItem, error)
 	ListMonitorItems(ctx context.Context, filter MonitorItemFilter) ([]MonitorItem, string, error)
 
+	CreateWorkAction(ctx context.Context, action *WorkAction) error
+	UpdateWorkAction(ctx context.Context, action *WorkAction) error
+	GetWorkAction(ctx context.Context, namespace, id string) (*WorkAction, error)
+	ListWorkActions(ctx context.Context, filter WorkActionFilter) ([]WorkAction, string, error)
+	LeaseNextWorkAction(ctx context.Context, filter WorkActionFilter, leaseOwner string, leaseTTL time.Duration) (*WorkAction, error)
+	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error)
+
+	CreateActionRecord(ctx context.Context, record *ActionRecord) error
+	UpdateActionRecord(ctx context.Context, record *ActionRecord) error
+	GetActionRecord(ctx context.Context, namespace, id string) (*ActionRecord, error)
+	ListActionRecords(ctx context.Context, filter ActionRecordFilter) ([]ActionRecord, string, error)
+
 	CreateReviewRecord(ctx context.Context, record *ReviewRecord) error
 	GetReviewRecord(ctx context.Context, namespace, id string) (*ReviewRecord, error)
 	ListReviewRecords(ctx context.Context, filter ReviewRecordFilter) ([]ReviewRecord, string, error)
@@ -207,6 +219,18 @@ type RepositoryMonitorStore interface {
 	CreateCommandEvent(ctx context.Context, event *CommandEvent) error
 	UpdateCommandEvent(ctx context.Context, event *CommandEvent) error
 	GetCommandEvent(ctx context.Context, namespace, id string) (*CommandEvent, error)
+	ListCommandEvents(ctx context.Context, filter CommandEventFilter) ([]CommandEvent, string, error)
+
+	CreateImplementationJob(ctx context.Context, job *ImplementationJob) error
+	UpdateImplementationJob(ctx context.Context, job *ImplementationJob) error
+	GetImplementationJob(ctx context.Context, namespace, id string) (*ImplementationJob, error)
+	ListImplementationJobs(ctx context.Context, filter ImplementationJobFilter) ([]ImplementationJob, string, error)
+	CountImplementationJobs(ctx context.Context, filter ImplementationJobFilter) (int, error)
+
+	CreateGitHubMutationRecord(ctx context.Context, record *GitHubMutationRecord) error
+	UpdateGitHubMutationRecord(ctx context.Context, record *GitHubMutationRecord) error
+	GetGitHubMutationRecord(ctx context.Context, namespace, id string) (*GitHubMutationRecord, error)
+	ListGitHubMutationRecords(ctx context.Context, filter GitHubMutationRecordFilter) ([]GitHubMutationRecord, string, error)
 
 	CreateRepairJob(ctx context.Context, job *RepairJob) error
 	UpdateRepairJob(ctx context.Context, job *RepairJob) error

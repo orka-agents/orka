@@ -1767,6 +1767,11 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultMaxTurns != nil {
 		metadata["maxTurns"] = strconv.FormatInt(int64(*agent.Spec.Runtime.DefaultMaxTurns), 10)
 	}
+	if agent != nil && agent.Spec.Runtime != nil {
+		if effort := strings.ToLower(strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort)); effort != "" {
+			metadata["reasoningEffort"] = effort
+		}
+	}
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
 		metadata["maxTurns"] = strconv.FormatInt(int64(*task.Spec.AgentRuntime.MaxTurns), 10)
 	}
@@ -1783,6 +1788,9 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	disallowedTools := []string(nil)
 	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
 		disallowedTools = append(disallowedTools, task.Spec.AgentRuntime.DisallowedTools...)
+	}
+	if taskRequestsRuntimeAuthOnly(task) {
+		metadata["runtimeAuthOnly"] = scheduledRunLabelValue
 	}
 	if taskRequestsReadOnlyAgent(task) {
 		metadata["readOnly"] = scheduledRunLabelValue
@@ -2032,6 +2040,9 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) ([]harness.TurnEnvVar, error) {
+	if err := validateHarnessWrapperRestrictedAgentRuntime(task, agent); err != nil {
+		return nil, err
+	}
 	env, err := r.harnessWrapperBaseTurnEnv(ctx, task)
 	if err != nil {
 		return nil, err
@@ -2045,7 +2056,7 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 		return nil, err
 	}
 	env = append(env, agentSecretEnv...)
-	if !taskRequestsReadOnlyAgent(task) {
+	if !taskRequestsReadOnlyAgent(task) && !taskRequestsRuntimeAuthOnly(task) {
 		taskSecretEnv, err := r.harnessWrapperTaskSecretEnv(ctx, task)
 		if err != nil {
 			return nil, err
@@ -2056,6 +2067,19 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 	// must remain authoritative over broad runtime Secret keys such as GIT_TOKEN.
 	env = append(env, workspaceGitEnv...)
 	return env, nil
+}
+
+func validateHarnessWrapperRestrictedAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
+		return err
+	}
+	if !taskRequestsRuntimeAuthOnly(task) || agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return nil
+	}
+	if runtimeRefName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name); runtimeRefName != "" {
+		return fmt.Errorf("runtime-auth-only tasks do not support external runtimeRef %q", runtimeRefName)
+	}
+	return nil
 }
 
 func (r *TaskReconciler) harnessWrapperWorkspaceGitSecretEnv(
@@ -2096,6 +2120,39 @@ func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) ([]harness.TurnEnvVar, error) {
+	if taskRequestsRuntimeAuthOnly(task) {
+		if runtimeRefName := agentHarnessRuntimeRefName(agent); runtimeRefName != "" {
+			return nil, fmt.Errorf("runtime-auth-only tasks do not support external runtimeRef %q", runtimeRefName)
+		}
+		secretNamespace, secretName, err := scopedAgentRuntimeSecretCoordinates(task, agent)
+		if err != nil {
+			return nil, err
+		}
+		if secretName == "" {
+			return nil, nil
+		}
+		secret := &corev1.Secret{}
+		key := ctrlclient.ObjectKey{Name: secretName, Namespace: secretNamespace}
+		if err := r.Get(ctx, key, secret); err != nil {
+			return nil, fmt.Errorf("resolve harness runtime credential Secret %s/%s: %w", key.Namespace, key.Name, err)
+		}
+		if err := validateScopedAgentRuntimeBinding(task, agent, secret); err != nil {
+			return nil, err
+		}
+		env, err := harnessWrapperSecretEnvFromSecret(key, secret)
+		if err != nil {
+			return nil, err
+		}
+		allowedKeys, credentialKeys, err := scopedAgentRuntimeSecretKeys(agent)
+		if err != nil {
+			return nil, err
+		}
+		filtered := filterHarnessTurnEnv(env, allowedKeys)
+		if !harnessTurnEnvHasAny(filtered, credentialKeys) {
+			return nil, fmt.Errorf("runtime-auth-only agent secret contains no supported credentials")
+		}
+		return filtered, nil
+	}
 	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
 		return nil, nil
 	}
@@ -2121,6 +2178,10 @@ func (r *TaskReconciler) harnessWrapperSecretEnv(
 	if err := r.Get(ctx, key, secret); err != nil {
 		return nil, fmt.Errorf("resolve harness runtime credential Secret %s/%s: %w", key.Namespace, key.Name, err)
 	}
+	return harnessWrapperSecretEnvFromSecret(key, secret)
+}
+
+func harnessWrapperSecretEnvFromSecret(key ctrlclient.ObjectKey, secret *corev1.Secret) ([]harness.TurnEnvVar, error) {
 	env := make([]harness.TurnEnvVar, 0, len(secret.Data))
 	for name, raw := range secret.Data {
 		name = strings.TrimSpace(name)
@@ -2171,6 +2232,19 @@ func (r *TaskReconciler) harnessWrapperTaskSecretEnv(
 	return r.harnessWrapperSecretEnv(ctx, ctrlclient.ObjectKey{Name: task.Spec.SecretRef.Name, Namespace: namespace})
 }
 
+func harnessTurnEnvHasAny(env []harness.TurnEnvVar, names []string) bool {
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		wanted[strings.TrimSpace(name)] = struct{}{}
+	}
+	for _, item := range env {
+		if _, ok := wanted[item.Name]; ok && strings.TrimSpace(item.Value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func filterHarnessTurnEnv(env []harness.TurnEnvVar, allowedKeys []string) []harness.TurnEnvVar {
 	if len(env) == 0 || len(allowedKeys) == 0 {
 		return nil
@@ -2199,7 +2273,11 @@ func setHarnessTurnEnv(env []harness.TurnEnvVar, name, value string) []harness.T
 }
 
 func harnessWrapperReadOnlyEnvBlocked(name string) bool {
-	switch strings.TrimSpace(name) {
+	name = strings.TrimSpace(name)
+	if strings.HasPrefix(name, "GIT_CONFIG_") || strings.HasPrefix(name, "DYLD_") {
+		return true
+	}
+	switch name {
 	case workerenv.AgentReadOnly,
 		workerenv.ResultStdout,
 		workerenv.AllowBash,
@@ -2209,7 +2287,23 @@ func harnessWrapperReadOnlyEnvBlocked(name string) bool {
 		workerenv.ClaudeDisableSettingSources,
 		workerenv.ClaudePermissionMode,
 		workerenv.CodexDisableSandbox,
-		workerenv.CodexSandboxMode:
+		workerenv.CodexSandboxMode,
+		"NODE_OPTIONS",
+		"NODE_PATH",
+		"HOME",
+		"ZDOTDIR",
+		"CODEX_HOME",
+		"BASH_ENV",
+		"ENV",
+		"LD_PRELOAD",
+		"LD_AUDIT",
+		"LD_LIBRARY_PATH",
+		"PYTHONPATH",
+		"PERL5OPT",
+		"RUBYOPT",
+		"NPM_CONFIG_USERCONFIG",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME":
 		return true
 	default:
 		return false

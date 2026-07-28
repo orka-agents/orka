@@ -355,6 +355,18 @@ func (s *Server) setupRoutes() {
 	api.Post("/monitors/repositories/:name/runs", s.handlers.CreateRepositoryMonitorRun)
 	api.Get("/monitors/repositories/:name/runs", s.handlers.ListRepositoryMonitorRuns)
 	api.Get("/monitors/repositories/:name/items", s.handlers.ListRepositoryMonitorItems)
+	api.Post("/monitors/repositories/:name/commands", s.handlers.CreateRepositoryMonitorCommandEvent)
+	api.Get("/monitors/commands", s.handlers.ListRepositoryMonitorCommandEvents)
+	api.Get("/monitors/commands/:id", s.handlers.GetRepositoryMonitorCommandEvent)
+	api.Get("/monitors/actions", s.handlers.ListRepositoryMonitorActionRecords)
+	api.Get("/monitors/actions/:id", s.handlers.GetRepositoryMonitorActionRecord)
+	api.Get("/monitors/work-actions", s.handlers.ListRepositoryMonitorWorkActions)
+	api.Get("/monitors/work-actions/:id", s.handlers.GetRepositoryMonitorWorkAction)
+	api.Get("/monitors/implementation-jobs", s.handlers.ListRepositoryMonitorImplementationJobs)
+	api.Get("/monitors/implementation-jobs/:id", s.handlers.GetRepositoryMonitorImplementationJob)
+	api.Get("/monitors/implementation-jobs/:id/patch-preview", s.handlers.GetRepositoryMonitorImplementationPatchPreview)
+	api.Get("/monitors/mutations", s.handlers.ListRepositoryMonitorGitHubMutations)
+	api.Get("/monitors/mutations/:id", s.handlers.GetRepositoryMonitorGitHubMutation)
 	api.Get("/monitors/events", s.handlers.ListRepositoryMonitorEvents)
 
 	// Substrate actor-pool endpoints

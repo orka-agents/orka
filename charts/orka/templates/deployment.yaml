@@ -1,13 +1,3 @@
-{{- if and .Values.controller.workspaceProvider.fakeProviderEnabled (not .Values.controller.workspaceProvider.apiEnabled) -}}
-{{- fail "controller.workspaceProvider.fakeProviderEnabled requires controller.workspaceProvider.apiEnabled" -}}
-{{- end -}}
-{{- if and .Values.controller.workspaceProvider.apiEnabled (not .Values.controller.workspaceProvider.classUseAdmission.enabled) -}}
-{{- fail "controller.workspaceProvider.apiEnabled requires controller.workspaceProvider.classUseAdmission.enabled" -}}
-{{- end -}}
-{{- if .Values.controller.workspaceProvider.classUseAdmission.enabled -}}
-{{- $workspaceWebhookSecret := required "controller.workspaceProvider.classUseAdmission.existingSecret is required when class-use admission is enabled" .Values.controller.workspaceProvider.classUseAdmission.existingSecret -}}
-{{- $workspaceWebhookCA := required "controller.workspaceProvider.classUseAdmission.caBundle is required when class-use admission is enabled" .Values.controller.workspaceProvider.classUseAdmission.caBundle -}}
-{{- end -}}
 {{- $gatewayCRDsReady := false -}}
 {{- if and .Values.controller.gateway.enabled (not .Values.controller.gateway.crdsReadyOverride) -}}
 {{- $gatewayClassCRD := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gatewayclasses.gateway.orka.ai" -}}
@@ -62,6 +52,7 @@ spec:
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           args:
             - --api-port={{ .Values.controller.apiPort }}
+            - --controller-url=http://{{ include "orka.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
             - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
             - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
             - --metrics-secure=false
@@ -224,6 +215,10 @@ spec:
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}
+            - --general-worker-image={{ .Values.workers.general.image.repository }}:{{ .Values.workers.general.image.tag }}
+            - --ai-worker-service-account-name={{ include "orka.aiWorkerServiceAccountName" . }}
+            - --vendor-worker-service-account-name={{ include "orka.vendorWorkerServiceAccountName" . }}
+            - --container-worker-service-account-name={{ include "orka.containerWorkerServiceAccountName" . }}
             - --ai-worker-cluster-role-name={{ include "orka.aiWorkerClusterRoleName" . }}
             - --vendor-worker-cluster-role-name={{ include "orka.vendorWorkerClusterRoleName" . }}
             - --container-worker-cluster-role-name={{ include "orka.containerWorkerClusterRoleName" . }}
@@ -233,18 +228,6 @@ spec:
             {{- end }}
             {{- if gt (int .Values.controller.maxTasksPerNamespace) 0 }}
             - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
-            {{- end }}
-            {{- with .Values.controller.workspaceProvider }}
-            {{- if .apiEnabled }}
-            - --enable-workspace-provider-api=true
-            {{- end }}
-            {{- if .fakeProviderEnabled }}
-            - --enable-fake-workspace-provider=true
-            {{- end }}
-            {{- if .classUseAdmission.enabled }}
-            - --workspace-class-use-admission-enabled=true
-            - --webhook-cert-path=/var/run/orka/workspace-webhook
-            {{- end }}
             {{- end }}
             {{- with .Values.controller.executionWorkspace }}
             - --execution-workspace-default-provider={{ .defaultProvider | default "agent-sandbox" }}
@@ -300,11 +283,11 @@ spec:
             - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
               value: {{ include "orka.containerWorkerClusterRoleName" . | quote }}
             - name: ORKA_HARNESS_WRAPPER_ENDPOINT
-              value: http://{{ include "orka.fullname" . }}-agent-harness-wrapper:8080
+              value: http://{{ include "orka.harnessWrapperName" . }}:8080
             - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
               value: /var/run/orka/harness-wrapper/token
             - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
-              value: {{ printf "%s-agent-harness-wrapper" (include "orka.fullname" .) | quote }}
+              value: {{ include "orka.harnessWrapperName" . | quote }}
             {{- if .Values.github.webhook.secretName }}
             - name: ORKA_GITHUB_WEBHOOK_SECRET
               valueFrom:
@@ -352,11 +335,6 @@ spec:
             - name: health
               containerPort: {{ .Values.controller.healthPort }}
               protocol: TCP
-            {{- if .Values.controller.workspaceProvider.classUseAdmission.enabled }}
-            - name: webhook-server
-              containerPort: 9443
-              protocol: TCP
-            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -385,31 +363,15 @@ spec:
             - name: harness-wrapper-auth
               mountPath: /var/run/orka/harness-wrapper
               readOnly: true
-            {{- if .Values.controller.workspaceProvider.classUseAdmission.enabled }}
-            - name: workspace-webhook-certs
-              mountPath: /var/run/orka/workspace-webhook
-              readOnly: true
-            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
         - name: harness-wrapper-auth
           secret:
-            secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (printf "%s-harness-wrapper-auth" (include "orka.fullname" .)) }}
+            secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (include "orka.harnessWrapperAuthSecretName" .) }}
             items:
               - key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
                 path: token
-        {{- if .Values.controller.workspaceProvider.classUseAdmission.enabled }}
-        - name: workspace-webhook-certs
-          secret:
-            secretName: {{ .Values.controller.workspaceProvider.classUseAdmission.existingSecret | quote }}
-            defaultMode: 0400
-            items:
-              - key: tls.crt
-                path: tls.crt
-              - key: tls.key
-                path: tls.key
-        {{- end }}
         - name: store
           {{- if .Values.store.persistence.enabled }}
           persistentVolumeClaim:

@@ -23,19 +23,21 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 			ControllerURL:      "http://controller",
 			AgentName:          "agent-a",
 			TransactionID:      "txn-123",
-			TransactionProfile: "kontxt",
+			TransactionProfile: "transaction-token",
 		},
-		Provider:        "openai",
-		Model:           "gpt-5",
-		Prompt:          "do work",
-		SystemPrompt:    "be concise",
-		BaseURL:         "https://example.test/v1",
-		AzureAPIVersion: "2024-10-21",
-		Tools:           []string{"delegate_task", "wait_for_tasks"},
-		EnableTelemetry: true,
-		TraceParent:     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
-		TraceState:      "vendor=value",
-		TraceBaggage:    "tenant=acme",
+		Provider:                         "openai",
+		Model:                            "gpt-5",
+		Prompt:                           "do work",
+		SystemPrompt:                     "be concise",
+		BaseURL:                          "https://example.test/v1",
+		AzureAPIVersion:                  "2024-10-21",
+		Tools:                            []string{"delegate_task", "wait_for_tasks"},
+		EnforceTransactionCredentialAuth: true,
+		TransactionCredentialReadScopes:  []string{"tenant:outbound-credentials:read"},
+		EnableTelemetry:                  true,
+		TraceParent:                      "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		TraceState:                       "vendor=value",
+		TraceBaggage:                     "tenant=acme",
 		Fallbacks: []FallbackProviderEnv{{
 			Provider:        "anthropic",
 			APIKey:          "secret",
@@ -62,6 +64,11 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	}
 	if len(parsed.Tools) != 2 || parsed.Tools[0] != "delegate_task" || parsed.Tools[1] != "wait_for_tasks" {
 		t.Fatalf("tools = %#v", parsed.Tools)
+	}
+	if !parsed.EnforceTransactionCredentialAuth ||
+		len(parsed.TransactionCredentialReadScopes) != 1 ||
+		parsed.TransactionCredentialReadScopes[0] != "tenant:outbound-credentials:read" {
+		t.Fatalf("transaction credential env mismatch: got %#v", parsed)
 	}
 	if !parsed.EnableTelemetry || parsed.TraceParent != env.TraceParent || parsed.TraceState != env.TraceState || parsed.TraceBaggage != env.TraceBaggage {
 		t.Fatalf("telemetry env mismatch: got %#v, want parent=%q state=%q baggage=%q", parsed, env.TraceParent, env.TraceState, env.TraceBaggage)
@@ -336,16 +343,16 @@ func TestTransactionLogFields(t *testing.T) {
 	if got := TransactionLogFields("", ""); got != "" {
 		t.Fatalf("TransactionLogFields empty = %q, want empty", got)
 	}
-	got := TransactionLogFields("txn-123", "kontxt")
-	want := ` transactionID="txn-123" contextTokenProfile="kontxt"`
+	got := TransactionLogFields("txn-123", "transaction-token")
+	want := ` transactionID="txn-123" contextTokenProfile="transaction-token"`
 	if got != want {
 		t.Fatalf("TransactionLogFields() = %q, want %q", got, want)
 	}
 }
 
 func TestTransactionLogFields_EscapesLogForgingCharacters(t *testing.T) {
-	got := TransactionLogFields("txn 123", "kontxt\nforged=true")
-	want := ` transactionID="txn 123" contextTokenProfile="kontxt\nforged=true"`
+	got := TransactionLogFields("txn 123", "transaction-token\nforged=true")
+	want := ` transactionID="txn 123" contextTokenProfile="transaction-token\nforged=true"`
 	if got != want {
 		t.Fatalf("TransactionLogFields() = %q, want %q", got, want)
 	}

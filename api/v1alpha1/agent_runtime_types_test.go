@@ -171,14 +171,15 @@ func TestAgentCLIRuntimeFields(t *testing.T) {
 	maxTurns := int32(50)
 	allowBash := true
 	runtime := AgentCLIRuntime{
-		Type:                AgentRuntimeCopilot,
-		DefaultMaxTurns:     &maxTurns,
-		DefaultAllowedTools: []string{"bash", "edit"},
-		DefaultAllowBash:    &allowBash,
+		Type:                   AgentRuntimeCodex,
+		DefaultMaxTurns:        &maxTurns,
+		DefaultAllowedTools:    []string{"bash", "edit"},
+		DefaultAllowBash:       &allowBash,
+		DefaultReasoningEffort: "high",
 	}
 
-	if runtime.Type != AgentRuntimeCopilot {
-		t.Errorf("Type = %q, want %q", runtime.Type, AgentRuntimeCopilot)
+	if runtime.Type != AgentRuntimeCodex {
+		t.Errorf("Type = %q, want %q", runtime.Type, AgentRuntimeCodex)
 	}
 	if *runtime.DefaultMaxTurns != 50 {
 		t.Errorf("DefaultMaxTurns = %d, want 50", *runtime.DefaultMaxTurns)
@@ -188,6 +189,9 @@ func TestAgentCLIRuntimeFields(t *testing.T) {
 	}
 	if runtime.DefaultAllowBash == nil || !*runtime.DefaultAllowBash {
 		t.Error("DefaultAllowBash should be true")
+	}
+	if runtime.DefaultReasoningEffort != "high" {
+		t.Errorf("DefaultReasoningEffort = %q, want high", runtime.DefaultReasoningEffort)
 	}
 }
 

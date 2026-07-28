@@ -74,6 +74,56 @@ var (
 		[]string{"result", "reason"},
 	)
 
+	TokenExchangeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_token_exchange_total",
+			Help: "Total OAuth token exchanges by adapter, grant class, result, and low-cardinality reason",
+		},
+		[]string{"adapter", "grant_class", "result", "reason"},
+	)
+
+	TokenExchangeDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_token_exchange_duration_seconds",
+			Help:    "OAuth token exchange latency by adapter, grant class, result, and low-cardinality reason",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"adapter", "grant_class", "result", "reason"},
+	)
+
+	// Repository monitor workflow metrics. Labels are low-cardinality intent/action/status values.
+	RepositoryMonitorCommandsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_repository_monitor_commands_total",
+			Help: "Repository monitor command events by intent and status",
+		},
+		[]string{"intent", "status"},
+	)
+
+	RepositoryMonitorWorkActionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_repository_monitor_work_actions_total",
+			Help: "Repository monitor workflow actions by desired action and status",
+		},
+		[]string{"desired_action", "status"},
+	)
+
+	RepositoryMonitorGitHubMutationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_repository_monitor_github_mutations_total",
+			Help: "Repository monitor controller-owned GitHub mutations by operation and status",
+		},
+		[]string{"operation", "status"},
+	)
+
+	RepositoryMonitorBlocksTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_repository_monitor_blocks_total",
+			Help: "Repository monitor policy, stale snapshot, and rate-limit blocks by reason",
+		},
+		[]string{"reason"},
+	)
+
 	// Execution event metrics. Labels intentionally exclude task/session IDs.
 	ExecutionEventsAppendedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -184,6 +234,12 @@ func init() {
 		ContextTokenAuthorizationTotal,
 		ContextTokenTTSExchangeTotal,
 		ContextTokenTTSExchangeDuration,
+		TokenExchangeTotal,
+		TokenExchangeDuration,
+		RepositoryMonitorCommandsTotal,
+		RepositoryMonitorWorkActionsTotal,
+		RepositoryMonitorGitHubMutationsTotal,
+		RepositoryMonitorBlocksTotal,
 		ExecutionEventsAppendedTotal,
 		ExecutionEventAppendFailuresTotal,
 		ExecutionEventAppendDuration,
@@ -225,12 +281,22 @@ func RecordContextTokenAuthorization(action, result, reason string) {
 	).Inc()
 }
 
-// RecordContextTokenTTSExchange records a kontxt TTS token exchange attempt.
+// RecordContextTokenTTSExchange records a transaction-token TTS exchange attempt.
 func RecordContextTokenTTSExchange(result, reason string, durationSeconds float64) {
 	result = normalizeMetricLabel(result)
 	reason = normalizeMetricLabel(reason)
 	ContextTokenTTSExchangeTotal.WithLabelValues(result, reason).Inc()
 	ContextTokenTTSExchangeDuration.WithLabelValues(result, reason).Observe(durationSeconds)
+}
+
+// RecordTokenExchange records one low-cardinality OAuth exchange observation.
+func RecordTokenExchange(adapter, grantClass, result, reason string, durationSeconds float64) {
+	adapter = normalizeMetricLabel(adapter)
+	grantClass = normalizeMetricLabel(grantClass)
+	result = normalizeMetricLabel(result)
+	reason = normalizeMetricLabel(reason)
+	TokenExchangeTotal.WithLabelValues(adapter, grantClass, result, reason).Inc()
+	TokenExchangeDuration.WithLabelValues(adapter, grantClass, result, reason).Observe(durationSeconds)
 }
 
 // RecordExecutionEventAppend records append success/failure and latency using low-cardinality labels.
@@ -303,6 +369,26 @@ func RecordExecutionEventDerivedLatency(measurement, result string, durationSeco
 // RecordExecutionEventDerivedFailure records one event-derived failure category.
 func RecordExecutionEventDerivedFailure(category, eventType string) {
 	ExecutionEventDerivedFailuresTotal.WithLabelValues(normalizeMetricLabel(category), normalizeMetricLabel(eventType)).Inc()
+}
+
+// RecordRepositoryMonitorCommand records a durable command event decision.
+func RecordRepositoryMonitorCommand(intent, status string) {
+	RepositoryMonitorCommandsTotal.WithLabelValues(normalizeMetricLabel(intent), normalizeMetricLabel(status)).Inc()
+}
+
+// RecordRepositoryMonitorWorkAction records a workflow action transition.
+func RecordRepositoryMonitorWorkAction(desiredAction, status string) {
+	RepositoryMonitorWorkActionsTotal.WithLabelValues(normalizeMetricLabel(desiredAction), normalizeMetricLabel(status)).Inc()
+}
+
+// RecordRepositoryMonitorGitHubMutation records one GitHub write audit result.
+func RecordRepositoryMonitorGitHubMutation(operation, status string) {
+	RepositoryMonitorGitHubMutationsTotal.WithLabelValues(normalizeMetricLabel(operation), normalizeMetricLabel(status)).Inc()
+}
+
+// RecordRepositoryMonitorBlock records a low-cardinality monitor block reason.
+func RecordRepositoryMonitorBlock(reason string) {
+	RepositoryMonitorBlocksTotal.WithLabelValues(normalizeMetricLabel(reason)).Inc()
 }
 
 func normalizeMetricLabel(value string) string {
