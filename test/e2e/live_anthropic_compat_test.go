@@ -20,7 +20,10 @@ import (
 	"github.com/orka-agents/orka/test/utils"
 )
 
-const liveAnthropicGoalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
+const (
+	liveAnthropicGoalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
+	liveAnthropicMaxTokens         = 128
+)
 
 var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 	const (
@@ -224,12 +227,12 @@ func fetchLiveAnthropicModels(apiBaseURL, token string) liveAnthropicModelList {
 func postLiveAnthropicJSON(apiBaseURL, token, providerName, model, expectedText string) liveAnthropicResponse {
 	body := fmt.Sprintf(`{
 		"model": "%s/%s",
-		"max_tokens": 32,
+		"max_tokens": %d,
 		"messages": [{
 			"role": "user",
 			"content": "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly %s\n%s and nothing else. Do not use any tools."
 		}]
-	}`, providerName, model, liveAnthropicGoalStateSentinel, expectedText)
+	}`, providerName, model, liveAnthropicMaxTokens, liveAnthropicGoalStateSentinel, expectedText)
 
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(apiBaseURL, "/")+"/anthropic/v1/messages", strings.NewReader(body))
 	Expect(err).NotTo(HaveOccurred())
@@ -256,13 +259,13 @@ func postLiveAnthropicJSON(apiBaseURL, token, providerName, model, expectedText 
 func postLiveAnthropicSSE(apiBaseURL, token, providerName, model, expectedText string) liveAnthropicStream {
 	body := fmt.Sprintf(`{
 		"model": "%s/%s",
-		"max_tokens": 32,
+		"max_tokens": %d,
 		"stream": true,
 		"messages": [{
 			"role": "user",
 			"content": "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly %s\n%s and nothing else. Do not use any tools."
 		}]
-	}`, providerName, model, liveAnthropicGoalStateSentinel, expectedText)
+	}`, providerName, model, liveAnthropicMaxTokens, liveAnthropicGoalStateSentinel, expectedText)
 
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(apiBaseURL, "/")+"/anthropic/v1/messages", strings.NewReader(body))
 	Expect(err).NotTo(HaveOccurred())
