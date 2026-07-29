@@ -17,6 +17,8 @@ function isRunningPhase(phase?: TaskPhase): boolean {
 
 export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhase) {
   const namespace = useUIStore((s) => s.namespace)
+  const taskScope = `${namespace}\u0000${taskId}`
+  const [stateScope, setStateScope] = useState(taskScope)
   const [logs, setLogs] = useState<string[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [isLive, setIsLive] = useState(false)
@@ -147,6 +149,14 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
   }, [taskId, enabled, taskPhase, namespace])
 
   useEffect(() => {
+    setStateScope(taskScope)
+    setLogs([])
+    setIsStreaming(false)
+    setIsLive(false)
+    setError(null)
+  }, [taskScope])
+
+  useEffect(() => {
     fetchLogs()
 
     // Set up polling for running tasks
@@ -190,5 +200,14 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
 
   const clear = useCallback(() => setLogs([]), [])
 
-  return { logs, isStreaming, isLive, error, refetch: fetchLogs, clear }
+  const isCurrentScope = stateScope === taskScope
+
+  return {
+    logs: isCurrentScope ? logs : [],
+    isStreaming: isCurrentScope ? isStreaming : false,
+    isLive: isCurrentScope ? isLive : false,
+    error: isCurrentScope ? error : null,
+    refetch: fetchLogs,
+    clear,
+  }
 }

@@ -258,6 +258,55 @@ describe('useTaskLogs', () => {
     expect(signals[1].aborted).toBe(true)
   })
 
+  it('clears task-scoped logs and errors before fetching a replacement task', async () => {
+    let replacementSignal: AbortSignal | undefined
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ logs: 'task-a-line' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(null, {
+        status: 500,
+        statusText: 'Internal Server Error',
+      }))
+      .mockImplementationOnce((_input, init) => {
+        replacementSignal = init?.signal as AbortSignal
+        return new Promise<Response>((_resolve, reject) => {
+          replacementSignal?.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'))
+          }, { once: true })
+        })
+      })
+
+    const { result, rerender, unmount } = renderHook(
+      ({ taskId }) => useTaskLogs(taskId, true, 'Running'),
+      { initialProps: { taskId: 'task-a' } },
+    )
+
+    await waitFor(() => {
+      expect(result.current.logs).toEqual(['task-a-line'])
+      expect(result.current.isStreaming).toBe(false)
+    })
+
+    await act(async () => {
+      await result.current.refetch()
+    })
+
+    expect(result.current.logs).toEqual(['task-a-line'])
+    expect(result.current.error).toBe('Failed to fetch logs: Internal Server Error')
+    expect(result.current.isLive).toBe(true)
+
+    rerender({ taskId: 'task-b' })
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    expect(replacementSignal?.aborted).toBe(false)
+    expect(result.current.logs).toEqual([])
+    expect(result.current.error).toBeNull()
+    expect(result.current.isLive).toBe(false)
+    expect(result.current.isStreaming).toBe(true)
+    unmount()
+  })
+
   it('aborts and restarts an in-flight log request when the namespace changes', () => {
     vi.useFakeTimers()
 
@@ -287,6 +336,49 @@ describe('useTaskLogs', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2)
     expect(urls[1]).toContain('namespace=team-blue')
     expect(signals[1].aborted).toBe(false)
+    unmount()
+  })
+
+  it('clears logs before fetching the same task from a replacement namespace', async () => {
+    let replacementSignal: AbortSignal | undefined
+    const urls: string[] = []
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce((input) => {
+        urls.push(String(input))
+        return Promise.resolve(new Response(JSON.stringify({ logs: 'default-line' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }))
+      })
+      .mockImplementationOnce((input, init) => {
+        urls.push(String(input))
+        replacementSignal = init?.signal as AbortSignal
+        return new Promise<Response>((_resolve, reject) => {
+          replacementSignal?.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'))
+          }, { once: true })
+        })
+      })
+
+    const { result, unmount } = renderHook(() => useTaskLogs('task-a', true, 'Running'))
+
+    await waitFor(() => {
+      expect(result.current.logs).toEqual(['default-line'])
+      expect(result.current.isStreaming).toBe(false)
+    })
+
+    act(() => {
+      useUIStore.setState({ namespace: 'team-blue' })
+    })
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(urls[0]).toContain('namespace=default')
+    expect(urls[1]).toContain('namespace=team-blue')
+    expect(replacementSignal?.aborted).toBe(false)
+    expect(result.current.logs).toEqual([])
+    expect(result.current.error).toBeNull()
+    expect(result.current.isLive).toBe(false)
+    expect(result.current.isStreaming).toBe(true)
     unmount()
   })
 

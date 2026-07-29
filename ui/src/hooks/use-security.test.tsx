@@ -21,10 +21,13 @@ import {
   useValidateFinding,
 } from './use-security'
 
-function createWrapper() {
-  const queryClient = new QueryClient({
+function createQueryClient() {
+  return new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
   })
+}
+
+function createWrapper(queryClient = createQueryClient()) {
   return ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   )
@@ -148,6 +151,110 @@ describe('security mutations', () => {
 
     expectNamespaceQuery(requests)
   })
+
+  it('invalidates the mutation namespace even when selection changes before success', async () => {
+    const paths = [
+      '/api/v1/security/findings/finding-1/dismiss',
+      '/api/v1/security/findings/finding-1/reopen',
+      '/api/v1/security/findings/finding-1/patch',
+      '/api/v1/security/findings/finding-1/validate',
+      '/api/v1/security/findings/finding-1/pull-request',
+    ]
+    let releaseRequest: (() => void) | undefined
+    let startedPath: string | undefined
+    let requestNamespace: string | null = null
+
+    for (const path of paths) {
+      server.use(
+        http.post(path, async ({ request }) => {
+          startedPath = new URL(request.url).pathname
+          requestNamespace = new URL(request.url).searchParams.get('namespace')
+          await new Promise<void>((resolve) => {
+            releaseRequest = () => resolve()
+          })
+          return HttpResponse.json({})
+        }),
+      )
+    }
+
+    const queryClient = createQueryClient()
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+    const { result } = renderHook(() => ({
+      dismiss: useDismissFinding('finding-1'),
+      reopen: useReopenFinding('finding-1'),
+      patch: useGeneratePatch('finding-1'),
+      validate: useValidateFinding('finding-1'),
+      pullRequest: useCreatePullRequest('finding-1'),
+    }), { wrapper: createWrapper(queryClient) })
+
+    const findingKey = ['security', 'finding', 'team-blue', 'finding-1']
+    const findingsKey = ['security', 'findings', 'team-blue']
+    const repositoriesKey = ['security', 'repositories', 'team-blue']
+    const patchesKey = ['security', 'patches', 'team-blue', 'finding-1']
+    const cases = [
+      {
+        path: paths[0],
+        mutate: () => result.current.dismiss.mutateAsync(),
+        expectedKeys: [findingKey, findingsKey, repositoriesKey],
+      },
+      {
+        path: paths[1],
+        mutate: () => result.current.reopen.mutateAsync(),
+        expectedKeys: [findingKey, findingsKey, repositoriesKey],
+      },
+      {
+        path: paths[2],
+        mutate: () => result.current.patch.mutateAsync(),
+        expectedKeys: [findingKey, patchesKey, findingsKey],
+      },
+      {
+        path: paths[3],
+        mutate: () => result.current.validate.mutateAsync(),
+        expectedKeys: [findingKey, findingsKey, repositoriesKey],
+      },
+      {
+        path: paths[4],
+        mutate: () => result.current.pullRequest.mutateAsync(),
+        expectedKeys: [findingKey, patchesKey, findingsKey],
+      },
+    ]
+
+    for (const mutationCase of cases) {
+      act(() => {
+        useUIStore.setState({ namespace: 'team-blue' })
+      })
+      invalidateSpy.mockClear()
+      releaseRequest = undefined
+      startedPath = undefined
+      requestNamespace = null
+      let mutationPromise: Promise<unknown>
+
+      act(() => {
+        mutationPromise = mutationCase.mutate()
+      })
+
+      await waitFor(() => expect(startedPath).toBe(mutationCase.path))
+      expect(requestNamespace).toBe('team-blue')
+
+      act(() => {
+        useUIStore.setState({ namespace: 'team-red' })
+      })
+
+      await act(async () => {
+        releaseRequest?.()
+        await mutationPromise
+      })
+
+      expect(invalidateSpy).toHaveBeenCalledTimes(mutationCase.expectedKeys.length)
+      for (const queryKey of mutationCase.expectedKeys) {
+        expect(invalidateSpy).toHaveBeenCalledWith({ queryKey })
+      }
+      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['security', 'findings'] })
+      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['security', 'repositories'] })
+      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['security', 'findings', 'team-red'] })
+      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['security', 'repositories', 'team-red'] })
+    }
+  })
 })
 
 describe('useAllFindings', () => {
@@ -173,7 +280,8 @@ describe('useAllFindings', () => {
       }),
     )
 
-    const { result } = renderHook(() => useAllFindings('repo'), { wrapper: createWrapper() })
+    const queryClient = createQueryClient()
+    const { result } = renderHook(() => useAllFindings('repo'), { wrapper: createWrapper(queryClient) })
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
 
@@ -183,5 +291,8 @@ describe('useAllFindings', () => {
     expect(requests[0].searchParams.has('cursor')).toBe(false)
     expect(requests[1].searchParams.get('limit')).toBe('100')
     expect(requests[1].searchParams.get('cursor')).toBe('1')
+    expect(queryClient.getQueryCache().findAll({
+      queryKey: ['security', 'findings', 'default'],
+    })).toHaveLength(1)
   })
 })
