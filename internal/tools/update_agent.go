@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -20,6 +19,8 @@ import (
 // UpdateAgentTool updates an existing Agent CRD.
 type UpdateAgentTool struct{}
 
+const updateAgentInvalidArgumentsErrorType = "invalid_arguments"
+
 func (t *UpdateAgentTool) Name() string { return updateAgentToolName }
 
 func (t *UpdateAgentTool) Description() string {
@@ -28,7 +29,18 @@ func (t *UpdateAgentTool) Description() string {
 
 func (t *UpdateAgentTool) Parameters() json.RawMessage {
 	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, systemPromptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "System prompt for the agent"}, toolsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Tool names to attach"}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
-		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai)"}, nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name"}, "temperature": map[string]any{jsonSchemaTypeField: "number", jsonSchemaDescriptionField: "Sampling temperature"},
+		"provider": map[string]any{
+			jsonSchemaTypeField:        jsonSchemaTypeString,
+			jsonSchemaEnumField:        []string{providerAnthropic, providerOpenAI},
+			jsonSchemaDescriptionField: "Model provider (anthropic or openai)",
+		},
+		nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name"},
+		"temperature": map[string]any{
+			jsonSchemaTypeField:        "number",
+			jsonSchemaDescriptionField: "Sampling temperature",
+			jsonSchemaMinimumField:     0,
+			jsonSchemaMaximumField:     2,
+		},
 	},
 	},
 	}, jsonSchemaRequiredField: []string{nameField},
@@ -43,12 +55,12 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 
 	var a map[string]any
 	if err := json.Unmarshal(args, &a); err != nil {
-		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
+		return ChatToolErrorResult(updateAgentInvalidArgumentsErrorType, fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
 	name := chatGetStringArg(a, nameField)
 	if name == "" {
-		return ChatToolErrorResult("invalid_arguments", "name is required", "Provide the agent name")
+		return ChatToolErrorResult(updateAgentInvalidArgumentsErrorType, "name is required", "Provide the agent name")
 	}
 
 	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
@@ -59,16 +71,13 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 
 	// Update specified fields
-	if modelProvider := chatGetStringArg(a, modelField); modelProvider != "" {
-		parts := strings.SplitN(modelProvider, "/", 2)
-		if agent.Spec.Model == nil {
-			agent.Spec.Model = &corev1alpha1.ModelConfig{}
-		}
-		if len(parts) == 2 {
-			agent.Spec.Model.Provider = parts[0]
-			agent.Spec.Model.Name = parts[1]
-		} else {
-			agent.Spec.Model.Name = modelProvider
+	if modelValue, ok := a[modelField]; ok {
+		if err := applyAgentModelUpdate(agent, modelValue); err != nil {
+			return ChatToolErrorResult(
+				updateAgentInvalidArgumentsErrorType,
+				err.Error(),
+				"Provide model as an object with string provider/name fields and a numeric temperature",
+			)
 		}
 	}
 
@@ -100,4 +109,93 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 
 	return ChatToolSuccess(map[string]any{nameField: agent.Name, messageField: "Agent updated"})
+}
+
+func applyAgentModelUpdate(agent *corev1alpha1.Agent, value any) error {
+	switch model := value.(type) {
+	case map[string]any:
+		var provider *string
+		if value, ok := model["provider"]; ok {
+			providerValue, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("model.provider must be a string")
+			}
+			if err := validateAgentModelProvider(providerValue); err != nil {
+				return err
+			}
+			provider = &providerValue
+		}
+
+		var name *string
+		if value, ok := model[nameField]; ok {
+			nameValue, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("model.name must be a string")
+			}
+			name = &nameValue
+		}
+
+		var temperature *float64
+		if value, ok := model["temperature"]; ok {
+			temperatureValue, ok := value.(float64)
+			if !ok {
+				return fmt.Errorf("model.temperature must be a number")
+			}
+			if temperatureValue < 0 || temperatureValue > 2 {
+				return fmt.Errorf("model.temperature must be between 0 and 2")
+			}
+			temperature = &temperatureValue
+		}
+
+		if provider == nil && name == nil && temperature == nil {
+			return nil
+		}
+		if agent.Spec.Model == nil {
+			agent.Spec.Model = &corev1alpha1.ModelConfig{}
+		}
+		if provider != nil {
+			agent.Spec.Model.Provider = *provider
+		}
+		if name != nil {
+			agent.Spec.Model.Name = *name
+		}
+		if temperature != nil {
+			agent.Spec.Model.Temperature = temperature
+		}
+		return nil
+
+	case string:
+		if model == "" {
+			return nil
+		}
+		provider, name := splitModelString(model)
+		if provider != "" {
+			if err := validateAgentModelProvider(provider); err != nil {
+				return err
+			}
+		}
+		if agent.Spec.Model == nil {
+			agent.Spec.Model = &corev1alpha1.ModelConfig{}
+		}
+		if provider != "" {
+			agent.Spec.Model.Provider = provider
+		}
+		agent.Spec.Model.Name = name
+		return nil
+
+	default:
+		return fmt.Errorf("model must be an object or legacy provider/name string")
+	}
+}
+
+func validateAgentModelProvider(provider string) error {
+	switch provider {
+	case providerAnthropic, providerOpenAI:
+		return nil
+	default:
+		return fmt.Errorf(
+			"model.provider must be one of %q or %q",
+			providerAnthropic, providerOpenAI,
+		)
+	}
 }

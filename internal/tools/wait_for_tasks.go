@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -27,7 +28,9 @@ import (
 
 // WaitForTasksTool implements waiting for child tasks to complete
 type WaitForTasksTool struct {
-	k8sClient client.Client
+	k8sClient     client.Client
+	pollInterval  time.Duration
+	notFoundGrace time.Duration
 }
 
 // WaitForTasksArgs are the arguments for the wait_for_tasks tool
@@ -84,14 +87,18 @@ type FailureDetails struct {
 }
 
 const (
-	maxWaitTaskSummaryChars = 4096
-	maxWaitTaskDataBytes    = 32 * 1024
+	maxWaitTaskSummaryChars      = 4096
+	maxWaitTaskDataBytes         = 32 * 1024
+	defaultWaitTaskPollInterval  = 5 * time.Second
+	defaultWaitTaskNotFoundGrace = 15 * time.Second
 )
 
 // NewWaitForTasksTool creates a new wait_for_tasks tool
 func NewWaitForTasksTool(k8sClient client.Client) *WaitForTasksTool {
 	return &WaitForTasksTool{
-		k8sClient: k8sClient,
+		k8sClient:     k8sClient,
+		pollInterval:  defaultWaitTaskPollInterval,
+		notFoundGrace: defaultWaitTaskNotFoundGrace,
 	}
 }
 
@@ -157,9 +164,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	deadline := time.Now().Add(timeout)
-	pollInterval := 5 * time.Second
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
+	pollInterval, notFoundGrace := t.waitDurations()
 
 	results := make(map[string]*TaskResultInfo)
 	for _, taskName := range waitArgs.Tasks {
@@ -169,6 +174,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 		}
 	}
 
+	notFoundSince := make(map[string]time.Time)
 	allTerminal := false
 	for {
 		allTerminal = true
@@ -176,10 +182,11 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			var task corev1alpha1.Task
 			err := t.k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: ns}, &task)
 			if err != nil {
-				results[taskName].Phase = taskPhaseErrorString
-				results[taskName].Result = fmt.Sprintf("error: %v", err)
+				permanent := recordWaitTaskGetError(results[taskName], taskName, err, notFoundSince, notFoundGrace)
+				allTerminal = allTerminal && permanent
 				continue
 			}
+			clearRecoveredWaitTaskGetError(results[taskName], taskName, notFoundSince)
 
 			phase := task.Status.Phase
 
@@ -287,6 +294,59 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	return string(data), nil
+}
+
+func (t *WaitForTasksTool) waitDurations() (time.Duration, time.Duration) {
+	pollInterval := t.pollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultWaitTaskPollInterval
+	}
+	notFoundGrace := t.notFoundGrace
+	if notFoundGrace <= 0 {
+		notFoundGrace = defaultWaitTaskNotFoundGrace
+	}
+	return pollInterval, notFoundGrace
+}
+
+func recordWaitTaskGetError(
+	result *TaskResultInfo,
+	taskName string,
+	err error,
+	notFoundSince map[string]time.Time,
+	notFoundGrace time.Duration,
+) bool {
+	result.Phase = taskPhaseErrorString
+	result.Result = fmt.Sprintf("error: %v", err)
+	if !apierrors.IsNotFound(err) {
+		delete(notFoundSince, taskName)
+		return isPermanentWaitForTasksGetError(err)
+	}
+	firstMiss, seen := notFoundSince[taskName]
+	if !seen {
+		firstMiss = time.Now()
+		notFoundSince[taskName] = firstMiss
+	}
+	return time.Since(firstMiss) >= notFoundGrace
+}
+
+func clearRecoveredWaitTaskGetError(
+	result *TaskResultInfo,
+	taskName string,
+	notFoundSince map[string]time.Time,
+) {
+	delete(notFoundSince, taskName)
+	if result.Phase == taskPhaseErrorString {
+		result.Result = ""
+	}
+}
+
+func isPermanentWaitForTasksGetError(err error) bool {
+	// NotFound remains retryable because cache-backed controller-runtime clients
+	// can briefly miss a Task that was just created through the same client.
+	return apierrors.IsForbidden(err) ||
+		apierrors.IsUnauthorized(err) ||
+		apierrors.IsBadRequest(err) ||
+		apierrors.IsInvalid(err)
 }
 
 func fetchTaskResultForNamespace(ctx context.Context, namespace, taskName string) (string, error) {

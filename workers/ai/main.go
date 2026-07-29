@@ -1201,10 +1201,14 @@ func executeAgentLoopWithEvents(
 			requestTools = nil
 		}
 		stepCtx, stepSpan := startAgentStepSpan(ctx, iteration, provider, model, requestTools, baseToolCtx)
+		requestSystemPrompt := systemPrompt
+		if finalAnswerRetry {
+			requestSystemPrompt = appendSystemInstruction(requestSystemPrompt, finalAnswerRetryPrompt)
+		}
 		req := &llm.CompletionRequest{
 			Model:        model,
 			Messages:     messages,
-			SystemPrompt: systemPrompt,
+			SystemPrompt: requestSystemPrompt,
 			MaxTokens:    4096,
 			Tools:        requestTools,
 		}
@@ -1221,23 +1225,9 @@ func executeAgentLoopWithEvents(
 
 		resp, err := provider.Complete(stepCtx, req)
 		if err != nil && llm.IsContextTooLongErr(err) {
-			tokenEstimate := 0
-			for _, m := range messages {
-				tokenEstimate += len(m.Content) / 4
-			}
-			beforeCount := len(messages)
-			messages = llm.TruncateMessages(messages, tokenEstimate/2)
-			req.Messages = messages
-			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeContextTruncated, modelLoopEventTimeout,
-				common.WithEventSeverity(events.ExecutionEventSeverityWarning),
-				common.WithEventSummary("model context truncated after provider context limit error"),
-				common.WithEventContent(eventContent(map[string]any{
-					"iteration":          iteration + 1,
-					"messageCountBefore": beforeCount,
-					"messageCountAfter":  len(messages),
-				})),
+			resp, messages, err = retryCompletionAfterContextOverflow(
+				stepCtx, provider, req, err, eventRecorder, iteration,
 			)
-			resp, err = provider.Complete(stepCtx, req)
 		}
 		err = completionCallError(resp, err)
 		if err != nil {
@@ -1297,7 +1287,6 @@ func executeAgentLoopWithEvents(
 			blankFinalRetried = true
 			finalAnswerRetry = true
 			iterationLimit++
-			messages = append(messages, llm.Message{Role: "user", Content: finalAnswerRetryPrompt})
 			stepSpan.End()
 			continue
 		case completionDecisionToolCalls:
@@ -1441,6 +1430,51 @@ func executeAgentLoopWithEvents(
 	}
 
 	return "", fmt.Errorf("max iterations reached without completion")
+}
+
+func appendSystemInstruction(systemPrompt, instruction string) string {
+	if systemPrompt == "" {
+		return instruction
+	}
+	return systemPrompt + "\n\n" + instruction
+}
+
+func retryCompletionAfterContextOverflow(
+	ctx context.Context,
+	provider llm.Provider,
+	req *llm.CompletionRequest,
+	overflowErr error,
+	eventRecorder common.EventRecorder,
+	iteration int,
+) (*llm.CompletionResponse, []llm.Message, error) {
+	beforeSize, err := llm.EstimateCompletionRequestSize(req)
+	if err != nil {
+		return nil, req.Messages, overflowErr
+	}
+	retryReq, err := llm.TruncateCompletionRequest(req, beforeSize.EstimatedTokens/2)
+	if err != nil {
+		return nil, req.Messages, overflowErr
+	}
+	afterSize, err := llm.EstimateCompletionRequestSize(retryReq)
+	if err != nil || afterSize.SerializedBytes >= beforeSize.SerializedBytes {
+		return nil, req.Messages, overflowErr
+	}
+
+	common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeContextTruncated, modelLoopEventTimeout,
+		common.WithEventSeverity(events.ExecutionEventSeverityWarning),
+		common.WithEventSummary("model context truncated after provider context limit error"),
+		common.WithEventContent(eventContent(map[string]any{
+			"iteration":             iteration + 1,
+			"messageCountBefore":    len(req.Messages),
+			"messageCountAfter":     len(retryReq.Messages),
+			"requestBytesBefore":    beforeSize.SerializedBytes,
+			"requestBytesAfter":     afterSize.SerializedBytes,
+			"estimatedTokensBefore": beforeSize.EstimatedTokens,
+			"estimatedTokensAfter":  afterSize.EstimatedTokens,
+		})),
+	)
+	resp, retryErr := provider.Complete(ctx, retryReq)
+	return resp, retryReq.Messages, retryErr
 }
 
 func optionalToolContext(contexts []*tools.ToolContext) *tools.ToolContext {

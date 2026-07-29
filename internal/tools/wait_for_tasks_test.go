@@ -9,15 +9,20 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apischema "k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -160,10 +165,43 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 			},
 		},
 		{
+			name: "finalizing remains nonterminal",
+			tasks: []corev1alpha1.Task{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "finalizing-task", Namespace: testNamespace},
+					Status: corev1alpha1.TaskStatus{
+						Phase: corev1alpha1.TaskPhaseFinalizing,
+					},
+				},
+			},
+			args:          WaitForTasksArgs{Tasks: []string{"finalizing-task"}, Timeout: shortPollIntervalString},
+			wantCompleted: false,
+			wantResults: []TaskResultInfo{
+				{Task: "finalizing-task", Phase: string(corev1alpha1.TaskPhaseFinalizing)},
+			},
+		},
+		{
+			name: "cancelled is terminal",
+			tasks: []corev1alpha1.Task{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "cancelled-task", Namespace: testNamespace},
+					Status: corev1alpha1.TaskStatus{
+						Phase:   corev1alpha1.TaskPhaseCancelled,
+						Message: "cancelled by user",
+					},
+				},
+			},
+			args:          WaitForTasksArgs{Tasks: []string{"cancelled-task"}, Timeout: "1s"},
+			wantCompleted: true,
+			wantResults: []TaskResultInfo{
+				{Task: "cancelled-task", Phase: string(corev1alpha1.TaskPhaseCancelled), Result: "cancelled by user"},
+			},
+		},
+		{
 			name:          "missing task",
 			tasks:         []corev1alpha1.Task{},
 			args:          WaitForTasksArgs{Tasks: []string{testNonexistentName}, Timeout: shortPollIntervalString},
-			wantCompleted: true,
+			wantCompleted: false,
 			wantResults: []TaskResultInfo{
 				{Task: testNonexistentName, Phase: taskPhaseErrorString},
 			},
@@ -257,6 +295,260 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWaitForTasksTool_Execute_PreservesFinalizingOutcomeAndWorkspaceStatus(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "finalizing-with-status", Namespace: testNamespace},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseFinalizing,
+			ExecutionOutcome: &corev1alpha1.TaskExecutionOutcome{
+				Phase:   corev1alpha1.TaskPhaseSucceeded,
+				Attempt: 2,
+				Message: "workload completed",
+			},
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				State:         "Attached",
+				AttachedEpoch: 7,
+			},
+		},
+	}
+	tool := NewWaitForTasksTool(newFakeClient(task))
+
+	result, err := tool.Execute(t.Context(), json.RawMessage(`{"tasks":["finalizing-with-status"],"timeout":"20ms"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var got WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if got.Completed {
+		t.Fatal("Completed = true for Finalizing task")
+	}
+	if len(got.Results) != 1 {
+		t.Fatalf("Results = %#v, want one result", got.Results)
+	}
+	info := got.Results[0]
+	if info.ExecutionOutcome == nil || info.ExecutionOutcome.Phase != corev1alpha1.TaskPhaseSucceeded || info.ExecutionOutcome.Attempt != 2 {
+		t.Fatalf("ExecutionOutcome = %#v, want preserved successful attempt", info.ExecutionOutcome)
+	}
+	if info.WorkspaceStatus == nil || info.WorkspaceStatus.State != "Attached" || info.WorkspaceStatus.AttachedEpoch != 7 {
+		t.Fatalf("WorkspaceStatus = %#v, want preserved status", info.WorkspaceStatus)
+	}
+}
+
+func TestWaitForTasksTool_Execute_TransientGetErrorTimesOutIncomplete(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
+
+	transientErr := errors.New("temporary Kubernetes read failure")
+	getCalls := 0
+	fakeClient := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+		Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+			getCalls++
+			return transientErr
+		},
+	})
+
+	result, err := NewWaitForTasksTool(fakeClient).Execute(
+		context.Background(),
+		json.RawMessage(`{"tasks":["temporarily-unreadable"],"timeout":"20ms"}`),
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var got WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if got.Completed {
+		t.Fatal("Completed = true after transient Get errors, want false")
+	}
+	if getCalls < 2 {
+		t.Fatalf("Get calls = %d, want at least 2 attempts before timeout", getCalls)
+	}
+	if len(got.Results) != 1 || got.Results[0].Phase != taskPhaseErrorString {
+		t.Fatalf("Results = %#v, want one Error result", got.Results)
+	}
+	if !strings.Contains(got.Results[0].Result, transientErr.Error()) {
+		t.Fatalf("Result = %q, want transient error details", got.Results[0].Result)
+	}
+}
+
+func TestWaitForTasksTool_Execute_RetriesNotFoundCacheMissUntilRecovery(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "eventually-visible", Namespace: testNamespace},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	getCalls := 0
+	fakeClient := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			if getCalls == 1 {
+				return apierrors.NewNotFound(apischema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "tasks"}, key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}, task)
+
+	result, err := NewWaitForTasksTool(fakeClient).Execute(
+		context.Background(),
+		json.RawMessage(`{"tasks":["eventually-visible"],"timeout":"20ms"}`),
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var got WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if !got.Completed {
+		t.Fatalf("Completed = false after NotFound cache miss recovered, result = %#v", got)
+	}
+	if getCalls < 2 {
+		t.Fatalf("Get calls = %d, want a retry after NotFound", getCalls)
+	}
+	if len(got.Results) != 1 || got.Results[0].Phase != taskPhaseSucceededString {
+		t.Fatalf("Results = %#v, want eventually visible task to succeed", got.Results)
+	}
+	if got.Results[0].Result != "" {
+		t.Fatalf("Result = %q, want stale NotFound error cleared after recovery", got.Results[0].Result)
+	}
+}
+
+func TestWaitForTasksTool_Execute_PersistentNotFoundStopsAfterGrace(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	getCalls := 0
+	fakeClient := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+		Get: func(_ context.Context, _ client.WithWatch, key client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+			getCalls++
+			return apierrors.NewNotFound(
+				apischema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "tasks"}, key.Name,
+			)
+		},
+	})
+	tool := NewWaitForTasksTool(fakeClient)
+	tool.pollInterval = time.Millisecond
+	tool.notFoundGrace = 3 * time.Millisecond
+
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"tasks":["missing-task"],"timeout":"1m"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var got WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if !got.Completed {
+		t.Fatalf("Completed = false after NotFound grace, result = %#v", got)
+	}
+	if getCalls < 2 || getCalls > 20 {
+		t.Fatalf("Get calls = %d, want bounded NotFound retries", getCalls)
+	}
+	if len(got.Results) != 1 || got.Results[0].Phase != taskPhaseErrorString {
+		t.Fatalf("Results = %#v, want terminal Error result", got.Results)
+	}
+}
+
+func TestWaitForTasksTool_Execute_TransientErrorClearsAfterRecovery(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "recovered-task", Namespace: testNamespace},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	getCalls := 0
+	fakeClient := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			if getCalls == 1 {
+				return errors.New("temporary read failure")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}, task)
+	tool := NewWaitForTasksTool(fakeClient)
+	tool.pollInterval = time.Millisecond
+
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"tasks":["recovered-task"],"timeout":"100ms"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var got WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if !got.Completed || len(got.Results) != 1 || got.Results[0].Phase != taskPhaseSucceededString {
+		t.Fatalf("result = %#v, want recovered success", got)
+	}
+	if got.Results[0].Result != "" {
+		t.Fatalf("Result = %q, want transient read error cleared", got.Results[0].Result)
+	}
+}
+
+func TestWaitForTasksTool_Execute_PermanentGetErrorCompletesWithError(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
+
+	getCalls := 0
+	fakeClient := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+		Get: func(_ context.Context, _ client.WithWatch, key client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+			getCalls++
+			return apierrors.NewForbidden(
+				apischema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "tasks"},
+				key.Name,
+				errors.New("access denied"),
+			)
+		},
+	})
+
+	result, err := NewWaitForTasksTool(fakeClient).Execute(
+		context.Background(),
+		json.RawMessage(`{"tasks":["forbidden-task"],"timeout":"1m"}`),
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var got WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if !got.Completed {
+		t.Fatalf("Completed = false for permanent Get error, result = %#v", got)
+	}
+	if getCalls != 1 {
+		t.Fatalf("Get calls = %d, want no retries for permanent error", getCalls)
+	}
+	if len(got.Results) != 1 || got.Results[0].Phase != taskPhaseErrorString {
+		t.Fatalf("Results = %#v, want one Error result", got.Results)
+	}
+}
+
+func TestWaitForTasksTool_Execute_HonorsCanceledContextDuringGetErrors(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
+
+	fakeClient := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+		Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+			return errors.New("temporary Kubernetes read failure")
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := NewWaitForTasksTool(fakeClient).Execute(
+		ctx,
+		json.RawMessage(`{"tasks":["temporarily-unreadable"],"timeout":"1m"}`),
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute() error = %v, want context.Canceled", err)
+	}
+	if result != "" {
+		t.Fatalf("Execute() result = %q, want empty result on cancellation", result)
 	}
 }
 

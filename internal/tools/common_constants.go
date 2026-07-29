@@ -152,6 +152,7 @@ const (
 	falseStr               = "false"
 	mergeMethodMerge       = "merge"
 	mergeMethodRebase      = "rebase"
+	providerAnthropic      = "anthropic"
 	providerOpenAI         = "openai"
 	errTypeNotFound        = "not_found"
 	internalErrorType      = "internal_error"

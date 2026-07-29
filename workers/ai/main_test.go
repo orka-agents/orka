@@ -637,8 +637,11 @@ func TestExecuteAgentLoop_RetriesBlankFinalResponseOnceWithoutTools(t *testing.T
 		t.Fatalf("retry request tools = %d, want 0", len(provider.requests[1].Tools))
 	}
 	retryMessages := provider.requests[1].Messages
-	if len(retryMessages) != 2 || retryMessages[1].Role != roleUser || retryMessages[1].Content != finalAnswerRetryPrompt {
-		t.Fatalf("retry messages = %#v", retryMessages)
+	if len(retryMessages) != 1 || retryMessages[0].Role != roleUser || retryMessages[0].Content != "investigate" {
+		t.Fatalf("retry messages = %#v, want only the original user task", retryMessages)
+	}
+	if provider.requests[1].SystemPrompt != finalAnswerRetryPrompt {
+		t.Fatalf("retry system prompt = %q, want %q", provider.requests[1].SystemPrompt, finalAnswerRetryPrompt)
 	}
 }
 

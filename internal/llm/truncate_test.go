@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+const (
+	testRoleAssistant = "assistant"
+	testRoleSystem    = "system"
+	testRoleTool      = "tool"
+	testRoleUser      = "user"
+)
+
 func Test_estimateTokens(t *testing.T) {
 	tests := []struct {
 		name string
@@ -76,6 +83,460 @@ func Test_estimateMessageTokens(t *testing.T) {
 	}
 }
 
+func TestEstimateCompletionRequestSizeIncludesCompleteSerializedRequest(t *testing.T) {
+	req := &CompletionRequest{
+		Model:        "test-model",
+		SystemPrompt: strings.Repeat("system ", 80),
+		Messages: []Message{
+			{
+				Role: testRoleAssistant,
+				ToolCalls: []ToolCall{{
+					ID:        "call-1",
+					Name:      "lookup",
+					Arguments: json.RawMessage(fmt.Sprintf(`{"query":%q}`, strings.Repeat("argument ", 80))),
+				}},
+			},
+			{Role: testRoleTool, ToolCallID: "call-1", Content: "tool result"},
+			{Role: testRoleUser, Content: "current task"},
+		},
+		Tools: []Tool{{
+			Name:        "lookup",
+			Description: strings.Repeat("description ", 80),
+			Parameters:  json.RawMessage(fmt.Sprintf(`{"type":"object","description":%q}`, strings.Repeat("schema ", 80))),
+		}},
+	}
+
+	got, err := EstimateCompletionRequestSize(req)
+	if err != nil {
+		t.Fatalf("EstimateCompletionRequestSize() error = %v", err)
+	}
+	serialized, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if got.SerializedBytes != len(serialized) {
+		t.Fatalf("SerializedBytes = %d, want %d", got.SerializedBytes, len(serialized))
+	}
+	if got.EstimatedTokens != estimateTokens(string(serialized)) {
+		t.Fatalf("EstimatedTokens = %d, want %d", got.EstimatedTokens, estimateTokens(string(serialized)))
+	}
+
+	messagesOnly, err := EstimateCompletionRequestSize(&CompletionRequest{Messages: req.Messages})
+	if err != nil {
+		t.Fatalf("messages-only EstimateCompletionRequestSize() error = %v", err)
+	}
+	if got.SerializedBytes <= messagesOnly.SerializedBytes {
+		t.Fatalf("complete request size = %d, messages-only size = %d; system prompt/tools were ignored",
+			got.SerializedBytes, messagesOnly.SerializedBytes)
+	}
+}
+
+func TestTruncateCompletionRequestDeepCopiesNestedToolData(t *testing.T) {
+	req := &CompletionRequest{
+		Messages: []Message{
+			{
+				Role: testRoleAssistant,
+				ToolCalls: []ToolCall{{
+					ID:        "call-1",
+					Name:      "lookup",
+					Arguments: json.RawMessage(`{"query":"original"}`),
+				}},
+			},
+			{Role: testRoleTool, ToolCallID: "call-1", Content: "result"},
+			{Role: testRoleUser, Content: "current task"},
+		},
+		Tools: []Tool{{
+			Name:       "lookup",
+			Parameters: json.RawMessage(`{"type":"object"}`),
+		}},
+	}
+
+	cloned, err := TruncateCompletionRequest(req, 10000)
+	if err != nil {
+		t.Fatalf("TruncateCompletionRequest() error = %v", err)
+	}
+	cloned.Messages[0].ToolCalls[0].Name = "mutated"
+	cloned.Messages[0].ToolCalls[0].Arguments[0] = '['
+	cloned.Tools[0].Parameters[0] = '['
+
+	if got := req.Messages[0].ToolCalls[0].Name; got != "lookup" {
+		t.Fatalf("original tool call name = %q, want lookup", got)
+	}
+	if got := string(req.Messages[0].ToolCalls[0].Arguments); got != `{"query":"original"}` {
+		t.Fatalf("original tool arguments mutated: %q", got)
+	}
+	if got := string(req.Tools[0].Parameters); got != `{"type":"object"}` {
+		t.Fatalf("original tool schema mutated: %q", got)
+	}
+}
+
+func TestTruncateCompletionRequestTruncatesSingleOversizedCurrentPrompt(t *testing.T) {
+	originalPrompt := "BEGIN-CURRENT-TASK\n" + strings.Repeat("details ", 2000) + "\nEND-CURRENT-TASK"
+	req := &CompletionRequest{
+		Model:        "test-model",
+		SystemPrompt: "system",
+		Messages:     []Message{{Role: testRoleUser, Content: originalPrompt}},
+		MaxTokens:    4096,
+	}
+	before, err := EstimateCompletionRequestSize(req)
+	if err != nil {
+		t.Fatalf("EstimateCompletionRequestSize() error = %v", err)
+	}
+
+	truncated, err := TruncateCompletionRequest(req, before.EstimatedTokens/2)
+	if err != nil {
+		t.Fatalf("TruncateCompletionRequest() error = %v", err)
+	}
+	if req.Messages[0].Content != originalPrompt {
+		t.Fatal("TruncateCompletionRequest() mutated the original request")
+	}
+	if len(truncated.Messages) != 1 || truncated.Messages[0].Role != testRoleUser {
+		t.Fatalf("messages = %#v, want the current user task", truncated.Messages)
+	}
+	gotPrompt := truncated.Messages[0].Content
+	if !strings.Contains(gotPrompt, "[Current user task truncated for context recovery.]") {
+		t.Fatalf("truncated prompt lacks explicit marker: %q", gotPrompt)
+	}
+	if !strings.Contains(gotPrompt, "BEGIN-CURRENT-TASK") || !strings.Contains(gotPrompt, "END-CURRENT-TASK") {
+		t.Fatalf("truncated prompt did not preserve task boundaries: %q", gotPrompt)
+	}
+	after, err := EstimateCompletionRequestSize(truncated)
+	if err != nil {
+		t.Fatalf("truncated EstimateCompletionRequestSize() error = %v", err)
+	}
+	if after.EstimatedTokens > before.EstimatedTokens/2 {
+		t.Fatalf("truncated request estimate = %d, budget = %d", after.EstimatedTokens, before.EstimatedTokens/2)
+	}
+	if after.SerializedBytes >= before.SerializedBytes {
+		t.Fatalf("truncated bytes = %d, original bytes = %d", after.SerializedBytes, before.SerializedBytes)
+	}
+}
+
+func TestTruncateCompletionRequestBalancesTightCurrentTaskBoundaries(t *testing.T) {
+	const (
+		beginSentinel = "BEGIN-SENTINEL--"
+		endSentinel   = "--END-SENTINEL"
+	)
+	originalPrompt := beginSentinel + strings.Repeat("middle ", 500) + endSentinel
+	req := &CompletionRequest{
+		Model:        "test-model",
+		SystemPrompt: strings.Repeat("fixed system ", 200),
+		Messages:     []Message{{Role: testRoleUser, Content: originalPrompt}},
+	}
+	budgetReq, err := cloneCompletionRequest(req)
+	if err != nil {
+		t.Fatalf("cloneCompletionRequest() error = %v", err)
+	}
+	originalRunes := []rune(originalPrompt)
+	budgetReq.Messages[0].Content = string(originalRunes[:16]) + currentUserTaskTruncationMarker +
+		string(originalRunes[len(originalRunes)-16:])
+	budget, err := EstimateCompletionRequestSize(budgetReq)
+	if err != nil {
+		t.Fatalf("EstimateCompletionRequestSize() error = %v", err)
+	}
+
+	truncated, err := TruncateCompletionRequest(req, budget.EstimatedTokens)
+	if err != nil {
+		t.Fatalf("TruncateCompletionRequest() error = %v", err)
+	}
+	gotPrompt := truncated.Messages[0].Content
+	if !strings.Contains(gotPrompt, beginSentinel) || !strings.Contains(gotPrompt, endSentinel) {
+		t.Fatalf("tight truncation did not preserve both task boundaries: %q", gotPrompt)
+	}
+	if !strings.Contains(gotPrompt, "[Current user task truncated for context recovery.]") {
+		t.Fatalf("tight truncation lacks marker: %q", gotPrompt)
+	}
+}
+
+func TestTruncateCompletionRequestDropsOversizedOldHistoryBeforeCurrentTask(t *testing.T) {
+	const currentTask = "CURRENT-TASK-SENTINEL: answer this request"
+	req := &CompletionRequest{
+		Model: "test-model",
+		Messages: []Message{
+			{Role: testRoleUser, Content: "OLD-FIRST-HISTORY:" + strings.Repeat("old ", 3000)},
+			{Role: testRoleAssistant, Content: "old answer"},
+			{Role: testRoleUser, Content: currentTask},
+		},
+	}
+	currentOnly := &CompletionRequest{
+		Model:    req.Model,
+		Messages: []Message{{Role: testRoleUser, Content: currentTask}},
+	}
+	budget, err := EstimateCompletionRequestSize(currentOnly)
+	if err != nil {
+		t.Fatalf("EstimateCompletionRequestSize() error = %v", err)
+	}
+
+	truncated, err := TruncateCompletionRequest(req, budget.EstimatedTokens+20)
+	if err != nil {
+		t.Fatalf("TruncateCompletionRequest() error = %v", err)
+	}
+	if len(truncated.Messages) == 0 {
+		t.Fatal("TruncateCompletionRequest() dropped every message")
+	}
+	if truncated.Messages[0].Role != testRoleSystem || !strings.Contains(truncated.Messages[0].Content, "truncated") {
+		t.Fatalf("first retained message = %#v, want a truncation note", truncated.Messages[0])
+	}
+	if got := truncated.Messages[len(truncated.Messages)-1]; got.Role != testRoleUser || got.Content != currentTask {
+		t.Fatalf("newest message = %#v, want preserved current task", got)
+	}
+	for _, message := range truncated.Messages {
+		if strings.Contains(message.Content, "OLD-FIRST-HISTORY") || message.Content == "old answer" {
+			t.Fatalf("oversized old history was retained: %#v", truncated.Messages)
+		}
+	}
+}
+
+func TestTruncateCompletionRequestKeepsAssistantToolResultBlocksAtomic(t *testing.T) {
+	const currentTask = "CURRENT-TASK-SENTINEL"
+	newestBlock := []Message{
+		{
+			Role: testRoleAssistant,
+			ToolCalls: []ToolCall{{
+				ID:        "new-call",
+				Name:      "lookup",
+				Arguments: json.RawMessage(`{"query":"new"}`),
+			}},
+		},
+		{Role: testRoleTool, ToolCallID: "new-call", Content: "new result"},
+	}
+	req := &CompletionRequest{
+		Model: "test-model",
+		Messages: []Message{
+			{Role: testRoleUser, Content: strings.Repeat("old history ", 1000)},
+			{Role: testRoleUser, Content: currentTask},
+			{
+				Role: testRoleAssistant,
+				ToolCalls: []ToolCall{{
+					ID:        "old-call",
+					Name:      "lookup",
+					Arguments: json.RawMessage(fmt.Sprintf(`{"query":%q}`, strings.Repeat("old argument ", 1000))),
+				}},
+			},
+			{Role: testRoleTool, ToolCallID: "old-call", Content: "old result"},
+		},
+	}
+	req.Messages = append(req.Messages, newestBlock...)
+	wantMessages := append([]Message{{Role: testRoleUser, Content: currentTask}}, newestBlock...)
+	wantSize, err := EstimateCompletionRequestSize(&CompletionRequest{Model: req.Model, Messages: wantMessages})
+	if err != nil {
+		t.Fatalf("EstimateCompletionRequestSize() error = %v", err)
+	}
+
+	truncated, err := TruncateCompletionRequest(req, wantSize.EstimatedTokens+100)
+	if err != nil {
+		t.Fatalf("TruncateCompletionRequest() error = %v", err)
+	}
+	if len(truncated.Messages) != len(wantMessages)+1 {
+		t.Fatalf("messages = %#v, want truncation note plus current task and newest complete tool block", truncated.Messages)
+	}
+	if truncated.Messages[0].Role != testRoleSystem || !strings.Contains(truncated.Messages[0].Content, "truncated") {
+		t.Fatalf("truncation note = %#v", truncated.Messages[0])
+	}
+	if truncated.Messages[1].Content != currentTask {
+		t.Fatalf("current task = %q, want %q", truncated.Messages[1].Content, currentTask)
+	}
+	if got := truncated.Messages[2].ToolCalls; len(got) != 1 || got[0].ID != "new-call" {
+		t.Fatalf("assistant tool calls = %#v, want new-call", got)
+	}
+	if got := truncated.Messages[3]; got.Role != testRoleTool || got.ToolCallID != "new-call" {
+		t.Fatalf("tool result = %#v, want matching new-call result", got)
+	}
+	for _, message := range truncated.Messages {
+		if message.ToolCallID == "old-call" {
+			t.Fatalf("orphaned old tool result retained: %#v", truncated.Messages)
+		}
+		for _, call := range message.ToolCalls {
+			if call.ID == "old-call" {
+				t.Fatalf("partial old assistant/tool block retained: %#v", truncated.Messages)
+			}
+		}
+	}
+}
+
+func TestTruncateCompletionRequestPreservesNewestCompletePostTaskEvidenceBeforePromptTruncation(t *testing.T) {
+	const (
+		currentTaskStart = "CURRENT-TASK-BEGIN"
+		currentTaskEnd   = "CURRENT-TASK-END"
+		newestResult     = "NEWEST-COMPLETE-EVIDENCE"
+	)
+	currentTask := currentTaskStart + strings.Repeat(" important task detail", 600) + currentTaskEnd
+	req := &CompletionRequest{
+		Model:        "test-model",
+		SystemPrompt: strings.Repeat("fixed system overhead ", 2000),
+		Tools: []Tool{{
+			Name:        "lookup",
+			Description: strings.Repeat("fixed tool description ", 1200),
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
+		}},
+		Messages: []Message{
+			{Role: testRoleUser, Content: currentTask},
+			{
+				Role: testRoleAssistant,
+				ToolCalls: []ToolCall{{
+					ID:        "older-call",
+					Name:      "lookup",
+					Arguments: json.RawMessage(fmt.Sprintf(`{"query":%q}`, strings.Repeat("older evidence ", 400))),
+				}},
+			},
+			{Role: testRoleTool, ToolCallID: "older-call", Content: strings.Repeat("older result ", 400)},
+			{
+				Role: testRoleAssistant,
+				ToolCalls: []ToolCall{{
+					ID:        "newest-call",
+					Name:      "lookup",
+					Arguments: json.RawMessage(`{"query":"newest"}`),
+				}},
+			},
+			{Role: testRoleTool, ToolCallID: "newest-call", Content: newestResult},
+			{
+				Role: testRoleAssistant,
+				ToolCalls: []ToolCall{{
+					ID:        "incomplete-call",
+					Name:      "lookup",
+					Arguments: json.RawMessage(fmt.Sprintf(`{"query":%q}`, strings.Repeat("incomplete ", 400))),
+				}},
+			},
+		},
+	}
+
+	before, err := EstimateCompletionRequestSize(req)
+	if err != nil {
+		t.Fatalf("EstimateCompletionRequestSize() error = %v", err)
+	}
+	budget := before.EstimatedTokens / 2
+	fixedRequest := *req
+	fixedRequest.Messages = nil
+	fixedSize, err := EstimateCompletionRequestSize(&fixedRequest)
+	if err != nil {
+		t.Fatalf("fixed EstimateCompletionRequestSize() error = %v", err)
+	}
+	if fixedSize.EstimatedTokens <= budget {
+		t.Fatalf("test fixture fixed tokens = %d, want greater than budget %d", fixedSize.EstimatedTokens, budget)
+	}
+
+	truncated, err := TruncateCompletionRequest(req, budget)
+	if err != nil {
+		t.Fatalf("TruncateCompletionRequest() error = %v", err)
+	}
+	after, err := EstimateCompletionRequestSize(truncated)
+	if err != nil {
+		t.Fatalf("truncated EstimateCompletionRequestSize() error = %v", err)
+	}
+	if after.SerializedBytes >= before.SerializedBytes {
+		t.Fatalf("truncated bytes = %d, original bytes = %d; request did not shrink", after.SerializedBytes, before.SerializedBytes)
+	}
+	if after.EstimatedTokens <= budget {
+		t.Fatalf("truncated tokens = %d, want fixture to remain above impossible budget %d", after.EstimatedTokens, budget)
+	}
+
+	var (
+		truncatedCurrentTask bool
+		keptNewestCall       bool
+		keptNewestResult     bool
+	)
+	for _, message := range truncated.Messages {
+		if message.Role == testRoleUser {
+			truncatedCurrentTask = strings.Contains(message.Content, currentUserTaskTruncationMarker) &&
+				strings.HasPrefix(message.Content, currentTask[:1]) &&
+				strings.HasSuffix(message.Content, currentTask[len(currentTask)-1:])
+		}
+		for _, call := range message.ToolCalls {
+			switch call.ID {
+			case "newest-call":
+				keptNewestCall = true
+			case "older-call", "incomplete-call":
+				t.Fatalf("dropped post-task tool block retained: %#v", truncated.Messages)
+			}
+		}
+		if message.ToolCallID == "newest-call" && message.Content == newestResult {
+			keptNewestResult = true
+		}
+		if message.ToolCallID == "older-call" || message.ToolCallID == "incomplete-call" {
+			t.Fatalf("dropped post-task tool result retained: %#v", truncated.Messages)
+		}
+	}
+	if !truncatedCurrentTask {
+		t.Fatalf("current task was not best-effort truncated with both boundaries: %#v", truncated.Messages)
+	}
+	if !keptNewestCall || !keptNewestResult {
+		t.Fatalf("newest complete post-task tool block was not retained atomically: %#v", truncated.Messages)
+	}
+}
+
+func TestTruncateCompletionRequestDropsNewestEvidenceOnlyWhenNeededToReachBudget(t *testing.T) {
+	const currentTask = "CURRENT-TASK-SENTINEL: preserve this request"
+	req := &CompletionRequest{
+		Model:        "test-model",
+		SystemPrompt: "small fixed system prompt",
+		Tools: []Tool{{
+			Name:        "lookup",
+			Description: "small fixed tool",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+		}},
+		Messages: []Message{
+			{Role: testRoleUser, Content: currentTask},
+			{
+				Role: testRoleAssistant,
+				ToolCalls: []ToolCall{{
+					ID:        "oversized-call",
+					Name:      "lookup",
+					Arguments: json.RawMessage(`{"query":"large"}`),
+				}},
+			},
+			{Role: testRoleTool, ToolCallID: "oversized-call", Content: strings.Repeat("large evidence ", 2000)},
+		},
+	}
+
+	before, err := EstimateCompletionRequestSize(req)
+	if err != nil {
+		t.Fatalf("EstimateCompletionRequestSize() error = %v", err)
+	}
+	budget := before.EstimatedTokens / 2
+	withoutEvidence := *req
+	withoutEvidence.Messages = []Message{{Role: testRoleUser, Content: currentTask}}
+	withoutEvidenceSize, err := EstimateCompletionRequestSize(&withoutEvidence)
+	if err != nil {
+		t.Fatalf("without-evidence EstimateCompletionRequestSize() error = %v", err)
+	}
+	if withoutEvidenceSize.EstimatedTokens > budget {
+		t.Fatalf(
+			"test fixture without-evidence tokens = %d, want no more than budget %d",
+			withoutEvidenceSize.EstimatedTokens, budget,
+		)
+	}
+
+	truncated, err := TruncateCompletionRequest(req, budget)
+	if err != nil {
+		t.Fatalf("TruncateCompletionRequest() error = %v", err)
+	}
+	after, err := EstimateCompletionRequestSize(truncated)
+	if err != nil {
+		t.Fatalf("truncated EstimateCompletionRequestSize() error = %v", err)
+	}
+	if after.EstimatedTokens > budget {
+		t.Fatalf("truncated tokens = %d, want no more than budget %d", after.EstimatedTokens, budget)
+	}
+
+	var keptCurrentTask bool
+	for _, message := range truncated.Messages {
+		if message.Role == testRoleUser && message.Content == currentTask {
+			keptCurrentTask = true
+		}
+		for _, call := range message.ToolCalls {
+			if call.ID == "oversized-call" {
+				t.Fatalf("oversized evidence call retained: %#v", truncated.Messages)
+			}
+		}
+		if message.ToolCallID == "oversized-call" {
+			t.Fatalf("oversized evidence result retained: %#v", truncated.Messages)
+		}
+	}
+	if !keptCurrentTask {
+		t.Fatalf("current task was not restored after dropping oversized evidence: %#v", truncated.Messages)
+	}
+}
+
 func TestGroupMessageBlocks(t *testing.T) {
 	t.Run("no messages", func(t *testing.T) {
 		blocks := groupMessageBlocks(nil)
@@ -86,9 +547,9 @@ func TestGroupMessageBlocks(t *testing.T) {
 
 	t.Run("simple messages no tool calls", func(t *testing.T) {
 		msgs := []Message{
-			{Role: "user", Content: "hi"},
-			{Role: "assistant", Content: "hello"},
-			{Role: "user", Content: "bye"},
+			{Role: testRoleUser, Content: "hi"},
+			{Role: testRoleAssistant, Content: "hello"},
+			{Role: testRoleUser, Content: "bye"},
 		}
 		blocks := groupMessageBlocks(msgs)
 		if len(blocks) != 3 {
@@ -103,10 +564,10 @@ func TestGroupMessageBlocks(t *testing.T) {
 
 	t.Run("assistant with tool calls groups with tool results", func(t *testing.T) {
 		msgs := []Message{
-			{Role: "assistant", Content: "", ToolCalls: []ToolCall{{ID: "1", Name: "search", Arguments: json.RawMessage(`{}`)}}},
-			{Role: "tool", Content: "result1", ToolCallID: "1"},
-			{Role: "tool", Content: "result2", ToolCallID: "2"},
-			{Role: "user", Content: "next"},
+			{Role: testRoleAssistant, Content: "", ToolCalls: []ToolCall{{ID: "1", Name: "search", Arguments: json.RawMessage(`{}`)}}},
+			{Role: testRoleTool, Content: "result1", ToolCallID: "1"},
+			{Role: testRoleTool, Content: "result2", ToolCallID: "2"},
+			{Role: testRoleUser, Content: "next"},
 		}
 		blocks := groupMessageBlocks(msgs)
 		if len(blocks) != 2 {
@@ -124,8 +585,8 @@ func TestGroupMessageBlocks(t *testing.T) {
 
 	t.Run("assistant without tool calls not grouped", func(t *testing.T) {
 		msgs := []Message{
-			{Role: "assistant", Content: "no tools"},
-			{Role: "tool", Content: "orphan", ToolCallID: "x"},
+			{Role: testRoleAssistant, Content: "no tools"},
+			{Role: testRoleTool, Content: "orphan", ToolCallID: "x"},
 		}
 		blocks := groupMessageBlocks(msgs)
 		if len(blocks) != 2 {
@@ -144,8 +605,8 @@ func TestTruncateMessages(t *testing.T) {
 
 	t.Run("within budget returns all", func(t *testing.T) {
 		msgs := []Message{
-			{Role: "user", Content: "hi"},
-			{Role: "assistant", Content: "hello"},
+			{Role: testRoleUser, Content: "hi"},
+			{Role: testRoleAssistant, Content: "hello"},
 		}
 		result := TruncateMessages(msgs, 10000)
 		if len(result) != 2 {
@@ -155,8 +616,8 @@ func TestTruncateMessages(t *testing.T) {
 
 	t.Run("budget too small keeps only first", func(t *testing.T) {
 		msgs := []Message{
-			{Role: "user", Content: "hi"},
-			{Role: "assistant", Content: "hello there how are you doing today"},
+			{Role: testRoleUser, Content: "hi"},
+			{Role: testRoleAssistant, Content: "hello there how are you doing today"},
 		}
 		// First message "hi" ≈ 1 token. Set budget to 1.
 		result := TruncateMessages(msgs, 1)
@@ -171,11 +632,11 @@ func TestTruncateMessages(t *testing.T) {
 	t.Run("truncation adds system note", func(t *testing.T) {
 		// Create messages where total exceeds budget
 		msgs := []Message{
-			{Role: "user", Content: "system prompt"},
-			{Role: "assistant", Content: strings.Repeat("a", 100)}, // ~25 tokens
-			{Role: "user", Content: strings.Repeat("b", 100)},      // ~25 tokens
-			{Role: "assistant", Content: strings.Repeat("c", 100)}, // ~25 tokens
-			{Role: "user", Content: "last"},                        // ~1 token
+			{Role: testRoleUser, Content: "system prompt"},
+			{Role: testRoleAssistant, Content: strings.Repeat("a", 100)}, // ~25 tokens
+			{Role: testRoleUser, Content: strings.Repeat("b", 100)},      // ~25 tokens
+			{Role: testRoleAssistant, Content: strings.Repeat("c", 100)}, // ~25 tokens
+			{Role: testRoleUser, Content: "last"},                        // ~1 token
 		}
 		// Budget large enough for first + enriched note + last message, but not all
 		result := TruncateMessages(msgs, 40)
@@ -186,7 +647,7 @@ func TestTruncateMessages(t *testing.T) {
 			t.Error("first message should be preserved")
 		}
 		// Should have a truncation note
-		if result[1].Role != "system" {
+		if result[1].Role != testRoleSystem {
 			t.Error("expected truncation note to have system role")
 		}
 		if !strings.Contains(result[1].Content, "truncated") {
@@ -196,10 +657,10 @@ func TestTruncateMessages(t *testing.T) {
 
 	t.Run("tool call groups kept atomically", func(t *testing.T) {
 		msgs := []Message{
-			{Role: "user", Content: "go"},
-			{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "fn", Arguments: json.RawMessage(`{}`)}}},
-			{Role: "tool", Content: "result", ToolCallID: "1"},
-			{Role: "user", Content: "ok"},
+			{Role: testRoleUser, Content: "go"},
+			{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "fn", Arguments: json.RawMessage(`{}`)}}},
+			{Role: testRoleTool, Content: "result", ToolCallID: "1"},
+			{Role: testRoleUser, Content: "ok"},
 		}
 		// Budget large enough for everything
 		result := TruncateMessages(msgs, 10000)
@@ -210,18 +671,18 @@ func TestTruncateMessages(t *testing.T) {
 
 	t.Run("truncation with tool calls produces enriched note", func(t *testing.T) {
 		msgs := []Message{
-			{Role: "user", Content: "system prompt"},
-			{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(`{"path":"main.go"}`)}}},
-			{Role: "tool", Content: "package main", ToolCallID: "1"},
-			{Role: "user", Content: strings.Repeat("x", 400)}, // ~100 tokens
-			{Role: "user", Content: "last"},
+			{Role: testRoleUser, Content: "system prompt"},
+			{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(`{"path":"main.go"}`)}}},
+			{Role: testRoleTool, Content: "package main", ToolCallID: "1"},
+			{Role: testRoleUser, Content: strings.Repeat("x", 400)}, // ~100 tokens
+			{Role: testRoleUser, Content: "last"},
 		}
 		// Budget large enough for first + enriched note + last, but not the big middle block
 		result := TruncateMessages(msgs, 60)
 		if len(result) < 2 {
 			t.Fatalf("expected at least 2 messages, got %d", len(result))
 		}
-		if result[1].Role != "system" {
+		if result[1].Role != testRoleSystem {
 			t.Error("expected system role for truncation note")
 		}
 		if !strings.Contains(result[1].Content, "truncated") {
@@ -237,7 +698,7 @@ func TestTruncateMessages(t *testing.T) {
 
 	t.Run("single message within budget", func(t *testing.T) {
 		msgs := []Message{
-			{Role: "user", Content: "hello"},
+			{Role: testRoleUser, Content: "hello"},
 		}
 		result := TruncateMessages(msgs, 10000)
 		if len(result) != 1 {
@@ -256,8 +717,8 @@ func TestExtractDroppedSummary(t *testing.T) {
 
 	t.Run("user messages only no tool calls", func(t *testing.T) {
 		blocks := []messageBlock{
-			{messages: []Message{{Role: "user", Content: "hello"}}, tokens: 2},
-			{messages: []Message{{Role: "assistant", Content: "hi there"}}, tokens: 3},
+			{messages: []Message{{Role: testRoleUser, Content: "hello"}}, tokens: 2},
+			{messages: []Message{{Role: testRoleAssistant, Content: "hi there"}}, tokens: 3},
 		}
 		result := extractDroppedSummary(blocks)
 		if !strings.Contains(result, "messages dropped") {
@@ -272,8 +733,8 @@ func TestExtractDroppedSummary(t *testing.T) {
 		blocks := []messageBlock{
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(`{"path":"main.go"}`)}}},
-					{Role: "tool", Content: "package main", ToolCallID: "1"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(`{"path":"main.go"}`)}}},
+					{Role: testRoleTool, Content: "package main", ToolCallID: "1"},
 				},
 				tokens: 10,
 			},
@@ -291,15 +752,15 @@ func TestExtractDroppedSummary(t *testing.T) {
 		blocks := []messageBlock{
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(`{"path":"main.go"}`)}}},
-					{Role: "tool", Content: "content1", ToolCallID: "1"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(`{"path":"main.go"}`)}}},
+					{Role: testRoleTool, Content: "content1", ToolCallID: "1"},
 				},
 				tokens: 10,
 			},
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "2", Name: "file_read", Arguments: json.RawMessage(`{"path":"utils.go"}`)}}},
-					{Role: "tool", Content: "content2", ToolCallID: "2"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "2", Name: "file_read", Arguments: json.RawMessage(`{"path":"utils.go"}`)}}},
+					{Role: testRoleTool, Content: "content2", ToolCallID: "2"},
 				},
 				tokens: 10,
 			},
@@ -320,8 +781,8 @@ func TestExtractDroppedSummary(t *testing.T) {
 		blocks := []messageBlock{
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "code_exec", Arguments: json.RawMessage(`{"language":"bash","code":"echo hi"}`)}}},
-					{Role: "tool", Content: "hi", ToolCallID: "1"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "code_exec", Arguments: json.RawMessage(`{"language":"bash","code":"echo hi"}`)}}},
+					{Role: testRoleTool, Content: "hi", ToolCallID: "1"},
 				},
 				tokens: 10,
 			},
@@ -336,29 +797,29 @@ func TestExtractDroppedSummary(t *testing.T) {
 		blocks := []messageBlock{
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(`{"path":"main.go"}`)}}},
-					{Role: "tool", Content: "pkg", ToolCallID: "1"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(`{"path":"main.go"}`)}}},
+					{Role: testRoleTool, Content: "pkg", ToolCallID: "1"},
 				},
 				tokens: 10,
 			},
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "2", Name: "web_search", Arguments: json.RawMessage(`{"query":"kubernetes pods"}`)}}},
-					{Role: "tool", Content: "results", ToolCallID: "2"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "2", Name: "web_search", Arguments: json.RawMessage(`{"query":"kubernetes pods"}`)}}},
+					{Role: testRoleTool, Content: "results", ToolCallID: "2"},
 				},
 				tokens: 10,
 			},
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "3", Name: "web_fetch", Arguments: json.RawMessage(`{"url":"https://example.com"}`)}}},
-					{Role: "tool", Content: "page", ToolCallID: "3"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "3", Name: "web_fetch", Arguments: json.RawMessage(`{"url":"https://example.com"}`)}}},
+					{Role: testRoleTool, Content: "page", ToolCallID: "3"},
 				},
 				tokens: 10,
 			},
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "4", Name: "code_exec", Arguments: json.RawMessage(`{"language":"python","code":"print(1)"}`)}}},
-					{Role: "tool", Content: "1", ToolCallID: "4"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "4", Name: "code_exec", Arguments: json.RawMessage(`{"language":"python","code":"print(1)"}`)}}},
+					{Role: testRoleTool, Content: "1", ToolCallID: "4"},
 				},
 				tokens: 10,
 			},
@@ -385,8 +846,8 @@ func TestExtractDroppedSummary(t *testing.T) {
 		blocks := []messageBlock{
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "broken_tool", Arguments: json.RawMessage(`{invalid json`)}}},
-					{Role: "tool", Content: "error", ToolCallID: "1"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "broken_tool", Arguments: json.RawMessage(`{invalid json`)}}},
+					{Role: testRoleTool, Content: "error", ToolCallID: "1"},
 				},
 				tokens: 10,
 			},
@@ -405,8 +866,8 @@ func TestExtractDroppedSummary(t *testing.T) {
 		blocks := []messageBlock{
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "web_fetch", Arguments: json.RawMessage(`{"url":"https://example.com"}`)}}},
-					{Role: "tool", Content: "page content", ToolCallID: "1"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "web_fetch", Arguments: json.RawMessage(`{"url":"https://example.com"}`)}}},
+					{Role: testRoleTool, Content: "page content", ToolCallID: "1"},
 				},
 				tokens: 10,
 			},
@@ -421,8 +882,8 @@ func TestExtractDroppedSummary(t *testing.T) {
 		blocks := []messageBlock{
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "web_search", Arguments: json.RawMessage(`{"query":"kubernetes pods"}`)}}},
-					{Role: "tool", Content: "search results", ToolCallID: "1"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "web_search", Arguments: json.RawMessage(`{"query":"kubernetes pods"}`)}}},
+					{Role: testRoleTool, Content: "search results", ToolCallID: "1"},
 				},
 				tokens: 10,
 			},
@@ -437,22 +898,22 @@ func TestExtractDroppedSummary(t *testing.T) {
 		blocks := []messageBlock{
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "sometool", Arguments: json.RawMessage(`{"x":1}`)}}},
-					{Role: "tool", Content: "r1", ToolCallID: "1"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "sometool", Arguments: json.RawMessage(`{"x":1}`)}}},
+					{Role: testRoleTool, Content: "r1", ToolCallID: "1"},
 				},
 				tokens: 5,
 			},
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "2", Name: "sometool", Arguments: json.RawMessage(`{"x":2}`)}}},
-					{Role: "tool", Content: "r2", ToolCallID: "2"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "2", Name: "sometool", Arguments: json.RawMessage(`{"x":2}`)}}},
+					{Role: testRoleTool, Content: "r2", ToolCallID: "2"},
 				},
 				tokens: 5,
 			},
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "3", Name: "sometool", Arguments: json.RawMessage(`{"x":3}`)}}},
-					{Role: "tool", Content: "r3", ToolCallID: "3"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "3", Name: "sometool", Arguments: json.RawMessage(`{"x":3}`)}}},
+					{Role: testRoleTool, Content: "r3", ToolCallID: "3"},
 				},
 				tokens: 5,
 			},
@@ -474,8 +935,8 @@ func TestExtractDroppedSummary(t *testing.T) {
 				Arguments: json.RawMessage(fmt.Sprintf(`{"path":"file%d.go"}`, i)),
 			}
 			blockMsgs = append(blockMsgs,
-				Message{Role: "assistant", ToolCalls: []ToolCall{args[i]}},
-				Message{Role: "tool", Content: "ok", ToolCallID: args[i].ID},
+				Message{Role: testRoleAssistant, ToolCalls: []ToolCall{args[i]}},
+				Message{Role: testRoleTool, Content: "ok", ToolCallID: args[i].ID},
 			)
 		}
 		blocks := []messageBlock{{messages: blockMsgs, tokens: 50}}
@@ -493,8 +954,8 @@ func TestExtractDroppedSummary(t *testing.T) {
 		blocks := []messageBlock{
 			{
 				messages: []Message{
-					{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(fmt.Sprintf(`{"path":%q}`, longPath))}}},
-					{Role: "tool", Content: "ok", ToolCallID: "1"},
+					{Role: testRoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(fmt.Sprintf(`{"path":%q}`, longPath))}}},
+					{Role: testRoleTool, Content: "ok", ToolCallID: "1"},
 				},
 				tokens: 10,
 			},
