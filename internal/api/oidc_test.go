@@ -43,6 +43,7 @@ type testOIDCTokenOptions struct {
 	ExpiresAt  time.Time
 	NotBefore  *time.Time
 	Kid        string
+	OmitKid    bool
 	Algorithm  string
 	Username   string
 	Email      string
@@ -140,7 +141,9 @@ func (p *testOIDCProvider) issueToken(t *testing.T, opts testOIDCTokenOptions) s
 	header := map[string]any{
 		"alg": algorithm,
 		"typ": "JWT",
-		"kid": kid,
+	}
+	if !opts.OmitKid {
+		header["kid"] = kid
 	}
 	claims := map[string]any{
 		"iss": issuer,
@@ -465,6 +468,50 @@ func TestNewAuthMiddleware_OIDC_ValidToken(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+func TestNewAuthMiddleware_OIDC_CachesJWKSAndDiscoveryPerMiddleware(t *testing.T) {
+	provider := newCacheTestOIDCProvider(t)
+	token := tamperJWTSignature(t, provider.issueToken(t, testOIDCTokenOptions{}))
+
+	newApp := func() *fiber.App {
+		app := fiber.New()
+		app.Use(NewAuthMiddleware(nil, AuthConfig{OIDC: provider.configWithoutJWKSURL()}))
+		app.Get("/test", func(ctx fiber.Ctx) error {
+			return ctx.SendStatus(http.StatusOK)
+		})
+		return app
+	}
+	requestInvalidToken := func(t *testing.T, app *fiber.App) {
+		t.Helper()
+		for i := range 8 {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			req.Header.Set(AuthHeader, BearerPrefix+token)
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("request %d failed: %v", i, err)
+			}
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("request %d status = %d, want %d", i, resp.StatusCode, http.StatusUnauthorized)
+			}
+		}
+	}
+
+	requestInvalidToken(t, newApp())
+	if got := provider.discoveryHits.Load(); got != 1 {
+		t.Fatalf("first middleware discovery fetches = %d, want 1", got)
+	}
+	if got := provider.jwksHits.Load(); got != 1 {
+		t.Fatalf("first middleware JWKS fetches = %d, want 1", got)
+	}
+
+	requestInvalidToken(t, newApp())
+	if got := provider.discoveryHits.Load(); got != 2 {
+		t.Fatalf("two middleware discovery fetches = %d, want 2 isolated cache fills", got)
+	}
+	if got := provider.jwksHits.Load(); got != 2 {
+		t.Fatalf("two middleware JWKS fetches = %d, want 2 isolated cache fills", got)
 	}
 }
 
