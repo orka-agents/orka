@@ -99,7 +99,6 @@ Full command reference, CI workflow catalog, and OpenTelemetry development notes
 | --- | --- |
 | `$autoreview` | Review before commit/land on non-trivial code changes. Repeat until no accepted/actionable findings remain. Skip for trivial/docs-only work, equivalent manual review, or when the human opts out. |
 | `$pr-closeout` | After creating or updating an agent-authored PR, drive it to green. Skip when the human opts out, the PR is intentionally draft/WIP, or the blocker is external/human-only. |
-| `$agent-transcript` | Before writing a GitHub PR or issue body for agent-authored work. |
 | `$kindctl` | Repo/worktree-scoped kind clusters, without touching the global kubeconfig. |
 | `$orka-kind-deploy` | Rebuild and redeploy the full local stack into a kind cluster. |
 | `$vekil-reverse-proxy-deploy` | Reverse proxy for Anthropic/Gemini/OpenAI-compatible clients. |
