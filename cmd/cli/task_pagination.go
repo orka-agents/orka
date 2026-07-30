@@ -15,7 +15,10 @@ import (
 	"github.com/orka-agents/orka/internal/cli/client"
 )
 
-const filteredTaskListPageSize = 500
+const (
+	filteredTaskListPageSize = 500
+	maxFilteredTaskListPages = 1000
+)
 
 func listFilteredTasks(
 	ctx context.Context,
@@ -40,21 +43,36 @@ func listFilteredTasksWithPagination(
 	}
 
 	var tasks []client.TaskSummary
-	continueToken := ""
-	for {
+	cursor := ""
+	seenContinuations := make(map[string]struct{})
+	for pageNumber := 1; pageNumber <= maxFilteredTaskListPages; pageNumber++ {
+		if err := ctx.Err(); err != nil {
+			return tasks, false, fmt.Errorf(
+				"listing tasks stopped after %d matching items before page %d: %w",
+				len(tasks),
+				pageNumber,
+				err,
+			)
+		}
+
 		opts := client.ListTasksOptions{Namespace: namespace}
 		if usePagination {
 			opts.Limit = filteredTaskListPageSize
-			opts.Continue = continueToken
+			opts.Continue = cursor
 		} else {
 			opts.All = true
 		}
 		page, err := c.ListTasksPage(ctx, opts)
 		if err != nil {
-			if usePagination && isCachePaginationUnsupported(err) {
+			if usePagination && ctx.Err() == nil && isCachePaginationUnsupported(err) {
 				return listFilteredTasksWithPagination(ctx, c, namespace, limit, match, false)
 			}
-			return nil, false, err
+			return tasks, false, fmt.Errorf(
+				"listing tasks stopped after %d matching items on page %d: %w",
+				len(tasks),
+				pageNumber,
+				err,
+			)
 		}
 
 		for _, task := range page.Items {
@@ -68,13 +86,42 @@ func listFilteredTasksWithPagination(
 		}
 
 		if !usePagination || page.Continue == "" {
+			if page.RemainingItemCount != nil && *page.RemainingItemCount > 0 {
+				return tasks, false, fmt.Errorf(
+					"listing tasks stopped after %d matching items: pagination ended with %d remaining items but no continuation",
+					len(tasks),
+					*page.RemainingItemCount,
+				)
+			}
 			return tasks, false, nil
+		}
+		if page.Continue == cursor {
+			return tasks, false, fmt.Errorf(
+				"listing tasks stopped after %d matching items: continuation did not advance",
+				len(tasks),
+			)
+		}
+		if _, seen := seenContinuations[page.Continue]; seen {
+			return tasks, false, fmt.Errorf(
+				"listing tasks stopped after %d matching items: continuation cycle detected",
+				len(tasks),
+			)
 		}
 		if limit > 0 && len(tasks) >= limit {
 			return tasks, true, nil
 		}
-		continueToken = page.Continue
+		if pageNumber == maxFilteredTaskListPages {
+			return tasks, false, fmt.Errorf(
+				"listing tasks stopped after %d matching items: pagination page limit (%d) reached",
+				len(tasks),
+				maxFilteredTaskListPages,
+			)
+		}
+		seenContinuations[page.Continue] = struct{}{}
+		cursor = page.Continue
 	}
+
+	return tasks, false, fmt.Errorf("listing tasks stopped: pagination terminated unexpectedly")
 }
 
 func isCachePaginationUnsupported(err error) bool {

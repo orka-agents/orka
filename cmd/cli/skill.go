@@ -43,7 +43,7 @@ func newSkillListCmd() *cobra.Command {
 		Short: "List skills",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := newClientFromCmd(cmd)
-			skills, err := c.ListSkills(context.Background(), client.ListOptions{
+			skills, err := c.ListSkills(cmd.Context(), client.ListOptions{
 				Namespace: c.Namespace,
 			})
 			if err != nil {

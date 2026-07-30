@@ -202,12 +202,13 @@ func newTaskListCmd() *cobra.Command {
 		Short:   "List tasks",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := newClientFromCmd(cmd)
+			ctx := cmd.Context()
 			var tasks []client.TaskSummary
 			if status != "" || transactionID != "" {
 				var truncated bool
 				var err error
 				tasks, truncated, err = listFilteredTasks(
-					context.Background(),
+					ctx,
 					c,
 					c.Namespace,
 					limit,
@@ -228,8 +229,7 @@ func newTaskListCmd() *cobra.Command {
 					warnFilteredTaskOutputLimited(limit)
 				}
 			} else {
-				var err error
-				tasks, err = c.ListTasks(context.Background(), client.ListTasksOptions{
+				page, err := c.ListTasksPage(ctx, client.ListTasksOptions{
 					Namespace: c.Namespace,
 					Limit:     limit,
 					Continue:  continueToken,
@@ -237,8 +237,11 @@ func newTaskListCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				tasks = page.Items
+				warnListContinuation(cmd, "task", map[string]any{
+					"metadata": map[string]any{"continue": page.Continue},
+				})
 			}
-
 			format, err := outputFormat(cmd)
 			if err != nil {
 				return err

@@ -3,9 +3,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -107,6 +111,99 @@ func TestNewAgentListCmd_Execute(t *testing.T) {
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestNewAgentListCmdListsAllPagesAndForwardsNamespace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const (
+		namespace    = "inventory-ns"
+		continuation = "agent-cursor+/=? segment"
+	)
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.URL.Query().Get("namespace"); got != namespace {
+			t.Errorf("namespace query = %q, want %q", got, namespace)
+		}
+		if requests == 1 {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items":    []map[string]any{{"metadata": map[string]any{"name": "agent-1"}}},
+				"metadata": map[string]any{"continue": continuation},
+			})
+			return
+		}
+		if got := r.URL.Query().Get("continue"); got != continuation {
+			t.Errorf("continue query = %q, want %q", got, continuation)
+		}
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items":    []map[string]any{{"metadata": map[string]any{"name": "agent-2"}}},
+			"metadata": map[string]any{},
+		})
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "list", "--server", srv.URL, "--namespace", namespace})
+	stdout, err := captureOutput(t, root.Execute)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if !strings.Contains(stdout, "agent-1") || !strings.Contains(stdout, "agent-2") {
+		t.Fatalf("stdout = %q, want agents from both pages", stdout)
+	}
+}
+
+func TestNewAgentListCmdReturnsUsefulPartialPageError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items":    []map[string]any{{"metadata": map[string]any{"name": "agent-1"}}},
+				"metadata": map[string]any{"continue": "next"},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "later agent page failed") //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "list", "--server", srv.URL})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "after 1 items on page 2") {
+		t.Fatalf("Execute() error = %v, want partial-result page error", err)
+	}
+}
+
+func TestNewAgentListCmdHonorsCommandContextCancellation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		json.NewEncoder(w).Encode(map[string]any{"items": []any{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "list", "--server", srv.URL})
+	if err := root.ExecuteContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExecuteContext() error = %v, want context canceled", err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 }
 

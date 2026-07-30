@@ -429,6 +429,9 @@ func TestListTasksPageAllUsesLimitZero(t *testing.T) {
 	if !strings.Contains(capturedQuery, "limit=0") {
 		t.Fatalf("query %q missing limit=0", capturedQuery)
 	}
+	if strings.Contains(capturedQuery, "paginate=") {
+		t.Fatalf("query %q unexpectedly opts into pagination", capturedQuery)
+	}
 }
 
 func TestListTasksPageReturnsPaginationMetadata(t *testing.T) {
@@ -439,6 +442,9 @@ func TestListTasksPageReturnsPaginationMetadata(t *testing.T) {
 		}
 		if got := r.URL.Query().Get("continue"); got != "abc" {
 			t.Errorf("continue query = %q, want abc", got)
+		}
+		if got := r.URL.Query().Get("paginate"); got != "true" {
+			t.Errorf("paginate query = %q, want true", got)
 		}
 		json.NewEncoder(w).Encode(taskListResponse{ //nolint:errcheck
 			Items: []TaskDetail{
