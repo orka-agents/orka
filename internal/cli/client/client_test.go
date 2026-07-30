@@ -10,11 +10,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 const (
@@ -34,6 +38,108 @@ func TestNew(t *testing.T) {
 	}
 	if c.HTTPClient == nil {
 		t.Error("HTTPClient should not be nil")
+	}
+}
+
+func TestNew_DoesNotAssumeDefaultTransportType(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = taskLogRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("unused")
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+	c := New("http://localhost:8080", "")
+	if c.HTTPClient == nil || c.HTTPClient.Transport == nil {
+		t.Fatal("New() did not configure an HTTP transport")
+	}
+}
+
+func TestNew_ConfiguresTransportSafetyWithoutOverallTimeout(t *testing.T) {
+	c := New("http://localhost:8080", "")
+	if c.HTTPClient.Timeout != 0 {
+		t.Fatalf("HTTPClient.Timeout = %s, want no overall timeout", c.HTTPClient.Timeout)
+	}
+
+	transport, ok := c.HTTPClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("HTTPClient.Transport = %T, want *http.Transport", c.HTTPClient.Transport)
+	}
+	if transport.DialContext == nil {
+		t.Fatal("transport DialContext is nil")
+	}
+	if transport.TLSHandshakeTimeout <= 0 {
+		t.Fatalf("TLSHandshakeTimeout = %s, want positive timeout", transport.TLSHandshakeTimeout)
+	}
+	if transport.ResponseHeaderTimeout != defaultResponseHeaderTimeout {
+		t.Fatalf(
+			"ResponseHeaderTimeout = %s, want %s",
+			transport.ResponseHeaderTimeout,
+			defaultResponseHeaderTimeout,
+		)
+	}
+	if transport.IdleConnTimeout <= 0 {
+		t.Fatalf("IdleConnTimeout = %s, want positive timeout", transport.IdleConnTimeout)
+	}
+}
+
+func TestStreamTaskLogs_ResponseHeaderStallIsBounded(t *testing.T) {
+	const responseHeaderTimeout = 25 * time.Millisecond
+
+	requestStarted := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "", "", responseHeaderTimeout)
+	done := make(chan error, 1)
+	go func() {
+		done <- c.StreamTaskLogs(t.Context(), "task", StreamLogsOptions{})
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("task log request did not start")
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("StreamTaskLogs() error = nil, want response-header timeout")
+		}
+		var timeoutErr interface{ Timeout() bool }
+		if !errors.As(err, &timeoutErr) || !timeoutErr.Timeout() {
+			t.Fatalf("StreamTaskLogs() error = %v, want timeout error", err)
+		}
+	case <-time.After(10 * responseHeaderTimeout):
+		t.Fatalf("StreamTaskLogs() did not return within response-header timeout %s", responseHeaderTimeout)
+	}
+}
+
+func TestStreamTaskLogs_LongBodyRemainsUsablePastResponseHeaderTimeout(t *testing.T) {
+	const (
+		responseHeaderTimeout = 25 * time.Millisecond
+		bodyDelay             = 75 * time.Millisecond
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(bodyDelay)
+		fmt.Fprint(w, "data: delayed log\n\n") //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	var output bytes.Buffer
+	c := newClient(srv.URL, "", "", responseHeaderTimeout)
+	if err := c.StreamTaskLogs(t.Context(), "task", StreamLogsOptions{Writer: &output}); err != nil {
+		t.Fatalf("StreamTaskLogs() error = %v", err)
+	}
+	if got, want := output.String(), "delayed log\n"; got != want {
+		t.Fatalf("stream output = %q, want %q", got, want)
 	}
 }
 
@@ -851,23 +957,42 @@ func TestGetChatConfig(t *testing.T) {
 
 func TestStreamTaskLogs(t *testing.T) {
 	tests := []struct {
-		name    string
-		status  int
-		body    string
-		wantOut string
-		wantErr bool
+		name            string
+		status          int
+		body            string
+		wantOut         string
+		wantErrContains string
 	}{
 		{
 			name:    "success",
 			status:  http.StatusOK,
-			body:    "data: line1\ndata: line2\n",
+			body:    "event: log\ndata: line1\n\nevent: log\ndata: line2\n\n",
 			wantOut: "line1\nline2\n",
 		},
 		{
-			name:    "server error",
-			status:  http.StatusInternalServerError,
-			body:    "error",
-			wantErr: true,
+			name:    "multiline data",
+			status:  http.StatusOK,
+			body:    "event: log\ndata: line1\ndata: line2\n\n",
+			wantOut: "line1\nline2\n",
+		},
+		{
+			name:            "stream error event",
+			status:          http.StatusOK,
+			body:            "event: log\ndata: before-error\n\nevent: error\ndata: {\"error\":\"failed to read task logs: unexpected EOF\"}\n\n",
+			wantOut:         "before-error\n",
+			wantErrContains: "failed to read task logs: unexpected EOF",
+		},
+		{
+			name:            "plain stream error event",
+			status:          http.StatusOK,
+			body:            "event: error\ndata: upstream failed\n\n",
+			wantErrContains: "upstream failed",
+		},
+		{
+			name:            "server error",
+			status:          http.StatusInternalServerError,
+			body:            "error",
+			wantErrContains: "API error (HTTP 500)",
 		},
 	}
 	for _, tt := range tests {
@@ -884,20 +1009,176 @@ func TestStreamTaskLogs(t *testing.T) {
 				Namespace: "ns1",
 				Writer:    &buf,
 			})
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
+			if tt.wantErrContains == "" {
+				if err != nil {
+					t.Fatalf("StreamTaskLogs() error = %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErrContains) {
+				t.Fatalf("StreamTaskLogs() error = %v, want containing %q", err, tt.wantErrContains)
 			}
-			if !tt.wantErr && buf.String() != tt.wantOut {
+			if buf.String() != tt.wantOut {
 				t.Errorf("output = %q, want %q", buf.String(), tt.wantOut)
 			}
 		})
 	}
 }
 
+func TestStreamTaskLogs_SSELimits(t *testing.T) {
+	tests := []struct {
+		name            string
+		body            func() string
+		wantOutputBytes int
+		wantErrContains string
+	}{
+		{
+			name:            "accepts server maximum log line",
+			body:            func() string { return "data: " + strings.Repeat("x", sseMaxDataBytes) + "\n\n" },
+			wantOutputBytes: sseMaxDataBytes + 1,
+		},
+		{
+			name:            "rejects oversized SSE line",
+			body:            func() string { return "data: " + strings.Repeat("x", sseMaxDataBytes+1) + "\n\n" },
+			wantErrContains: "SSE line exceeds",
+		},
+		{
+			name: "rejects oversized aggregate event",
+			body: func() string {
+				return "data: " + strings.Repeat("a", sseMaxDataBytes/2+1) +
+					"\ndata: " + strings.Repeat("b", sseMaxDataBytes/2+1) + "\n\n"
+			},
+			wantErrContains: "SSE event data exceeds",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, tt.body()) //nolint:errcheck
+			}))
+			defer srv.Close()
+
+			var output bytes.Buffer
+			c := New(srv.URL, "")
+			err := c.StreamTaskLogs(t.Context(), "t1", StreamLogsOptions{Writer: &output})
+			if tt.wantErrContains == "" {
+				if err != nil {
+					t.Fatalf("StreamTaskLogs() error = %v", err)
+				}
+				if got := output.Len(); got != tt.wantOutputBytes {
+					t.Fatalf("output length = %d, want %d", got, tt.wantOutputBytes)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrContains) {
+				t.Fatalf("StreamTaskLogs() error = %v, want containing %q", err, tt.wantErrContains)
+			}
+			if output.Len() != 0 {
+				t.Fatalf("output length = %d, want 0", output.Len())
+			}
+		})
+	}
+}
+
+func TestStreamTaskLogs_PropagatesScannerError(t *testing.T) {
+	const event = "data: before-error\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Length", fmt.Sprint(len(event)+32))
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, event) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	var output bytes.Buffer
+	c := New(srv.URL, "")
+	err := c.StreamTaskLogs(t.Context(), "t1", StreamLogsOptions{Writer: &output})
+	if err == nil || !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Fatalf("StreamTaskLogs() error = %v, want scanner error", err)
+	}
+	if got, want := output.String(), "before-error\n"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestStreamTaskLogs_PropagatesWriterError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: line\n\n") //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	wantErr := errors.New("writer failed")
+	c := New(srv.URL, "")
+	err := c.StreamTaskLogs(t.Context(), "t1", StreamLogsOptions{Writer: taskLogErrorWriter{err: wantErr}})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("StreamTaskLogs() error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestStreamTaskLogs_BoundsErrorResponseBody(t *testing.T) {
+	body := &taskLogTrackingReadCloser{reader: strings.NewReader(strings.Repeat("x", 1<<20))}
+	c := New("http://orka.test", "")
+	c.HTTPClient = &http.Client{Transport: taskLogRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     make(http.Header),
+			Body:       body,
+		}, nil
+	})}
+
+	err := c.StreamTaskLogs(t.Context(), "task", StreamLogsOptions{})
+	if err == nil {
+		t.Fatal("StreamTaskLogs() error = nil, want status error")
+	}
+	if body.bytesRead > maxErrorResponseBodyBytes+maxResponseBodyDrainBytes {
+		t.Fatalf("error response bytes read = %d, want at most %d", body.bytesRead, maxErrorResponseBodyBytes+maxResponseBodyDrainBytes)
+	}
+	if !body.closed {
+		t.Fatal("error response body was not closed")
+	}
+}
+
+func TestStreamTaskLogs_ErrorBodyReadHasTimeBound(t *testing.T) {
+	body := newTaskLogBlockingReadCloser()
+	c := New("http://orka.test", "")
+	c.HTTPClient = &http.Client{Transport: taskLogRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		go func() {
+			<-req.Context().Done()
+			_ = body.Close()
+		}()
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     make(http.Header),
+			Body:       body,
+		}, nil
+	})}
+
+	done := make(chan error, 1)
+	go func() { done <- c.StreamTaskLogs(t.Context(), "task", StreamLogsOptions{}) }()
+
+	select {
+	case <-body.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("stream error body read did not start")
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("StreamTaskLogs() error = nil, want status error")
+		}
+	case <-time.After(500 * time.Millisecond):
+		_ = body.Close()
+		<-done
+		t.Fatal("stream error body read did not return within a bounded interval")
+	}
+}
+
 func TestStreamTaskLogs_NilWriter(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: line\n")) //nolint:errcheck
+		w.Write([]byte("data: line\n\n")) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -1148,4 +1429,60 @@ func TestDoJSONAndTxnToken(t *testing.T) {
 	if gotNamespace != "team-a" {
 		t.Fatalf("namespace query = %q, want team-a", gotNamespace)
 	}
+}
+
+type taskLogRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f taskLogRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type taskLogErrorWriter struct {
+	err error
+}
+
+func (w taskLogErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+type taskLogTrackingReadCloser struct {
+	reader    io.Reader
+	bytesRead int
+	closed    bool
+}
+
+func (r *taskLogTrackingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.bytesRead += n
+	return n, err
+}
+
+func (r *taskLogTrackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
+type taskLogBlockingReadCloser struct {
+	readStarted chan struct{}
+	closed      chan struct{}
+	readOnce    sync.Once
+	closeOnce   sync.Once
+}
+
+func newTaskLogBlockingReadCloser() *taskLogBlockingReadCloser {
+	return &taskLogBlockingReadCloser{
+		readStarted: make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+}
+
+func (r *taskLogBlockingReadCloser) Read([]byte) (int, error) {
+	r.readOnce.Do(func() { close(r.readStarted) })
+	<-r.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *taskLogBlockingReadCloser) Close() error {
+	r.closeOnce.Do(func() { close(r.closed) })
+	return nil
 }

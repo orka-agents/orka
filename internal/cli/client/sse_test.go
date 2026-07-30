@@ -7,8 +7,10 @@ MIT License - see LICENSE file for details.
 package client
 
 import (
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewSSEReader(t *testing.T) {
@@ -36,6 +38,20 @@ func TestSSEReader_Next(t *testing.T) {
 			input: "data: plain text\n\n",
 			wantEvents: []SSEEvent{
 				{Data: "plain text"},
+			},
+		},
+		{
+			name:  "multiline data",
+			input: "event: log\ndata: first\ndata: second\n\n",
+			wantEvents: []SSEEvent{
+				{Event: "log", Data: "first\nsecond"},
+			},
+		},
+		{
+			name:  "field values without optional space",
+			input: "event:error\ndata:{\"error\":\"boom\"}\n\n",
+			wantEvents: []SSEEvent{
+				{Event: "error", Data: `{"error":"boom"}`},
 			},
 		},
 		{
@@ -68,6 +84,25 @@ func TestSSEReader_Next(t *testing.T) {
 			input: "data: no-event\n\n",
 			wantEvents: []SSEEvent{
 				{Data: "no-event"},
+			},
+		},
+		{
+			name:       "unterminated event is discarded at EOF",
+			input:      "event: log\ndata: final line\n",
+			wantEvents: nil,
+		},
+		{
+			name:  "UTF-8 BOM is ignored",
+			input: "\ufeffevent: error\ndata: boom\n\n",
+			wantEvents: []SSEEvent{
+				{Event: "error", Data: "boom"},
+			},
+		},
+		{
+			name:  "lone carriage returns delimit fields",
+			input: "event: error\rdata: boom\r\r",
+			wantEvents: []SSEEvent{
+				{Event: "error", Data: "boom"},
 			},
 		},
 		{
@@ -122,7 +157,7 @@ func TestSSEReader_Err(t *testing.T) {
 
 func TestSSEReader_LargeData(t *testing.T) {
 	// Test that the reader can handle large data lines (buffer is configured for 1MB)
-	largeData := strings.Repeat("x", 100000)
+	largeData := strings.Repeat("x", sseMaxDataBytes)
 	input := "data: " + largeData + "\n\n"
 	r := NewSSEReader(strings.NewReader(input))
 
@@ -136,7 +171,7 @@ func TestSSEReader_LargeData(t *testing.T) {
 }
 
 func TestSSEReader_ConsecutiveEvents(t *testing.T) {
-	input := "event: a\ndata: 1\nevent: b\ndata: 2\n"
+	input := "event: a\ndata: 1\n\nevent: b\ndata: 2\n\n"
 	r := NewSSEReader(strings.NewReader(input))
 
 	evt1, ok := r.Next()
@@ -158,5 +193,57 @@ func TestSSEReader_ConsecutiveEvents(t *testing.T) {
 	_, ok = r.Next()
 	if ok {
 		t.Error("expected no more events")
+	}
+}
+
+func TestSSEReader_OversizedLine(t *testing.T) {
+	input := "data: " + strings.Repeat("x", sseMaxDataBytes+1) + "\n\n"
+	r := NewSSEReader(strings.NewReader(input))
+
+	if event, ok := r.Next(); ok {
+		t.Fatalf("Next() = %+v, true; want no event", event)
+	}
+	if err := r.Err(); err == nil || !strings.Contains(err.Error(), "SSE line exceeds") {
+		t.Fatalf("Err() = %v, want SSE line size error", err)
+	}
+}
+
+func TestSSEReader_OversizedMultilineEvent(t *testing.T) {
+	first := strings.Repeat("a", sseMaxDataBytes/2+1)
+	second := strings.Repeat("b", sseMaxDataBytes/2+1)
+	input := "data: " + first + "\ndata: " + second + "\n\n"
+	r := NewSSEReader(strings.NewReader(input))
+
+	if event, ok := r.Next(); ok {
+		t.Fatalf("Next() = %+v, true; want no event", event)
+	}
+	if err := r.Err(); err == nil || !strings.Contains(err.Error(), "SSE event data exceeds") {
+		t.Fatalf("Err() = %v, want aggregate SSE data size error", err)
+	}
+}
+
+func TestSSEReader_DispatchesLoneCREventBeforeEOF(t *testing.T) {
+	reader, writer := io.Pipe()
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+	events := make(chan SSEEvent, 1)
+	go func() {
+		event, ok := NewSSEReader(reader).Next()
+		if ok {
+			events <- event
+		}
+	}()
+	if _, err := io.WriteString(writer, "event: log\rdata: live\r\r"); err != nil {
+		t.Fatalf("write SSE event: %v", err)
+	}
+	select {
+	case event := <-events:
+		if event.Event != "log" || event.Data != "live" {
+			t.Fatalf("event = %+v, want log/live", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("lone-CR SSE event was not dispatched before EOF")
 	}
 }

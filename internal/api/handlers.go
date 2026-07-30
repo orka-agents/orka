@@ -13,7 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -24,6 +26,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
@@ -33,7 +36,14 @@ import (
 	"github.com/orka-agents/orka/internal/tracing"
 )
 
-const queryTrue = "true"
+const (
+	queryTrue = "true"
+
+	defaultTaskLogStreamHeartbeatEvery = 15 * time.Second
+	taskLogStreamInitialBufferBytes    = 64 * 1024
+	taskLogStreamMaxLineBytes          = 1024 * 1024
+	taskLogStreamScannerBufferBytes    = taskLogStreamMaxLineBytes + 2
+)
 
 // Handlers contains all API handlers
 //
@@ -791,28 +801,75 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	follow := c.Query("follow") == queryTrue
 
 	if follow {
-		streamCtx, streamCancel := context.WithCancel(context.Background())
+		// SendStreamWriter outlives the Fiber handler, so the Kubernetes stream
+		// must not permanently inherit Fiber's recyclable request context. Mirror
+		// request cancellation only while the upstream stream is being established,
+		// then hand ownership to explicit deadlines plus heartbeat/write failure
+		// detection below. A bare post-handoff cancellation cannot be retained:
+		// Fiber uses that same signal when it recycles the handler context.
+		streamBaseCtx := context.WithoutCancel(ctx)
+		var streamCtx context.Context
+		var streamCancel context.CancelFunc
+		if deadline, ok := ctx.Deadline(); ok {
+			streamCtx, streamCancel = context.WithDeadline(streamBaseCtx, deadline)
+		} else {
+			streamCtx, streamCancel = context.WithCancel(streamBaseCtx)
+		}
+		stopSetupCancellation := context.AfterFunc(ctx, streamCancel)
 		stream, err := StreamPodLogs(streamCtx, h.clientset, namespace, podName, "worker")
 		if err != nil {
+			_ = stopSetupCancellation()
 			streamCancel()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+				errors.Is(streamCtx.Err(), context.DeadlineExceeded) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				return fiber.NewError(fiber.StatusGatewayTimeout, "task log stream setup timed out")
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to stream logs: %v", err))
+		}
+		if !stopSetupCancellation() || ctx.Err() != nil || streamCtx.Err() != nil {
+			streamCancel()
+			_ = stream.Close()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(streamCtx.Err(), context.DeadlineExceeded) {
+				return fiber.NewError(fiber.StatusGatewayTimeout, "task log stream setup timed out")
+			}
+			return nil
 		}
 
 		c.Set("Content-Type", "text/event-stream")
 		c.Set("Cache-Control", "no-cache")
 		c.Set("Connection", "keep-alive")
+		c.Set("X-Accel-Buffering", "no")
 
-		return c.SendStreamWriter(func(w *bufio.Writer) {
-			defer streamCancel()
-			defer func() { _ = stream.Close() }()
-			scanner := bufio.NewScanner(stream)
-			for scanner.Scan() {
-				_, _ = fmt.Fprintf(w, "data: %s\n\n", scanner.Text())
-				if err := w.Flush(); err != nil {
-					return
+		heartbeatEvery := h.eventStreamHeartbeatEvery
+		if heartbeatEvery <= 0 {
+			heartbeatEvery = defaultTaskLogStreamHeartbeatEvery
+		}
+
+		streamNamespace := strings.Clone(namespace)
+		streamPodName := strings.Clone(podName)
+		streamLog := logf.FromContext(streamCtx)
+		streamErr := c.SendStreamWriter(func(w *bufio.Writer) {
+			defer func() {
+				streamCancel()
+				_ = stream.Close()
+			}()
+			if err := streamTaskLogsSSE(streamCtx, w, stream, heartbeatEvery); err != nil {
+				if taskLogClientDisconnected(err) {
+					streamLog.V(1).Info("task log client disconnected", "namespace", streamNamespace, "pod", streamPodName)
+				} else {
+					streamLog.Error(err, "failed to relay task log stream", "namespace", streamNamespace, "pod", streamPodName)
 				}
 			}
 		})
+		if streamErr != nil {
+			streamCancel()
+			_ = stream.Close()
+		}
+		return streamErr
 	}
 
 	// Non-follow mode: return the last N lines
@@ -836,6 +893,142 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"logs": string(logBytes),
 	})
+}
+
+type taskLogScanResult struct {
+	line string
+	err  error
+}
+
+type taskLogDownstreamError struct{ err error }
+
+func (e taskLogDownstreamError) Error() string { return e.err.Error() }
+func (e taskLogDownstreamError) Unwrap() error { return e.err }
+
+func taskLogClientDisconnected(err error) bool {
+	var downstream taskLogDownstreamError
+	if !errors.As(err, &downstream) {
+		return false
+	}
+	err = downstream.err
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "broken pipe") || strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "closed connection") || strings.Contains(message, "connection closed")
+}
+
+func streamTaskLogsSSE(
+	ctx context.Context,
+	w *bufio.Writer,
+	stream io.Reader,
+	heartbeatEvery time.Duration,
+) error {
+	results := make(chan taskLogScanResult)
+	go scanTaskLogLines(ctx, stream, results)
+
+	heartbeat := time.NewTicker(heartbeatEvery)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case result, ok := <-results:
+			if !ok {
+				return nil
+			}
+			if result.err != nil {
+				if err := writeTaskLogStreamErrorSSE(w, result.err); err != nil {
+					return errors.Join(result.err, fmt.Errorf("report task log stream error: %w", err))
+				}
+				return result.err
+			}
+			if err := writeTaskLogLineSSE(w, result.line); err != nil {
+				return taskLogDownstreamError{err: err}
+			}
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+				return taskLogDownstreamError{err: fmt.Errorf("write task log heartbeat: %w", err)}
+			}
+			if err := w.Flush(); err != nil {
+				return taskLogDownstreamError{err: fmt.Errorf("flush task log heartbeat: %w", err)}
+			}
+		}
+	}
+}
+
+func scanTaskLogLines(ctx context.Context, stream io.Reader, results chan<- taskLogScanResult) {
+	defer close(results)
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, taskLogStreamInitialBufferBytes), taskLogStreamScannerBufferBytes)
+	for scanner.Scan() {
+		if len(scanner.Bytes()) > taskLogStreamMaxLineBytes {
+			sendTaskLogScanResult(ctx, results, taskLogScanResult{err: taskLogLineTooLongError()})
+			return
+		}
+		if !sendTaskLogScanResult(ctx, results, taskLogScanResult{line: scanner.Text()}) {
+			return
+		}
+	}
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			err = taskLogLineTooLongError()
+		}
+		sendTaskLogScanResult(ctx, results, taskLogScanResult{err: err})
+	}
+}
+
+func sendTaskLogScanResult(ctx context.Context, results chan<- taskLogScanResult, result taskLogScanResult) bool {
+	select {
+	case results <- result:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func writeTaskLogLineSSE(w *bufio.Writer, line string) error {
+	// SSE treats a bare carriage return as a field delimiter. Frame every
+	// carriage-return-delimited progress segment as data so task output cannot
+	// inject event fields; clients reconstruct the segments with newlines.
+	remaining := line
+	for {
+		segment, rest, found := strings.Cut(remaining, "\r")
+		if _, err := fmt.Fprintf(w, "data: %s\n", segment); err != nil {
+			return fmt.Errorf("write task log event: %w", err)
+		}
+		if !found {
+			break
+		}
+		remaining = rest
+	}
+	if _, err := fmt.Fprint(w, "\n"); err != nil {
+		return fmt.Errorf("write task log event: %w", err)
+	}
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("flush task log event: %w", err)
+	}
+	return nil
+}
+
+func taskLogLineTooLongError() error {
+	return fmt.Errorf("task log line exceeds %d bytes", taskLogStreamMaxLineBytes)
+}
+
+func writeTaskLogStreamErrorSSE(w *bufio.Writer, streamErr error) error {
+	data, err := json.Marshal(struct {
+		Error string `json:"error"`
+	}{
+		Error: fmt.Sprintf("failed to read task logs: %v", streamErr),
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: error\ndata: %s\n\n", data); err != nil {
+		return err
+	}
+	return w.Flush()
 }
 
 // GetTaskResult gets the result of a task
