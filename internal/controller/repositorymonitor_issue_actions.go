@@ -715,15 +715,11 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
 	priority := int32(750)
 	agentRef := *agent
-	workspace := &corev1alpha1.WorkspaceConfig{GitRepo: repositoryMonitorHTTPSCloneURL(owner, repository), Branch: effectiveRepositoryMonitorBranch(monitor)}
-	gitRef := monitor.Spec.GitSecretRef
-	workspace.GitSecretRef = gitRef
-	env := []corev1.EnvVar{
-		{Name: "ORKA_GITHUB_REPOSITORY", Value: owner + "/" + repository},
-		{Name: "ORKA_GITHUB_ACTION", Value: actionKind},
-	}
-	if repositoryMonitorIssueActionRequiresRawResult(actionKind) {
-		env = append(env, corev1.EnvVar{Name: workerenv.ResultStdout, Value: scheduledRunLabelValue})
+	workspace := &corev1alpha1.WorkspaceConfig{
+		Intent:            corev1alpha1.WorkspaceIntentRead,
+		GitRepo:           repositoryMonitorHTTPSCloneURL(owner, repository),
+		Branch:            effectiveRepositoryMonitorBranch(monitor),
+		ReadCredentialRef: workspaceCredentialReference(monitor.Spec.GitSecretRef),
 	}
 	allowedTools := readOnlyAgentAllowedTools()
 	annotations := map[string]string{
@@ -740,6 +736,20 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 	var runtimeAuthRef *corev1alpha1.SecretReference
 	if actionKind == repositoryMonitorIssueActionImplementation {
 		allowedTools = nil
+		credentialRef := workspaceCredentialReference(monitor.Spec.GitSecretRef)
+		workspace.Intent = corev1alpha1.WorkspaceIntentWrite
+		workspace.PublicationGitRepo = workspace.GitRepo
+		workspace.PublicationReadCredentialRef = credentialRef
+		workspace.PublicationCredentialRef = credentialRef
+		workspace.ForgeCredentialRef = credentialRef
+		workspace.PRBaseBranch = effectiveRepositoryMonitorBranch(monitor)
+		workspace.PushBranch = repositoryMonitorIssueImplementationBranch(monitor, item, command)
+		maxChangedFiles := int32(repositoryMonitorImplementationMaxChangedFiles(monitor)) //nolint:gosec // CRD field is int32-bounded.
+		workspace.MaxChangedFiles = &maxChangedFiles
+		workspace.AllowedPaths = append([]string(nil), monitor.Spec.IssueWorkflow.Implementation.AllowedPaths...)
+		workspace.DenyRepositoryControlPaths = true
+		workspace.RejectBinaryFiles = true
+		workspace.RejectSecretLikeContent = true
 		annotations[labels.AnnotationAgentRuntimeAuthOnly] = scheduledRunLabelValue
 		binding, found, err := r.loadRepositoryMonitorRuntimeAuthBinding(ctx, monitor, command, taskName)
 		if err != nil {
@@ -779,17 +789,19 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 			Annotations: annotations,
 		},
 		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeAgent,
-			AgentRef: &agentRef,
-			Prompt:   buildRepositoryMonitorIssueActionPrompt(monitor, owner, repository, item, actionKind, phase, priorActions),
-			Timeout:  &timeout,
-			Priority: &priority,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				AllowedTools: allowedTools,
-				Workspace:    workspace,
-			},
-			Env: env,
+			Type:         corev1alpha1.TaskTypeAgent,
+			AgentRef:     &agentRef,
+			Prompt:       buildRepositoryMonitorIssueActionPrompt(monitor, owner, repository, item, actionKind, phase, priorActions),
+			Timeout:      &timeout,
+			Priority:     &priority,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: allowedTools},
+			Workspace:    workspace,
 		},
+	}
+	if actionKind == repositoryMonitorIssueActionImplementation {
+		task.Spec.SessionRef = &corev1alpha1.SessionReference{
+			Name: repositoryMonitorPublicationSessionName(monitor, workspace.PushBranch), Create: true, Append: false,
+		}
 	}
 	bindRepositoryMonitorRuntimeAuth(&task.Spec, runtimeAuthRef)
 	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
@@ -914,13 +926,8 @@ func repositoryMonitorIssueActionTaskName(monitor *corev1alpha1.RepositoryMonito
 	return repositoryMonitorBoundedDNSName(fmt.Sprintf("monissue-%s-%d-%s-%s", monitor.Name, item.Number, actionKind, run.ID), 63)
 }
 
-func repositoryMonitorIssueActionRequiresRawResult(actionKind string) bool {
-	switch actionKind {
-	case repositoryMonitorIssueActionTriage, repositoryMonitorIssueActionResearch, repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionDecompose:
-		return true
-	default:
-		return false
-	}
+func repositoryMonitorPublicationSessionName(monitor *corev1alpha1.RepositoryMonitor, branch string) string {
+	return repositoryMonitorBoundedDNSName(fmt.Sprintf("monbranch-%s-%s", monitor.Name, repositoryMonitorShortHash(branch)), 63)
 }
 
 func repositoryMonitorIssueImplementationBranch(monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, command *store.CommandEvent) string {
@@ -1457,6 +1464,9 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 				item.LastActionKind = repositoryMonitorIssueActionMutateToPR
 				item.LastActionTaskName = mutationTaskName
 				item.LastVerdict = repositoryMonitorRunPhaseQueued
+			} else if phase == repositoryMonitorIssuePhasePROpened {
+				item.LastActionKind = repositoryMonitorIssueActionMutateToPR
+				item.LastVerdict = repositoryMonitorRunPhaseSucceeded
 			}
 			if reason != "" {
 				item.SkipReason = reason
@@ -1726,7 +1736,71 @@ func repositoryMonitorPathPatternMatches(pattern, path string) bool {
 	return strings.TrimSuffix(pattern, "/") == strings.TrimSuffix(path, "/")
 }
 
+func repositoryMonitorACPDeliveryReceipt(task *corev1alpha1.Task) (branch, headSHA string, ok bool) {
+	if task == nil || task.Status.Delivery == nil {
+		return "", "", false
+	}
+	delivery := task.Status.Delivery
+	if delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeVerifiedExact {
+		return "", "", false
+	}
+	headSHA = strings.TrimSpace(delivery.VerifiedRemoteSHA)
+	branch = strings.TrimSpace(delivery.Branch)
+	return branch, headSHA, branch != "" && headSHA != ""
+}
+
 func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (string, string, string, error) {
+	if branch, headSHA, delivered := repositoryMonitorACPDeliveryReceipt(task); delivered {
+		configuredBranch := repositoryMonitorIssueTaskPushBranch(task)
+		if configuredBranch == "" || branch != configuredBranch {
+			return repositoryMonitorIssuePhaseBlocked, "", "implementation_delivery_branch_mismatch", nil
+		}
+		if r.ArtifactStore == nil {
+			return repositoryMonitorIssuePhaseBlocked, "", "artifact_store_missing", nil
+		}
+		patchArtifact := repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID)
+		deliverySummary, _ := json.Marshal(map[string]any{
+			"schemaVersion": "orka.issueImplementation.delivery.v1",
+			"branch":        branch, "headSHA": headSHA,
+			"artifactDigest":  task.Status.Delivery.ArtifactDigest,
+			"maxChangedFiles": task.Spec.Workspace.MaxChangedFiles,
+			"allowedPaths":    task.Spec.Workspace.AllowedPaths,
+		})
+		if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, patchArtifact, "application/json", deliverySummary); err != nil {
+			return repositoryMonitorIssuePhaseBlocked, "", "patch_summary_artifact_save_failed", nil
+		}
+		copyRecord := *record
+		payload, _ := common.FormatStructuredResult(&common.StructuredResult{
+			Summary: "ACP workspace delivery verified", PushBranch: branch, HeadSHA: headSHA,
+		})
+		copyRecord.PayloadJSON = string(payload)
+		phase, prNumber, reason, err := r.finishIssueMutation(ctx, monitor, item, &copyRecord, task)
+		if err != nil {
+			return "", "", "", err
+		}
+		if prNumber > 0 {
+			item.LinkedPRNumber = int64(prNumber)
+		}
+		if updateErr := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
+			job.Branch = branch
+			job.PRNumber = int64(prNumber)
+			job.PatchArtifactID = patchArtifact
+			now := time.Now()
+			job.CompletedAt = &now
+			if phase == repositoryMonitorIssuePhasePROpened {
+				job.Phase = repositoryMonitorIssuePhasePROpened
+				job.ValidationState = repositoryMonitorCIStatePassed
+				job.Error = ""
+			} else {
+				job.Phase = repositoryMonitorIssuePhaseBlocked
+				job.ValidationState = repositoryMonitorReviewVerdictFailed
+				job.Error = firstNonEmptyIssueAction(reason, "implementation_delivery_failed")
+			}
+		}); updateErr != nil {
+			return "", "", "", updateErr
+		}
+		return phase, "", reason, nil
+	}
 	sr := common.ParseStructuredResult(record.PayloadJSON)
 	if strings.TrimSpace(sr.Diff) == "" {
 		if err := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
@@ -1760,7 +1834,7 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 	if err := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
 		job.Phase = repositoryMonitorIssuePhasePatchReady
 		job.PatchArtifactID = patchArtifact
-		job.ValidationState = "passed"
+		job.ValidationState = repositoryMonitorCIStatePassed
 	}); err != nil {
 		return "", "", "", err
 	}
@@ -2330,14 +2404,19 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueMutationTask(c
 	branch := repositoryMonitorIssueImplementationBranch(monitor, item, &store.CommandEvent{ID: record.CommandEventID})
 	priority := int32(850)
 	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
+	credentialRef := workspaceCredentialReference(monitor.Spec.GitSecretRef)
 	workspace := &corev1alpha1.WorkspaceConfig{
-		GitRepo:      monitor.Spec.RepoURL,
-		Branch:       effectiveRepositoryMonitorBranch(monitor),
-		PRBaseBranch: effectiveRepositoryMonitorBranch(monitor),
-		PushBranch:   branch,
+		Intent:                       corev1alpha1.WorkspaceIntentWrite,
+		GitRepo:                      monitor.Spec.RepoURL,
+		Branch:                       effectiveRepositoryMonitorBranch(monitor),
+		ReadCredentialRef:            credentialRef,
+		PublicationGitRepo:           monitor.Spec.RepoURL,
+		PublicationReadCredentialRef: credentialRef,
+		PublicationCredentialRef:     credentialRef,
+		ForgeCredentialRef:           credentialRef,
+		PRBaseBranch:                 effectiveRepositoryMonitorBranch(monitor),
+		PushBranch:                   branch,
 	}
-	gitRef := monitor.Spec.GitSecretRef
-	workspace.GitSecretRef = gitRef
 	taskName := repositoryMonitorIssueMutationTaskName(monitor, item, record)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2392,9 +2471,6 @@ func numberFieldFromJSON(payload, key string) int64 {
 func repositoryMonitorIssueTaskPushBranch(task *corev1alpha1.Task) string {
 	if task == nil {
 		return ""
-	}
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
-		return strings.TrimSpace(task.Spec.AgentRuntime.Workspace.PushBranch)
 	}
 	if task.Spec.Workspace != nil {
 		return strings.TrimSpace(task.Spec.Workspace.PushBranch)
@@ -2511,7 +2587,7 @@ func repositoryMonitorIssueActionUpdatesStatusComment(actionKind, workflowPhase 
 	case repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionMutateToPR, repositoryMonitorIssueActionDecompose:
 		return true
 	case repositoryMonitorIssueActionImplementation:
-		return workflowPhase == repositoryMonitorIssuePhaseBlocked
+		return workflowPhase == repositoryMonitorIssuePhaseBlocked || workflowPhase == repositoryMonitorIssuePhasePROpened
 	default:
 		return false
 	}

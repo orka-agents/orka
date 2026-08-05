@@ -1,0 +1,392 @@
+package api
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/gofiber/fiber/v3"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/artifactcap"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
+	"github.com/orka-agents/orka/internal/store"
+)
+
+const acpArtifactAuthorizationPath = "/internal/v2/acp/artifact-authorizations"
+
+type acpArtifactAuthorizationRequest struct {
+	Namespace string                      `json:"namespace"`
+	Metadata  harnessv2.MutationMetadata  `json:"metadata"`
+	Artifact  harnessv2.ArtifactReference `json:"artifact"`
+}
+
+type acpArtifactAuthorizationResponse struct {
+	Capability    string `json:"capability"`
+	RequestDigest string `json:"requestDigest"`
+}
+
+func (s *Server) installACPArtifactAuthorizationBroker() {
+	s.app.Post(acpArtifactAuthorizationPath, s.issueACPArtifactAuthorization)
+	s.app.Post(publisherservice.ArtifactAuthorizationBrokerPath, s.issuePublisherArtifactAuthorization)
+	s.app.Post(publisherservice.CredentialBrokerPath, s.issuePublisherCredential)
+}
+
+func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
+	var request acpArtifactAuthorizationRequest
+	if err := json.Unmarshal(c.Body(), &request); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+	}
+	now := time.Now().UTC()
+	if request.Namespace == "" || request.Metadata.PromptID == "" || request.Metadata.TaskUID == "" ||
+		request.Artifact.MediaType != artifactcap.MediaTypeWorkspaceDelta || request.Artifact.Validate() != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+	}
+	if got, err := harnessv2.CanonicalRequestDigest(request); err != nil || got != request.Metadata.RequestDigest {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+	}
+	pool, secret, err := s.resolveArtifactRuntimePool(c.Context(), request)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	bearer := strings.TrimSpace(strings.TrimPrefix(string(c.Request().Header.Peek("Authorization")), "Bearer "))
+	expectedBearer := strings.TrimSpace(string(secret.Data[runtimePoolControllerTokenKeyAPI]))
+	if !constantAPIStringEqual(bearer, expectedBearer) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	capabilitySecret := secret.Data[runtimePoolCapabilitySecretKeyAPI]
+	if err := harnessv2.VerifyOperationCapability(capabilitySecret, string(c.Request().Header.Peek(harnessv2.OperationCapabilityHeader)), request.Metadata, true, now); err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	if pool.Status.ActiveInstance == nil || pool.Status.ActiveInstance.RuntimeInstanceID != string(request.Metadata.Fence.RuntimeInstanceID) {
+		return c.Status(fiber.StatusGone).JSON(fiber.Map{"error": "stale_runtime"})
+	}
+	task, err := findTaskByUIDWithReader(c.Context(), s.authorizationReader(), request.Namespace, string(request.Metadata.TaskUID))
+	if err != nil || task.Status.Execution == nil || task.Status.Execution.PromptID != string(request.Metadata.PromptID) ||
+		task.Status.Execution.RuntimeSessionUID != string(request.Metadata.Fence.RuntimeSessionUID) ||
+		task.Status.Execution.RuntimeInstanceID != string(request.Metadata.Fence.RuntimeInstanceID) ||
+		(task.Status.Execution.State != corev1alpha1.TaskExecutionStateRunning && task.Status.Execution.State != corev1alpha1.TaskExecutionStateSettling) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	artifactSecret, err := readACPArtifactCapabilitySecret()
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+	}
+	binding := artifactcap.OperationRequest{
+		Operation: artifactcap.OperationUpload, ObjectDigest: request.Artifact.Digest,
+		Identity:      artifactcap.Identity{Namespace: request.Namespace, TaskID: string(request.Metadata.TaskUID)},
+		ContentLength: request.Artifact.SizeBytes, MediaType: request.Artifact.MediaType,
+		OperationID: "runtime-delta-upload-" + string(request.Metadata.OperationID),
+	}
+	const capabilityTTL = 2 * time.Minute
+	authorization, err := artifactcap.Issue(artifactSecret, binding, now, capabilityTTL)
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+	}
+	if s.config.ArtifactReservations == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+	}
+	if err := s.config.ArtifactReservations.Reserve(c.Context(), binding, now.Add(capabilityTTL+artifactcap.MaxClockSkew)); err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+	}
+	return c.JSON(acpArtifactAuthorizationResponse{Capability: authorization.Capability, RequestDigest: authorization.RequestDigest})
+}
+
+const (
+	runtimePoolControllerTokenKeyAPI  = "controller-token"
+	runtimePoolCapabilitySecretKeyAPI = "capability-secret"
+)
+
+func (s *Server) authorizationReader() client.Reader {
+	if s.config.APIReader != nil {
+		return s.config.APIReader
+	}
+	return s.client
+}
+
+func (s *Server) resolveArtifactRuntimePool(ctx context.Context, request acpArtifactAuthorizationRequest) (*corev1alpha1.RuntimePool, *corev1.Secret, error) {
+	reader := s.authorizationReader()
+	var pools corev1alpha1.RuntimePoolList
+	if err := reader.List(ctx, &pools, client.InNamespace(request.Namespace)); err != nil {
+		return nil, nil, err
+	}
+	var pool *corev1alpha1.RuntimePool
+	for i := range pools.Items {
+		candidate := &pools.Items[i]
+		if string(candidate.UID) == string(request.Metadata.Fence.RuntimePoolUID) {
+			pool = candidate.DeepCopy()
+			break
+		}
+	}
+	if pool == nil || pool.Status.ActiveInstance == nil {
+		return nil, nil, fmt.Errorf("runtime pool not found")
+	}
+	var secrets corev1.SecretList
+	if err := reader.List(ctx, &secrets, client.InNamespace(pool.Status.ActiveInstance.PodNamespace), client.MatchingLabels{
+		"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(pool.UID),
+	}); err != nil {
+		return nil, nil, err
+	}
+	if len(secrets.Items) != 1 {
+		return nil, nil, fmt.Errorf("runtime pool auth secret is ambiguous")
+	}
+	return pool, secrets.Items[0].DeepCopy(), nil
+}
+
+func (s *Server) findTaskByUID(ctx context.Context, namespace, uid string) (*corev1alpha1.Task, error) {
+	return findTaskByUIDWithReader(ctx, s.authorizationReader(), namespace, uid)
+}
+
+func findTaskByUIDWithReader(ctx context.Context, reader client.Reader, namespace, uid string) (*corev1alpha1.Task, error) {
+	var tasks corev1alpha1.TaskList
+	if err := reader.List(ctx, &tasks, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+	for i := range tasks.Items {
+		if string(tasks.Items[i].UID) == uid {
+			return tasks.Items[i].DeepCopy(), nil
+		}
+	}
+	return nil, fmt.Errorf("task not found")
+}
+
+func readACPArtifactCapabilitySecret() ([]byte, error) {
+	path := strings.TrimSpace(os.Getenv(envACPArtifactSecretFile))
+	if path == "" {
+		return nil, fmt.Errorf("artifact capability secret is not configured")
+	}
+	return readACPArtifactCapabilitySecretFile(path)
+}
+
+func readACPArtifactCapabilitySecretFile(path string) ([]byte, error) {
+	value, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("artifact capability secret is unavailable")
+	}
+	value = []byte(strings.TrimSpace(string(value)))
+	if len(value) < artifactcap.MinSecretBytes {
+		return nil, fmt.Errorf("artifact capability secret is unavailable")
+	}
+	return value, nil
+}
+
+func constantAPIStringEqual(left, right string) bool {
+	if len(left) != len(right) || left == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
+}
+
+const envWorkspacePublisherControllerTokenFile = "ORKA_WORKSPACE_PUBLISHER_CONTROLLER_TOKEN_FILE"
+
+func (s *Server) issuePublisherArtifactAuthorization(c fiber.Ctx) error {
+	var request publisherservice.ArtifactAuthorizationRequest
+	decoder := json.NewDecoder(strings.NewReader(string(c.Body())))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) == nil || request.Validate() != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+	}
+	expectedBearer, err := readSecretAtEnvPath(envWorkspacePublisherControllerTokenFile, 16)
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_authorization_unavailable"})
+	}
+	bearer := strings.TrimSpace(strings.TrimPrefix(string(c.Request().Header.Peek("Authorization")), "Bearer "))
+	if !constantAPIStringEqual(bearer, string(expectedBearer)) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	if err := s.authorizePublisherArtifactRequest(c.Context(), request); err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	if err := s.authorizePublisherParentEffect(c.Context(), request.ParentOperation, request.Metadata); err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	artifactSecret, err := readACPArtifactCapabilitySecret()
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+	}
+	binding, err := publisherservice.ArtifactBinding(request)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+	}
+	now := time.Now().UTC()
+	const capabilityTTL = 2 * time.Minute
+	authorization, err := artifactcap.Issue(artifactSecret, binding, now, capabilityTTL)
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+	}
+	if s.config.ArtifactReservations == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+	}
+	if err := s.config.ArtifactReservations.Reserve(c.Context(), binding, now.Add(capabilityTTL+artifactcap.MaxClockSkew)); err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_transport_unavailable"})
+	}
+	return c.JSON(publisherservice.ArtifactAuthorizationResponse{
+		Capability: authorization.Capability, RequestDigest: authorization.RequestDigest,
+	})
+}
+
+func (s *Server) authorizePublisherArtifactRequest(ctx context.Context, request publisherservice.ArtifactAuthorizationRequest) error {
+	switch request.ParentOperation {
+	case publisherservice.OperationWorkspacePrepare:
+		return s.authorizePublisherWorkspaceUpload(ctx, request)
+	case publisherservice.OperationPublicationPrepare:
+		if request.ArtifactOperation == artifactcap.OperationUpload {
+			return s.authorizePublisherBundleUpload(ctx, request)
+		}
+		return s.authorizePublisherDeltaDownload(ctx, request)
+	case publisherservice.OperationPublicationPublish, publisherservice.OperationPublicationVerify:
+		return s.authorizePublisherBundleDownload(ctx, request)
+	default:
+		return fmt.Errorf("unsupported publisher artifact operation")
+	}
+}
+
+func (s *Server) authorizePublisherWorkspaceUpload(ctx context.Context, request publisherservice.ArtifactAuthorizationRequest) error {
+	if request.ArtifactOperation != artifactcap.OperationUpload || request.Metadata.TaskID == "" || request.Metadata.PublicationID != "" {
+		return fmt.Errorf("workspace artifact identity is invalid")
+	}
+	task, err := s.findTaskByUID(ctx, request.Metadata.Namespace, request.Metadata.TaskID)
+	if err != nil || task.Status.Execution == nil {
+		return fmt.Errorf("workspace Task is unavailable")
+	}
+	execution := task.Status.Execution
+	if execution.State != corev1alpha1.TaskExecutionStatePlanned || execution.PromptID == "" ||
+		request.Metadata.OperationID != "workspace-prepare-"+execution.PromptID {
+		return fmt.Errorf("workspace Task is not in the exact preparation state")
+	}
+	return nil
+}
+
+func (s *Server) authorizePublisherDeltaDownload(ctx context.Context, request publisherservice.ArtifactAuthorizationRequest) error {
+	if request.ArtifactOperation != artifactcap.OperationDownload || request.Metadata.PublicationID == "" || request.Metadata.TaskID != "" {
+		return fmt.Errorf("publication artifact identity is invalid")
+	}
+	publication, err := s.findPublicationByID(ctx, request.Metadata.Namespace, request.Metadata.PublicationID)
+	if err != nil || string(publication.Status.State) != string(store.PublicationPreparing) {
+		return fmt.Errorf("publication is not preparing")
+	}
+	if publication.Spec.ArtifactID != string(request.Artifact.ArtifactID) ||
+		publication.Spec.ArtifactDigest != request.Artifact.Digest ||
+		publication.Spec.ArtifactSizeBytes != request.Artifact.SizeBytes ||
+		publication.Spec.ArtifactMediaType != request.Artifact.MediaType {
+		return fmt.Errorf("publication artifact identity drifted")
+	}
+	return nil
+}
+
+func (s *Server) authorizePublisherBundleUpload(ctx context.Context, request publisherservice.ArtifactAuthorizationRequest) error {
+	if request.ArtifactOperation != artifactcap.OperationUpload || request.Artifact.MediaType != artifactcap.MediaTypeGitBundle ||
+		request.Metadata.PublicationID == "" || request.Metadata.TaskID != "" {
+		return fmt.Errorf("prepared bundle upload identity is invalid")
+	}
+	publication, err := s.findPublicationByID(ctx, request.Metadata.Namespace, request.Metadata.PublicationID)
+	if err != nil || string(publication.Status.State) != string(store.PublicationPreparing) || publication.Status.PreparedReceipt != nil {
+		return fmt.Errorf("publication is not accepting a prepared bundle")
+	}
+	return nil
+}
+
+func (s *Server) authorizePublisherBundleDownload(ctx context.Context, request publisherservice.ArtifactAuthorizationRequest) error {
+	if request.ArtifactOperation != artifactcap.OperationDownload || request.Artifact.MediaType != artifactcap.MediaTypeGitBundle ||
+		request.Metadata.PublicationID == "" || request.Metadata.TaskID != "" {
+		return fmt.Errorf("prepared bundle download identity is invalid")
+	}
+	publication, err := s.findPublicationByID(ctx, request.Metadata.Namespace, request.Metadata.PublicationID)
+	if err != nil || publication.Status.PreparedReceipt == nil {
+		return fmt.Errorf("publication prepared receipt is unavailable")
+	}
+	expectedState := store.PublicationPublishing
+	if request.ParentOperation == publisherservice.OperationPublicationVerify {
+		expectedState = store.PublicationVerifying
+	}
+	receipt := publication.Status.PreparedReceipt
+	if string(publication.Status.State) != string(expectedState) || receipt.BundleArtifactID != string(request.Artifact.ArtifactID) ||
+		receipt.BundleDigest != request.Artifact.Digest || receipt.BundleSizeBytes != request.Artifact.SizeBytes ||
+		receipt.BundleMediaType != request.Artifact.MediaType {
+		return fmt.Errorf("publication prepared bundle identity drifted")
+	}
+	return nil
+}
+
+func (s *Server) findPublicationByID(ctx context.Context, namespace, id string) (*corev1alpha1.Publication, error) {
+	var publications corev1alpha1.PublicationList
+	if err := s.authorizationReader().List(ctx, &publications, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+	for i := range publications.Items {
+		if publications.Items[i].Spec.ID == id {
+			return publications.Items[i].DeepCopy(), nil
+		}
+	}
+	return nil, fmt.Errorf("publication not found")
+}
+
+func readSecretAtEnvPath(name string, minimum int) ([]byte, error) {
+	path := strings.TrimSpace(os.Getenv(name))
+	if path == "" {
+		return nil, fmt.Errorf("%s is not configured", name)
+	}
+	value, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	value = []byte(strings.TrimSpace(string(value)))
+	if len(value) < minimum {
+		return nil, fmt.Errorf("%s is unavailable", name)
+	}
+	return value, nil
+}
+
+func (s *Server) authorizePublisherParentEffect(
+	ctx context.Context,
+	operation publisherservice.Operation,
+	metadata publisherservice.OperationMetadata,
+) error {
+	kind := ""
+	aggregateID := metadata.PublicationID
+	switch operation {
+	case publisherservice.OperationWorkspaceResolve:
+		kind, aggregateID = "workspace.resolve", metadata.TaskID
+	case publisherservice.OperationWorkspacePrepare:
+		kind, aggregateID = "workspace.prepare", metadata.TaskID
+	case publisherservice.OperationPublicationPreflight:
+		kind = "publisher.preflight"
+	case publisherservice.OperationPublicationPrepare:
+		kind = "publisher.prepare"
+	case publisherservice.OperationPublicationPublish:
+		kind = "publisher.publish"
+	case publisherservice.OperationPublicationVerify:
+		kind = "publisher.verify"
+	case publisherservice.OperationPullRequestReconcile:
+		kind = "publisher.pull-request"
+	default:
+		return fmt.Errorf("unsupported Publisher parent operation")
+	}
+	if aggregateID == "" || metadata.OperationID == "" {
+		return fmt.Errorf("publisher parent effect identity is incomplete")
+	}
+	var effects corev1alpha1.ExternalEffectList
+	if err := s.authorizationReader().List(ctx, &effects, client.InNamespace(metadata.Namespace)); err != nil {
+		return err
+	}
+	matches := 0
+	for i := range effects.Items {
+		effect := &effects.Items[i]
+		if effect.Spec.Kind == kind && effect.Spec.IdentityNamespace == metadata.Namespace &&
+			effect.Spec.AggregateID == aggregateID && effect.Spec.OperationID == metadata.OperationID &&
+			effect.Status.State == corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight) {
+			matches++
+		}
+	}
+	if matches != 1 {
+		return fmt.Errorf("publisher parent effect is not uniquely in flight")
+	}
+	return nil
+}

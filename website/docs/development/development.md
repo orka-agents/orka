@@ -80,23 +80,28 @@ See [Testing](testing.md) for full test structure and patterns.
 
 The repository has additional GitHub Actions workflows in addition to the normal test matrix:
 
-- `Live Copilot Proxy E2E` — exercises live model-backed Orka paths through the copilot-proxy harness.
+- `Live ACP Runtime E2E` — runs on trusted default-branch changes, nightly, or by manual dispatch. It builds the current controller and all four built-in runtime images, bootstraps Kind plus Vekil and the production ACP topology, and executes live Codex, OpenCode, Claude, and Copilot RuntimePools through the canonical smoke validator.
+- `Live ACP Release Gate` — is a manual, protected-environment destructive gate that adds result/fork checks, clean-room publication to a distinct fork, PR verification and cleanup, scale-to-zero recovery, and immutable-image assertions.
+- `Live Copilot Proxy E2E` — exercises native `type: ai` and compatibility API paths through an external proxy used as test infrastructure. The canonical live ACP workflow separately executes the built-in Codex, OpenCode, Claude, and Copilot RuntimePools end to end.
 - `Live Agent Sandbox E2E` — installs the pinned upstream `agent-sandbox` release in Kind, builds the PR controller plus fake Claude/sandbox-runtime and upstream router images, then validates workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing without model access.
 - `Live GitHub Label Trigger E2E` — builds the PR controller image, deploys it to Kind, configures a generated webhook secret and synthetic runtime Agent, then verifies signed label webhooks create scoped agent Tasks while invalid signatures and duplicate deliveries are handled correctly. This workflow is manual, model-free, and secret-free.
 - `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, and verifies `spec.requestedBy` stamping plus client provenance-tampering rejection.
 - `Gateway Live E2E` — runs on relevant pushes and pull requests or by manual dispatch. It creates a fresh Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid authentication, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. It is model-free and secret-free and does not use repository or provider credentials.
 - `Repository Monitor Smoke` — runs automatically on PRs and pushes touching monitor-relevant Go, CRD/config, worker, or dependency paths. It creates the UI embed stub and runs focused Go tests for monitor store/API/controller behavior, GitHub pull request event queueing, targeted single-PR inventory runs, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling.
-- `Agent Substrate E2E` — installs Agent Substrate and Orka into a fresh Kind cluster, creates Orka-compatible `WorkerPool`/`ActorTemplate` resources, validates direct Substrate actor execution, runs default and pooled Orka Tasks through the Substrate workspace provider, exercises pooled MCP actor-backed Tools, and checks workspace placement/density telemetry. This workflow is secret-free.
+- `Agent Substrate E2E` — exercises the archived execution-workspace prototype. It is secret-free but is not an ACP v2 release gate and does not validate RuntimePool, prompt fencing, clean-room publication, or restart semantics.
 
 Validate workflow/script edits locally before pushing:
 
 ```bash
 bash -n scripts/live-copilot-proxy-e2e.sh
+bash -n scripts/live-acp-runtime-e2e.sh scripts/live-acp-runtime-kind-e2e.sh scripts/lib/live-acp-runtime-kind-bootstrap.sh
 bash -n scripts/live-agent-sandbox-e2e.sh
 bash -n scripts/live-github-label-trigger-e2e.sh
 bash -n scripts/live-github-oidc-e2e.sh
 bash -n scripts/agent-substrate-e2e.sh
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-copilot-proxy-e2e.yml
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-acp-runtime-e2e.yml
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-acp-release-gate.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-agent-sandbox-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-label-trigger-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-oidc-e2e.yml
@@ -105,7 +110,7 @@ go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/repos
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-substrate-e2e.yml
 ```
 
-The agent sandbox live script does not require provider credentials or model access. It uses a deterministic fake `claude` CLI in the sandbox runtime image so CI can verify Orka's sandbox plumbing independently from external LLM availability.
+The agent-sandbox and Substrate scripts exercise the earlier execution-workspace prototype. They are not ACP v2 release evidence; the current built-in path rejects `Task.spec.execution.workspace`.
 
 The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. Transaction-token provider E2E now lives in the external integration repository.
 
@@ -120,8 +125,7 @@ bash scripts/agent-substrate-e2e.sh
 
 ## Harness wrapper real-world validation
 
-When changing the agent-harness-wrapper, validate it against a live cluster, not
-only unit tests. Follow the canonical [Live validation checklist](../guides/cli-harness-wrapper.md#live-validation-checklist).
+When changing ACP runtime supervision or broker boundaries, validate them against a live cluster, not only unit tests. Use `scripts/live-acp-runtime-e2e.sh` for an already deployed cluster, or `scripts/live-acp-runtime-kind-e2e.sh` to create the same ephemeral Kind/Vekil topology used by CI.
 
 ## OpenTelemetry development
 
@@ -129,9 +133,9 @@ Telemetry is enabled with `--enable-telemetry` (or the legacy alias
 `--enable-tracing`) and exported through `OTEL_EXPORTER_OTLP_ENDPOINT`. When the
 controller flag is enabled and a worker-reachable OTLP endpoint is configured,
 AI worker Jobs receive `ORKA_ENABLE_TELEMETRY=true`, `ORKA_TRACEPARENT`, and the
-non-secret standard OTLP environment. Agent-runtime and harness-wrapper
-telemetry is explicit opt-in on those workloads; OTLP endpoint variables alone
-do not enable Kubernetes worker telemetry. Delegated child Tasks continue the
+non-secret standard OTLP environment. ACP RuntimePool telemetry is explicit
+opt-in on the managed runtime workload; OTLP endpoint variables alone do not
+enable runtime telemetry. Delegated child Tasks continue the
 active parent trace through Task annotations.
 
 GenAI semantic-convention constants live in `internal/tracing/genai` rather than
@@ -139,7 +143,7 @@ upstream `semconv` because the GenAI conventions are still Development-stage.
 Run focused telemetry tests with:
 
 ```bash
-go test ./internal/tracing/... ./internal/llm/ ./internal/tools/ ./internal/worker ./workers/ai ./workers/harness/cliwrapper -run 'Tracing|Telemetry|GenAI|ExecuteTool|TraceContext|Traceparent|TaskRun|DelegateTrace' -v
+go test ./internal/tracing/... ./internal/llm/ ./internal/tools/ ./internal/worker ./workers/ai ./internal/harness/v2/... ./internal/acp/... ./workers/acp/... -run 'Tracing|Telemetry|GenAI|ExecuteTool|TraceContext|Traceparent|TaskRun|RuntimeSession|Fence' -v
 ```
 
 The live Kind e2e coverage for collector export lives in
@@ -168,17 +172,25 @@ make ui-test-coverage   # Run UI tests with coverage
 
 ```bash
 # Build images
-make docker-build                  # Controller image
-make docker-build-ai-worker        # AI worker
-make docker-build-general-worker   # General worker
-make docker-build-harness-wrapper  # Agent CLI harness wrapper (codex/claude/copilot/opencode)
-make docker-build-all              # Controller, workers, and harness wrapper
+make docker-build                       # Controller image
+make docker-build-ai-worker             # Native AI worker
+make docker-build-general-worker        # General worker
+make docker-build-acp-codex-runtime      # Immutable Codex ACP runtime
+make docker-build-acp-claude-runtime     # Immutable Claude ACP runtime
+make docker-build-acp-copilot-runtime    # Immutable GitHub Copilot ACP runtime
+make docker-build-acp-opencode-runtime    # Immutable OpenCode ACP runtime
+make docker-build-workspace-publisher    # Clean-room Workspace/Publisher
+make docker-build-all
 
 # Push images
 make docker-push
 make docker-push-ai-worker
 make docker-push-general-worker
-make docker-push-harness-wrapper
+make docker-push-acp-codex-runtime
+make docker-push-acp-claude-runtime
+make docker-push-acp-copilot-runtime
+make docker-push-acp-opencode-runtime
+make docker-push-workspace-publisher
 make docker-push-all
 ```
 
@@ -186,9 +198,15 @@ make docker-push-all
 
 ```bash
 kind create cluster
-make docker-build docker-push IMG=<registry>/orka:tag
-make docker-build-harness-wrapper docker-push-harness-wrapper HARNESS_WRAPPER_IMG=<registry>/agent-harness-wrapper:tag
-make deploy IMG=<registry>/orka:tag HARNESS_WRAPPER_IMG=<registry>/agent-harness-wrapper:tag
+make docker-build-all
+# Push/load the images, then use immutable runtime digests for deployment.
+make deploy \
+  IMG=<repo>@sha256:<controller-digest> \
+  ACP_CODEX_RUNTIME_IMG=<registry>/acp-codex@sha256:<digest> \
+  ACP_CLAUDE_RUNTIME_IMG=<registry>/acp-claude@sha256:<digest> \
+  ACP_COPILOT_RUNTIME_IMG=<registry>/acp-copilot@sha256:<digest> \
+  ACP_OPENCODE_RUNTIME_IMG=<registry>/acp-opencode@sha256:<digest> \
+  WORKSPACE_PUBLISHER_IMG=<repo>@sha256:<publisher-digest>
 ```
 
 ### Demo Cluster + Recordings

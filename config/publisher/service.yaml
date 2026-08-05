@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: workspace-publisher
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: workspace-publisher
+spec:
+  selector:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: workspace-publisher
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

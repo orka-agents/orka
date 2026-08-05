@@ -82,8 +82,10 @@ func migrate(db *sql.DB) error {
 			session_type  TEXT NOT NULL DEFAULT 'task',
 			owner_type    TEXT NOT NULL DEFAULT '',
 			owner_ref     TEXT NOT NULL DEFAULT '',
-			active_task     TEXT NOT NULL DEFAULT '',
-			active_task_uid TEXT NOT NULL DEFAULT '',
+			active_task            TEXT NOT NULL DEFAULT '',
+			active_task_uid        TEXT NOT NULL DEFAULT '',
+			active_task_expires_at TIMESTAMP,
+			control_session_uid    TEXT NOT NULL DEFAULT '',
 			message_count   INTEGER NOT NULL DEFAULT 0,
 			input_tokens  INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -91,6 +93,24 @@ func migrate(db *sql.DB) error {
 			created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (namespace, name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS session_cleanup_intents (
+			namespace        TEXT NOT NULL,
+			session_name     TEXT NOT NULL,
+			operation_id     TEXT NOT NULL,
+			operation_digest TEXT NOT NULL,
+			plan             BLOB NOT NULL,
+			created_at       TIMESTAMP NOT NULL,
+			PRIMARY KEY(namespace, session_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS session_cleanup_completions (
+			namespace        TEXT NOT NULL,
+			session_name     TEXT NOT NULL,
+			session_uid      TEXT NOT NULL DEFAULT '',
+			operation_id     TEXT NOT NULL,
+			operation_digest TEXT NOT NULL,
+			completed_at     TIMESTAMP NOT NULL,
+			PRIMARY KEY(namespace, session_name)
 		)`,
 		`CREATE TABLE IF NOT EXISTS session_messages (
 			id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -834,8 +854,19 @@ func migrate(db *sql.DB) error {
 		{Name: "owner_type", Definition: "owner_type TEXT NOT NULL DEFAULT ''"},
 		{Name: "owner_ref", Definition: "owner_ref TEXT NOT NULL DEFAULT ''"},
 		{Name: "active_task_uid", Definition: "active_task_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "active_task_expires_at", Definition: "active_task_expires_at TIMESTAMP"},
+		{Name: "control_session_uid", Definition: "control_session_uid TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
+	}
+	if err := ensureSQLiteColumns(db, "session_cleanup_completions", []sqliteColumnMigration{
+		{Name: "session_uid", Definition: "session_uid TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_cleanup_completions_uid
+		ON session_cleanup_completions(session_uid) WHERE session_uid <> ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
 	}
 	if _, err := db.Exec(`UPDATE sessions SET active_task_uid = COALESCE((
 		SELECT event.task_uid FROM gateway_events event
@@ -1040,6 +1071,9 @@ func migrate(db *sql.DB) error {
 		ON memories(namespace, source_proposal_id)
 		WHERE source_proposal_id <> ''`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
+	}
+	if err := migrateControlStore(db); err != nil {
+		return err
 	}
 
 	return nil

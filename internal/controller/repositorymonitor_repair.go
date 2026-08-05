@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -18,7 +19,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
 
@@ -276,15 +276,21 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 	priority := int32(820)
 	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
 	repairer := *monitor.Spec.Agents.Repairer
+	credentialRef := workspaceCredentialReference(monitor.Spec.GitSecretRef)
 	workspace := &corev1alpha1.WorkspaceConfig{
-		GitRepo:      repositoryMonitorHTTPSCloneURL(owner, repository),
-		Branch:       pr.HeadBranch,
-		Ref:          pr.HeadSHA,
-		PRBaseBranch: pr.BaseBranch,
-		PushBranch:   pr.HeadBranch,
+		Intent:                       corev1alpha1.WorkspaceIntentWrite,
+		GitRepo:                      repositoryMonitorHTTPSCloneURL(owner, repository),
+		Branch:                       pr.HeadBranch,
+		Ref:                          pr.HeadSHA,
+		ReadCredentialRef:            credentialRef,
+		PublicationGitRepo:           repositoryMonitorHTTPSCloneURL(owner, repository),
+		PublicationReadCredentialRef: credentialRef,
+		PublicationCredentialRef:     credentialRef,
+		ForgeCredentialRef:           credentialRef,
+		PRBaseBranch:                 pr.BaseBranch,
+		PushBranch:                   pr.HeadBranch,
+		ExpectedRemoteSHA:            pr.HeadSHA,
 	}
-	gitRef := monitor.Spec.GitSecretRef
-	workspace.GitSecretRef = gitRef
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -310,21 +316,16 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
-			Type:         corev1alpha1.TaskTypeAgent,
-			AgentRef:     &repairer,
-			Prompt:       buildRepositoryMonitorRepairPrompt(command.Intent, monitoredRepo, pr, item),
-			Timeout:      &timeout,
-			Priority:     &priority,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{Workspace: workspace},
-			Env: []corev1.EnvVar{
-				{Name: workerenv.PRBaseRepo, Value: repositoryMonitorHTTPSCloneURL(owner, repository)},
-				{Name: workerenv.PRBaseSHA, Value: pr.BaseSHA},
-				{Name: workerenv.RequirePushBranch, Value: "true"},
+			Type:      corev1alpha1.TaskTypeAgent,
+			AgentRef:  &repairer,
+			Prompt:    buildRepositoryMonitorRepairPrompt(command.Intent, monitoredRepo, pr, item),
+			Timeout:   &timeout,
+			Priority:  &priority,
+			Workspace: workspace,
+			SessionRef: &corev1alpha1.SessionReference{
+				Name: repositoryMonitorPublicationSessionName(monitor, pr.HeadBranch), Create: true, Append: false,
 			},
 		},
-	}
-	if command.Intent == "update_branch" {
-		task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.AllowEmptyPushBranch, Value: "true"})
 	}
 	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
 		return 0, err
@@ -374,6 +375,60 @@ func buildRepositoryMonitorRepairPrompt(intent, repo string, pr repositoryMonito
 	return fmt.Sprintf("Repair this exact pull request head for intent %q. Keep scope limited, run relevant validation, and leave final changes for Orka to commit and push to the configured push branch. Do not merge or close the PR.\n\nInput:\n%s\n", intent, string(payloadJSON))
 }
 
+func (r *RepositoryMonitorReconciler) repositoryMonitorHeadContainsBase(
+	ctx context.Context,
+	monitor *corev1alpha1.RepositoryMonitor,
+	job *store.RepairJob,
+) (bool, error) {
+	if monitor == nil || job == nil {
+		return false, fmt.Errorf("monitor and repair job are required")
+	}
+	owner, repository, ok := strings.Cut(strings.TrimSpace(job.Repo), "/")
+	if !ok || owner == "" || repository == "" || strings.Contains(repository, "/") {
+		return false, fmt.Errorf("repair repository identity is invalid")
+	}
+	baseSHA, headSHA := strings.TrimSpace(job.BaseSHA), strings.TrimSpace(job.HeadSHA)
+	if baseSHA == "" || headSHA == "" {
+		return false, fmt.Errorf("repair base and head SHAs are required")
+	}
+	token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
+	if err != nil {
+		return false, err
+	}
+	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
+	if baseURL == "" {
+		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s", baseURL, url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(baseSHA), url.PathEscape(headSHA))
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	response, err := repositoryMonitorHTTPClient(r).Do(request)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close() //nolint:errcheck
+	body, err := readRepositoryMonitorGitHubResponse(response.Body, repositoryMonitorGitHubResponseLimit)
+	if err != nil {
+		return false, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return false, &repositoryMonitorGitHubAPIError{Operation: "compare repair head", StatusCode: response.StatusCode, Body: string(body)}
+	}
+	var result struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false, err
+	}
+	return result.Status == "ahead" || result.Status == "identical", nil
+}
+
+//nolint:gocyclo // Repair ingestion keeps delivery, audit, and work-action settlement in one transaction.
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTasks(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
 	jobs, _, err := r.Store.ListRepairJobs(ctx, store.RepairJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Phase: repositoryMonitorRepairPhaseQueued, Limit: 100})
 	if err != nil {
@@ -411,7 +466,27 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 			job.Phase = repositoryMonitorRepairPhaseFailed
 			job.LastError = "repair task result is missing"
-			if r.ResultStore != nil {
+			if branch, headSHA, delivered := repositoryMonitorACPDeliveryReceipt(&task); delivered {
+				job.PushedSHA = headSHA
+				if branch != job.Branch {
+					job.LastError = "repair delivery branch did not match the requested PR head branch"
+				} else {
+					job.Phase = repositoryMonitorRepairPhaseSucceeded
+					job.LastError = ""
+				}
+			} else if task.Status.Delivery != nil && task.Status.Delivery.Outcome == corev1alpha1.TaskDeliveryOutcomeNoChange && job.Intent == repositoryMonitorCommandIntentUpdateBranch {
+				containsBase, verifyErr := r.repositoryMonitorHeadContainsBase(ctx, monitor, &job)
+				if verifyErr != nil {
+					return ingested, verifyErr
+				}
+				if containsBase {
+					job.Phase = repositoryMonitorRepairPhaseSucceeded
+					job.PushedSHA = job.HeadSHA
+					job.LastError = ""
+				} else {
+					job.LastError = "PR head does not contain the requested base revision"
+				}
+			} else if r.ResultStore != nil {
 				if raw, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name); err == nil {
 					sr := common.ParseStructuredResult(string(raw))
 					job.PushedSHA = sr.HeadSHA

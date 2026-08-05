@@ -1,11 +1,13 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	neturl "net/url"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -421,15 +423,9 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 	if _, builtin := builtinToolsMap[name]; builtin {
 		return fiber.NewError(fiber.StatusConflict, "built-in tools cannot be updated")
 	}
-	tool, err := h.fetchToolCRD(c, name)
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
 		return err
-	}
-	if toolSpecHasProtectedAuth(tool.Spec) {
-		return fiber.NewError(
-			fiber.StatusBadRequest,
-			"tools with protected HTTP auth configuration must be updated with Kubernetes RBAC",
-		)
 	}
 	var req UpdateToolRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -438,11 +434,64 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 	if err := validateToolRESTMutation(req.Spec); err != nil {
 		return err
 	}
-	tool.Spec = req.Spec
-	if err := authorizeToolWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), tool); err != nil {
-		return err
+
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
 	}
-	if err := h.client.Update(c.Context(), tool); err != nil {
+	ctx := c.Context()
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+	var (
+		tool              *corev1alpha1.Tool
+		initialGeneration int64
+		initialSpec       *corev1alpha1.ToolSpec
+		initialUID        types.UID
+	)
+	errToolSpecChanged := errors.New("tool spec changed concurrently")
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Tool{}
+		if err := reader.Get(ctx, key, current); err != nil {
+			return err
+		}
+		if initialSpec == nil {
+			initialGeneration = current.Generation
+			initialSpec = current.Spec.DeepCopy()
+			initialUID = current.UID
+		} else if current.UID != initialUID ||
+			current.Generation != initialGeneration ||
+			!apiequality.Semantic.DeepEqual(current.Spec, *initialSpec) {
+			return errToolSpecChanged
+		}
+		if toolSpecHasProtectedAuth(current.Spec) {
+			return fiber.NewError(
+				fiber.StatusBadRequest,
+				"tools with protected HTTP auth configuration must be updated with Kubernetes RBAC",
+			)
+		}
+		current.Spec = req.Spec
+		if err := authorizeToolWorkspaceClassUse(ctx, h.clientset, GetUserInfo(c), current); err != nil {
+			return err
+		}
+		if err := h.client.Update(ctx, current); err != nil {
+			return err
+		}
+		tool = current
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errToolSpecChanged) {
+			return fiber.NewError(fiber.StatusConflict, "tool spec was modified concurrently")
+		}
+		var fiberErr *fiber.Error
+		if errors.As(err, &fiberErr) {
+			return err
+		}
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "tool not found")
+		}
+		if apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusConflict, "tool was modified concurrently")
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update tool: %v", err))
 	}
 	return c.JSON(tool)

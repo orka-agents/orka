@@ -100,7 +100,8 @@ jobs:
 
           helm lint cmd/build/helmify/static
           helm lint charts/orka
-          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 19
+          expected_crds=$(find config/crd/bases -maxdepth 1 -type f -name '*.yaml' | wc -l | tr -d ' ')
+          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq "${expected_crds}"
           git diff --check
 
       - name: Create release pull request

@@ -391,17 +391,7 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 				{Name: security.EnvPolicyDigest, Value: policy.Digest},
 				{Name: security.EnvPolicyProvenance, Value: security.PolicyProvenanceEnv(policy)},
 			},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      scan.Spec.RepoURL,
-					Branch:       security.EffectiveWorkspaceBranch(scan),
-					Ref:          security.EffectiveRef(scan),
-					GitSecretRef: scan.Spec.GitSecretRef,
-					SubPath:      scan.Spec.SubPath,
-					ForkRepo:     scan.Spec.ForkRepo,
-					PRBaseBranch: scan.Spec.PRBaseBranch,
-				},
-			},
+			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
@@ -642,15 +632,7 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 				{Name: security.EnvScanBaseCommit, Value: run.BaseCommit},
 				{Name: security.EnvScanHeadCommit, Value: run.HeadCommit},
 			},
-			Workspace: &corev1alpha1.WorkspaceConfig{
-				GitRepo:      scan.Spec.RepoURL,
-				Branch:       security.EffectiveWorkspaceBranch(scan),
-				Ref:          security.EffectiveRef(scan),
-				GitSecretRef: scan.Spec.GitSecretRef,
-				SubPath:      scan.Spec.SubPath,
-				ForkRepo:     scan.Spec.ForkRepo,
-				PRBaseBranch: scan.Spec.PRBaseBranch,
-			},
+			Workspace: repositoryScanTaskWorkspace(scan, ""),
 		},
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
@@ -909,17 +891,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 					{Name: security.EnvPolicyProvenance, Value: security.PolicyProvenanceEnv(policy)},
 					{Name: security.EnvSliceID, Value: reviewSlice.ID},
 				},
-				AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-					Workspace: &corev1alpha1.WorkspaceConfig{
-						GitRepo:      scan.Spec.RepoURL,
-						Branch:       security.EffectiveWorkspaceBranch(scan),
-						Ref:          security.EffectiveRef(scan),
-						GitSecretRef: scan.Spec.GitSecretRef,
-						SubPath:      scan.Spec.SubPath,
-						ForkRepo:     scan.Spec.ForkRepo,
-						PRBaseBranch: scan.Spec.PRBaseBranch,
-					},
-				},
+				Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 			},
 		}
 		if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
@@ -2029,17 +2001,7 @@ func (r *RepositoryScanReconciler) createValidationTask(ctx context.Context, sca
 				{Name: security.EnvPolicyProvenance, Value: security.PolicyProvenanceEnv(policy)},
 				{Name: security.EnvFindingID, Value: finding.ID},
 			},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      scan.Spec.RepoURL,
-					Branch:       security.EffectiveWorkspaceBranch(scan),
-					Ref:          security.EffectiveRef(scan),
-					GitSecretRef: scan.Spec.GitSecretRef,
-					SubPath:      scan.Spec.SubPath,
-					ForkRepo:     scan.Spec.ForkRepo,
-					PRBaseBranch: scan.Spec.PRBaseBranch,
-				},
-			},
+			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
@@ -2862,8 +2824,6 @@ func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *co
 	requestedBranch := ""
 	if task.Spec.Workspace != nil {
 		requestedBranch = strings.TrimSpace(task.Spec.Workspace.PushBranch)
-	} else if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
-		requestedBranch = strings.TrimSpace(task.Spec.AgentRuntime.Workspace.PushBranch)
 	}
 	if requestedBranch != "" && strings.TrimSpace(proposal.Branch) == "" {
 		proposal.Branch = requestedBranch

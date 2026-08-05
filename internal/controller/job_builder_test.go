@@ -39,6 +39,7 @@ const (
 	testAIWorkerServiceAccountName        = "release-ai-worker"
 	testVendorWorkerServiceAccountName    = "release-vendor-worker"
 	testContainerWorkerServiceAccountName = "release-container-worker"
+	testFalseValue                        = "false"
 )
 
 const (
@@ -1644,6 +1645,36 @@ func hasVolume(volumes []corev1.Volume, name string) bool {
 	return false
 }
 
+func requireWorkspaceCredentialProjection(
+	t *testing.T,
+	volumes []corev1.Volume,
+	volumeName string,
+	secretName string,
+	secretKey string,
+) {
+	t.Helper()
+	for _, volume := range volumes {
+		if volume.Name != volumeName {
+			continue
+		}
+		if volume.Secret == nil {
+			t.Fatalf("volume %q has no Secret source", volumeName)
+		}
+		if volume.Secret.SecretName != secretName {
+			t.Fatalf("volume %q SecretName = %q, want %q", volumeName, volume.Secret.SecretName, secretName)
+		}
+		if len(volume.Secret.Items) != 1 {
+			t.Fatalf("volume %q items = %#v, want one key projection", volumeName, volume.Secret.Items)
+		}
+		item := volume.Secret.Items[0]
+		if item.Key != secretKey || item.Path != defaultACPWorkspaceCredentialKey {
+			t.Fatalf("volume %q projection = %#v, want key %q at %q", volumeName, item, secretKey, defaultACPWorkspaceCredentialKey)
+		}
+		return
+	}
+	t.Fatalf("missing workspace credential volume %q", volumeName)
+}
+
 // helper to find a volume mount by name
 func findVolumeMount(mounts []corev1.VolumeMount, name string) (corev1.VolumeMount, bool) {
 	for _, m := range mounts {
@@ -1746,10 +1777,8 @@ func TestJobBuilder_Build_ContainerTask_GitSecretVolume_DirectMountOptIn(t *test
 			Type:  corev1alpha1.TaskTypeContainer,
 			Image: testBusyboxImage,
 			Workspace: &corev1alpha1.WorkspaceConfig{
-				GitRepo: "https://github.com/example/repo",
-				GitSecretRef: &corev1.LocalObjectReference{
-					Name: "my-git-creds",
-				},
+				GitRepo:           "https://github.com/example/repo",
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "my-git-creds"},
 			},
 		},
 	}
@@ -1759,7 +1788,7 @@ func TestJobBuilder_Build_ContainerTask_GitSecretVolume_DirectMountOptIn(t *test
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	mount, ok := findVolumeMount(job.Spec.Template.Spec.Containers[0].VolumeMounts, testGitCredentials)
+	mount, ok := findVolumeMount(job.Spec.Template.Spec.Containers[0].VolumeMounts, "git-read-credentials")
 	if !ok {
 		t.Fatal("Missing git-credentials volume mount")
 	}
@@ -1769,6 +1798,7 @@ func TestJobBuilder_Build_ContainerTask_GitSecretVolume_DirectMountOptIn(t *test
 	if !mount.ReadOnly {
 		t.Error("git-credentials mount should be read-only")
 	}
+	requireWorkspaceCredentialProjection(t, job.Spec.Template.Spec.Volumes, "git-read-credentials", "my-git-creds", defaultACPWorkspaceCredentialKey)
 }
 
 func TestJobBuilder_Build_UntrustedContainerTask_DirectSecretsDisabledByDefault(t *testing.T) {
@@ -1847,14 +1877,11 @@ func TestJobBuilder_Build_ContainerTask_Workspace(t *testing.T) {
 			Command: []string{"sh", "-lc"},
 			Args:    []string{"go test ./..."},
 			Workspace: &corev1alpha1.WorkspaceConfig{
-				GitRepo:    "https://github.com/example/repo.git",
-				Branch:     "feature",
-				Ref:        "abc123",
-				SubPath:    "src",
-				PushBranch: "demo/fixup",
-				GitSecretRef: &corev1.LocalObjectReference{
-					Name: "git-credentials",
-				},
+				GitRepo:           "https://github.com/example/repo.git",
+				Branch:            "feature",
+				Ref:               "abc123",
+				SubPath:           "src",
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "git-credentials"},
 			},
 		},
 	}
@@ -1870,8 +1897,11 @@ func TestJobBuilder_Build_ContainerTask_Workspace(t *testing.T) {
 	if !hasVolume(job.Spec.Template.Spec.Volumes, "home") {
 		t.Fatal("missing home volume")
 	}
-	if !hasVolume(job.Spec.Template.Spec.Volumes, testGitCredentials) {
-		t.Fatal("missing git credentials volume")
+	if !hasVolume(job.Spec.Template.Spec.Volumes, "git-read-credentials") {
+		t.Fatal("missing read git credential volume")
+	}
+	if hasVolume(job.Spec.Template.Spec.Volumes, "git-publication-credentials") {
+		t.Fatal("read-only custom-image workspace should not include publication credentials")
 	}
 	if len(job.Spec.Template.Spec.InitContainers) != 1 {
 		t.Fatalf("init container count = %d, want 1", len(job.Spec.Template.Spec.InitContainers))
@@ -1883,14 +1913,14 @@ func TestJobBuilder_Build_ContainerTask_Workspace(t *testing.T) {
 	if init.Image != builder.GeneralWorkerImage {
 		t.Errorf("init image = %q, want %q", init.Image, builder.GeneralWorkerImage)
 	}
-	if !hasVolumeMount(init.VolumeMounts, testGitCredentials) {
+	if !hasVolumeMount(init.VolumeMounts, "git-read-credentials") {
 		t.Fatal("prepare-workspace init container missing git-credentials mount")
 	}
 	if _, ok := findEnvVar(init.Env, "ORKA_GIT_REPO"); !ok {
 		t.Fatal("init missing ORKA_GIT_REPO")
 	}
 	container := job.Spec.Template.Spec.Containers[0]
-	if hasVolumeMount(container.VolumeMounts, testGitCredentials) {
+	if hasVolumeMount(container.VolumeMounts, "git-read-credentials") || hasVolumeMount(container.VolumeMounts, "git-publication-credentials") {
 		t.Fatal("main container should not mount git credentials by default")
 	}
 	if container.WorkingDir != "/workspace/src" {
@@ -1899,8 +1929,197 @@ func TestJobBuilder_Build_ContainerTask_Workspace(t *testing.T) {
 	if _, ok := findEnvVar(container.Env, "ORKA_GIT_REF"); !ok {
 		t.Fatal("container missing ORKA_GIT_REF")
 	}
-	if _, ok := findEnvVar(container.Env, "ORKA_PUSH_BRANCH"); !ok {
-		t.Fatal("container missing ORKA_PUSH_BRANCH")
+	if _, ok := findEnvVar(container.Env, "ORKA_PUSH_BRANCH"); ok {
+		t.Fatal("read-only custom-image workspace unexpectedly included ORKA_PUSH_BRANCH")
+	}
+}
+
+func TestJobBuilder_Build_ContainerTask_CustomImagePushBranchFailsClosed(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "custom-container-publish", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:  corev1alpha1.TaskTypeContainer,
+			Image: testBusyboxImage,
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:                  "https://github.com/example/source.git",
+				PushBranch:               "orka/publish",
+				ReadCredentialRef:        &corev1alpha1.WorkspaceCredentialReference{Name: "source-read"},
+				PublicationCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "publication-write"},
+			},
+		},
+	}
+
+	const want = "custom-image container Tasks do not support workspace.pushBranch publication"
+	if _, err := builder.Build(context.Background(), task, nil, nil); err == nil || err.Error() != want {
+		t.Fatalf("Build() error = %v, want %q", err, want)
+	}
+}
+
+func TestJobBuilder_Build_ContainerTask_ManagedPushBranchAccepted(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-container-publish", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:  corev1alpha1.TaskTypeContainer,
+			Image: "",
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:                  "https://github.com/example/source.git",
+				PushBranch:               "orka/publish",
+				ReadCredentialRef:        &corev1alpha1.WorkspaceCredentialReference{Name: "source-read"},
+				PublicationCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "publication-write"},
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v, want managed container publication accepted", err)
+	}
+	container := job.Spec.Template.Spec.Containers[0]
+	if container.Image != builder.GeneralWorkerImage {
+		t.Fatalf("container image = %q, want managed worker %q", container.Image, builder.GeneralWorkerImage)
+	}
+	if pushBranch, ok := findEnvVar(container.Env, "ORKA_PUSH_BRANCH"); !ok || pushBranch.Value != "orka/publish" {
+		t.Fatalf("ORKA_PUSH_BRANCH = %#v, present=%v, want orka/publish", pushBranch, ok)
+	}
+}
+
+func TestJobBuilder_Build_ContainerTask_PushUsesSeparatedCredentials(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "container-publish", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Command: []string{"sh", "-lc"},
+			Args:    []string{"echo change >> file.txt"},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:                  "https://github.com/example/source.git",
+				PublicationGitRepo:       "https://github.com/example/target.git",
+				PushBranch:               "orka/publish",
+				ReadCredentialRef:        &corev1alpha1.WorkspaceCredentialReference{Name: "source-read", Key: "source-token"},
+				PublicationCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "target-write", Key: "target-token"},
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(job.Spec.Template.Spec.InitContainers) != 1 {
+		t.Fatalf("init container count = %d, want 1", len(job.Spec.Template.Spec.InitContainers))
+	}
+	init := job.Spec.Template.Spec.InitContainers[0]
+	if !hasVolumeMount(init.VolumeMounts, "git-read-credentials") || hasVolumeMount(init.VolumeMounts, "git-publication-credentials") {
+		t.Fatalf("workspace init mounts = %#v, want source read credential only", init.VolumeMounts)
+	}
+	container := job.Spec.Template.Spec.Containers[0]
+	if !hasVolumeMount(container.VolumeMounts, "git-publication-credentials") || hasVolumeMount(container.VolumeMounts, "git-read-credentials") {
+		t.Fatalf("worker mounts = %#v, want target publication credential only", container.VolumeMounts)
+	}
+	requireWorkspaceCredentialProjection(t, job.Spec.Template.Spec.Volumes, "git-read-credentials", "source-read", "source-token")
+	requireWorkspaceCredentialProjection(t, job.Spec.Template.Spec.Volumes, "git-publication-credentials", "target-write", "target-token")
+	if forkRepo, ok := findEnvVar(container.Env, workerenv.ForkRepo); !ok || forkRepo.Value != "https://github.com/example/target.git" {
+		t.Fatalf("%s = %#v, want publication repository", workerenv.ForkRepo, forkRepo)
+	}
+}
+
+func TestJobBuilder_Build_ContainerTask_PushRequiresPublicationCredential(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "container-publish", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeContainer,
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:           "https://github.com/example/source.git",
+				PushBranch:        "orka/publish",
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "source-read"},
+			},
+		},
+	}
+
+	if _, err := builder.Build(context.Background(), task, nil, nil); err == nil || !strings.Contains(err.Error(), "publicationCredentialRef") {
+		t.Fatalf("Build() error = %v, want missing publication credential", err)
+	}
+}
+
+func TestJobBuilder_Build_ContainerTask_RejectsUnsupportedPublicationGuarantees(t *testing.T) {
+	tests := []struct {
+		name   string
+		field  string
+		mutate func(*corev1alpha1.WorkspaceConfig)
+	}{
+		{
+			name:  "expected remote SHA",
+			field: "workspace.expectedRemoteSHA",
+			mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+				workspace.ExpectedRemoteSHA = strings.Repeat("a", 40)
+			},
+		},
+		{
+			name:  "create PR",
+			field: "workspace.createPR",
+			mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+				workspace.CreatePR = true
+			},
+		},
+		{
+			name:  "max changed files",
+			field: "workspace.maxChangedFiles",
+			mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+				limit := int32(1)
+				workspace.MaxChangedFiles = &limit
+			},
+		},
+		{
+			name:  "allowed paths",
+			field: "workspace.allowedPaths",
+			mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+				workspace.AllowedPaths = []string{"src/**"}
+			},
+		},
+		{
+			name:  "repository control paths",
+			field: "workspace.denyRepositoryControlPaths",
+			mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+				workspace.DenyRepositoryControlPaths = true
+			},
+		},
+		{
+			name:  "binary files",
+			field: "workspace.rejectBinaryFiles",
+			mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+				workspace.RejectBinaryFiles = true
+			},
+		},
+		{
+			name:  "secret-like content",
+			field: "workspace.rejectSecretLikeContent",
+			mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+				workspace.RejectSecretLikeContent = true
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace := &corev1alpha1.WorkspaceConfig{GitRepo: "https://github.com/example/source.git"}
+			tt.mutate(workspace)
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "container-unsupported-publication", Namespace: defaultNS},
+				Spec: corev1alpha1.TaskSpec{
+					Type:      corev1alpha1.TaskTypeContainer,
+					Image:     testBusyboxImage,
+					Workspace: workspace,
+				},
+			}
+
+			_, err := setupJobBuilder().Build(context.Background(), task, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), tt.field) {
+				t.Fatalf("Build() error = %v, want unsupported %s error", err, tt.field)
+			}
+		})
 	}
 }
 
@@ -2287,16 +2506,14 @@ func TestAddAgentWorkspaceEnvVars_AllFields(t *testing.T) {
 	jb := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		Spec: corev1alpha1.TaskSpec{
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/org/repo",
-					Branch:       "main",
-					Ref:          "abc123",
-					SubPath:      "src/",
-					ForkRepo:     "https://github.com/fork/repo",
-					PRBaseBranch: "develop",
-					PushBranch:   "feature-branch",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:            "https://github.com/org/repo",
+				Branch:             "main",
+				Ref:                "abc123",
+				SubPath:            "src/",
+				PublicationGitRepo: "https://github.com/fork/repo",
+				PRBaseBranch:       "develop",
+				PushBranch:         "feature-branch",
 			},
 		},
 	}
@@ -3127,7 +3344,33 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 
 }
 
-func TestReadOnlyAgentRuntimeGuardsRejectOpencode(t *testing.T) {
+func TestJobBuilderAddAgentToolsEnvVarsDefaultsOpenCodeToolsOnlyWhenOmitted(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent}}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeOpencode,
+	}}}
+
+	envVars := builder.addAgentToolsEnvVars(nil, task, agent)
+	if got, ok := findEnvVar(envVars, workerenv.AllowedTools); !ok || got.Value != "Read,Write,Edit,Bash,Glob,Grep" {
+		t.Fatalf("%s = %#v, found=%v", workerenv.AllowedTools, got, ok)
+	}
+
+	agent.Spec.Runtime.DefaultAllowedTools = []string{}
+	envVars = builder.addAgentToolsEnvVars(nil, task, agent)
+	if got, ok := findEnvVar(envVars, workerenv.AllowedTools); ok {
+		t.Fatalf("explicit empty %s unexpectedly emitted: %#v", workerenv.AllowedTools, got)
+	}
+
+	agent.Spec.Runtime.DefaultAllowedTools = nil
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{}}
+	envVars = builder.addAgentToolsEnvVars(nil, task, agent)
+	if got, ok := findEnvVar(envVars, workerenv.AllowedTools); ok {
+		t.Fatalf("explicit empty task override %s unexpectedly emitted: %#v", workerenv.AllowedTools, got)
+	}
+}
+
+func TestReadOnlyAgentRuntimeGuardsAllowOpencode(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue},
@@ -3139,14 +3382,15 @@ func TestReadOnlyAgentRuntimeGuardsRejectOpencode(t *testing.T) {
 		},
 	}
 
-	if err := validateReadOnlyAgentRuntime(task, agent); err == nil || !strings.Contains(err.Error(), "opencode") {
-		t.Fatalf("validateReadOnlyAgentRuntime() error = %v, want opencode rejection", err)
+	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
+		t.Fatalf("validateReadOnlyAgentRuntime() error = %v, want OpenCode accepted", err)
 	}
 	if got := readOnlyAgentRuntimeType(agent); got != corev1alpha1.AgentRuntimeOpencode {
 		t.Fatalf("readOnlyAgentRuntimeType() = %q, want opencode", got)
 	}
-	if _, err := readOnlyAgentRuntimeSecretKeys(agent); err == nil || !strings.Contains(err.Error(), "opencode") {
-		t.Fatalf("readOnlyAgentRuntimeSecretKeys() error = %v, want opencode rejection", err)
+	keys, err := readOnlyAgentRuntimeSecretKeys(agent)
+	if err != nil || len(keys) != 0 {
+		t.Fatalf("readOnlyAgentRuntimeSecretKeys() = %#v, %v, want no runtime secret keys", keys, err)
 	}
 }
 
@@ -3348,35 +3592,22 @@ func TestAddSecretVolumes_RuntimeAuthOnlyRejectsFoundryCredentials(t *testing.T)
 	}
 }
 
-func TestValidateReadOnlyAgentRuntimeAllowsCodexWithScopedCredentials(t *testing.T) {
+func TestValidateReadOnlyAgentRuntimeRejectsCodexBecauseCredentialsAndShellCannotShareReadOnlyProfile(t *testing.T) {
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 		labels.AnnotationAgentReadOnly: scheduledRunLabelValue,
 	}}}
 	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
 		Type: corev1alpha1.AgentRuntimeCodex,
 	}}}
-	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
-		t.Fatalf("validateReadOnlyAgentRuntime() error = %v", err)
+	if err := validateReadOnlyBuiltInAgentRuntime(task, corev1alpha1.AgentRuntimeCodex); err == nil ||
+		!strings.Contains(err.Error(), "do not support codex runtime") {
+		t.Fatalf("validateReadOnlyBuiltInAgentRuntime() error = %v, want fail-closed Codex rejection", err)
 	}
-	if err := validateReadOnlyBuiltInAgentRuntime(task, corev1alpha1.AgentRuntimeCodex); err != nil {
-		t.Fatalf("validateReadOnlyBuiltInAgentRuntime() error = %v", err)
-	}
-	keys, err := readOnlyAgentRuntimeSecretKeys(agent)
-	if err != nil {
-		t.Fatalf("readOnlyAgentRuntimeSecretKeys() error = %v", err)
-	}
-	joined := strings.Join(keys, ",")
-	for _, want := range []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey, workerenv.OpenAIBaseURL} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("read-only Codex keys = %#v, missing %s", keys, want)
-		}
-	}
-	secret := &corev1.Secret{Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte("x")}}
-	if !readOnlyAgentRuntimeSecretHasCredential(secret, agent) {
-		t.Fatal("read-only Codex credential was not recognized")
+	if err := validateReadOnlyAgentRuntime(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "do not support codex runtime") {
+		t.Fatalf("validateReadOnlyAgentRuntime() error = %v, want fail-closed Codex rejection", err)
 	}
 }
-
 func TestValidateReadOnlyAgentRuntimeRejectsExternalRuntimeRef(t *testing.T) {
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 		labels.AnnotationAgentReadOnly: scheduledRunLabelValue,

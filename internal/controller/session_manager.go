@@ -22,6 +22,8 @@ import (
 type SessionManager struct {
 	store             store.SessionStore
 	gatewayEventStore store.GatewayEventStore
+	cleanupStore      store.SessionCleanupStore
+	epochs            *ControllerEpochManager
 }
 
 // NewSessionManager creates a new SessionManager backed by the given store.
@@ -33,6 +35,15 @@ func NewSessionManager(ss store.SessionStore) *SessionManager {
 func (m *SessionManager) SetGatewayEventStore(events store.GatewayEventStore) {
 	if m != nil {
 		m.gatewayEventStore = events
+	}
+}
+
+// SetACPSessionCleanup enables the hard-cutover cross-store Session deletion
+// path. It is configured only when ACP Kubernetes control storage is enabled.
+func (m *SessionManager) SetACPSessionCleanup(cleanup store.SessionCleanupStore, epochs *ControllerEpochManager) {
+	if m != nil {
+		m.cleanupStore = cleanup
+		m.epochs = epochs
 	}
 }
 
@@ -280,9 +291,30 @@ func (m *SessionManager) GetSession(ctx context.Context, namespace, name string)
 	return m.store.GetSession(ctx, namespace, name)
 }
 
-// DeleteSession deletes a session.
+// DeleteSession deletes a session. ACP-enabled deployments coordinate the
+// Kubernetes-authoritative controls before removing the SQLite transcript.
 func (m *SessionManager) DeleteSession(ctx context.Context, namespace, name string) error {
-	return m.store.DeleteSession(ctx, namespace, name)
+	if m.cleanupStore == nil {
+		return m.store.DeleteSession(ctx, namespace, name)
+	}
+	if m.epochs == nil {
+		return fmt.Errorf("ACP session cleanup requires a controller epoch manager")
+	}
+	fence, err := m.epochs.CurrentFence(ctx)
+	if err != nil {
+		return err
+	}
+	operationID := store.CanonicalControlID("session-cleanup", namespace, name)
+	operationDigest, err := acpDomainDigest("session-cleanup", map[string]string{
+		"namespace": namespace, "sessionName": name, "operationID": operationID,
+	})
+	if err != nil {
+		return err
+	}
+	return m.cleanupStore.ReclaimSession(ctx, store.ReclaimSessionRequest{
+		Namespace: namespace, SessionName: name, Fence: fence,
+		OperationID: operationID, OperationDigest: operationDigest, RequestedAt: time.Now().UTC(),
+	})
 }
 
 // ListSessions lists all sessions in a namespace.

@@ -11,11 +11,15 @@ redact() {
     -e 's#eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}#[REDACTED-JWT]#g'
 }
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/lib/kind-local-registry.sh
+. "${script_dir}/lib/kind-local-registry.sh"
 cluster="${KIND_CLUSTER:-orka-live-github-oidc-e2e}"
 namespace="${ORKA_NAMESPACE:-orka-system}"
 deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-github-oidc-e2e}"
+publisher_image="${ORKA_WORKSPACE_PUBLISHER_IMAGE:-orka-workspace-publisher:live-github-oidc-e2e}"
 audience="${ORKA_GITHUB_OIDC_AUDIENCE:-orka-live-github-oidc-e2e}"
 issuer="${ORKA_GITHUB_OIDC_ISSUER:-https://token.actions.githubusercontent.com}"
 repository="${GITHUB_REPOSITORY:-orka-agents/orka}"
@@ -46,15 +50,21 @@ cleanup() {
       fi
     } | redact >&2
   fi
+  orka_kind_registry_stop
   kind delete cluster --name "${cluster}" >/dev/null 2>&1 || true
   rm -rf "${workdir}"
   exit "${status}"
 }
 trap cleanup EXIT
 
-fetch_token() {
+require_token_source() {
   if [[ -n "${token}" ]]; then return; fi
   [[ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" && -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]] || die "GitHub OIDC token source is unavailable"
+}
+
+fetch_token() {
+  require_token_source
+  if [[ -n "${token}" ]]; then return; fi
   response="${workdir}/oidc.json"
   curl -fsS -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
     "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$(printf '%s' "${audience}" | jq -sRr @uri)" >"${response}"
@@ -94,14 +104,29 @@ wait_for_api() {
 for cmd in make go docker kind kubectl curl jq; do require_cmd "${cmd}"; done
 cd "${repo_root}"
 cp "${kustomization}" "${backup}"
-fetch_token
+require_token_source
 log "Creating kind cluster ${cluster}"
 make setup-test-e2e KIND_CLUSTER="${cluster}"
 kubectl config use-context "kind-${cluster}" >/dev/null
+log "Installing current Orka CRDs into the test cluster"
+make install
+log "Creating the Vekil namespace required by the production ingress policy"
+kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f -
+orka_kind_registry_start "${cluster}"
 log "Building and loading controller image"
 make docker-build IMG="${manager_image}"
+make docker-build-workspace-publisher WORKSPACE_PUBLISHER_IMG="${publisher_image}"
 kind load docker-image "${manager_image}" --name "${cluster}"
-make deploy IMG="${manager_image}"
+manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
+publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
+make deploy \
+  IMG="${manager_ref}" \
+  WORKSPACE_PUBLISHER_IMG="${publisher_ref}" \
+  ACP_CODEX_RUNTIME_IMG="example.invalid/orka/acp-codex@${placeholder_digest}" \
+  ACP_CLAUDE_RUNTIME_IMG="example.invalid/orka/acp-claude@${placeholder_digest}" \
+  ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
+  ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
 kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
 kubectl -n "${namespace}" patch deployment "${deployment}" --type=strategic \
   -p '{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent"}]}}}}'
@@ -117,6 +142,9 @@ kubectl -n "${namespace}" set env deployment/"${deployment}" \
 kubectl -n "${namespace}" rollout status deployment/"${deployment}" --timeout=5m
 start_api_port_forward
 wait_for_api
+# GitHub Actions OIDC tokens are short-lived; fetch immediately before use so
+# cluster setup and image builds cannot consume the token lifetime.
+fetch_token
 
 payload="${workdir}/task.json"
 response="${workdir}/response.json"

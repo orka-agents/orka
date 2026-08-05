@@ -2,6 +2,8 @@ import { z } from 'zod'
 
 export const taskTypeSchema = z.enum(['container', 'ai', 'agent'])
 export const taskPhaseSchema = z.enum(['Pending', 'Running', 'Finalizing', 'Succeeded', 'Failed', 'Scheduled', 'Cancelled'])
+export const workspaceIntentSchema = z.enum(['read', 'write'])
+
 
 export const conditionSchema = z.object({
   type: z.string(),
@@ -46,21 +48,143 @@ export const aiSpecSchema = z.object({
   tools: z.array(z.string()).optional(),
 })
 
+export const repositoryIdentitySchema = z.object({
+  provider: z.string(),
+  id: z.string(),
+})
+
+export const workspaceCredentialRefSchema = z.object({
+  name: z.string().trim().min(1),
+  key: z.string().trim().min(1).optional(),
+}).strict()
+
 export const workspaceConfigSchema = z.object({
+  intent: workspaceIntentSchema.optional(),
   gitRepo: z.string().optional(),
+  sourceRepository: repositoryIdentitySchema.optional(),
   branch: z.string().optional(),
   ref: z.string().optional(),
-  pushBranch: z.string().optional(),
-  gitSecretRef: z.object({ name: z.string() }).optional(),
+  readCredentialRef: workspaceCredentialRefSchema.optional(),
+  publicationGitRepo: z.string().optional(),
+  publicationRepository: repositoryIdentitySchema.optional(),
+  publicationReadCredentialRef: workspaceCredentialRefSchema.optional(),
+  publicationCredentialRef: workspaceCredentialRefSchema.optional(),
+  forgeCredentialRef: workspaceCredentialRefSchema.optional(),
   subPath: z.string().optional(),
+  prBaseBranch: z.string().optional(),
+  pushBranch: z.string().optional(),
+  createPR: z.boolean().optional(),
+}).strict().superRefine((workspace, context) => {
+  if (workspace.createPR && !workspace.forgeCredentialRef) {
+    context.addIssue({
+      code: 'custom',
+      message: 'createPR requires forgeCredentialRef',
+      path: ['forgeCredentialRef'],
+    })
+  }
 })
 
 export const agentRuntimeSpecSchema = z.object({
-  workspace: workspaceConfigSchema.optional(),
   maxTurns: z.number().optional(),
   allowedTools: z.array(z.string()).optional(),
   disallowedTools: z.array(z.string()).optional(),
   allowBash: z.boolean().optional(),
+}).strict()
+
+export const taskExecutionStateSchema = z.enum([
+  'Queued',
+  'Reserved',
+  'SessionStarting',
+  'Planned',
+  'Submitting',
+  'SubmittedUnknown',
+  'Accepted',
+  'Running',
+  'Settling',
+  'Succeeded',
+  'Failed',
+  'Cancelled',
+  'OutcomeUnknown',
+])
+
+export const taskExecutionOutcomeSchema = z.enum(['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown'])
+
+export const taskExecutionStatusSchema = z.object({
+  state: taskExecutionStateSchema.optional(),
+  outcome: taskExecutionOutcomeSchema.optional(),
+  reason: z.string().optional(),
+  attempt: z.number().optional(),
+  promptID: z.string().optional(),
+  runtimePoolName: z.string().optional(),
+  runtimePoolUID: z.string().optional(),
+  runtimeInstanceID: z.string().optional(),
+  runtimeSessionUID: z.string().optional(),
+  runtimeSessionGeneration: z.number().optional(),
+  requestDigest: z.string().optional(),
+  controllerEpoch: z.number().optional(),
+  message: z.string().optional(),
+  lastTransitionTime: z.string().optional(),
+})
+
+export const taskDeliveryStateSchema = z.enum([
+  'NotRequested',
+  'Validating',
+  'Preparing',
+  'Prepared',
+  'Publishing',
+  'Verifying',
+  'VerifiedExact',
+  'DeliveredSuperseded',
+  'ReadValidated',
+  'NoChange',
+  'CancelledBeforePublish',
+  'ReadOnlyWorkspaceModified',
+  'DeliveryConflict',
+  'CredentialBlocked',
+  'PublicationOutcomeUnknown',
+])
+
+export const taskDeliveryOutcomeSchema = z.enum([
+  'NotRequested',
+  'VerifiedExact',
+  'DeliveredSuperseded',
+  'ReadValidated',
+  'NoChange',
+  'CancelledBeforePublish',
+  'ReadOnlyWorkspaceModified',
+  'DeliveryConflict',
+  'CredentialBlocked',
+  'PublicationOutcomeUnknown',
+])
+
+export const taskPullRequestReceiptSchema = z.object({
+  id: z.string(),
+  number: z.number().optional(),
+  url: z.string().optional(),
+  state: z.string().optional(),
+  baseBranch: z.string().optional(),
+  headBranch: z.string().optional(),
+  headSHA: z.string().optional(),
+})
+
+export const taskDeliveryStatusSchema = z.object({
+  state: taskDeliveryStateSchema.optional(),
+  outcome: taskDeliveryOutcomeSchema.optional(),
+  reason: z.string().optional(),
+  publicationID: z.string().optional(),
+  sourceRepository: repositoryIdentitySchema.optional(),
+  publicationRepository: repositoryIdentitySchema.optional(),
+  branch: z.string().optional(),
+  startingSHA: z.string().optional(),
+  remoteBeforeSHA: z.string().nullable().optional(),
+  treeSHA: z.string().optional(),
+  expectedCommitSHA: z.string().optional(),
+  verifiedRemoteSHA: z.string().optional(),
+  supersedingRemoteSHA: z.string().optional(),
+  artifactDigest: z.string().optional(),
+  prReceipt: taskPullRequestReceiptSchema.optional(),
+  message: z.string().optional(),
+  lastTransitionTime: z.string().optional(),
 })
 
 export const resultRefSchema = z.object({
@@ -127,6 +251,7 @@ export const taskSpecSchema = z.object({
   agentRef: agentRefSchema.optional(),
   prompt: z.string().optional(),
   agentRuntime: agentRuntimeSpecSchema.optional(),
+  workspace: workspaceConfigSchema.optional(),
 })
 
 export const taskStatusSchema = z.object({
@@ -137,6 +262,8 @@ export const taskStatusSchema = z.object({
   iteration: z.number().optional(),
   jobName: z.string().optional(),
   resultRef: resultRefSchema.optional(),
+  execution: taskExecutionStatusSchema.optional(),
+  delivery: taskDeliveryStatusSchema.optional(),
   webhookDelivered: z.boolean().optional(),
   message: z.string().optional(),
   childTasks: z.array(childTaskStatusSchema).optional(),
@@ -166,6 +293,10 @@ export type TaskSpec = z.infer<typeof taskSpecSchema>
 export type TaskStatus = z.infer<typeof taskStatusSchema>
 export type TaskType = z.infer<typeof taskTypeSchema>
 export type TaskPhase = z.infer<typeof taskPhaseSchema>
+export type WorkspaceIntent = z.infer<typeof workspaceIntentSchema>
+export type WorkspaceConfig = z.infer<typeof workspaceConfigSchema>
+export type TaskExecutionStatus = z.infer<typeof taskExecutionStatusSchema>
+export type TaskDeliveryStatus = z.infer<typeof taskDeliveryStatusSchema>
 export type ExecutionWorkspaceStatus = z.infer<typeof executionWorkspaceStatusSchema>
 
 export const planStateSchema = z.object({

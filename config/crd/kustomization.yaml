@@ -6,6 +6,13 @@ resources:
 - bases/core.orka.ai_tools.yaml
 - bases/core.orka.ai_agents.yaml
 - bases/core.orka.ai_agentruntimes.yaml
+- bases/core.orka.ai_runtimepools.yaml
+- bases/core.orka.ai_promptattempts.yaml
+- bases/core.orka.ai_runtimesessioncontrols.yaml
+- bases/core.orka.ai_branchclaims.yaml
+- bases/core.orka.ai_publications.yaml
+- bases/core.orka.ai_controllerepochs.yaml
+- bases/core.orka.ai_externaleffects.yaml
 - bases/core.orka.ai_providers.yaml
 - bases/core.orka.ai_skills.yaml
 - bases/core.orka.ai_repositoryscans.yaml

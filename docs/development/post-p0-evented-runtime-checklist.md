@@ -16,7 +16,7 @@ This checklist maps the P0 wave plans in `~/Downloads/orka-p0-wave-plans/` and t
 | Public task SSE stream | Implemented + tested | Replay, live polling, heartbeat, terminal `stream_complete`, and reconnect tests. |
 | Controller lifecycle producers | Implemented + tested | Task controller emits lifecycle events; focused controller event tests exist, envtest full suite requires envtest binaries. |
 | AI worker producers | Implemented + tested | `workers/ai` event tests cover model/tool/result/context events and redaction. |
-| Agent CLI producers | Implemented + tested | agent runtime event tests cover command/runtime lifecycle. |
+| ACP runtime producers | Foundation implemented + tested | Dispatcher, RuntimePool, v2 supervisor, and delivery state tests cover the session-centric path; full live/restart/publication acceptance remains required. |
 | Container/general worker producer | Implemented + tested | worker/common and general worker event/result tests cover basic lifecycle. |
 | Redaction/truncation | Implemented + tested | Worker-side and store-side redaction tests cover bearer/JWT/API key/cookie/GitHub/Anthropic/OpenAI/Txn token patterns. |
 | No Agent Substrate dependency | Implemented | Event store, APIs, trace, session aggregation, fork, and approvals use normal Task/Job event streams. |
@@ -47,7 +47,7 @@ This checklist maps the P0 wave plans in `~/Downloads/orka-p0-wave-plans/` and t
 | F4 | Integrate one high-risk action | Deferred integration | First target is PR creation/merge; API/read model is ready for worker/tool integration. |
 | F5 | CLI approvals | Implemented | `orka task approvals/approve/decline`. |
 | G1-G2 | Event metrics/SLO hooks | Implemented baseline | Metric names and safe labels are documented; append-time idempotent pair derivation can be expanded as producers stabilize. |
-| H | Harness protocol prep | Documented | See `docs/development/harness-protocol-mvp.md`. |
+| H | ACP runtime protocol | Superseded by v2 | The turn-oriented prototype was removed. The current contract is `orka.harness.v2`; see `website/docs/development/agent-runtime-adapter-contract.md`. |
 
 ## Release notes draft
 

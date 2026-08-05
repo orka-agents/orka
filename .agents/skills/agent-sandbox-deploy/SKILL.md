@@ -108,9 +108,8 @@ test -x "$kindctl"
    "$orka_kind_deploy"
    ```
 
-   The harness-wrapper image must be present for the separate plain-agent model
-   smoke. The model-free direct workspace-adapter smoke bypasses the Task/harness
-   path.
+   The digest-pinned ACP runtime images must be present for the separate plain-agent
+   model smoke. The model-free direct workspace-adapter smoke bypasses the Task-to-RuntimeSession path.
 
 3. **Install agent-sandbox** by driving the canonical script against the kindctl
    kubeconfig. Export `KUBECONFIG` from kindctl so the script's `kubectl` calls
@@ -208,12 +207,132 @@ test -x "$kindctl"
      wget -qO- http://127.0.0.1:1337/readyz
    ```
 
-   If you only need model-free confidence, run the CI parity script from the
-   `Model-free CI parity` section of `references/validate.md`. It validates
-   installation/configuration plus the direct workspace-adapter lifecycle
-   (SandboxClaim readiness, router exec, delete, retained reuse, and claim
-   cleanup);
-   only the full workspace-backed agent Task path remains gated.
+   If you only need model-free confidence, run the CI parity script below. It
+   validates installation/configuration only while workspace-backed agent Tasks
+   remain gated; it is not a claim/readiness/exec/cleanup smoke.
+
+## Validate
+
+> **Current boundary:** this skill validates the upstream agent-sandbox
+> provider directly. Orka ACP RuntimeSessions do not yet map to sandbox claims;
+> execution-workspace-backed agent Tasks remain expected-future evidence. The
+> removed v1 harness-wrapper path must not be reintroduced. Validate plain
+> Codex/Claude ACP Tasks with `scripts/live-acp-runtime-e2e.sh`.
+
+Do **not** use an execution-workspace agent Task as the success criterion yet.
+Validate the two currently wired paths separately:
+
+- **Model path through ACP** (requires the optional `AGENTIC=1` step and
+  vekil ready): run a plain agent Task with no `execution.workspace` and wait
+  for it to succeed.
+
+```bash
+"$kindctl" kubectl -n demo-magic apply -f - <<'YAML'
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: sandbox-codex-agent
+  namespace: demo-magic
+spec:
+  runtime:
+    type: codex
+    defaultMaxTurns: 1
+    defaultAllowBash: true
+  model:
+    name: gpt-5.5
+  secretRef:
+    name: sandbox-model-key
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: orka-live-model-smoke
+  namespace: demo-magic
+spec:
+  type: agent
+  agentRef:
+    name: sandbox-codex-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: 10m0s
+  prompt: "Reply exactly: ORKA_LIVE_MODEL_OK"
+YAML
+
+"$kindctl" kubectl -n demo-magic \
+  wait --for=jsonpath='{.status.phase}'=Succeeded task/orka-live-model-smoke --timeout=10m
+```
+
+- **Installation/configuration parity**: run the model-free CI parity script
+  below when you want a self-contained cluster bring-up with fake model
+  credentials. It verifies the install/config path, but it does **not** exercise
+  claim → ready → exec → cleanup through the direct adapter.
+
+If you need to demonstrate the intended API shape before RuntimeSession-backed workspace support lands, run it only as an **expected-failure** check and wait for the gate
+instead of `Succeeded`:
+
+```bash
+"$kindctl" kubectl apply -f - <<'YAML'
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: sandbox-codex-agent
+  namespace: demo-magic
+spec:
+  runtime:
+    type: codex
+    defaultMaxTurns: 1
+    defaultAllowBash: true
+  model:
+    name: gpt-5.5
+  secretRef:
+    name: sandbox-model-key
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: orka-live-sandbox-smoke
+  namespace: demo-magic
+spec:
+  type: agent
+  agentRef:
+    name: sandbox-codex-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: 10m0s
+  execution:
+    workspace:
+      enabled: true
+      templateRef:
+        name: orka-live-template
+      reusePolicy: none
+      cleanupPolicy: delete
+  prompt: "Reply exactly: ORKA_LIVE_SANDBOX_OK"
+YAML
+
+"$kindctl" kubectl -n demo-magic \
+  wait --for=jsonpath='{.status.executionWorkspace.reason}'=WorkspaceValidationFailed \
+  task/orka-live-sandbox-smoke --timeout=2m
+```
+
+Once ACP RuntimeSessions map agent Tasks to execution workspaces, the expected-failure
+check can become the live success smoke. At that point, a successful sandbox
+wrapper log should include the claimed workspace name, e.g. `completed in
+sandbox workspace sandbox-claim-...`. Orka Task status does **not** expose
+sandbox claim/exec/cleanup state — read worker logs and upstream agent-sandbox
+resources for lifecycle detail.
+
+### Model-free CI parity
+
+`scripts/live-agent-sandbox-e2e.sh` (run by the `Live Agent Sandbox E2E`
+workflow) stands up a clean kind cluster with fake model credentials and **no
+model access**. The script exercises the direct workspace adapter (claim, readiness, router exec, delete, retained reuse, and cleanup) but deliberately skips the unsupported full ACP Task-to-workspace path:
+
+```bash
+bash scripts/live-agent-sandbox-e2e.sh
+```
+
+That script owns its own cluster lifecycle; do not run it against a kindctl
+cluster you want to keep.
 
 ## Guardrails
 

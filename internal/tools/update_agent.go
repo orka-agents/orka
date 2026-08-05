@@ -27,9 +27,15 @@ func (t *UpdateAgentTool) Description() string {
 }
 
 func (t *UpdateAgentTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, systemPromptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "System prompt for the agent"}, toolsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Tool names to attach"}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
-		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai)"}, nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name"}, "temperature": map[string]any{jsonSchemaTypeField: "number", jsonSchemaDescriptionField: "Sampling temperature"},
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, systemPromptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "System prompt for the agent. OpenCode runtime Agents do not support Agent system prompts; use Task prompts instead."}, toolsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Tool names to attach"}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
+		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai). For OpenCode this is normalized into model.name."},
+		nameField:  map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name. OpenCode accepts a provider/model ID or a bare model name when the existing provider is retained."},
+		"temperature": map[string]any{jsonSchemaTypeField: "number", "minimum": 0, "maximum": 2,
+			jsonSchemaDescriptionField: "Sampling temperature. OpenCode only accepts the legacy default 0.7."},
+		"contextWindow": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, "minimum": 1, jsonSchemaDescriptionField: "Reviewed model context capacity; required for OpenCode"},
+		"maxTokens":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, "minimum": 1, jsonSchemaDescriptionField: "Reviewed maximum output tokens; required for OpenCode"},
 	},
+		jsonSchemaDescriptionField: "Partial model update. Omitted fields preserve their existing values.",
 	},
 	}, jsonSchemaRequiredField: []string{nameField},
 	})
@@ -58,23 +64,36 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return classifyChatK8sErr(err)
 	}
 
-	// Update specified fields
-	if modelProvider := chatGetStringArg(a, modelField); modelProvider != "" {
-		parts := strings.SplitN(modelProvider, "/", 2)
-		if agent.Spec.Model == nil {
-			agent.Spec.Model = &corev1alpha1.ModelConfig{}
+	requestedSystemPrompt := chatGetStringArg(a, systemPromptField)
+	if requestedSystemPrompt != "" && isOpenCodeAgent(agent) {
+		return ChatToolErrorResult(
+			"invalid_arguments",
+			"opencode runtime does not support systemPrompt",
+			"Omit systemPrompt for OpenCode Agents and use Task prompts for instructions.",
+		)
+	}
+
+	if rawModel, supplied := a[modelField]; supplied {
+		modelUpdate, err := parseAgentModelUpdate(rawModel)
+		if err != nil {
+			return ChatToolErrorResult(
+				"invalid_arguments",
+				err.Error(),
+				"Provide model as an object with valid provider, name, temperature, contextWindow, and maxTokens fields.",
+			)
 		}
-		if len(parts) == 2 {
-			agent.Spec.Model.Provider = parts[0]
-			agent.Spec.Model.Name = parts[1]
-		} else {
-			agent.Spec.Model.Name = modelProvider
+		if err := applyAgentModelUpdate(agent, modelUpdate); err != nil {
+			return ChatToolErrorResult(
+				"invalid_arguments",
+				err.Error(),
+				"Use a consistent provider/model ID and reviewed model limits.",
+			)
 		}
 	}
 
-	if systemPrompt := chatGetStringArg(a, systemPromptField); systemPrompt != "" {
+	if requestedSystemPrompt != "" {
 		agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{
-			Inline: systemPrompt,
+			Inline: requestedSystemPrompt,
 		}
 	}
 
@@ -82,6 +101,20 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		agent.Spec.Tools = nil
 		for _, tn := range toolNames {
 			agent.Spec.Tools = append(agent.Spec.Tools, corev1alpha1.ToolReference{Name: tn})
+		}
+	}
+
+	if isOpenCodeAgent(agent) {
+		if agent.Spec.SystemPrompt != nil &&
+			(strings.TrimSpace(agent.Spec.SystemPrompt.Inline) != "" || agent.Spec.SystemPrompt.ConfigMapRef != nil) {
+			return ChatToolErrorResult(
+				"invalid_arguments",
+				"opencode runtime does not support systemPrompt",
+				"Remove spec.systemPrompt and use Task prompts for OpenCode instructions.",
+			)
+		}
+		if result, ok := normalizeChatOpenCodeModel(agent); !ok {
+			return result, nil
 		}
 	}
 

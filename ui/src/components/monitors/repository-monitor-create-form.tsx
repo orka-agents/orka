@@ -88,7 +88,7 @@ export function RepositoryMonitorCreateForm() {
   const [formError, setFormError] = useState('')
 
   const claudeAgents = useMemo(
-    () => (agents?.items ?? []).filter((agent) => agent.spec.runtime?.type === 'claude'),
+    () => (agents?.items ?? []).filter((agent) => agent.spec.runtime && 'type' in agent.spec.runtime && agent.spec.runtime.type === 'claude'),
     [agents?.items],
   )
 

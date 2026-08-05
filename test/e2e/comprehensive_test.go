@@ -12,7 +12,6 @@ package e2e
 import (
 	"fmt"
 	"os/exec"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -34,11 +33,11 @@ var _ = Describe("Comprehensive Functionality", Ordered, func() {
 
 	AfterAll(func() {
 		By("cleaning up comprehensive test resources")
-		for _, name := range []string{containerCompTaskName, aiCompTaskName, claudeCompTaskName, copilotCompTaskName} {
+		for _, name := range []string{containerCompTaskName, aiCompTaskName, claudeCompTaskName} {
 			cmd := exec.Command("kubectl", "delete", "task", name, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		}
-		for _, name := range []string{claudeCompAgentName, copilotCompAgentName} {
+		for _, name := range []string{claudeCompAgentName} {
 			cmd := exec.Command("kubectl", "delete", "agent", name, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		}
@@ -47,7 +46,7 @@ var _ = Describe("Comprehensive Functionality", Ordered, func() {
 	})
 
 	AfterEach(func() {
-		dumpDebugInfo(containerCompTaskName, aiCompTaskName, claudeCompTaskName, copilotCompTaskName)
+		dumpDebugInfo(containerCompTaskName, aiCompTaskName, claudeCompTaskName)
 	})
 
 	// Container task: validates execution environment, file I/O, process management, and output
@@ -133,145 +132,52 @@ var _ = Describe("Comprehensive Functionality", Ordered, func() {
 		verifyResultAvailable(aiCompTaskName)
 	})
 
-	// Claude agent: exercises multi-turn tool use with bash and file operations
-	It("should run a comprehensive Claude agent task with multi-turn tool use", func() {
-		skipIfNoKey("E2E_ANTHROPIC_API_KEY")
-
-		By("creating a Claude agent with bash enabled")
+	// ACP agent task: validates shared RuntimePool planning instead of per-Task Jobs.
+	It("should plan a comprehensive Claude task on an ACP v2 RuntimePool", func() {
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",
-			"metadata": {
-				"name": "%s",
-				"namespace": "%s"
-			},
+			"metadata": {"name": %q, "namespace": %q},
 			"spec": {
 				"runtime": {
 					"type": "claude",
 					"defaultMaxTurns": 10,
-					"defaultAllowBash": true
+					"defaultAllowBash": false
 				},
-				"secretRef": {
-					"name": "e2e-anthropic-secret"
-				}
+				"model": {"name": "claude-sonnet-4-20250514"}
 			}
 		}`, claudeCompAgentName, namespace)
-
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(agentManifest)
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create comprehensive Claude agent")
 
-		By("creating a multi-turn task")
 		taskManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
-			"metadata": {
-				"name": "%s",
-				"namespace": "%s"
-			},
+			"metadata": {"name": %q, "namespace": %q},
 			"spec": {
 				"type": "agent",
-				"prompt": "Do the following steps using bash:\n1. Create a file /tmp/e2e-test.txt containing the text 'hello from e2e'\n2. Read the file back and confirm its contents\n3. Count the number of words in the file\n4. Append ' - test complete' to the file\n5. Print the final contents of the file\n\nReport the results of each step.",
-				"agentRef": {
-					"name": "%s"
-				},
-				"agentRuntime": {
-					"maxTurns": 10
-				}
+				"prompt": "Read the workspace and summarize the most important files without modifying them.",
+				"agentRef": {"name": %q},
+				"agentRuntime": {"maxTurns": 10},
+				"workspace": {"intent": "read"}
 			}
 		}`, claudeCompTaskName, namespace, claudeCompAgentName)
-
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(taskManifest)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create comprehensive Claude task")
 
-		By("waiting for the task to complete (up to 5 minutes)")
-		phase := waitForTaskCompletion(claudeCompTaskName, 5*time.Minute)
-		Expect(phase).To(Equal("Succeeded"), "Claude agent task with multi-turn tools should succeed")
-
-		By("verifying the result is stored")
-		verifyResultAvailable(claudeCompTaskName)
-
-		By("verifying the Job used the Claude worker image")
-		image := getJobContainerImage(claudeCompTaskName)
-		Expect(image).To(ContainSubstring("claude"))
-
-		By("verifying multi-turn execution happened (pod should have completed)")
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "pods",
-				"-l", fmt.Sprintf("orka.ai/task=%s", claudeCompTaskName),
-				"-o", "jsonpath={.items[0].status.phase}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(strings.TrimSpace(output)).To(Equal("Succeeded"))
-		}, 30*time.Second, time.Second).Should(Succeed())
+		verifyACPTaskRuntimeForTask(claudeCompTaskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			Model:           "claude-sonnet-4-20250514",
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(10),
+			AllowBash:       acpBool(false),
+			Workspace:       &acpWorkspaceExpectation{Intent: "read"},
+		}, 2*time.Minute)
+		verifyNoJobForTask(claudeCompTaskName, 5*time.Second)
 	})
 
-	// Copilot agent: exercises the Copilot runtime with tool use
-	It("should run a comprehensive Copilot agent task with tool use", func() {
-		skipIfNoKey("E2E_GITHUB_TOKEN")
-
-		By("creating a Copilot agent with bash enabled")
-		agentManifest := fmt.Sprintf(`{
-			"apiVersion": "core.orka.ai/v1alpha1",
-			"kind": "Agent",
-			"metadata": {
-				"name": "%s",
-				"namespace": "%s"
-			},
-			"spec": {
-				"runtime": {
-					"type": "copilot",
-					"defaultMaxTurns": 10,
-					"defaultAllowBash": true
-				},
-				"secretRef": {
-					"name": "e2e-github-secret"
-				}
-			}
-		}`, copilotCompAgentName, namespace)
-
-		cmd := exec.Command("kubectl", "apply", "-f", "-")
-		cmd.Stdin = stringReader(agentManifest)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create comprehensive Copilot agent")
-
-		By("creating a multi-turn task")
-		taskManifest := fmt.Sprintf(`{
-			"apiVersion": "core.orka.ai/v1alpha1",
-			"kind": "Task",
-			"metadata": {
-				"name": "%s",
-				"namespace": "%s"
-			},
-			"spec": {
-				"type": "agent",
-				"prompt": "Do the following using bash:\n1. Create a file /tmp/copilot-test.txt with the text 'copilot e2e test'\n2. Use cat to read it back\n3. Use wc -w to count the words\n4. Print 'All steps completed successfully'\n\nReport what you did.",
-				"agentRef": {
-					"name": "%s"
-				},
-				"agentRuntime": {
-					"maxTurns": 10
-				}
-			}
-		}`, copilotCompTaskName, namespace, copilotCompAgentName)
-
-		cmd = exec.Command("kubectl", "apply", "-f", "-")
-		cmd.Stdin = stringReader(taskManifest)
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create comprehensive Copilot task")
-
-		By("waiting for the task to complete (up to 5 minutes)")
-		phase := waitForTaskCompletion(copilotCompTaskName, 5*time.Minute)
-		Expect(phase).To(BeElementOf("Succeeded", "Failed"),
-			"Copilot agent task should reach terminal phase")
-
-		By("verifying the Job used the Copilot worker image")
-		image := getJobContainerImage(copilotCompTaskName)
-		Expect(image).To(ContainSubstring("copilot"))
-	})
 })

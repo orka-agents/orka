@@ -23,6 +23,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/workers/common"
 )
 
 func TestRun_Success(t *testing.T) {
@@ -194,6 +195,55 @@ func TestPrepareWorkspaceIfConfiguredRejectsTraversalSubPath(t *testing.T) {
 		t.Fatal("prepareWorkspaceIfConfigured() error = nil, want traversal rejection")
 	} else if !strings.Contains(err.Error(), "contains path traversal") {
 		t.Fatalf("prepareWorkspaceIfConfigured() error = %v, want traversal rejection", err)
+	}
+}
+
+func TestConfigurePublicationRemotePushesToPublicationRepository(t *testing.T) {
+	sourceBare := filepath.Join(t.TempDir(), "source.git")
+	targetBare := filepath.Join(t.TempDir(), "target.git")
+	seed := t.TempDir()
+	work := filepath.Join(t.TempDir(), "work")
+	runGit(t, t.TempDir(), "init", "--bare", sourceBare)
+	runGit(t, t.TempDir(), "init", "--bare", targetBare)
+	runGit(t, seed, "init", "-b", "main")
+	runGit(t, seed, "config", "user.email", "orka@example.com")
+	runGit(t, seed, "config", "user.name", "Orka Test")
+	if err := os.WriteFile(filepath.Join(seed, "file.txt"), []byte("source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, seed, "add", "file.txt")
+	runGit(t, seed, "commit", "-m", "source")
+	runGit(t, seed, "remote", "add", "origin", "file://"+sourceBare)
+	runGit(t, seed, "push", "-u", "origin", "main")
+
+	clone := exec.Command("git", "clone", "--branch", "main", "file://"+sourceBare, work)
+	if output, err := clone.CombinedOutput(); err != nil {
+		t.Fatalf("git clone failed: %s: %v", strings.TrimSpace(string(output)), err)
+	}
+	t.Setenv(workerenv.ForkRepo, "file://"+targetBare)
+	t.Setenv(workerenv.PushBranch, "orka/publish")
+	t.Setenv(workerenv.RequirePushBranch, "true")
+	if err := configurePublicationRemote(work); err != nil {
+		t.Fatalf("configurePublicationRemote() error = %v", err)
+	}
+	if got := runGit(t, work, "remote", "get-url", "origin"); got != "file://"+targetBare {
+		t.Fatalf("origin URL = %q, want publication repository", got)
+	}
+	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("published\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := common.FinalizeResult(work, "published"); err != nil {
+		t.Fatalf("FinalizeResult() error = %v", err)
+	}
+	targetHead := runGit(t, targetBare, "rev-parse", "refs/heads/orka/publish")
+	if targetHead == "" {
+		t.Fatal("publication repository branch is empty")
+	}
+	command := exec.Command(
+		"git", "-C", sourceBare, "rev-parse", "--verify", "refs/heads/orka/publish",
+	)
+	if command.Run() == nil {
+		t.Fatal("source repository unexpectedly received the publication branch")
 	}
 }
 

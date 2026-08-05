@@ -738,10 +738,10 @@ func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, eve
 				Name: agentName,
 			},
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				MaxTurns:  githubMaxTurns(),
-				Workspace: workspace,
+				MaxTurns: githubMaxTurns(),
 			},
-			Timeout: githubTimeout(),
+			Workspace: workspace,
+			Timeout:   githubTimeout(),
 			Env: []corev1.EnvVar{
 				{Name: "ORKA_GITHUB_EVENT", Value: event},
 				{Name: "ORKA_GITHUB_DELIVERY", Value: delivery},
@@ -752,7 +752,7 @@ func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, eve
 			},
 		},
 	}
-	if action == githubActionReview && workspace != nil && workspace.GitSecretRef != nil {
+	if action == githubActionReview && workspace != nil && workspace.ReadCredentialRef != nil {
 		task.Annotations[labels.AnnotationWorkspaceInitContainer] = queryTrue
 	}
 	if target.Number > 0 {
@@ -807,6 +807,7 @@ func githubWorkspace(action string, target githubLabelTarget, replayKey string) 
 		repo = target.HeadRepo
 	}
 	ws := &corev1alpha1.WorkspaceConfig{
+		Intent:  corev1alpha1.WorkspaceIntentRead,
 		GitRepo: repoURL(repo),
 	}
 
@@ -838,7 +839,15 @@ func githubWorkspace(action string, target githubLabelTarget, replayKey string) 
 	}
 
 	if gitSecret != "" {
-		ws.GitSecretRef = &corev1.LocalObjectReference{Name: gitSecret}
+		ws.ReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: gitSecret}
+	}
+	if ws.PushBranch != "" {
+		ws.Intent = corev1alpha1.WorkspaceIntentWrite
+		ws.PublicationGitRepo = ws.GitRepo
+		if gitSecret != "" {
+			ws.PublicationReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: gitSecret}
+			ws.PublicationCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: gitSecret}
+		}
 	}
 	if target.IsPR && target.BaseBranch != "" {
 		ws.PRBaseBranch = target.BaseBranch

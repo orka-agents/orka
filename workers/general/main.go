@@ -238,6 +238,9 @@ func submitResult(workDir, output string) error {
 	resultDir := ""
 	if workDir != "" {
 		resultDir = workspaceDir
+		if err := configurePublicationRemote(resultDir); err != nil {
+			return err
+		}
 	}
 	resultBytes, err := common.FinalizeResult(resultDir, output)
 	if err != nil {
@@ -247,6 +250,18 @@ func submitResult(workDir, output string) error {
 		return err
 	}
 	return common.UploadArtifacts()
+}
+
+func configurePublicationRemote(workDir string) error {
+	publicationRepo := strings.TrimSpace(os.Getenv(workerenv.ForkRepo))
+	if publicationRepo == "" || strings.TrimSpace(os.Getenv(workerenv.PushBranch)) == "" {
+		return nil
+	}
+	command := exec.Command("git", "-C", workDir, "remote", "set-url", "origin", publicationRepo)
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("configure publication Git remote: %w", err)
+	}
+	return nil
 }
 
 func runSecurityMapper(ctx context.Context) error {

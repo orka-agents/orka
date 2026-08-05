@@ -1,11 +1,17 @@
-# Use wrapper-first Execution Workspace providers
+# ADR 0006: Use wrapper-first Execution Workspace providers
 
 Date: 2026-05-21
 
 ## Status
 
-Superseded as the target architecture by ADR 0012 and ADR 0014. Retained as historical and transitional context for the legacy direct-provider path.
+Superseded by the ACP core RuntimePool cutover.
 
-Orka should add new Execution Workspace providers behind the existing worker-wrapper path before moving provider lifecycle ownership into the controller. The controller validates, locks, and creates the normal worker Job; the outer worker claims the selected provider, stages the inner worker, runs it inside the workspace, reports provider-neutral status, and applies cleanup. This preserves Orka's existing worker auth, result submission, artifact upload, and agent runtime behavior while isolating provider-specific lifecycle code behind `WorkspaceExecutor`.
+## Original decision
 
-Controller-direct execution can be reconsidered after Substrate is stable enough to justify tighter lifecycle orchestration and stronger controller-owned observability.
+The original execution-workspace prototype placed provider ownership in a per-Task worker path: the controller created a worker Job, the worker claimed an upstream workspace, staged another worker process, and handled result submission and cleanup.
+
+## Superseding decision
+
+Built-in `type: agent` Tasks now use only `orka.harness.v2` RuntimePools and private RuntimeSessions. There is no per-Task agent Job or worker-based fallback. Top-level `Task.spec.workspace` defines verified repository input and clean-room publication policy; `Task.spec.execution.workspace` is rejected by the ACP core runtime.
+
+Future agent-sandbox or Substrate support must host one RuntimeSession behind the same v2 lifecycle. Orka remains authoritative for attempt/session fences, prompt leases, cancellation, transcript/finalization, workspace deltas, publication, and delivery receipts. Source-read, target-read, target-write, and forge credentials remain outside the ACP process tree.

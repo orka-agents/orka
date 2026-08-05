@@ -43,6 +43,14 @@ import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { TaskCreateForm } from './task-create-form'
 
+async function openWriteWorkspace(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByText(/Advanced Options/))
+  await user.click(screen.getByText(/Workspace policy/))
+  const intentTrigger = screen.getByText('Workspace intent').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+  fireEvent.pointerDown(intentTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+  fireEvent.click(await screen.findByRole('option', { name: /Write — produce/ }))
+}
+
 describe('TaskCreateForm', () => {
   beforeEach(() => {
     useUIStore.setState({ sidebarCollapsed: false, theme: 'light', namespace: 'default' })
@@ -242,13 +250,13 @@ describe('TaskCreateForm', () => {
     expect(screen.getByPlaceholderText('30m')).toBeInTheDocument()
   })
 
-  it('shows workspace config fields when agent type is selected and advanced expanded', async () => {
+  it('shows role-specific workspace credential names and optional keys', async () => {
     useStateTypeOverride = 'agent'
     server.use(
       http.get('/api/v1/agents', () =>
         HttpResponse.json({
           items: [
-            { metadata: { name: 'my-agent', namespace: 'default' }, spec: { model: { name: 'claude' } } },
+            { metadata: { name: 'my-agent', namespace: 'default' }, spec: { runtime: { type: 'codex' } } },
           ],
         }),
       ),
@@ -257,20 +265,218 @@ describe('TaskCreateForm', () => {
     render(<TaskCreateForm />)
 
     await user.click(screen.getByText(/Advanced Options/))
+    expect(screen.queryByText('Max Turns')).not.toBeInTheDocument()
+    expect(screen.queryByText('Allow Bash')).not.toBeInTheDocument()
 
-    expect(screen.getByText('Max Turns')).toBeInTheDocument()
-    expect(screen.getByText('Allow Bash')).toBeInTheDocument()
+    await user.click(screen.getByText(/Workspace policy/))
+    expect(screen.getByText('Workspace intent')).toBeInTheDocument()
+    expect(screen.getAllByText(/Read — verified workspace must remain unchanged/).length).toBeGreaterThan(0)
+    expect(screen.getByText('Source repository URL')).toBeInTheDocument()
+    expect(screen.getByLabelText('Source repository URL')).not.toBeRequired()
+    expect(screen.getByLabelText('Source repository URL identity')).toHaveAttribute('placeholder', 'github.com/org/repo')
+    expect(screen.queryByPlaceholderText('R_kgDOExample')).not.toBeInTheDocument()
+    expect(screen.getByText(/normalized credential-free URL identity/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Read credential Secret')).toBeInTheDocument()
+    expect(screen.getByLabelText('Read credential key')).toHaveAttribute('placeholder', 'token (default)')
+    expect(screen.queryByLabelText('Publication write credential Secret')).not.toBeInTheDocument()
 
-    await user.click(screen.getByText(/Workspace Configuration/))
+    const intentTrigger = screen.getByText('Workspace intent').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+    fireEvent.pointerDown(intentTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    await waitFor(() => expect(screen.getByRole('option', { name: /Write — produce/ })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('option', { name: /Write — produce/ }))
 
-    expect(screen.getByText('Git Repo URL')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('https://github.com/org/repo')).toBeInTheDocument()
-    expect(screen.getByText('Branch')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('main')).toBeInTheDocument()
-    expect(screen.getByText('Push Branch')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('feature/my-task')).toBeInTheDocument()
-    expect(screen.getByText('Git Secret Ref')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('git-credentials')).toBeInTheDocument()
+    for (const label of [
+      'Publication read credential Secret',
+      'Publication read credential key',
+      'Publication write credential Secret',
+      'Publication write credential key',
+      'Forge credential Secret',
+      'Forge credential key',
+    ]) {
+      expect(await screen.findByLabelText(label)).toBeInTheDocument()
+    }
+    expect(screen.getByLabelText('Source repository URL')).toBeRequired()
+    expect(screen.getByLabelText('Publication write credential Secret')).toBeRequired()
+    expect(screen.getByLabelText('Pull request base branch')).not.toBeRequired()
+    expect(screen.getByLabelText('Forge credential Secret')).not.toBeRequired()
+    expect(screen.getByText('Publication repository URL')).toBeInTheDocument()
+    expect(screen.getByLabelText('Publication repository URL identity')).toHaveAttribute('placeholder', 'github.com/org/repo')
+    expect(screen.getAllByText(/normalized credential-free URL identity/)).toHaveLength(2)
+    expect(screen.getByText('Publication branch')).toBeInTheDocument()
+    expect(screen.getByText(/Secret values are never shown/)).toBeInTheDocument()
+    expect(screen.getByText(/Reconcile a pull request/)).toBeInTheDocument()
+    await user.click(screen.getByRole('switch', { name: /Reconcile a pull request/ }))
+    expect(screen.getByLabelText('Pull request base branch')).toBeRequired()
+    expect(screen.getByLabelText('Forge credential Secret')).toBeRequired()
+  })
+
+  it('submits top-level write workspace with distinct credential roles and keys', async () => {
+    useStateTypeOverride = 'agent'
+    let submitted: any
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({ items: [] })),
+      http.post('/api/v1/tasks', async ({ request }) => {
+        submitted = await request.json()
+        return HttpResponse.json({ metadata: { name: submitted.name }, spec: submitted })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'write-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
+    await user.click(screen.getByText(/Advanced Options/))
+    await user.click(screen.getByText(/Workspace policy/))
+
+    const intentTrigger = screen.getByText('Workspace intent').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+    fireEvent.pointerDown(intentTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    fireEvent.click(await screen.findByRole('option', { name: /Write — produce/ }))
+
+    const repositoryURLs = screen.getAllByPlaceholderText('https://github.com/org/repo')
+    await user.type(repositoryURLs[0], 'https://github.com/source/repo')
+    await user.type(screen.getByLabelText('Source repository provider'), 'github')
+    await user.type(screen.getByLabelText('Source repository URL identity'), 'github.com/source/repo')
+    await user.type(screen.getByLabelText('Read credential Secret'), 'source-read')
+    await user.type(screen.getByLabelText('Read credential key'), 'source-token')
+    await user.type(repositoryURLs[1], 'https://github.com/publish/repo')
+    await user.type(screen.getByLabelText('Publication provider'), 'github')
+    await user.type(screen.getByLabelText('Publication repository URL identity'), 'github.com/publish/repo')
+    await user.type(screen.getByLabelText('Publication read credential Secret'), 'target-read')
+    await user.type(screen.getByLabelText('Publication read credential key'), 'verify-token')
+    await user.type(screen.getByLabelText('Publication write credential Secret'), 'target-write')
+    await user.type(screen.getByLabelText('Publication write credential key'), 'write-token')
+    await user.type(screen.getByLabelText('Forge credential Secret'), 'forge-api')
+    await user.type(screen.getByLabelText('Forge credential key'), 'forge-token')
+    await user.type(screen.getByPlaceholderText('Leave empty for an Orka-owned branch'), 'orka/change')
+    await user.type(screen.getByLabelText('Pull request base branch'), 'main')
+    await user.click(screen.getByRole('switch', { name: /Reconcile a pull request/ }))
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Task created'))
+    expect(submitted.workspace).toEqual({
+      intent: 'write',
+      gitRepo: 'https://github.com/source/repo',
+      sourceRepository: { provider: 'github', id: 'github.com/source/repo' },
+      readCredentialRef: { name: 'source-read', key: 'source-token' },
+      publicationGitRepo: 'https://github.com/publish/repo',
+      publicationRepository: { provider: 'github', id: 'github.com/publish/repo' },
+      publicationReadCredentialRef: { name: 'target-read', key: 'verify-token' },
+      publicationCredentialRef: { name: 'target-write', key: 'write-token' },
+      forgeCredentialRef: { name: 'forge-api', key: 'forge-token' },
+      pushBranch: 'orka/change',
+      prBaseBranch: 'main',
+      createPR: true,
+    })
+    expect(JSON.stringify(submitted)).not.toContain('must-never-render')
+    expect(submitted.agentRuntime?.workspace).toBeUndefined()
+    expect(submitted.workspace.gitSecretRef).toBeUndefined()
+    expect(submitted.workspace.forkRepo).toBeUndefined()
+  }, 10_000)
+
+  it('requires a source repository URL for write workspaces', async () => {
+    useStateTypeOverride = 'agent'
+    let postCount = 0
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({ items: [] })),
+      http.post('/api/v1/tasks', () => {
+        postCount += 1
+        return HttpResponse.json({})
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'write-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
+    await openWriteWorkspace(user)
+    await user.type(screen.getByLabelText('Source repository URL'), '   ')
+    await user.type(screen.getByLabelText('Publication write credential Secret'), 'target-write')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    expect(toast.error).toHaveBeenCalledWith('Source repository URL is required for write workspaces')
+    expect(postCount).toBe(0)
+    expect(toast.success).not.toHaveBeenCalled()
+  })
+
+  it('requires a publication write credential for write workspaces', async () => {
+    useStateTypeOverride = 'agent'
+    let postCount = 0
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({ items: [] })),
+      http.post('/api/v1/tasks', () => {
+        postCount += 1
+        return HttpResponse.json({})
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'write-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
+    await openWriteWorkspace(user)
+    await user.type(screen.getByLabelText('Source repository URL'), 'https://github.com/source/repo')
+    await user.type(screen.getByLabelText('Publication write credential Secret'), '   ')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    expect(toast.error).toHaveBeenCalledWith('Publication write credential Secret is required for write workspaces')
+    expect(postCount).toBe(0)
+    expect(toast.success).not.toHaveBeenCalled()
+  })
+
+  it('requires a pull request base branch when creating a pull request', async () => {
+    useStateTypeOverride = 'agent'
+    let postCount = 0
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({ items: [] })),
+      http.post('/api/v1/tasks', () => {
+        postCount += 1
+        return HttpResponse.json({})
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'write-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
+    await openWriteWorkspace(user)
+    await user.type(screen.getByLabelText('Source repository URL'), 'https://github.com/source/repo')
+    await user.type(screen.getByLabelText('Publication write credential Secret'), 'target-write')
+    await user.type(screen.getByLabelText('Forge credential Secret'), 'forge-api')
+    await user.type(screen.getByLabelText('Pull request base branch'), '   ')
+    await user.click(screen.getByRole('switch', { name: /Reconcile a pull request/ }))
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    expect(toast.error).toHaveBeenCalledWith('Pull request base branch is required when creating a pull request')
+    expect(postCount).toBe(0)
+    expect(toast.success).not.toHaveBeenCalled()
+  })
+
+  it('requires a forge credential before creating a pull request', async () => {
+    useStateTypeOverride = 'agent'
+    let postCount = 0
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({ items: [] })),
+      http.post('/api/v1/tasks', () => {
+        postCount += 1
+        return HttpResponse.json({})
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'write-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
+    await openWriteWorkspace(user)
+    await user.type(screen.getByLabelText('Source repository URL'), 'https://github.com/source/repo')
+    await user.type(screen.getByLabelText('Publication write credential Secret'), 'target-write')
+    await user.type(screen.getByLabelText('Pull request base branch'), 'main')
+    await user.click(screen.getByRole('switch', { name: /Reconcile a pull request/ }))
+    const submitButton = screen.getByRole('button', { name: 'Create Task' })
+    fireEvent.submit(submitButton.closest('form')!)
+
+    expect(toast.error).toHaveBeenCalledWith('Forge credential Secret is required when creating a pull request')
+    expect(postCount).toBe(0)
+    expect(toast.success).not.toHaveBeenCalled()
   })
 
   it('does not show workspace config for non-agent types', async () => {
@@ -279,8 +485,7 @@ describe('TaskCreateForm', () => {
 
     await user.click(screen.getByText(/Advanced Options/))
 
-    expect(screen.queryByText('Max Turns')).not.toBeInTheDocument()
-    expect(screen.queryByText('Workspace Configuration')).not.toBeInTheDocument()
+    expect(screen.queryByText('Workspace policy')).not.toBeInTheDocument()
   })
 
   it('shows agent info card when agent is selected', async () => {
@@ -293,7 +498,7 @@ describe('TaskCreateForm', () => {
               metadata: { name: 'coord-agent', namespace: 'default' },
               spec: {
                 model: { provider: 'anthropic', name: 'claude-sonnet' },
-                runtime: { type: 'copilot' },
+                runtime: { type: 'codex' },
                 coordination: { enabled: true },
                 tools: [{ name: 'tool1' }, { name: 'tool2' }],
               },
@@ -305,10 +510,9 @@ describe('TaskCreateForm', () => {
     render(<TaskCreateForm />)
 
     // Wait for agents to load and select the agent
-    await waitFor(() => {
-      const trigger = screen.getByText('Agent Reference').closest('.space-y-2')!.querySelector('[role="combobox"]')!
-      fireEvent.pointerDown(trigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
-    })
+    const trigger = screen.getByText('Agent Reference').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+    await waitFor(() => expect(trigger).not.toBeDisabled())
+    fireEvent.pointerDown(trigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
     await waitFor(() => {
       expect(screen.getByRole('option', { name: /coord-agent/ })).toBeInTheDocument()
     })
@@ -319,8 +523,41 @@ describe('TaskCreateForm', () => {
     })
     expect(screen.getByText('anthropic')).toBeInTheDocument()
     expect(screen.getByText('claude-sonnet')).toBeInTheDocument()
-    expect(screen.getByText('copilot runtime')).toBeInTheDocument()
+    expect(screen.getByText('codex ACP')).toBeInTheDocument()
     expect(screen.getByText('Coordination')).toBeInTheDocument()
     expect(screen.getByText('2 tools')).toBeInTheDocument()
+  })
+
+  it('hides external-runtime agents that cannot be dispatched', async () => {
+    useStateTypeOverride = 'agent'
+    server.use(
+      http.get('/api/v1/agents', () =>
+        HttpResponse.json({
+          items: [
+            {
+              metadata: { name: 'built-in-agent', namespace: 'default' },
+              spec: { runtime: { type: 'codex' } },
+            },
+            {
+              metadata: { name: 'external-agent', namespace: 'default' },
+              spec: { runtime: { runtimeRef: { name: 'external-codex' } } },
+            },
+            {
+              metadata: { name: 'provider-agent', namespace: 'default' },
+              spec: { model: { provider: 'openai', name: 'gpt-5.4' } },
+            },
+          ],
+        }),
+      ),
+    )
+    render(<TaskCreateForm />)
+
+    expect(await screen.findByText(/Agents without a built-in CLI runtime are hidden/)).toBeInTheDocument()
+    const trigger = screen.getByText('Agent Reference').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+    fireEvent.pointerDown(trigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+
+    expect(await screen.findByRole('option', { name: /built-in-agent/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /external-agent/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /provider-agent/ })).not.toBeInTheDocument()
   })
 })

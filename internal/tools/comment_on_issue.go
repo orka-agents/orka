@@ -86,7 +86,7 @@ func (t *CommentOnIssueTool) Execute(ctx context.Context, argsJSON json.RawMessa
 	}
 
 	// Resolve repo and token using the shared helper
-	owner, repo, token, baseURL, err := resolveRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveForgeRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}

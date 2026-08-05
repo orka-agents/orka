@@ -44,27 +44,27 @@ type WaitForTasksResult struct {
 
 // TaskResultInfo holds individual task result information
 type TaskResultInfo struct {
-	Task             string                                 `json:"task"`
-	Agent            string                                 `json:"agent,omitempty"`
-	Phase            string                                 `json:"phase"`
-	Result           string                                 `json:"result,omitempty"`
-	Summary          string                                 `json:"summary,omitempty"`
-	Verdict          string                                 `json:"verdict,omitempty"`
-	Feedback         string                                 `json:"feedback,omitempty"`
-	Files            []string                               `json:"files,omitempty"`
-	Data             map[string]any                         `json:"data,omitempty"`
-	Artifacts        []common.ArtifactRef                   `json:"artifacts,omitempty"`
-	BaseSHA          string                                 `json:"baseSHA,omitempty"`
-	HeadSHA          string                                 `json:"headSHA,omitempty"`
-	PushBranch       string                                 `json:"pushBranch,omitempty"`
-	WorkspaceRef     string                                 `json:"workspaceRef,omitempty"`
-	WorkspaceBranch  string                                 `json:"workspaceBranch,omitempty"`
-	Iteration        string                                 `json:"iteration,omitempty"`
-	FailureDetails   *FailureDetails                        `json:"failureDetails,omitempty"`
-	Retried          bool                                   `json:"retried,omitempty"`
-	RetryTaskName    string                                 `json:"retryTaskName,omitempty"`
-	ExecutionOutcome *corev1alpha1.TaskExecutionOutcome     `json:"executionOutcome,omitempty"`
-	WorkspaceStatus  *corev1alpha1.ExecutionWorkspaceStatus `json:"workspaceStatus,omitempty"`
+	Task             string                                     `json:"task"`
+	Agent            string                                     `json:"agent,omitempty"`
+	Phase            string                                     `json:"phase"`
+	Result           string                                     `json:"result,omitempty"`
+	Summary          string                                     `json:"summary,omitempty"`
+	Verdict          string                                     `json:"verdict,omitempty"`
+	Feedback         string                                     `json:"feedback,omitempty"`
+	Files            []string                                   `json:"files,omitempty"`
+	Data             map[string]any                             `json:"data,omitempty"`
+	Artifacts        []common.ArtifactRef                       `json:"artifacts,omitempty"`
+	BaseSHA          string                                     `json:"baseSHA,omitempty"`
+	HeadSHA          string                                     `json:"headSHA,omitempty"`
+	PushBranch       string                                     `json:"pushBranch,omitempty"`
+	WorkspaceRef     string                                     `json:"workspaceRef,omitempty"`
+	WorkspaceBranch  string                                     `json:"workspaceBranch,omitempty"`
+	Iteration        string                                     `json:"iteration,omitempty"`
+	FailureDetails   *FailureDetails                            `json:"failureDetails,omitempty"`
+	Retried          bool                                       `json:"retried,omitempty"`
+	RetryTaskName    string                                     `json:"retryTaskName,omitempty"`
+	ExecutionOutcome *corev1alpha1.TaskWorkloadExecutionOutcome `json:"executionOutcome,omitempty"`
+	WorkspaceStatus  *corev1alpha1.ExecutionWorkspaceStatus     `json:"workspaceStatus,omitempty"`
 }
 
 func waitTaskTerminal(phase corev1alpha1.TaskPhase) bool {

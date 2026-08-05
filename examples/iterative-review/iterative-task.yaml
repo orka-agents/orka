@@ -12,8 +12,11 @@ spec:
     Repository details for delegated agent tasks:
     - gitRepo: https://github.com/example/api.git
     - branch: main
-    - gitSecretRef: git-credentials
+    - readCredentialRef: repository-read
+    - publicationGitRepo: https://github.com/example/api.git
+    - publicationCredentialRef: repository-publish
     - pushBranch: feature/jwt-auth
+    - prBaseBranch: main
 
     Requirements:
     - Login endpoint with username/password

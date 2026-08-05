@@ -1,19 +1,19 @@
 # Getting Started
 
 Orka is a Kubernetes-native platform for running AI agents and tool-using workflows as
-durable, observable Kubernetes Jobs. You describe work as a **Task**; the controller
-schedules it, runs it in a hardened worker pod, stores the result, and (optionally) notifies
-you — with sessions, retries, priorities, and multi-agent delegation handled for you.
+durable, observable Tasks. Native AI and container work runs in hardened worker Jobs; ACP
+coding agents run as fenced RuntimeSessions in controller-owned RuntimePools. The controller
+stores results and delivery receipts and handles sessions, priorities, and delegation.
 
 ## Mental Model
 
 Three custom resources cover most use cases:
 
 - **Provider** — an LLM backend (Anthropic, OpenAI, or Azure OpenAI) plus its API-key Secret.
-- **Agent** — a reusable configuration: which Provider/model, system prompt, tools, skills,
-  and (optionally) an external CLI runtime or coordination settings.
+- **Agent** — a reusable configuration: Provider/model, system prompt, tools, skills,
+  ACP runtime profile, or coordination settings.
 - **Task** — one unit of work. `type: ai` runs through Orka's built-in AI worker, `type: agent`
-  runs an external coding CLI (Claude Code, Codex, Copilot), and `type: container` runs an
+  runs a Codex, Claude, Copilot, or OpenCode ACP session in a RuntimePool, and `type: container` runs an
   arbitrary container command.
 
 A Task references an Agent, an Agent references a Provider. Results are retrieved over the
@@ -38,10 +38,18 @@ For development, you also need:
 ```bash
 helm install orka charts/orka \
   --namespace orka-system \
-  --create-namespace
+  --create-namespace \
+  --set controller.image.repository=docker.io/sozercan/orka \
+  --set controller.image.digest=sha256:<controller-digest> \
+  --set publisher.image.repository=docker.io/sozercan/orka-workspace-publisher \
+  --set publisher.image.digest=sha256:<publisher-digest> \
+  --set controller.acpRuntime.codexImage=docker.io/sozercan/orka-acp-codex@sha256:<codex-digest> \
+  --set controller.acpRuntime.claudeImage=docker.io/sozercan/orka-acp-claude@sha256:<claude-digest> \
+  --set controller.acpRuntime.copilotImage=docker.io/sozercan/orka-acp-copilot@sha256:<copilot-digest> \
+  --set controller.acpRuntime.opencodeImage=docker.io/sozercan/orka-acp-opencode@sha256:<opencode-digest>
 ```
 
-A normal fresh install creates Orka's twelve cluster-scoped CRDs before the
+A normal fresh install creates Orka's 26 cluster-scoped CRDs before the
 controller resources. Use `--skip-crds` only when one designated platform or
 release owner already manages compatible Orka CRDs for the cluster; all other
 Orka releases should use that flag.
@@ -58,32 +66,26 @@ Follow the complete commands and ownership guidance in
 
 ### Using kubectl
 
-The development target creates the required harness-wrapper authentication
-Secret without replacing an existing value:
+The development target creates the required ACP artifact, publisher, provider-proxy, and SCM-proxy Secrets without replacing existing values:
 
 ```bash
 # Install CRDs
 make install
 
 # Deploy controller
-make deploy IMG=ghcr.io/orka-agents/orka:latest
+make deploy \
+  IMG=docker.io/sozercan/orka@sha256:<controller-digest> \
+  WORKSPACE_PUBLISHER_IMG=docker.io/sozercan/orka-workspace-publisher@sha256:<publisher-digest> \
+  ACP_CODEX_RUNTIME_IMG=docker.io/sozercan/orka-acp-codex@sha256:<codex-digest> \
+  ACP_CLAUDE_RUNTIME_IMG=docker.io/sozercan/orka-acp-claude@sha256:<claude-digest> \
+  ACP_COPILOT_RUNTIME_IMG=docker.io/sozercan/orka-acp-copilot@sha256:<copilot-digest> \
+  ACP_OPENCODE_RUNTIME_IMG=docker.io/sozercan/orka-acp-opencode@sha256:<opencode-digest>
 ```
 
-When applying the promoted installer directly, pre-create that Secret because
-raw manifests cannot safely contain a shared bearer token:
-
-```bash
-set -euo pipefail
-
-kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
-if ! kubectl -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then
-  openssl rand -hex 32 | \
-    kubectl -n orka-system create secret generic harness-wrapper-auth \
-      --from-file=token=/dev/stdin
-fi
-
-kubectl apply -f deploy/orka.yaml
-```
+`make deploy` applies the same resources as the canonical
+`config/acp-production` Kustomize overlay. For direct Kustomize workflows, use
+that overlay rather than `config/default`; it includes the Vekil ingress policy
+that permits model traffic only through the authenticated provider proxy.
 
 ## Quick Start
 
@@ -172,26 +174,23 @@ orka task download <task-name> [filename] -o <path>
 
 ## Agent Runtimes Quick Start
 
-Agent runtimes let you run tasks via Codex CLI, Claude Code CLI, GitHub Copilot CLI, or OpenCode CLI with full autonomous coding capabilities.
+ACP agent runtimes run the supported Codex, Claude, Copilot, and OpenCode profiles as
+fenced RuntimeSessions in controller-owned RuntimePools. External
+`orka.harness.v2` registrations can be probed and conformance-tested, but
+`runtimeRef` Task dispatch remains fail-closed until the external v2 dispatcher
+support boundary is enabled.
 
-### 1. Create Credentials
+### 1. Configure the central provider proxy
 
-```bash
-# For Claude Code CLI (direct API)
-kubectl create secret generic claude-credentials \
-  --from-literal=ANTHROPIC_API_KEY=sk-ant-your-key
+Built-in ACP Agents never reference provider Secrets. Configure Vekil with the
+upstream provider credentials and keep Orka's authenticated provider proxy in
+front of it. The controller gives RuntimePools only the proxy bearer and the
+reviewed provider/model scope; the upstream credential never enters the ACP
+process tree.
 
-# For Claude Code CLI (Azure AI Foundry)
-kubectl create secret generic claude-credentials \
-  --from-literal=CLAUDE_CODE_USE_FOUNDRY=1 \
-  --from-literal=ANTHROPIC_FOUNDRY_API_KEY=your-key \
-  --from-literal=ANTHROPIC_FOUNDRY_RESOURCE=your-resource \
-  --from-literal=ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-5
-
-# For Codex CLI
-kubectl create secret generic codex-api-key \
-  --from-literal=OPENAI_API_KEY=sk-proj-your-key
-```
+For Kustomize installs, verify that `config/acp-production` is applied and that
+the `provider-auth-proxy` Deployment is Ready before submitting ACP Tasks. Helm
+deployments enable the same boundary with `providerProxy.enabled=true`.
 
 ### 2. Create an Agent with Runtime
 
@@ -202,12 +201,8 @@ kind: Agent
 metadata:
   name: claude-agent
 spec:
-  secretRef:
-    name: claude-credentials
-  execution:
-    runtimeClassName: gvisor
-    nodeSelector:
-      sandbox-runtime: gvisor
+  model:
+    name: claude-sonnet-4-20250514
   runtime:
     type: claude
     defaultMaxTurns: 50
@@ -220,7 +215,14 @@ spec:
 EOF
 ```
 
-For Codex Agents, keep `defaultAllowBash: true` for now. The current Codex runtime implementation fails fast when bash is disabled because the upstream Codex CLI does not yet expose a reliable shell-disable mode.
+For Codex Agents, keep `defaultAllowBash: true` for now. The current Codex
+runtime implementation fails fast when bash is disabled because the upstream
+Codex CLI does not yet expose a reliable shell-disable mode. For OpenCode
+Agents, set `runtime.type: opencode`, use the provider/model form expected by
+OpenCode (such as `openai/gpt-5.4`), and set reviewed `model.contextWindow`
+and `model.maxTokens` ceilings. Orka requires both values and pins them into the
+immutable RuntimePool profile so OpenCode compaction and proxy output limits do
+not depend on mutable catalog discovery.
 
 ### 3. Run an Agent Task
 
@@ -234,11 +236,17 @@ spec:
   type: agent
   agentRef:
     name: claude-agent
-  prompt: "Review the code in this repo for security issues"
+  prompt: "Review the code in this repo for security issues. Do not modify files."
+  workspace:
+    intent: read
+    gitRepo: "https://github.com/example/repo.git"
+    branch: main
+    # Optional for a private source repository. This Secret is resolved only
+    # by the clean-room credential broker, never by the ACP runtime.
+    # readCredentialRef:
+    #   name: repository-read
   agentRuntime:
-    workspace:
-      gitRepo: "https://github.com/example/repo.git"
-      branch: main
+    maxTurns: 20
 EOF
 ```
 
@@ -246,6 +254,8 @@ EOF
 
 ```bash
 kubectl get task code-review
+kubectl get runtimepools
+orka task status code-review
 
 curl http://localhost:8080/api/v1/tasks/code-review/result \
   -H "Authorization: Bearer $(kubectl create token orka-client)"
@@ -255,7 +265,7 @@ See [Agent Runtimes](concepts/agent-runtimes.md) for full configuration referenc
 
 ## Optional Runtime Isolation
 
-If your cluster exposes Kubernetes `RuntimeClass` objects such as `gvisor` or `kata-qemu`, you can route worker Jobs through them with `spec.execution`.
+If your cluster exposes Kubernetes `RuntimeClass` objects such as `gvisor` or `kata-qemu`, native `ai` and container Tasks can route worker Jobs through them with `spec.execution`. Built-in ACP agent Tasks instead use reviewed RuntimePool resource profiles.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -267,19 +277,15 @@ spec:
   agentRef:
     name: assistant
   prompt: "Summarize the repo"
-  execution:
-    runtimeClassName: gvisor
-    nodeSelector:
-      sandbox-runtime: gvisor
 ```
 
-Use `Agent.spec.execution` for defaults, then override it per task when needed. See [Configuration](concepts/configuration.md#execution), [Agent Runtimes](concepts/agent-runtimes.md#runtime-isolation), and [Security](concepts/security.md#runtime-isolation) for details.
+Use `Agent.spec.execution` for defaults, then override it per task when needed. See [Configuration](concepts/configuration.md#execution), [Agent Runtimes](concepts/agent-runtimes.md#runtime-and-credential-boundaries), and [Security](concepts/security.md#execution-workloads) for details.
 
 ## Accessing the Dashboard
 
 ```bash
 # Port-forward the controller service
-kubectl port-forward -n orka-system svc/orka-api 8080:8080
+kubectl port-forward -n orka-system svc/orka 8080:8080
 
 # Open in browser
 open http://localhost:8080
@@ -316,12 +322,12 @@ The CLI supports token extraction from bearer tokens, token files, exec-based au
 - [Configuration](concepts/configuration.md) — Helm values, controller flags, and metrics
 - [Memory](concepts/memory.md) — Namespace-scoped durable memory and reviewable proposals
 - [Transaction Token Integration](concepts/transaction-tokens.md) — Request-scoped transaction-token auth
-- [Agent Sandbox Workspaces](concepts/agent-sandbox.md) / [Substrate](concepts/substrate.md) — Durable, reusable execution workspaces
+- [Agent Sandbox Workspaces](concepts/agent-sandbox.md) / [Substrate](concepts/substrate.md) — Deferred execution-workspace providers behind the ACP v2 seam
 - [Security](concepts/security.md) — Pod hardening, authentication, and multi-tenancy
 
 **Guides & reference**
 
-- [Agent Runtimes](concepts/agent-runtimes.md) — Codex CLI, Claude Code CLI, Copilot CLI, and OpenCode CLI configuration
+- [Agent Runtimes](concepts/agent-runtimes.md) — ACP v2 RuntimePools, RuntimeSessions, workspace policy, and delivery
 - [Interactive Chat](guides/chat.md) — Chat endpoint with tool execution
 - [Multi-Agent Coordination](guides/multi-agent-coordination.md) — Coordinator agents and delegation
 - [OpenAI Compatibility](reference/openai-compat.md) — Use any OpenAI-compatible client via `/openai/v1/`

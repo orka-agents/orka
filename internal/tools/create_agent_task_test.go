@@ -66,6 +66,19 @@ func TestCreateAgentTaskTool_Parameters(t *testing.T) {
 			t.Errorf("missing %s property", key)
 		}
 	}
+	workspaceSchema, ok := props[workspaceField].(map[string]any)
+	if !ok {
+		t.Fatal("workspace schema is not an object")
+	}
+	workspaceProps, ok := workspaceSchema[jsonSchemaPropertiesField].(map[string]any)
+	if !ok {
+		t.Fatal("workspace schema is missing properties")
+	}
+	for _, key := range []string{"publicationReadCredentialRef", "publicationCredentialRef", "forgeCredentialRef"} {
+		if _, ok := workspaceProps[key]; !ok {
+			t.Errorf("workspace schema missing %s property", key)
+		}
+	}
 }
 
 func newCreateAgentTaskToolCtx(fc client.Client) context.Context {
@@ -123,12 +136,13 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 				"prompt":"Refactor module",
 				"agentRef":"claude-agent",
 				"maxTurns": 10,
-				"workspace": {
-					"gitRepo": "https://github.com/example/repo",
-					"branch": "main",
-					"pushBranch": "feature/refactor",
-					"subPath": "src"
-				}
+					"workspace": {
+						"gitRepo": "https://github.com/example/repo",
+						"branch": "main",
+						"pushBranch": "feature/refactor",
+						"publicationCredentialRef": "git-publish",
+						"subPath": "src"
+					}
 			}`),
 			checkResult: func(t *testing.T, result string) {
 				var r ChatToolResult
@@ -267,7 +281,102 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 	}
 }
 
-func TestCreateAgentTaskTool_Execute_PreservesExplicitGitSecretRef(t *testing.T) {
+func TestCreateAgentTaskTool_Execute_RejectsNonObjectWorkspace(t *testing.T) {
+	for _, workspace := range []string{`"repo"`, `["repo"]`, `null`} {
+		t.Run(workspace, func(t *testing.T) {
+			fc := newFakeClient()
+			ctx := newCreateAgentTaskToolCtx(fc)
+			tool := &CreateAgentTaskTool{}
+			args := json.RawMessage(`{"prompt":"Fix the bug","agentRef":"codex-agent","workspace":` + workspace + `}`)
+
+			result, err := tool.Execute(ctx, args)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "workspace must be an object") {
+				t.Fatalf("response = %#v, want invalid workspace arguments", response)
+			}
+		})
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_RequiresExplicitPublicationCredentialForWrite(t *testing.T) {
+	fc := newFakeClient()
+	ctx := newCreateAgentTaskToolCtx(fc)
+	tool := &CreateAgentTaskTool{}
+	args := json.RawMessage(`{
+		"prompt":"Fix the bug",
+		"agentRef":"codex-agent",
+		"workspace":{"gitRepo":"https://github.com/example/repo","intent":"write","readCredentialRef":"source-read"}
+	}`)
+
+	result, err := tool.Execute(ctx, args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "publicationCredentialRef is required") {
+		t.Fatalf("response = %#v, want explicit publication credential denial", response)
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_BindsPublicationCredentialRoles(t *testing.T) {
+	fc := newFakeClient()
+	ctx := newCreateAgentTaskToolCtx(fc)
+	tool := &CreateAgentTaskTool{}
+	args := json.RawMessage(`{
+		"prompt":"Fix the bug",
+		"agentRef":"codex-agent",
+		"workspace":{
+			"gitRepo":"https://github.com/example/source.git",
+			"publicationGitRepo":"https://github.com/example/target.git",
+			"pushBranch":"orka/fix",
+			"createPR":true,
+			"readCredentialRef":"source-read",
+			"publicationReadCredentialRef":"target-read",
+			"publicationCredentialRef":"target-write",
+			"forgeCredentialRef":"forge"
+		}
+	}`)
+
+	result, err := tool.Execute(ctx, args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Success {
+		t.Fatalf("response = %#v, want success", response)
+	}
+	task := &corev1alpha1.Task{}
+	if err := fc.Get(t.Context(), apitypes.NamespacedName{Name: testAgentTaskGeneratedName, Namespace: defaultNamespace}, task); err != nil {
+		t.Fatal(err)
+	}
+	workspace := task.Spec.Workspace
+	if workspace == nil || workspace.ReadCredentialRef == nil || workspace.ReadCredentialRef.Name != "source-read" {
+		t.Fatalf("readCredentialRef = %#v, want source-read", workspace)
+	}
+	if workspace.PublicationReadCredentialRef == nil || workspace.PublicationReadCredentialRef.Name != "target-read" {
+		t.Fatalf("publicationReadCredentialRef = %#v, want target-read", workspace.PublicationReadCredentialRef)
+	}
+	if workspace.PublicationCredentialRef == nil || workspace.PublicationCredentialRef.Name != "target-write" {
+		t.Fatalf("publicationCredentialRef = %#v, want target-write", workspace.PublicationCredentialRef)
+	}
+	if workspace.ForgeCredentialRef == nil || workspace.ForgeCredentialRef.Name != "forge" {
+		t.Fatalf("forgeCredentialRef = %#v, want forge", workspace.ForgeCredentialRef)
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_PreservesExplicitReadCredentialRef(t *testing.T) {
 	fc := newFakeClient(
 		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "my-secret", Namespace: defaultNamespace}},
 	)
@@ -279,7 +388,7 @@ func TestCreateAgentTaskTool_Execute_PreservesExplicitGitSecretRef(t *testing.T)
 		"agentRef":"claude-agent",
 		"workspace":{
 			"gitRepo":"https://github.com/example/repo",
-			"gitSecretRef":"my-secret"
+			"readCredentialRef":"my-secret"
 		}
 	}`))
 	if err != nil {
@@ -298,18 +407,18 @@ func TestCreateAgentTaskTool_Execute_PreservesExplicitGitSecretRef(t *testing.T)
 	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testAgentTaskGeneratedName, Namespace: defaultNamespace}, task); err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.Workspace == nil {
 		t.Fatal("expected workspace to be set")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
-		t.Fatal("expected gitSecretRef to be preserved")
+	if task.Spec.Workspace.ReadCredentialRef == nil {
+		t.Fatal("expected readCredentialRef to be preserved")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "my-secret" {
-		t.Errorf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "my-secret")
+	if task.Spec.Workspace.ReadCredentialRef.Name != "my-secret" {
+		t.Errorf("readCredentialRef = %q, want %q", task.Spec.Workspace.ReadCredentialRef.Name, "my-secret")
 	}
 }
 
-func TestCreateAgentTaskTool_Execute_AutoDiscoversGitSecretRefWhenOmitted(t *testing.T) {
+func TestCreateAgentTaskTool_Execute_AutoDiscoversReadCredentialRefWhenOmitted(t *testing.T) {
 	fc := newFakeClient(
 		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testGitCredentialsSecret, Namespace: defaultNamespace}},
 	)
@@ -339,14 +448,14 @@ func TestCreateAgentTaskTool_Execute_AutoDiscoversGitSecretRefWhenOmitted(t *tes
 	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testAgentTaskGeneratedName, Namespace: defaultNamespace}, task); err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.Workspace == nil {
 		t.Fatal("expected workspace to be set")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
-		t.Fatal("expected gitSecretRef to be auto-discovered")
+	if task.Spec.Workspace.ReadCredentialRef == nil {
+		t.Fatal("expected readCredentialRef to be auto-discovered")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != testGitCredentialsSecret {
-		t.Fatalf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, testGitCredentialsSecret)
+	if task.Spec.Workspace.ReadCredentialRef.Name != testGitCredentialsSecret {
+		t.Fatalf("readCredentialRef = %q, want %q", task.Spec.Workspace.ReadCredentialRef.Name, testGitCredentialsSecret)
 	}
 }
 
@@ -386,11 +495,11 @@ func TestCreateAgentTaskTool_Execute_UsesCopilotAgentSecretForGitCredentials(t *
 	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testAgentTaskGeneratedName, Namespace: defaultNamespace}, task); err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
-		t.Fatal("expected gitSecretRef to be populated from the copilot agent")
+	if task.Spec.Workspace == nil || task.Spec.Workspace.ReadCredentialRef == nil {
+		t.Fatal("expected readCredentialRef to be populated from the copilot agent")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != testCustomCopilotSecretName {
-		t.Fatalf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, testCustomCopilotSecretName)
+	if task.Spec.Workspace.ReadCredentialRef.Name != testCustomCopilotSecretName {
+		t.Fatalf("readCredentialRef = %q, want %q", task.Spec.Workspace.ReadCredentialRef.Name, testCustomCopilotSecretName)
 	}
 }
 

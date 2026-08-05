@@ -7,25 +7,26 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
-	"slices"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-func TestRuntimeSecretCandidatesOpencode(t *testing.T) {
-	candidates := RuntimeSecretCandidates(corev1alpha1.AgentRuntimeOpencode)
-	for _, want := range []string{"opencode-credentials", "opencode-api-key"} {
-		if !slices.Contains(candidates, want) {
-			t.Fatalf("RuntimeSecretCandidates(opencode) = %#v, want %q", candidates, want)
-		}
+func TestRuntimeSecretCandidatesOpencodeIsEmpty(t *testing.T) {
+	if candidates := RuntimeSecretCandidates(corev1alpha1.AgentRuntimeOpencode); len(candidates) != 0 {
+		t.Fatalf("RuntimeSecretCandidates(opencode) = %#v, want no Agent Secret candidates", candidates)
 	}
-	if slices.Contains(candidates, "openai-api-key") {
-		t.Fatalf("RuntimeSecretCandidates(opencode) = %#v, want no generic OpenAI fallback", candidates)
-	}
+}
 
-	candidates[0] = "changed-candidate"
-	if got := RuntimeSecretCandidates(corev1alpha1.AgentRuntimeOpencode)[0]; got == "changed-candidate" {
-		t.Fatal("RuntimeSecretCandidates returned shared backing storage")
+func TestFirstUsableRuntimeSecretNameDoesNotDiscoverOpencodeSecrets(t *testing.T) {
+	secrets := []corev1.Secret{
+		{ObjectMeta: metav1.ObjectMeta{Name: "opencode-credentials", Namespace: defaultNamespace}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "opencode-api-key", Namespace: defaultNamespace}},
+	}
+	if got := FirstUsableRuntimeSecretName(secrets, corev1alpha1.AgentRuntimeOpencode); got != "" {
+		t.Fatalf("FirstUsableRuntimeSecretName(opencode) = %q, want no auto-discovered Agent Secret", got)
 	}
 }

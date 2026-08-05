@@ -8,11 +8,8 @@ package api
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
 	"strings"
-	"time"
 
 	"github.com/gofiber/fiber/v3"
 	batchv1 "k8s.io/api/batch/v1"
@@ -77,65 +74,9 @@ func (a internalCallerAuthorizer) verifyNamespace(c fiber.Ctx, namespace string)
 	return nil
 }
 
-func (a internalCallerAuthorizer) verifyArtifactUploadCaller(c fiber.Ctx, namespace, taskName string) error {
-	userInfo := GetUserInfo(c)
-	if err := a.verifyNamespace(c, namespace); err != nil {
-		var fiberErr *fiber.Error
-		if !errors.As(err, &fiberErr) || fiberErr.Code != fiber.StatusForbidden {
-			return err
-		}
-		if allowErr := a.verifyHarnessWrapperArtifactUpload(c.Context(), userInfo, namespace, taskName); allowErr == nil {
-			return nil
-		}
-		return err
-	}
-	if userInfo != nil && serviceAccountNameFromUsername(userInfo.Username) == expectedHarnessWrapperServiceAccountName() {
-		return a.verifyHarnessWrapperArtifactUpload(c.Context(), userInfo, namespace, taskName)
-	}
-	return nil
-}
+func (a internalCallerAuthorizer) verifyArtifactUploadCaller(c fiber.Ctx, namespace, _ string) error {
+	return a.verifyNamespace(c, namespace)
 
-func (a internalCallerAuthorizer) verifyHarnessWrapperArtifactUpload(
-	ctx context.Context,
-	userInfo *UserInfo,
-	namespace string,
-	taskName string,
-) error {
-	if a.k8sReader == nil || userInfo == nil {
-		return fiber.NewError(fiber.StatusForbidden, "cross-namespace access denied")
-	}
-	if userInfo.AuthType != AuthTypeTokenReview {
-		return fiber.NewError(fiber.StatusForbidden, "caller pod token required")
-	}
-	controlNamespace := currentPodNamespace()
-	if controlNamespace == "" {
-		return fiber.NewError(fiber.StatusForbidden, "controller namespace unavailable")
-	}
-	callerNamespace := strings.TrimSpace(userInfo.Namespace)
-	if callerNamespace == "" {
-		callerNamespace = parseServiceAccountNamespace(userInfo.Username)
-	}
-	if callerNamespace != controlNamespace {
-		return fiber.NewError(fiber.StatusForbidden, "caller is not a control-plane service account")
-	}
-	if serviceAccountNameFromUsername(userInfo.Username) != expectedHarnessWrapperServiceAccountName() {
-		return fiber.NewError(fiber.StatusForbidden, "caller is not the harness wrapper service account")
-	}
-
-	task := &corev1alpha1.Task{}
-	if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
-		return fiber.NewError(fiber.StatusForbidden, "target task not found")
-	}
-	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
-		return fiber.NewError(fiber.StatusForbidden, "target task is not an agent task")
-	}
-	if strings.TrimSpace(task.Status.JobName) != "" {
-		return fiber.NewError(fiber.StatusForbidden, "target task has a worker job")
-	}
-	if !harnessWrapperArtifactUploadAuthorized(task) {
-		return fiber.NewError(fiber.StatusForbidden, "target task is not running through harness wrapper")
-	}
-	return nil
 }
 
 func (a internalCallerAuthorizer) verifyExecutionEventStreamWriter(
@@ -212,55 +153,6 @@ func (a internalCallerAuthorizer) verifyTaskWorker(ctx context.Context, userInfo
 		}
 	}
 	return fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
-}
-
-func harnessWrapperArtifactUploadAuthorized(task *corev1alpha1.Task) bool {
-	if task == nil || task.Annotations == nil ||
-		strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) == "" ||
-		strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]) == "" {
-		return false
-	}
-	if task.Status.Phase != "" && task.Status.Phase != corev1alpha1.TaskPhasePending && task.Status.Phase != corev1alpha1.TaskPhaseRunning {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(task.Annotations[harnessWrapperStartedAnnotation]), "true") {
-		return true
-	}
-	plannedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(task.Annotations[harnessWrapperPlannedAtAnno]))
-	if err != nil {
-		return false
-	}
-	now := time.Now()
-	if plannedAt.After(now.Add(time.Minute)) {
-		return false
-	}
-	return now.Sub(plannedAt) <= harnessWrapperPlannedTurnTTL
-}
-
-func currentPodNamespace() string {
-	if namespace := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); namespace != "" {
-		return namespace
-	}
-	data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
-
-func expectedHarnessWrapperServiceAccountName() string {
-	if name := strings.TrimSpace(os.Getenv(harnessWrapperServiceAccountEnv)); name != "" {
-		return name
-	}
-	return "agent-harness-wrapper"
-}
-
-func serviceAccountNameFromUsername(username string) string {
-	parts := strings.Split(strings.TrimSpace(username), ":")
-	if len(parts) == 4 && parts[0] == "system" && parts[1] == "serviceaccount" {
-		return parts[3]
-	}
-	return ""
 }
 
 func firstUserExtra(userInfo *UserInfo, key string) string {

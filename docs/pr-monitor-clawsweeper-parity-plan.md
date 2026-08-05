@@ -1,5 +1,10 @@
 # PR Monitor to ClawSweeper Parity Plan
 
+> Historical scope note: this plan describes repository-monitor application
+> state. Its SQLite source-of-truth statements do not apply to ACP runtime
+> control records. The ACP hard cutover makes control CRD status and Kubernetes
+> Leases authoritative while retaining monitor history in SQLite.
+
 This document describes how to evolve Orka's current PR monitor into an
 Orka-native maintainer automation system with capabilities comparable to
 ClawSweeper.
@@ -618,8 +623,9 @@ Input:
 - branch write mode
 - constraints on files, tools, and allowed mutation
 
-The repair task may use an agent runtime workspace. It should not directly
-merge or close a PR.
+The repair Task may use top-level `spec.workspace` with `intent: write`, separate
+read/publication credentials, and an Orka-owned publication branch. The ACP child
+must not push, merge, or close a PR directly.
 
 ### Repair Task Output
 

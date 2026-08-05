@@ -1,0 +1,290 @@
+package conformance_test
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
+	"testing"
+	"time"
+
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/harness/v2/conformance"
+	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
+)
+
+func TestCheckPassesStrictHostileLifecycleOnce(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	target.ProbeLifecycle = true
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if !result.Passed {
+		t.Fatalf("Check() failed: %s", result.Message)
+	}
+	if !result.LifecycleProbeExecuted {
+		t.Fatal("hostile lifecycle probe was not executed")
+	}
+	if result.ObservedCapabilities == nil || result.ObservedStatus == nil {
+		t.Fatalf("observations are incomplete: %#v", result)
+	}
+	counts := server.Counts()
+	if counts.SessionCreates != 1 || counts.PromptStarts != 1 || counts.PromptCancels != 1 || counts.WorkspaceDeltas != 1 || counts.SessionDeletes != 1 {
+		t.Fatalf("hostile cycle counts = %#v, want exactly one accepted create/prompt/cancel/delta/delete", counts)
+	}
+	if counts.ReplayClassifications != 6 || counts.DigestConflicts != 6 {
+		t.Fatalf("hostile replay counts = %#v, want six exact replays and six digest conflicts", counts)
+	}
+}
+
+func TestCheckRejectsClaimedDuplicateSafetyWithoutReplaySemantics(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*conformancetest.Config)
+		want   string
+	}{
+		{
+			name: "identical replay",
+			mutate: func(config *conformancetest.Config) {
+				config.BreakDuplicateSafeMutations = true
+			},
+			want: "identical runtime-session creation classified",
+		},
+		{
+			name: "digest conflict",
+			mutate: func(config *conformancetest.Config) {
+				config.BreakDigestConflictClassification = true
+			},
+			want: "conflicting runtime-session creation succeeded",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target, config := testTargetAndConfig(t)
+			target.ProbeLifecycle = true
+			test.mutate(&config)
+			server, err := conformancetest.NewServer(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+			target.BaseURL = server.URL()
+
+			result := conformance.Check(t.Context(), target)
+			if result.Passed || !strings.Contains(result.Message, test.want) {
+				t.Fatalf("Check() = %#v, want duplicate-safety failure containing %q", result, test.want)
+			}
+		})
+	}
+}
+
+func TestCheckNeverReconnectsOrReplaysDisconnectedPrompt(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	target.ProbeLifecycle = true
+	config.DisconnectPromptAfterAccepted = true
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "original prompt stream") {
+		t.Fatalf("Check() = %#v, want disconnected-stream failure", result)
+	}
+	if got := server.Counts().PromptStarts; got != 1 {
+		t.Fatalf("prompt starts = %d, want exactly one with no reconnect or replay", got)
+	}
+}
+
+func TestCheckRejectsUnauthenticatedStatusExposure(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	config.AllowUnauthenticatedStatus = true
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "unauthenticated status negative probe") {
+		t.Fatalf("Check() = %#v, want status auth-negative failure", result)
+	}
+}
+
+func TestCheckExercisesPublicationFinalizationForWriteRuntime(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	target.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+	config.Profile = target.Profile
+	target.SupportsPublicationFinalization = true
+	target.ProbeLifecycle = true
+	config.SupportsPublicationFinalization = true
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+	result := conformance.Check(t.Context(), target)
+	if !result.Passed || !result.LifecycleProbeExecuted {
+		t.Fatalf("Check() = %#v, want successful publication-finalization lifecycle", result)
+	}
+}
+
+func TestCheckRetriesCleanupAfterUnconfirmedSessionDelete(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	target.ProbeLifecycle = true
+	config.FailFirstSessionDeleteBeforeApply = true
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "delete conformance runtime session") {
+		t.Fatalf("Check() = %#v, want injected deletion failure", result)
+	}
+	counts := server.Counts()
+	if counts.SessionDeleteAttempts != 2 || counts.SessionDeletes != 1 {
+		t.Fatalf("delete cleanup counts = attempts:%d applied:%d, want attempts:2 applied:1", counts.SessionDeleteAttempts, counts.SessionDeletes)
+	}
+}
+
+func TestCheckRejectsFreshPublicationFinalizationAppliedAtReplacement(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	target.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+	config.Profile = target.Profile
+	target.SupportsPublicationFinalization = true
+	target.ProbeLifecycle = true
+	config.SupportsPublicationFinalization = true
+	config.BreakFreshPublicationFinalizationAppliedAt = true
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "did not preserve the original receipt") {
+		t.Fatalf("Check() = %#v, want fresh-recovery AppliedAt failure", result)
+	}
+}
+
+func TestCheckRejectsConflictingFreshPublicationFinalization(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	target.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+	config.Profile = target.Profile
+	target.SupportsPublicationFinalization = true
+	target.ProbeLifecycle = true
+	config.SupportsPublicationFinalization = true
+	config.BreakFreshPublicationFinalizationConflictGuard = true
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "conflicting fresh publication finalization succeeded") {
+		t.Fatalf("Check() = %#v, want conflicting fresh-receipt failure", result)
+	}
+}
+
+func TestCheckRejectsExactInstanceMismatch(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+	target.ExpectedRuntimeInstanceID = "different-runtime-instance"
+
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "runtime instance ID") {
+		t.Fatalf("Check() = %#v, want exact-instance failure", result)
+	}
+}
+
+func TestCheckRejectsTrustedRuntimeWithoutExplicitTrust(t *testing.T) {
+	target, _ := testTargetAndConfig(t)
+	target.BaseURL = "http://example.invalid"
+	target.WorkspaceGovernance = conformance.WorkspaceGovernanceClaims{Mode: conformance.WorkspaceGovernanceTrusted}
+	result := conformance.Check(t.Context(), target)
+	if result.Passed || !strings.Contains(result.Message, "explicitly marked trusted") {
+		t.Fatalf("Check() = %#v, want explicit-trust failure", result)
+	}
+}
+
+func testTargetAndConfig(t *testing.T) (conformance.Target, conformancetest.Config) {
+	t.Helper()
+	toolPolicy := harnessv2.MCPToolPolicy{AllowedToolNames: []string{}, Tools: []harnessv2.MCPToolDescriptor{}}
+	toolPolicy.DescriptorDigest, _ = harnessv2.CanonicalMCPToolDescriptorDigest(toolPolicy.Tools)
+	approvalPolicy := harnessv2.MCPApprovalPolicy{}
+	toolPolicyDigest, _ := harnessv2.CanonicalRuntimeToolPolicyDigest(toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)
+	approvalPolicyDigest, _ := harnessv2.CanonicalMCPApprovalPolicyDigest(approvalPolicy)
+	mcpConfigurationDigest, _ := harnessv2.CanonicalMCPConfigurationDigest(toolPolicy.AllowedToolNames)
+	profile := harnessv2.RuntimeProfile{
+		ACPProfile:               harnessv2.ACPProfileV1,
+		AdapterDigests:           map[string]string{"codex": testDigest("adapter")},
+		ProviderKind:             "codex",
+		Model:                    "gpt-test",
+		AgentConfigurationDigest: testDigest("agent"),
+		ToolPolicyDigest:         toolPolicyDigest,
+		ApprovalPolicyDigest:     approvalPolicyDigest,
+		MCPConfigurationDigest:   mcpConfigurationDigest,
+		WorkspaceIntent:          harnessv2.WorkspaceIntentRead,
+		ProxyCredentialRole:      "provider-proxy",
+		ProxyCredentialScope:     "session-and-prompt",
+		ResourceClass:            "standard",
+	}
+	limits := harnessv2.DefaultProtocolLimits()
+	claims := conformance.WorkspaceGovernanceClaims{
+		Mode:                            conformance.WorkspaceGovernanceStrict,
+		OrkaOwnedWorkspaceDeltas:        true,
+		PromptScopedBrokerAuthorization: true,
+		NoDirectSCMPublication:          true,
+		OrkaOwnedCleanRoomPublication:   true,
+		ExactInstanceFencing:            true,
+		DuplicateSafeMutations:          true,
+		CancellationSettlement:          true,
+	}
+	token := strings.Repeat("t", 32)
+	secret := []byte(strings.Repeat("s", 32))
+	config := conformancetest.Config{
+		ControllerBearerToken:     token,
+		OperationCapabilitySecret: secret,
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	target := conformance.Target{
+		ControllerBearerToken:     token,
+		OperationCapabilitySecret: secret,
+		ControlTimeout:            10 * time.Second,
+		ExpectedRuntimeInstanceID: config.RuntimeInstanceID,
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	return target, config
+}
+
+func testDigest(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}

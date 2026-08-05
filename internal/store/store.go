@@ -81,6 +81,19 @@ type SessionStore interface {
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
 }
 
+// ExpiringSessionLockStore supports crash-recoverable transient locks. Durable
+// Task locks continue to use SessionStore.AcquireLock without an expiry.
+type ExpiringSessionLockStore interface {
+	AcquireLockUntil(ctx context.Context, namespace, name, ownerName, ownerUID string, expiresAt time.Time) error
+}
+
+// FencedSessionWriteStore binds transcript and token writes to the exact active
+// transient lock owner so an expired request cannot write after takeover.
+type FencedSessionWriteStore interface {
+	AppendMessagesWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, messages []SessionMessage) error
+	UpdateTokenCountsWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error
+}
+
 // GatewayEventStore handles durable normalized ingress records and atomic Session projection.
 type GatewayEventStore interface {
 	AdmitGatewayEvent(ctx context.Context, admission GatewayEventAdmission) (*GatewayEvent, bool, error)

@@ -2,804 +2,539 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/harness"
-	"github.com/orka-agents/orka/internal/harness/harnesstest"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
+	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
 )
 
-const agentRuntimeTestBearer = "mock-token"
-
-func TestAgentRuntimeReconcilerMarksReadyForFakeHarness(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: agentRuntimeTestBearer})
+func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken:     strings.Repeat("t", 32),
+		OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID:         "external-runtime-instance-1",
+		SupervisorBootID:          "boot-1",
+		RuntimePoolUID:            "external-pool-1",
+		Profile:                   profile,
+		Limits:                    limits,
+		SupportsDrain:             true,
+		WorkspaceGovernance:       claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer server.Close()
 
-	runtime, secret := testAgentRuntimeAndSecret(server.URL())
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get AgentRuntime: %v", err)
-	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
 	if !updated.Status.Ready {
 		t.Fatalf("Ready = false, message=%q", updated.Status.Message)
 	}
-	if updated.Status.ObservedGeneration != runtime.Generation {
-		t.Fatalf("ObservedGeneration = %d, want %d", updated.Status.ObservedGeneration, runtime.Generation)
+	if updated.Status.ObservedCapabilities == nil {
+		t.Fatal("ObservedCapabilities is nil")
 	}
-	if updated.Status.ObservedCapabilities == nil || updated.Status.ObservedCapabilities.RuntimeName != "fibey-agentkit" {
-		t.Fatalf("ObservedCapabilities = %#v", updated.Status.ObservedCapabilities)
+	observed := updated.Status.ObservedCapabilities
+	if observed.ProtocolVersion != harnessv2.ProtocolVersion || observed.Transport != "http+ndjson" {
+		t.Fatalf("observed protocol = %#v", observed)
 	}
-	cond := meta.FindStatusCondition(updated.Status.Conditions, agentRuntimeReadyCondition)
-	if cond == nil || cond.Status != metav1.ConditionTrue {
-		t.Fatalf("Ready condition = %#v, want true", cond)
+	if observed.RuntimeInstanceID != string(config.RuntimeInstanceID) || observed.SupervisorBootID != string(config.SupervisorBootID) {
+		t.Fatalf("observed exact instance = %#v", observed)
 	}
-}
-
-func TestValidateAgentRuntimeRequiredCapabilitiesChecksBrokeredProfiles(t *testing.T) {
-	supportsContinuation := true
-	runtime := &corev1alpha1.AgentRuntime{Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-		Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-			ToolExecutionModes:   []corev1alpha1.AgentRuntimeToolExecutionMode{corev1alpha1.AgentRuntimeToolExecutionModeBrokered},
-			BrokeredToolClasses:  []corev1alpha1.AgentRuntimeBrokeredToolClass{corev1alpha1.AgentRuntimeBrokeredToolClassRead},
-			SupportsContinuation: &supportsContinuation,
-		},
-	}}
-	caps := &harness.CapabilitiesResponse{
-		Version:                 harness.ProtocolVersion,
-		ProtocolVersion:         harness.ProtocolVersion,
-		Transport:               harness.HTTPTransport,
-		RuntimeName:             "fibey-http-runtime",
-		ProviderKind:            harness.ProviderKindRemote,
-		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeBrokered},
-		BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
-		SupportsCancel:          true,
-		SupportsRuntimeSessions: true,
-		SupportsContinuation:    true,
+	if observed.RuntimeProfileDigest != runtimeObject.Spec.Capabilities.Profile.Digest || observed.Limits.MaxConcurrentPrompts != int32(limits.MaxConcurrentPrompts) {
+		t.Fatalf("observed profile/limits = %#v", observed)
 	}
-	if err := validateAgentRuntimeRequiredCapabilities(runtime, caps); err != nil {
-		t.Fatalf("validateAgentRuntimeRequiredCapabilities() error = %v", err)
+	if !observed.WorkspaceGovernance.Strict() {
+		t.Fatalf("observed strict governance = %#v", observed.WorkspaceGovernance)
 	}
-	caps.BrokeredToolClasses = nil
-	if err := validateAgentRuntimeRequiredCapabilities(runtime, caps); err == nil || !strings.Contains(err.Error(), "brokeredToolClass") {
-		t.Fatalf("validateAgentRuntimeRequiredCapabilities() = %v, want missing brokered class", err)
+	if updated.Status.ObservedControllerAuthRefResourceVersion == "" || updated.Status.ObservedOperationCapabilityRefResourceVersion == "" {
+		t.Fatalf("observed auth versions = %#v", updated.Status)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, agentRuntimeReadyCondition)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != agentRuntimeReasonReady {
+		t.Fatalf("Ready condition = %#v", condition)
+	}
+	counts := server.Counts()
+	if counts.PromptStarts != 1 || counts.PromptCancels != 1 || counts.SessionDeletes != 1 || counts.WorkspaceDeltas != 1 {
+		t.Fatalf("hostile conformance counts = %#v", counts)
 	}
 }
 
-func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeReadyWhenBrokeredConformancePasses(t *testing.T) {
-	type turnState struct {
-		request   harness.StartTurnRequest
-		continued chan harness.ContinueTurnRequest
+func TestAgentRuntimeReconcilerDoesNotRepeatHostileCycleWhenIdentityIsUnchanged(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken: strings.Repeat("t", 32), OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID: "external-runtime-instance-1", SupervisorBootID: "boot-1", RuntimePoolUID: "external-pool-1",
+		Profile: profile, Limits: limits, SupportsDrain: true, WorkspaceGovernance: claims,
 	}
-	turns := map[harness.HarnessTurnID]*turnState{}
-	completedTurns := map[harness.HarnessTurnID]struct{}{}
-	var turnsMu sync.Mutex
-	mux := http.NewServeMux()
-	mux.HandleFunc(harness.HealthPath, func(w http.ResponseWriter, r *http.Request) {
-		harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{
-			Version:   harness.ProtocolVersion,
-			Status:    harness.HealthStatusOK,
-			Ready:     true,
-			CheckedAt: time.Now().UTC(),
-		})
-	})
-	mux.HandleFunc(harness.CapabilitiesPath, func(w http.ResponseWriter, r *http.Request) {
-		harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
-			Version:                 harness.ProtocolVersion,
-			ProtocolVersion:         harness.ProtocolVersion,
-			Transport:               harness.HTTPTransport,
-			RuntimeName:             "fibey-brokered-runtime",
-			ProviderKind:            harness.ProviderKindRemote,
-			ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeBrokered},
-			BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
-			SupportsCancel:          true,
-			SupportsRuntimeSessions: true,
-			SupportsContinuation:    true,
-		})
-	})
-	mux.HandleFunc(harness.TurnsPath, func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
-			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
-			return
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	for range 2 {
+		if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+			t.Fatal(err)
 		}
-		var request harness.StartTurnRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			harness.WriteError(w, http.StatusBadRequest, "invalid JSON")
-			return
-		}
-		turnsMu.Lock()
-		if _, completed := completedTurns[request.TurnID]; completed {
-			turnsMu.Unlock()
-			harness.WriteError(w, http.StatusConflict, "turn already completed")
-			return
-		}
-		turn := turns[request.TurnID]
-		if turn != nil && turn.request.Input.Prompt != request.Input.Prompt {
-			turnsMu.Unlock()
-			harness.WriteError(w, http.StatusConflict, "turn already exists")
-			return
-		}
-		if turn == nil {
-			turn = &turnState{request: request, continued: make(chan harness.ContinueTurnRequest, 1)}
-			turns[request.TurnID] = turn
-		}
-		turnsMu.Unlock()
-		eventsPath, _ := harness.EventStreamPath(request.TurnID)
-		harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, EventStreamPath: eventsPath})
-	})
-	mux.HandleFunc(harness.TurnsPath+"/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
-			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
-		if err != nil {
-			harness.WriteError(w, http.StatusNotFound, "not found")
-			return
-		}
-		turnsMu.Lock()
-		turn := turns[turnID]
-		turnsMu.Unlock()
-		if turn == nil {
-			harness.WriteError(w, http.StatusNotFound, "turn not found")
-			return
-		}
-		switch resource {
-		case harness.TurnResourceEvents:
-			_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameTurnStarted, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, Seq: 1})
-			_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameToolCallRequested, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, Seq: 2, ToolName: "conformance_read", ToolCallID: "call-1", Content: json.RawMessage(`{"probe":true}`)})
-			select {
-			case continued := <-turn.continued:
-				_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameToolResultReceived, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, Seq: 3, ToolName: "conformance_read", ToolCallID: "call-1", Content: continued.ToolResults[0].Output})
-				_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameTurnCompleted, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, Seq: 4, Completed: &harness.TurnCompleted{Result: "ok", FinalEventSeq: 4}})
-				turnsMu.Lock()
-				completedTurns[turn.request.TurnID] = struct{}{}
-				turnsMu.Unlock()
-			case <-time.After(2 * time.Second):
+	}
+	counts := server.Counts()
+	if counts.PromptStarts != 1 || counts.SessionCreates != 1 {
+		t.Fatalf("deep hostile cycle repeated on unchanged ready runtime: %#v", counts)
+	}
+}
+
+func TestAgentRuntimeReconcilerRechecksHostileCycleAfterAuthenticatedIdentityChange(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*harnessv2.Fence)
+	}{
+		{name: "supervisor boot", mutate: func(fence *harnessv2.Fence) { fence.SupervisorBootID = "boot-2" }},
+		{name: "controller epoch", mutate: func(fence *harnessv2.Fence) { fence.ControllerEpoch++ }},
+		{name: "runtime pool UID", mutate: func(fence *harnessv2.Fence) { fence.RuntimePoolUID = "external-pool-2" }},
+		{name: "runtime pool generation", mutate: func(fence *harnessv2.Fence) { fence.RuntimePoolGeneration++ }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+			config := conformancetest.Config{
+				ControllerBearerToken: strings.Repeat("t", 32), OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+				RuntimeInstanceID: "external-runtime-instance-1", SupervisorBootID: "boot-1", RuntimePoolUID: "external-pool-1",
+				Profile: profile, Limits: limits, SupportsDrain: true, WorkspaceGovernance: claims,
 			}
-			_ = harness.WriteSSEDone(w)
-		case harness.TurnResourceContinue:
-			var request harness.ContinueTurnRequest
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				harness.WriteError(w, http.StatusBadRequest, "invalid JSON")
-				return
+			server, err := conformancetest.NewServer(config)
+			if err != nil {
+				t.Fatal(err)
 			}
-			turn.continued <- request
-			harness.WriteJSON(w, http.StatusAccepted, harness.ContinueTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID})
-		default:
-			harness.WriteError(w, http.StatusNotFound, "not found")
-		}
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	runtime, secret := testAgentRuntimeAndSecret(server.URL)
-	runtime.Spec.Capabilities.ToolExecutionModes = []corev1alpha1.AgentRuntimeToolExecutionMode{
-		corev1alpha1.AgentRuntimeToolExecutionModeBrokered,
-	}
-	runtime.Spec.Capabilities.BrokeredToolClasses = []corev1alpha1.AgentRuntimeBrokeredToolClass{
-		corev1alpha1.AgentRuntimeBrokeredToolClassRead,
-	}
-	supportsContinuation := true
-	runtime.Spec.Capabilities.SupportsContinuation = &supportsContinuation
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get AgentRuntime: %v", err)
-	}
-	if !updated.Status.Ready {
-		t.Fatalf("Ready = false, message=%q", updated.Status.Message)
-	}
-	if updated.Status.ObservedCapabilities == nil || len(updated.Status.ObservedCapabilities.ToolExecutionModes) != 1 || updated.Status.ObservedCapabilities.ToolExecutionModes[0] != corev1alpha1.AgentRuntimeToolExecutionModeBrokered {
-		t.Fatalf("ObservedCapabilities = %#v, want brokered-only", updated.Status.ObservedCapabilities)
-	}
-}
-
-func TestAgentRuntimeReconcilerRequiresBrokeredReadConformanceWhenCapabilityRequested(t *testing.T) {
-	turns := map[harness.HarnessTurnID]harness.StartTurnRequest{}
-	mux := http.NewServeMux()
-	mux.HandleFunc(harness.HealthPath, func(w http.ResponseWriter, r *http.Request) {
-		harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{Version: harness.ProtocolVersion, Status: harness.HealthStatusOK, Ready: true, CheckedAt: time.Now().UTC()})
-	})
-	mux.HandleFunc(harness.CapabilitiesPath, func(w http.ResponseWriter, r *http.Request) {
-		harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
-			Version:                 harness.ProtocolVersion,
-			ProtocolVersion:         harness.ProtocolVersion,
-			Transport:               harness.HTTPTransport,
-			RuntimeName:             "fibey-runtime",
-			ProviderKind:            harness.ProviderKindRemote,
-			ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved, harness.ToolExecutionModeBrokered},
-			BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
-			SupportsCancel:          true,
-			SupportsRuntimeSessions: true,
-			SupportsContinuation:    true,
-		})
-	})
-	mux.HandleFunc(harness.TurnsPath, func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
-			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		var request harness.StartTurnRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			harness.WriteError(w, http.StatusBadRequest, "invalid JSON")
-			return
-		}
-		if _, exists := turns[request.TurnID]; exists {
-			harness.WriteError(w, http.StatusConflict, "turn already exists")
-			return
-		}
-		turns[request.TurnID] = request
-		eventsPath, _ := harness.EventStreamPath(request.TurnID)
-		harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, EventStreamPath: eventsPath})
-	})
-	mux.HandleFunc(harness.TurnsPath+"/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
-			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
-		if err != nil {
-			harness.WriteError(w, http.StatusNotFound, "not found")
-			return
-		}
-		request := turns[turnID]
-		switch resource {
-		case harness.TurnResourceEvents:
-			_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameTurnStarted, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, Seq: 1})
-			if request.ToolExecutionMode == harness.ToolExecutionModeBrokered {
-				_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameToolCallRequested, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, Seq: 2, ToolName: "read_incident", ToolCallID: "call-1", Content: json.RawMessage(`{"probe":true}`)})
-				return
+			defer server.Close()
+			runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+			reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+			allowAgentRuntimeLoopback(t)
+			if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+				t.Fatal(err)
 			}
-			_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameTurnCompleted, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, Seq: 2, Completed: &harness.TurnCompleted{Result: "ok", FinalEventSeq: 2}})
-			_ = harness.WriteSSEDone(w)
-		case harness.TurnResourceCancel:
-			harness.WriteJSON(w, http.StatusAccepted, harness.CancelTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID})
-		default:
-			harness.WriteError(w, http.StatusNotFound, "not found")
-		}
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
 
-	runtime, secret := testAgentRuntimeAndSecret(server.URL)
-	runtime.Spec.Capabilities.ToolExecutionModes = []corev1alpha1.AgentRuntimeToolExecutionMode{corev1alpha1.AgentRuntimeToolExecutionModeObserved, corev1alpha1.AgentRuntimeToolExecutionModeBrokered}
-	runtime.Spec.Capabilities.BrokeredToolClasses = []corev1alpha1.AgentRuntimeBrokeredToolClass{corev1alpha1.AgentRuntimeBrokeredToolClassRead}
-	supportsContinuation := true
-	runtime.Spec.Capabilities.SupportsContinuation = &supportsContinuation
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get AgentRuntime: %v", err)
-	}
-	if updated.Status.Ready {
-		t.Fatalf("Ready = true, want false when brokered read continue path is broken")
-	}
-	if !strings.Contains(updated.Status.Message, "brokered") {
-		t.Fatalf("Message = %q, want brokered conformance failure", updated.Status.Message)
-	}
-}
-
-func TestAgentRuntimeReconcilerRevalidatesBearerAuthOnReadyRuntime(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: agentRuntimeTestBearer})
-	defer server.Close()
-
-	runtime, secret := testAgentRuntimeAndSecret(server.URL())
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("first Reconcile: %v", err)
-	}
-	var ready corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &ready); err != nil {
-		t.Fatalf("Get ready AgentRuntime: %v", err)
-	}
-	if !ready.Status.Ready {
-		t.Fatalf("Ready = false after first reconcile, message=%q", ready.Status.Message)
-	}
-
-	var changed corev1.Secret
-	if err := r.Get(context.Background(), client.ObjectKey{Name: secret.Name, Namespace: secret.Namespace}, &changed); err != nil {
-		t.Fatalf("Get Secret: %v", err)
-	}
-	changed.Data["token"] = []byte("wrong-token")
-	if err := r.Update(context.Background(), &changed); err != nil {
-		t.Fatalf("Update Secret: %v", err)
-	}
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("second Reconcile: %v", err)
-	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get updated AgentRuntime: %v", err)
-	}
-	if updated.Status.Ready {
-		t.Fatalf("Ready = true, want false after bearer auth changed")
-	}
-	if !strings.Contains(updated.Status.Message, "401") && !strings.Contains(updated.Status.Message, "unauthorized") {
-		t.Fatalf("Message = %q, want auth failure", updated.Status.Message)
-	}
-}
-
-func TestAgentRuntimeReconcilerRechecksUnauthenticatedMutationOnReadyRuntime(t *testing.T) {
-	requireAuth := true
-	turns := map[harness.HarnessTurnID]harness.StartTurnRequest{}
-	mux := http.NewServeMux()
-	mux.HandleFunc(harness.HealthPath, func(w http.ResponseWriter, r *http.Request) {
-		harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{
-			Version:   harness.ProtocolVersion,
-			Status:    harness.HealthStatusOK,
-			Ready:     true,
-			CheckedAt: time.Now().UTC(),
+			fence := server.Fence()
+			test.mutate(&fence)
+			if err := server.SetFence(fence); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+				t.Fatal(err)
+			}
+			updated := getAgentRuntime(t, reconciler, runtimeObject)
+			if !updated.Status.Ready {
+				t.Fatalf("Ready = false after identity change, message=%q", updated.Status.Message)
+			}
+			counts := server.Counts()
+			if counts.SessionCreates != 2 || counts.PromptStarts != 2 {
+				t.Fatalf("authenticated identity change did not rerun full lifecycle: %#v", counts)
+			}
 		})
-	})
-	mux.HandleFunc(harness.CapabilitiesPath, func(w http.ResponseWriter, r *http.Request) {
-		harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
-			Version:                 harness.ProtocolVersion,
-			ProtocolVersion:         harness.ProtocolVersion,
-			Transport:               harness.HTTPTransport,
-			RuntimeName:             "fibey-agentkit",
-			ProviderKind:            harness.ProviderKindKubernetesService,
-			ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
-			SupportsCancel:          true,
-			SupportsRuntimeSessions: true,
+	}
+}
+
+func TestAgentRuntimeAuthenticatedIdentityChanged(t *testing.T) {
+	fence := harnessv2.Fence{
+		RuntimeInstanceID: "runtime-1", SupervisorBootID: "boot-1", ControllerEpoch: 1,
+		RuntimePoolUID: "pool-1", RuntimePoolGeneration: 1, RuntimeProfileDigest: harnessv2.ProfileDigest(testControllerDigest("profile")),
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+	}
+	previous := &corev1alpha1.AgentRuntimeObservedCapabilities{
+		RuntimeInstanceID: string(fence.RuntimeInstanceID), SupervisorBootID: string(fence.SupervisorBootID),
+		ControllerEpoch: int64(fence.ControllerEpoch), RuntimePoolUID: string(fence.RuntimePoolUID),
+		RuntimePoolGeneration: int64(fence.RuntimePoolGeneration), RuntimeProfileDigest: string(fence.RuntimeProfileDigest),
+		ProfileDigestSchemaVersion: int32(fence.ProfileDigestSchemaVersion),
+	}
+	if agentRuntimeAuthenticatedIdentityChanged(previous, &harnessv2.StatusResponse{Fence: fence}) {
+		t.Fatal("unchanged authenticated identity was reported changed")
+	}
+	if !agentRuntimeAuthenticatedIdentityChanged(nil, &harnessv2.StatusResponse{Fence: fence}) {
+		t.Fatal("missing previous identity must require lifecycle conformance")
+	}
+	if !agentRuntimeAuthenticatedIdentityChanged(previous, nil) {
+		t.Fatal("missing current identity must require lifecycle conformance")
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*harnessv2.Fence)
+	}{
+		{name: "runtime instance", mutate: func(f *harnessv2.Fence) { f.RuntimeInstanceID = "runtime-2" }},
+		{name: "supervisor boot", mutate: func(f *harnessv2.Fence) { f.SupervisorBootID = "boot-2" }},
+		{name: "controller epoch", mutate: func(f *harnessv2.Fence) { f.ControllerEpoch++ }},
+		{name: "runtime pool UID", mutate: func(f *harnessv2.Fence) { f.RuntimePoolUID = "pool-2" }},
+		{name: "runtime pool generation", mutate: func(f *harnessv2.Fence) { f.RuntimePoolGeneration++ }},
+		{name: "runtime profile", mutate: func(f *harnessv2.Fence) {
+			f.RuntimeProfileDigest = harnessv2.ProfileDigest(testControllerDigest("profile-2"))
+		}},
+		{name: "profile schema", mutate: func(f *harnessv2.Fence) { f.ProfileDigestSchemaVersion++ }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := fence
+			test.mutate(&changed)
+			if !agentRuntimeAuthenticatedIdentityChanged(previous, &harnessv2.StatusResponse{Fence: changed}) {
+				t.Fatalf("%s change did not require lifecycle conformance", test.name)
+			}
 		})
-	})
-	mux.HandleFunc(harness.TurnsPath, func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth && strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
-			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		var request harness.StartTurnRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			harness.WriteError(w, http.StatusBadRequest, "invalid JSON request")
-			return
-		}
-		if _, exists := turns[request.TurnID]; exists {
-			harness.WriteError(w, http.StatusConflict, "turn already exists")
-			return
-		}
-		turns[request.TurnID] = request
-		eventsPath, _ := harness.EventStreamPath(request.TurnID)
-		harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
-			Version:          harness.ProtocolVersion,
-			Accepted:         true,
-			RuntimeSessionID: request.RuntimeSessionID,
-			TurnID:           request.TurnID,
-			CorrelationID:    request.CorrelationID,
-			EventStreamPath:  eventsPath,
-		})
-	})
-	mux.HandleFunc(harness.TurnsPath+"/", func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth && strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
-			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
-		if err != nil {
-			harness.WriteError(w, http.StatusNotFound, "not found")
-			return
-		}
-		request, ok := turns[turnID]
-		if !ok {
-			harness.WriteError(w, http.StatusNotFound, "turn not found")
-			return
-		}
-		switch resource {
-		case "events":
-			_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
-				Version:          harness.ProtocolVersion,
-				Type:             harness.FrameTurnCompleted,
-				RuntimeSessionID: request.RuntimeSessionID,
-				TurnID:           request.TurnID,
-				CorrelationID:    request.CorrelationID,
-				Seq:              1,
-				Completed:        &harness.TurnCompleted{Result: "ok", FinalEventSeq: 1},
-			})
-			_ = harness.WriteSSEDone(w)
-		case "cancel":
-			harness.WriteJSON(w, http.StatusAccepted, harness.CancelTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID})
-		default:
-			harness.WriteError(w, http.StatusNotFound, "not found")
-		}
-	})
-	server := httptest.NewServer(mux)
+	}
+}
+
+func TestAgentRuntimeReconcilerRechecksHostileCycleAfterAuthRotation(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken: strings.Repeat("t", 32), OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID: "external-runtime-instance-1", SupervisorBootID: "boot-1", RuntimePoolUID: "external-pool-1",
+		Profile: profile, Limits: limits, SupportsDrain: true, WorkspaceGovernance: claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer server.Close()
-
-	runtime, secret := testAgentRuntimeAndSecret(server.URL)
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("first Reconcile: %v", err)
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
 	}
-	requireAuth = false
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("second Reconcile: %v", err)
+	stored := &corev1.Secret{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(secret), stored); err != nil {
+		t.Fatal(err)
 	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get AgentRuntime: %v", err)
+	stored.Data["capability-secret"] = []byte(strings.Repeat("q", 32))
+	if err := reconciler.Update(t.Context(), stored); err != nil {
+		t.Fatal(err)
 	}
-	if updated.Status.Ready {
-		t.Fatalf("Ready = true, want false after unauthenticated StartTurn became accepted")
+	// The fake runtime still has the old key, so rotation must force a deep probe
+	// and fail closed rather than leaving the prior Ready status in place.
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(updated.Status.Message, "unauthenticated start turn was accepted") {
-		t.Fatalf("Message = %q, want unauthenticated start failure", updated.Status.Message)
-	}
-}
-
-func TestAgentRuntimeReconcilerMarksNotReadyForBadProtocol(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{ProtocolVersion: "orka.harness.v0", AuthToken: agentRuntimeTestBearer})
-	defer server.Close()
-
-	runtime, secret := testAgentRuntimeAndSecret(server.URL())
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get AgentRuntime: %v", err)
-	}
-	if updated.Status.Ready {
-		t.Fatalf("Ready = true, want false")
-	}
-	if !strings.Contains(updated.Status.Message, "unsupported protocol version") {
-		t.Fatalf("Message = %q, want unsupported protocol", updated.Status.Message)
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "operation capability") {
+		t.Fatalf("rotated mismatched capability key did not fail closed: %#v", updated.Status)
 	}
 }
 
-func TestAgentRuntimeReconcilerRejectsUnlabeledBearerSecret(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
-	defer server.Close()
-
-	runtime, secret := testAgentRuntimeAndSecret(server.URL())
-	secret.Labels = nil
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get AgentRuntime: %v", err)
-	}
-	if updated.Status.Ready {
-		t.Fatalf("Ready = true, want false")
-	}
-	if !strings.Contains(updated.Status.Message, agentRuntimeAuthUseLabel) {
-		t.Fatalf("Message = %q, want missing auth-secret label", updated.Status.Message)
-	}
-}
-
-func TestAgentRuntimeReconcilerRejectsBearerSecretWithoutEndpointBinding(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
-	defer server.Close()
-
-	runtime, secret := testAgentRuntimeAndSecret(server.URL())
-	secret.Annotations = nil
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get AgentRuntime: %v", err)
-	}
-	if updated.Status.Ready {
-		t.Fatalf("Ready = true, want false")
-	}
-	if !strings.Contains(updated.Status.Message, agentRuntimeAuthEndpointAnnotation) {
-		t.Fatalf("Message = %q, want missing endpoint binding annotation", updated.Status.Message)
-	}
-}
-
-func TestAgentRuntimeReconcilerRejectsBearerSecretEndpointMismatch(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
-	defer server.Close()
-
-	runtime, secret := testAgentRuntimeAndSecret(server.URL())
-	secret.Annotations[agentRuntimeAuthEndpointAnnotation] = "http://different-runtime.default.svc.cluster.local:8080"
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get AgentRuntime: %v", err)
-	}
-	if updated.Status.Ready {
-		t.Fatalf("Ready = true, want false")
-	}
-	if !strings.Contains(updated.Status.Message, "annotated for endpoint") {
-		t.Fatalf("Message = %q, want endpoint mismatch", updated.Status.Message)
-	}
-}
-
-func TestAgentRuntimeReconcilerReportsMissingBearerSecret(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
-	defer server.Close()
-
-	runtime, _ := testAgentRuntimeAndSecret(server.URL())
-	r := newAgentRuntimeUnitReconciler(t, runtime)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get AgentRuntime: %v", err)
-	}
-	if updated.Status.Ready {
-		t.Fatalf("Ready = true, want false")
-	}
-	if !strings.Contains(updated.Status.Message, "not found") {
-		t.Fatalf("Message = %q, want missing Secret context", updated.Status.Message)
-	}
-}
-
-func TestAgentRuntimeReconcilerReportsMissingBearerSecretKey(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
-	defer server.Close()
-
-	runtime, secret := testAgentRuntimeAndSecret(server.URL())
-	secret.Data = map[string][]byte{"other": []byte("x")}
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get AgentRuntime: %v", err)
-	}
-	if updated.Status.Ready {
-		t.Fatalf("Ready = true, want false")
-	}
-	if !strings.Contains(updated.Status.Message, "key") || !strings.Contains(updated.Status.Message, "empty or missing") {
-		t.Fatalf("Message = %q, want missing key context", updated.Status.Message)
-	}
-}
-
-func TestAgentRuntimeReconcilerRequiresCapabilitySubset(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
-	defer server.Close()
-
-	runtime, secret := testAgentRuntimeAndSecret(server.URL())
-	runtime.Spec.Capabilities.ToolExecutionModes = []corev1alpha1.AgentRuntimeToolExecutionMode{corev1alpha1.AgentRuntimeToolExecutionMode("future")}
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	var updated corev1alpha1.AgentRuntime
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
-		t.Fatalf("Get AgentRuntime: %v", err)
-	}
-	if updated.Status.Ready {
-		t.Fatalf("Ready = true, want false")
-	}
-	if !strings.Contains(updated.Status.Message, "toolExecutionMode") {
-		t.Fatalf("Message = %q, want capability failure", updated.Status.Message)
-	}
-}
-
-func reconcileRequestFor(obj client.Object) ctrl.Request {
-	return ctrl.Request{NamespacedName: client.ObjectKeyFromObject(obj)}
-}
-
-func newAgentRuntimeUnitReconciler(t *testing.T, objs ...client.Object) *AgentRuntimeReconciler {
-	t.Helper()
-	previousAllowLoopback := agentRuntimeAllowInsecureLoopbackForTests
-	agentRuntimeAllowInsecureLoopbackForTests = true
-	t.Cleanup(func() { agentRuntimeAllowInsecureLoopbackForTests = previousAllowLoopback })
-	scheme := newTestScheme()
-	fc := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.AgentRuntime{}).
-		WithObjects(objs...).
-		Build()
-	return &AgentRuntimeReconciler{Client: fc, Scheme: scheme}
-}
-
-func testAgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *corev1.Secret) {
-	supportsCancel := true
-	supportsSessions := true
-	runtime := &corev1alpha1.AgentRuntime{
-		ObjectMeta: metav1.ObjectMeta{Name: "fibey-agentkit", Namespace: "default", Generation: 1},
+func TestAgentRuntimeReconcilerRejectsV1Contract(t *testing.T) {
+	runtimeObject := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "legacy", Generation: 1},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
-			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
-				Mode:     corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint,
-				Endpoint: endpoint,
+			ContractVersion: corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"),
+			Deployment:      corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: "https://runtime.example.com"},
+		},
+	}
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "orka.harness.v2") {
+		t.Fatalf("legacy runtime status = %#v", updated.Status)
+	}
+}
+
+func TestValidateAgentRuntimeSpecRequiresExactCanonicalProfileDigest(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims}
+	runtimeObject, _ := testAgentRuntimeAndSecret(t, "https://runtime.example.com", config)
+	runtimeObject.Spec.Capabilities.Profile.Digest = testControllerDigest("wrong")
+	if err := validateAgentRuntimeSpec(runtimeObject); err == nil || !strings.Contains(err.Error(), "canonical digest") {
+		t.Fatalf("validateAgentRuntimeSpec() = %v, want canonical digest mismatch", err)
+	}
+}
+
+func TestValidateAgentRuntimeSpecRejectsTrustedRuntimeStrictClaims(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	claims.Mode = v2conformance.WorkspaceGovernanceTrusted
+	claims.Trusted = true
+	config := conformancetest.Config{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims}
+	runtimeObject, _ := testAgentRuntimeAndSecret(t, "https://runtime.example.com", config)
+	if err := validateAgentRuntimeSpec(runtimeObject); err == nil || !strings.Contains(err.Error(), "must not claim strict") {
+		t.Fatalf("validateAgentRuntimeSpec() = %v, want trusted strict-claim rejection", err)
+	}
+}
+
+func TestAgentRuntimeTrustedNonGovernedRegistrationIsExplicitAndNotStrictEligible(t *testing.T) {
+	profile, _, limits := testAgentRuntimeProfileClaimsAndLimits()
+	claims := v2conformance.WorkspaceGovernanceClaims{Mode: v2conformance.WorkspaceGovernanceTrusted, Trusted: true}
+	config := conformancetest.Config{
+		ControllerBearerToken: strings.Repeat("t", 32), OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID: "trusted-runtime-1", SupervisorBootID: "boot-1", RuntimePoolUID: "external-pool-1",
+		Profile: profile, Limits: limits, WorkspaceGovernance: claims,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	if runtimeObject.Spec.Capabilities.SupportsStrictWorkspaceIntent(corev1alpha1.WorkspaceIntentRead) ||
+		runtimeObject.Spec.Capabilities.SupportsStrictWorkspaceIntent(corev1alpha1.WorkspaceIntentWrite) {
+		t.Fatal("trusted non-governed runtime was eligible for strict workspace intent")
+	}
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if !updated.Status.Ready || updated.Status.ObservedCapabilities == nil || !updated.Status.ObservedCapabilities.WorkspaceGovernance.Trusted {
+		t.Fatalf("trusted runtime registration = %#v", updated.Status)
+	}
+	if server.Counts().WorkspaceDeltas != 0 {
+		t.Fatal("trusted non-governed conformance unexpectedly relied on strict workspace delta production")
+	}
+}
+
+func TestAgentRuntimeReconcilerFailsClosedWhenStatusIsUnauthenticated(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken: strings.Repeat("t", 32), OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID: "runtime-1", SupervisorBootID: "boot-1", RuntimePoolUID: "pool-1",
+		Profile: profile, Limits: limits, WorkspaceGovernance: claims, AllowUnauthenticatedStatus: true,
+	}
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, server.URL(), config)
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "status negative probe") {
+		t.Fatalf("unauthenticated status exposure = %#v", updated.Status)
+	}
+}
+
+func TestAgentRuntimeReconcilerRejectsMissingCapabilitySecretKey(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{
+		ControllerBearerToken: strings.Repeat("t", 32), OperationCapabilitySecret: []byte(strings.Repeat("s", 32)),
+		RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims,
+	}
+	runtimeObject, secret := testAgentRuntimeAndSecret(t, "https://runtime.example.com", config)
+	delete(secret.Data, "capability-secret")
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "at least 32 bytes") {
+		t.Fatalf("missing capability key status = %#v", updated.Status)
+	}
+}
+
+func TestAgentRuntimeEndpointPolicy(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims}
+	runtimeObject, _ := testAgentRuntimeAndSecret(t, "http://runtime.default.svc.cluster.local:8080", config)
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"}}
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service)
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err != nil {
+		t.Fatalf("same-namespace Service endpoint: %v", err)
+	}
+	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.other.svc.cluster.local:8080"
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "must match") {
+		t.Fatalf("cross-namespace endpoint error = %v", err)
+	}
+	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.example.com"
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("external HTTP endpoint error = %v", err)
+	}
+}
+
+func TestAgentRuntimeProfilePreservesModelLimits(t *testing.T) {
+	base, _, _ := testAgentRuntimeProfileClaimsAndLimits()
+	base.ProviderKind = runtimePoolProviderOpencode
+	base.Model = "openai/gpt-test"
+	base.AdapterDigests = map[string]string{"opencode": testControllerDigest("opencode-adapter")}
+	base.ProxyCredentialScope = "model:openai/gpt-test"
+	base.ModelLimits = &harnessv2.ModelTokenLimits{Context: 32768, Output: 4096}
+	spec := corev1alpha1.AgentRuntimeProfileSpec{
+		DigestSchemaVersion:      int32(harnessv2.ProfileDigestSchemaVersion),
+		ACPProfile:               base.ACPProfile,
+		AdapterName:              "opencode",
+		AdapterDigest:            base.AdapterDigests["opencode"],
+		ProviderKind:             base.ProviderKind,
+		Model:                    base.Model,
+		ModelLimits:              &corev1alpha1.ModelTokenLimits{Context: 32768, Output: 4096},
+		AgentConfigurationDigest: base.AgentConfigurationDigest,
+		ToolPolicyDigest:         base.ToolPolicyDigest,
+		ApprovalPolicyDigest:     base.ApprovalPolicyDigest,
+		MCPConfigurationDigest:   base.MCPConfigurationDigest,
+		WorkspaceIntent:          corev1alpha1.WorkspaceIntent(base.WorkspaceIntent),
+		ProxyCredentialRole:      base.ProxyCredentialRole,
+		ProxyCredentialScope:     base.ProxyCredentialScope,
+		ResourceClass:            base.ResourceClass,
+	}
+	profile, err := agentRuntimeProfile(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.ModelLimits == nil || profile.ModelLimits.Context != 32768 || profile.ModelLimits.Output != 4096 {
+		t.Fatalf("model limits = %#v", profile.ModelLimits)
+	}
+}
+
+func testAgentRuntimeAndSecret(t *testing.T, endpoint string, config conformancetest.Config) (*corev1alpha1.AgentRuntime, *corev1.Secret) {
+	t.Helper()
+	profileDigest, err := harnessv2.CanonicalProfileDigest(config.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterName, adapterDigest := "", ""
+	for adapterName, adapterDigest = range config.Profile.AdapterDigests {
+		break
+	}
+	var apiModelLimits *corev1alpha1.ModelTokenLimits
+	if config.Profile.ModelLimits != nil {
+		apiModelLimits = &corev1alpha1.ModelTokenLimits{
+			Context: config.Profile.ModelLimits.Context,
+			Output:  config.Profile.ModelLimits.Output,
+		}
+	}
+	runtimeObject := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime", Generation: 1},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+			Deployment:      corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: endpoint},
+			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{
+				ControllerBearerTokenSecretRef: corev1alpha1.AgentRuntimeSecretKeyReference{Name: "runtime-auth", Key: "controller-token"},
+				OperationCapabilitySecretRef:   corev1alpha1.AgentRuntimeSecretKeyReference{Name: "runtime-auth", Key: "capability-secret"},
 			},
-			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{BearerAuthRef: corev1alpha1.AgentRuntimeBearerAuthReference{
-				Name: "fibey-agentkit-harness-token",
-				Key:  "token",
-			}},
 			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-				ToolExecutionModes:      []corev1alpha1.AgentRuntimeToolExecutionMode{corev1alpha1.AgentRuntimeToolExecutionModeObserved},
-				SupportsCancel:          &supportsCancel,
-				SupportsRuntimeSessions: &supportsSessions,
+				RuntimeInstanceID: string(config.RuntimeInstanceID),
+				Profile: corev1alpha1.AgentRuntimeProfileSpec{
+					Digest: string(profileDigest), DigestSchemaVersion: int32(harnessv2.ProfileDigestSchemaVersion),
+					ACPProfile: config.Profile.ACPProfile, AdapterName: adapterName, AdapterDigest: adapterDigest,
+					ProviderKind: config.Profile.ProviderKind, Model: config.Profile.Model, ModelLimits: apiModelLimits,
+					AgentConfigurationDigest: config.Profile.AgentConfigurationDigest,
+					ToolPolicyDigest:         config.Profile.ToolPolicyDigest, ApprovalPolicyDigest: config.Profile.ApprovalPolicyDigest,
+					MCPConfigurationDigest: config.Profile.MCPConfigurationDigest,
+					WorkspaceIntent:        corev1alpha1.WorkspaceIntent(config.Profile.WorkspaceIntent),
+					ProxyCredentialRole:    config.Profile.ProxyCredentialRole, ProxyCredentialScope: config.Profile.ProxyCredentialScope,
+					ResourceClass: config.Profile.ResourceClass,
+				},
+				Limits: corev1alpha1.AgentRuntimeProtocolLimits{
+					MaxResidentSessions: int32(config.Limits.MaxResidentSessions), MaxConcurrentPrompts: int32(config.Limits.MaxConcurrentPrompts),
+					MaxRequestBytes: int32(config.Limits.MaxRequestBytes), MaxEventLineBytes: int32(config.Limits.MaxEventLineBytes),
+					MaxTerminalResultBytes: int32(config.Limits.MaxTerminalResultBytes), MaxBufferedEvents: int32(config.Limits.MaxBufferedEvents),
+					MaxUpdateEventsPerSecond: int32(config.Limits.MaxUpdateEventsPerSecond), MinPromptLeaseMillis: config.Limits.MinPromptLeaseMillis,
+					MaxPromptLeaseMillis: config.Limits.MaxPromptLeaseMillis, MaxPendingPermissions: int32(config.Limits.MaxPendingPermissions),
+					MaxWorkspaceDeltaBytes: config.Limits.MaxWorkspaceDeltaBytes,
+				},
+				SupportsDrain: config.SupportsDrain,
+				WorkspaceGovernance: corev1alpha1.AgentRuntimeWorkspaceGovernanceCapabilities{
+					Mode: corev1alpha1.AgentRuntimeWorkspaceGovernanceMode(config.WorkspaceGovernance.Mode), Trusted: config.WorkspaceGovernance.Trusted,
+					OrkaOwnedWorkspaceDeltas:        config.WorkspaceGovernance.OrkaOwnedWorkspaceDeltas,
+					PromptScopedBrokerAuthorization: config.WorkspaceGovernance.PromptScopedBrokerAuthorization,
+					NoDirectSCMPublication:          config.WorkspaceGovernance.NoDirectSCMPublication,
+					OrkaOwnedCleanRoomPublication:   config.WorkspaceGovernance.OrkaOwnedCleanRoomPublication,
+					ExactInstanceFencing:            config.WorkspaceGovernance.ExactInstanceFencing,
+					DuplicateSafeMutations:          config.WorkspaceGovernance.DuplicateSafeMutations,
+					CancellationSettlement:          config.WorkspaceGovernance.CancellationSettlement,
+				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "fibey-agentkit-harness-token", Namespace: "default", Labels: map[string]string{agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: "fibey-agentkit"}, Annotations: map[string]string{agentRuntimeAuthEndpointAnnotation: endpoint}},
-		Data:       map[string][]byte{"token": []byte(agentRuntimeTestBearer)},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-auth",
+			Labels:      map[string]string{agentRuntimeAuthUseLabel: "true", agentRuntimeAuthRefNameLabel: runtimeObject.Name},
+			Annotations: map[string]string{agentRuntimeAuthEndpointAnnotation: endpoint},
+		},
+		Data: map[string][]byte{
+			"controller-token":  []byte(config.ControllerBearerToken),
+			"capability-secret": append([]byte(nil), config.OperationCapabilitySecret...),
+		},
 	}
-	return runtime, secret
+	return runtimeObject, secret
 }
 
-func TestAgentRuntimeEndpointPolicyRejectsInsecureExternalEndpoint(t *testing.T) {
-	runtime, secret := testAgentRuntimeAndSecret("http://runtime.example.com")
-	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if err := validateAgentRuntimeSpec(runtime); err != nil {
-		t.Fatalf("validateAgentRuntimeSpec() error = %v", err)
+func testAgentRuntimeProfileClaimsAndLimits() (harnessv2.RuntimeProfile, v2conformance.WorkspaceGovernanceClaims, harnessv2.ProtocolLimits) {
+	toolPolicy := harnessv2.MCPToolPolicy{AllowedToolNames: []string{}, Tools: []harnessv2.MCPToolDescriptor{}}
+	toolPolicyDigest, _ := harnessv2.CanonicalRuntimeToolPolicyDigest(toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)
+	approvalPolicyDigest, _ := harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{})
+	mcpConfigurationDigest, _ := harnessv2.CanonicalMCPConfigurationDigest(toolPolicy.AllowedToolNames)
+	profile := harnessv2.RuntimeProfile{
+		ACPProfile:     harnessv2.ACPProfileV1,
+		AdapterDigests: map[string]string{"codex": testControllerDigest("adapter")},
+		ProviderKind:   "codex", Model: acpTestModel,
+		AgentConfigurationDigest: testControllerDigest("agent"), ToolPolicyDigest: toolPolicyDigest,
+		ApprovalPolicyDigest: approvalPolicyDigest, MCPConfigurationDigest: mcpConfigurationDigest,
+		WorkspaceIntent:     harnessv2.WorkspaceIntentRead,
+		ProxyCredentialRole: "provider-proxy", ProxyCredentialScope: "session-and-prompt", ResourceClass: "standard",
 	}
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy() = %v, want https requirement", err)
+	claims := v2conformance.WorkspaceGovernanceClaims{
+		Mode:                     v2conformance.WorkspaceGovernanceStrict,
+		OrkaOwnedWorkspaceDeltas: true, PromptScopedBrokerAuthorization: true,
+		NoDirectSCMPublication: true, OrkaOwnedCleanRoomPublication: true,
+		ExactInstanceFencing: true, DuplicateSafeMutations: true, CancellationSettlement: true,
 	}
-	runtime.Spec.Deployment.Endpoint = "http://127.0.0.1:8080"
-	agentRuntimeAllowInsecureLoopbackForTests = false
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(loopback) = %v, want https requirement", err)
+	return profile, claims, harnessv2.DefaultProtocolLimits()
+}
+
+func testControllerDigest(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func reconcileRequestFor(object client.Object) ctrl.Request {
+	return ctrl.Request{NamespacedName: client.ObjectKeyFromObject(object)}
+}
+
+func newAgentRuntimeUnitReconciler(t *testing.T, objects ...client.Object) *AgentRuntimeReconciler {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.AgentRuntime{}).WithObjects(objects...).Build()
+	return &AgentRuntimeReconciler{Client: fakeClient, Scheme: scheme}
+}
+
+func getAgentRuntime(t *testing.T, reconciler *AgentRuntimeReconciler, object *corev1alpha1.AgentRuntime) corev1alpha1.AgentRuntime {
+	t.Helper()
+	var updated corev1alpha1.AgentRuntime
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(object), &updated); err != nil {
+		t.Fatal(err)
+	}
+	return updated
+}
+
+func allowAgentRuntimeLoopback(t *testing.T) {
+	t.Helper()
 	agentRuntimeAllowInsecureLoopbackForTests = true
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: "default"}, Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "runtime"}}}
-	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service)
-	runtime.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(cluster-local) error = %v", err)
-	}
-	runtime.Spec.Deployment.Endpoint = "http://runtime:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(short-service) = %v, want https requirement", err)
-	}
-	runtime.Spec.Deployment.Endpoint = "http://runtime.default:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(service-namespace) error = %v", err)
-	}
-	selectorlessService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "selectorless-runtime", Namespace: "default"}}
-	externalNameService := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: "default"},
-		Spec:       corev1.ServiceSpec{Type: corev1.ServiceTypeExternalName, ExternalName: "runtime.example.com"},
-	}
-	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service, selectorlessService, externalNameService)
-	runtime.Spec.Deployment.Endpoint = "http://selectorless-runtime.default.svc.cluster.local:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(selectorless service) = %v, want https requirement", err)
-	}
-	runtime.Spec.Deployment.Endpoint = "http://external-runtime.default.svc.cluster.local:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(externalName) = %v, want https requirement", err)
-	}
-	runtime.Spec.Deployment.Endpoint = "http://missing:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(missing short service) = %v, want https requirement", err)
-	}
-	runtime.Spec.Deployment.Endpoint = "http://runtime.dev:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(namespace-like external) = %v, want https requirement", err)
-	}
-	runtime.Spec.Deployment.Endpoint = "http://runtime.svc.attacker.com"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(svc-looking external) = %v, want https requirement", err)
-	}
-	runtime.Spec.Deployment.Endpoint = "http://runtime.default.svc.attacker.com"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(svc-extra-label external) = %v, want https requirement", err)
-	}
-	runtime.Spec.Deployment.Endpoint = "http://10.0.0.5:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(private IP) = %v, want https requirement", err)
-	}
-	runtime.Spec.Deployment.Endpoint = "https://user:pass@runtime.example.com"
-	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), "credentials") {
-		t.Fatalf("validateAgentRuntimeSpec(credentials) = %v, want credentials rejection", err)
-	}
-}
-
-func TestValidateAgentRuntimeExecutableCapabilitiesRejectsUnknownBrokeredClass(t *testing.T) {
-	err := validateAgentRuntimeExecutableCapabilities(&harness.CapabilitiesResponse{
-		RuntimeName:             "runtime-a",
-		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeBrokered},
-		BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClass("admin")},
-		SupportsRuntimeSessions: true,
-		SupportsContinuation:    true,
-	})
-	if err == nil || !strings.Contains(err.Error(), "unsupported brokeredToolClass") {
-		t.Fatalf("validateAgentRuntimeExecutableCapabilities() error = %v, want brokered class rejection", err)
-	}
-}
-
-func TestValidateAgentRuntimeExecutableCapabilitiesRequiresBrokeredContinuation(t *testing.T) {
-	err := validateAgentRuntimeExecutableCapabilities(&harness.CapabilitiesResponse{
-		RuntimeName:             "runtime-a",
-		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved, harness.ToolExecutionModeBrokered},
-		BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
-		SupportsCancel:          true,
-		SupportsRuntimeSessions: true,
-	})
-	if err == nil || !strings.Contains(err.Error(), "supportsContinuation") {
-		t.Fatalf("validateAgentRuntimeExecutableCapabilities() error = %v, want continuation requirement", err)
-	}
-}
-
-func TestValidateObservedHarnessCapabilitiesRequiresCancelAndSessions(t *testing.T) {
-	err := validateObservedHarnessCapabilities(&harness.CapabilitiesResponse{
-		RuntimeName:             "runtime-a",
-		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
-		SupportsRuntimeSessions: true,
-	})
-	if err == nil || !strings.Contains(err.Error(), "supportsCancel") {
-		t.Fatalf("validateObservedHarnessCapabilities() error = %v, want supportsCancel requirement", err)
-	}
-	err = validateObservedHarnessCapabilities(&harness.CapabilitiesResponse{
-		RuntimeName:        "runtime-a",
-		ToolExecutionModes: []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
-		SupportsCancel:     true,
-	})
-	if err == nil || !strings.Contains(err.Error(), "supportsRuntimeSessions") {
-		t.Fatalf("validateObservedHarnessCapabilities() error = %v, want supportsRuntimeSessions requirement", err)
-	}
-}
-
-func TestObservedCapabilitiesFromConformanceRedactsStrings(t *testing.T) {
-	leaked := "sk-" + strings.Repeat("a", 20)
-	got := observedCapabilitiesFromConformance(&harness.CapabilitiesResponse{
-		ProtocolVersion:         harness.ProtocolVersion,
-		Transport:               harness.HTTPTransport,
-		RuntimeName:             "runtime " + leaked,
-		RuntimeVersion:          "Authorization: Bearer " + leaked,
-		ProviderKind:            harness.ProviderKindKubernetesService,
-		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
-		SupportsCancel:          true,
-		SupportsRuntimeSessions: true,
-	})
-	if got == nil {
-		t.Fatal("observed = nil")
-	}
-	if strings.Contains(got.RuntimeName, leaked) || strings.Contains(got.RuntimeVersion, leaked) {
-		t.Fatalf("observed capabilities leaked secret-like values: %#v", got)
-	}
-}
-
-func TestValidateObservedHarnessCapabilitiesRequiresObservedMode(t *testing.T) {
-	err := validateObservedHarnessCapabilities(&harness.CapabilitiesResponse{
-		RuntimeName:        "runtime-a",
-		ToolExecutionModes: []harness.ToolExecutionMode{harness.ToolExecutionModeBrokered},
-	})
-	if err == nil || !strings.Contains(err.Error(), "observed") {
-		t.Fatalf("validateObservedHarnessCapabilities() error = %v, want observed mode requirement", err)
-	}
-}
-
-func TestObservedCapabilitiesFromConformanceMapsModes(t *testing.T) {
-	got := observedCapabilitiesFromConformance(&harness.CapabilitiesResponse{
-		ProtocolVersion:         harness.ProtocolVersion,
-		RuntimeName:             "runtime-a",
-		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
-		SupportsCancel:          true,
-		SupportsRuntimeSessions: true,
-	})
-	if got == nil || len(got.ToolExecutionModes) != 1 || got.ToolExecutionModes[0] != corev1alpha1.AgentRuntimeToolExecutionModeObserved {
-		t.Fatalf("observed = %#v", got)
-	}
+	t.Cleanup(func() { agentRuntimeAllowInsecureLoopbackForTests = false })
 }

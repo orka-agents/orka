@@ -1,0 +1,269 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+	"text/tabwriter"
+
+	"github.com/spf13/cobra"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/cli/client"
+)
+
+type taskWorkspaceCreateOptions struct {
+	intent                        string
+	gitRepo                       string
+	sourceRepositoryProvider      string
+	sourceRepositoryID            string
+	branch                        string
+	ref                           string
+	subPath                       string
+	readCredential                string
+	readCredentialKey             string
+	publicationGitRepo            string
+	publicationRepositoryProvider string
+	publicationRepositoryID       string
+	publicationReadCredential     string
+	publicationReadCredentialKey  string
+	publicationCredential         string
+	publicationCredentialKey      string
+	forgeCredential               string
+	forgeCredentialKey            string
+	pushBranch                    string
+	prBaseBranch                  string
+	createPR                      bool
+}
+
+func (o *taskWorkspaceCreateOptions) bindFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&o.intent, "workspace-intent", "read", "Agent workspace intent: read or write")
+	cmd.Flags().StringVar(&o.gitRepo, "git-repo", "", "Source repository URL (credentials must not be embedded)")
+	cmd.Flags().StringVar(&o.sourceRepositoryProvider, "source-repository-provider", "", "Canonical source repository provider")
+	cmd.Flags().StringVar(&o.sourceRepositoryID, "source-repository-id", "", "Canonical source repository ID")
+	cmd.Flags().StringVar(&o.branch, "branch", "", "Source branch")
+	cmd.Flags().StringVar(&o.ref, "ref", "", "Source commit, tag, or ref")
+	cmd.Flags().StringVar(&o.subPath, "sub-path", "", "Subdirectory within the source repository")
+	cmd.Flags().StringVar(&o.readCredential, "read-credential", "", "Secret name for source clone/read credentials")
+	cmd.Flags().StringVar(&o.readCredentialKey, "read-credential-key", "", "Secret key for source clone/read credentials (default: token)")
+	cmd.Flags().StringVar(&o.publicationGitRepo, "publication-git-repo", "", "Publication repository URL")
+	cmd.Flags().StringVar(&o.publicationRepositoryProvider, "publication-repository-provider", "", "Canonical publication repository provider")
+	cmd.Flags().StringVar(&o.publicationRepositoryID, "publication-repository-id", "", "Canonical publication repository ID")
+	cmd.Flags().StringVar(&o.publicationReadCredential, "publication-read-credential", "", "Secret name for publication preflight and verification credentials")
+	cmd.Flags().StringVar(&o.publicationReadCredentialKey, "publication-read-credential-key", "", "Secret key for publication preflight and verification credentials (default: token)")
+	cmd.Flags().StringVar(&o.publicationCredential, "publication-credential", "", "Secret name for publication write credentials")
+	cmd.Flags().StringVar(&o.publicationCredentialKey, "publication-credential-key", "", "Secret key for publication write credentials (default: token)")
+	cmd.Flags().StringVar(&o.forgeCredential, "forge-credential", "", "Secret name for forge API credentials used to reconcile pull requests")
+	cmd.Flags().StringVar(&o.forgeCredentialKey, "forge-credential-key", "", "Secret key for forge API credentials (default: token)")
+	cmd.Flags().StringVar(&o.pushBranch, "push-branch", "", "Publication branch (default: controller-derived full-entropy branch)")
+	cmd.Flags().StringVar(&o.prBaseBranch, "pr-base-branch", "", "Pull request base branch")
+	cmd.Flags().BoolVar(&o.createPR, "create-pr", false, "Reconcile a pull request after verified publication")
+}
+
+func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (map[string]any, error) {
+	intent := strings.ToLower(strings.TrimSpace(o.intent))
+	if intent != string(corev1alpha1.WorkspaceIntentRead) && intent != string(corev1alpha1.WorkspaceIntentWrite) {
+		return nil, fmt.Errorf("--workspace-intent must be read or write")
+	}
+	workspaceFlagsUsed := false
+	for _, name := range []string{
+		"workspace-intent", "git-repo", "source-repository-provider", "source-repository-id", "branch", "ref",
+		"sub-path", "read-credential", "read-credential-key", "publication-git-repo", "publication-repository-provider",
+		"publication-repository-id", "publication-read-credential", "publication-read-credential-key",
+		"publication-credential", "publication-credential-key", "forge-credential", "forge-credential-key",
+		"push-branch", "pr-base-branch", "create-pr",
+	} {
+		workspaceFlagsUsed = workspaceFlagsUsed || cmd.Flags().Changed(name)
+	}
+	if taskType != cliTaskTypeAgent {
+		if workspaceFlagsUsed {
+			return nil, fmt.Errorf("workspace flags are supported only for agent tasks")
+		}
+		return nil, nil
+	}
+	if (strings.TrimSpace(o.sourceRepositoryProvider) == "") != (strings.TrimSpace(o.sourceRepositoryID) == "") {
+		return nil, fmt.Errorf("--source-repository-provider and --source-repository-id must be set together")
+	}
+	if (strings.TrimSpace(o.publicationRepositoryProvider) == "") != (strings.TrimSpace(o.publicationRepositoryID) == "") {
+		return nil, fmt.Errorf("--publication-repository-provider and --publication-repository-id must be set together")
+	}
+	for _, credential := range []struct {
+		nameFlag string
+		name     string
+		keyFlag  string
+		key      string
+	}{
+		{nameFlag: "--read-credential", name: o.readCredential, keyFlag: "--read-credential-key", key: o.readCredentialKey},
+		{nameFlag: "--publication-read-credential", name: o.publicationReadCredential, keyFlag: "--publication-read-credential-key", key: o.publicationReadCredentialKey},
+		{nameFlag: "--publication-credential", name: o.publicationCredential, keyFlag: "--publication-credential-key", key: o.publicationCredentialKey},
+		{nameFlag: "--forge-credential", name: o.forgeCredential, keyFlag: "--forge-credential-key", key: o.forgeCredentialKey},
+	} {
+		if strings.TrimSpace(credential.key) != "" && strings.TrimSpace(credential.name) == "" {
+			return nil, fmt.Errorf("%s requires %s", credential.keyFlag, credential.nameFlag)
+		}
+	}
+	publicationRequested := o.createPR || strings.TrimSpace(o.publicationGitRepo) != "" ||
+		strings.TrimSpace(o.publicationRepositoryProvider) != "" || strings.TrimSpace(o.publicationReadCredential) != "" ||
+		strings.TrimSpace(o.publicationReadCredentialKey) != "" || strings.TrimSpace(o.publicationCredential) != "" ||
+		strings.TrimSpace(o.publicationCredentialKey) != "" || strings.TrimSpace(o.forgeCredential) != "" ||
+		strings.TrimSpace(o.forgeCredentialKey) != "" || strings.TrimSpace(o.pushBranch) != "" || strings.TrimSpace(o.prBaseBranch) != ""
+	if err := o.validatePublicationOptions(intent, publicationRequested); err != nil {
+		return nil, err
+	}
+
+	workspace := map[string]any{"intent": intent}
+	addTrimmed(workspace, "gitRepo", o.gitRepo)
+	addRepositoryIdentity(workspace, "sourceRepository", o.sourceRepositoryProvider, o.sourceRepositoryID)
+	addTrimmed(workspace, "branch", o.branch)
+	addTrimmed(workspace, "ref", o.ref)
+	addTrimmed(workspace, "subPath", o.subPath)
+	addCredentialRef(workspace, "readCredentialRef", o.readCredential, o.readCredentialKey)
+	if intent == string(corev1alpha1.WorkspaceIntentWrite) {
+		addTrimmed(workspace, "publicationGitRepo", o.publicationGitRepo)
+		addRepositoryIdentity(workspace, "publicationRepository", o.publicationRepositoryProvider, o.publicationRepositoryID)
+		addCredentialRef(workspace, "publicationReadCredentialRef", o.publicationReadCredential, o.publicationReadCredentialKey)
+		addCredentialRef(workspace, "publicationCredentialRef", o.publicationCredential, o.publicationCredentialKey)
+		addCredentialRef(workspace, "forgeCredentialRef", o.forgeCredential, o.forgeCredentialKey)
+		addTrimmed(workspace, "pushBranch", o.pushBranch)
+		addTrimmed(workspace, "prBaseBranch", o.prBaseBranch)
+		if o.createPR {
+			workspace["createPR"] = true
+		}
+	}
+	return workspace, nil
+}
+
+func (o taskWorkspaceCreateOptions) validatePublicationOptions(intent string, publicationRequested bool) error {
+	if intent != string(corev1alpha1.WorkspaceIntentWrite) {
+		if publicationRequested {
+			return fmt.Errorf("publication flags require --workspace-intent write")
+		}
+		return nil
+	}
+	if strings.TrimSpace(o.gitRepo) == "" {
+		return fmt.Errorf("--workspace-intent write requires --git-repo")
+	}
+	if strings.TrimSpace(o.publicationCredential) == "" {
+		return fmt.Errorf("--workspace-intent write requires --publication-credential")
+	}
+	if o.createPR && strings.TrimSpace(o.prBaseBranch) == "" {
+		return fmt.Errorf("--create-pr requires --pr-base-branch")
+	}
+	if o.createPR && strings.TrimSpace(o.forgeCredential) == "" {
+		return fmt.Errorf("--create-pr requires --forge-credential")
+	}
+	return nil
+}
+
+func addTrimmed(target map[string]any, key, value string) {
+	if value = strings.TrimSpace(value); value != "" {
+		target[key] = value
+	}
+}
+
+func addRepositoryIdentity(target map[string]any, key, provider, id string) {
+	provider = strings.TrimSpace(provider)
+	id = strings.TrimSpace(id)
+	if provider != "" && id != "" {
+		target[key] = map[string]any{"provider": provider, "id": id}
+	}
+}
+
+func addCredentialRef(target map[string]any, field, name, secretKey string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	ref := map[string]any{"name": name}
+	if secretKey = strings.TrimSpace(secretKey); secretKey != "" {
+		ref["key"] = secretKey
+	}
+	target[field] = ref
+}
+
+func newTaskRuntimeStatusCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "status <name>",
+		Short: "Show durable execution, delivery, and runtime-pool status",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClientFromCmd(cmd)
+			detail, err := c.GetTask(cmd.Context(), args[0], client.GetOptions{Namespace: c.Namespace})
+			if err != nil {
+				return err
+			}
+			status := safeTaskRuntimeStatus(*detail)
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format != outputTable {
+				return printStructured(cmd, status)
+			}
+			return printTaskRuntimeStatusTable(cmd, status)
+		},
+	}
+	addOutputFlag(cmd, outputTable)
+	return cmd
+}
+
+func safeTaskRuntimeStatus(task client.TaskDetail) map[string]any {
+	out := map[string]any{
+		"task":      client.StringField(task, "metadata", "name"),
+		"namespace": client.StringField(task, "metadata", "namespace"),
+	}
+	status := nestedMap(task, "status")
+	out["phase"] = status["phase"]
+	if execution := nestedMap(status, "execution"); len(execution) > 0 {
+		out["execution"] = copyKeys(execution,
+			"state", "outcome", "reason", "attempt", "promptID", "runtimePoolName", "runtimePoolUID",
+			"runtimeInstanceID", "runtimeSessionUID", "runtimeSessionGeneration", "requestDigest", "controllerEpoch",
+			"message", "lastTransitionTime")
+	}
+	if delivery := nestedMap(status, "delivery"); len(delivery) > 0 {
+		out["delivery"] = copyKeys(delivery,
+			"state", "outcome", "reason", "publicationID", "sourceRepository", "publicationRepository", "branch",
+			"startingSHA", "remoteBeforeSHA", "treeSHA", "expectedCommitSHA", "verifiedRemoteSHA", "supersedingRemoteSHA",
+			"artifactDigest", "prReceipt", "message", "lastTransitionTime")
+	}
+	return out
+}
+
+func printTaskRuntimeStatusTable(cmd *cobra.Command, status map[string]any) error {
+	execution := nestedMap(status, "execution")
+	delivery := nestedMap(status, "delivery")
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "FIELD\tVALUE") //nolint:errcheck
+	rows := [][2]string{
+		{"Task", anyString(status["task"])},
+		{"Namespace", anyString(status["namespace"])},
+		{"Phase", anyString(status["phase"])},
+		{"Execution", anyString(execution["state"])},
+		{"Execution outcome", anyString(execution["outcome"])},
+		{"Execution reason", anyString(execution["reason"])},
+		{"Attempt", anyString(execution["attempt"])},
+		{"RuntimePool", anyString(execution["runtimePoolName"])},
+		{"Runtime instance", compactCLIValue(anyString(execution["runtimeInstanceID"]))},
+		{"Runtime session generation", anyString(execution["runtimeSessionGeneration"])},
+		{"Delivery", anyString(delivery["state"])},
+		{"Delivery outcome", anyString(delivery["outcome"])},
+		{"Publication branch", anyString(delivery["branch"])},
+		{"Verified remote", compactCLIValue(anyString(delivery["verifiedRemoteSHA"]))},
+	}
+	for _, row := range rows {
+		fmt.Fprintf(w, "%s\t%s\n", row[0], dash(row[1])) //nolint:errcheck
+	}
+	if execution["state"] == "OutcomeUnknown" || execution["outcome"] == "OutcomeUnknown" {
+		fmt.Fprintln(w, "Replay policy\tTerminal; create a new Task explicitly. No automatic replay.") //nolint:errcheck
+	}
+	return w.Flush()
+}
+
+func copyKeys(source map[string]any, keys ...string) map[string]any {
+	out := map[string]any{}
+	for _, key := range keys {
+		if value, ok := source[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
+}

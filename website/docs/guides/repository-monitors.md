@@ -24,7 +24,7 @@ A repository monitor can:
 - store monitor runs, issue/PR items, command events, workflow actions, action records, implementation jobs, mutation records, review records, and audit events durably
 - show monitor status, recent runs, workflow timeline, blocked reasons, implementation jobs, mutation audit, issues, and the PR queue in the dashboard under **Monitors**
 
-The review task is bound to the exact PR head SHA. It runs as a `type: agent` task, uses a Claude runtime Agent, checks out the PR head in a read-only workspace, writes generated PR context under `/workspace/.git/orka/`, and is instructed to return only the structured review result. It does not receive GitHub mutation credentials, post comments, push commits, merge, close, or mutate labels. If `spec.review.publish.enabled` is true, the controller later revalidates the PR state and may publish a deterministic neutral `COMMENT` review from the structured result.
+The review Task is bound to the exact PR head SHA. It runs as a `type: agent` Task with top-level `workspace.intent: read`; `RepositoryMonitor.spec.gitSecretRef` is mapped only to `workspace.readCredentialRef`. The ACP runtime receives no Git credential and must leave the verified tree unchanged. If `spec.review.publish.enabled` is true, the controller later revalidates the PR state and may publish a deterministic neutral `COMMENT` review from the structured result.
 
 ## Current Limits
 
@@ -43,7 +43,7 @@ The first implementation is intentionally narrow:
 
 Repository monitor backend coverage has a focused GitHub Actions workflow at `.github/workflows/repository-monitor-smoke.yml`. It runs on pull requests and pushes that touch the workflow, Go API/controller/store code, CRD/config paths, worker code, or Go dependency files.
 
-The smoke workflow creates the UI embed stub and runs targeted Go tests for monitor store CRUD, API handlers, GitHub pull request event handling, targeted single-PR inventory runs, controller queue and review flow, blocked status counts, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker signing/detection tooling. Worker-level PR review diff context generation is covered by the normal Go test workflow. UI monitor pages are covered by the normal frontend test workflow rather than this smoke workflow.
+The smoke workflow creates the UI embed stub and runs targeted Go tests for monitor store CRUD, API handlers, GitHub pull request event handling, targeted single-PR inventory runs, controller queue and review flow, blocked status counts, read-only review Task construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker signing/detection tooling. Worker-level PR review diff context generation is covered by the normal Go test workflow. UI monitor pages are covered by the normal frontend test workflow rather than this smoke workflow.
 
 The smoke workflow is secret-free. Exact pull request event queueing is exercised with synthetic signed webhook payloads and test clients, so repository monitor PRs do not need live GitHub credentials just to verify queueing, scope checks, or review result ingestion in CI.
 
@@ -90,17 +90,17 @@ kubectl create secret generic repo-monitor-github \
   --from-literal=token='<github-token>'
 ```
 
-The same Secret is mounted into review workspaces for same-repository PR heads. Fork PR heads are checked out from the fork URL without the monitored repository credential.
+For review Tasks, the controller maps `RepositoryMonitor.spec.gitSecretRef` to top-level `workspace.readCredentialRef`. The clean-room source boundary resolves it for same-repository private PR heads; the ACP runtime never receives the Secret. Fork PR heads use the eligible source repository URL and remain read-only.
 
 ## Review Workspace Context
 
-Before the Claude reviewer starts, the worker fetches the PR base branch and writes generated read-only context files:
+The review Task is pinned to the exact PR head SHA with `workspace.intent: read`. The controller supplies bounded PR metadata, changed-file information, and diff context as Orka-owned prompt/artifact inputs rather than treating child-controlled Git metadata as authority.
 
-- `/workspace/.git/orka/pr-review.md` - base/head summary and diff stats
-- `/workspace/.git/orka/pr-review.files` - changed file list
-- `/workspace/.git/orka/pr-review.diff` - unified diff from the base branch to the PR head
+The reviewer must not mutate the verified tree. Any unexpected workspace change fails read validation. GitHub review publishing, when enabled, happens later through the controller's deterministic publisher path; the ACP child has no GitHub mutation credential.
 
-The generated files are added to the workspace's git exclude file so they are not captured as task changes. Read-only review tasks receive only scoped file-reading tools for `/workspace/**` and selected Claude runtime environment variables from the reviewer Secret.
+:::caution ACP migration status
+The monitor controller still contains compatibility code for the earlier worker-based context handoff. Treat provider-live RepositoryMonitor review execution as pending ACP v2 revalidation; unit tests of Task construction alone are not release evidence.
+:::
 
 ## Create a Monitor
 

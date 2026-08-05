@@ -9,7 +9,6 @@ import { ArrowLeft, Trash2 } from 'lucide-react'
 import { PageHeader } from '@/components/layout/page-header'
 import { TaskStatusBadge } from './task-status-badge'
 import { PRStatusBadge } from './pr-status-badge'
-import { PRCreateDialog } from './pr-create-dialog'
 import { TaskResultViewer } from './task-result-viewer'
 import { StructuredLogViewer } from './structured-log-viewer'
 import { TaskExecutionPanel } from './task-execution-panel'
@@ -150,13 +149,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <PRStatusBadge annotations={task.metadata.annotations} />
         </div>
         <div className="flex items-center gap-2">
-          {task.status?.phase === 'Succeeded' &&
-            task.spec.agentRuntime?.workspace?.pushBranch && (
-              <PRCreateDialog
-                taskName={task.metadata.name}
-                pushBranch={task.spec.agentRuntime.workspace.pushBranch}
-              />
-            )}
           {deleteArmed ? (
             <span className="flex items-center gap-1">
               <Button

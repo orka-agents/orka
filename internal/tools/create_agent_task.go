@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -28,11 +29,19 @@ func (t *CreateAgentTaskTool) Description() string {
 
 func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
 	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, promptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The prompt/instruction for the agent"}, agentRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent name with runtime configured"}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, "maxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Maximum agent loop iterations"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
-		"gitRepo":      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Git repository URL"},
-		"branch":       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Git branch to clone from (must exist). Omit to use the default branch."},
-		"pushBranch":   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Branch name to push changes to (will be created if it doesn't exist). Use this for new feature branches."},
-		"gitSecretRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional secret name containing git credentials. Omit to auto-discover git credentials or reuse the Copilot agent secret when available."},
-		"subPath":      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo"},
+		"intent":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaEnumField: []string{"read", "write"}, jsonSchemaDescriptionField: "Workspace intent. Defaults to read; publication fields require write."},
+		"gitRepo":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source Git repository URL"},
+		"branch":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist). Omit with ref to resolve and freeze the repository's advertised default branch."},
+		"ref":                          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact source commit, tag, or ref"},
+		"readCredentialRef":            map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for clone/read credentials. Omit to auto-discover a read credential when available."},
+		"publicationGitRepo":           map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication repository URL for write Tasks"},
+		"publicationReadCredentialRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for target-repository preflight and verification credentials"},
+		"publicationCredentialRef":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Secret name for target-repository write credentials. Required for write intent."},
+		"forgeCredentialRef":           map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for forge API credentials used to reconcile pull requests"},
+		"pushBranch":                   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication branch name"},
+		"prBaseBranch":                 map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Pull request base branch"},
+		"createPR":                     map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Reconcile a pull request after publication"},
+		"subPath":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo"},
 	},
 	}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
 	}, jsonSchemaRequiredField: []string{nameField, promptField, agentRefField},
@@ -101,36 +110,55 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	if ws, ok := a[workspaceField]; ok {
-		if wsMap, ok := ws.(map[string]any); ok {
-			if agentRuntime == nil {
-				agentRuntime = &corev1alpha1.AgentRuntimeSpec{}
-			}
-			wsCfg := &corev1alpha1.WorkspaceConfig{}
-			if gitRepo := chatGetStringArg(wsMap, "gitRepo"); gitRepo != "" {
-				wsCfg.GitRepo = gitRepo
-			}
-			if branch := chatGetStringArg(wsMap, "branch"); branch != "" {
-				wsCfg.Branch = branch
-			}
-			if subPath := chatGetStringArg(wsMap, "subPath"); subPath != "" {
-				wsCfg.SubPath = subPath
-			}
-			if pushBranch := chatGetStringArg(wsMap, "pushBranch"); pushBranch != "" {
-				wsCfg.PushBranch = pushBranch
-			}
-			agent, err := loadAgent(ctx, tc.Client, namespace, agentRef)
-			if err != nil {
-				result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
-				return result, nil
-			}
-			secretRef, err := resolveWorkspaceGitSecretRef(ctx, tc.Client, namespace, agent, chatGetStringArg(wsMap, "gitSecretRef"))
-			if err != nil {
-				result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
-				return result, nil
-			}
-			wsCfg.GitSecretRef = secretRef
-			agentRuntime.Workspace = wsCfg
+		wsMap, ok := ws.(map[string]any)
+		if !ok {
+			return ChatToolErrorResult("invalid_arguments", "workspace must be an object", "Provide workspace as a JSON object or omit it")
 		}
+		wsCfg := &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead}
+		if intent := strings.ToLower(strings.TrimSpace(chatGetStringArg(wsMap, "intent"))); intent != "" {
+			switch corev1alpha1.WorkspaceIntent(intent) {
+			case corev1alpha1.WorkspaceIntentRead, corev1alpha1.WorkspaceIntentWrite:
+				wsCfg.Intent = corev1alpha1.WorkspaceIntent(intent)
+			default:
+				return ChatToolErrorResult("invalid_arguments", "workspace.intent must be read or write", "Use read for inspection or write for publication")
+			}
+		}
+		wsCfg.GitRepo = chatGetStringArg(wsMap, "gitRepo")
+		wsCfg.Branch = chatGetStringArg(wsMap, "branch")
+		wsCfg.Ref = chatGetStringArg(wsMap, "ref")
+		wsCfg.SubPath = chatGetStringArg(wsMap, "subPath")
+		wsCfg.PublicationGitRepo = chatGetStringArg(wsMap, "publicationGitRepo")
+		wsCfg.PushBranch = chatGetStringArg(wsMap, "pushBranch")
+		wsCfg.PRBaseBranch = chatGetStringArg(wsMap, "prBaseBranch")
+		wsCfg.CreatePR, _ = wsMap["createPR"].(bool)
+		if wsCfg.PublicationGitRepo != "" || wsCfg.PushBranch != "" || wsCfg.PRBaseBranch != "" || wsCfg.CreatePR {
+			wsCfg.Intent = corev1alpha1.WorkspaceIntentWrite
+		}
+		publicationCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationCredentialRef"))
+		if wsCfg.Intent == corev1alpha1.WorkspaceIntentWrite && publicationCredential == "" {
+			return ChatToolErrorResult("invalid_arguments", "workspace.publicationCredentialRef is required for write intent", "Provide a dedicated target-repository write credential")
+		}
+		agent, err := loadAgent(ctx, tc.Client, namespace, agentRef)
+		if err != nil {
+			result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
+			return result, nil
+		}
+		readRef, err := resolveWorkspaceCredentialRef(ctx, tc.Client, namespace, agent, chatGetStringArg(wsMap, "readCredentialRef"))
+		if err != nil {
+			result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
+			return result, nil
+		}
+		wsCfg.ReadCredentialRef = readRef
+		if publicationReadCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationReadCredentialRef")); publicationReadCredential != "" {
+			wsCfg.PublicationReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: publicationReadCredential}
+		}
+		if publicationCredential != "" {
+			wsCfg.PublicationCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: publicationCredential}
+		}
+		if forgeCredential := strings.TrimSpace(chatGetStringArg(wsMap, "forgeCredentialRef")); forgeCredential != "" {
+			wsCfg.ForgeCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: forgeCredential}
+		}
+		task.Spec.Workspace = wsCfg
 	}
 
 	task.Spec.AgentRuntime = agentRuntime

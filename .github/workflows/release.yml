@@ -70,13 +70,13 @@ jobs:
           diff --no-dereference --recursive --unified manifest_staging/charts/orka charts/orka
           diff --no-dereference --recursive --unified manifest_staging/deploy deploy
           helm lint charts/orka
-          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 19
+          expected_crds=$(find config/crd/bases -maxdepth 1 -type f -name '*.yaml' | wc -l | tr -d ' ')
+          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq "${expected_crds}"
 
           rendered_chart=$(mktemp)
           trap 'rm -f "${rendered_chart}"' EXIT
           helm template release-validation charts/orka \
             --namespace orka-system \
-            --set-string workers.harnessWrapper.auth.token=mock-token \
             > "${rendered_chart}"
 
           runtime_images=()
@@ -85,9 +85,9 @@ jobs:
             image_ref=${image_ref#\"}
             image_ref=${image_ref%\"}
             runtime_images+=("${image_ref}")
-          done < <(grep -E '^[[:space:]]+image:[[:space:]]+' "${rendered_chart}")
+          done < <(grep -E '^[[:space:]]+image:[[:space:]]+' "${rendered_chart}" | sort -u)
           if [[ ${#runtime_images[@]} -ne 2 ]]; then
-            echo "Expected two rendered runtime images; found ${#runtime_images[@]}." >&2
+            echo "Expected two unique rendered controller/publisher images; found ${#runtime_images[@]}." >&2
             exit 1
           fi
           for image_ref in "${runtime_images[@]}"; do
@@ -121,8 +121,9 @@ jobs:
             echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
             exit 1
           fi
-          if [[ $(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$') -ne 19 ]]; then
-            echo "Packaged Orka chart must contain exactly 19 CRDs." >&2
+          expected_crds=$(find config/crd/bases -maxdepth 1 -type f -name '*.yaml' | wc -l | tr -d ' ')
+          if [[ $(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$') -ne ${expected_crds} ]]; then
+            echo "Packaged Orka chart CRD count does not match config/crd/bases (${expected_crds})." >&2
             exit 1
           fi
 
@@ -218,9 +219,25 @@ jobs:
             image_suffix: "/general-worker"
             dockerfile: workers/general/Dockerfile
             context: .
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
-            dockerfile: workers/harness/Dockerfile
+          - image: acp-codex-runtime
+            image_suffix: "/acp-codex-runtime"
+            dockerfile: workers/acp/images/codex/Dockerfile
+            context: .
+          - image: acp-claude-runtime
+            image_suffix: "/acp-claude-runtime"
+            dockerfile: workers/acp/images/claude/Dockerfile
+            context: .
+          - image: acp-copilot-runtime
+            image_suffix: "/acp-copilot-runtime"
+            dockerfile: workers/acp/images/copilot/Dockerfile
+            context: .
+          - image: acp-opencode-runtime
+            image_suffix: "/acp-opencode-runtime"
+            dockerfile: workers/acp/images/opencode/Dockerfile
+            context: .
+          - image: workspace-publisher
+            image_suffix: "/workspace-publisher"
+            dockerfile: workers/publisher/Dockerfile
             context: .
     steps:
       - name: Checkout
@@ -336,12 +353,44 @@ jobs:
             image_suffix: "/general-worker"
             platform: linux/arm64
             platform_slug: linux-arm64
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
+          - image: acp-codex-runtime
+            image_suffix: "/acp-codex-runtime"
             platform: linux/amd64
             platform_slug: linux-amd64
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
+          - image: acp-codex-runtime
+            image_suffix: "/acp-codex-runtime"
+            platform: linux/arm64
+            platform_slug: linux-arm64
+          - image: acp-claude-runtime
+            image_suffix: "/acp-claude-runtime"
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: acp-claude-runtime
+            image_suffix: "/acp-claude-runtime"
+            platform: linux/arm64
+            platform_slug: linux-arm64
+          - image: acp-copilot-runtime
+            image_suffix: "/acp-copilot-runtime"
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: acp-copilot-runtime
+            image_suffix: "/acp-copilot-runtime"
+            platform: linux/arm64
+            platform_slug: linux-arm64
+          - image: acp-opencode-runtime
+            image_suffix: "/acp-opencode-runtime"
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: acp-opencode-runtime
+            image_suffix: "/acp-opencode-runtime"
+            platform: linux/arm64
+            platform_slug: linux-arm64
+          - image: workspace-publisher
+            image_suffix: "/workspace-publisher"
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: workspace-publisher
+            image_suffix: "/workspace-publisher"
             platform: linux/arm64
             platform_slug: linux-arm64
     steps:
@@ -400,8 +449,16 @@ jobs:
             image_suffix: "/ai-worker"
           - image: general-worker
             image_suffix: "/general-worker"
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
+          - image: acp-codex-runtime
+            image_suffix: "/acp-codex-runtime"
+          - image: acp-claude-runtime
+            image_suffix: "/acp-claude-runtime"
+          - image: acp-copilot-runtime
+            image_suffix: "/acp-copilot-runtime"
+          - image: acp-opencode-runtime
+            image_suffix: "/acp-opencode-runtime"
+          - image: workspace-publisher
+            image_suffix: "/workspace-publisher"
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -519,7 +576,11 @@ jobs:
           promote_image controller ""
           promote_image ai-worker "/ai-worker"
           promote_image general-worker "/general-worker"
-          promote_image agent-harness-wrapper "/agent-harness-wrapper"
+          promote_image acp-codex-runtime "/acp-codex-runtime"
+          promote_image acp-claude-runtime "/acp-claude-runtime"
+          promote_image acp-copilot-runtime "/acp-copilot-runtime"
+          promote_image acp-opencode-runtime "/acp-opencode-runtime"
+          promote_image workspace-publisher "/workspace-publisher"
 
 
   publish-helm-chart:

@@ -26,10 +26,10 @@ type ExecutionSpec struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
-	// Workspace requests an upstream agent-sandbox execution workspace for agent Tasks.
-	// When enabled, the Task controller validates the request and propagates the
-	// resolved sandbox settings to the agent worker Job. The worker wrapper then
-	// claims the sandbox workspace and runs the configured agent runtime inside it.
+	// Workspace requests an execution workspace for worker-backed Task types.
+	// ACP core agent Tasks reject this field because their ephemeral workspace is
+	// owned by RuntimeSession lifecycle and clean-room publication. Actor-backed
+	// RuntimeSession support is a future integration behind the v2 lifecycle seam.
 	// +optional
 	Workspace *ExecutionWorkspaceSpec `json:"workspace,omitempty"`
 }

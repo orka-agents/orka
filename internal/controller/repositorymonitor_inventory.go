@@ -377,17 +377,13 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 			Priority: &priority,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				AllowedTools: readOnlyAgentAllowedTools(),
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      workspaceRepo,
-					Ref:          pr.HeadSHA,
-					GitSecretRef: gitSecretRef,
-					PRBaseBranch: pr.BaseBranch,
-				},
 			},
-			Env: []corev1.EnvVar{
-				{Name: workerenv.PRBaseRepo, Value: repositoryMonitorHTTPSCloneURL(owner, repository)},
-				{Name: workerenv.PRBaseSHA, Value: pr.BaseSHA},
-				{Name: workerenv.ResultStdout, Value: scheduledRunLabelValue},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				Intent:            corev1alpha1.WorkspaceIntentRead,
+				GitRepo:           workspaceRepo,
+				Ref:               pr.HeadSHA,
+				ReadCredentialRef: workspaceCredentialReference(gitSecretRef),
+				PRBaseBranch:      pr.BaseBranch,
 			},
 		},
 	}

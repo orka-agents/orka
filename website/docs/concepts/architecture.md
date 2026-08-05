@@ -4,38 +4,35 @@ slug: /architecture
 
 # Architecture
 
-Orka is a Kubernetes-native task execution platform where a controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes.
+Orka is a Kubernetes-native task execution platform. Container and native AI Tasks run through worker Jobs; built-in coding-agent Tasks run through the ACP v2 RuntimePool and RuntimeSession control plane.
 
 ## Overview
 
+```text
+                               Orka Controller
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ Task/API/controllers   ACP dispatcher   RuntimePool controller       │
+  │ Kubernetes control CRDs + Leases   SQLite payload/outbox/artifacts   │
+  │ prompt MCP broker   artifact/credential brokers   publisher client   │
+  └───────────────┬─────────────────────┬────────────────────────────────┘
+                  │                     │
+          native Task paths       type: agent (ACP v2)
+             │                         │
+      ┌──────┴──────┐          ┌───────┴────────┐        ┌──────────────┐
+      │ General/AI  │          │ RuntimePool    │───────▶│ authenticated│
+      │ worker Jobs │          │ 0 or 1 Pod     │        │ provider     │
+      └─────────────┘          │ many private   │        │ proxy → Vekil│
+                               │ RuntimeSessions│        └──────────────┘
+                               └───────┬────────┘
+                                       │ validated workspace delta
+                               ┌───────┴────────────┐
+                               │ Workspace/Publisher│
+                               │ clone/prepare/CAS  │
+                               │ push/verify/PR     │
+                               └────────────────────┘
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                          Orka Controller                             │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────────┐     │
-│  │     Task    │  │    Agent     │  │     Tool & Provider      │     │
-│  │  Reconciler │  │  Controller  │  │       Controllers        │     │
-│  └─────────────┘  └──────────────┘  └──────────────────────────┘     │
-│                                                                      │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────────┐     │
-│  │   Session   │  │   Priority   │  │     REST API + Chat      │     │
-│  │   Manager   │  │    Queue     │  │    (Fiber framework)     │     │
-│  └─────────────┘  └──────────────┘  └──────────────────────────┘     │
-│                                                                      │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────────┐     │
-│  │  Prometheus │  │   Embedded   │  │     Auth Middleware      │     │
-│  │   Metrics   │  │    Web UI    │  │      (SA/OIDC auth)      │     │
-│  └─────────────┘  └──────────────┘  └──────────────────────────┘     │
-└──────────────────────────────────────────────────────────────────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              │               │               │
-       ┌──────┴──────┐ ┌──────┴──────┐ ┌──────┴──────┐
-       │   General   │ │     AI      │ │    Agent    │
-       │   Worker    │ │   Worker    │ │   Workers   │
-       │ (containers)│ │ (LLM agent) │ │(Claude CLI, │
-       └─────────────┘ └─────────────┘ │ Copilot CLI)│
-                                       └─────────────┘
-```
+
+The ACP runtime and Workspace/Publisher use separate network and credential identities. Runtime Pods have only the authenticated provider-proxy and prompt-scoped MCP paths; they have no Git credentials or direct SCM publication egress. The Publisher obtains exact-operation artifact and credential capabilities from controller brokers. It has no provider/MCP access, and all HTTPS SCM and forge traffic traverses the authenticated exact-host SCM egress proxy.
 
 ## Core Components
 
@@ -57,7 +54,13 @@ The controller is the central component that runs as a Kubernetes Deployment. It
   - OpenAI-compatible API
   - Anthropic-compatible API
   - internal worker APIs
-- **Task Reconciler**: Watches Task resources, creates/manages Jobs, handles lifecycle
+- **Task Reconciler**: Routes native Tasks to worker Jobs and built-in agent Tasks to the ACP dispatcher; there is no agent Job fallback
+- **ACP Dispatcher**: Persists fenced attempts, reserves pool/session capacity, streams prompts, validates workspace deltas, and projects execution/delivery status
+- **RuntimePool Controller**: Owns digest-pinned, scale-to-zero runtime Deployments, exact-Pod routing, admission, drain, replacement, and cleanup
+- **Workspace/Publisher Client**: Invokes the separate clean-room clone, deterministic commit, exact-ref publication, verification, and PR-reconciliation service
+- **ACP Control Store**: Uses Kubernetes CRD status and coordination Leases as the authority for controller epochs, attempts, RuntimeSessions, branch claims, publications, and external effects
+- **Artifact/Credential Brokers**: Issue short-lived, exact-operation artifact access and release frozen role-specific Secret values only to the Workspace/Publisher
+- **Prompt MCP Broker**: Revalidates Task, attempt, prompt lease, exact runtime fences, tool policy, approval evidence, and consequential-effect identity for every runtime tool call
 - **RepositoryScanReconciler**: Watches `RepositoryScan` resources and drives repository security scanning:
   - schedules manual and cron scans
   - creates AI tasks for threat-model generation and vulnerability discovery
@@ -79,13 +82,20 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 
 ### Custom Resource Definitions (`api/v1alpha1/`)
 
-Orka uses nine core CRDs:
+Orka uses workload, gateway, workspace, and controller-owned ACP control CRDs:
 
 | CRD | Purpose |
 |-----|---------|
 | **Task** | Core work unit — container, AI, or agent type |
 | **Agent** | Reusable agent configurations with model, tools, skills, and optional runtime |
-| **AgentRuntime** | Namespace-local facade/registry entry for bring-your-own remote execution backends implementing the Orka runtime contract |
+| **AgentRuntime** | Namespace-local v2 registration and conformance record for operator-owned external runtimes |
+| **RuntimePool** | Controller-owned logical pool for one trust domain and immutable built-in ACP profile |
+| **ControllerEpoch** | Current controller holder/epoch and takeover fence |
+| **PromptAttempt** | Durable ACP execution/delivery state for one Task attempt |
+| **RuntimeSessionControl** | Logical Session lifecycle, exact runtime identity, and mutation lease state |
+| **BranchClaim** | CAS ownership/baseline for one publication branch |
+| **Publication** | Prepared commit, push, verification, and optional PR reconciliation state |
+| **ExternalEffect** | Idempotency and reconciliation ledger for consequential brokered calls |
 | **Tool** | Custom HTTP-based tool definitions for agents |
 | **Provider** | LLM provider configuration (Anthropic, OpenAI, Azure OpenAI) |
 | **Skill** | Reusable prompt content injected into agent system prompts |
@@ -93,13 +103,15 @@ Orka uses nine core CRDs:
 | **RepositoryMonitor** | GitHub pull request monitor configuration, scheduling, status, and queue counts |
 | **SubstrateActorPool** | Desired state and status for a pool of Agent Substrate actors used by workspace-backed execution |
 
-### Worker Images (`workers/`)
+### Execution Images
 
-| Worker | Description |
-|--------|-------------|
-| **General Worker** (`workers/general/`) | Runs arbitrary container commands |
-| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in core, coordination, GitHub, agent-management, planning, memory, transcript, chat, session, and task-management tools |
-| **CLI Harness Wrapper** (`workers/harness/cliwrapper/`) | Runs Codex, Claude, Copilot, OpenCode, or generic CLI turns through the `orka.harness.v1` protocol |
+| Image | Description |
+| --- | --- |
+| **General Worker** (`workers/general/`) | Runs arbitrary container commands in a per-Task Job. |
+| **AI Worker** (`workers/ai/`) | Runs native LLM/coordination Tasks in a per-Task Job. |
+| **ACP Runtime** (`cmd/orka-acp-runtime`, `workers/acp/`) | Hosts multiple private Codex, Claude, Copilot, or OpenCode RuntimeSessions through `orka.harness.v2`. |
+| **Provider Auth Proxy** (`cmd/orka-provider-auth-proxy`) | Authenticates RuntimePool traffic, enforces provider/model routing, and fronts Vekil. |
+| **Workspace Publisher** (`cmd/orka-workspace-publisher`, `workers/publisher/`) | Uses a separate identity for clean-room clone, commit preparation, exact-ref publication, independent verification, and PR reconciliation. |
 
 ## Design Decisions
 
@@ -110,10 +122,12 @@ Orka uses nine core CRDs:
 | **Plan Storage** | SQLite (embedded) | Persists autonomous coordination plan state across iterations. |
 | **Memory Storage** | SQLite (embedded) | Persists durable memories and reviewable memory proposals for namespace-scoped recall. |
 | **Artifact Storage** | SQLite stores artifact metadata and BLOB content, 10MB max per artifact. | Keeps worker outputs co-located with task/session state while bounding per-artifact size. |
+| **ACP Control Authority** | Kubernetes CRD status + coordination Leases | `resourceVersion` CAS and Leases provide shared/watchable epoch, attempt, Session, branch, publication, and external-effect fencing. |
+| **ACP Payload/Outbox Storage** | SQLite behind Kubernetes fences | Stores transcript/SessionTurn payloads and deferred outbox projections without becoming a second control authority. |
 | **Security Scan Storage** | SQLite stores repository scan runs, threat models, findings, and patch proposals. | Provides durable repository-security history without an external database. |
 | **API Authentication** | Kubernetes ServiceAccount tokens plus optional OIDC JWT and generic context-token validation. | Native K8s auth by default; OIDC and `transaction-token` TxTokens support external/request-scoped API clients. |
 | **Task Queue** | Priority queuing (0-1000) | Higher priority tasks are scheduled first. |
-| **Secret Management** | Reference K8s Secrets in specs | Controller mounts secrets to worker/harness pods. |
+| **Secret Management** | Reference Kubernetes Secrets by role | Native workers receive only required Secrets. ACP source-read, target-read, target-write, forge, provider-proxy, publisher-auth, and capability roles stay separate; Git/forge values are brokered only to the clean-room Publisher. |
 | **Observability** | Prometheus metrics, structured logs, optional OpenTelemetry traces and GenAI OTLP metrics. | Standard K8s metrics/logging with opt-in distributed tracing and model/tool latency telemetry. |
 | **AI Tools** | Built-in + extensible via CRDs | Ship with categorized built-in tools and can be extended via Tool CRDs. |
 | **Failure Policy** | Configurable retry with backoff | `spec.retryPolicy` with max retries and exponential backoff. |
@@ -135,18 +149,19 @@ orka/
 │   ├── llm/                # LLM provider interface and implementations
 │   │   ├── anthropic/      # Anthropic Claude provider
 │   │   └── openai/         # OpenAI provider
-│   ├── store/              # Storage interfaces and SQLite implementation
-│   │   └── sqlite/         # SQLite backend for results, sessions, plans, artifacts, memory, security
+│   ├── store/              # Storage interfaces plus Kubernetes/SQLite adapters
+│   │   ├── kube/           # Kubernetes-authoritative ACP control store
+│   │   └── sqlite/         # Payload, outbox, sessions, plans, artifacts, memory, security
 │   ├── tools/              # Built-in tool implementations
 │   ├── metrics/            # Prometheus metrics
 │   ├── worker/             # Tool executor for custom Tool CRDs
 │   ├── cli/                # CLI command implementations
 │   └── uiembed/            # Go embed for UI static assets
 ├── workers/
-│   ├── ai/                 # AI worker (LLM agent with tools)
+│   ├── ai/                 # Native AI worker (LLM agent with tools)
 │   ├── general/            # General worker (container commands)
-│   └── agent/
-│       └── harness/        # CLI harness wrapper adapters
+│   ├── acp/                # ACP supervisor and immutable runtime images
+│   └── publisher/          # Clean-room workspace/publication image
 ├── ui/                     # React SPA (Vite + TanStack Router + shadcn/ui)
 ├── config/                 # Kustomize manifests (CRDs, RBAC, samples)
 ├── charts/orka/          # Helm chart
@@ -157,32 +172,19 @@ orka/
 
 ## Task Lifecycle
 
+Native `ai` and container Tasks retain the worker Job lifecycle. Built-in `type: agent` Tasks use durable ACP attempt state:
+
+```text
+Queued -> Reserved -> SessionStarting -> Planned -> Submitting
+       -> Accepted -> Running -> Settling
+       -> Succeeded | Failed | Cancelled | OutcomeUnknown
 ```
-Task Created
-      │
-      ▼
-┌───────────┐    session locked?     ┌───────────┐
-│  Pending  │──────────────────────▶│  Pending  │ (wait for lock)
-│           │◀──────────────────────│           │
-└─────┬─────┘    lock acquired      └───────────┘
-      │
-      ▼
-┌───────────┐
-│  Running  │ ── Job created, Pod running
-└─────┬─────┘
-      │
-   ┌──┴──┐
-   │     │
-   ▼     ▼
-┌───────┐ ┌────────┐
-│ Succ. │ │ Failed │ ── retry? → back to Running
-└───────┘ └────────┘
-      │
-      ▼
-Result stored in SQLite (workers POST to controller via HTTP)
-Session lock released
-Webhook delivered (if configured)
-```
+
+The selected RuntimePool scales from `Stopped` through `Starting` to `Serving/Accepting`. The dispatcher creates or reuses a private RuntimeSession, starts one non-reconnectable prompt stream, renews its lease, and records bounded events. A prompt that may have been accepted is never automatically replayed.
+
+After prompt settlement, the RuntimeSession enters validation. Read Tasks succeed only after the final tree matches the verified baseline. Write Tasks with changes proceed through clean-room preparation, exact-ref publication, independent verification, optional PR reconciliation, and finalization. The controller settles the Kubernetes control records and SQLite transcript/outbox payloads before projecting terminal Task status.
+
+The top-level Task phase, `status.execution`, and `status.delivery` are safe compatibility/read-model projections. The authoritative ACP transitions live in `PromptAttempt`, `RuntimeSessionControl`, `BranchClaim`, `Publication`, `ExternalEffect`, `RuntimePool.status`, and the associated coordination Leases.
 
 ## Multi-Agent Coordination
 
@@ -283,7 +285,7 @@ Key behaviors:
 - **Token tracking**: Input/output token counts tracked in the session record
 - **Cross-runtime**: Sessions store user/assistant messages only, enabling cross-runtime continuation (AI ↔ agent tasks)
 - **No size limit**: SQLite storage removes the old ConfigMap 1MB constraint
-- **Init container delivery**: Session transcripts are delivered to worker/harness pods via an init container that fetches from the controller's internal API
+- **Runtime-specific delivery**: native workers fetch session context through their worker path; ACP RuntimeSessions are reconstructed from the canonical transcript and verified workspace baseline
 
 ## Memory Model
 
@@ -300,13 +302,15 @@ Proposal review is intentionally separate from durable memory mutation. Acceptin
 
 ## Security Model
 
-- **Worker pods**: Non-root (uid 1000), read-only rootfs, all capabilities dropped, seccomp RuntimeDefault
+- **Native worker Pods**: Non-root, read-only rootfs, all capabilities dropped, seccomp RuntimeDefault
+- **ACP runtime Pods**: Read-only rootfs, no service-account token, default-deny egress, narrowly scoped supervisor capabilities, and distinct non-reused child UIDs/GIDs per RuntimeSession
+- **Workspace/Publisher**: Separate network/credential identity with operation-scoped SCM credentials and only authenticated proxy-mediated SCM/forge egress; no provider or prompt-broker access
 - **Controller**: Non-root (uid 65532), read-only rootfs, seccomp RuntimeDefault
 - **ServiceAccount TokenReview**: Default API authentication validates Kubernetes ServiceAccount bearer tokens via the TokenReview API.
 - **Optional OIDC JWT validation**: External API endpoints can validate OIDC JWTs when issuer/audience settings are configured.
 - **Optional context-token validation**: External API endpoints can validate generic context tokens, with built-in `transaction-token` TxToken support via `Txn-Token` and profile-specific issuer/audience/JWKS settings. Orka can enforce operation scopes and signed `tctx` constraints, stamp immutable transaction metadata, and use transaction-token TTS to narrow child/outbound tokens for delegated agents and downstream Tool calls.
 - **Internal worker endpoints**: `/internal/v1` endpoints require ServiceAccount authentication for worker result, plan, message, artifact, memory, and transcript calls.
-- **Secrets**: API keys referenced via `secretRef`, mounted as read-only volumes, never logged
+- **Secrets**: Provider-proxy, source-read, publication-read, publication-write, forge, artifact, publisher-auth, and prompt-broker roles are separate. Task status stores only safe references/versions and non-secret receipts; ACP children never receive Git or forge credentials.
 - **`--watch-namespace`**: Optionally scopes the controller and API to a single namespace.
 - **Namespace isolation**: `--enforce-namespace-isolation` restricts users to their ServiceAccount namespace.
 - **Cross-namespace references**: Cross-namespace Agent and Provider references are rejected when namespace isolation is enforced.
@@ -321,12 +325,16 @@ Proposal review is intentionally separate from durable memory mutation. Acceptin
 | `github.com/gofiber/fiber/v3` | HTTP router |
 | `github.com/anthropics/anthropic-sdk-go` | Anthropic Claude API |
 | `github.com/openai/openai-go/v3` | OpenAI API (official SDK) |
-| `github.com/github/copilot-sdk/go` | GitHub Copilot SDK |
+| `github.com/github/copilot-sdk/go` | GitHub Copilot integration used by the built-in Copilot ACP RuntimePool profile |
 | `modernc.org/sqlite` | Embedded SQLite (pure Go, no CGO) |
 
 ## SQLite Store Internals
 
-All persistent data uses SQLite via `modernc.org/sqlite` (pure Go, no CGO dependency).
+SQLite via `modernc.org/sqlite` (pure Go, no CGO dependency) stores Orka
+payload/read-model data. ACP control authority is deliberately excluded:
+controller epochs and Session mutation ownership use Kubernetes Leases, while
+attempt, Session, branch, publication, and external-effect transitions use CRD
+status `resourceVersion` CAS.
 
 ### Schema
 
@@ -340,6 +348,7 @@ All persistent data uses SQLite via `modernc.org/sqlite` (pure Go, no CGO depend
 | `memories` | `id` | Durable namespace-scoped memories with provenance, tags, disabled/deleted flags, and recall counters |
 | `memory_proposals` | `id` | Reviewable memory/skill/policy/workflow proposals with status, reviewer, and review notes |
 | `artifacts` | `(namespace, task_name, filename)` | Artifact metadata and BLOB content, 10MB max per artifact |
+| `session_turns` / outbox tables | stable IDs | ACP transcript/SessionTurn payloads and deferred terminal projections committed behind Kubernetes epoch/Session fences |
 | `security_scan_runs` | `id` | Repository scan run lifecycle, mode, commits, timestamps, summary, and errors |
 | `security_threat_models` | `(namespace, repository_scan, version)` | Versioned repository threat models generated or edited for scans |
 | `security_findings` | `id` | Deduplicated findings with severity, confidence, validation, evidence, and PR linkage |

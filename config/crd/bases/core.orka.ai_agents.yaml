@@ -1094,10 +1094,10 @@ spec:
                     type: array
                   workspace:
                     description: |-
-                      Workspace requests an upstream agent-sandbox execution workspace for agent Tasks.
-                      When enabled, the Task controller validates the request and propagates the
-                      resolved sandbox settings to the agent worker Job. The worker wrapper then
-                      claims the sandbox workspace and runs the configured agent runtime inside it.
+                      Workspace requests an execution workspace for worker-backed Task types.
+                      ACP core agent Tasks reject this field because their ephemeral workspace is
+                      owned by RuntimeSession lifecycle and clean-room publication. Actor-backed
+                      RuntimeSession support is a future integration behind the v2 lifecycle seam.
                     properties:
                       boot:
                         description: |-
@@ -1247,6 +1247,13 @@ spec:
                   Model defines the LLM model configuration
                   Provider field is optional if providerRef is set
                 properties:
+                  contextWindow:
+                    description: |-
+                      ContextWindow is the reviewed model context capacity in tokens. Built-in
+                      runtimes that manage their own compaction require this value explicitly.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   fallbacks:
                     description: |-
                       Fallbacks defines alternative providers to try when the primary fails.
@@ -1267,7 +1274,10 @@ spec:
                       type: object
                     type: array
                   maxTokens:
-                    description: MaxTokens limits the response length
+                    description: |-
+                      MaxTokens limits the response length. OpenCode validates positive reviewed
+                      limits at its runtime-specific admission boundary; existing Agent objects
+                      may retain the legacy zero value.
                     format: int32
                     type: integer
                   name:
@@ -1284,7 +1294,6 @@ spec:
                     - openai
                     type: string
                   temperature:
-                    default: 0.7
                     description: Temperature controls randomness in generation
                     maximum: 2
                     minimum: 0
@@ -1428,9 +1437,9 @@ spec:
                     description: Type specifies which built-in CLI runtime to use.
                       Use runtimeRef for admin-registered custom runtimes.
                     enum:
-                    - copilot
                     - claude
                     - codex
+                    - copilot
                     - opencode
                     type: string
                 type: object
@@ -1520,6 +1529,9 @@ spec:
                     description: Inline is the inline prompt text
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: system prompt must use only one of inline or configMapRef
+                  rule: '!(has(self.inline) && self.inline.size() > 0 && has(self.configMapRef))'
               tools:
                 description: Tools lists the default tools available to this agent
                 items:
@@ -1547,6 +1559,10 @@ spec:
             x-kubernetes-validations:
             - message: execution.workspace.classRef is only supported on Task specs
               rule: '!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)'
+            - message: opencode runtime does not support spec.systemPrompt
+              rule: '!(has(self.runtime) && has(self.runtime.type) && self.runtime.type
+                == ''opencode'' && has(self.systemPrompt) && ((has(self.systemPrompt.inline)
+                && self.systemPrompt.inline.size() > 0) || has(self.systemPrompt.configMapRef)))'
           status:
             description: AgentStatus defines the observed state of Agent
             properties:

@@ -1,0 +1,183 @@
+name: Live ACP Release Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        description: HTTPS GitHub source repository URL used for the release canary
+        required: true
+        default: https://github.com/orka-agents/orka.git
+        type: string
+      publication_repository:
+        description: HTTPS URL of a distinct GitHub fork used for publication
+        required: true
+        type: string
+      source_ref:
+        description: Full SHA of the dispatched workflow commit; must equal the selected base branch head
+        required: true
+        type: string
+      pr_base:
+        description: Default branch targeted by the temporary canary PR
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-acp-release-gate
+  cancel-in-progress: false
+
+jobs:
+  live-acp-release-gate:
+    name: ACP destructive release acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    environment: live-acp-release-gate
+    env:
+      ACP_E2E_OPENCODE_CONTEXT_WINDOW: "32768"
+      ACP_E2E_OPENCODE_MAX_TOKENS: "4096"
+      ACP_E2E_OPENCODE_MODEL: "openai/gpt-5.4"
+      ACP_E2E_KIND_TAG: acp-release-${{ github.run_id }}-${{ github.run_attempt }}
+      KIND_VERSION: v0.31.0
+      KIND_SHA256_AMD64: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
+      KIND_SHA256_ARM64: 8e1014e87c34901cc422a1445866835d1e666f2a61301c27e722bdeab5a1f7e4
+    steps:
+      - name: Validate trusted dispatch inputs
+        env:
+          CHECKED_OUT_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_BASE: ${{ inputs.pr_base }}
+          PUBLICATION_REPOSITORY: ${{ inputs.publication_repository }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]]; then
+            echo "Dispatch this workflow from the default branch (${DEFAULT_BRANCH}) only." >&2
+            exit 1
+          fi
+          if [[ "${PR_BASE}" != "${DEFAULT_BRANCH}" ]]; then
+            echo "pr_base must equal the default branch (${DEFAULT_BRANCH})." >&2
+            exit 1
+          fi
+          if [[ ! "${SOURCE_REPOSITORY}" =~ ^https://github\.com/[^/?#]+/[^/?#]+(\.git)?$ ]]; then
+            echo "source_repository must be an HTTPS github.com repository URL." >&2
+            exit 1
+          fi
+          expected_source="https://github.com/${GITHUB_REPOSITORY}"
+          normalized_source="${SOURCE_REPOSITORY%.git}"
+          if [[ "${normalized_source,,}" != "${expected_source,,}" ]]; then
+            echo "source_repository must identify this repository: ${expected_source}.git" >&2
+            exit 1
+          fi
+          if [[ ! "${PUBLICATION_REPOSITORY}" =~ ^https://github\.com/[^/?#]+/[^/?#]+(\.git)?$ ]]; then
+            echo "publication_repository must be an HTTPS github.com repository URL." >&2
+            exit 1
+          fi
+          normalized_publication="${PUBLICATION_REPOSITORY%.git}"
+          if [[ "${normalized_source,,}" == "${normalized_publication,,}" ]]; then
+            echo "publication_repository must be a distinct fork." >&2
+            exit 1
+          fi
+          if [[ ! "${SOURCE_REF}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "source_ref must be a full 40-character commit SHA." >&2
+            exit 1
+          fi
+          if [[ "${SOURCE_REF,,}" != "${CHECKED_OUT_SHA,,}" ]]; then
+            echo "source_ref must equal the dispatched workflow commit ${CHECKED_OUT_SHA}." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space for Docker-heavy live E2E
+        run: |
+          set -Eeuo pipefail
+          echo "Disk usage before cleanup"
+          df -h
+          docker system df || true
+
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/swift
+
+          docker system prune -af || true
+          docker builder prune -af || true
+
+          echo "Disk usage after cleanup"
+          df -h
+          docker system df || true
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install kind
+        run: |
+          set -Eeuo pipefail
+          arch="$(go env GOARCH)"
+          case "${arch}" in
+            amd64) expected_sha="${KIND_SHA256_AMD64}" ;;
+            arm64) expected_sha="${KIND_SHA256_ARM64}" ;;
+            *) echo "unsupported runner architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSL --retry 3 --retry-delay 2 -o ./kind \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${arch}"
+          printf '%s  %s\n' "${expected_sha}" ./kind | sha256sum --check --strict -
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Verify toolchain
+        run: |
+          set -Eeuo pipefail
+          docker version
+          git --version
+          gh --version
+          jq --version
+          kind version
+          kubectl version --client=true
+
+      - name: Run destructive canonical ACP release gate in Kind
+        env:
+          ACP_E2E_REF: ${{ inputs.source_ref }}
+          ACP_E2E_REPO: ${{ inputs.source_repository }}
+          ACP_E2E_WRITE_CREATE_PR: "1"
+          ACP_E2E_WRITE_CREDENTIAL_TOKEN: ${{ secrets.ACP_E2E_WRITE_CREDENTIAL_TOKEN }}
+          ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN: ${{ secrets.ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN }}
+          ACP_E2E_WRITE_PR_BASE: ${{ inputs.pr_base }}
+          ACP_E2E_WRITE_PUBLICATION_REPO: ${{ inputs.publication_repository }}
+          ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN: ${{ secrets.ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN }}
+          ACP_E2E_WRITE_SOURCE_REF: ${{ inputs.source_ref }}
+          ACP_E2E_WRITE_SOURCE_REPO: ${{ inputs.source_repository }}
+          ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN: ${{ secrets.ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN }}
+          RELEASE_GATE: "1"
+        run: |
+          set -Eeuo pipefail
+
+          required_secrets=(
+            COPILOT_GITHUB_TOKEN
+            ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN
+            ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN
+            ACP_E2E_WRITE_CREDENTIAL_TOKEN
+            ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN
+          )
+          for name in "${required_secrets[@]}"; do
+            if [[ -z "${!name}" ]]; then
+              echo "${name} must be configured in the live-acp-release-gate environment." >&2
+              exit 1
+            fi
+          done
+
+          bash scripts/live-acp-runtime-kind-e2e.sh

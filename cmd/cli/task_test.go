@@ -62,7 +62,7 @@ func TestNewTaskCmd(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		subNames[sub.Use] = true
 	}
-	for _, want := range []string{"create <prompt>", "list", "get <name>", "logs <name>", "delete <name>"} {
+	for _, want := range []string{"create <prompt>", "list", "get <name>", "status <name>", "logs <name>", "delete <name>"} {
 		if !subNames[want] {
 			t.Errorf("missing subcommand %q", want)
 		}
@@ -73,7 +73,13 @@ func TestNewTaskCreateCmdFlags(t *testing.T) {
 	cmd := newTaskCreateCmd()
 
 	// Verify flags
-	for _, flagName := range []string{"type", "agent", "provider", "timeout"} {
+	for _, flagName := range []string{
+		"type", "agent", "provider", "timeout", "workspace-intent", "git-repo",
+		"read-credential", "read-credential-key", "publication-git-repo",
+		"publication-read-credential", "publication-read-credential-key",
+		"publication-credential", "publication-credential-key", "forge-credential", "forge-credential-key",
+		"push-branch", "create-pr",
+	} {
 		if cmd.Flags().Lookup(flagName) == nil {
 			t.Errorf("missing flag %q", flagName)
 		}

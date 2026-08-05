@@ -187,13 +187,11 @@ func TestCreatePullRequestTool_Success(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -289,13 +287,11 @@ func TestCreatePullRequestTool_ExistingPR(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -388,10 +384,8 @@ func TestCreatePullRequestTool_NoGitRepo(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					Branch: testBranch,
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				Branch: testBranch,
 			},
 		},
 	}
@@ -417,7 +411,7 @@ func TestCreatePullRequestTool_NoGitRepo(t *testing.T) {
 	}
 }
 
-func TestCreatePullRequestTool_NoGitSecretRefWithoutFallbackToken(t *testing.T) {
+func TestCreatePullRequestTool_NoForgeCredentialRefFailsClosed(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
@@ -426,11 +420,9 @@ func TestCreatePullRequestTool_NoGitSecretRefWithoutFallbackToken(t *testing.T) 
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
 			},
 		},
 	}
@@ -447,11 +439,13 @@ func TestCreatePullRequestTool_NoGitSecretRefWithoutFallbackToken(t *testing.T) 
 		Title:      testPullRequestTitle,
 	})
 
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
-		t.Fatal("expected error for no token")
+		t.Fatal("expected error for missing forgeCredentialRef")
 	}
-	if !strings.Contains(err.Error(), "could not resolve GitHub token") {
+	if !strings.Contains(err.Error(), "workspace has no forgeCredentialRef configured") {
 		t.Errorf("unexpected error: %s", err.Error())
 	}
 }
@@ -465,18 +459,16 @@ func TestCreatePullRequestTool_EmptyToken(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:            testSozercanAynaRepoURL,
+				Branch:             testBranch,
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 			},
 		},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
-		Data:       map[string][]byte{otherSecretKey: []byte("value")},
+		Data:       map[string][]byte{tokenKey: []byte(" \n")},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -495,7 +487,7 @@ func TestCreatePullRequestTool_EmptyToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty token")
 	}
-	if !strings.Contains(err.Error(), "does not contain a 'token', 'password', or 'GITHUB_TOKEN' key") {
+	if !strings.Contains(err.Error(), `contains an empty configured key "token"`) {
 		t.Errorf("unexpected error: %s", err.Error())
 	}
 }

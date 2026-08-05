@@ -19,27 +19,14 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
-require_sha256() {
-  if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
-    return
-  fi
-  die "missing required command: sha256sum or shasum"
-}
-
-sha256_hex() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
-    return
-  fi
-  shasum -a 256 | awk '{print $1}'
-}
-
 sanitize_image_tag() {
   printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '-'
 }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/lib/kind-local-registry.sh
+. "${script_dir}/lib/kind-local-registry.sh"
 
 agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v0.5.0}"
 kind_cluster="${KIND_CLUSTER:-orka-live-agent-sandbox-e2e}"
@@ -51,17 +38,11 @@ orka_api_local_port="${ORKA_API_LOCAL_PORT:-18084}"
 router_api_local_port="${ORKA_AGENT_SANDBOX_ROUTER_LOCAL_PORT:-18085}"
 e2e_run_id="$(sanitize_image_tag "${ORKA_AGENT_SANDBOX_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-agent-sandbox-e2e-${e2e_run_id}}"
-fake_claude_image="${ORKA_FAKE_HARNESS_WRAPPER_IMAGE:-orka-agent-sandbox-fake-claude:live-agent-sandbox-e2e-${e2e_run_id}}"
-harness_wrapper_image="${ORKA_HARNESS_WRAPPER_IMAGE:-orka-agent-harness-wrapper:live-agent-sandbox-e2e-${e2e_run_id}}"
+publisher_image="${ORKA_WORKSPACE_PUBLISHER_IMAGE:-orka-workspace-publisher:live-agent-sandbox-e2e-${e2e_run_id}}"
+sandbox_fixture_image="${ORKA_AGENT_SANDBOX_FIXTURE_IMAGE:-orka-agent-sandbox-fixture:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_router_image="${ORKA_AGENT_SANDBOX_ROUTER_IMAGE:-orka-agent-sandbox-router:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_template_name="${ORKA_AGENT_SANDBOX_TEMPLATE:-orka-agent-sandbox-e2e-template}"
-agent_name="${ORKA_AGENT_SANDBOX_AGENT:-orka-agent-sandbox-e2e-agent}"
-delete_task_name="${ORKA_AGENT_SANDBOX_DELETE_TASK:-orka-agent-sandbox-delete-smoke}"
-retain_task_one="${ORKA_AGENT_SANDBOX_RETAIN_TASK_ONE:-orka-agent-sandbox-retain-one}"
-retain_task_two="${ORKA_AGENT_SANDBOX_RETAIN_TASK_TWO:-orka-agent-sandbox-retain-two}"
-session_name="${ORKA_AGENT_SANDBOX_SESSION:-orka-agent-sandbox-session}"
 smoke_claim_name="${ORKA_AGENT_SANDBOX_SMOKE_CLAIM:-orka-agent-sandbox-e2e-retained-smoke}"
-wait_timeout="${ORKA_AGENT_SANDBOX_WAIT_TIMEOUT:-8m}"
 api_pf_pid=""
 router_pf_pid=""
 router_namespace=""
@@ -69,7 +50,7 @@ created_kind_cluster="0"
 agent_sandbox_module_cache=""
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-agent-sandbox-e2e.XXXXXX")"
 kind_config="${ORKA_AGENT_SANDBOX_KIND_CONFIG:-${work_dir}/kind-config.yaml}"
-fake_dockerfile="${work_dir}/Dockerfile.fake-claude"
+fixture_dockerfile="${work_dir}/Dockerfile.sandbox-fixture"
 api_pf_log="${work_dir}/api-port-forward.log"
 router_pf_log="${work_dir}/router-port-forward.log"
 smoke_go_dir="${repo_root}/.tmp-live-agent-sandbox-smoke-${e2e_run_id}"
@@ -125,11 +106,6 @@ dump_diagnostics() {
     echo "=== Controller Logs ==="
     kubectl logs deployment/"${orka_controller_deployment}" -n "${orka_namespace}" -c manager --tail=300 2>/dev/null || true
     echo
-    echo "=== Worker Logs ==="
-    for task in "${delete_task_name}" "${retain_task_one}" "${retain_task_two}"; do
-      kubectl logs -n "${orka_namespace}" -l "orka.ai/task=${task}" --all-containers --tail=300 --prefix 2>/dev/null || true
-    done
-    echo
     echo "=== Agent Sandbox Controller Logs ==="
     kubectl logs deployment/agent-sandbox-controller -n agent-sandbox-system --tail=300 2>/dev/null || true
     echo
@@ -164,6 +140,7 @@ on_exit() {
 
   cleanup_port_forward
   restore_manager_kustomization
+  orka_kind_registry_stop
   if [[ "${created_kind_cluster}" == "1" ]]; then
     kind delete cluster --name "${kind_cluster}" >/dev/null 2>&1 || true
   fi
@@ -243,46 +220,8 @@ wait_for_http() {
   die "${description} never became available at ${url}"
 }
 
-duration_to_seconds() {
-  local value="$1"
-  local rest="$1"
-  local total=0
-  local number unit amount
-
-  if [[ "${value}" =~ ^[0-9]+$ ]]; then
-    printf '%s\n' "${value}"
-    return
-  fi
-
-  while [[ -n "${rest}" ]]; do
-    if [[ ! "${rest}" =~ ^([0-9]+)([hms])(.*)$ ]]; then
-      die "unsupported duration ${value}; use digits with h, m, or s units"
-    fi
-
-    number="${BASH_REMATCH[1]}"
-    unit="${BASH_REMATCH[2]}"
-    rest="${BASH_REMATCH[3]}"
-    amount=$((10#${number}))
-
-    case "${unit}" in
-      h) total=$((total + amount * 3600)) ;;
-      m) total=$((total + amount * 60)) ;;
-      s) total=$((total + amount)) ;;
-    esac
-  done
-
-  [[ "${total}" -gt 0 ]] || die "duration ${value} must be positive"
-  printf '%s\n' "${total}"
-}
-
-api_token_duration() {
-  local timeout_seconds
-  timeout_seconds="$(duration_to_seconds "${wait_timeout}")"
-  printf '%ss\n' "$((timeout_seconds * 4 + 600))"
-}
-
-write_fake_claude_dockerfile() {
-  cat >"${fake_dockerfile}" <<'DOCKERFILE'
+write_sandbox_fixture_dockerfile() {
+  cat >"${fixture_dockerfile}" <<'DOCKERFILE'
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 
 ARG TARGETARCH
@@ -291,8 +230,6 @@ WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./cmd/orka-agent-harness-wrapper
-
 RUN cat >/tmp/sandbox-runtime.go <<'GO'
 package main
 
@@ -483,23 +420,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /out/worker /worker
 COPY --from=builder /out/sandbox-runtime /usr/local/bin/sandbox-runtime
 
-RUN printf '%s\n' \
-    '#!/bin/sh' \
-    'set -eu' \
-    'marker=/workspace/orka-agent-sandbox-retained-marker.txt' \
-    'prompt="$*"' \
-    'if [ "${ORKA_AGENT_SANDBOX_ENABLED:-}" != "false" ]; then echo "ORKA_AGENT_SANDBOX_ENABLED was ${ORKA_AGENT_SANDBOX_ENABLED:-missing}" >&2; exit 41; fi' \
-    'if [ "${ORKA_AGENT_SANDBOX_DEPTH:-}" != "1" ]; then echo "ORKA_AGENT_SANDBOX_DEPTH was ${ORKA_AGENT_SANDBOX_DEPTH:-missing}" >&2; exit 42; fi' \
-    'if [ -z "${ORKA_SA_TOKEN_PATH:-}" ] || [ ! -s "${ORKA_SA_TOKEN_PATH}" ]; then echo "missing staged service account token" >&2; exit 43; fi' \
-    'state=absent' \
-    'if [ -f "$marker" ]; then state=present; fi' \
-    'printf "run=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker"' \
-    'printf "ORKA_LIVE_SANDBOX_OK depth=%s enabled=%s retained_marker=%s pwd=%s prompt=%s\n" "${ORKA_AGENT_SANDBOX_DEPTH}" "${ORKA_AGENT_SANDBOX_ENABLED}" "$state" "$(pwd)" "$prompt"' \
-    > /usr/local/bin/claude \
-    && chmod 0755 /worker /usr/local/bin/sandbox-runtime /usr/local/bin/claude
+RUN chmod 0755 /usr/local/bin/sandbox-runtime
 
 RUN groupadd -g 1000 worker \
     && useradd -u 1000 -g worker -m worker \
@@ -508,7 +431,7 @@ RUN groupadd -g 1000 worker \
 
 USER 1000:1000
 ENV HOME=/home/worker
-ENTRYPOINT ["/worker"]
+ENTRYPOINT ["/usr/local/bin/sandbox-runtime"]
 DOCKERFILE
 }
 
@@ -588,7 +511,6 @@ patch_controller_for_agent_sandbox() {
   log "Configuring Orka controller for agent-sandbox"
   kubectl -n "${orka_namespace}" get deployment "${orka_controller_deployment}" -o json |
     jq \
-      --arg claudeImage "${fake_claude_image}" \
       --arg routerURL "${router_url}" \
       --arg rolloutID "${rollout_id}" \
       --arg template "${sandbox_template_name}" '
@@ -642,7 +564,7 @@ spec:
         runAsNonRoot: true
       containers:
         - name: agent
-          image: ${fake_claude_image}
+          image: ${sandbox_fixture_image}
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/sandbox-runtime"]
           ports:
@@ -678,185 +600,6 @@ spec:
   sandboxTemplateRef:
     name: ${sandbox_template_name}
 YAML
-}
-
-apply_agent() {
-  log "Creating fake Claude runtime Agent ${agent_name}"
-  kubectl apply -f - <<YAML
-apiVersion: core.orka.ai/v1alpha1
-kind: Agent
-metadata:
-  name: ${agent_name}
-  namespace: ${orka_namespace}
-spec:
-  runtime:
-    type: claude
-    defaultMaxTurns: 1
-    defaultAllowBash: false
-  model:
-    name: fake-model-no-network
-YAML
-}
-
-apply_agent_task() {
-  local task_name="$1"
-  local prompt="$2"
-  local reuse_policy="$3"
-  local cleanup_policy="$4"
-  local session_block=""
-
-  if [[ "${reuse_policy}" == "session" ]]; then
-    session_block="$(cat <<YAML
-  sessionRef:
-    name: ${session_name}
-    create: true
-    append: true
-YAML
-)"
-  fi
-
-  kubectl apply -f - <<YAML
-apiVersion: core.orka.ai/v1alpha1
-kind: Task
-metadata:
-  name: ${task_name}
-  namespace: ${orka_namespace}
-spec:
-  type: agent
-  agentRef:
-    name: ${agent_name}
-  agentRuntime:
-    maxTurns: 1
-  timeout: 8m0s
-${session_block}
-  execution:
-    workspace:
-      enabled: true
-      templateRef:
-        name: ${sandbox_template_name}
-      reusePolicy: ${reuse_policy}
-      cleanupPolicy: ${cleanup_policy}
-  prompt: "${prompt}"
-YAML
-}
-
-wait_for_task_succeeded() {
-  local task_name="$1"
-  local phase message timeout_seconds deadline
-  log "Waiting for Task/${task_name} to succeed"
-  timeout_seconds="$(duration_to_seconds "${wait_timeout}")"
-  deadline=$((SECONDS + timeout_seconds))
-
-  while (( SECONDS < deadline )); do
-    phase="$(kubectl -n "${orka_namespace}" get task "${task_name}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    case "${phase}" in
-      Succeeded)
-        run kubectl -n "${orka_namespace}" wait --for=jsonpath='{.status.resultRef.available}'=true "task/${task_name}" --timeout=2m
-        return
-        ;;
-      Failed)
-        message="$(kubectl -n "${orka_namespace}" get task "${task_name}" -o jsonpath='{.status.message}' 2>/dev/null || true)"
-        die "Task/${task_name} failed: ${message:-no status message}"
-        ;;
-    esac
-    sleep 2
-  done
-
-  die "Task/${task_name} did not succeed within ${wait_timeout}"
-}
-
-task_job_name() {
-  local task_name="$1"
-  kubectl -n "${orka_namespace}" get task "${task_name}" -o jsonpath='{.status.jobName}'
-}
-
-task_logs() {
-  local task_name="$1"
-  local job_name
-  job_name="$(task_job_name "${task_name}")"
-  kubectl -n "${orka_namespace}" logs -l "job-name=${job_name}" --all-containers --tail=500
-}
-
-fetch_result() {
-  local api_base="$1"
-  local token="$2"
-  local task_name="$3"
-  curl -fsS \
-    -H "Authorization: Bearer ${token}" \
-    "${api_base}/api/v1/tasks/${task_name}/result?namespace=${orka_namespace}" |
-    jq -er '.result'
-}
-
-assert_result_contains() {
-  local result="$1"
-  local expected="$2"
-  if [[ "${result}" != *"${expected}"* ]]; then
-    printf 'result did not contain %q:\n%s\n' "${expected}" "${result}" >&2
-    exit 1
-  fi
-}
-
-session_claim_name() {
-  local hash
-  hash="$(printf '%s\0%s\0%s\0%s\0%s' \
-    "${orka_namespace}" \
-    "${orka_namespace}" \
-    "${orka_namespace}" \
-    "${sandbox_template_name}" \
-    "${session_name}" |
-    sha256_hex |
-    awk '{print substr($1, 1, 32)}')"
-  printf 'orka-session-%s\n' "${hash}"
-}
-
-sandbox_pod_name() {
-  local sandbox="$1"
-  local selector=""
-  local pod=""
-
-  for _ in $(seq 1 60); do
-    selector="$(kubectl -n "${orka_namespace}" get sandbox "${sandbox}" -o jsonpath='{.status.selector}' 2>/dev/null || true)"
-    if [[ -n "${selector}" ]]; then
-      pod="$(kubectl -n "${orka_namespace}" get pod -l "${selector}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-    fi
-
-    if [[ -z "${pod}" ]] && kubectl -n "${orka_namespace}" get pod "${sandbox}" >/dev/null 2>&1; then
-      pod="${sandbox}"
-    fi
-
-    if [[ -n "${pod}" ]]; then
-      printf '%s\n' "${pod}"
-      return 0
-    fi
-
-    sleep 2
-  done
-
-  die "could not resolve pod for Sandbox/${sandbox}"
-}
-
-verify_delete_cleanup() {
-  local logs="$1"
-  local claim
-  claim="$(printf '%s\n' "${logs}" | sed -nE 's/.*completed in (agent-sandbox|sandbox) workspace ([^[:space:]]*).*/\2/p' | tail -n 1)"
-  [[ -n "${claim}" ]] || die "could not find claimed sandbox workspace in delete task logs"
-
-  log "Verifying delete cleanup removed SandboxClaim/${claim}"
-  run kubectl -n "${orka_namespace}" wait --for=delete "sandboxclaim/${claim}" --timeout=2m
-}
-
-verify_retained_claim_reused() {
-  local claim="$1"
-  log "Verifying retained session SandboxClaim/${claim}"
-  kubectl -n "${orka_namespace}" get sandboxclaim "${claim}" -o json |
-    jq -e --arg template "${sandbox_template_name}" '
-      .spec.warmPoolRef.name == $template
-      and ((.status.sandbox.name // "") != "")
-    ' >/dev/null
-
-  local sandbox
-  sandbox="$(kubectl -n "${orka_namespace}" get sandboxclaim "${claim}" -o jsonpath='{.status.sandbox.name}')"
-  kubectl -n "${orka_namespace}" get sandbox "${sandbox}" >/dev/null
 }
 
 write_workspace_smoke_go() {
@@ -1062,22 +805,8 @@ run_workspace_smoke() {
 }
 
 reset_e2e_resources() {
-  local session_claim
-  session_claim="$(session_claim_name)"
-
   log "Resetting fixed-name agent-sandbox e2e resources"
-  run kubectl -n "${orka_namespace}" delete task \
-    "${delete_task_name}" \
-    "${retain_task_one}" \
-    "${retain_task_two}" \
-    --ignore-not-found=true \
-    --wait=true \
-    --timeout=2m
-  run kubectl -n "${orka_namespace}" delete sandboxclaim "${session_claim}" "${smoke_claim_name}" \
-    --ignore-not-found=true \
-    --wait=true \
-    --timeout=2m
-  run kubectl -n "${orka_namespace}" delete agent "${agent_name}" \
+  run kubectl -n "${orka_namespace}" delete sandboxclaim "${smoke_claim_name}" \
     --ignore-not-found=true \
     --wait=true \
     --timeout=2m
@@ -1099,7 +828,6 @@ main() {
   require_cmd kubectl
   require_cmd curl
   require_cmd jq
-  require_sha256
 
   cd "${repo_root}"
   [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
@@ -1109,34 +837,49 @@ main() {
 
   setup_kind_cluster
   run kubectl config use-context "kind-${kind_cluster}"
+  log "Installing current Orka CRDs into the test cluster"
+  run make install
+  log "Creating the Vekil namespace required by the production ingress policy"
+  kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f -
+  orka_kind_registry_start "${kind_cluster}"
 
   install_agent_sandbox
 
   log "Building manager image ${manager_image}"
   run make docker-build IMG="${manager_image}"
+  log "Building workspace publisher image ${publisher_image}"
+  run make docker-build-workspace-publisher WORKSPACE_PUBLISHER_IMG="${publisher_image}"
 
-  write_fake_claude_dockerfile
-  log "Building fake Claude worker/runtime image ${fake_claude_image}"
-  run docker build -t "${fake_claude_image}" -f "${fake_dockerfile}" .
-  log "Building harness-wrapper service image ${harness_wrapper_image}"
-  run make docker-build-harness-wrapper HARNESS_WRAPPER_IMG="${harness_wrapper_image}"
+  write_sandbox_fixture_dockerfile
+  log "Building agent-sandbox HTTP fixture image ${sandbox_fixture_image}"
+  run docker build -t "${sandbox_fixture_image}" -f "${fixture_dockerfile}" .
   build_sandbox_router_image
 
   log "Loading images into Kind cluster ${kind_cluster}"
   run kind load docker-image "${manager_image}" --name "${kind_cluster}"
-  run kind load docker-image "${fake_claude_image}" --name "${kind_cluster}"
-  run kind load docker-image "${harness_wrapper_image}" --name "${kind_cluster}"
+  run kind load docker-image "${sandbox_fixture_image}" --name "${kind_cluster}"
   run kind load docker-image "${sandbox_router_image}" --name "${kind_cluster}"
 
-  log "Deploying Orka manager"
-  run make deploy IMG="${manager_image}" HARNESS_WRAPPER_IMG="${harness_wrapper_image}"
+  local manager_ref publisher_ref
+  manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
+  publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+
+  log "Deploying Orka manager with inert digest-pinned ACP images (agent-sandbox RuntimeSession dispatch is deferred)"
+  local placeholder_digest
+  placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
+  run make deploy \
+    IMG="${manager_ref}" \
+    WORKSPACE_PUBLISHER_IMG="${publisher_ref}" \
+    ACP_CODEX_RUNTIME_IMG="example.invalid/orka/acp-codex@${placeholder_digest}" \
+    ACP_CLAUDE_RUNTIME_IMG="example.invalid/orka/acp-claude@${placeholder_digest}" \
+    ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
+    ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
   run kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
   deploy_sandbox_router
   patch_controller_for_agent_sandbox
 
   reset_e2e_resources
   apply_sandbox_template
-  apply_agent
 
   log "Port-forwarding Orka API service"
   api_pf_pid="$(start_port_forward "${orka_namespace}" "svc/${orka_api_service}" "${orka_api_local_port}" "${orka_api_service_port}" "${api_pf_log}")"
@@ -1152,7 +895,7 @@ main() {
 
   run_workspace_smoke "${router_base}"
 
-  log "Skipping full agent Task workspace smoke: harness-wrapper runtime currently rejects execution workspaces before Job creation"
+  log "Skipping workspace-backed ACP Task smoke: Task.spec.execution.workspace is intentionally unsupported until RuntimeSession-to-agent-sandbox dispatch is implemented; the direct workspace adapter path was validated above"
   log "Live agent-sandbox installation/configuration/workspace-adapter e2e passed"
 }
 

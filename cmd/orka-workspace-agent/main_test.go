@@ -1880,7 +1880,22 @@ func TestWorkspaceAgentBoundsRetainedOperationResults(t *testing.T) {
 	); !errors.Is(err, errOperationResultExpired) {
 		t.Fatalf("expired operation retry error = %v, want %v", err, errOperationResultExpired)
 	}
-	newRequest := execRequest{OperationID: "after-result-expiry", Command: []string{"true"}}
+	releasePath := filepath.Join(t.TempDir(), "release-after-tombstone-eviction")
+	t.Cleanup(func() {
+		_ = os.WriteFile(releasePath, nil, 0o600)
+		server.mu.Lock()
+		cancel := server.executionCancels["after-result-expiry"]
+		server.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	})
+	newRequest := execRequest{
+		OperationID: "after-result-expiry",
+		Command: []string{
+			"sh", "-c", `while [ ! -e "$1" ]; do sleep 0.01; done`, "sh", releasePath,
+		},
+	}
 	if _, err := server.startExecution(newRequest, normalized, 1); err != nil {
 		t.Fatalf("new operation rejected by tombstones: %v", err)
 	}
@@ -1892,6 +1907,29 @@ func TestWorkspaceAgentBoundsRetainedOperationResults(t *testing.T) {
 	server.mu.Unlock()
 	if remainingTombstones != 0 {
 		t.Fatalf("expired tombstones retained = %d", remainingTombstones)
+	}
+	if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+		t.Fatalf("release operation after tombstone eviction: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		result, found, conflict, expired := server.loadExecution(newRequest.OperationID, 1)
+		if conflict || expired || !found {
+			t.Fatalf(
+				"released operation unavailable: found=%t conflict=%t expired=%t",
+				found, conflict, expired,
+			)
+		}
+		if !result.Running {
+			if result.State != workspaceagent.OperationStateSucceeded {
+				t.Fatalf("released operation state = %q, want %q", result.State, workspaceagent.OperationStateSucceeded)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("released operation did not complete")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if _, err := server.startExecution(request, normalized, 1); !errors.Is(err, errOperationResultExpired) {
 		t.Fatalf("operation ownership expired within active epoch: %v", err)

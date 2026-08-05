@@ -1,6 +1,6 @@
 # Execution Workspace Provider, Pool, and Hosted Tool Implementation Plan
 
-**Date:** July 16, 2026  
+**Date:** July 16, 2026
 **Target repository:** `github.com/orka-agents/orka`
 
 ## Summary

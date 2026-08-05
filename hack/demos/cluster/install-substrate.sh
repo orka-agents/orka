@@ -1,36 +1,28 @@
 #!/usr/bin/env bash
-# Install Agent Substrate + an Orka-compatible workspace template into a
-# dedicated kind cluster for Demo 70.
+# Install the archived Agent Substrate infrastructure in a dedicated kind
+# cluster for direct workspace/MCP evaluation.
 #
-# Substrate's standup is heavy (clone Substrate at a pinned ref, create a kind
-# cluster + local registry, deploy the ate-system control plane, build/push the
-# controller + codex-worker + workspace-agent images via docker + ko, create a
-# WorkerPool + gVisor ActorTemplate, deploy Orka wired with --substrate-* flags,
-# and a local RustFS snapshot bucket). That exact sequence is already proven in
-# CI by scripts/agent-substrate-e2e.sh.
+# This is intentionally not an agent-runtime installer. The ACP v2 hard cutover
+# removed the legacy turn-wrapper path, and RuntimeSession-to-Substrate Actor
+# dispatch remains deferred until an Actor-backed orka.harness.v2 supervisor
+# exists. Current built-in Codex, Claude, and Copilot validation uses controller-owned
+# RuntimePools via scripts/live-acp-runtime-e2e.sh.
 #
-# Rather than duplicate ~600 lines (and drift from CI), this installer is a thin
-# wrapper over that script with KEEP_CLUSTER=1, so it leaves behind a fully
-# wired cluster Demo 70 can drive. The e2e's own task exercises run as a
-# built-in smoke test (a few seconds each) before it hands the cluster back.
+# The underlying scripts/agent-substrate-e2e.sh flow clones the pinned
+# Substrate revision, verifies and applies the reviewed evaluation patches in
+# hack/agent-substrate, creates its dedicated kind cluster and registry,
+# deploys the control plane, and validates direct Substrate plus Orka-brokered
+# MCP workspace paths. KEEP_CLUSTER=1 leaves that infrastructure available for
+# inspection after the smoke checks finish.
 #
-# Unlike install-agent-sandbox.sh (which attach to the
-# shared demo-magic kind cluster), Substrate needs its OWN cluster: it uses
-# Substrate's create-kind-cluster.sh (custom registry + gVisor node config),
-# so it cannot bolt onto an existing cluster.
+# Unlike install-kontxt.sh / install-agent-sandbox.sh (which attach to the
+# shared demo-magic kind cluster), Substrate needs its own cluster because its
+# bootstrap installs custom registry and gVisor node configuration.
 #
-# Requires: kind, ko, docker, go, git, jq, kubectl, curl (and gh for the git
-# token convenience). The cluster is named by KIND_CLUSTER (default
-# orka-agent-substrate-e2e); its context is kind-<KIND_CLUSTER>. Tear down with:
+# Requires: kind, ko, docker, go, git, jq, kubectl, and curl. The cluster is
+# named by KIND_CLUSTER (default orka-agent-substrate-e2e); its context is
+# kind-<KIND_CLUSTER>. Tear down with:
 # kind delete cluster --name <KIND_CLUSTER>
-#
-# The base Substrate standup is secret-free. The agentic layer (AGENTIC=1,
-# default) additionally: builds a codex-capable Actor image and points the
-# ActorTemplate at it; deploys the vekil model proxy (one-time GitHub
-# device-code login — the operator completes it from the pod logs); and creates
-# the model + git Secrets. Set AGENTIC=0 to skip the agentic layer. The git
-# token comes from GIT_TOKEN/GITHUB_TOKEN or the local gh CLI; the model proxy
-# needs a Copilot-enabled GitHub account for the device-code login.
 
 set -Eeuo pipefail
 
@@ -40,35 +32,39 @@ repo_root="$(cd "${script_dir}/../../.." && pwd)"
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+if [[ "${AGENTIC:-0}" != "0" ]]; then
+  die "AGENTIC mode was removed with the ACP v2 hard cutover; use scripts/live-acp-runtime-e2e.sh for built-in agent runtime validation"
+fi
+
 # Pin to the same Substrate revision CI uses, unless overridden.
 SUBSTRATE_REF="${SUBSTRATE_REF:-b80031d260959b1fc5c6f61e3099fe2a6d368af1}"
+if [[ ! "${SUBSTRATE_REF}" =~ ^[[:xdigit:]]{40}$ ]]; then
+  die "SUBSTRATE_REF must be an immutable full 40-hex commit SHA; branches and movable tags cannot identify a reusable cluster"
+fi
+SUBSTRATE_REF="$(printf '%s' "${SUBSTRATE_REF}" | tr '[:upper:]' '[:lower:]')"
 KIND_CLUSTER="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
+SUBSTRATE_KUBECONFIG="${SUBSTRATE_KUBECONFIG:-${HOME}/.kube/orka-substrate-${KIND_CLUSTER}.config}"
+DIRECT_EVAL_MARKER_NAMESPACE="orka-system"
+DIRECT_EVAL_MARKER_NAME="orka-substrate-direct-evaluation-v2"
+DIRECT_EVAL_MARKER_SCHEMA_VERSION="4"
+DIRECT_EVAL_PATCH_SET_VERSION="2026-08-01.2"
+DIRECT_EVAL_HARDENING="atenet-routing-metadata-allowlist+envoy-info,atelet-root-supervisor-capabilities,ateom-runsc-delete-recovery"
+DIRECT_EVAL_PATCH_FILES=(
+  "hack/agent-substrate/atelet-root-supervisor-capabilities.patch"
+  "hack/agent-substrate/atenet-router-authorization-redaction.patch"
+  "hack/agent-substrate/ateom-runsc-delete-recovery.patch"
+)
 # Reuse-or-recreate behavior when the kind cluster already exists. The Substrate
 # standup (scripts/agent-substrate-e2e.sh -> hack/create-kind-cluster.sh) does
 # `kind delete cluster` then recreate, so re-running this bootstrap on a live
-# cluster would DESTROY it (and any completed vekil device-code login, which is
-# cached in an emptyDir). When a cluster already exists we prompt the operator
-# reuse / recreate / cancel. Set DEMO_CLUSTER_REUSE=reuse|recreate|cancel to skip
-# the prompt (required for non-interactive runs that should not just recreate).
+# cluster would DESTROY it and its direct-evaluation state. When a cluster
+# already exists we prompt the operator to reuse, recreate, or cancel. Set
+# DEMO_CLUSTER_REUSE=reuse|recreate|cancel to skip the prompt (required for
+# non-interactive runs that should not just recreate).
 DEMO_CLUSTER_REUSE="${DEMO_CLUSTER_REUSE:-}"
-# Exercise the retained-workspace path during standup so the warm-reuse beat is
-# smoke-tested before Demo 70 runs. Override to 0 to skip.
+# Exercise the extended direct workspace and MCP checks during standup.
+# Override to 0 to run only the base smoke checks.
 SUBSTRATE_E2E_EXTENDED="${SUBSTRATE_E2E_EXTENDED:-1}"
-
-# Agentic Demo 70 add-ons (set AGENTIC=0 to stop after the base standup and
-# leave the demo model-free). The agentic layer makes Demo 70 a REAL model run
-# that opens a PR, so it needs a model proxy + a codex-capable Actor image.
-AGENTIC="${AGENTIC:-1}"
-SUBSTRATE_NS="${DEMO_SUBSTRATE_NAMESPACE:-default}"
-SUBSTRATE_TEMPLATE_NS="${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE:-ate-demo}"
-SUBSTRATE_TEMPLATE_NAME="${DEMO_SUBSTRATE_TEMPLATE_NAME:-orka-codex-ci}"
-SUBSTRATE_MODEL_SECRET="${DEMO_SUBSTRATE_MODEL_SECRET:-substrate-model-key}"
-SUBSTRATE_GIT_SECRET="${DEMO_SUBSTRATE_GIT_SECRET:-github-credentials}"
-SUBSTRATE_MODEL="${DEMO_SUBSTRATE_RUNTIME_MODEL:-gpt-5.5}"
-VEKIL_NS="${VEKIL_NAMESPACE:-vekil-system}"
-KIND_REGISTRY_NAME="${KIND_REGISTRY_NAME:-kind-registry}"
-KIND_REGISTRY_PORT="${KIND_REGISTRY_PORT:-5001}"
-CODEX_ACTOR_TAG="${CODEX_ACTOR_TAG:-demo}"
 
 # Put the Go bin dir on PATH so a `go install`ed ko is found.
 if command -v go >/dev/null 2>&1; then
@@ -90,10 +86,59 @@ docker info >/dev/null 2>&1 || die "docker daemon is not reachable — start Doc
 e2e_script="${repo_root}/scripts/agent-substrate-e2e.sh"
 [[ -f "${e2e_script}" ]] || die "expected ${e2e_script} to exist"
 
+reviewed_patch_set_manifest() {
+  local relative_path patch_path patch_blob
+  for relative_path in "${DIRECT_EVAL_PATCH_FILES[@]}"; do
+    patch_path="${repo_root}/${relative_path}"
+    [[ -f "${patch_path}" ]] || die "expected reviewed patch ${patch_path} to exist"
+    patch_blob="$(git hash-object "${patch_path}")"
+    [[ -n "${patch_blob}" ]] || die "could not fingerprint reviewed patch ${patch_path}"
+    printf '%s git-blob:%s\n' "${relative_path}" "${patch_blob}"
+  done
+}
+
+# The marker stores this exact, ordered manifest in addition to its schema and
+# human-reviewed version. Any patch-byte change therefore invalidates reuse even
+# if a developer forgets to bump DIRECT_EVAL_PATCH_SET_VERSION.
+DIRECT_EVAL_REVIEWED_PATCH_SET="$(reviewed_patch_set_manifest)"
+
 # cluster_exists: true when a kind cluster named ${KIND_CLUSTER} is present.
 cluster_exists() {
   command -v kind >/dev/null 2>&1 || return 1
   kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER}"
+}
+
+activate_scoped_kubeconfig() {
+  mkdir -p "$(dirname "${SUBSTRATE_KUBECONFIG}")"
+  kind export kubeconfig --name "${KIND_CLUSTER}" --kubeconfig "${SUBSTRATE_KUBECONFIG}" >/dev/null
+  chmod 0600 "${SUBSTRATE_KUBECONFIG}"
+  export KUBECONFIG="${SUBSTRATE_KUBECONFIG}"
+  log "Using retained scoped kubeconfig ${SUBSTRATE_KUBECONFIG}"
+}
+
+direct_evaluation_marker_exists() {
+  kubectl --context "kind-${KIND_CLUSTER}" -n "${DIRECT_EVAL_MARKER_NAMESPACE}" \
+    get configmap "${DIRECT_EVAL_MARKER_NAME}" >/dev/null 2>&1
+}
+
+direct_evaluation_hardening_matches() {
+  local marker_json
+  marker_json="$(kubectl --context "kind-${KIND_CLUSTER}" -n "${DIRECT_EVAL_MARKER_NAMESPACE}" \
+    get configmap "${DIRECT_EVAL_MARKER_NAME}" -o json 2>/dev/null)" || return 1
+
+  jq -e \
+    --arg marker_schema "${DIRECT_EVAL_MARKER_SCHEMA_VERSION}" \
+    --arg substrate_commit "${SUBSTRATE_REF}" \
+    --arg patch_set_version "${DIRECT_EVAL_PATCH_SET_VERSION}" \
+    --arg reviewed_patch_set "${DIRECT_EVAL_REVIEWED_PATCH_SET}" \
+    --arg hardening "${DIRECT_EVAL_HARDENING}" \
+    '(
+      .data["marker-schema-version"] == $marker_schema and
+      .data["substrate-commit"] == $substrate_commit and
+      .data["reviewed-patch-set-version"] == $patch_set_version and
+      .data["reviewed-patch-set"] == $reviewed_patch_set and
+      .data["pinned-hardening"] == $hardening
+    )' <<<"${marker_json}" >/dev/null
 }
 
 # cluster_health: prints a one-line health summary to stdout and returns 0 when
@@ -137,12 +182,12 @@ prompt_cluster_action() {
     printf '\n'
     printf 'A kind cluster named %q already exists.\n' "${KIND_CLUSTER}"
     if [[ "${healthy_flag}" == 1 ]]; then
-      printf 'It looks healthy. Reusing keeps it (and any vekil login) intact.\n'
+      printf 'It looks healthy. Reusing keeps its direct-evaluation state intact.\n'
     else
       printf 'WARNING: it does NOT look healthy — reusing may carry that breakage forward.\n'
     fi
-    printf '  [r] reuse    — keep the cluster; reconcile add-ons only (non-destructive)\n'
-    printf '  [c] recreate — DELETE and rebuild from scratch (destroys vekil login + state)\n'
+    printf '  [r] reuse    — keep the cluster unchanged (non-destructive)\n'
+    printf '  [c] recreate — DELETE and rebuild from scratch (destroys cluster state)\n'
     printf '  [x] cancel   — exit without changes\n'
     printf 'Choose r/c/x [default: %s]: ' "${default_hint}"
   } >/dev/tty
@@ -158,13 +203,20 @@ prompt_cluster_action() {
 
 run_e2e=1
 if cluster_exists; then
+  activate_scoped_kubeconfig
   health_summary="$(cluster_health)" && health_flag=1 || health_flag=0
   log "Existing cluster kind-${KIND_CLUSTER} detected (${health_summary})"
   action="$(prompt_cluster_action "${health_flag}")"
   case "${action}" in
     reuse)
-      log "Reusing existing cluster — skipping the Substrate standup (kind delete + rebuild)."
-      log "Reconciling the agentic add-ons idempotently below."
+      if ! direct_evaluation_marker_exists; then
+        die "existing cluster has no ACP v2 direct-evaluation marker and may retain retired agentic add-ons; choose DEMO_CLUSTER_REUSE=recreate or cancel"
+      fi
+      if ! direct_evaluation_hardening_matches; then
+        die "existing cluster does not match marker schema ${DIRECT_EVAL_MARKER_SCHEMA_VERSION}, Substrate commit ${SUBSTRATE_REF}, and reviewed patch set ${DIRECT_EVAL_PATCH_SET_VERSION}; choose DEMO_CLUSTER_REUSE=recreate or cancel"
+      fi
+      log "Reusing existing marked cluster — skipping the Substrate standup (kind delete + rebuild)."
+      log "Leaving the existing direct Substrate/MCP evaluation cluster unchanged."
       run_e2e=0
       ;;
     recreate)
@@ -192,114 +244,25 @@ if [[ "${run_e2e}" == 1 ]]; then
     bash "${e2e_script}"
 fi
 
-if [[ "${AGENTIC}" == "1" ]]; then
-  ctx="kind-${KIND_CLUSTER}"
-  log "Ensuring substrate demo namespace ${SUBSTRATE_NS}"
-  kubectl --context "${ctx}" create namespace "${SUBSTRATE_NS}" --dry-run=client -o yaml \
-    | kubectl --context "${ctx}" apply -f -
+# The CI-parity E2E deliberately uses an isolated temporary kubeconfig. Export
+# the fresh or reused cluster into a stable, scoped file before follow-up
+# marker and health operations. Never merge into ~/.kube/config.
+activate_scoped_kubeconfig
 
-  # ---- 1. Codex-capable Actor image -------------------------------------
-  # The agentic run executes a real codex CLI INSIDE the gVisor Actor, so the
-  # Actor image must carry codex + git (the e2e's stripped workspace-agent-root
-  # does not). The production agent-harness-wrapper image has the daemon + codex +
-  # git. Build it LOCALLY (the kind registry is on localhost; a remote builder
-  # cannot push there) for the kind node arch, push to the registry, and point
-  # the ActorTemplate at it.
-  node_arch="$(kubectl --context "${ctx}" get nodes \
-    -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
-  reg_ip="$(docker inspect -f '{{with index .NetworkSettings.Networks "kind"}}{{.IPAddress}}{{end}}' "${KIND_REGISTRY_NAME}" 2>/dev/null || true)"
-  [[ -n "${reg_ip}" ]] || die "could not determine ${KIND_REGISTRY_NAME} kind-network IP"
-  push_image="localhost:${KIND_REGISTRY_PORT}/orka/agent-harness-wrapper:${CODEX_ACTOR_TAG}"
-  actor_image="${reg_ip}:5000/orka/agent-harness-wrapper:${CODEX_ACTOR_TAG}"
+log "Recording ACP v2 direct-evaluation marker ${DIRECT_EVAL_MARKER_NAMESPACE}/${DIRECT_EVAL_MARKER_NAME}"
+kubectl --context "kind-${KIND_CLUSTER}" -n "${DIRECT_EVAL_MARKER_NAMESPACE}" \
+  create configmap "${DIRECT_EVAL_MARKER_NAME}" \
+  --from-literal=mode=direct-workspace-mcp \
+  --from-literal=runtime-dispatch=deferred \
+  --from-literal="marker-schema-version=${DIRECT_EVAL_MARKER_SCHEMA_VERSION}" \
+  --from-literal="substrate-commit=${SUBSTRATE_REF}" \
+  --from-literal="reviewed-patch-set-version=${DIRECT_EVAL_PATCH_SET_VERSION}" \
+  --from-literal="reviewed-patch-set=${DIRECT_EVAL_REVIEWED_PATCH_SET}" \
+  --from-literal="pinned-hardening=${DIRECT_EVAL_HARDENING}" \
+  --dry-run=client -o yaml \
+  | kubectl --context "kind-${KIND_CLUSTER}" apply -f - >/dev/null
 
-  log "Building codex Actor image ${push_image} (arch ${node_arch})"
-  docker build --platform "linux/${node_arch}" -t "${push_image}" \
-    -f "${repo_root}/workers/harness/Dockerfile" "${repo_root}"
-  docker push "${push_image}"
-
-  log "Pointing ActorTemplate ${SUBSTRATE_TEMPLATE_NS}/${SUBSTRATE_TEMPLATE_NAME} at the codex image"
-  kubectl --context "${ctx}" -n "${SUBSTRATE_TEMPLATE_NS}" patch actortemplate "${SUBSTRATE_TEMPLATE_NAME}" \
-    --type=json -p "[{\"op\":\"replace\",\"path\":\"/spec/containers/0/image\",\"value\":\"${actor_image}\"}]"
-  log "Waiting for the ActorTemplate to rebuild its golden snapshot on the new image"
-  for _ in $(seq 1 72); do
-    ph="$(kubectl --context "${ctx}" -n "${SUBSTRATE_TEMPLATE_NS}" get actortemplate "${SUBSTRATE_TEMPLATE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    [[ "${ph}" == "Ready" ]] && break
-    sleep 5
-  done
-  ph="$(kubectl --context "${ctx}" -n "${SUBSTRATE_TEMPLATE_NS}" get actortemplate "${SUBSTRATE_TEMPLATE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-  [[ "${ph}" == "Ready" ]] || die "ActorTemplate ${SUBSTRATE_TEMPLATE_NS}/${SUBSTRATE_TEMPLATE_NAME} did not become Ready (phase=${ph:-unknown})"
-
-  # ---- 2. In-cluster model proxy (vekil) --------------------------------
-  # Zero-config Copilot upstream via device-code login (a gho_ gh token has no
-  # Copilot entitlement). The deploy script prints a github.com/login/device
-  # code in the pod logs; the operator completes it once, and vekil caches the
-  # session. We do NOT pass a token secret here.
-  vekil_script=""
-  for candidate in \
-    "${repo_root}/.agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh" \
-    "${repo_root}/.claude/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh"; do
-    if [[ -x "${candidate}" ]]; then
-      vekil_script="${candidate}"
-      break
-    fi
-  done
-  if kubectl --context "${ctx}" -n "${VEKIL_NS}" get deploy vekil >/dev/null 2>&1; then
-    log "vekil already deployed in ${VEKIL_NS} — leaving it (re-run device-code login if /readyz is down)"
-  elif [[ -x "${vekil_script}" ]]; then
-    log "Deploying vekil model proxy to ${VEKIL_NS} (device-code login)"
-    bash "${vekil_script}" --context "${ctx}" --namespace "${VEKIL_NS}" --skip-wait
-    log "ACTION REQUIRED: complete the GitHub device-code login printed in vekil's logs:"
-    log "  kubectl --context ${ctx} -n ${VEKIL_NS} logs deploy/vekil | grep 'login/device'"
-    log "  (visit the URL, enter the code; then /readyz returns 200)"
-  else
-    die "vekil deploy script not found under .agents/skills or .claude/skills; install the skill or deploy an in-cluster OpenAI-compatible proxy before Demo 70"
-  fi
-  vekil_url="http://vekil.${VEKIL_NS}.svc.cluster.local:1337/v1"
-
-  # ---- 3. Model Secret + git Secret -------------------------------------
-  # The codex Agent's secretRef carries the model endpoint as env (EnvFrom).
-  # The api-key is a placeholder — vekil holds the real Copilot session.
-  log "Creating model Secret ${SUBSTRATE_NS}/${SUBSTRATE_MODEL_SECRET} (endpoint -> vekil)"
-  kubectl --context "${ctx}" -n "${SUBSTRATE_NS}" create secret generic "${SUBSTRATE_MODEL_SECRET}" \
-    --from-literal=OPENAI_BASE_URL="${vekil_url}" \
-    --from-literal=OPENAI_API_KEY=proxy-placeholder \
-    --dry-run=client -o yaml | kubectl --context "${ctx}" apply -f -
-
-  # Git credentials for push + PR. Prefer an explicit GIT_TOKEN/GITHUB_TOKEN
-  # env; otherwise fall back to the local gh CLI token (never printed).
-  git_token="${GIT_TOKEN:-${GITHUB_TOKEN:-}}"
-  if [[ -z "${git_token}" ]] && command -v gh >/dev/null 2>&1; then
-    git_token="$(gh auth token 2>/dev/null || true)"
-  fi
-  if [[ -n "${git_token}" ]]; then
-    log "Creating git Secret ${SUBSTRATE_NS}/${SUBSTRATE_GIT_SECRET} (token not printed)"
-    kubectl --context "${ctx}" -n "${SUBSTRATE_NS}" create secret generic "${SUBSTRATE_GIT_SECRET}" \
-      --from-literal=username=oauth2 \
-      --from-literal=password="${git_token}" \
-      --dry-run=client -o yaml | kubectl --context "${ctx}" apply -f -
-    unset git_token
-  else
-    log "No git token found (set GIT_TOKEN, GITHUB_TOKEN, or 'gh auth login')."
-    log "Create it before running Demo 70:"
-    log "  kubectl -n ${SUBSTRATE_NS} create secret generic ${SUBSTRATE_GIT_SECRET} --from-literal=username=oauth2 --from-literal=password=<token>"
-  fi
-
-  # The demos authenticate to the Orka API with a token minted for this SA
-  # (prepare_api_env -> kubectl create token orka-client). The API validates
-  # any SA token via TokenReview, so the SA just needs to exist. cluster-up.sh
-  # provides it on the shared cluster; this e2e-built cluster needs it created.
-  orka_client_sa="${ORKA_TOKEN_SERVICE_ACCOUNT:-orka-client}"
-  orka_client_ns="${ORKA_TOKEN_NAMESPACE:-${SUBSTRATE_NS}}"
-  log "Ensuring Orka API client ServiceAccount ${orka_client_ns}/${orka_client_sa}"
-  kubectl --context "${ctx}" create namespace "${orka_client_ns}" --dry-run=client -o yaml \
-    | kubectl --context "${ctx}" apply -f -
-  kubectl --context "${ctx}" create serviceaccount "${orka_client_sa}" -n "${orka_client_ns}" \
-    --dry-run=client -o yaml | kubectl --context "${ctx}" apply -f -
-
-  log "Agentic add-ons ready (model ${SUBSTRATE_MODEL} via vekil; codex Actor image; git secret; API client SA)."
-fi
-
-log "Agent Substrate installed. Demo 70 can run against context kind-${KIND_CLUSTER}:"
-log "  kubectl config use-context kind-${KIND_CLUSTER}"
-log "  DEMO_SUBSTRATE_NAMESPACE=default ./hack/demos/70-agent-substrate.sh"
+log "Agent Substrate direct-evaluation cluster is available at context kind-${KIND_CLUSTER}."
+log "This cluster does not provide an ACP agent runtime; Demo 70 remains archived."
+log "Use scripts/live-acp-runtime-e2e.sh for live Codex, Claude, and Copilot RuntimePool validation."
 log "Tear down with: kind delete cluster --name ${KIND_CLUSTER}"

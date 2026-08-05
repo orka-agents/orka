@@ -25,6 +25,7 @@ jobs:
   test-e2e:
     name: Run on Ubuntu
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       KIND_VERSION: v0.31.0
     steps:

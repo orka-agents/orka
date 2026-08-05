@@ -30,7 +30,6 @@ const sidebars = {
         'guides/multi-agent-coordination',
         'guides/autonomous-tasks',
         'guides/transaction-token-migration',
-        'guides/cli-harness-wrapper',
         'guides/repository-security-scanning',
         'guides/repository-monitors',
         'guides/github-label-triggers',

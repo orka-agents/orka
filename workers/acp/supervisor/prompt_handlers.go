@@ -1,0 +1,1695 @@
+package supervisor
+
+import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"path"
+	"reflect"
+	"slices"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/orka-agents/orka/internal/acp"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/security"
+	"github.com/orka-agents/orka/internal/workspacedelta"
+)
+
+//nolint:gocyclo // The explicit state-machine branches are easier to audit together.
+func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
+	var request harnessv2.StartPromptRequest
+	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+		return
+	}
+	now := time.Now().UTC()
+	minLease := time.Duration(s.cfg.Capabilities.Limits.MinPromptLeaseMillis) * time.Millisecond
+	maxLease := time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond
+	if err := request.ValidateAt(now, minLease, maxLease); err != nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if string(request.Metadata.PromptID) != r.PathValue("promptID") {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "prompt path does not match request", nil, false)
+		return
+	}
+	if !s.authorizeMutation(w, r, request.Metadata, true) {
+		return
+	}
+	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
+	slotHeld := false
+	defer func() {
+		if slotHeld {
+			<-s.promptSlots
+		}
+	}()
+
+	s.mu.Lock()
+	state := s.sessions[sessionID]
+	if state == nil || state.creating {
+		s.mu.Unlock()
+		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
+		return
+	}
+	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		return
+	}
+	if err := request.MCPAuthorization.ValidateProfile(state.profile); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		return
+	}
+	classification, err := harnessv2.ClassifyOperation(
+		s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata,
+		operationPtr(state.operations, request.Metadata.OperationID), true, now,
+	)
+	if err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if classification.Class != harnessv2.RequestClassificationFresh {
+		s.mu.Unlock()
+		writeClassificationError(w, classification)
+		return
+	}
+	if s.drain.Requested || state.drainCleanupScheduled {
+		s.mu.Unlock()
+		writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime pool is draining", nil, true)
+		return
+	}
+	if state.descriptor.State != harnessv2.RuntimeSessionStateIdle || (state.prompt != nil && state.prompt.settlement == nil) {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, "runtime session is not idle", nil, false)
+		return
+	}
+	content, err := promptContentToACP(request.Input.Content)
+	if err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	select {
+	case s.promptSlots <- struct{}{}:
+		slotHeld = true
+	default:
+		s.mu.Unlock()
+		writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime pool is at prompt capacity", nil, true)
+		return
+	}
+	prompt := &promptState{
+		request:   request,
+		operation: operationRecord(request.Metadata, harnessv2.OperationPhaseRecorded, "", now),
+		lease:     request.Lease,
+		startedAt: now,
+	}
+	state.prompt = prompt
+	state.operations[request.Metadata.OperationID] = prompt.operation
+	runtimeSession := state.runtime
+	providerProxy := state.providerProxy
+	mcpProxy := state.mcpProxy
+	if providerProxy == nil ||
+		providerProxy.activateWithMaxTurns(string(request.Metadata.PromptID), state.agentConfiguration.MaxTurns, request.Lease.ExpiresAt, now) != nil {
+		state.prompt = nil
+		delete(state.operations, request.Metadata.OperationID)
+		s.mu.Unlock()
+		writeError(
+			w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned,
+			"provider proxy activation failed", nil, false,
+		)
+		return
+	}
+	if mcpProxy == nil || mcpProxy.activate(request.MCPAuthorization, request.Lease, now) != nil {
+		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+		state.prompt = nil
+		delete(state.operations, request.Metadata.OperationID)
+		s.mu.Unlock()
+		writeError(
+			w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned,
+			"MCP proxy activation failed", nil, false,
+		)
+		return
+	}
+	stopRequestGate := context.AfterFunc(r.Context(), func() {
+		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+	})
+	defer stopRequestGate()
+	s.mu.Unlock()
+
+	run, err := runtimeSession.StartPromptWithLease(
+		r.Context(), string(request.Metadata.PromptID), string(request.Metadata.RequestDigest),
+		content, request.Lease.ExpiresAt.Sub(now),
+	)
+	if err != nil {
+		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+		s.mu.Lock()
+		if state.prompt == prompt {
+			state.prompt = nil
+			delete(state.operations, request.Metadata.OperationID)
+		}
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, safeError(err), nil, false)
+		return
+	}
+
+	first, ok := <-run.Events
+	if !ok {
+		result := providerTurnLimitResult(state, prompt, <-run.Result)
+		s.finishPrompt(state, prompt, result, time.Now().UTC())
+		if result.Accepted {
+			writeError(
+				w, http.StatusInternalServerError, harnessv2.ErrorCodeOutcomeUnknown,
+				"accepted ACP prompt settled without an event stream", nil, false,
+			)
+		} else {
+			writeError(
+				w, http.StatusBadGateway, harnessv2.ErrorCodeSessionPoisoned,
+				"ACP prompt failed before acceptance", nil, true,
+			)
+		}
+		return
+	}
+
+	limits := eventLimits(s.cfg.Capabilities.Limits)
+	encoder, err := harnessv2.NewEventEncoder(w, limits, harnessv2.EventExpectationFromMetadata(request.Metadata))
+	if err != nil {
+		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+		_, _ = runtimeSession.CancelPrompt(context.Background(), string(request.Metadata.PromptID))
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, safeError(err), nil, false)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	streamBroken := false
+	markStreamBroken := func(stage, eventType string, sequence int64, err error) {
+		if streamBroken {
+			return
+		}
+		streamBroken = true
+		slog.Error(
+			"ACP prompt stream broken",
+			"stage", stage,
+			"promptID", request.Metadata.PromptID,
+			"eventType", eventType,
+			"sequence", sequence,
+			"errorClass", promptStreamErrorClass(err),
+			"errorDetail", promptStreamErrorDetail(err),
+		)
+	}
+	encodeEvent := func(event harnessv2.Event) {
+		if streamBroken {
+			return
+		}
+		if err := encoder.Encode(event); err != nil {
+			markStreamBroken("event-encode", string(event.Type), int64(event.Identity.Sequence), err)
+			deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+			cancelCtx, cancel := context.WithTimeout(
+				context.Background(), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)*2,
+			)
+			defer cancel()
+			_, _ = runtimeSession.CancelPrompt(cancelCtx, string(request.Metadata.PromptID))
+			return
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	if first.Type != acp.PromptEventAccepted {
+		markStreamBroken("first-event", string(first.Type), first.Sequence, nil)
+		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+		_, _ = runtimeSession.CancelPrompt(context.Background(), string(request.Metadata.PromptID))
+	}
+	mapped, err := s.mapRuntimeEvent(state, prompt, first)
+	if err != nil {
+		markStreamBroken("event-map", string(first.Type), first.Sequence, err)
+		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+		_, _ = runtimeSession.CancelPrompt(context.Background(), string(request.Metadata.PromptID))
+	} else if mapped != nil {
+		encodeEvent(*mapped)
+	}
+	for event := range run.Events {
+		mapped, mapErr := s.mapRuntimeEvent(state, prompt, event)
+		if mapErr != nil {
+			markStreamBroken("event-map", string(event.Type), event.Sequence, mapErr)
+			deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+			_, _ = runtimeSession.CancelPrompt(context.Background(), string(request.Metadata.PromptID))
+			continue
+		}
+		if mapped != nil {
+			encodeEvent(*mapped)
+		}
+	}
+	result := <-run.Result
+	if result.Err != nil {
+		stage, rpcCode := promptExecutionDiagnostic(result.Err)
+		slog.Error("ACP prompt execution failed", "stage", stage, "rpcCode", rpcCode, "accepted", result.Accepted)
+	}
+	deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+	terminal, settledResult, terminalErr := s.terminalEvent(state, prompt, result)
+	if terminalErr != nil {
+		markStreamBroken("terminal-build", string(terminal.Type), int64(terminal.Identity.Sequence), terminalErr)
+	} else {
+		encodeEvent(terminal)
+	}
+	if !streamBroken {
+		if err := encoder.Close(); err != nil {
+			slog.Error(
+				"ACP prompt stream close failed",
+				"promptID", request.Metadata.PromptID,
+				"errorClass", promptStreamErrorClass(err),
+			)
+		}
+	}
+	s.finishPrompt(state, prompt, settledResult, terminal.Identity.Timestamp)
+	slotHeld = false
+	<-s.promptSlots
+}
+
+func promptStreamErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	detail := strings.NewReplacer("\n", " ", "\r", " ").Replace(strings.TrimSpace(err.Error()))
+	limit := 512
+	if len(detail) <= limit {
+		return detail
+	}
+	for limit > 0 && !utf8.RuneStart(detail[limit]) {
+		limit--
+	}
+	return detail[:limit] + "..."
+}
+
+func promptStreamErrorClass(err error) string {
+	switch {
+	case err == nil:
+		return "unexpected-event"
+	case errors.Is(err, harnessv2.ErrEventRateExceeded):
+		return "event-rate-exceeded"
+	case errors.Is(err, harnessv2.ErrEventByteRateExceeded):
+		return "event-byte-rate-exceeded"
+	case errors.Is(err, harnessv2.ErrEventLineTooLarge):
+		return "event-line-too-large"
+	case errors.Is(err, harnessv2.ErrMalformedEvent):
+		return "malformed-event"
+	case errors.Is(err, harnessv2.ErrEventIdentityMismatch):
+		return "event-identity-mismatch"
+	case errors.Is(err, harnessv2.ErrEventSequence):
+		return "event-sequence"
+	case errors.Is(err, harnessv2.ErrEventAfterTerminal):
+		return "event-after-terminal"
+	case errors.Is(err, harnessv2.ErrMissingAcceptedEvent):
+		return "missing-accepted-event"
+	case strings.Contains(err.Error(), "write event"):
+		return "event-write"
+	case strings.Contains(err.Error(), "omitted toolCallId"):
+		return "missing-tool-call-id"
+	case strings.Contains(err.Error(), "decode ACP session update"),
+		strings.Contains(err.Error(), "decode ACP agent message content"):
+		return "update-decode"
+	case strings.Contains(err.Error(), "permission"):
+		return "permission-map"
+	case strings.Contains(err.Error(), "unsupported runtime prompt event"):
+		return "unsupported-runtime-event"
+	case strings.Contains(err.Error(), "activate prompt-scoped MCP authority"):
+		return "mcp-authority"
+	case strings.Contains(err.Error(), "terminal") && strings.Contains(err.Error(), "size"):
+		return "terminal-size"
+	default:
+		return "unclassified"
+	}
+}
+
+func promptExecutionDiagnostic(err error) (string, int) {
+	var rpcErr *acp.RPCError
+	switch {
+	case errors.As(err, &rpcErr):
+		return "json-rpc-error", rpcErr.Code
+	case errors.Is(err, acp.ErrClosed):
+		return "transport-closed", 0
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline-exceeded", 0
+	case errors.Is(err, context.Canceled):
+		return "context-canceled", 0
+	default:
+		return "client-error", 0
+	}
+}
+
+func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
+	var request harnessv2.RenewPromptLeaseRequest
+	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+		return
+	}
+	now := time.Now().UTC()
+	maxLease := time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond
+	if err := request.ValidateAt(now, maxLease); err != nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if !pathMatchesPrompt(r, request.Metadata) || !s.authorizeMutation(w, r, request.Metadata, true) {
+		return
+	}
+	s.mu.Lock()
+	state := s.sessions[harnessv2.RuntimeSessionID(r.PathValue("sessionID"))]
+	if state == nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "prompt is no longer active", nil, false)
+		return
+	}
+	classification, err := harnessv2.ClassifyOperation(
+		s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata,
+		operationPtr(state.operations, request.Metadata.OperationID), true, now,
+	)
+	if err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if classification.Class != harnessv2.RequestClassificationFresh {
+		replay := state.operationReplays[request.Metadata.OperationID]
+		s.mu.Unlock()
+		if replay != nil && classification.Class == harnessv2.RequestClassificationDuplicate {
+			writeLeaseOperationReplay(w, r, replay, classification)
+		} else {
+			writeClassificationError(w, classification)
+		}
+		return
+	}
+	if state.prompt == nil || state.prompt.settlement != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "prompt is no longer active", nil, false)
+		return
+	}
+	if !promptMetadataMatches(request.Metadata, state.prompt.request.Metadata) {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "lease renewal prompt identity does not match the active prompt", nil, false)
+		return
+	}
+	if err := request.MCPAuthorization.ValidateProfile(state.profile); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		return
+	}
+	if err := harnessv2.ValidatePromptLeaseRenewal(state.prompt.lease, request.Lease, request.ExpectedLeaseGeneration, now, maxLease); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		return
+	}
+	runtimeSession := state.runtime
+	providerProxy := state.providerProxy
+	mcpProxy := state.mcpProxy
+	if err := runtimeSession.RenewPromptLeaseFor(string(request.Metadata.PromptID), request.Lease.ExpiresAt.Sub(now)); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, safeError(err), nil, false)
+		return
+	}
+	if providerProxy == nil || mcpProxy == nil ||
+		providerProxy.renew(string(request.Metadata.PromptID), request.Lease.ExpiresAt, now) != nil ||
+		mcpProxy.renew(request.MCPAuthorization, request.Lease, now) != nil {
+		if providerProxy != nil {
+			providerProxy.revoke()
+		}
+		if mcpProxy != nil {
+			mcpProxy.revoke(harnessv2.RuntimeSessionStateCancelling)
+		}
+		s.mu.Unlock()
+		cancelCtx, cancel := context.WithTimeout(context.Background(), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)*2)
+		defer cancel()
+		_, _ = runtimeSession.CancelPrompt(cancelCtx, string(request.Metadata.PromptID))
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "prompt provider lease is no longer active", nil, false)
+		return
+	}
+	state.prompt.lease = request.Lease
+	state.prompt.request.MCPAuthorization = request.MCPAuthorization
+	response := harnessv2.PromptLeaseResponse{
+		Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, Lease: request.Lease,
+	}
+	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", now)
+	if state.operationReplays == nil {
+		state.operationReplays = make(map[harnessv2.OperationID]*operationReplay)
+	}
+	done := make(chan struct{})
+	close(done)
+	state.operationReplays[request.Metadata.OperationID] = &operationReplay{done: done, lease: &response}
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request) {
+	var request harnessv2.ResolvePermissionRequest
+	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+		return
+	}
+	now := time.Now().UTC()
+	if err := request.ValidateAt(now); err != nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if !pathMatchesPermission(r, request) || !s.authorizeMutation(w, r, request.Metadata, true) {
+		return
+	}
+	s.mu.Lock()
+	state := s.sessions[harnessv2.RuntimeSessionID(r.PathValue("sessionID"))]
+	if state == nil || state.prompt == nil || state.prompt.settlement != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "prompt is no longer active", nil, false)
+		return
+	}
+	classification, err := harnessv2.ClassifyOperation(
+		s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata,
+		operationPtr(state.operations, request.Metadata.OperationID), true, now,
+	)
+	if err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	permission, pending := state.permissions[request.RequestID]
+	if classification.Class != harnessv2.RequestClassificationFresh {
+		replay := state.operationReplays[request.Metadata.OperationID]
+		s.mu.Unlock()
+		if replay != nil && classification.Class == harnessv2.RequestClassificationDuplicate {
+			writePermissionOperationReplay(w, r, replay, classification)
+		} else if classification.Class == harnessv2.RequestClassificationDuplicate && permission.decision != nil {
+			writeJSON(w, http.StatusOK, harnessv2.PermissionResolutionResponse{
+				Protocol: harnessv2.ProtocolVersion, Classification: classification, State: harnessv2.PermissionResolutionAlreadyResolved,
+				Decision: *permission.decision, ResolvedAt: now,
+			})
+		} else {
+			writeClassificationError(w, classification)
+		}
+		return
+	}
+	if !pending {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "permission request is no longer pending", nil, false)
+		return
+	}
+
+	outcome := acp.CancelledPermissionOutcome()
+	var approval *harnessv2.MCPApprovalEvidence
+	if request.Decision.Outcome == harnessv2.PermissionDecisionSelected {
+		outcome = acp.SelectedPermissionOutcome(request.Decision.OptionID)
+		optionKind := permission.options[request.Decision.OptionID]
+		if optionKind == harnessv2.PermissionOptionAllowOnce || optionKind == harnessv2.PermissionOptionAllowAlways {
+			if state.mcpProxy == nil {
+				s.mu.Unlock()
+				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize an MCP tool", nil, false)
+				return
+			}
+			toolName, resolveErr := state.mcpProxy.resolveApprovalToolName(permission.toolName, permission.title)
+			if resolveErr != nil {
+				s.mu.Unlock()
+				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize an MCP tool", nil, false)
+				return
+			}
+			approval = &harnessv2.MCPApprovalEvidence{
+				PermissionRequestID: request.RequestID, ToolCallID: permission.toolCallID, ToolName: toolName,
+				GrantedAt: now, ExpiresAt: permission.expiresAt, Reusable: optionKind == harnessv2.PermissionOptionAllowAlways,
+			}
+		}
+	}
+	replay := reserveOperationReplayLocked(state, request.Metadata, now)
+	mutations := state.promptMutations
+	mcpProxy := state.mcpProxy
+	s.mu.Unlock()
+
+	if mutations == nil {
+		failure := operationFailure{status: http.StatusInternalServerError, code: harnessv2.ErrorCodeSessionPoisoned, message: "runtime permission resolver is unavailable"}
+		s.completeOperationFailure(replay, failure)
+		writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
+		return
+	}
+	if approval != nil {
+		if err := mcpProxy.grantApproval(request.Metadata.PromptID, *approval); err != nil {
+			failure := operationFailure{status: http.StatusForbidden, code: harnessv2.ErrorCodeForbidden, message: "permission cannot authorize an MCP tool"}
+			s.completeOperationFailure(replay, failure)
+			writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
+			return
+		}
+	}
+	if err := mutations.ResolvePermission(string(request.Metadata.PromptID), string(request.RequestID), outcome); err != nil {
+		if mcpProxy != nil {
+			mcpProxy.revoke(harnessv2.RuntimeSessionStatePoisoned)
+		}
+		failure := operationFailure{status: http.StatusGone, code: harnessv2.ErrorCodeSettled, message: safeError(err)}
+		s.completeOperationFailure(replay, failure)
+		writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
+		return
+	}
+
+	resolvedAt := time.Now().UTC()
+	response := harnessv2.PermissionResolutionResponse{
+		Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+		State: harnessv2.PermissionResolutionApplied, Decision: request.Decision, ResolvedAt: resolvedAt,
+	}
+	s.mu.Lock()
+	if current, ok := state.permissions[request.RequestID]; ok {
+		current.decision = &request.Decision
+		state.permissions[request.RequestID] = current
+	}
+	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", resolvedAt)
+	replay.permission = &response
+	close(replay.done)
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
+	var request harnessv2.CancelPromptRequest
+	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+		return
+	}
+	now := time.Now().UTC()
+	if err := request.ValidateAt(now); err != nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if !pathMatchesPrompt(r, request.Metadata) || !s.authorizeMutation(w, r, request.Metadata, true) {
+		return
+	}
+	s.mu.Lock()
+	state := s.sessions[harnessv2.RuntimeSessionID(r.PathValue("sessionID"))]
+	if state == nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "prompt is not active", nil, false)
+		return
+	}
+	classification, err := harnessv2.ClassifyOperation(
+		s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata,
+		operationPtr(state.operations, request.Metadata.OperationID), true, now,
+	)
+	if err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if classification.Class != harnessv2.RequestClassificationFresh {
+		replay := state.operationReplays[request.Metadata.OperationID]
+		s.mu.Unlock()
+		if replay != nil && (classification.Class == harnessv2.RequestClassificationDuplicate || classification.Class == harnessv2.RequestClassificationSettled) {
+			writeCancellationOperationReplay(w, r, replay, classification)
+		} else {
+			writeClassificationError(w, classification)
+		}
+		return
+	}
+	if state.prompt == nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "prompt is not active", nil, false)
+		return
+	}
+	if !promptMetadataMatches(request.Metadata, state.prompt.request.Metadata) {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "cancellation prompt identity does not match the active prompt", nil, false)
+		return
+	}
+	invalidated := uint32(len(state.permissions))
+	replay := reserveOperationReplayLocked(state, request.Metadata, now)
+	mutations := state.promptMutations
+	providerProxy := state.providerProxy
+	mcpProxy := state.mcpProxy
+	prompt := state.prompt
+	s.mu.Unlock()
+	if mutations == nil {
+		failure := operationFailure{status: http.StatusInternalServerError, code: harnessv2.ErrorCodeSessionPoisoned, message: "runtime cancellation is unavailable"}
+		s.completeOperationFailure(replay, failure)
+		writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
+		return
+	}
+	if providerProxy != nil || mcpProxy != nil {
+		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+	}
+	cancelCtx, cancel := context.WithDeadline(r.Context(), request.SettlementDeadline)
+	defer cancel()
+	result, cancelErr := mutations.CancelPrompt(cancelCtx, string(request.Metadata.PromptID))
+	if cancelErr != nil && result.Outcome == "" {
+		result = acp.PromptResult{Outcome: acp.PromptOutcomeOutcomeUnknown, Accepted: true, Err: cancelErr, SettledAt: time.Now().UTC()}
+	}
+	settlement := settlementFromResult(result, time.Now().UTC())
+	forced := cancelErr != nil && result.Outcome == acp.PromptOutcomeOutcomeUnknown
+
+	s.mu.Lock()
+	settlement = settlePromptLocked(prompt, settlement)
+	if settlement.TerminalEvent != harnessv2.EventOutcomeUnknown {
+		forced = false
+	}
+	if state.prompt == prompt {
+		state.permissions = make(map[harnessv2.PermissionRequestID]permissionState)
+	}
+	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseSettled, settlement.TerminalEvent, settlement.SettledAt)
+	response := cancellationResponse(harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, settlement, invalidated, forced)
+	replay.cancellation = &response
+	close(replay.done)
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, response)
+}
+
+func reserveOperationReplayLocked(
+	state *sessionState,
+	metadata harnessv2.MutationMetadata,
+	at time.Time,
+) *operationReplay {
+	if state.operationReplays == nil {
+		state.operationReplays = make(map[harnessv2.OperationID]*operationReplay)
+	}
+	replay := &operationReplay{done: make(chan struct{})}
+	state.operationReplays[metadata.OperationID] = replay
+	state.operations[metadata.OperationID] = operationRecord(metadata, harnessv2.OperationPhaseRecorded, "", at)
+	return replay
+}
+
+func (s *Server) completeOperationFailure(replay *operationReplay, failure operationFailure) {
+	s.mu.Lock()
+	replay.failure = &failure
+	close(replay.done)
+	s.mu.Unlock()
+}
+
+func writePermissionOperationReplay(
+	w http.ResponseWriter,
+	r *http.Request,
+	replay *operationReplay,
+	classification harnessv2.Classification,
+) {
+	select {
+	case <-replay.done:
+	case <-r.Context().Done():
+		return
+	}
+	if replay.failure != nil {
+		writeError(w, replay.failure.status, replay.failure.code, replay.failure.message, &classification, replay.failure.retryable)
+		return
+	}
+	if replay.permission == nil {
+		writeClassificationError(w, classification)
+		return
+	}
+	response := *replay.permission
+	response.Classification = harnessv2.Classification{Class: harnessv2.RequestClassificationDuplicate, Phase: harnessv2.OperationPhaseApplied}
+	response.State = harnessv2.PermissionResolutionAlreadyResolved
+	writeJSON(w, http.StatusOK, response)
+}
+
+func writeLeaseOperationReplay(
+	w http.ResponseWriter,
+	r *http.Request,
+	replay *operationReplay,
+	classification harnessv2.Classification,
+) {
+	select {
+	case <-replay.done:
+	case <-r.Context().Done():
+		return
+	}
+	if replay.failure != nil {
+		writeError(w, replay.failure.status, replay.failure.code, replay.failure.message, &classification, replay.failure.retryable)
+		return
+	}
+	if replay.lease == nil {
+		writeClassificationError(w, classification)
+		return
+	}
+	response := *replay.lease
+	response.Classification = harnessv2.Classification{Class: harnessv2.RequestClassificationDuplicate, Phase: harnessv2.OperationPhaseApplied}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func writeCancellationOperationReplay(
+	w http.ResponseWriter,
+	r *http.Request,
+	replay *operationReplay,
+	classification harnessv2.Classification,
+) {
+	select {
+	case <-replay.done:
+	case <-r.Context().Done():
+		return
+	}
+	if replay.failure != nil {
+		writeError(w, replay.failure.status, replay.failure.code, replay.failure.message, &classification, replay.failure.retryable)
+		return
+	}
+	if replay.cancellation == nil {
+		writeClassificationError(w, classification)
+		return
+	}
+	response := *replay.cancellation
+	response.Classification = harnessv2.Classification{
+		Class:         harnessv2.RequestClassificationSettled,
+		Phase:         harnessv2.OperationPhaseSettled,
+		TerminalEvent: response.Settlement.TerminalEvent,
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http.Request) {
+	var request harnessv2.FinalizeRuntimeSessionPublicationRequest
+	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+		return
+	}
+	now := time.Now().UTC()
+	if err := request.ValidateAt(now); err != nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if !s.authorizeMutation(w, r, request.Metadata, true) {
+		return
+	}
+	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
+	s.mu.Lock()
+	state := s.sessions[sessionID]
+	if state == nil || state.creating {
+		s.mu.Unlock()
+		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
+		return
+	}
+	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		return
+	}
+	classification, err := harnessv2.ClassifyOperation(
+		s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata,
+		operationPtr(state.operations, request.Metadata.OperationID), true, now,
+	)
+	if err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if classification.Class != harnessv2.RequestClassificationFresh {
+		descriptor, receipt := state.descriptor, state.publicationFinalization
+		s.mu.Unlock()
+		if classification.Class == harnessv2.RequestClassificationDuplicate && descriptor.State == harnessv2.RuntimeSessionStateFinalizing && receipt != nil {
+			writeJSON(w, http.StatusOK, harnessv2.FinalizeRuntimeSessionPublicationResponse{
+				Protocol: harnessv2.ProtocolVersion, Classification: classification, Session: descriptor, Finalization: *receipt,
+			})
+		} else {
+			writeClassificationError(w, classification)
+		}
+		return
+	}
+	if state.workspaceIntent != harnessv2.WorkspaceIntentWrite || state.prompt == nil || state.prompt.settlement == nil ||
+		!promptMetadataMatches(request.Metadata, state.prompt.request.Metadata) {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "runtime session is not ready for publication finalization", nil, false)
+		return
+	}
+	deltaResponse, ok := state.deltas[request.WorkspaceDeltaID]
+	if !ok || deltaResponse.Delta.State != harnessv2.WorkspaceDeltaPrepared || !deltaResponse.Delta.PublicationSafe ||
+		deltaResponse.Delta.RuntimeSessionUID != state.descriptor.RuntimeSessionUID ||
+		deltaResponse.Delta.SessionGeneration != state.descriptor.Generation {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "publication finalization does not match the prepared workspace delta", nil, false)
+		return
+	}
+	receipt := harnessv2.PublicationFinalizationReceipt{
+		WorkspaceDeltaID: request.WorkspaceDeltaID, PublicationID: request.PublicationID,
+		PublicationGeneration: request.PublicationGeneration, PublicationVersion: request.PublicationVersion,
+		TerminalState: request.TerminalState, TerminalReceiptDigest: request.TerminalReceiptDigest, AppliedAt: now,
+	}
+	if state.descriptor.State == harnessv2.RuntimeSessionStateFinalizing {
+		if state.publicationFinalization == nil || !publicationFinalizationMatches(*state.publicationFinalization, receipt) {
+			s.mu.Unlock()
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "publication finalization receipt conflicts with the accepted receipt", nil, false)
+			return
+		}
+		receipt = *state.publicationFinalization
+	} else {
+		if state.descriptor.State != harnessv2.RuntimeSessionStatePublicationPrepared {
+			s.mu.Unlock()
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "runtime session is not awaiting publication finalization", nil, false)
+			return
+		}
+		if err := harnessv2.ValidateRuntimeSessionTransition(state.descriptor.State, harnessv2.RuntimeSessionStateFinalizing); err != nil {
+			s.mu.Unlock()
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
+			return
+		}
+		state.descriptor.State = harnessv2.RuntimeSessionStateFinalizing
+		state.publicationFinalization = &receipt
+	}
+	state.descriptor.LastTransitionAt = now
+	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", now)
+	descriptor := state.descriptor
+	mcpProxy := state.mcpProxy
+	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled
+	if drainCleanup {
+		state.drainCleanupScheduled = true
+	}
+	s.mu.Unlock()
+	if mcpProxy != nil {
+		mcpProxy.revoke(harnessv2.RuntimeSessionStateFinalizing)
+	}
+	writeJSON(w, http.StatusOK, harnessv2.FinalizeRuntimeSessionPublicationResponse{
+		Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+		Session: descriptor, Finalization: receipt,
+	})
+	if drainCleanup {
+		go s.cleanupDrainedSession(sessionID, state)
+	}
+}
+
+func publicationFinalizationMatches(a, b harnessv2.PublicationFinalizationReceipt) bool {
+	return a.WorkspaceDeltaID == b.WorkspaceDeltaID && a.PublicationID == b.PublicationID &&
+		a.PublicationGeneration == b.PublicationGeneration && a.PublicationVersion == b.PublicationVersion &&
+		a.TerminalState == b.TerminalState && a.TerminalReceiptDigest == b.TerminalReceiptDigest
+}
+
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	var request harnessv2.DeleteRuntimeSessionRequest
+	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+		return
+	}
+	now := time.Now().UTC()
+	if err := request.ValidateAt(now); err != nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if !s.authorizeMutation(w, r, request.Metadata, true) {
+		return
+	}
+	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
+	s.mu.Lock()
+	state := s.sessions[sessionID]
+	if state == nil {
+		tombstone, ok := s.tombstones[request.Metadata.Fence.RuntimeSessionUID]
+		if !ok || tombstone.RuntimeSessionGeneration != request.Metadata.Fence.RuntimeSessionGeneration ||
+			tombstone.RuntimeProfileDigest != request.Metadata.Fence.RuntimeProfileDigest {
+			s.mu.Unlock()
+			writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
+			return
+		}
+		record := tombstoneOperation(tombstone, request.Metadata.OperationID)
+		if record == nil {
+			s.mu.Unlock()
+			writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
+			return
+		}
+		classification, classifyErr := harnessv2.ClassifyOperation(
+			s.expectedFence(tombstone.RuntimeSessionUID, tombstone.RuntimeSessionGeneration), request.Metadata, record, true, now,
+		)
+		s.mu.Unlock()
+		if classifyErr != nil {
+			writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, classifyErr.Error(), nil, false)
+			return
+		}
+		if classification.Class != harnessv2.RequestClassificationDuplicate || classification.Phase != harnessv2.OperationPhaseDeleted {
+			writeClassificationError(w, classification)
+			return
+		}
+		writeJSON(w, http.StatusOK, harnessv2.DeleteRuntimeSessionResponse{
+			Protocol: harnessv2.ProtocolVersion, Classification: classification, State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone,
+		})
+		return
+	}
+	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		return
+	}
+	if state.descriptor.State == harnessv2.RuntimeSessionStateDeleting {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, "runtime session cleanup is already in progress", nil, true)
+		return
+	}
+	publicationFinalized := state.descriptor.State == harnessv2.RuntimeSessionStateFinalizing && state.publicationFinalization != nil
+	if !publicationFinalized {
+		if _, err := harnessv2.DeletionTransition(state.descriptor.State); err != nil {
+			s.mu.Unlock()
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
+			return
+		}
+	}
+	classification, err := harnessv2.ClassifyOperation(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata, operationPtr(state.operations, request.Metadata.OperationID), true, now)
+	if err != nil || classification.Class != harnessv2.RequestClassificationFresh {
+		s.mu.Unlock()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		} else {
+			writeClassificationError(w, classification)
+		}
+		return
+	}
+	runtimeSession := state.runtime
+	providerProxy := state.providerProxy
+	state.descriptor.State = harnessv2.RuntimeSessionStateDeleting
+	state.descriptor.LastTransitionAt = now
+	s.mu.Unlock()
+	var providerCleanupErr error
+	if state.mcpProxy != nil {
+		state.mcpProxy.close()
+	}
+	if providerProxy != nil {
+		providerProxy.close()
+		providerCleanupErr = providerProxy.wait(r.Context())
+	}
+	cleanup, deleteErr := runtimeSession.Delete(r.Context())
+	if providerCleanupErr != nil || deleteErr != nil || !cleanup.Proven {
+		s.poisonPool("descendant_cleanup_unproven")
+		s.mu.Lock()
+		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		state.descriptor.LastTransitionAt = time.Now().UTC()
+		s.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "runtime descendant cleanup could not be proven", nil, false)
+		return
+	}
+	if err := acp.ReclaimSessionOwnership(state.paths.Root); err != nil {
+		slog.Error("ACP runtime session deletion failed", "stage", "ownership reclaim")
+		s.poisonPool("session_root_ownership_reclaim_unproven")
+		s.mu.Lock()
+		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		state.descriptor.LastTransitionAt = time.Now().UTC()
+		s.mu.Unlock()
+		writeError(
+			w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned,
+			"runtime session filesystem ownership reclaim could not be proven", nil, false,
+		)
+		return
+	}
+	if err := os.RemoveAll(state.paths.Root); err != nil {
+		s.poisonPool("session_root_cleanup_unproven")
+		s.mu.Lock()
+		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		state.descriptor.LastTransitionAt = time.Now().UTC()
+		s.mu.Unlock()
+		writeError(
+			w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned,
+			"runtime session filesystem cleanup could not be proven", nil, false,
+		)
+		return
+	}
+	deletedAt := time.Now().UTC()
+	s.mu.Lock()
+	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseDeleted, "", deletedAt)
+	operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
+	for _, operation := range state.operations {
+		operations = append(operations, operation)
+	}
+	tombstone := harnessv2.RuntimeSessionTombstone{
+		RuntimeSessionUID: state.descriptor.RuntimeSessionUID, RuntimeSessionGeneration: state.descriptor.Generation,
+		RuntimeProfileDigest: state.descriptor.RuntimeProfileDigest, DeletedAt: deletedAt, Operations: operations,
+	}
+	delete(s.sessions, sessionID)
+	s.tombstones[tombstone.RuntimeSessionUID] = tombstone
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, harnessv2.DeleteRuntimeSessionResponse{
+		Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+		State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone,
+	})
+}
+
+func tombstoneOperation(tombstone harnessv2.RuntimeSessionTombstone, operationID harnessv2.OperationID) *harnessv2.OperationRecord {
+	for i := range tombstone.Operations {
+		if tombstone.Operations[i].OperationID == operationID {
+			record := tombstone.Operations[i]
+			return &record
+		}
+	}
+	return nil
+}
+
+func workspaceDeltaChangedPaths(result workspacedelta.Result) []string {
+	paths := make(map[string]struct{}, len(result.Changes)+len(result.Deletions))
+	for _, change := range result.Changes {
+		paths[change.Path] = struct{}{}
+	}
+	for _, deletion := range result.Deletions {
+		paths[deletion.Path] = struct{}{}
+	}
+	resultPaths := make([]string, 0, len(paths))
+	for changedPath := range paths {
+		resultPaths = append(resultPaths, changedPath)
+	}
+	slices.Sort(resultPaths)
+	return resultPaths
+}
+
+func workspaceDeltaPathAllowed(changedPath string, patterns []string) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	for _, patternValue := range patterns {
+		patternValue = strings.TrimPrefix(strings.TrimSpace(patternValue), "./")
+		if strings.HasSuffix(patternValue, "/**") && strings.HasPrefix(changedPath, strings.TrimSuffix(patternValue, "**")) {
+			return true
+		}
+		if matched, err := path.Match(patternValue, changedPath); err == nil && matched {
+			return true
+		}
+		if strings.TrimSuffix(patternValue, "/") == strings.TrimSuffix(changedPath, "/") {
+			return true
+		}
+	}
+	return false
+}
+
+func workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, changedPath string) bool {
+	return workspaceDeltaRepositoryControlPath(path.Join(strings.TrimSpace(workspaceRelativeRoot), changedPath))
+}
+
+func workspaceDeltaRepositoryControlPath(changedPath string) bool {
+	lower := strings.ToLower(strings.TrimPrefix(changedPath, "./"))
+	return strings.HasPrefix(lower, ".github/workflows/") ||
+		strings.HasPrefix(lower, "config/rbac/") ||
+		(strings.HasPrefix(lower, "charts/") && strings.Contains(lower, "secret"))
+}
+
+func buildWorkspaceDelta(
+	baseline *workspacedelta.Snapshot,
+	workspace string,
+	intent workspacedelta.Intent,
+	limits harnessv2.WorkspaceDeltaLimits,
+) (workspacedelta.Result, error) {
+	return workspacedelta.BuildWithLimits(
+		baseline,
+		workspace,
+		intent,
+		workspacedelta.BuildLimits{MaxArtifactBytes: limits.MaxBytes},
+	)
+}
+
+func workspaceDeltaContentPolicyViolation(artifact []byte, limits harnessv2.WorkspaceDeltaLimits) (string, error) {
+	if len(artifact) == 0 || (!limits.RejectBinaryFiles && !limits.RejectSecretLikeContent) {
+		return "", nil
+	}
+	reader := tar.NewReader(bytes.NewReader(artifact))
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		fileContent := strings.HasPrefix(header.Name, "files/")
+		symlinkManifest := header.Name == "meta/symlinks.json"
+		if !fileContent && !symlinkManifest {
+			continue
+		}
+		if header.Size < 0 || header.Size > limits.MaxBytes {
+			return "", fmt.Errorf("workspace delta file size is invalid")
+		}
+		content, err := io.ReadAll(io.LimitReader(reader, header.Size+1))
+		if err != nil || int64(len(content)) != header.Size {
+			return "", fmt.Errorf("workspace delta file content is incomplete")
+		}
+		if fileContent && limits.RejectBinaryFiles && (bytes.IndexByte(content, 0) >= 0 || !utf8.Valid(content)) {
+			return "workspace delta contains binary file content", nil
+		}
+		if limits.RejectSecretLikeContent && security.LooksLikeSecret(string(content)) {
+			return "workspace delta contains secret-like file content", nil
+		}
+	}
+}
+
+func workspaceDeltaContainsSessionCredential(artifact []byte, state *sessionState) bool {
+	if len(artifact) == 0 || state == nil {
+		return false
+	}
+	credentials := [][]byte{}
+	if state.providerProxy != nil {
+		credentials = append(credentials, state.providerProxy.credential)
+	}
+	if state.mcpProxy != nil {
+		credentials = append(credentials, state.mcpProxy.credential)
+	}
+	for _, credential := range credentials {
+		if len(credential) >= 8 && bytes.Contains(artifact, credential) {
+			return true
+		}
+	}
+	return false
+}
+
+//nolint:gocyclo // Workspace validation keeps security invariants in one auditable boundary.
+func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
+	var request harnessv2.CreateWorkspaceDeltaRequest
+	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+		return
+	}
+	now := time.Now().UTC()
+	if err := request.ValidateAt(now); err != nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if r.PathValue("deltaID") != string(request.DeltaID) {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "workspace delta path does not match request", nil, false)
+		return
+	}
+	if !s.authorizeMutation(w, r, request.Metadata, true) {
+		return
+	}
+	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
+	s.mu.Lock()
+	state := s.sessions[sessionID]
+	if state == nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "runtime session not found", nil, false)
+		return
+	}
+	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		return
+	}
+	classification, err := harnessv2.ClassifyOperation(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata, operationPtr(state.operations, request.Metadata.OperationID), true, now)
+	if err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
+		return
+	}
+	if classification.Class != harnessv2.RequestClassificationFresh {
+		response, ok := state.deltas[request.DeltaID]
+		s.mu.Unlock()
+		if classification.Class == harnessv2.RequestClassificationDuplicate && ok {
+			response.Classification = classification
+			writeJSON(w, http.StatusOK, response)
+		} else {
+			writeClassificationError(w, classification)
+		}
+		return
+	}
+	if state.prompt == nil || state.prompt.settlement == nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "prompt has not settled", nil, false)
+		return
+	}
+	if !promptMetadataMatches(request.Metadata, state.prompt.request.Metadata) {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "workspace delta prompt identity does not match the settled prompt", nil, false)
+		return
+	}
+	if state.descriptor.State != harnessv2.RuntimeSessionStateValidating {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "runtime session is not awaiting workspace validation", nil, false)
+		return
+	}
+	if state.prompt.settlementDigest == "" || request.PromptSettlementDigest != state.prompt.settlementDigest {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "prompt settlement digest does not match", nil, false)
+		return
+	}
+	if request.Intent != state.workspaceIntent || !reflect.DeepEqual(request.VerifiedBaseline, state.descriptor.WorkspaceBaseline) {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "workspace intent or verified baseline does not match the runtime session", nil, false)
+		return
+	}
+	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
+	runtimeSession, baseline, paths := state.runtime, state.baseline, state.paths
+	s.mu.Unlock()
+
+	freezeCtx, cancel := context.WithTimeout(r.Context(), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace))
+	defer cancel()
+	if err := runtimeSession.Freeze(freezeCtx); err != nil {
+		s.poisonSession(state, "workspace freeze could not be proven")
+		s.poisonPool("workspace_freeze_unproven")
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace freeze could not be proven", nil, false)
+		return
+	}
+	frozenAt := time.Now().UTC()
+	intent := workspacedelta.IntentRead
+	if request.Intent == harnessv2.WorkspaceIntentWrite {
+		intent = workspacedelta.IntentWrite
+	}
+	uid, gid := runtimeSession.ChildIdentity()
+	if err := acp.ReclaimSessionOwnership(paths.Root); err != nil {
+		slog.Error("ACP workspace validation failed", "stage", "ownership reclaim")
+		s.poisonSession(state, "workspace ownership reclaim failed")
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership reclaim failed", nil, false)
+		return
+	}
+	result, buildErr := buildWorkspaceDelta(baseline, paths.Workspace, intent, request.Limits)
+	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
+		slog.Error("ACP workspace validation failed", "stage", "ownership restore")
+		s.poisonSession(state, "workspace ownership restore failed")
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership restore failed", nil, false)
+		return
+	}
+	if buildErr != nil {
+		slog.Error("ACP workspace validation failed", "stage", "delta construction")
+		if errors.Is(buildErr, workspacedelta.ErrLimitExceeded) {
+			s.poisonSession(state, "workspace delta exceeds request limits")
+			writeError(w, http.StatusRequestEntityTooLarge, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds request limits", nil, false)
+			return
+		}
+		s.poisonSession(state, "workspace validation failed")
+		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace validation failed", nil, false)
+		return
+	}
+	entryCount := len(result.Changes) + len(result.Deletions)
+	changedPaths := workspaceDeltaChangedPaths(result)
+	if request.Limits.MaxChangedFiles > 0 && len(changedPaths) > int(request.Limits.MaxChangedFiles) {
+		s.poisonSession(state, "workspace delta exceeds changed-file limit")
+		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds changed-file limit", nil, false)
+		return
+	}
+	for _, changedPath := range changedPaths {
+		if !workspaceDeltaPathAllowed(changedPath, request.Limits.AllowedPaths) {
+			s.poisonSession(state, "workspace delta contains a disallowed path")
+			writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a disallowed path", nil, false)
+			return
+		}
+		if request.Limits.DenyRepositoryControlPaths && workspaceDeltaRepositoryControlPathForWorkspace(state.workspaceRelativeRoot, changedPath) {
+			s.poisonSession(state, "workspace delta contains a protected repository-control path")
+			writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a protected repository-control path", nil, false)
+			return
+		}
+	}
+	if request.Limits.RejectSecretLikeContent && security.LooksLikeSecret(strings.Join(changedPaths, "\n")) {
+		s.poisonSession(state, "workspace delta path looks secret-like")
+		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta path looks secret-like", nil, false)
+		return
+	}
+	if violation, policyErr := workspaceDeltaContentPolicyViolation(result.Artifact, request.Limits); policyErr != nil {
+		s.poisonSession(state, "workspace delta content policy could not be verified")
+		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta content policy could not be verified", nil, false)
+		return
+	} else if violation != "" {
+		s.poisonSession(state, violation)
+		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, violation, nil, false)
+		return
+	}
+	if workspaceDeltaContainsSessionCredential(result.Artifact, state) {
+		s.poisonSession(state, "workspace delta contains a session credential")
+		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a session credential", nil, false)
+		return
+	}
+	if entryCount > int(request.Limits.MaxEntries) || int64(len(result.Artifact)) > request.Limits.MaxBytes {
+		s.poisonSession(state, "workspace delta exceeds request limits")
+		writeError(w, http.StatusRequestEntityTooLarge, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds request limits", nil, false)
+		return
+	}
+	descriptor := harnessv2.WorkspaceDeltaDescriptor{
+		DeltaID: request.DeltaID, RuntimeSessionUID: state.descriptor.RuntimeSessionUID, SessionGeneration: state.descriptor.Generation,
+		Intent: request.Intent, VerifiedBaseline: request.VerifiedBaseline, RelativeRoot: state.workspaceRelativeRoot,
+		EntryCount:        uint32(entryCount),
+		DeletedEntryCount: uint32(len(result.Deletions)), SymlinkEntryCount: uint32(len(result.Symlinks)),
+		NoFollowVerified: true, FrozenAt: frozenAt,
+	}
+	for _, change := range result.Changes {
+		if change.Kind == workspacedelta.EntryFile {
+			descriptor.ChangedFileCount++
+		}
+	}
+	switch result.Classification {
+	case workspacedelta.ClassificationNoChange:
+		descriptor.State = harnessv2.WorkspaceDeltaNoChange
+		descriptor.PublicationSafe = true
+		if err := runtimeSession.Thaw(); err != nil {
+			s.poisonSession(state, "workspace thaw failed")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace thaw failed", nil, false)
+			return
+		}
+	case workspacedelta.ClassificationReadOnlyModified:
+		descriptor.State = harnessv2.WorkspaceDeltaReadOnlyModified
+		descriptor.PublicationSafe = false
+	case workspacedelta.ClassificationWriteDelta:
+		if s.cfg.ArtifactUploader == nil {
+			s.poisonSession(state, "durable workspace artifact upload is unavailable")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "durable workspace artifact upload is unavailable", nil, false)
+			return
+		}
+		artifact, err := s.cfg.ArtifactUploader.UploadWorkspaceDelta(r.Context(), request, result.Artifact, result.ArtifactDigest)
+		if err != nil || artifact.Digest != result.ArtifactDigest || artifact.SizeBytes != int64(len(result.Artifact)) {
+			s.poisonSession(state, "workspace artifact persistence failed")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace artifact persistence failed", nil, false)
+			return
+		}
+		descriptor.State = harnessv2.WorkspaceDeltaPrepared
+		descriptor.ManifestDigest = result.ManifestDigest
+		descriptor.Artifact = &artifact
+		descriptor.PublicationSafe = true
+	default:
+		s.poisonSession(state, "unsupported workspace delta classification")
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "unsupported workspace delta classification", nil, false)
+		return
+	}
+	response := harnessv2.CreateWorkspaceDeltaResponse{Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, Delta: descriptor}
+	if err := response.ValidateFor(request); err != nil {
+		s.poisonSession(state, "workspace delta response invariant failed")
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace delta response invariant failed", nil, false)
+		return
+	}
+	s.mu.Lock()
+	state.deltas[request.DeltaID] = response
+	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", time.Now().UTC())
+	nextMCPState := harnessv2.RuntimeSessionStatePoisoned
+	switch descriptor.State {
+	case harnessv2.WorkspaceDeltaNoChange:
+		state.descriptor.State = harnessv2.RuntimeSessionStateIdle
+		nextMCPState = harnessv2.RuntimeSessionStateIdle
+	case harnessv2.WorkspaceDeltaPrepared:
+		state.descriptor.State = harnessv2.RuntimeSessionStatePublicationPrepared
+		nextMCPState = harnessv2.RuntimeSessionStatePublicationPrepared
+	case harnessv2.WorkspaceDeltaReadOnlyModified:
+		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	}
+	state.descriptor.LastTransitionAt = time.Now().UTC()
+	mcpProxy := state.mcpProxy
+	sessionCleanup := (s.drain.Requested || state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned) && !state.drainCleanupScheduled
+	if sessionCleanup {
+		state.drainCleanupScheduled = true
+	}
+	s.mu.Unlock()
+	if mcpProxy != nil {
+		mcpProxy.revoke(nextMCPState)
+	}
+	writeJSON(w, http.StatusOK, response)
+	if sessionCleanup {
+		go s.cleanupDrainedSession(sessionID, state)
+	}
+}
+
+func (s *Server) poisonSession(state *sessionState, _ string) {
+	if state.providerProxy != nil {
+		state.providerProxy.revoke()
+	}
+	if state.mcpProxy != nil {
+		state.mcpProxy.revoke(harnessv2.RuntimeSessionStatePoisoned)
+	}
+	s.mu.Lock()
+	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	state.descriptor.LastTransitionAt = time.Now().UTC()
+	cleanup := !state.creating && state.runtime != nil && !state.drainCleanupScheduled
+	if cleanup {
+		state.drainCleanupScheduled = true
+	}
+	s.mu.Unlock()
+	if cleanup {
+		go s.cleanupDrainedSession(state.id, state)
+	}
+}
+
+func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event acp.PromptEvent) (*harnessv2.Event, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prompt.sequence++
+	identity := eventIdentity(s.cfg.Fence, state.descriptor, prompt.request.Metadata, prompt.sequence, event.Timestamp)
+	switch event.Type {
+	case acp.PromptEventAccepted:
+		if state.mcpProxy == nil || state.mcpProxy.markRunning(prompt.request.Metadata.PromptID, event.Timestamp) != nil {
+			return nil, fmt.Errorf("activate prompt-scoped MCP authority")
+		}
+		prompt.acceptedAt = event.Timestamp
+		prompt.operation = operationRecord(prompt.request.Metadata, harnessv2.OperationPhaseAccepted, "", event.Timestamp)
+		state.operations[prompt.request.Metadata.OperationID] = prompt.operation
+		state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
+		state.descriptor.LastTransitionAt = event.Timestamp
+		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
+	case acp.PromptEventUpdate:
+		update, text, ok, err := mapACPUpdate(event.Update)
+		if err != nil {
+			prompt.sequence--
+			return nil, err
+		}
+		if text != "" && !prompt.terminalResultOverflow {
+			limit := s.cfg.Capabilities.Limits.MaxTerminalResultBytes
+			if len(text) > limit || prompt.assistant.Len() > limit-len(text) {
+				prompt.terminalResultOverflow = true
+			} else {
+				prompt.assistant.WriteString(text)
+			}
+		}
+		if !ok {
+			prompt.sequence--
+			return nil, nil
+		}
+		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity, Update: update}, nil
+	case acp.PromptEventPermissionRequested:
+		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout))
+		if err != nil {
+			return nil, err
+		}
+		options := make(map[string]harnessv2.PermissionOptionKind, len(permission.Options))
+		for _, option := range permission.Options {
+			options[option.OptionID] = option.Kind
+		}
+		state.permissions[permission.RequestID] = permissionState{
+			requestID: permission.RequestID, toolCallID: permission.ToolCallID, toolName: permission.ToolName,
+			title: permission.Title, requestedAt: event.Timestamp, expiresAt: permission.ExpiresAt, options: options,
+		}
+		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventPermissionRequested, Identity: identity, PermissionRequested: permission}, nil
+	default:
+		return nil, fmt.Errorf("unsupported runtime prompt event %q", event.Type)
+	}
+}
+
+func (s *Server) terminalEvent(
+	state *sessionState,
+	prompt *promptState,
+	result acp.PromptResult,
+) (harnessv2.Event, acp.PromptResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prompt.sequence++
+	effective := result
+	if prompt.settlement != nil {
+		effective = promptResultFromSettlement(*prompt.settlement)
+	} else {
+		effective = providerTurnLimitResult(state, prompt, effective)
+	}
+	now := effective.SettledAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+		effective.SettledAt = now
+	}
+	event := s.buildTerminalEventLocked(state, prompt, effective, now)
+	limit := s.cfg.Capabilities.Limits.MaxTerminalResultBytes
+	if !prompt.terminalResultOverflow && serializedEventWithinLimit(event, limit) {
+		return event, effective, nil
+	}
+
+	effective = acp.PromptResult{
+		Outcome: acp.PromptOutcomeFailed, StopReason: acp.StopReasonRefusal,
+		Accepted: true, SettledAt: now, Err: fmt.Errorf("terminal result exceeds configured size limit"),
+	}
+	event = harnessv2.Event{
+		Protocol: harnessv2.ProtocolVersion,
+		Type:     harnessv2.EventFailed,
+		Identity: eventIdentity(s.cfg.Fence, state.descriptor, prompt.request.Metadata, prompt.sequence, now),
+		Failed: &harnessv2.FailedEvent{
+			StopReason: harnessv2.ACPStopReasonRefusal,
+			Code:       "terminal_result_too_large",
+			Message:    "terminal result exceeded configured size limit",
+			Retryable:  false,
+		},
+	}
+	if !serializedEventWithinLimit(event, limit) {
+		return event, effective, fmt.Errorf("bounded terminal failure event exceeds %d bytes", limit)
+	}
+	return event, effective, nil
+}
+
+func (s *Server) buildTerminalEventLocked(
+	state *sessionState,
+	prompt *promptState,
+	result acp.PromptResult,
+	at time.Time,
+) harnessv2.Event {
+	event := harnessv2.Event{
+		Protocol: harnessv2.ProtocolVersion,
+		Identity: eventIdentity(s.cfg.Fence, state.descriptor, prompt.request.Metadata, prompt.sequence, at),
+	}
+	switch result.Outcome {
+	case acp.PromptOutcomeCompleted:
+		text := prompt.assistant.String()
+		if strings.TrimSpace(text) == "" {
+			text = "Prompt completed without textual output."
+		}
+		event.Type = harnessv2.EventCompleted
+		event.Completed = &harnessv2.CompletedEvent{
+			StopReason: harnessv2.ACPStopReasonEndTurn,
+			Result: harnessv2.PromptResult{
+				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: text}},
+				Model:   s.cfg.Provider.Model,
+			},
+		}
+	case acp.PromptOutcomeCancelled:
+		event.Type = harnessv2.EventCancelled
+		event.Cancelled = &harnessv2.CancelledEvent{StopReason: harnessv2.ACPStopReasonCancelled, Reason: "prompt cancelled"}
+	case acp.PromptOutcomeOutcomeUnknown:
+		event.Type = harnessv2.EventOutcomeUnknown
+		event.OutcomeUnknown = &harnessv2.OutcomeUnknownEvent{Code: "acp_settlement_unproven", Message: "ACP prompt outcome could not be proven", Retryable: false}
+	default:
+		event.Type = harnessv2.EventFailed
+		code, message := "acp_prompt_failed", "ACP prompt failed"
+		if result.StopReason == acp.StopReasonMaxTurnRequests {
+			code = "turn_limit"
+			message = "ACP prompt exceeded maximum provider inference requests"
+		}
+		event.Failed = &harnessv2.FailedEvent{
+			StopReason: harnessv2.ACPStopReason(result.StopReason),
+			Code:       code,
+			Message:    message,
+			Retryable:  false,
+		}
+	}
+	return event
+}
+
+func providerTurnLimitResult(state *sessionState, prompt *promptState, result acp.PromptResult) acp.PromptResult {
+	if state == nil || prompt == nil || state.providerProxy == nil ||
+		!state.providerProxy.maxTurnsExceeded(string(prompt.request.Metadata.PromptID)) {
+		return result
+	}
+	result.Outcome = acp.PromptOutcomeFailed
+	result.StopReason = acp.StopReasonMaxTurnRequests
+	result.Accepted = true
+	return result
+}
+
+func serializedEventWithinLimit(event harnessv2.Event, limit int) bool {
+	encoded, err := json.Marshal(event)
+	return err == nil && len(encoded) <= limit
+}
+
+func promptResultFromSettlement(settlement harnessv2.PromptSettlement) acp.PromptResult {
+	result := acp.PromptResult{Accepted: true, SettledAt: settlement.SettledAt, StopReason: acp.StopReason(settlement.StopReason)}
+	switch settlement.TerminalEvent {
+	case harnessv2.EventCompleted:
+		result.Outcome = acp.PromptOutcomeCompleted
+		result.StopReason = acp.StopReasonEndTurn
+	case harnessv2.EventCancelled:
+		result.Outcome = acp.PromptOutcomeCancelled
+		result.StopReason = acp.StopReasonCancelled
+	case harnessv2.EventOutcomeUnknown:
+		result.Outcome = acp.PromptOutcomeOutcomeUnknown
+	default:
+		result.Outcome = acp.PromptOutcomeFailed
+		if result.StopReason == "" {
+			result.StopReason = acp.StopReasonRefusal
+		}
+	}
+	return result
+}
+
+func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result acp.PromptResult, settledAt time.Time) {
+	settlement := settlementFromResult(result, settledAt)
+	s.mu.Lock()
+	settlement = settlePromptLocked(prompt, settlement)
+	state.operations[prompt.request.Metadata.OperationID] = operationRecord(prompt.request.Metadata, harnessv2.OperationPhaseSettled, settlement.TerminalEvent, settlement.SettledAt)
+	state.permissions = make(map[harnessv2.PermissionRequestID]permissionState)
+	next := harnessv2.RuntimeSessionStatePoisoned
+	if settlement.TerminalEvent == harnessv2.EventCompleted {
+		next = harnessv2.RuntimeSessionStateValidating
+	}
+	state.descriptor.State = next
+	state.descriptor.LastTransitionAt = settlement.SettledAt
+	sessionCleanup := settlement.TerminalEvent != harnessv2.EventCompleted && !state.drainCleanupScheduled
+	if sessionCleanup {
+		state.drainCleanupScheduled = true
+	}
+	s.mu.Unlock()
+	deactivatePromptCapabilities(state, prompt.request.Metadata.PromptID, next)
+	if sessionCleanup {
+		go s.cleanupDrainedSession(state.id, state)
+	}
+}
+
+func settlePromptLocked(prompt *promptState, settlement harnessv2.PromptSettlement) harnessv2.PromptSettlement {
+	if prompt.settlement != nil {
+		return *prompt.settlement
+	}
+	prompt.settlement = &settlement
+	digest, err := harnessv2.CanonicalPromptSettlementDigest(settlement)
+	if err == nil {
+		prompt.settlementDigest = digest
+	}
+	return settlement
+}
+
+func deactivatePromptCapabilities(state *sessionState, promptID harnessv2.PromptID, next harnessv2.RuntimeSessionState) {
+	if state == nil {
+		return
+	}
+	if state.providerProxy != nil {
+		state.providerProxy.deactivate(string(promptID))
+	}
+	if state.mcpProxy != nil {
+		state.mcpProxy.deactivate(promptID, next)
+	}
+}
+
+func settlementFromResult(result acp.PromptResult, at time.Time) harnessv2.PromptSettlement {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	settlement := harnessv2.PromptSettlement{SettledAt: at}
+	switch result.Outcome {
+	case acp.PromptOutcomeCompleted:
+		settlement.TerminalEvent, settlement.Outcome, settlement.StopReason = harnessv2.EventCompleted, harnessv2.PromptOutcomeSucceeded, harnessv2.ACPStopReasonEndTurn
+	case acp.PromptOutcomeCancelled:
+		settlement.TerminalEvent, settlement.Outcome, settlement.StopReason = harnessv2.EventCancelled, harnessv2.PromptOutcomeCancelled, harnessv2.ACPStopReasonCancelled
+	case acp.PromptOutcomeOutcomeUnknown:
+		settlement.TerminalEvent, settlement.Outcome = harnessv2.EventOutcomeUnknown, harnessv2.PromptOutcomeUnknown
+	default:
+		mapping := harnessv2.MapACPStopReason(harnessv2.ACPStopReason(result.StopReason), true)
+		settlement.TerminalEvent, settlement.Outcome, settlement.StopReason = mapping.EventType, mapping.Outcome, harnessv2.ACPStopReason(result.StopReason)
+	}
+	return settlement
+}
+
+func cancellationResponse(classification harnessv2.Classification, settlement harnessv2.PromptSettlement, invalidated uint32, forced bool) harnessv2.CancelPromptResponse {
+	barrier := harnessv2.CancellationBarrierSettled
+	proven := settlement.TerminalEvent != harnessv2.EventOutcomeUnknown
+	if !proven {
+		barrier = harnessv2.CancellationBarrierOutcomeUnknown
+	} else if forced {
+		barrier = harnessv2.CancellationBarrierForcedTerminated
+	}
+	return harnessv2.CancelPromptResponse{
+		Protocol: harnessv2.ProtocolVersion, Classification: classification, BarrierState: barrier,
+		SettlementProven: proven, Settlement: settlement, InvalidatedPermissionRequests: invalidated,
+		ForcedTermination: forced,
+	}
+}
+
+func (s *Server) validateSessionFence(state *sessionState, metadata harnessv2.MutationMetadata) error {
+	mismatch := harnessv2.CompareFence(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), metadata.Fence, true)
+	if mismatch != harnessv2.FenceMatch {
+		return fmt.Errorf("stale runtime fence: %s", mismatch)
+	}
+	return nil
+}
+
+func eventIdentity(base harnessv2.Fence, descriptor harnessv2.RuntimeSessionDescriptor, metadata harnessv2.MutationMetadata, sequence uint64, at time.Time) harnessv2.EventIdentity {
+	return harnessv2.EventIdentity{
+		RuntimeInstanceID: base.RuntimeInstanceID, SupervisorBootID: base.SupervisorBootID,
+		RuntimeSessionUID: descriptor.RuntimeSessionUID, RuntimeSessionGeneration: descriptor.Generation,
+		TaskUID: metadata.TaskUID, TaskAttempt: metadata.TaskAttempt, PromptID: metadata.PromptID,
+		Sequence: sequence, RequestDigest: metadata.RequestDigest, Timestamp: at,
+	}
+}
+
+func eventLimits(limits harnessv2.ProtocolLimits) harnessv2.EventStreamLimits {
+	return harnessv2.EventStreamLimits{
+		MaxLineBytes: limits.MaxEventLineBytes, MaxTerminalResultBytes: limits.MaxTerminalResultBytes,
+		MaxBufferedEvents: limits.MaxBufferedEvents, MaxUpdateEventsPerSecond: limits.MaxUpdateEventsPerSecond,
+	}
+}
+
+func promptMetadataMatches(incoming, current harnessv2.MutationMetadata) bool {
+	return incoming.TaskUID == current.TaskUID && incoming.TaskAttempt == current.TaskAttempt && incoming.PromptID == current.PromptID
+}
+
+func pathMatchesPrompt(r *http.Request, metadata harnessv2.MutationMetadata) bool {
+	return r.PathValue("promptID") == string(metadata.PromptID)
+}
+
+func pathMatchesPermission(r *http.Request, request harnessv2.ResolvePermissionRequest) bool {
+	return pathMatchesPrompt(r, request.Metadata) && r.PathValue("requestID") == string(request.RequestID)
+}

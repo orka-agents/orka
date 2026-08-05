@@ -8,7 +8,10 @@ rules:
   - ""
   resources:
   - configmaps
+  - namespaces
+  - pods
   - secrets
+  - services
   verbs:
   - create
   - delete
@@ -21,14 +24,11 @@ rules:
   - ""
   resources:
   - endpoints
-  - namespaces
   - nodes
   - persistentvolumeclaims
   - persistentvolumes
-  - pods
   - pods/status
   - replicationcontrollers
-  - services
   verbs:
   - get
   - list
@@ -89,12 +89,23 @@ rules:
   - apps
   resources:
   - daemonsets
-  - deployments
-  - replicasets
   - statefulsets
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - replicasets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - ate.dev
@@ -155,9 +166,16 @@ rules:
   resources:
   - agentruntimes
   - agents
+  - branchclaims
+  - controllerepochs
+  - externaleffects
+  - promptattempts
   - providers
+  - publications
   - repositorymonitors
   - repositoryscans
+  - runtimepools
+  - runtimesessioncontrols
   - skills
   - substrateactorpools
   - tasks
@@ -175,10 +193,17 @@ rules:
   resources:
   - agentruntimes/finalizers
   - agents/finalizers
+  - branchclaims/finalizers
+  - controllerepochs/finalizers
+  - externaleffects/finalizers
   - outboundaccesspolicies/finalizers
+  - promptattempts/finalizers
   - providers/finalizers
+  - publications/finalizers
   - repositorymonitors/finalizers
   - repositoryscans/finalizers
+  - runtimepools/finalizers
+  - runtimesessioncontrols/finalizers
   - skills/finalizers
   - substrateactorpools/finalizers
   - tasks/finalizers
@@ -190,10 +215,17 @@ rules:
   resources:
   - agentruntimes/status
   - agents/status
+  - branchclaims/status
+  - controllerepochs/status
+  - externaleffects/status
   - outboundaccesspolicies/status
+  - promptattempts/status
   - providers/status
+  - publications/status
   - repositorymonitors/status
   - repositoryscans/status
+  - runtimepools/status
+  - runtimesessioncontrols/status
   - skills/status
   - substrateactorpools/status
   - tasks/status
@@ -303,14 +335,20 @@ rules:
   - delete
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - policy
   resources:
   - poddisruptionbudgets
   verbs:
+  - create
+  - delete
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io

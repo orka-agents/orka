@@ -33,6 +33,7 @@ describe('Sidebar', () => {
     expect(screen.getByText('Chat')).toBeInTheDocument()
     expect(screen.getByText('Tasks')).toBeInTheDocument()
     expect(screen.getByText('Sessions')).toBeInTheDocument()
+    expect(screen.getByText('Runtimes')).toBeInTheDocument()
     expect(screen.getByText('Agents')).toBeInTheDocument()
     expect(screen.getByText('Tools')).toBeInTheDocument()
   })

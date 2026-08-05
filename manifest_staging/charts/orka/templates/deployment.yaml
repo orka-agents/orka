@@ -1,13 +1,22 @@
-{{- if and .Values.controller.workspaceProvider.fakeProviderEnabled (not .Values.controller.workspaceProvider.apiEnabled) -}}
-{{- fail "controller.workspaceProvider.fakeProviderEnabled requires controller.workspaceProvider.apiEnabled" -}}
-{{- end -}}
-{{- if and .Values.controller.workspaceProvider.apiEnabled (not .Values.controller.workspaceProvider.classUseAdmission.enabled) -}}
-{{- fail "controller.workspaceProvider.apiEnabled requires controller.workspaceProvider.classUseAdmission.enabled" -}}
-{{- end -}}
-{{- if .Values.controller.workspaceProvider.classUseAdmission.enabled -}}
-{{- $workspaceWebhookSecret := required "controller.workspaceProvider.classUseAdmission.existingSecret is required when class-use admission is enabled" .Values.controller.workspaceProvider.classUseAdmission.existingSecret -}}
-{{- $workspaceWebhookCA := required "controller.workspaceProvider.classUseAdmission.caBundle is required when class-use admission is enabled" .Values.controller.workspaceProvider.classUseAdmission.caBundle -}}
-{{- end -}}
+{{- include "orka.validateProviderProxyConfig" . }}
+{{- if .Values.controller.acpRuntime.enabled }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) }}
+{{- fail "controller.image.digest must be a sha256 digest when controller.acpRuntime.enabled=true" }}
+{{- end }}
+{{- if or (not .Values.publisher.enabled) (not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.publisher.image.digest | default ""))) }}
+{{- fail "publisher must be enabled with publisher.image.digest set when controller.acpRuntime.enabled=true" }}
+{{- end }}
+{{- if not .Values.store.persistence.enabled }}
+{{- fail "store.persistence.enabled must be true when controller.acpRuntime.enabled=true" }}
+{{- end }}
+{{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.codexImage" "ref" .Values.controller.acpRuntime.codexImage) }}
+{{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.claudeImage" "ref" .Values.controller.acpRuntime.claudeImage) }}
+{{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.copilotImage" "ref" .Values.controller.acpRuntime.copilotImage) }}
+{{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.opencodeImage" "ref" .Values.controller.acpRuntime.opencodeImage) }}
+{{- if and .Values.controller.acpRuntime.enabled (not .Values.providerProxy.enabled) }}
+{{- fail "providerProxy.enabled must be true when controller.acpRuntime.enabled is true" }}
+{{- end }}
+{{- end }}
 {{- $gatewayCRDsReady := false -}}
 {{- if and .Values.controller.gateway.enabled (not .Values.controller.gateway.crdsReadyOverride) -}}
 {{- $gatewayClassCRD := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gatewayclasses.gateway.orka.ai" -}}
@@ -27,7 +36,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "orka.fullname" . }}-controller
+  name: {{ include "orka.controllerName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller
@@ -46,9 +55,15 @@ spec:
       labels:
         {{- include "orka.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: controller
-      {{- with .Values.annotations }}
+        orka.ai/network-role: controller
+      {{- if or .Values.annotations .Values.publisher.auth.rolloutNonce }}
       annotations:
+        {{- with .Values.annotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.publisher.auth.rolloutNonce }}
+        orka.ai/publisher-auth-rollout-nonce: {{ . | quote }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "orka.serviceAccountName" . }}
@@ -56,9 +71,12 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if and .Values.controller.acpRuntime.enabled .Values.controller.acpRuntime.upgradeDrain.enabled }}
+      terminationGracePeriodSeconds: {{ .Values.controller.acpRuntime.upgradeDrain.terminationGracePeriodSeconds }}
+      {{- end }}
       containers:
         - name: controller
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          image: {{ include "orka.imageRef" .Values.controller.image | quote }}
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           args:
             - --api-port={{ .Values.controller.apiPort }}
@@ -70,6 +88,33 @@ spec:
             - --watch-namespace={{ .Values.controller.watchNamespace }}
             {{- end }}
             - --leader-elect={{ .Values.controller.leaderElect }}
+            - --acp-runtime-enabled={{ .Values.controller.acpRuntime.enabled }}
+            - --acp-runtime-namespace={{ .Values.controller.acpRuntime.namespace }}
+            {{- if and .Values.controller.acpRuntime.enabled .Values.controller.acpRuntime.upgradeDrain.enabled }}
+            - --acp-upgrade-drain-bind-address=127.0.0.1:{{ .Values.controller.acpRuntime.upgradeDrain.port }}
+            - --acp-upgrade-drain-timeout={{ .Values.controller.acpRuntime.upgradeDrain.timeout }}
+            - --acp-upgrade-drain-poll-interval={{ .Values.controller.acpRuntime.upgradeDrain.pollInterval }}
+            - --acp-upgrade-drain-trigger-timeout={{ .Values.controller.acpRuntime.upgradeDrain.triggerTimeout }}
+            - --acp-upgrade-drain-marker-namespace={{ .Release.Namespace }}
+            {{- end }}
+            {{- if and .Values.controller.acpRuntime.enabled .Values.providerProxy.enabled }}
+            - --acp-provider-proxy-base-url=http://{{ include "orka.providerProxyName" . }}.{{ .Release.Namespace }}.svc:8080
+            - --acp-provider-proxy-namespace={{ .Release.Namespace }}
+            - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
+            - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
+            {{- end }}
+            {{- if .Values.controller.acpRuntime.codexImage }}
+            - {{ printf "--acp-codex-runtime-image=%s" .Values.controller.acpRuntime.codexImage | quote }}
+            {{- end }}
+            {{- if .Values.controller.acpRuntime.claudeImage }}
+            - {{ printf "--acp-claude-runtime-image=%s" .Values.controller.acpRuntime.claudeImage | quote }}
+            {{- end }}
+            {{- if .Values.controller.acpRuntime.copilotImage }}
+            - {{ printf "--acp-copilot-runtime-image=%s" .Values.controller.acpRuntime.copilotImage | quote }}
+            {{- end }}
+            {{- if .Values.controller.acpRuntime.opencodeImage }}
+            - {{ printf "--acp-opencode-runtime-image=%s" .Values.controller.acpRuntime.opencodeImage | quote }}
+            {{- end }}
             - --zap-log-level={{ .Values.controller.logLevel }}
             - --gateway-enabled={{ $gatewayRuntimeEnabled }}
             - --gateway-pending-per-session={{ .Values.controller.gateway.pendingPerSession }}
@@ -146,9 +191,6 @@ spec:
             {{- if .secretRead }}
             - {{ printf "--context-token-secret-read-scopes=%s" .secretRead | quote }}
             {{- end }}
-            {{- if .secretCredentialRead }}
-            - {{ printf "--context-token-secret-credential-read-scopes=%s" .secretCredentialRead | quote }}
-            {{- end }}
             {{- if .agentRead }}
             - {{ printf "--context-token-agent-read-scopes=%s" .agentRead | quote }}
             {{- end }}
@@ -196,8 +238,8 @@ spec:
             {{- end }}
             {{- end }}
             {{- with .tts }}
-            {{- if .endpoint }}
-            - {{ printf "--context-token-tts-endpoint=%s" .endpoint | quote }}
+            {{- if .url }}
+            - {{ printf "--context-token-tts-endpoint=%s" .url | quote }}
             {{- end }}
             {{- if .audience }}
             - {{ printf "--context-token-tts-audience=%s" .audience | quote }}
@@ -225,14 +267,6 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
-            {{- with .Values.controller.outboundAccess }}
-            {{- if .trustedGatewayServices }}
-            - {{ printf "--outbound-access-trusted-gateway-services=%s" (join "," .trustedGatewayServices) | quote }}
-            {{- end }}
-            {{- if .trustedTokenEndpointServices }}
-            - {{ printf "--outbound-access-trusted-token-endpoint-services=%s" (join "," .trustedTokenEndpointServices) | quote }}
-            {{- end }}
-            {{- end }}
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}
@@ -249,18 +283,6 @@ spec:
             {{- end }}
             {{- if gt (int .Values.controller.maxTasksPerNamespace) 0 }}
             - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
-            {{- end }}
-            {{- with .Values.controller.workspaceProvider }}
-            {{- if .apiEnabled }}
-            - --enable-workspace-provider-api=true
-            {{- end }}
-            {{- if .fakeProviderEnabled }}
-            - --enable-fake-workspace-provider=true
-            {{- end }}
-            {{- if .classUseAdmission.enabled }}
-            - --workspace-class-use-admission-enabled=true
-            - --webhook-cert-path=/var/run/orka/workspace-webhook
-            {{- end }}
             {{- end }}
             {{- with .Values.controller.executionWorkspace }}
             - --execution-workspace-default-provider={{ .defaultProvider | default "agent-sandbox" }}
@@ -315,12 +337,20 @@ spec:
               value: {{ include "orka.vendorWorkerClusterRoleName" . | quote }}
             - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
               value: {{ include "orka.containerWorkerClusterRoleName" . | quote }}
-            - name: ORKA_HARNESS_WRAPPER_ENDPOINT
-              value: http://{{ include "orka.harnessWrapperName" . }}:8080
-            - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
-              value: /var/run/orka/harness-wrapper/token
-            - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
-              value: {{ include "orka.harnessWrapperName" . | quote }}
+            - name: ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE
+              value: /var/run/orka/acp-artifacts/capability-secret
+            - name: ORKA_ACP_ARTIFACT_ROOT
+              value: /data/acp-artifacts
+            - name: ORKA_ACP_ARTIFACT_MAX_BYTES
+              value: {{ .Values.controller.acpArtifact.maxBytes | quote }}
+            {{- if .Values.publisher.enabled }}
+            - name: ORKA_WORKSPACE_PUBLISHER_URL
+              value: http://{{ include "orka.publisherName" . }}:8080
+            - name: ORKA_WORKSPACE_PUBLISHER_CONTROLLER_TOKEN_FILE
+              value: /var/run/orka/publisher-auth/controller-token
+            - name: ORKA_WORKSPACE_PUBLISHER_CAPABILITY_SECRET_FILE
+              value: /var/run/orka/publisher-auth/operation-capability-secret
+            {{- end }}
             {{- if .Values.github.webhook.secretName }}
             - name: ORKA_GITHUB_WEBHOOK_SECRET
               valueFrom:
@@ -368,11 +398,15 @@ spec:
             - name: health
               containerPort: {{ .Values.controller.healthPort }}
               protocol: TCP
-            {{- if .Values.controller.workspaceProvider.classUseAdmission.enabled }}
-            - name: webhook-server
-              containerPort: 9443
-              protocol: TCP
-            {{- end }}
+          {{- if and .Values.controller.acpRuntime.enabled .Values.controller.acpRuntime.upgradeDrain.enabled }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /manager
+                  - {{ printf "--acp-upgrade-drain-trigger-url=http://127.0.0.1:%v%s" .Values.controller.acpRuntime.upgradeDrain.port "/acp/upgrade-drain" | quote }}
+                  - {{ printf "--acp-upgrade-drain-trigger-timeout=%s" .Values.controller.acpRuntime.upgradeDrain.triggerTimeout | quote }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -398,41 +432,56 @@ spec:
               mountPath: /tmp
             - name: store
               mountPath: /data
-            - name: harness-wrapper-auth
-              mountPath: /var/run/orka/harness-wrapper
+            - name: acp-artifact-capability
+              mountPath: /var/run/orka/acp-artifacts
               readOnly: true
-            {{- if .Values.controller.workspaceProvider.classUseAdmission.enabled }}
-            - name: workspace-webhook-certs
-              mountPath: /var/run/orka/workspace-webhook
+            {{- if .Values.publisher.enabled }}
+            - name: workspace-publisher-auth
+              mountPath: /var/run/orka/publisher-auth
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.controller.acpRuntime.enabled .Values.providerProxy.enabled }}
+            - name: provider-auth-proxy
+              mountPath: /var/run/orka/provider-auth
               readOnly: true
             {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: harness-wrapper-auth
+        - name: acp-artifact-capability
           secret:
-            secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (include "orka.harnessWrapperAuthSecretName" .) }}
-            items:
-              - key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
-                path: token
-        {{- if .Values.controller.workspaceProvider.classUseAdmission.enabled }}
-        - name: workspace-webhook-certs
-          secret:
-            secretName: {{ .Values.controller.workspaceProvider.classUseAdmission.existingSecret | quote }}
+            secretName: {{ .Values.controller.acpArtifact.existingSecret | default (include "orka.acpArtifactSecretName" .) }}
             defaultMode: 0400
             items:
-              - key: tls.crt
-                path: tls.crt
-              - key: tls.key
-                path: tls.key
-        {{- end }}
+              - key: {{ .Values.controller.acpArtifact.secretKey | default "capability-secret" }}
+                path: capability-secret
         - name: store
           {{- if .Values.store.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ include "orka.fullname" . }}-store
+            claimName: {{ include "orka.storeName" . }}
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if .Values.publisher.enabled }}
+        - name: workspace-publisher-auth
+          secret:
+            secretName: {{ .Values.publisher.auth.existingSecret | default (include "orka.publisherAuthSecretName" .) }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.publisher.auth.controllerTokenKey | default "controller-token" }}
+                path: controller-token
+              - key: {{ .Values.publisher.auth.capabilitySecretKey | default "operation-capability-secret" }}
+                path: operation-capability-secret
+        {{- end }}
+        {{- if and .Values.controller.acpRuntime.enabled .Values.providerProxy.enabled }}
+        - name: provider-auth-proxy
+          secret:
+            secretName: {{ .Values.providerProxy.auth.existingSecret | default (include "orka.providerProxyName" .) }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.providerProxy.auth.tokenKey | default "token" }}
+                path: token
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

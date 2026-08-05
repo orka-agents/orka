@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/controller"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
@@ -89,6 +90,7 @@ type Handlers struct {
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 	resultStore               store.ResultStore
 	sessionStore              store.SessionStore
+	sessionManager            *controller.SessionManager
 	planStore                 store.PlanStore
 	healthChecker             store.HealthChecker
 	artifactStore             store.ArtifactStore
@@ -114,6 +116,7 @@ type HandlersConfig struct {
 	ContextTokenAuthorization ContextTokenAuthorizationConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
+	SessionManager            *controller.SessionManager
 	PlanStore                 store.PlanStore
 	KubeClient                kubernetes.Interface
 	HealthChecker             store.HealthChecker
@@ -139,6 +142,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		contextTokenAuthorization: cfg.ContextTokenAuthorization,
 		resultStore:               cfg.ResultStore,
 		sessionStore:              cfg.SessionStore,
+		sessionManager:            cfg.SessionManager,
 		planStore:                 cfg.PlanStore,
 		healthChecker:             cfg.HealthChecker,
 		artifactStore:             cfg.ArtifactStore,
@@ -436,6 +440,15 @@ func rejectReservedTaskAnnotations(annotations map[string]string) error {
 	return nil
 }
 
+func rejectReservedTaskLabels(taskLabels map[string]string) error {
+	for key := range taskLabels {
+		if strings.HasPrefix(key, "orka.ai/") {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("label %q is reserved", key))
+		}
+	}
+	return nil
+}
+
 // CreateTask creates a new task
 func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	if err := rejectRequestedByTampering(c.Body()); err != nil {
@@ -460,6 +473,9 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		annotations = req.Metadata.Annotations
 	}
 	if err := rejectReservedTaskAnnotations(annotations); err != nil {
+		return err
+	}
+	if err := rejectReservedTaskLabels(req.Metadata.Labels); err != nil {
 		return err
 	}
 
@@ -955,12 +971,16 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
-	if err := h.sessionStore.DeleteSession(ctx, namespace, id); err != nil {
+	deleteSession := h.sessionStore.DeleteSession
+	if h.sessionManager != nil {
+		deleteSession = h.sessionManager.DeleteSession
+	}
+	if err := deleteSession(ctx, namespace, id); err != nil {
 		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrGatewayOwnedSession) {
 			return fiber.NewError(fiber.StatusNotFound, "session not found")
 		}
 		if errors.Is(err, store.ErrConflict) {
-			return fiber.NewError(fiber.StatusConflict, "session has pending gateway events")
+			return fiber.NewError(fiber.StatusConflict, "session has active or unsettled work")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete session: %v", err))
 	}
@@ -997,7 +1017,7 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	}
 
 	// Add built-in tools to the response
-	toolItems := make([]fiber.Map, 0, len(toolList.Items)+len(builtinToolsList))
+	toolItems := make([]fiber.Map, 0)
 	for _, tool := range builtinToolsList {
 		name, _ := tool["name"].(string)
 		allowed, err := contextTokenAllowsToolMetadata(c, h.contextTokenAuthorization, "listTools", name)

@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,6 +102,176 @@ func TestValidateAgent_RuntimeOnly(t *testing.T) {
 
 	if err := r.validateAgent(context.Background(), agent); err != nil {
 		t.Errorf("runtime-only agent should be valid, got %v", err)
+	}
+}
+
+func TestValidateAgent_OpenCodeRequirements(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		model         string
+		contextWindow *int32
+		maxTokens     *int32
+		secret        string
+		systemPrompt  string
+		wantErr       string
+	}{
+		{name: "valid", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), maxTokens: new(int32(4096))},
+		{name: "system prompt", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), maxTokens: new(int32(4096)), systemPrompt: "ignored", wantErr: "does not support spec.systemPrompt"},
+		{name: "missing model", wantErr: "requires spec.model.name"},
+		{name: "missing context window", model: "openai/gpt-5.4", maxTokens: new(int32(4096)), wantErr: "requires a positive spec.model.contextWindow"},
+		{name: "missing max tokens", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), wantErr: "requires a positive spec.model.maxTokens"},
+		{name: "inverted limits", model: "openai/gpt-5.4", contextWindow: new(int32(4096)), maxTokens: new(int32(4096)), wantErr: "contextWindow must exceed"},
+		{name: "substitution model", model: "{env:ORKA_OPENCODE_PROVIDER_TOKEN}", contextWindow: new(int32(32768)), maxTokens: new(int32(4096)), wantErr: "substitution braces"},
+		{name: "legacy secret", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), maxTokens: new(int32(4096)), secret: "placeholder", wantErr: "does not support agent secretRef"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			agent := baseAgent("opencode")
+			agent.Spec.ProviderRef = nil
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode}
+			agent.Spec.Model = &corev1alpha1.ModelConfig{Name: test.model, ContextWindow: test.contextWindow, MaxTokens: test.maxTokens}
+			if test.secret != "" {
+				agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: test.secret}
+			}
+			if test.systemPrompt != "" {
+				agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: test.systemPrompt}
+			}
+			err := setupAgentReconciler().validateAgent(context.Background(), agent)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateAgent() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("validateAgent() error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateAgent_BuiltInRuntimeRejectsCredentialSecretRef(t *testing.T) {
+	for _, runtimeType := range []corev1alpha1.AgentRuntimeType{
+		corev1alpha1.AgentRuntimeCodex,
+		corev1alpha1.AgentRuntimeClaude,
+		corev1alpha1.AgentRuntimeCopilot,
+		corev1alpha1.AgentRuntimeOpencode,
+	} {
+		t.Run(string(runtimeType), func(t *testing.T) {
+			r := setupAgentReconciler()
+			agent := baseAgent(string(runtimeType))
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: runtimeType}
+			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "legacy-provider-creds"}
+
+			err := r.validateAgent(context.Background(), agent)
+			if err == nil || !strings.Contains(err.Error(), "does not support agent secretRef") {
+				t.Fatalf("validateAgent() error = %v, want built-in ACP secretRef rejection", err)
+			}
+		})
+	}
+}
+
+func TestValidateAgent_CredentialSecretRefRemainsValidOutsideBuiltInACPRuntimes(t *testing.T) {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "provider-creds", Namespace: testNS}}
+	for _, tt := range []struct {
+		name    string
+		runtime *corev1alpha1.AgentCLIRuntime
+	}{
+		{name: "provider-backed agent"},
+		{
+			name: "custom runtimeRef agent",
+			runtime: &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := setupAgentReconciler(secret.DeepCopy())
+			agent := baseAgent(tt.name)
+			agent.Spec.Runtime = tt.runtime
+			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secret.Name}
+
+			if err := r.validateAgent(context.Background(), agent); err != nil {
+				t.Fatalf("validateAgent() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateAgent_BuiltInRuntimeRejectsUnsupportedModelControls(t *testing.T) {
+	temperature := 0.2
+	maxTokens := int32(128)
+	zeroMaxTokens := int32(0)
+	for _, tt := range []struct {
+		name      string
+		runtime   corev1alpha1.AgentRuntimeType
+		configure func(*corev1alpha1.ModelConfig)
+		wantError string
+	}{
+		{
+			name:    "codex temperature",
+			runtime: corev1alpha1.AgentRuntimeCodex,
+			configure: func(model *corev1alpha1.ModelConfig) {
+				model.Temperature = &temperature
+			},
+			wantError: "spec.model.temperature",
+		},
+		{
+			name:    "claude max tokens",
+			runtime: corev1alpha1.AgentRuntimeClaude,
+			configure: func(model *corev1alpha1.ModelConfig) {
+				model.MaxTokens = &maxTokens
+			},
+			wantError: "spec.model.maxTokens",
+		},
+		{
+			name:    "copilot explicit zero max tokens",
+			runtime: corev1alpha1.AgentRuntimeCopilot,
+			configure: func(model *corev1alpha1.ModelConfig) {
+				model.MaxTokens = &zeroMaxTokens
+			},
+			wantError: "spec.model.maxTokens",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := setupAgentReconciler()
+			agent := baseAgent(tt.name)
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: tt.runtime}
+			tt.configure(agent.Spec.Model)
+
+			err := r.validateAgent(context.Background(), agent)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateAgent() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateAgent_ModelControlsRemainValidOutsideBuiltInACPRuntimes(t *testing.T) {
+	temperature := 0.2
+	maxTokens := int32(128)
+	for _, tt := range []struct {
+		name    string
+		runtime *corev1alpha1.AgentCLIRuntime
+	}{
+		{name: "provider-backed agent"},
+		{
+			name: "custom runtimeRef agent",
+			runtime: &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := setupAgentReconciler()
+			agent := baseAgent(tt.name)
+			agent.Spec.Runtime = tt.runtime
+			agent.Spec.Model.Temperature = &temperature
+			agent.Spec.Model.MaxTokens = &maxTokens
+
+			if err := r.validateAgent(context.Background(), agent); err != nil {
+				t.Fatalf("validateAgent() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -1066,4 +1237,15 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 		}
 	}
 	return nil
+}
+
+func TestValidateAgent_BuiltInRuntimeAcceptsLegacyDefaultTemperature(t *testing.T) {
+	r := setupAgentReconciler()
+	agent := baseAgent("legacy-default-temperature")
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude}
+	temperature := legacyDefaultACPTemperature
+	agent.Spec.Model.Temperature = &temperature
+	if err := r.validateAgent(context.Background(), agent); err != nil {
+		t.Fatalf("legacy default temperature rejected: %v", err)
+	}
 }

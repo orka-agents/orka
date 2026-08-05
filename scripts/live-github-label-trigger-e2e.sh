@@ -52,6 +52,8 @@ EOF_HELP
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/lib/kind-local-registry.sh
+. "${script_dir}/lib/kind-local-registry.sh"
 
 kind_cluster="${KIND_CLUSTER:-orka-live-github-label-trigger-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
@@ -60,6 +62,7 @@ orka_api_service="${ORKA_API_SERVICE:-orka-api}"
 orka_api_service_port="${ORKA_API_SERVICE_PORT:-8080}"
 orka_api_local_port="${ORKA_API_LOCAL_PORT:-18082}"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-github-label-trigger-e2e}"
+publisher_image="${ORKA_WORKSPACE_PUBLISHER_IMAGE:-orka-workspace-publisher:live-github-label-trigger-e2e}"
 target_repo_url="${GITHUB_LABEL_TRIGGER_TARGET_REPO_URL:-https://github.com/orka-agents/orka}"
 target_number="${GITHUB_LABEL_TRIGGER_TARGET_NUMBER:-1}"
 agent_name="${GITHUB_LABEL_TRIGGER_AGENT_NAME:-github-label-ci-agent}"
@@ -151,6 +154,7 @@ on_exit() {
   kubectl delete agent "${agent_name}" -n default --ignore-not-found=true >/dev/null 2>&1 || true
 
   restore_manager_kustomization
+  orka_kind_registry_stop
   make cleanup-test-e2e KIND_CLUSTER="${kind_cluster}" >/dev/null 2>&1 || true
   rm -rf "${work_dir}" >/dev/null 2>&1 || true
 
@@ -393,15 +397,32 @@ main() {
   log "Creating or reusing Kind cluster ${kind_cluster}"
   run make setup-test-e2e KIND_CLUSTER="${kind_cluster}"
   run kubectl config use-context "kind-${kind_cluster}"
+  log "Installing current Orka CRDs into the test cluster"
+  run make install
+  log "Creating the Vekil namespace required by the production ingress policy"
+  kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f -
+  orka_kind_registry_start "${kind_cluster}"
 
   log "Building manager image ${manager_image}"
   run make docker-build IMG="${manager_image}"
+  log "Building workspace publisher image ${publisher_image}"
+  run make docker-build-workspace-publisher WORKSPACE_PUBLISHER_IMG="${publisher_image}"
 
   log "Loading manager image into Kind cluster ${kind_cluster}"
   run kind load docker-image "${manager_image}" --name "${kind_cluster}"
 
+  local manager_ref publisher_ref placeholder_digest
+  manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
+  publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+  placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
   log "Deploying Orka manager"
-  run make deploy IMG="${manager_image}"
+  run make deploy \
+    IMG="${manager_ref}" \
+    WORKSPACE_PUBLISHER_IMG="${publisher_ref}" \
+    ACP_CODEX_RUNTIME_IMG="example.invalid/orka/acp-codex@${placeholder_digest}" \
+    ACP_CLAUDE_RUNTIME_IMG="example.invalid/orka/acp-claude@${placeholder_digest}" \
+    ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
+    ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
   run kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
   run kubectl wait --for=condition=Established crd/agents.core.orka.ai --timeout=60s
 
@@ -467,10 +488,11 @@ main() {
     --arg repo_clone "${repo_clone}" \
     '.spec.type == "agent"
       and .spec.agentRef.name == $agent
-      and .spec.agentRuntime.workspace.gitRepo == $repo_clone
-      and .spec.agentRuntime.workspace.branch == "main"
-      and ((.spec.agentRuntime.workspace.pushBranch // "") == "")
-      and (.spec.agentRuntime.workspace.gitSecretRef == null)
+      and .spec.workspace.gitRepo == $repo_clone
+      and .spec.workspace.branch == "main"
+      and ((.spec.workspace.pushBranch // "") == "")
+      and (.spec.workspace.readCredentialRef == null)
+      and ((.spec.workspace.intent // "read") == "read")
       and .metadata.annotations["orka.ai/github-delivery"] == $delivery
       and .metadata.annotations["orka.ai/github-label"] == $label
       and .metadata.annotations["orka.ai/github-repository"] == $repo_full

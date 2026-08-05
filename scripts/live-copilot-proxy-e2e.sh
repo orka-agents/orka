@@ -20,13 +20,23 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 
 kind_cluster="${KIND_CLUSTER:-orka-live-copilot-proxy-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
+# Legacy Provider/Chat/Anthropic paths call the configured upstream directly,
+# so keep their fixture outside the production Vekil ingress policy. The ACP
+# RuntimePool matrix uses a second fixture at the fixed production identity and
+# therefore still traverses the authenticated provider-proxy boundary.
 copilot_proxy_namespace="${COPILOT_PROXY_NAMESPACE:-default}"
 copilot_proxy_service="${COPILOT_PROXY_SERVICE:-copilot-proxy}"
 copilot_proxy_service_port="${COPILOT_PROXY_SERVICE_PORT:-1337}"
-copilot_proxy_local_port="${COPILOT_PROXY_LOCAL_PORT:-18081}"
+provider_proxy_namespace="${ACP_PROVIDER_PROXY_NAMESPACE:-vekil-system}"
+provider_proxy_service="${ACP_PROVIDER_PROXY_SERVICE:-vekil}"
+provider_proxy_service_port="${ACP_PROVIDER_PROXY_SERVICE_PORT:-1337}"
 copilot_proxy_image="${COPILOT_PROXY_IMAGE:-ghcr.io/sozercan/vekil:v0.14.0@sha256:9e6ab58b9c27888db34d76422c3520b3bf103742a058572439a1fe0aa35a2ade}"
 proxy_token_secret_name="${COPILOT_PROXY_TOKEN_SECRET_NAME:-live-copilot-proxy-token}"
 token_value="${COPILOT_GITHUB_TOKEN:-}"
+[[ "${provider_proxy_namespace}" == "vekil-system" && "${provider_proxy_service}" == "vekil" && "${provider_proxy_service_port}" == "1337" ]] ||
+  die "live Copilot proxy E2E requires the production Vekil Service identity vekil.vekil-system.svc:1337"
+[[ "${copilot_proxy_namespace}/${copilot_proxy_service}" != "${provider_proxy_namespace}/${provider_proxy_service}" ]] ||
+  die "legacy live proxy fixture must be distinct from the production Vekil Service identity"
 proxy_pf_pid=""
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-copilot-proxy-e2e.XXXXXX")"
 
@@ -64,11 +74,17 @@ dump_diagnostics() {
     echo "=== Orka Namespace Events ==="
     kubectl get events -n "${orka_namespace}" --sort-by=.lastTimestamp 2>/dev/null || true
     echo
-    echo "=== Proxy Namespace Resources ==="
+    echo "=== Legacy Proxy Namespace Resources ==="
     kubectl get pods,svc,deploy -n "${copilot_proxy_namespace}" -o wide 2>/dev/null || true
     echo
-    echo "=== Proxy Namespace Events ==="
+    echo "=== Legacy Proxy Namespace Events ==="
     kubectl get events -n "${copilot_proxy_namespace}" --sort-by=.lastTimestamp 2>/dev/null || true
+    echo
+    echo "=== Provider Proxy Namespace Resources ==="
+    kubectl get pods,svc,deploy -n "${provider_proxy_namespace}" -o wide 2>/dev/null || true
+    echo
+    echo "=== Provider Proxy Namespace Events ==="
+    kubectl get events -n "${provider_proxy_namespace}" --sort-by=.lastTimestamp 2>/dev/null || true
     echo
     echo "=== Controller Logs ==="
     local controller_pod
@@ -77,11 +93,18 @@ dump_diagnostics() {
       kubectl logs "${controller_pod}" -n "${orka_namespace}" --tail=200 2>/dev/null || true
     fi
     echo
-    echo "=== Proxy Logs ==="
+    echo "=== Legacy Proxy Logs ==="
     local proxy_pod
     proxy_pod="$(kubectl get pods -l app="${copilot_proxy_service}" -n "${copilot_proxy_namespace}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
     if [[ -n "${proxy_pod}" ]]; then
       kubectl logs "${proxy_pod}" -n "${copilot_proxy_namespace}" --tail=200 2>/dev/null || true
+    fi
+    echo
+    echo "=== Provider Proxy Logs ==="
+    local provider_proxy_pod
+    provider_proxy_pod="$(kubectl get pods -l app.kubernetes.io/name=vekil -n "${provider_proxy_namespace}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    if [[ -n "${provider_proxy_pod}" ]]; then
+      kubectl logs "${provider_proxy_pod}" -n "${provider_proxy_namespace}" --tail=200 2>/dev/null || true
     fi
   } | redact >&2
 }
@@ -171,10 +194,11 @@ main() {
   log "Creating Kind cluster ${kind_cluster}"
   make setup-test-e2e KIND_CLUSTER="${kind_cluster}"
 
-  log "Creating proxy namespace ${copilot_proxy_namespace}"
+  log "Creating live proxy namespaces"
   kubectl create namespace "${copilot_proxy_namespace}" --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create namespace "${provider_proxy_namespace}" --dry-run=client -o yaml | kubectl apply -f -
 
-  log "Deploying copilot-proxy"
+  log "Deploying direct-access live proxy fixture"
   kubectl apply -f - <<YAML
 apiVersion: v1
 kind: Secret
@@ -234,9 +258,71 @@ spec:
   ports:
     - port: ${copilot_proxy_service_port}
       targetPort: 1337
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${proxy_token_secret_name}
+  namespace: ${provider_proxy_namespace}
+type: Opaque
+stringData:
+  COPILOT_GITHUB_TOKEN: "${token_value}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${provider_proxy_service}
+  namespace: ${provider_proxy_namespace}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vekil
+  template:
+    metadata:
+      labels:
+        app: ${provider_proxy_service}
+        app.kubernetes.io/name: vekil
+    spec:
+      containers:
+        - name: ${provider_proxy_service}
+          image: ${copilot_proxy_image}
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 1337
+          env:
+            - name: COPILOT_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ${proxy_token_secret_name}
+                  key: COPILOT_GITHUB_TOKEN
+            - name: PORT
+              value: "1337"
+            - name: TOKEN_DIR
+              value: /home/nonroot/.config/copilot-proxy
+          volumeMounts:
+            - name: token-cache
+              mountPath: /home/nonroot/.config/copilot-proxy
+      volumes:
+        - name: token-cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${provider_proxy_service}
+  namespace: ${provider_proxy_namespace}
+spec:
+  selector:
+    app.kubernetes.io/name: vekil
+  ports:
+    - port: ${provider_proxy_service_port}
+      targetPort: 1337
 YAML
 
   wait_for_proxy_deployment
+  log "Waiting for provider proxy rollout"
+  kubectl rollout status deployment/"${provider_proxy_service}" -n "${provider_proxy_namespace}" --timeout=5m
 
   log "Waiting for copilot-proxy /readyz via Kubernetes service proxy"
   wait_for_kube_service_proxy \
@@ -246,7 +332,15 @@ YAML
     "/readyz" \
     "copilot-proxy /readyz"
 
-  log "Validating copilot-proxy live models"
+  log "Waiting for provider proxy /readyz via Kubernetes service proxy"
+  wait_for_kube_service_proxy \
+    "${provider_proxy_namespace}" \
+    "${provider_proxy_service}" \
+    "${provider_proxy_service_port}" \
+    "/readyz" \
+    "provider proxy /readyz"
+
+  log "Validating direct-access live proxy models"
   wait_for_kube_service_proxy \
     "${copilot_proxy_namespace}" \
     "${copilot_proxy_service}" \
@@ -265,13 +359,27 @@ YAML
   log "Live proxy model families detected"
   jq -r '.data[].id' "${work_dir}/copilot-proxy-models.json" | redact >&2
 
+  log "Validating provider proxy live models"
+  wait_for_kube_service_proxy \
+    "${provider_proxy_namespace}" \
+    "${provider_proxy_service}" \
+    "${provider_proxy_service_port}" \
+    "/v1/models" \
+    "provider proxy /v1/models" \
+    "${work_dir}/provider-proxy-models.json"
+  jq -e '.data | length > 0' "${work_dir}/provider-proxy-models.json" >/dev/null
+
   log "Running focused live copilot-proxy Go e2e specs"
   KIND_CLUSTER="${kind_cluster}" \
+  E2E_EPHEMERAL_CLUSTER=true \
   E2E_GITHUB_TOKEN="${token_value}" \
   E2E_LIVE_COPILOT_PROXY_BASE_URL="http://${copilot_proxy_service}.${copilot_proxy_namespace}.svc.cluster.local:${copilot_proxy_service_port}/v1" \
   E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE="${copilot_proxy_namespace}" \
   E2E_LIVE_COPILOT_PROXY_SERVICE_NAME="${copilot_proxy_service}" \
   E2E_LIVE_COPILOT_PROXY_SERVICE_PORT="${copilot_proxy_service_port}" \
+  E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_NAMESPACE="${provider_proxy_namespace}" \
+  E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_NAME="${provider_proxy_service}" \
+  E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_PORT="${provider_proxy_service_port}" \
   go test -tags=e2e ./test/e2e/ -timeout 45m -v -ginkgo.v \
     -ginkgo.focus="Live Copilot Proxy Provider|Live Chat API|Live Anthropic Compat API|Live Agent Runtime Matrix"
 

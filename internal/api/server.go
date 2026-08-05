@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/controller"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
@@ -47,6 +48,7 @@ type ServerConfig struct {
 	PlanStore                 store.PlanStore
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore
+	ArtifactReservations      artifactcap.CapabilityReservationRecorder
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
@@ -89,9 +91,10 @@ type Server struct {
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	app := fiber.New(fiber.Config{
-		AppName:      "Orka API",
-		BodyLimit:    15 << 20, // 15MB — allows artifact uploads up to 10MB + overhead
-		ErrorHandler: customErrorHandler,
+		AppName:           "Orka API",
+		BodyLimit:         defaultAPIRequestBodyLimit,
+		StreamRequestBody: true,
+		ErrorHandler:      customErrorHandler,
 	})
 	app.Server().HeaderReceived = requestBodyConfig
 
@@ -123,6 +126,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ContextTokenAuthorization: config.ContextTokenAuthorization,
 		ResultStore:               config.ResultStore,
 		SessionStore:              config.SessionStore,
+		SessionManager:            sessionManager,
 		PlanStore:                 config.PlanStore,
 		KubeClient:                config.Clientset,
 		HealthChecker:             config.HealthChecker,
@@ -224,6 +228,12 @@ func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
 
 // setupRoutes configures the API routes
 func (s *Server) setupRoutes() {
+	// The ACP artifact transport must be installed before other routes so large
+	// capability-bound uploads remain streamed while ordinary API bodies retain
+	// the historical bounded request limit.
+	s.installACPArtifactTransport()
+	s.installACPArtifactAuthorizationBroker()
+
 	// Health endpoints
 	s.app.Get("/healthz", s.handlers.Healthz)
 	s.app.Get("/readyz", s.handlers.Readyz)
@@ -308,6 +318,15 @@ func (s *Server) setupRoutes() {
 	api.Get("/tools/:name", s.handlers.GetTool)
 	api.Put("/tools/:name", s.handlers.UpdateTool)
 	api.Delete("/tools/:name", s.handlers.DeleteTool)
+
+	// Runtime fabric endpoints
+	api.Get("/runtime-pools", s.handlers.ListRuntimePools)
+	api.Get("/runtime-pools/:name", s.handlers.GetRuntimePool)
+	api.Get("/agent-runtimes", s.handlers.ListAgentRuntimes)
+	api.Post("/agent-runtimes", s.handlers.CreateAgentRuntime)
+	api.Get("/agent-runtimes/:name", s.handlers.GetAgentRuntime)
+	api.Put("/agent-runtimes/:name", s.handlers.UpdateAgentRuntime)
+	api.Delete("/agent-runtimes/:name", s.handlers.DeleteAgentRuntime)
 
 	// Agent endpoints
 	api.Post("/agents", s.handlers.CreateAgent)

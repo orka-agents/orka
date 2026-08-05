@@ -2,17 +2,45 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
+
+type recordingToolReader struct {
+	client.Reader
+	getCalls         int
+	resourceVersions []string
+}
+
+func (r *recordingToolReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	obj client.Object,
+	opts ...client.GetOption,
+) error {
+	r.getCalls++
+	if err := r.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	r.resourceVersions = append(r.resourceVersions, obj.GetResourceVersion())
+	return nil
+}
 
 func TestHandlers_ProviderCRUD(t *testing.T) {
 	handlers, app := setupTestHandlers()
@@ -140,6 +168,142 @@ func TestHandlers_ToolWriteRejectsBuiltInAndCRUD(t *testing.T) {
 
 	resp = testJSONRequest(t, app, http.MethodDelete, "/tools/http-tool", nil)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
+func TestHandlers_UpdateToolRetriesStatusOnlyConflictWithFreshRead(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "http-tool", Namespace: "default"},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "original",
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL:    "https://example.com/original",
+				Method: http.MethodPost,
+			},
+		},
+	}
+	updateCalls := 0
+	var updateVersions []string
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Tool{}).
+		WithObjects(tool).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				updateCalls++
+				updateVersions = append(updateVersions, obj.GetResourceVersion())
+				if updateCalls == 1 {
+					current := &corev1alpha1.Tool{}
+					if err := c.Get(ctx, client.ObjectKeyFromObject(obj), current); err != nil {
+						return err
+					}
+					current.Status.Available = true
+					current.Status.Error = "health check completed"
+					if err := c.Status().Update(ctx, current); err != nil {
+						return err
+					}
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "tools"},
+						obj.GetName(),
+						errors.New("status update advanced resource version"),
+					)
+				}
+				return c.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	reader := &recordingToolReader{Reader: kubeClient}
+	handlers := NewHandlers(HandlersConfig{Client: kubeClient, APIReader: reader})
+	app := fiber.New()
+	app.Put("/tools/:name", handlers.UpdateTool)
+
+	resp := testJSONRequest(t, app, http.MethodPut, "/tools/http-tool", map[string]any{
+		"spec": map[string]any{
+			"description": "updated",
+			"http": map[string]any{
+				"url":    "https://example.com/updated",
+				"method": http.MethodPost,
+			},
+		},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, 2, updateCalls)
+	require.Equal(t, 2, reader.getCalls)
+	require.Len(t, reader.resourceVersions, 2)
+	require.NotEqual(t, reader.resourceVersions[0], reader.resourceVersions[1])
+	require.Equal(t, reader.resourceVersions, updateVersions)
+
+	updated := &corev1alpha1.Tool{}
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(tool), updated))
+	require.Equal(t, "updated", updated.Spec.Description)
+	require.Equal(t, "https://example.com/updated", updated.Spec.HTTP.URL)
+	require.True(t, updated.Status.Available)
+	require.Equal(t, "health check completed", updated.Status.Error)
+}
+
+func TestHandlers_UpdateToolRejectsConcurrentSpecEdit(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "http-tool", Namespace: "default", Generation: 1},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "original",
+			HTTP:        &corev1alpha1.HTTPExecution{URL: "https://example.com/original"},
+		},
+	}
+	updateCalls := 0
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tool).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				updateCalls++
+				if updateCalls == 1 {
+					current := &corev1alpha1.Tool{}
+					if err := c.Get(ctx, client.ObjectKeyFromObject(obj), current); err != nil {
+						return err
+					}
+					current.Generation++
+					current.Spec.Description = "concurrent edit"
+					current.Spec.HTTP.URL = "https://example.com/concurrent"
+					if err := c.Update(ctx, current, opts...); err != nil {
+						return err
+					}
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "tools"},
+						obj.GetName(),
+						errors.New("spec update advanced resource version"),
+					)
+				}
+				return c.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	reader := &recordingToolReader{Reader: kubeClient}
+	handlers := NewHandlers(HandlersConfig{Client: kubeClient, APIReader: reader})
+	app := fiber.New()
+	app.Put("/tools/:name", handlers.UpdateTool)
+
+	resp := testJSONRequest(t, app, http.MethodPut, "/tools/http-tool", map[string]any{
+		"spec": map[string]any{
+			"description": "requested update",
+			"http":        map[string]any{"url": "https://example.com/requested"},
+		},
+	})
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	require.Equal(t, 1, updateCalls)
+	require.Equal(t, 2, reader.getCalls)
+	require.Len(t, reader.resourceVersions, 2)
+	require.NotEqual(t, reader.resourceVersions[0], reader.resourceVersions[1])
+
+	updated := &corev1alpha1.Tool{}
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(tool), updated))
+	require.Equal(t, int64(2), updated.Generation)
+	require.Equal(t, "concurrent edit", updated.Spec.Description)
+	require.Equal(t, "https://example.com/concurrent", updated.Spec.HTTP.URL)
 }
 
 func TestHandlers_SubstrateActorPoolCRUD(t *testing.T) {

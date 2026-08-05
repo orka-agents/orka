@@ -53,9 +53,6 @@ def main() -> int:
             (r"(ghcr\.io/orka-agents/orka/ai-worker:)[^\s]+", rf"\g<1>{version}", 1),
             (r"(ghcr\.io/orka-agents/orka/general-worker:)[^\s]+", rf"\g<1>{version}", 1),
         ],
-        ROOT / "config/harness-wrapper/deployment.yaml": [
-            (r"(ghcr\.io/orka-agents/orka/agent-harness-wrapper:)[^\s]+", rf"\g<1>{version}", 1),
-        ],
         ROOT / "config/manager/kustomization.yaml": [
             (r"^(\s*newTag:)\s*.*$", rf"\g<1> {version}", 2),
         ],

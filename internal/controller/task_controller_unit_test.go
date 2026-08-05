@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -44,10 +45,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
@@ -65,6 +68,7 @@ const (
 func newTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(s)
+	_ = workspacev1alpha1.AddToScheme(s)
 	_ = corev1.AddToScheme(s)
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
@@ -78,7 +82,11 @@ func newTestScheme() *runtime.Scheme {
 func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskReconciler {
 	fb := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}, &corev1alpha1.AgentRuntime{}).
+		WithStatusSubresource(
+			&corev1alpha1.Task{}, &corev1alpha1.Agent{}, &corev1alpha1.AgentRuntime{},
+			&corev1alpha1.ControllerEpoch{}, &corev1alpha1.PromptAttempt{}, &corev1alpha1.RuntimeSessionControl{},
+			&corev1alpha1.BranchClaim{}, &corev1alpha1.Publication{}, &corev1alpha1.ExternalEffect{},
+		).
 		WithIndex(&corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex).
 		WithIndex(&corev1.Event{}, eventReasonField, eventReasonIndex)
 	if len(objs) > 0 {
@@ -461,53 +469,77 @@ func TestValidateTaskAgentCompatibility_AgentTaskNoRuntime(t *testing.T) {
 
 func TestValidateTaskAgentCompatibility_AgentTaskCopilotRuntime(t *testing.T) {
 	r := &TaskReconciler{}
-	task := &corev1alpha1.Task{
-		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
-	}
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
-		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
-		},
-	}
-	err := r.validateTaskAgentCompatibility(task, agent)
-	if err != nil {
-		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for copilot harness runtime", err)
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "a1"}, Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot}}}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want Copilot accepted", err)
 	}
 }
-
 func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRuntime(t *testing.T) {
 	r := &TaskReconciler{}
-	task := &corev1alpha1.Task{
-		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
-	}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
+			Model:   testOpenCodeModelConfig(),
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
-			Model:   &corev1alpha1.ModelConfig{Name: "kimi-k2"},
 		},
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
-		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for opencode harness runtime", err)
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want OpenCode accepted", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRejectsSecretRef(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "a1"}, Spec: corev1alpha1.AgentSpec{
+		Model:     testOpenCodeModelConfig(),
+		Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+		SecretRef: &corev1.LocalObjectReference{Name: "legacy-opencode-secret"},
+	}}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "does not support agent secretRef") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want OpenCode secretRef rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRejectsReasoningEffort(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "a1"}, Spec: corev1alpha1.AgentSpec{
+		Model: testOpenCodeModelConfig(),
+		Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type:                   corev1alpha1.AgentRuntimeOpencode,
+			DefaultReasoningEffort: agentReasoningEffortHigh,
+		},
+	}}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "does not support spec.runtime.defaultReasoningEffort") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want OpenCode reasoning-effort rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRejectsSubstitutionModel(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "a1"}, Spec: corev1alpha1.AgentSpec{
+		Model:   &corev1alpha1.ModelConfig{Name: "{file:/proc/self/environ}"},
+		Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+	}}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "substitution braces") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want substitution rejection", err)
 	}
 }
 
 func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRuntimeRequiresModel(t *testing.T) {
 	r := &TaskReconciler{}
-	task := &corev1alpha1.Task{
-		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
-	}
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
-		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
-		},
-	}
-
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "a1"}, Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode}}}
 	err := r.validateTaskAgentCompatibility(task, agent)
-	if err == nil || !strings.Contains(err.Error(), "requires spec.model.name") {
-		t.Fatalf("validateTaskAgentCompatibility() error = %v, want missing OpenCode model rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "opencode runtime requires spec.model.name") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want missing model rejection", err)
 	}
 }
 
@@ -515,21 +547,15 @@ func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}},
-		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "review"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
 	}
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
-		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
-		},
-	}
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "a1"}, Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot}}}
 	err := r.validateTaskAgentCompatibility(task, agent)
-	if err == nil || !strings.Contains(err.Error(), "read-only agent tasks do not support copilot") {
-		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only copilot rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "GITHUB_TOKEN can mutate GitHub") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only credential rejection", err)
 	}
 }
-
-func TestValidateTaskAgentCompatibility_ReadOnlyOpencodeRejected(t *testing.T) {
+func TestValidateTaskAgentCompatibility_ReadOnlyOpencodeAccepted(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}},
@@ -538,13 +564,12 @@ func TestValidateTaskAgentCompatibility_ReadOnlyOpencodeRejected(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
+			Model:   testOpenCodeModelConfig(),
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
-			Model:   &corev1alpha1.ModelConfig{Name: "kimi-k2"},
 		},
 	}
-	err := r.validateTaskAgentCompatibility(task, agent)
-	if err == nil || !strings.Contains(err.Error(), "read-only agent tasks do not support opencode") {
-		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only opencode rejection", err)
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only OpenCode accepted", err)
 	}
 }
 
@@ -570,6 +595,61 @@ func TestValidateTaskAgentCompatibility_AgentTaskRejectsApprovalRequiredTools(t 
 	}
 }
 
+func TestValidateTaskAgentCompatibility_BuiltInRuntimeRejectsCredentialSecretRefs(t *testing.T) {
+	for _, runtimeType := range []corev1alpha1.AgentRuntimeType{
+		corev1alpha1.AgentRuntimeCodex,
+		corev1alpha1.AgentRuntimeClaude,
+		corev1alpha1.AgentRuntimeCopilot,
+	} {
+		for _, refOwner := range []string{"agent", "task"} {
+			t.Run(string(runtimeType)+"/"+refOwner, func(t *testing.T) {
+				r := &TaskReconciler{}
+				task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+				agent := &corev1alpha1.Agent{
+					ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+					Spec: corev1alpha1.AgentSpec{
+						Runtime: &corev1alpha1.AgentCLIRuntime{Type: runtimeType},
+					},
+				}
+				switch refOwner {
+				case "agent":
+					agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-creds"}
+				case "task":
+					task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-creds"}
+				}
+
+				err := r.validateTaskAgentCompatibility(task, agent)
+				wantError := fmt.Sprintf("does not support %s secretRef", refOwner)
+				if err == nil || !strings.Contains(err.Error(), wantError) {
+					t.Fatalf("validateTaskAgentCompatibility() error = %v, want %q", err, wantError)
+				}
+			})
+		}
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ProviderBackedCredentialSecretRefsRemainValid(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{
+			Type:      corev1alpha1.TaskTypeAI,
+			Prompt:    "do stuff",
+			SecretRef: &corev1alpha1.SecretReference{Name: "task-creds"},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			ProviderRef: &corev1alpha1.ProviderReference{Name: "provider"},
+			SecretRef:   &corev1.LocalObjectReference{Name: "agent-creds"},
+		},
+	}
+
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_RuntimeRefRejectsCredentialSecretRefs(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -589,16 +669,6 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsCredentialSecretRefs(t 
 				task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-creds"}
 			},
 			wantError: "task secretRef",
-		},
-		{
-			name: "workspace gitSecretRef",
-			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
-				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/example/repo",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
-				}}
-			},
-			wantError: "gitSecretRef",
 		},
 	}
 	for _, tt := range tests {
@@ -727,57 +797,8 @@ func TestValidateTaskAgentCompatibility_ReadOnlyRuntimeRefRejected(t *testing.T)
 			Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
 		},
 	}
-	err := r.validateTaskAgentCompatibility(task, agent)
-	if err == nil || !strings.Contains(err.Error(), "read-only agent tasks do not support runtimeRef") {
-		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only runtimeRef rejection", err)
-	}
-}
-
-func TestValidateTaskAgentCompatibility_StaleFrozenRuntimeRefStatusIgnoredWithoutPlannedTurn(t *testing.T) {
-	r := &TaskReconciler{}
-	task := &corev1alpha1.Task{
-		Spec: corev1alpha1.TaskSpec{
-			Type:         corev1alpha1.TaskTypeAgent,
-			Prompt:       "continue",
-			PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: "prior"},
-		},
-		Status: corev1alpha1.TaskStatus{HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{RuntimeRefName: "stale-runtime"}},
-	}
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
-		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
-		},
-	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
-		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for stale frozen runtimeRef status", err)
-	}
-}
-
-func TestValidateTaskAgentCompatibility_ActiveFrozenRuntimeRefStillRejectsPriorTaskRef(t *testing.T) {
-	r := &TaskReconciler{}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-			harnessWrapperTurnIDAnnotation:  "turn-1",
-			harnessWrapperRuntimeAnnotation: "runtime-1",
-			harnessWrapperCorrelationIDAnno: "corr-1",
-		}},
-		Spec: corev1alpha1.TaskSpec{
-			Type:         corev1alpha1.TaskTypeAgent,
-			Prompt:       "continue",
-			PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: "prior"},
-		},
-		Status: corev1alpha1.TaskStatus{HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{RuntimeRefName: "active-runtime"}},
-	}
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
-		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
-		},
-	}
-	err := r.validateTaskAgentCompatibility(task, agent)
-	if err == nil || !strings.Contains(err.Error(), "priorTaskRef") {
-		t.Fatalf("validateTaskAgentCompatibility() error = %v, want priorTaskRef rejection", err)
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want conformant runtimeRef compatibility", err)
 	}
 }
 
@@ -3199,7 +3220,70 @@ func TestHandleDeletion_NoFinalizer(t *testing.T) {
 	}
 }
 
+func TestHandleDeletionRemovesFinalizerWithMetadataOnlyPatch(t *testing.T) {
+	scheme := newTestScheme()
+	now := metav1.Now()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "del-agent-metadata",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{labels.TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeAgent,
+			Timeout: &metav1.Duration{Duration: 12 * time.Minute},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	base, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	patchInspected := false
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.UpdateOption) error {
+			if _, ok := object.(*corev1alpha1.Task); ok {
+				return errors.New("full Task update is forbidden while removing the finalizer")
+			}
+			return delegate.Update(ctx, object, options...)
+		},
+		Patch: func(ctx context.Context, delegate client.WithWatch, object client.Object, patch client.Patch, options ...client.PatchOption) error {
+			if _, ok := object.(*corev1alpha1.Task); ok {
+				data, err := patch.Data(object)
+				if err != nil {
+					return err
+				}
+				var body map[string]any
+				if err := json.Unmarshal(data, &body); err != nil {
+					return err
+				}
+				if _, present := body["spec"]; present {
+					return fmt.Errorf("finalizer patch unexpectedly contains spec: %s", data)
+				}
+				metadata, ok := body["metadata"].(map[string]any)
+				if !ok {
+					return fmt.Errorf("finalizer patch has no metadata: %s", data)
+				}
+				if _, present := metadata["finalizers"]; !present {
+					return fmt.Errorf("finalizer patch has no finalizers: %s", data)
+				}
+				patchInspected = true
+			}
+			return delegate.Patch(ctx, object, patch, options...)
+		},
+	})
+
+	if _, err := r.handleDeletion(context.Background(), task); err != nil {
+		t.Fatalf("handleDeletion() error = %v", err)
+	}
+	if !patchInspected {
+		t.Fatal("finalizer removal patch was not inspected")
+	}
+}
+
 func TestHandleDeletion_WithPersistedResultWithoutResultRef(t *testing.T) {
+
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -5585,6 +5669,78 @@ func TestReconcile_AddFinalizer(t *testing.T) {
 	}
 }
 
+func TestReconcile_AddFinalizerUsesMetadataOnlyPatch(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "rec-fin-metadata", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeAgent,
+			Timeout: &metav1.Duration{Duration: 12 * time.Minute},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	base, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	patchInspected := false
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.UpdateOption) error {
+			if _, ok := object.(*corev1alpha1.Task); ok {
+				return errors.New("full Task update is forbidden while adding the finalizer")
+			}
+			return delegate.Update(ctx, object, options...)
+		},
+		Patch: func(ctx context.Context, delegate client.WithWatch, object client.Object, patch client.Patch, options ...client.PatchOption) error {
+			if _, ok := object.(*corev1alpha1.Task); ok {
+				data, err := patch.Data(object)
+				if err != nil {
+					return err
+				}
+				var body map[string]any
+				if err := json.Unmarshal(data, &body); err != nil {
+					return err
+				}
+				if _, present := body["spec"]; present {
+					return fmt.Errorf("finalizer patch unexpectedly contains spec: %s", data)
+				}
+				metadata, ok := body["metadata"].(map[string]any)
+				if !ok {
+					return fmt.Errorf("finalizer patch has no metadata: %s", data)
+				}
+				if _, present := metadata["finalizers"]; !present {
+					return fmt.Errorf("finalizer patch has no finalizers: %s", data)
+				}
+				patchInspected = true
+			}
+			return delegate.Patch(ctx, object, patch, options...)
+		},
+	})
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: task.Name, Namespace: task.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %s, want 1s", result.RequeueAfter)
+	}
+	if !patchInspected {
+		t.Fatal("finalizer patch was not inspected")
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get updated Task: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(&updated, labels.TaskFinalizer) {
+		t.Fatal("Task finalizer was not added")
+	}
+	if updated.Spec.Timeout == nil || updated.Spec.Timeout.Duration != 12*time.Minute {
+		t.Fatalf("Task timeout = %#v, want 12m", updated.Spec.Timeout)
+	}
+}
+
 func TestReconcile_InitializeStatus(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -5664,7 +5820,7 @@ func TestHandlePending_TransactionTokenPendingRequeuesWithoutJob(t *testing.T) {
 	}
 }
 
-func TestHandlePending_AgentRuntimeWithoutSecretUsesHarnessWrapperNotJob(t *testing.T) {
+func TestHandlePending_BuiltInAgentRuntimeFailsClosedWhenACPDisabled(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
@@ -5698,8 +5854,68 @@ func TestHandlePending_AgentRuntimeWithoutSecretUsesHarnessWrapperNotJob(t *test
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
-	if !strings.Contains(updated.Status.Message, harnessWrapperEndpointEnv) {
-		t.Fatalf("message = %q, want harness wrapper endpoint failure", updated.Status.Message)
+	if !strings.Contains(updated.Status.Message, "no fallback execution path") {
+		t.Fatalf("message = %q, want fail-closed ACP-disabled error", updated.Status.Message)
+	}
+	assertNoJobsForTask(t, r, task)
+}
+
+func TestHandlePending_ExternalRuntimeRefFailsBeforeAttemptCreation(t *testing.T) {
+	scheme := newTestScheme()
+	externalRuntime := plannerExternalRuntime()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: externalRuntime.Name},
+			},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-task", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent, externalRuntime)
+	r.ACPRuntimeEnabled = true
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, "Task dispatch is not supported until the v2 dispatcher is wired") {
+		t.Fatalf("message = %q, want external dispatch support-boundary rejection", updated.Status.Message)
+	}
+	if updated.Status.Attempts != 0 {
+		t.Fatalf("attempts = %d, want 0", updated.Status.Attempts)
+	}
+	if updated.Status.Execution != nil {
+		t.Fatalf("execution = %#v, want nil", updated.Status.Execution)
+	}
+	if _, exists := updated.Labels[acpExternalRuntimeTaskLabel]; exists {
+		t.Fatalf("external runtime label was written: %v", updated.Labels)
+	}
+	attempts := &corev1alpha1.PromptAttemptList{}
+	if err := r.List(context.Background(), attempts, client.InNamespace(task.Namespace)); err != nil {
+		t.Fatalf("list PromptAttempts: %v", err)
+	}
+	if len(attempts.Items) != 0 {
+		t.Fatalf("PromptAttempts = %d, want 0", len(attempts.Items))
 	}
 	assertNoJobsForTask(t, r, task)
 }
@@ -5725,6 +5941,7 @@ func TestHandlePending_AgentRuntimeWithResourcesFailsBeforeJobBackend(t *testing
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
 	r := newUnitReconciler(scheme, task, agent)
+	r.ACPRuntimeEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -5772,7 +5989,7 @@ func TestHandlePending_AgentRuntimeUnsupportedPlannerFeaturesFailBeforeJobBacken
 			mutateTask: func(task *corev1alpha1.Task) {
 				task.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{Name: "prior", Namespace: "other"}
 			},
-			want: "cross-namespace priorTaskRef",
+			want: "use sessionRef",
 		},
 	}
 
@@ -5796,6 +6013,7 @@ func TestHandlePending_AgentRuntimeUnsupportedPlannerFeaturesFailBeforeJobBacken
 			}
 			tt.mutateTask(task)
 			r := newUnitReconciler(scheme, task, agent)
+			r.ACPRuntimeEnabled = true
 			r.EnforceNamespaceIsolation = true
 
 			result, err := r.handlePending(context.Background(), task)
@@ -5871,7 +6089,7 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
-	if !strings.Contains(updated.Status.Message, "execution workspace is not supported by harness runtime yet") {
+	if !strings.Contains(updated.Status.Message, "Task.spec.execution.workspace is not supported by the ACP core runtime; use Task.spec.workspace") {
 		t.Fatalf("message = %q, want workspace unsupported failure", updated.Status.Message)
 	}
 	assertExecutionWorkspaceValidationFailedStatus(
@@ -5879,7 +6097,7 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 		updated.Status.ExecutionWorkspace,
 		corev1alpha1.WorkspaceProviderAgentSandbox,
 		template.Name,
-		"execution workspace is not supported by harness runtime yet",
+		"Task.spec.execution.workspace is not supported by the ACP core runtime; use Task.spec.workspace",
 	)
 	assertNoJobsForTask(t, r, task)
 }
@@ -6889,6 +7107,148 @@ func TestHandlePending_WithSessionRef(t *testing.T) {
 	}
 }
 
+func TestHandlePending_AgentSessionWaitExpiresAtAbsoluteDeadline(t *testing.T) {
+	scheme := newTestScheme()
+	timeout := metav1.Duration{Duration: time.Minute}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pend-expired-session", Namespace: "default", UID: "12345678-abcd-efgh-ijkl-1234567890ad",
+			CreationTimestamp: metav1.NewTime(time.Now().UTC().Add(-2 * time.Minute)),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, Prompt: "expired before session lock",
+			Timeout: &timeout, SessionRef: &corev1alpha1.SessionReference{Name: "busy-session", Create: true, Append: true},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("result = %#v, want terminal result", result)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseCancelled || updated.Status.Execution == nil ||
+		updated.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled ||
+		updated.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled ||
+		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("TaskTimeout") ||
+		updated.Status.Execution.Attempt != 0 || updated.Status.Execution.PromptID != "" ||
+		updated.Status.Delivery == nil || updated.Status.Delivery.State != corev1alpha1.TaskDeliveryStateNotRequested {
+		t.Fatalf("expired pending Task status = %#v", updated.Status)
+	}
+}
+
+func TestHandlePending_ExpiredAgentSettlesDurableAttemptBeforeStatusBinding(t *testing.T) {
+	scheme := newTestScheme()
+	timeout := metav1.Duration{Duration: time.Minute}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "expired-durable-attempt", Namespace: "default", UID: "12345678-abcd-efgh-ijkl-1234567890ae",
+			CreationTimestamp: metav1.NewTime(time.Now().UTC().Add(-2 * time.Minute)),
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "expired after attempt create", Timeout: &timeout},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task)
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	controlStore := sqlite.NewStore(db, "expired-attempt-test")
+	epochs := NewControllerEpochManager(controlStore, "expired-attempt-controller")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fence, err := epochs.CurrentFence(ctx)
+	if err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	promptID := fmt.Sprintf("prompt-%s-1", task.UID)
+	attemptKey := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+		Key: attemptKey, RequestDigest: testControlDigestForDispatcher("expired-durable-attempt"),
+		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+	}, fence)
+	if err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	r.DurableControlStore = controlStore
+	r.ControllerEpochManager = epochs
+	r.APIReader = r.Client
+
+	result, err := r.handlePending(ctx, task.DeepCopy())
+	if err != nil {
+		cancelEpoch()
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		cancelEpoch()
+		t.Fatalf("result = %#v, want terminal result", result)
+	}
+	settled, err := controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if settled.ExecutionState != store.PromptExecutionCancelled {
+		cancelEpoch()
+		t.Fatalf("attempt state = %s, want %s", settled.ExecutionState, store.PromptExecutionCancelled)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if updated.Status.Execution == nil || updated.Status.Execution.Attempt != 1 || updated.Status.Execution.PromptID != promptID ||
+		updated.Status.Execution.RequestDigest != attempt.RequestDigest || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled ||
+		!acpTaskRequiresAuthoritativeAttemptDiscovery(updated) {
+		cancelEpoch()
+		t.Fatalf("settled Task status = %#v", updated.Status)
+	}
+	cancelEpoch()
+	if err := <-epochDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCancelACPTaskBeforeDurableAttemptDoesNotOverwriteFreshExecutionStatus(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "fresh-status", Namespace: "default", UID: "12345678-abcd-efgh-ijkl-1234567890af"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, Execution: &corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateQueued, Attempt: 1, PromptID: "prompt-fresh-status-1",
+		}},
+	}
+	r := newUnitReconciler(scheme, task)
+	stale := task.DeepCopy()
+	stale.Status.Execution = nil
+	result, err := r.cancelACPTaskBeforeDurableAttempt(context.Background(), stale, "expired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("result = %#v, want one-second retry", result)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued || updated.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("fresh status was overwritten: %#v", updated.Status)
+	}
+}
+
 func TestHandlePending_WithMissingSessionCreateFalseFailsTask(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -7594,6 +7954,118 @@ func TestHandleCompletedCleansJobWhenTerminalEventAppendFails(t *testing.T) {
 	}
 }
 
+func TestCompleteExecutedTaskBeginsFinalizingUntilWorkspaceAuthorityIsRevoked(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "finalize-after-execution", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}}},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseRunning,
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				AttachedEpoch: 2,
+				Conditions:    []metav1.Condition{{Type: "Attached", Status: metav1.ConditionTrue}},
+			},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	result, err := reconciler.completeExecutedTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "execution complete")
+	if err != nil {
+		t.Fatalf("completeExecutedTask() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("completeExecutedTask() result = %#v, want finalization requeue", result)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFinalizing || updated.Status.CompletionTime != nil {
+		t.Fatalf("status = %#v, want Finalizing without completion time", updated.Status)
+	}
+	if updated.Status.ExecutionOutcome == nil || updated.Status.ExecutionOutcome.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("execution outcome = %#v, want immutable Succeeded outcome", updated.Status.ExecutionOutcome)
+	}
+	complete := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeComplete)
+	if complete == nil || complete.Status != metav1.ConditionFalse || complete.Reason != "TaskFinalizing" {
+		t.Fatalf("complete condition = %#v, want TaskFinalizing false", complete)
+	}
+}
+
+func TestHandleFinalizingBeginsWorkspaceAttachmentRevocation(t *testing.T) {
+	scheme := newTestScheme()
+	epoch := int64(2)
+	workspaceObject := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-finalize", Namespace: "default", UID: types.UID("workspace-uid")},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			AttachmentEpoch: epoch,
+			Attachment:      &workspacev1alpha1.ExecutionWorkspaceAttachment{Epoch: epoch},
+		},
+		Status: workspacev1alpha1.ExecutionWorkspaceStatus{AttachedEpoch: epoch},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "finalize-revoke", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}}},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseFinalizing,
+			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1},
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				WorkspaceRef:  &corev1alpha1.WorkspaceObjectReference{Name: workspaceObject.Name, UID: string(workspaceObject.UID)},
+				AttachedEpoch: epoch,
+				Conditions:    []metav1.Condition{{Type: "Attached", Status: metav1.ConditionTrue}},
+			},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task, workspaceObject)
+	result, err := reconciler.handleFinalizing(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleFinalizing() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("handleFinalizing() result = %#v, want requeue", result)
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(workspaceObject), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Spec.Attachment != nil || current.Spec.AttachmentEpoch != epoch {
+		t.Fatalf("workspace attachment intent = %#v epoch=%d, want revoked at epoch %d", current.Spec.Attachment, current.Spec.AttachmentEpoch, epoch)
+	}
+}
+
+func TestHandleFinalizingCompletesAfterProjectedRevocationUsingHighWaterEpoch(t *testing.T) {
+	scheme := newTestScheme()
+	epoch := int64(3)
+	workspaceObject := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-detached", Namespace: "default", UID: types.UID("workspace-detached-uid")},
+		Spec:       workspacev1alpha1.ExecutionWorkspaceSpec{AttachmentEpoch: epoch},
+		Status:     workspacev1alpha1.ExecutionWorkspaceStatus{AttachedEpoch: 0, Conditions: []metav1.Condition{{Type: "Attached", Status: metav1.ConditionFalse}}},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "finalize-detached", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}}},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseFinalizing,
+			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1, Message: "done"},
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				WorkspaceRef:  &corev1alpha1.WorkspaceObjectReference{Name: workspaceObject.Name, UID: string(workspaceObject.UID)},
+				AttachedEpoch: epoch,
+				Conditions:    []metav1.Condition{{Type: "Attached", Status: metav1.ConditionFalse}},
+			},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task, workspaceObject)
+	if _, err := reconciler.handleFinalizing(context.Background(), task); err != nil {
+		t.Fatalf("handleFinalizing() error = %v", err)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("phase = %s, want Succeeded", updated.Status.Phase)
+	}
+}
+
 func TestHandleFinalizingCompletesRecordedOutcome(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -7601,7 +8073,7 @@ func TestHandleFinalizingCompletesRecordedOutcome(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status: corev1alpha1.TaskStatus{
 			Phase: corev1alpha1.TaskPhaseFinalizing,
-			ExecutionOutcome: &corev1alpha1.TaskExecutionOutcome{
+			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{
 				Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1, RecordedAt: metav1.Now(), Message: "done",
 			},
 		},
@@ -7627,7 +8099,7 @@ func TestHandleFinalizingWaitsForAttachmentRevocation(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status: corev1alpha1.TaskStatus{
 			Phase: corev1alpha1.TaskPhaseFinalizing,
-			ExecutionOutcome: &corev1alpha1.TaskExecutionOutcome{
+			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{
 				Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1, RecordedAt: metav1.Now(), Message: "done",
 			},
 			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
@@ -8329,5 +8801,130 @@ func TestEnsureWorkerRBACPrunesRemovedTrustedServiceReadBindingAfterRestart(t *t
 	}
 	if err := restarted.Get(context.Background(), types.NamespacedName{Name: unrelatedName, Namespace: "infra"}, unrelatedBinding); err != nil {
 		t.Fatalf("unrelated prefixed RoleBinding was removed: %v", err)
+	}
+}
+
+func TestHandleFinalizingQuarantinesWorkspaceAfterTimeout(t *testing.T) {
+	scheme := newTestScheme()
+	epoch := int64(4)
+	workspaceObject := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-timeout", Namespace: "default", UID: types.UID("workspace-timeout-uid")},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			AttachmentEpoch: epoch,
+			Attachment:      &workspacev1alpha1.ExecutionWorkspaceAttachment{Epoch: epoch},
+		},
+		Status: workspacev1alpha1.ExecutionWorkspaceStatus{AttachedEpoch: epoch},
+	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: attachmentSecretName(workspaceObject.Name, epoch), Namespace: "default"}}
+	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: attachmentLeaseName(workspaceObject.Name), Namespace: "default"}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "finalize-timeout", Namespace: "default", UID: types.UID("task-timeout-uid")},
+		Spec:       corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}}},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseFinalizing,
+			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{
+				Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1,
+				RecordedAt: metav1.NewTime(time.Now().Add(-workspaceFinalizationTimeout - time.Minute)),
+			},
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				WorkspaceRef:  &corev1alpha1.WorkspaceObjectReference{Name: workspaceObject.Name, UID: string(workspaceObject.UID)},
+				AttachedEpoch: epoch,
+				Conditions:    []metav1.Condition{{Type: "Attached", Status: metav1.ConditionTrue}},
+			},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task, workspaceObject, secret, lease)
+	if _, err := reconciler.handleFinalizing(context.Background(), task); err != nil {
+		t.Fatalf("handleFinalizing() error = %v", err)
+	}
+	updatedTask := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), updatedTask); err != nil {
+		t.Fatal(err)
+	}
+	if updatedTask.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed quarantine settlement", updatedTask.Status.Phase)
+	}
+	updatedWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(workspaceObject), updatedWorkspace); err != nil {
+		t.Fatal(err)
+	}
+	if updatedWorkspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined || updatedWorkspace.Spec.Attachment != nil {
+		t.Fatalf("workspace quarantine = %#v", updatedWorkspace.Spec)
+	}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(secret), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("attachment secret still exists: %v", err)
+	}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(lease), &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("attachment lease still exists: %v", err)
+	}
+}
+
+func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "no-attempt-delete", Namespace: "default", UID: types.UID("12345678-abcd-efgh-ijkl-1234567890bb"),
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseFailed,
+			Message: "unsupported runtime",
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	persistDB, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer persistDB.Close() //nolint:errcheck
+	controlStore, err := storekube.NewComposite(r.Client, "default", sqlite.NewStore(persistDB, "reclaim-test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	epochs := NewControllerEpochManager(controlStore, "reclaim-controller")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := epochs.CurrentFence(ctx); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	r.DurableControlStore = controlStore
+	r.ControllerEpochManager = epochs
+	r.APIReader = r.Client
+
+	current := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, current); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if _, err := r.handleDeletion(ctx, current); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	got := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), got); err == nil {
+		if controllerutil.ContainsFinalizer(got, labels.TaskFinalizer) {
+			cancelEpoch()
+			t.Fatalf("Task finalizer remained after no-attempt reclamation: %#v", got.Finalizers)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	cancelEpoch()
+	if err := <-epochDone; err != nil {
+		t.Fatal(err)
 	}
 }

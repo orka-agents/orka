@@ -1,0 +1,51 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: fakepoolparameters.fake.workspace.orka.ai
+spec:
+  group: fake.workspace.orka.ai
+  names:
+    categories:
+    - orka
+    kind: FakePoolParameters
+    listKind: FakePoolParametersList
+    plural: fakepoolparameters
+    singular: fakepoolparameters
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FakePoolParameters is the namespaced parameters identity used by the
+          development-only fake workspace pool reconciler.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              FakePoolParametersSpec is intentionally empty. Pool capacity is expressed by
+              the generic ExecutionWorkspacePool resource; this object provides an
+              adapter-owned namespaced parameters identity for conformance.
+            type: object
+        type: object
+    served: true
+    storage: true

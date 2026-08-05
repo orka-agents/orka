@@ -10,7 +10,7 @@ This plan keeps Orka's existing architecture:
 - Scan, validation, and patch work continue to run as Kubernetes-backed `Task` resources.
 - Dynamic security data remains in SQLite.
 - Detailed outputs continue to flow through task artifacts.
-- Credentials, transaction metadata, and authorization remain governed by existing Orka worker, Secret, RBAC, OIDC, and context-token controls.
+- Credentials, transaction metadata, and authorization remain governed by Orka Secret roles, ACP operation fences, RBAC, OIDC, and context-token controls.
 
 ## Target Outcomes
 
@@ -39,7 +39,7 @@ Orka already has:
 - SQLite-backed scan runs, threat models, findings, and patch proposals.
 - Artifact contracts for threat models, findings, validation output, and patch diffs.
 - Human-in-the-loop patch generation and PR creation.
-- Worker isolation through non-root pods, read-only root filesystem, dropped capabilities, seccomp, optional runtime class, and writable `/tmp`, `/home/worker`, and `/workspace`.
+- Native mapper/container isolation plus ACP RuntimePools with private RuntimeSessions, digest-pinned profiles, no Git credentials, and separate clean-room publication.
 
 Key gaps to close:
 

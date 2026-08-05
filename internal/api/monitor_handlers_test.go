@@ -97,6 +97,22 @@ func repositoryMonitorHandlerTestReviewerSecret() *corev1.Secret {
 	}
 }
 
+func repositoryMonitorHandlerTestOpenCodeAgent(name string) *corev1alpha1.Agent {
+	contextWindow := int32(32768)
+	maxTokens := int32(4096)
+	return &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "demo"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Name:          "openai/gpt-test",
+				ContextWindow: &contextWindow,
+				MaxTokens:     &maxTokens,
+			},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+		},
+	}
+}
+
 func TestRepositoryMonitorHandlers_CRUDAndManualRun(t *testing.T) {
 	app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
 	body := fmt.Sprintf(`{
@@ -355,13 +371,7 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedReviewerAgent(t *testing.T) {
 			name:     "missing runtime",
 			agent:    &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "no-runtime", Namespace: "demo"}},
 			reviewer: "no-runtime",
-			want:     "must use the claude runtime",
-		},
-		{
-			name:     "codex runtime",
-			agent:    repositoryMonitorHandlerTestAgent("codex-reviewer", corev1alpha1.AgentRuntimeCodex),
-			reviewer: "codex-reviewer",
-			want:     "is not supported",
+			want:     "must use a built-in claude, codex, or opencode runtime",
 		},
 		{
 			name:     "copilot runtime",
@@ -395,6 +405,112 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedReviewerAgent(t *testing.T) {
 			require.Contains(t, readRespBody(t, resp), tt.want)
 		})
 	}
+}
+
+func TestCreateRepositoryMonitor_AllowsCodexReviewer(t *testing.T) {
+	reviewer := repositoryMonitorHandlerTestAgent("codex-reviewer", corev1alpha1.AgentRuntimeCodex)
+	reviewer.Spec.SecretRef.Name = "codex-reviewer-secret"
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "codex-reviewer-secret", Namespace: "demo"},
+		Data:       map[string][]byte{workerenv.OpenAIAPIKey: []byte("openai-key")},
+	}
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, reviewer, secret)
+	body := fmt.Sprintf(`{
+		"name":"repo-monitor",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"agents":{"reviewer":{"name":"codex-reviewer"}}
+		}
+	}`, monitorTestRepoURL)
+
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+func TestCreateRepositoryMonitor_AllowsOpenCodeReadOnlyAgents(t *testing.T) {
+	tests := []struct {
+		role                string
+		pullRequestsEnabled bool
+		issuesEnabled       bool
+	}{
+		{role: "reviewer", pullRequestsEnabled: true},
+		{role: "triager", issuesEnabled: true},
+		{role: "researcher", issuesEnabled: true},
+		{role: "planner", issuesEnabled: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.role, func(t *testing.T) {
+			agentName := "opencode-" + tt.role
+			app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, repositoryMonitorHandlerTestOpenCodeAgent(agentName))
+			body := fmt.Sprintf(`{
+				"name":"repo-monitor",
+				"namespace":"demo",
+				"spec":{
+					"repoURL":%q,
+					"targets":{"pullRequests":{"enabled":%t},"issues":{"enabled":%t}},
+					"agents":{%q:{"name":%q}}
+				}
+			}`, monitorTestRepoURL, tt.pullRequestsEnabled, tt.issuesEnabled, tt.role, agentName)
+
+			req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusCreated, resp.StatusCode, readRespBody(t, resp))
+		})
+	}
+}
+
+func TestCreateRepositoryMonitor_RejectsInvalidOpenCodeReadOnlyAgent(t *testing.T) {
+	reviewer := repositoryMonitorHandlerTestOpenCodeAgent("invalid-opencode-reviewer")
+	reviewer.Spec.Model.Name = "openai/"
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, reviewer)
+	body := fmt.Sprintf(`{
+		"name":"repo-monitor",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"agents":{"reviewer":{"name":"invalid-opencode-reviewer"}}
+		}
+	}`, monitorTestRepoURL)
+
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Contains(t, readRespBody(t, resp), "invalid OpenCode configuration")
+}
+
+func TestCreateRepositoryMonitor_RejectsCodexIssueReadOnlyAgent(t *testing.T) {
+	triager := repositoryMonitorHandlerTestAgent("codex-triager", corev1alpha1.AgentRuntimeCodex)
+	triager.Spec.SecretRef.Name = "codex-triager-secret"
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "codex-triager-secret", Namespace: "demo"},
+		Data:       map[string][]byte{workerenv.OpenAIAPIKey: []byte("openai-key")},
+	}
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, triager, secret)
+	body := fmt.Sprintf(`{
+		"name":"repo-monitor",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"targets":{"pullRequests":{"enabled":false},"issues":{"enabled":true}},
+			"agents":{"triager":{"name":"codex-triager"}}
+		}
+	}`, monitorTestRepoURL)
+
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Contains(t, readRespBody(t, resp), "is not supported")
 }
 
 func TestCreateRepositoryMonitor_RejectsReviewerWithoutClaudeCredentials(t *testing.T) {

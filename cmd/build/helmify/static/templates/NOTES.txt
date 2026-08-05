@@ -1,10 +1,10 @@
 Orka has been installed.
 
-Controller: {{ include "orka.fullname" . }}-controller
+Controller: {{ include "orka.controllerName" . }}
 Namespace:  {{ .Release.Namespace }}
 
 CRD lifecycle:
-  - A fresh install creates Orka's thirteen cluster-scoped CRDs unless --skip-crds is used.
+  - A fresh install creates Orka's 26 cluster-scoped CRDs unless --skip-crds is used.
   - Helm does not update CRDs during helm upgrade. Apply the CRDs from the exact
     target chart before upgrading the release.
   - helm uninstall retains the CRDs and all Orka custom resources.
@@ -25,7 +25,7 @@ Upgrade guidance: helm show readme <the same chart reference or archive>
 
 {{- else }}
 
-✅ SQLite store is using persistent storage (PVC: {{ include "orka.fullname" . }}-store).
+✅ SQLite store is using persistent storage (PVC: {{ include "orka.storeName" . }}).
    Data will survive pod restarts.
 
 {{- end }}

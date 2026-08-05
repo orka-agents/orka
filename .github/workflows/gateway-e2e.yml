@@ -50,7 +50,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      E2E_AGENTRUNTIME_EXTERNAL: "true"
       E2E_EPHEMERAL_CLUSTER: "true"
       E2E_GATEWAY: "true"
       E2E_GO_TEST_TIMEOUT: 30m

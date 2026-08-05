@@ -196,4 +196,67 @@ describe('TaskExecutionPanel', () => {
     expect(rollup).toHaveTextContent('gpt-4o')
     expect(rollup).toHaveTextContent('openai')
   })
+
+  it('renders exact runtime pool identity and never-replay unknown outcome guidance', () => {
+    render(
+      <TaskExecutionPanel
+        task={makeTask({
+          spec: { type: 'agent', workspace: { intent: 'read' } },
+          status: {
+            phase: 'Failed',
+            attempts: 1,
+            execution: {
+              state: 'OutcomeUnknown',
+              outcome: 'OutcomeUnknown',
+              runtimePoolName: 'codex-read',
+              runtimeInstanceID: 'pod-uid:boot-id',
+              runtimeSessionGeneration: 2,
+              controllerEpoch: 7,
+            },
+          },
+        })}
+      />,
+    )
+    const execution = screen.getByLabelText('Durable execution status')
+    expect(execution).toHaveTextContent('codex-read')
+    expect(execution).toHaveTextContent('OutcomeUnknown')
+    expect(execution).toHaveTextContent('will not replay the prompt automatically')
+  })
+
+  it('renders clean-room delivery and verified publication receipt', () => {
+    render(
+      <TaskExecutionPanel
+        task={makeTask({
+          spec: {
+            type: 'agent',
+            workspace: {
+              intent: 'write',
+              gitRepo: 'https://github.com/source/repo',
+              pushBranch: 'orka/change',
+              createPR: true,
+            },
+          },
+          status: {
+            phase: 'Succeeded',
+            attempts: 1,
+            delivery: {
+              state: 'VerifiedExact',
+              outcome: 'VerifiedExact',
+              branch: 'orka/change',
+              publicationID: 'pub-1',
+              expectedCommitSHA: 'abc123',
+              verifiedRemoteSHA: 'abc123',
+              prReceipt: { id: 'pr-1', number: 42, state: 'open', baseBranch: 'main', headBranch: 'orka/change' },
+            },
+          },
+        })}
+      />,
+    )
+    const delivery = screen.getByLabelText('Workspace delivery status')
+    expect(delivery).toHaveTextContent('write')
+    expect(delivery).toHaveTextContent('VerifiedExact')
+    expect(delivery).toHaveTextContent('Pull request #42')
+    expect(delivery).toHaveTextContent('orka/change → main')
+  })
+
 })

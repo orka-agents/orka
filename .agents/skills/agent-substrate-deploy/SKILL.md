@@ -26,8 +26,7 @@ the CI-proven `scripts/agent-substrate-e2e.sh`. **Drive the installer in place;
 do not copy either script into the skill.** They pin the Substrate revision
 (`SUBSTRATE_REF`, default `b80031d260959b1fc5c6f61e3099fe2a6d368af1`) and own the
 heavy lifting: clone Substrate at the pinned ref, create the kind cluster + local
-registry, deploy the `ate-system` control plane, build/push the controller,
-agent-harness-wrapper, workspace-agent, MCP server, and tool-client images;
+registry, deploy the `ate-system` control plane, build/push the controller, workspace-agent, MCP server, and tool-client images;
 publish the Substrate `ateom-gvisor` image; create a `WorkerPool` + gVisor
 `ActorTemplate`, initialize the RustFS snapshot bucket, and deploy Orka
 wired with `--substrate-*`. Re-pin by overriding `SUBSTRATE_REF`, not by editing
@@ -120,17 +119,9 @@ is a larger task; confirm scope before attempting it.
    kind export kubeconfig --name "${cluster}" --kubeconfig "${KUBECONFIG}"
    DEMO_CLUSTER_REUSE=reuse bash hack/demos/cluster/install-substrate.sh
 
-   # The base e2e creates codex-substrate-ci without model env and patches the
-   # service-backed harness wrapper to use a fake Codex CLI. Patch the Agent with
-   # the model Secret from the agentic layer and remove the fake CLI override
-   # before using a plain agent Task as model-validation evidence.
-   kubectl --context "$ctx" -n default patch agent codex-substrate-ci --type=merge \
-     -p "$(jq -cn \
-       --arg ref substrate-model-key \
-       --arg model gpt-5.5 \
-       '{spec:{model:{name:$model},secretRef:{name:$ref}}}')"
-   kubectl --context "$ctx" -n orka-system set env deployment/orka-agent-harness-wrapper CODEX_CLI_PATH-
-   kubectl --context "$ctx" -n orka-system rollout status deployment/orka-agent-harness-wrapper --timeout=5m
+   # This installer validates only the direct Substrate and MCP paths. The
+   # pre-cutover AGENTIC/model layer is retired. Validate Codex or Claude ACP
+   # RuntimePools separately with scripts/live-acp-runtime-e2e.sh.
    ```
 
    > **Login race (verified live 2026-06): disarm vekil's liveness probe before
@@ -180,8 +171,85 @@ is a larger task; confirm scope before attempting it.
    ```
 
    For a model-free validation, stay on `AGENTIC=0` and rely on the built-in
-   smoke exercises documented in `references/validate.md` instead of standing
-   up vekil.
+   smoke exercises (next section) instead of standing up vekil.
+
+## Validate
+
+> **Current boundary:** this skill validates direct Substrate Actor and MCP
+> behavior only. Orka ACP RuntimeSessions do not yet map to Substrate Actors;
+> execution-workspace-backed agent Tasks remain future integration evidence,
+> not a success criterion. The removed v1 harness-wrapper path must not be
+> reintroduced. Validate plain Codex/Claude ACP Tasks with
+> `scripts/live-acp-runtime-e2e.sh` instead.
+
+The installer leaves a fully wired cluster. During standup it smoke-tests direct
+actor create/resume/exec/suspend/delete and Substrate-backed MCP tool lifecycle.
+It does **not** currently smoke-test retained workspace reuse for Orka agent
+Tasks because ACP RuntimeSession-to-Actor dispatch is not yet wired.
+
+If you skipped the kubeconfig export in the workflow above, do it before any
+manual `kubectl` commands — the e2e standup uses an isolated kubeconfig and does
+**not** leave `kind-<KIND_CLUSTER>` in your default one. Keep using the scoped
+`KUBECONFIG` in that shell:
+
+```bash
+cluster="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
+ctx="kind-${cluster}"
+export KUBECONFIG="$(mktemp -t orka-substrate-kubeconfig.XXXXXX)"
+kind export kubeconfig --name "${cluster}" --kubeconfig "${KUBECONFIG}"
+```
+
+To drive an Orka Task yourself (intended shape; currently gated as noted above):
+
+```bash
+cluster="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
+ctx="kind-${cluster}"
+export KUBECONFIG="$(mktemp -t orka-substrate-kubeconfig.XXXXXX)"
+kind export kubeconfig --name "${cluster}" --kubeconfig "${KUBECONFIG}"
+kubectl --context "$ctx" -n default apply -f - <<'YAML'
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: substrate-smoke
+  namespace: default
+spec:
+  type: agent
+  agentRef:
+    name: codex-substrate-ci
+  prompt: "Run make test and summarize the result."
+  sessionRef:
+    name: substrate-demo
+    create: true
+  execution:
+    workspace:
+      enabled: true
+      provider: substrate
+      templateRef:
+        name: orka-codex-ci
+        namespace: ate-demo
+      reusePolicy: session
+      cleanupPolicy: retain
+YAML
+
+kubectl --context "$ctx" -n default get task substrate-smoke -o yaml
+```
+
+Check the provider-neutral workspace lifecycle in
+`status.executionWorkspace` (`phase`, `placement`, `density`, `resumeLatency`).
+Status is intentionally sanitized — it must not expose actor IDs, snapshot URIs,
+worker pod IPs, daemon URLs, or tokens.
+
+### CI parity
+
+`scripts/agent-substrate-e2e.sh` (the `Agent Substrate E2E` workflow) runs the
+same path end-to-end and is secret-free. Run it directly when you want a clean,
+self-contained validation with its own cluster lifecycle:
+
+```bash
+PATH="$(go env GOPATH)/bin:$PATH" SUBSTRATE_E2E_EXTENDED=1 bash scripts/agent-substrate-e2e.sh
+```
+
+Set `KEEP_CLUSTER=1` to inspect the cluster after a failure.
 
 ## Guardrails
 

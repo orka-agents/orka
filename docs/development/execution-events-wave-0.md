@@ -1,6 +1,6 @@
 # Execution Event Contract Dependency Notes
 
-Wave 0 defines the required P0 execution event contract for later implementation lanes. It does not require Agent Substrate, resident actors, fork/checkpoint support, full trace graphs, approvals workflows, harness protocol work, remote harnesses, or session stream endpoints.
+Wave 0 defines the required P0 execution event contract for later implementation lanes. It does not require Agent Substrate, resident actors, fork/checkpoint support, full trace graphs, approvals workflows, ACP v2 runtime work, external runtime adapters, or session stream endpoints.
 
 ## Stable contracts from Wave 0
 

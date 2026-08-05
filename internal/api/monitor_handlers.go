@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
@@ -214,7 +215,7 @@ func (h *Handlers) validateRepositoryMonitorImplementerAgent(c fiber.Ctx, namesp
 			}
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get implementer credential Secret %q: %v", secretName, err))
 		}
-		if !repositoryMonitorImplementerSecretHasCredential(&secret, agent.Spec.Runtime.Type) {
+		if !repositoryMonitorRuntimeSecretHasCredential(&secret, agent.Spec.Runtime.Type) {
 			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q credential Secret %q has no supported key for runtime %q", ref.Name, secretName, agent.Spec.Runtime.Type))
 		}
 		return nil
@@ -279,17 +280,35 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get %s agent %q: %v", role, ref.Name, err))
 	}
+	allowedRuntimes := "claude or opencode"
+	if role == "reviewer" {
+		allowedRuntimes = "claude, codex, or opencode"
+	}
 	if agent.Spec.Runtime == nil {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must use the claude runtime for read-only repository monitor tasks", field, ref.Name))
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must use a built-in %s runtime for read-only repository monitor tasks", field, ref.Name, allowedRuntimes))
 	}
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude", field, ref.Name))
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in %s", field, ref.Name, allowedRuntimes))
 	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeClaude {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude", field, ref.Name, agent.Spec.Runtime.Type))
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeOpencode:
+		if err := controller.ValidateOpenCodeAgentSpec(&agent); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q has an invalid OpenCode configuration: %v", field, ref.Name, err))
+		}
+		return nil
+	case corev1alpha1.AgentRuntimeClaude:
+	case corev1alpha1.AgentRuntimeCodex:
+		if role != "reviewer" {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use %s", field, ref.Name, agent.Spec.Runtime.Type, allowedRuntimes))
+		}
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use %s", field, ref.Name, agent.Spec.Runtime.Type, allowedRuntimes))
 	}
 	if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must reference a Secret with Claude credentials for read-only repository monitor tasks", field, ref.Name))
+		if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeClaude {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must reference a Secret with Claude credentials for read-only repository monitor tasks", field, ref.Name))
+		}
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must reference a Secret with credentials for runtime %q", field, ref.Name, agent.Spec.Runtime.Type))
 	}
 	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
 	var secret corev1.Secret
@@ -299,13 +318,16 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get %s %q credential Secret %q: %v", field, ref.Name, secretName, err))
 	}
-	if !repositoryMonitorClaudeSecretHasCredential(&secret) {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q credential Secret %q must contain a supported Claude auth key", field, ref.Name, secretName))
+	if !repositoryMonitorRuntimeSecretHasCredential(&secret, agent.Spec.Runtime.Type) {
+		if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeClaude {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q credential Secret %q must contain a supported Claude auth key", field, ref.Name, secretName))
+		}
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q credential Secret %q must contain a supported auth key for runtime %q", field, ref.Name, secretName, agent.Spec.Runtime.Type))
 	}
 	return nil
 }
 
-func repositoryMonitorImplementerSecretHasCredential(secret *corev1.Secret, runtimeType corev1alpha1.AgentRuntimeType) bool {
+func repositoryMonitorRuntimeSecretHasCredential(secret *corev1.Secret, runtimeType corev1alpha1.AgentRuntimeType) bool {
 	if secret == nil {
 		return false
 	}
@@ -349,18 +371,6 @@ func repositoryMonitorGitSecretHasToken(secret *corev1.Secret) bool {
 		return false
 	}
 	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
-		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func repositoryMonitorClaudeSecretHasCredential(secret *corev1.Secret) bool {
-	if secret == nil {
-		return false
-	}
-	for _, key := range []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"} {
 		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
 			return true
 		}

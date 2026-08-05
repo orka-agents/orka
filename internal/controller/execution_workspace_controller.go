@@ -830,7 +830,7 @@ func (r *ExecutionWorkspaceReconciler) projectWorkspaceToOwnerWithTerminalDeleti
 			projection.ClassRef = &corev1alpha1.WorkspaceClassReference{Name: workspace.Spec.ClassBinding.Name}
 			projection.WorkspaceRef = &corev1alpha1.WorkspaceObjectReference{Name: workspace.Name, UID: string(workspace.UID)}
 			projection.State = string(state)
-			projection.AttachedEpoch = attachedEpoch
+			projection.AttachedEpoch = max(projection.AttachedEpoch, workspace.Spec.AttachmentEpoch, attachedEpoch)
 			projection.Conditions = append([]metav1.Condition(nil), conditions...)
 			task.Status.ExecutionWorkspace = projection
 			return r.Status().Patch(ctx, task, client.MergeFrom(before))

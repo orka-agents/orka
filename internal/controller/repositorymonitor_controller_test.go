@@ -2471,14 +2471,14 @@ func TestRepositoryMonitorReconcileForkPullRequestTaskUsesHeadRepoWithoutBaseSec
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastReviewID}, &task); err != nil {
 		t.Fatalf("Get review task %q error = %v", item.LastReviewID, err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatalf("task AgentRuntime.Workspace is nil")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitRepo != "https://github.com/forker/orka.git" || task.Spec.AgentRuntime.Workspace.Ref != "fork-sha" {
-		t.Fatalf("workspace = %#v, want fork repo at exact fork head", task.Spec.AgentRuntime.Workspace)
+	if task.Spec.Workspace.GitRepo != "https://github.com/forker/orka.git" || task.Spec.Workspace.Ref != "fork-sha" {
+		t.Fatalf("workspace = %#v, want fork repo at exact fork head", task.Spec.Workspace)
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef != nil {
-		t.Fatalf("workspace GitSecretRef = %#v, want nil for fork PR review", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	if task.Spec.Workspace.ReadCredentialRef != nil {
+		t.Fatalf("workspace ReadCredentialRef = %#v, want nil for fork PR review", task.Spec.Workspace.ReadCredentialRef)
 	}
 	if !strings.Contains(task.Spec.Prompt, `"headRepo": "forker/orka"`) {
 		t.Fatalf("prompt does not include fork head repo:\n%s", task.Spec.Prompt)
@@ -2540,14 +2540,14 @@ func TestRepositoryMonitorReconcileSameRepoSSHMonitorUsesHTTPSCloneURL(t *testin
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastReviewID}, &task); err != nil {
 		t.Fatalf("Get review task %q error = %v", item.LastReviewID, err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatalf("task AgentRuntime.Workspace is nil")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.AgentRuntime.Workspace.Ref != "ssh-head-sha" {
-		t.Fatalf("workspace = %#v, want HTTPS monitored repo at exact head", task.Spec.AgentRuntime.Workspace)
+	if task.Spec.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.Workspace.Ref != "ssh-head-sha" {
+		t.Fatalf("workspace = %#v, want HTTPS monitored repo at exact head", task.Spec.Workspace)
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "github-token" {
-		t.Fatalf("workspace GitSecretRef = %#v, want github-token for same-repo review", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	if task.Spec.Workspace.ReadCredentialRef == nil || task.Spec.Workspace.ReadCredentialRef.Name != "github-token" {
+		t.Fatalf("workspace ReadCredentialRef = %#v, want github-token for same-repo review", task.Spec.Workspace.ReadCredentialRef)
 	}
 }
 
@@ -2605,14 +2605,14 @@ func TestRepositoryMonitorReconcileMissingHeadRepoDoesNotAttachBaseSecret(t *tes
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastReviewID}, &task); err != nil {
 		t.Fatalf("Get review task %q error = %v", item.LastReviewID, err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatalf("task AgentRuntime.Workspace is nil")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.AgentRuntime.Workspace.Ref != "unknown-head-sha" {
-		t.Fatalf("workspace = %#v, want monitored repo at exact head", task.Spec.AgentRuntime.Workspace)
+	if task.Spec.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.Workspace.Ref != "unknown-head-sha" {
+		t.Fatalf("workspace = %#v, want monitored repo at exact head", task.Spec.Workspace)
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef != nil {
-		t.Fatalf("workspace GitSecretRef = %#v, want nil when head repo is unverified", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	if task.Spec.Workspace.ReadCredentialRef != nil {
+		t.Fatalf("workspace ReadCredentialRef = %#v, want nil when head repo is unverified", task.Spec.Workspace.ReadCredentialRef)
 	}
 }
 
@@ -3890,23 +3890,18 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "reviewer" {
 		t.Fatalf("task AgentRef = %#v, want reviewer", task.Spec.AgentRef)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatalf("task AgentRuntime.Workspace is nil")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.AgentRuntime.Workspace.Ref != "sha1" || task.Spec.AgentRuntime.Workspace.PRBaseBranch != repositoryMonitorTestDefaultBranch {
-		t.Fatalf("workspace = %#v, want repo with exact PR head sha1", task.Spec.AgentRuntime.Workspace)
+	if task.Spec.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.Workspace.Ref != "sha1" || task.Spec.Workspace.PRBaseBranch != repositoryMonitorTestDefaultBranch {
+		t.Fatalf("workspace = %#v, want repo with exact PR head sha1", task.Spec.Workspace)
+
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "github-token" {
-		t.Fatalf("workspace GitSecretRef = %#v, want github-token", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	if task.Spec.Workspace.ReadCredentialRef == nil || task.Spec.Workspace.ReadCredentialRef.Name != "github-token" {
+		t.Fatalf("workspace ReadCredentialRef = %#v, want github-token", task.Spec.Workspace.ReadCredentialRef)
 	}
-	if got := repositoryMonitorTaskEnvValue(task.Spec.Env, workerenv.PRBaseRepo); got != repositoryMonitorTestRepoURL {
-		t.Fatalf("%s = %q, want %s", workerenv.PRBaseRepo, got, repositoryMonitorTestRepoURL)
-	}
-	if got := repositoryMonitorTaskEnvValue(task.Spec.Env, workerenv.PRBaseSHA); got != "base1" {
-		t.Fatalf("%s = %q, want base1", workerenv.PRBaseSHA, got)
-	}
-	if got := repositoryMonitorTaskEnvValue(task.Spec.Env, workerenv.ResultStdout); got != scheduledRunLabelValue {
-		t.Fatalf("%s = %q, want "+scheduledRunLabelValue+" so review JSON is preserved", workerenv.ResultStdout, got)
+	if len(task.Spec.Env) != 0 {
+		t.Fatalf("task env = %#v, want no arbitrary env for ACP runtime compatibility", task.Spec.Env)
 	}
 	if task.Labels[labels.LabelRepositoryMonitor] != labels.SelectorValue("inventory") || task.Labels[labels.LabelMonitorRun] != labels.SelectorValue("run-1") {
 		t.Fatalf("task labels = %#v, want monitor and run labels", task.Labels)
@@ -3920,15 +3915,6 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	if !strings.Contains(task.Spec.Prompt, "/workspace/.git/orka/pr-review.diff") {
 		t.Fatalf("task prompt does not include generated PR diff context path:\n%s", task.Spec.Prompt)
 	}
-}
-
-func repositoryMonitorTaskEnvValue(envVars []corev1.EnvVar, name string) string {
-	for _, envVar := range envVars {
-		if envVar.Name == name {
-			return envVar.Value
-		}
-	}
-	return ""
 }
 
 func TestRepositoryMonitorReconcileRejectsInvalidRepoURLWithoutPersistingMetadata(t *testing.T) {
@@ -4240,6 +4226,32 @@ func TestRepositoryMonitorValidationAllowsCodexReviewer(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorValidationAllowsOpenCodeReviewerWithoutSecret(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "opencode-review-monitor", Namespace: "default"},
+		Spec: corev1alpha1.RepositoryMonitorSpec{Agents: corev1alpha1.RepositoryMonitorAgents{
+			Reviewer: &corev1alpha1.AgentReference{Name: "opencode-reviewer"},
+		}},
+	}
+	reviewer := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "opencode-reviewer", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:   testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+		},
+	}
+	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).Build()}
+	reason, message, err := reconciler.validateRepositoryMonitorReviewerAgent(ctx, monitor)
+	if err != nil || reason != "" || message != "" {
+		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
+	}
+}
+
 func TestRepositoryMonitorReconcileRejectsInvalidGitSecretWithoutPersistingMetadata(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -4539,6 +4551,7 @@ func TestRepositoryMonitorDecomposeActionReusesCommandWorkAction(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // This test verifies the complete read/write task-policy matrix in one flow.
 func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -4570,8 +4583,11 @@ func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: planTaskName}, &planTask); err != nil {
 		t.Fatalf("Get plan task error = %v", err)
 	}
-	if !taskEnvHasValue(planTask.Spec.Env, workerenv.ResultStdout, scheduledRunLabelValue) {
-		t.Fatalf("plan task env = %#v, want %s=true", planTask.Spec.Env, workerenv.ResultStdout)
+	if len(planTask.Spec.Env) != 0 {
+		t.Fatalf("plan task env = %#v, want ACP-safe empty env", planTask.Spec.Env)
+	}
+	if planTask.Spec.Workspace == nil || planTask.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentRead {
+		t.Fatalf("plan task workspace = %#v, want governed read intent", planTask.Spec.Workspace)
 	}
 	if planTask.Annotations[labels.AnnotationAgentReadOnly] != scheduledRunLabelValue || planTask.Annotations[labels.AnnotationWorkspaceInitContainer] != scheduledRunLabelValue {
 		t.Fatalf("plan task annotations = %#v, want hardened read-only workspace", planTask.Annotations)
@@ -4587,6 +4603,9 @@ func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	}
 	if taskEnvHasValue(implementationTask.Spec.Env, workerenv.ResultStdout, scheduledRunLabelValue) {
 		t.Fatalf("implementation task env = %#v, did not want %s=true because workspace finalization must capture patch diffs", implementationTask.Spec.Env, workerenv.ResultStdout)
+	}
+	if implementationTask.Spec.Workspace == nil || implementationTask.Spec.Workspace.MaxChangedFiles == nil || *implementationTask.Spec.Workspace.MaxChangedFiles != 12 || !implementationTask.Spec.Workspace.DenyRepositoryControlPaths || !implementationTask.Spec.Workspace.RejectBinaryFiles || !implementationTask.Spec.Workspace.RejectSecretLikeContent {
+		t.Fatalf("implementation workspace policy = %#v, want signed monitor publication controls", implementationTask.Spec.Workspace)
 	}
 	if implementationTask.Annotations[labels.AnnotationAgentReadOnly] != "" || implementationTask.Annotations[labels.AnnotationWorkspaceInitContainer] != scheduledRunLabelValue || implementationTask.Annotations[labels.AnnotationAgentRuntimeAuthOnly] != scheduledRunLabelValue {
 		t.Fatalf("implementation task annotations = %#v, want workspace init and runtime-only credentials without read-only tools", implementationTask.Annotations)
@@ -5013,7 +5032,6 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 	}
 
 	implTaskName := item.LastActionTaskName
-	implementationDiff := "diff --git a/internal/health.go b/internal/health.go\n--- a/internal/health.go\n+++ b/internal/health.go\n@@ -1 +1 @@\n-old\n+new\n"
 	agentResult, _ := json.Marshal(map[string]any{
 		"schemaVersion":  "orka.issueImplementation.v1",
 		"repo":           "orka-agents/orka",
@@ -5022,68 +5040,34 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 		"status":         "patch_ready",
 		"summary":        "Implemented fake health endpoint.",
 	})
-	implBytes, _ := common.FormatStructuredResult(&common.StructuredResult{
-		Summary: string(agentResult),
-		BaseSHA: "base77",
-		HeadSHA: "base77",
-		Diff:    implementationDiff,
-		Files:   []string{"internal/health.go"},
-	})
+	implBytes, _ := common.FormatStructuredResult(&common.StructuredResult{Summary: string(agentResult)})
 	if err := monitorStore.SaveResult(ctx, "default", implTaskName, implBytes); err != nil {
 		t.Fatalf("SaveResult(implementation) error = %v", err)
 	}
-	markRepositoryMonitorTestTaskSucceeded(t, ctx, cl, implTaskName)
+	var implementationTask corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: implTaskName}, &implementationTask); err != nil {
+		t.Fatal(err)
+	}
+	branch := repositoryMonitorIssueTaskPushBranch(&implementationTask)
+	if implementationTask.Spec.SessionRef == nil || implementationTask.Spec.SessionRef.Name != repositoryMonitorPublicationSessionName(monitor, branch) || implementationTask.Spec.SessionRef.Append {
+		t.Fatalf("implementation task session = %#v, want stable branch owner", implementationTask.Spec.SessionRef)
+	}
+	markRepositoryMonitorTestTaskDelivered(t, ctx, cl, implTaskName, branch, "head77")
 
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
-		t.Fatalf("Reconcile(implementation ingest) error = %v", err)
-	}
-	item, err = monitorStore.GetMonitorItem(ctx, "default", monitor.Name, repositoryMonitorIssueKind, "77")
-	if err != nil {
-		t.Fatalf("GetMonitorItem(after implementation ingest) error = %v", err)
-	}
-	if item.WorkflowPhase != repositoryMonitorIssuePhaseMutationQueued || item.LastActionTaskName == "" || item.LastActionTaskName == implTaskName {
-		t.Fatalf("item after mutation queue = %#v, want mutation queued with new task", item)
-	}
-	mutationTaskName := item.LastActionTaskName
-	var mutationTask corev1alpha1.Task
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: mutationTaskName}, &mutationTask); err != nil {
-		t.Fatalf("Get mutation task() error = %v", err)
-	}
-	branch := repositoryMonitorIssueTaskPushBranch(&mutationTask)
-	if branch == "" {
-		t.Fatalf("mutation task workspace = %#v, want push branch", mutationTask.Spec.AgentRuntime)
-	}
-
-	if mutationTask.Spec.Type != corev1alpha1.TaskTypeContainer || mutationTask.Spec.AgentRef != nil || mutationTask.Spec.Image != "" || len(mutationTask.Spec.Command) != 1 || mutationTask.Spec.Command[0] != scheduledRunLabelValue {
-		t.Fatalf("mutation task spec = %#v, want deterministic trusted general-worker container", mutationTask.Spec)
-	}
-	if mutationTask.Spec.Workspace == nil || mutationTask.Spec.AgentRuntime != nil || mutationTask.Spec.PriorTaskRef == nil || mutationTask.Spec.PriorTaskRef.Name != implTaskName {
-		t.Fatalf("mutation task workspace/prior task = %#v, want validated implementation replay", mutationTask.Spec)
-	}
-	if !taskEnvHasValue(mutationTask.Spec.Env, workerenv.PriorTaskDiffSHA256, repositoryMonitorIssuePatchDigest(implementationDiff)) {
-		t.Fatalf("mutation task env = %#v, want validated diff digest", mutationTask.Spec.Env)
-	}
-	mutationBytes, _ := common.FormatStructuredResult(&common.StructuredResult{
-		Summary:    "Pushed validated implementation branch.",
-		BaseSHA:    "base77",
-		HeadSHA:    "head77",
-		Diff:       implementationDiff,
-		Files:      []string{"internal/health.go"},
-		PushBranch: branch,
-	})
-	if err := monitorStore.SaveResult(ctx, "default", mutationTaskName, mutationBytes); err != nil {
-		t.Fatalf("SaveResult(mutation) error = %v", err)
-	}
-	markRepositoryMonitorTestTaskSucceeded(t, ctx, cl, mutationTaskName)
-
-	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
-		t.Fatalf("Reconcile(mutation ingest) error = %v", err)
+		t.Fatalf("Reconcile(ACP implementation delivery ingest) error = %v", err)
 	}
 	if !createdPR {
 		t.Fatal("fake GitHub create PR endpoint was not called")
 	}
+	for attempt := 0; attempt < 3 && !createdStatusComment; attempt++ {
+		if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
+			t.Fatalf("Reconcile(status projection) error = %v", err)
+		}
+	}
 	if !createdStatusComment {
-		t.Fatal("fake GitHub issue status comment endpoint was not called")
+		current, _ := monitorStore.GetMonitorItem(ctx, "default", monitor.Name, repositoryMonitorIssueKind, "77")
+		t.Fatalf("fake GitHub issue status comment endpoint was not called; item=%#v", current)
 	}
 	item, err = monitorStore.GetMonitorItem(ctx, "default", monitor.Name, repositoryMonitorIssueKind, "77")
 	if err != nil {
@@ -5103,21 +5087,12 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListImplementationJobs(final) error = %v", err)
 	}
-	if len(jobs) != 1 || jobs[0].Phase != repositoryMonitorIssuePhasePROpened || jobs[0].PRNumber != 177 || jobs[0].PatchArtifactID == "" {
-		t.Fatalf("implementation job final = %#v, want pr_opened with PR and patch artifact", jobs)
+	if len(jobs) != 1 || jobs[0].Phase != repositoryMonitorIssuePhasePROpened || jobs[0].PRNumber != 177 || jobs[0].Branch != branch || jobs[0].PatchArtifactID == "" {
+		t.Fatalf("implementation job final = %#v, want direct ACP delivery on branch %q with summary artifact", jobs, branch)
 	}
-	artifacts, err := monitorStore.ListArtifacts(ctx, "default", implTaskName)
-	if err != nil {
-		t.Fatalf("ListArtifacts() error = %v", err)
-	}
-	foundPatchSummary := false
-	for _, artifact := range artifacts {
-		if strings.HasSuffix(artifact.Filename, ".json") {
-			foundPatchSummary = true
-		}
-	}
-	if !foundPatchSummary {
-		t.Fatalf("artifacts = %#v, want patch summary artifact", artifacts)
+	artifact, contentType, err := monitorStore.GetArtifact(ctx, "default", implTaskName, jobs[0].PatchArtifactID)
+	if err != nil || contentType != "application/json" || !strings.Contains(string(artifact), "orka.issueImplementation.delivery.v1") {
+		t.Fatalf("delivery summary artifact = %q, %q, %v", artifact, contentType, err)
 	}
 }
 
@@ -5449,6 +5424,23 @@ func markRepositoryMonitorTestTaskSucceeded(t *testing.T, ctx context.Context, c
 	}
 }
 
+func markRepositoryMonitorTestTaskDelivered(t *testing.T, ctx context.Context, cl crclient.Client, name, branch, headSHA string) {
+	t.Helper()
+	task := corev1alpha1.Task{}
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, &task); err != nil {
+		t.Fatalf("Get(%q) error = %v", name, err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+		State: corev1alpha1.TaskDeliveryStateVerifiedExact, Outcome: corev1alpha1.TaskDeliveryOutcomeVerifiedExact,
+		Branch: branch, VerifiedRemoteSHA: headSHA,
+	}
+	if err := cl.Status().Update(ctx, &task); err != nil {
+		t.Fatalf("Status().Update(%q) error = %v", name, err)
+	}
+}
+
 func repositoryMonitorTestHasMutation(records []store.GitHubMutationRecord, operation string) bool {
 	for _, record := range records {
 		if record.Operation == operation && record.Status == "succeeded" {
@@ -5508,8 +5500,11 @@ func TestRepositoryMonitorPullRequestFixCommandQueuesRepairTask(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: jobs[0].TaskName}, &task); err != nil {
 		t.Fatalf("Get repair task() error = %v", err)
 	}
-	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "repairer" || task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil || task.Spec.AgentRuntime.Workspace.PushBranch != "feature-fix" {
-		t.Fatalf("repair task spec = %#v, want repairer push to feature branch", task.Spec)
+	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "repairer" || task.Spec.Workspace == nil || task.Spec.Workspace.PushBranch != "feature-fix" || task.Spec.Workspace.ExpectedRemoteSHA != "head31" {
+		t.Fatalf("repair task spec = %#v, want exact-head repair publication", task.Spec)
+	}
+	if task.Spec.SessionRef == nil || !task.Spec.SessionRef.Create || task.Spec.SessionRef.Append || task.Spec.SessionRef.Name != repositoryMonitorPublicationSessionName(monitor, "feature-fix") {
+		t.Fatalf("repair task session = %#v, want stable non-appending branch owner", task.Spec.SessionRef)
 	}
 }
 
@@ -5836,11 +5831,11 @@ func TestRepositoryMonitorPRReviewRepairReadinessAutomergeFakeGitHubE2E(t *testi
 		t.Fatalf("repairs = %#v, want queued repair", repairs)
 	}
 	repairTaskName := repairs[0].TaskName
-	repairResult, _ := common.FormatStructuredResult(&common.StructuredResult{Summary: "fixed review finding", HeadSHA: "head88-fixed", PushBranch: "feature-repair", Files: []string{"internal/example.go"}})
+	repairResult, _ := common.FormatStructuredResult(&common.StructuredResult{Summary: "fixed review finding"})
 	if err := monitorStore.SaveResult(ctx, "default", repairTaskName, repairResult); err != nil {
 		t.Fatalf("SaveResult(repair) error = %v", err)
 	}
-	markRepositoryMonitorTestTaskSucceeded(t, ctx, cl, repairTaskName)
+	markRepositoryMonitorTestTaskDelivered(t, ctx, cl, repairTaskName, "feature-repair", "head88-repaired")
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
 		t.Fatalf("Reconcile(ingest repair) error = %v", err)
 	}
@@ -7188,6 +7183,33 @@ func TestRepositoryMonitorValidationRejectsCodexPlanner(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorValidationAllowsOpenCodeIssueReadOnlyRolesWithoutSecret(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	for _, role := range []string{"triager", "researcher", "planner"} {
+		t.Run(role, func(t *testing.T) {
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: role, Namespace: "default"},
+				Spec: corev1alpha1.AgentSpec{
+					Model:   testOpenCodeModelConfig(),
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+				},
+			}
+			monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: role + "-monitor", Namespace: "default"}}
+			reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()}
+			reason, message, err := reconciler.validateRepositoryMonitorIssueReadOnlyAgent(
+				ctx, monitor, role, &corev1alpha1.AgentReference{Name: role},
+			)
+			if err != nil || reason != "" || message != "" {
+				t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorPlanApprovalContinuesOriginalImplementCommand(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -7574,5 +7596,30 @@ func TestRepositoryMonitorIssueStatusCommentRecreatesDeletedComment(t *testing.T
 	}
 	if patchCalls != 1 || postCalls != 1 || item.StatusCommentID != "9001" {
 		t.Fatalf("patch=%d post=%d item=%#v, want one recovery create", patchCalls, postCalls, item)
+	}
+}
+
+func TestRepositoryMonitorUpdateBranchNoChangeVerifiesBaseAncestry(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/orka-agents/orka/compare/base-sha...head-sha" {
+			t.Fatalf("unexpected compare path %s", r.URL.Path)
+		}
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			t.Fatal("missing compare authorization")
+		}
+		_, _ = w.Write([]byte(`{"status":"ahead"}`))
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	monitor, secret := repositoryMonitorInventoryTestObjects("update-branch-no-change")
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: client, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
+	ok, err := reconciler.repositoryMonitorHeadContainsBase(ctx, monitor, &store.RepairJob{Repo: "orka-agents/orka", BaseSHA: "base-sha", HeadSHA: "head-sha"})
+	if err != nil || !ok {
+		t.Fatalf("repositoryMonitorHeadContainsBase() = %v, %v", ok, err)
 	}
 }

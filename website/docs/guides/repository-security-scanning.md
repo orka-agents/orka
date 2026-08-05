@@ -75,6 +75,8 @@ spec:
   maxFindingsPerRun: 25
 ```
 
+For patch Tasks, the Workspace/Publisher—not the ACP child—prepares and publishes the branch.
+
 See [Configuration → RepositoryScan](../concepts/configuration.md#repositoryscan) for every
 spec and status field, and [API Reference → Security](../reference/api-reference.md#security)
 for the endpoint and query-parameter reference, including the typical findings → validate →
@@ -175,12 +177,11 @@ old repository-wide findings by itself.
 
 ## Safety
 
-- Scan and patch tasks run in isolated worker pods with Orka's hardened defaults (non-root,
-  read-only rootfs, dropped capabilities).
-- Private repositories require an explicit `gitSecretRef` (or detected credentials).
+- Scan and patch agent Tasks use ACP RuntimePools with private RuntimeSessions; deterministic mapper/container work keeps the native hardened worker path.
+- `RepositoryScan.spec.gitSecretRef` remains the scan-level compatibility reference. Orka maps it to `workspace.readCredentialRef` for scans and to both Task read/publication roles for patch Tasks; the ACP child never receives the Secret.
 - Patches and PRs are never created automatically — both are explicit user actions.
-- Patch proposals cannot reach `patch_ready` without a pushed branch, patch summary, and
-  diff artifact that matches the worker's structured workspace diff.
+- Patch proposals cannot reach `patch_ready` without a verified publisher branch receipt, patch summary, and
+  diff artifact that matches the validated workspace delta.
 - Edited threat models are treated as ranking input, not executable instructions.
 - Finding evidence is structured as repo-relative file/line references or flat sanitized
   artifacts within the per-file (10 MB) and total (50 MB) artifact upload limits.

@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Canonical production ACP overlay. The nested ACP workload base applies the
+# orka-system namespace, while the Vekil ingress policy deliberately retains
+# its explicit vekil-system namespace.
+resources:
+  - ../acp-workload
+  - ../vekil-ingress
+configMapGenerator:
+  - name: acp-runtime-images
+    namespace: orka-system
+    envs:
+      - runtime-images.env
+generatorOptions:
+  labels:
+    orka.ai/acp-runtime-images: "true"
+# Fail-closed placeholders: direct rendering is immutable but not runnable
+# until an operator replaces all four runtime digests (make deploy does this atomically).
+images:
+  - name: ghcr.io/orka-agents/orka
+    newName: docker.io/sozercan/orka
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  - name: docker.io/sozercan/orka-workspace-publisher
+    newName: docker.io/sozercan/orka-workspace-publisher
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

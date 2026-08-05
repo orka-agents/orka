@@ -76,10 +76,10 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "codex-agent" {
 		t.Fatalf("agentRef = %#v, want codex-agent", task.Spec.AgentRef)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatal("agent runtime workspace missing")
 	}
-	ws := task.Spec.AgentRuntime.Workspace
+	ws := task.Spec.Workspace
 	if ws.GitRepo != githubWebhookTestVekilCloneURL {
 		t.Errorf("gitRepo = %q", ws.GitRepo)
 	}
@@ -90,8 +90,11 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	if ws.PushBranch != wantPushBranch {
 		t.Errorf("pushBranch = %q, want %q", ws.PushBranch, wantPushBranch)
 	}
-	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
-		t.Fatalf("gitSecretRef = %#v, want %s", ws.GitSecretRef, githubWebhookTestGitSecret)
+	if ws.ReadCredentialRef == nil || ws.ReadCredentialRef.Name != githubWebhookTestGitSecret {
+		t.Fatalf("readCredentialRef = %#v, want %s", ws.ReadCredentialRef, githubWebhookTestGitSecret)
+	}
+	if ws.PublicationReadCredentialRef == nil || ws.PublicationReadCredentialRef.Name != githubWebhookTestGitSecret {
+		t.Fatalf("publicationReadCredentialRef = %#v, want %s", ws.PublicationReadCredentialRef, githubWebhookTestGitSecret)
 	}
 	if task.Labels[labels.LabelCreatedBy] != githubWebhookCreatedBy {
 		t.Errorf("created-by label = %q", task.Labels[labels.LabelCreatedBy])
@@ -163,7 +166,7 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionUpdateBranch, 34, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
-	ws := task.Spec.AgentRuntime.Workspace
+	ws := task.Spec.Workspace
 	if ws.Branch != "feature/x" {
 		t.Errorf("branch = %q, want feature/x", ws.Branch)
 	}
@@ -173,8 +176,11 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	if ws.PushBranch != "feature/x" {
 		t.Errorf("pushBranch = %q, want feature/x", ws.PushBranch)
 	}
-	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
-		t.Fatalf("gitSecretRef = %#v, want %s for same-repo PR", ws.GitSecretRef, githubWebhookTestGitSecret)
+	if ws.ReadCredentialRef == nil || ws.ReadCredentialRef.Name != githubWebhookTestGitSecret {
+		t.Fatalf("readCredentialRef = %#v, want %s for same-repo PR", ws.ReadCredentialRef, githubWebhookTestGitSecret)
+	}
+	if ws.PublicationReadCredentialRef == nil || ws.PublicationReadCredentialRef.Name != githubWebhookTestGitSecret {
+		t.Fatalf("publicationReadCredentialRef = %#v, want %s for same-repo PR", ws.PublicationReadCredentialRef, githubWebhookTestGitSecret)
 	}
 	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
@@ -226,7 +232,7 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 35, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
-	ws := task.Spec.AgentRuntime.Workspace
+	ws := task.Spec.Workspace
 	if ws.GitRepo != "https://github.com/contributor/orka.git" {
 		t.Errorf("gitRepo = %q, want fork head repo", ws.GitRepo)
 	}
@@ -239,8 +245,8 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	if ws.PushBranch != "" {
 		t.Errorf("pushBranch = %q, want empty for fork PR without safe git credentials", ws.PushBranch)
 	}
-	if ws.GitSecretRef != nil {
-		t.Fatalf("gitSecretRef = %#v, want nil for fork PR", ws.GitSecretRef)
+	if ws.ReadCredentialRef != nil {
+		t.Fatalf("readCredentialRef = %#v, want nil for fork PR", ws.ReadCredentialRef)
 	}
 	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
@@ -283,7 +289,7 @@ func TestGitHubWebhook_PullRequestMissingHeadRepoFailsClosedForGitSecret(t *test
 	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 36, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
-	ws := task.Spec.AgentRuntime.Workspace
+	ws := task.Spec.Workspace
 	if ws.GitRepo != "https://github.com/orka-agents/orka.git" {
 		t.Errorf("gitRepo = %q, want base repository fallback", ws.GitRepo)
 	}
@@ -293,8 +299,8 @@ func TestGitHubWebhook_PullRequestMissingHeadRepoFailsClosedForGitSecret(t *test
 	if ws.PushBranch != "" {
 		t.Errorf("pushBranch = %q, want empty for PR without verified head repository", ws.PushBranch)
 	}
-	if ws.GitSecretRef != nil {
-		t.Fatalf("gitSecretRef = %#v, want nil for PR without verified head repository", ws.GitSecretRef)
+	if ws.ReadCredentialRef != nil {
+		t.Fatalf("readCredentialRef = %#v, want nil for PR without verified head repository", ws.ReadCredentialRef)
 	}
 	if !strings.Contains(task.Spec.Prompt, "Orka will not push them automatically") {
 		t.Errorf("prompt missing no-push guidance: %s", task.Spec.Prompt)
@@ -333,12 +339,12 @@ func TestGitHubWebhook_PullRequestReviewUsesInitOnlyGitSecret(t *testing.T) {
 	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionReview, 37, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
-	ws := task.Spec.AgentRuntime.Workspace
+	ws := task.Spec.Workspace
 	if ws.PushBranch != "" {
 		t.Errorf("pushBranch = %q, want empty for review action", ws.PushBranch)
 	}
-	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
-		t.Fatalf("gitSecretRef = %#v, want %s for init-only clone", ws.GitSecretRef, githubWebhookTestGitSecret)
+	if ws.ReadCredentialRef == nil || ws.ReadCredentialRef.Name != githubWebhookTestGitSecret {
+		t.Fatalf("readCredentialRef = %#v, want %s for init-only clone", ws.ReadCredentialRef, githubWebhookTestGitSecret)
 	}
 	if task.Annotations[labels.AnnotationWorkspaceInitContainer] != queryTrue {
 		t.Fatalf("workspace init annotation = %q, want true", task.Annotations[labels.AnnotationWorkspaceInitContainer])
@@ -376,12 +382,12 @@ func TestGitHubWebhook_ToIssuesMountsGitSecretWithoutPushBranch(t *testing.T) {
 	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionToIssues, 38, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
-	ws := task.Spec.AgentRuntime.Workspace
+	ws := task.Spec.Workspace
 	if ws.PushBranch != "" {
 		t.Errorf("pushBranch = %q, want empty for to-issues action", ws.PushBranch)
 	}
-	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
-		t.Fatalf("gitSecretRef = %#v, want %s", ws.GitSecretRef, githubWebhookTestGitSecret)
+	if ws.ReadCredentialRef == nil || ws.ReadCredentialRef.Name != githubWebhookTestGitSecret {
+		t.Fatalf("readCredentialRef = %#v, want %s", ws.ReadCredentialRef, githubWebhookTestGitSecret)
 	}
 }
 

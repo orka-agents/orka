@@ -510,16 +510,14 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken
 		},
 	})
 	body := CreateTaskRequest{
-		Name:      "authorized-context-token-task",
-		Namespace: "default",
-		Type:      corev1alpha1.TaskTypeAgent,
-		AgentRef:  &corev1alpha1.AgentReference{Name: "reviewer"},
-		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-			Workspace: &corev1alpha1.WorkspaceConfig{
-				GitRepo: "https://github.com/orka-agents/orka.git",
-				Branch:  "feature-branch",
-			},
-			AllowedTools: []string{"file_read"},
+		Name:         "authorized-context-token-task",
+		Namespace:    "default",
+		Type:         corev1alpha1.TaskTypeAgent,
+		AgentRef:     &corev1alpha1.AgentReference{Name: "reviewer"},
+		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"file_read"}},
+		Workspace: &corev1alpha1.WorkspaceConfig{
+			GitRepo: "https://github.com/orka-agents/orka.git",
+			Branch:  "feature-branch",
 		},
 	}
 	bodyBytes, _ := json.Marshal(body)
@@ -669,6 +667,41 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsProviderModelResolv
 		Type:      corev1alpha1.TaskTypeAgent,
 		AgentRef:  &corev1alpha1.AgentReference{Name: "reviewer"},
 		Prompt:    "review this change",
+	})
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationUsesOpenCodeAgentIdentityOverAIOverrides(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	agent := testAgentFromJSON(t, `{
+		"metadata": {"name": "opencode-agent", "namespace": "default"},
+		"spec": {
+			"model": {"name": "openai/gpt-5.4", "contextWindow": 32768, "maxTokens": 4096},
+			"runtime": {"type": "opencode"}
+		}
+	}`)
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":        "default",
+			"allowedProviders": []string{string(corev1alpha1.ProviderTypeAnthropic)},
+			"allowedModels":    []string{"claude-sonnet-4"},
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+		Name:      "opencode-ai-override-denied",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAgent,
+		AgentRef:  &corev1alpha1.AgentReference{Name: "opencode-agent"},
+		Prompt:    "review this change",
+		AI: &corev1alpha1.AISpec{
+			Provider: string(corev1alpha1.ProviderTypeAnthropic),
+			Model:    "claude-sonnet-4",
+		},
 	})
 
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -1085,10 +1118,8 @@ func TestHandlers_GetTask_ContextTokenAuthorizationEnforcesLoadedTaskRepoContext
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/allowed.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/allowed.git",
 			},
 		},
 	}
@@ -1116,10 +1147,8 @@ func TestHandlers_ListTasks_ContextTokenAuthorizationFiltersLoadedTaskContext(t 
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/allowed.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/allowed.git",
 			},
 		},
 	}
@@ -1128,10 +1157,8 @@ func TestHandlers_ListTasks_ContextTokenAuthorizationFiltersLoadedTaskContext(t 
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/other.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/other.git",
 			},
 		},
 	}
@@ -1168,10 +1195,8 @@ func TestHandlers_GetTaskChildren_ContextTokenAuthorizationFiltersLoadedTaskCont
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/allowed.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/allowed.git",
 			},
 		},
 	}
@@ -1186,10 +1211,8 @@ func TestHandlers_GetTaskChildren_ContextTokenAuthorizationFiltersLoadedTaskCont
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/allowed.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/allowed.git",
 			},
 		},
 	}
@@ -1204,10 +1227,8 @@ func TestHandlers_GetTaskChildren_ContextTokenAuthorizationFiltersLoadedTaskCont
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/other.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/other.git",
 			},
 		},
 	}
@@ -1246,10 +1267,8 @@ func TestHandlers_DeleteTask_ContextTokenAuthorizationEnforcesLoadedTaskRepoCont
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/allowed.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/allowed.git",
 			},
 		},
 	}
@@ -1731,6 +1750,35 @@ func TestHandlers_CreateTask_RejectsClientSuppliedTransaction(t *testing.T) {
 			app.Post("/tasks", handlers.CreateTask)
 
 			bodyBytes, _ := json.Marshal(tt.body)
+			req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestHandlers_CreateTask_RejectsReservedLabels(t *testing.T) {
+	for _, labelName := range []string{labels.LabelParentTask, labels.LabelCoordinator} {
+		t.Run(labelName, func(t *testing.T) {
+			handlers, app := setupTestHandlers()
+			app.Post("/tasks", handlers.CreateTask)
+
+			body := CreateTaskRequest{
+				Name:      "reserved-label-task",
+				Namespace: "default",
+				Metadata: MetadataRequest{Labels: map[string]string{
+					labelName: "reserved-value",
+				}},
+				Type:  corev1alpha1.TaskTypeContainer,
+				Image: "busybox",
+			}
+			bodyBytes, _ := json.Marshal(body)
 			req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)

@@ -1,0 +1,311 @@
+diff --git a/cmd/servers/atenet/app/router/envoyrunner.go b/cmd/servers/atenet/app/router/envoyrunner.go
+index 8d38be29..593f4a9e 100644
+--- a/cmd/servers/atenet/app/router/envoyrunner.go
++++ b/cmd/servers/atenet/app/router/envoyrunner.go
+@@ -170,7 +170,7 @@ func (r *envoyrunner) reconcileEnvoyDeployment(ctx context.Context) error {
+ 								"-c",
+ 								"/etc/envoy/envoy.yaml",
+ 								"--component-log-level",
+-								"upstream:debug,router:debug,ext_proc:debug",
++								"upstream:info,router:info,ext_proc:info",
+ 							},
+ 							Ports: []corev1.ContainerPort{
+ 								{
+diff --git a/cmd/servers/atenet/app/router/extproc_in.go b/cmd/servers/atenet/app/router/extproc_in.go
+index 31751184..7271d8cf 100644
+--- a/cmd/servers/atenet/app/router/extproc_in.go
++++ b/cmd/servers/atenet/app/router/extproc_in.go
+@@ -17,20 +17,77 @@ package router
+ import (
+ 	"fmt"
+ 	"net"
++	"net/url"
+ 	"strings"
+ 
+ 	"github.com/agent-substrate/substrate/internal/resources"
+ 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ )
+ 
++const (
++	invalidRequestPath      = "[invalid]"
++	invalidRequestAuthority = "[invalid]"
++)
++
+ type requestMetadata struct {
+ 	headers map[string]string
+ 	path    string
+ 	host    string
+ }
+ 
++func isSafeRequestMetadataHeader(key string) bool {
++	switch key {
++	case ":method", ":path", ":authority", "host", "x-request-id":
++		return true
++	default:
++		return false
++	}
++}
++
++func sanitizeRequestPath(value string) string {
++	if value == "*" {
++		return value
++	}
++	requestURI, err := url.ParseRequestURI(value)
++	if err != nil {
++		return invalidRequestPath
++	}
++	if requestURI.Opaque != "" {
++		// ParseRequestURI intentionally stores an absolute-form request target in
++		// Opaque. Parse it as a URL only to recover the escaped path; userinfo,
++		// authority, query, and fragment values remain excluded from metadata.
++		requestURI, err = url.Parse(value)
++		if err != nil || requestURI.Scheme == "" || requestURI.Host == "" {
++			return invalidRequestPath
++		}
++	}
++	path := requestURI.EscapedPath()
++	if path == "" {
++		return "/"
++	}
++	return path
++}
++
++func sanitizeRequestAuthority(value string) string {
++	if value == "" {
++		return ""
++	}
++	authority, err := url.Parse("//" + value)
++	if err != nil || authority.Host == "" || authority.User != nil || authority.Path != "" ||
++		authority.RawPath != "" || authority.RawQuery != "" || authority.Fragment != "" {
++		return invalidRequestAuthority
++	}
++	return authority.Host
++}
++
+ func (m *requestMetadata) String() string {
+-	return fmt.Sprintf("%+v", *m)
++	return fmt.Sprintf(
++		"method=%q path=%q host=%q request_id=%q",
++		m.headers[":method"],
++		m.path,
++		m.host,
++		m.headers["x-request-id"],
++	)
+ }
+ 
+ func newRequestMetadata(headers []*corev3.HeaderValue) *requestMetadata {
+@@ -40,18 +97,24 @@ func newRequestMetadata(headers []*corev3.HeaderValue) *requestMetadata {
+ 
+ 	for _, h := range headers {
+ 		k := strings.ToLower(h.Key)
++		if !isSafeRequestMetadataHeader(k) {
++			continue
++		}
++
+ 		val := h.Value
+ 		if val == "" && len(h.RawValue) > 0 {
+ 			val = string(h.RawValue)
+ 		}
+-
+-		headersMap[k] = val
+ 		if k == ":path" {
++			val = sanitizeRequestPath(val)
+ 			path = val
+ 		}
+ 		if k == ":authority" || k == "host" {
++			val = sanitizeRequestAuthority(val)
+ 			host = val
+ 		}
++
++		headersMap[k] = val
+ 	}
+ 
+ 	return &requestMetadata{
+diff --git a/cmd/servers/atenet/app/router/extproc_in_test.go b/cmd/servers/atenet/app/router/extproc_in_test.go
+index 09bb9a4c..e6d2e1e1 100644
+--- a/cmd/servers/atenet/app/router/extproc_in_test.go
++++ b/cmd/servers/atenet/app/router/extproc_in_test.go
+@@ -15,14 +15,15 @@
+ package router
+ 
+ import (
+-	"fmt"
+ 	"reflect"
++	"strings"
+ 	"testing"
+ 
+ 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ )
+ 
+ func TestExtractMetadata(t *testing.T) {
++	absoluteFormTarget := "https://example.com/api/v1/a%2Fb?sample=placeholder"
+ 	tests := []struct {
+ 		name        string
+ 		headers     []*corev3.HeaderValue
+@@ -31,13 +32,15 @@ func TestExtractMetadata(t *testing.T) {
+ 		wantHost    string
+ 	}{
+ 		{
+-			name: "basic path and authority",
++			name: "basic safe routing metadata",
+ 			headers: []*corev3.HeaderValue{
++				{Key: ":method", Value: "GET"},
+ 				{Key: ":path", Value: "/api/v1/test"},
+ 				{Key: ":authority", Value: "example.com"},
+ 				{Key: "X-Request-ID", Value: "req-123"},
+ 			},
+ 			wantHeaders: map[string]string{
++				":method":      "GET",
+ 				":path":        "/api/v1/test",
+ 				":authority":   "example.com",
+ 				"x-request-id": "req-123",
+@@ -76,29 +79,62 @@ func TestExtractMetadata(t *testing.T) {
+ 			wantHost: "authority.com",
+ 		},
+ 		{
+-			name: "no authority or host headers",
++			name: "arbitrary headers are omitted",
+ 			headers: []*corev3.HeaderValue{
+ 				{Key: ":path", Value: "/api/v1/test"},
+ 				{Key: "x-something-else", Value: "custom-value"},
++				{Key: "X-Request-ID", RawValue: []byte("req-from-raw-value")},
+ 			},
+ 			wantHeaders: map[string]string{
+-				":path":            "/api/v1/test",
+-				"x-something-else": "custom-value",
++				":path":        "/api/v1/test",
++				"x-request-id": "req-from-raw-value",
+ 			},
+ 			wantPath: "/api/v1/test",
+ 			wantHost: "",
+ 		},
+ 		{
+-			name: "headers are lowercased",
++			name: "credential headers and query values are omitted",
+ 			headers: []*corev3.HeaderValue{
+-				{Key: "UPPER-KEY", Value: "UPPER-VALUE"},
+-				{Key: "camelCaseKey", Value: "camelValue"},
++				{Key: ":method", Value: "POST"},
++				{Key: ":path", RawValue: []byte("/api/v1/test?token=test-token-placeholder")},
++				{Key: ":authority", Value: "example.com"},
++				{Key: "X-Request-ID", Value: "req-credential-test"},
++				{Key: "Authorization", Value: "Bearer test-auth-token"},
++				{Key: "Proxy-Authorization", RawValue: []byte("Basic dummy")},
++				{Key: "Txn-Token", Value: "gateway-token"},
++				{Key: "Cookie", RawValue: []byte("session=sample")},
++				{Key: "X-API-Key", Value: "fake"},
++				{Key: "X-Unrecognized-Raw", RawValue: []byte("not-a-real")},
+ 			},
+ 			wantHeaders: map[string]string{
+-				"upper-key":    "UPPER-VALUE",
+-				"camelcasekey": "camelValue",
++				":method":      "POST",
++				":path":        "/api/v1/test",
++				":authority":   "example.com",
++				"x-request-id": "req-credential-test",
+ 			},
+-			wantPath: "",
++			wantPath: "/api/v1/test",
++			wantHost: "example.com",
++		},
++		{
++			name: "absolute-form request target preserves only escaped path",
++			headers: []*corev3.HeaderValue{
++				{Key: ":path", Value: absoluteFormTarget},
++			},
++			wantHeaders: map[string]string{
++				":path": "/api/v1/a%2Fb",
++			},
++			wantPath: "/api/v1/a%2Fb",
++			wantHost: "",
++		},
++		{
++			name: "invalid request target fails closed",
++			headers: []*corev3.HeaderValue{
++				{Key: ":path", Value: "not a valid request URI"},
++			},
++			wantHeaders: map[string]string{
++				":path": invalidRequestPath,
++			},
++			wantPath: invalidRequestPath,
+ 			wantHost: "",
+ 		},
+ 	}
+@@ -120,18 +156,56 @@ func TestExtractMetadata(t *testing.T) {
+ 	}
+ }
+ 
+-func TestRequestMetadata_String(t *testing.T) {
++func TestSanitizeRequestAuthority(t *testing.T) {
++	userinfoFixture := string([]byte{0x73, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2d, 0x75, 0x73, 0x65, 0x72, 0x3a, 0x73, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2d, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x40, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d})
++	for _, test := range []struct {
++		name  string
++		value string
++		want  string
++	}{
++		{name: "host", value: "example.com", want: "example.com"},
++		{name: "host with port", value: "example.com:8443", want: "example.com:8443"},
++		{name: "userinfo", value: userinfoFixture, want: invalidRequestAuthority},
++		{name: "query", value: "example.com?sample=placeholder", want: invalidRequestAuthority},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			if got := sanitizeRequestAuthority(test.value); got != test.want {
++				t.Fatalf("sanitizeRequestAuthority() = %q, want %q", got, test.want)
++			}
++		})
++	}
++}
++
++func TestRequestMetadataStringOnlyIncludesSafeRoutingMetadata(t *testing.T) {
+ 	headers := []*corev3.HeaderValue{
+-		{Key: ":path", Value: "/api/v1/test"},
++		{Key: ":method", Value: "POST"},
++		{Key: ":path", RawValue: []byte("/api/v1/test")},
+ 		{Key: ":authority", Value: "example.com"},
++		{Key: "X-Request-ID", RawValue: []byte("req-123")},
++		{Key: "Authorization", Value: "Bearer secret-token"},
++		{Key: "Proxy-Authorization", RawValue: []byte("Basic decoy-token")},
++		{Key: "Txn-Token", Value: "matrix_qa_e2ee_cli_gateway"},
++		{Key: "Cookie", RawValue: []byte("session=changeme")},
++		{Key: "X-API-Key", Value: "redacted"},
++		{Key: "X-Unrecognized-Raw", RawValue: []byte("token-oversized")},
+ 	}
+-	m := newRequestMetadata(headers)
+-	str := m.String()
+-	if str == "" {
+-		t.Errorf("expected non-empty string from String()")
++	metadata := newRequestMetadata(headers)
++	got := metadata.String()
++	want := `method="POST" path="/api/v1/test" host="example.com" request_id="req-123"`
++	if got != want {
++		t.Fatalf("String() = %q, want %q", got, want)
+ 	}
+-	if !reflect.DeepEqual(str, fmt.Sprintf("%+v", *m)) {
+-		t.Errorf("String() = %q, want %q", str, fmt.Sprintf("%+v", *m))
++	for _, sensitive := range []string{
++		"secret-token",
++		"decoy-token",
++		"matrix_qa_e2ee_cli_gateway",
++		"changeme",
++		"redacted",
++		"token-oversized",
++	} {
++		if strings.Contains(got, sensitive) {
++			t.Fatalf("String() leaked sensitive value %q: %q", sensitive, got)
++		}
+ 	}
+ }
+ 
+diff --git a/manifests/ate-install/atenet-router.yaml b/manifests/ate-install/atenet-router.yaml
+index e309cad0..74486a9b 100644
+--- a/manifests/ate-install/atenet-router.yaml
++++ b/manifests/ate-install/atenet-router.yaml
+@@ -146,7 +146,7 @@ spec:
+         - "-c"
+         - "/etc/envoy/envoy.yaml"
+         - "--component-log-level"
+-        - "upstream:debug,router:debug,ext_proc:debug"
++        - "upstream:info,router:info,ext_proc:info"
+         ports:
+         - name: http
+           containerPort: 8080

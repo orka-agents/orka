@@ -76,17 +76,16 @@ jobs:
             exit 1
           fi
 
-          grep -Fq 'get secret harness-wrapper-auth' config/harness-wrapper/README.md
-          grep -Fq 'create secret generic harness-wrapper-auth' config/harness-wrapper/README.md
-          test "$(grep -c 'secretName: harness-wrapper-auth' manifest_staging/deploy/orka.yaml)" -eq 2
-          if awk '
-            /^---$/ { kind = ""; name = "" }
-            /^kind: / { kind = $2 }
-            /^  name: / { name = $2 }
-            kind == "Secret" && name == "harness-wrapper-auth" { found = 1 }
-            END { exit(found ? 0 : 1) }
-          ' manifest_staging/deploy/orka.yaml; then
-            echo "The raw installer must require a pre-created harness-wrapper-auth Secret, not embed one." >&2
+          for secret in acp-artifact-capability workspace-publisher-auth provider-auth-proxy scm-egress-proxy-auth; do
+            grep -Fq "${secret}" config/acp-workload/README.md
+            test "$(grep -c "secretName: ${secret}" manifest_staging/deploy/orka.yaml)" -ge 1
+          done
+          if grep -Fq 'harness-wrapper' manifest_staging/deploy/orka.yaml; then
+            echo "The staged installer reintroduced the removed v1 harness wrapper." >&2
+            exit 1
+          fi
+          if grep -q '^kind: Secret$' manifest_staging/deploy/orka.yaml; then
+            echo "The raw installer must require pre-created ACP Secrets, not embed credentials." >&2
             exit 1
           fi
 
@@ -100,52 +99,35 @@ jobs:
           secondary_serviceaccounts=$(mktemp)
           secondary_gateway_policy=$(mktemp)
           long_render=$(mktemp)
-          long_wrapper_service=$(mktemp)
-          long_wrapper_secret=$(mktemp)
-          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_wrapper_service}" "${long_wrapper_secret}"' EXIT
-          helm template orka manifest_staging/charts/orka \
-            --namespace "${NAMESPACE}" \
-            --set-string workers.harnessWrapper.auth.token=mock-token \
-            > "${default_render}"
-          helm template secondary manifest_staging/charts/orka \
-            --namespace "${NAMESPACE}" \
-            --set-string workers.harnessWrapper.auth.token=mock-token \
-            > "${secondary_render}"
-          helm template secondary manifest_staging/charts/orka \
-            --namespace "${NAMESPACE}" \
-            --set-string workers.harnessWrapper.auth.token=mock-token \
-            --show-only templates/rbac.yaml \
-            > "${secondary_rbac}"
-          helm template secondary manifest_staging/charts/orka \
-            --namespace "${NAMESPACE}" \
-            --set-string workers.harnessWrapper.auth.token=mock-token \
-            --show-only templates/serviceaccount.yaml \
-            > "${secondary_serviceaccounts}"
-          helm template secondary manifest_staging/charts/orka \
-            --namespace "${NAMESPACE}" \
-            --set-string workers.harnessWrapper.auth.token=mock-token \
-            --show-only templates/gateway-task-admission-policy.yaml \
-            > "${secondary_gateway_policy}"
+          long_publisher_service=$(mktemp)
+          long_publisher_secret=$(mktemp)
+          long_provider_service=$(mktemp)
+          long_provider_secret=$(mktemp)
+          long_scm_service=$(mktemp)
+          long_scm_secret=$(mktemp)
+          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}"' EXIT
+          helm template orka manifest_staging/charts/orka             --namespace "${NAMESPACE}"             > "${default_render}"
+          helm template secondary manifest_staging/charts/orka             --namespace "${NAMESPACE}"             > "${secondary_render}"
+          helm template secondary manifest_staging/charts/orka             --namespace "${NAMESPACE}"             --show-only templates/rbac.yaml             > "${secondary_rbac}"
+          helm template secondary manifest_staging/charts/orka             --namespace "${NAMESPACE}"             --show-only templates/serviceaccount.yaml             > "${secondary_serviceaccounts}"
+          helm template secondary manifest_staging/charts/orka             --namespace "${NAMESPACE}"             --show-only templates/gateway-task-admission-policy.yaml             > "${secondary_gateway_policy}"
 
           long_release=$(printf 'r%.0s' {1..53})
-          helm template "${long_release}" manifest_staging/charts/orka \
-            --namespace "${NAMESPACE}" \
-            --set-string workers.harnessWrapper.auth.token=mock-token \
-            > "${long_render}"
-          helm template "${long_release}" manifest_staging/charts/orka \
-            --namespace "${NAMESPACE}" \
-            --set-string workers.harnessWrapper.auth.token=mock-token \
-            --show-only templates/harness-wrapper-service.yaml \
-            > "${long_wrapper_service}"
-          helm template "${long_release}" manifest_staging/charts/orka \
-            --namespace "${NAMESPACE}" \
-            --set-string workers.harnessWrapper.auth.token=mock-token \
-            --show-only templates/harness-wrapper-secret.yaml \
-            > "${long_wrapper_secret}"
+          helm template "${long_release}" manifest_staging/charts/orka             --namespace "${NAMESPACE}"             > "${long_render}"
+          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --show-only templates/publisher-service.yaml > "${long_publisher_service}"
+          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --show-only templates/publisher-secret.yaml > "${long_publisher_secret}"
+          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --set providerProxy.enabled=true --show-only templates/provider-proxy-service.yaml > "${long_provider_service}"
+          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --set providerProxy.enabled=true --show-only templates/provider-proxy-secret.yaml > "${long_provider_secret}"
+          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --show-only templates/scm-egress-proxy-service.yaml > "${long_scm_service}"
+          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --show-only templates/scm-egress-proxy-secret.yaml > "${long_scm_secret}"
 
           grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
           grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc:8080" "${secondary_render}"
           grep -Fq -- "--ai-worker-service-account-name=orka-ai-worker" "${default_render}"
+          if grep -Fq -- "namespace: vekil-system" "${default_render}"; then
+            echo "Default chart values must not require an undeclared external Vekil namespace." >&2
+            exit 1
+          fi
           for tier in ai vendor container; do
             account="secondary-orka-${tier}-worker"
             grep -Fq -- "--${tier}-worker-service-account-name=${account}" "${secondary_render}"
@@ -153,24 +135,28 @@ jobs:
             grep -Fq -- "name: ${account}" "${secondary_rbac}"
             grep -Fq -- ":${account}'" "${secondary_gateway_policy}"
           done
-          wrapper_name=$(awk '$1 == "name:" { print $2; exit }' "${long_wrapper_service}")
-          wrapper_secret_name=$(awk '$1 == "name:" { print $2; exit }' "${long_wrapper_secret}")
-          [[ -n "${wrapper_name}" && ${#wrapper_name} -le 63 ]]
-          [[ -n "${wrapper_secret_name}" && ${#wrapper_secret_name} -le 63 ]]
-          grep -Fq -- "http://${wrapper_name}:8080" "${long_render}"
-          grep -Fq -- "serviceAccountName: ${wrapper_name}" "${long_render}"
-          grep -Fq -- "secretName: ${wrapper_secret_name}" "${long_render}"
+          for rendered in "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}"; do
+            resource_name=$(awk '$1 == "name:" { print $2; exit }' "${rendered}")
+            [[ -n "${resource_name}" && ${#resource_name} -le 63 ]]
+          done
+          publisher_name=$(awk '$1 == "name:" { print $2; exit }' "${long_publisher_service}")
+          scm_name=$(awk '$1 == "name:" { print $2; exit }' "${long_scm_service}")
+          grep -Fq -- "http://${publisher_name}:8080" "${long_render}"
+          grep -Fq -- "@${scm_name}.${NAMESPACE}.svc:8080" "${long_render}"
 
           chart_version=$(awk '$1 == "version:" { print $2; exit }' manifest_staging/charts/orka/Chart.yaml)
           grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker:${chart_version}" "${secondary_render}"
-          for resource in agentruntimes substrateactorpools; do
+          for resource in agentruntimes branchclaims controllerepochs externaleffects promptattempts publications runtimepools runtimesessioncontrols substrateactorpools; do
             grep -Eq "resources: \\[.*\"${resource}\"" "${secondary_rbac}"
             grep -Eq "resources: \\[.*\"${resource}/status\"" "${secondary_rbac}"
-            grep -Eq "resources: \\[.*\"${resource}/finalizers\"" "${secondary_rbac}"
           done
           test "$(grep -Fc 'resources: ["serviceaccounts/token"]' manifest_staging/charts/orka/templates/rbac.yaml)" -eq 1
           if grep -Fq 'ai-worker-tokenrequest' manifest_staging/charts/orka/templates/rbac.yaml; then
             echo "AI workers must not receive an unrestricted TokenRequest ClusterRole." >&2
+            exit 1
+          fi
+          if grep -Rq 'harness-wrapper' manifest_staging/charts/orka/templates; then
+            echo "The generated chart reintroduced removed v1 harness-wrapper templates." >&2
             exit 1
           fi
 
@@ -182,7 +168,7 @@ jobs:
             echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
             exit 1
           fi
-          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 19
+          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 26
 
       - name: Install kind
         run: |
@@ -216,19 +202,26 @@ jobs:
           expected_crds=$(cat <<'CRDS'
           agentruntimes.core.orka.ai
           agents.core.orka.ai
+          branchclaims.core.orka.ai
+          controllerepochs.core.orka.ai
           executionworkspaceclasses.workspace.orka.ai
           executionworkspacepools.workspace.orka.ai
           executionworkspaceproviders.workspace.orka.ai
           executionworkspaces.workspace.orka.ai
+          externaleffects.core.orka.ai
           fakepoolparameters.fake.workspace.orka.ai
           fakeproviderconfigs.fake.workspace.orka.ai
           gatewaybindings.gateway.orka.ai
           gatewayclasses.gateway.orka.ai
           gateways.gateway.orka.ai
           outboundaccesspolicies.core.orka.ai
+          promptattempts.core.orka.ai
           providers.core.orka.ai
+          publications.core.orka.ai
           repositorymonitors.core.orka.ai
           repositoryscans.core.orka.ai
+          runtimepools.core.orka.ai
+          runtimesessioncontrols.core.orka.ai
           skills.core.orka.ai
           substrateactorpools.core.orka.ai
           tasks.core.orka.ai
@@ -266,10 +259,9 @@ jobs:
             --set controller.image.pullPolicy=IfNotPresent \
             --set-string workers.ai.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
             --set-string workers.ai.image.tag="${PAUSE_IMAGE_TAG}" \
-            --set-string workers.harnessWrapper.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
-            --set-string workers.harnessWrapper.image.tag="${PAUSE_IMAGE_TAG}" \
-            --set workers.harnessWrapper.image.pullPolicy=IfNotPresent \
-            --set-string workers.harnessWrapper.auth.token=mock-token
+            --set publisher.enabled=false \
+            --set providerProxy.enabled=false \
+            --set scmEgressProxy.enabled=false
 
           assert_all_orka_crds "after helm install"
 

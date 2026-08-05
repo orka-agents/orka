@@ -10,8 +10,11 @@ spec:
     name: "gpt-5.4"
   systemPrompt:
     inline: "You are a helpful coding assistant."
-  secretRef:
-    name: codex-api-key
+  # Provider credentials are injected only by the central authenticated proxy;
+  # no provider Secret is referenced by an ACP Agent or delivered to its runtime.
+  # runtime.type selects the built-in Codex ACP profile backed exclusively by
+  # a controller-owned, digest-pinned orka.harness.v2 RuntimePool. There is no
+  # per-Task Job/image or legacy harness fallback.
   runtime:
     type: codex
     defaultMaxTurns: 50

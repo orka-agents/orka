@@ -1,0 +1,36 @@
+{{- if .Values.providerProxy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "orka.providerProxyName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "orka.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: provider-auth-proxy
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.controller.acpRuntime.namespace }}
+          podSelector:
+            matchLabels:
+              orka.ai/network-role: provider-client
+      ports: [{protocol: TCP, port: 8080}]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: vekil-system}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: vekil}
+      ports: [{protocol: TCP, port: 1337}]
+{{- end }}

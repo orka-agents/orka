@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -155,8 +154,8 @@ func expectContainerTaskWorkspace(t *testing.T, fc client.Client) {
 	if task.Spec.Workspace.Ref != "abc123" {
 		t.Errorf("ref = %q", task.Spec.Workspace.Ref)
 	}
-	if task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != testGitCredentialsSecret {
-		t.Fatalf("gitSecretRef = %#v", task.Spec.Workspace.GitSecretRef)
+	if task.Spec.Workspace.ReadCredentialRef == nil || task.Spec.Workspace.ReadCredentialRef.Name != testGitCredentialsSecret {
+		t.Fatalf("readCredentialRef = %#v", task.Spec.Workspace.ReadCredentialRef)
 	}
 	if task.Spec.PriorTaskRef == nil || task.Spec.PriorTaskRef.Name != testCoderTaskName {
 		t.Fatalf("priorTaskRef = %#v", task.Spec.PriorTaskRef)
@@ -186,8 +185,8 @@ func expectContainerTaskInheritedWorkspace(t *testing.T, fc client.Client) {
 	if task.Spec.Workspace.SubPath != "src" {
 		t.Errorf("subPath = %q", task.Spec.Workspace.SubPath)
 	}
-	if task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != testGitCredentialsSecret {
-		t.Fatalf("gitSecretRef = %#v", task.Spec.Workspace.GitSecretRef)
+	if task.Spec.Workspace.ReadCredentialRef == nil || task.Spec.Workspace.ReadCredentialRef.Name != testGitCredentialsSecret {
+		t.Fatalf("readCredentialRef = %#v", task.Spec.Workspace.ReadCredentialRef)
 	}
 	if task.Spec.PriorTaskRef == nil || task.Spec.PriorTaskRef.Name != testCoderTaskName {
 		t.Fatalf("priorTaskRef = %#v", task.Spec.PriorTaskRef)
@@ -227,7 +226,7 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 		},
 		{
 			name: "with workspace",
-			args: json.RawMessage(`{"name":"validation","image":"golang:1.26","command":["sh","-lc"],"args":["go test ./..."],"workspace":{"gitRepo":"https://github.com/example/repo.git","branch":"feature","ref":"abc123","gitSecretRef":"git-credentials","subPath":"src"},"prior_task":"coder-task"}`),
+			args: json.RawMessage(`{"name":"validation","image":"golang:1.26","command":["sh","-lc"],"args":["go test ./..."],"workspace":{"gitRepo":"https://github.com/example/repo.git","branch":"feature","ref":"abc123","readCredentialRef":"git-credentials","subPath":"src"},"prior_task":"coder-task"}`),
 			objects: []client.Object{
 				&corev1alpha1.Task{
 					ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
@@ -236,6 +235,31 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 			},
 			checkResult: expectContainerTaskSuccess,
 			checkClient: expectContainerTaskWorkspace,
+		},
+		{
+			name: "push branch requires explicit publication credential",
+			args: json.RawMessage(`{"name":"publish","command":["sh","-lc"],"args":["echo change >> file.txt"],"workspace":{"gitRepo":"https://github.com/example/source.git","publicationGitRepo":"https://github.com/example/target.git","pushBranch":"orka/publish"}}`),
+			checkResult: func(t *testing.T, result string) {
+				expectContainerTaskError(t, result, "missing_publication_credential")
+			},
+		},
+		{
+			name:        "push branch keeps explicit publication repository and credential",
+			args:        json.RawMessage(`{"name":"publish","command":["sh","-lc"],"args":["echo change >> file.txt"],"workspace":{"gitRepo":"https://github.com/example/source.git","readCredentialRef":"source-read","publicationGitRepo":"https://github.com/example/target.git","publicationCredentialRef":"target-write","pushBranch":"orka/publish"}}`),
+			checkResult: expectContainerTaskSuccess,
+			checkClient: func(t *testing.T, fc client.Client) {
+				task := &corev1alpha1.Task{}
+				key := client.ObjectKey{Name: testContainerTaskGeneratedName, Namespace: defaultNamespace}
+				if err := fc.Get(context.Background(), key, task); err != nil {
+					t.Fatalf("failed to get created task: %v", err)
+				}
+				workspace := task.Spec.Workspace
+				if workspace == nil || workspace.Intent != corev1alpha1.WorkspaceIntentWrite || workspace.PushBranch != "orka/publish" ||
+					workspace.PublicationGitRepo != "https://github.com/example/target.git" || workspace.PublicationCredentialRef == nil ||
+					workspace.PublicationCredentialRef.Name != "target-write" {
+					t.Fatalf("publication workspace = %#v", workspace)
+				}
+			},
 		},
 		{
 			name: "repo validation without workspace fails",
@@ -253,10 +277,10 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 					Spec: corev1alpha1.TaskSpec{
 						Type: corev1alpha1.TaskTypeAgent,
 						Workspace: &corev1alpha1.WorkspaceConfig{
-							GitRepo:      "https://github.com/example/prior.git",
-							Ref:          "prior-sha",
-							SubPath:      "src",
-							GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredentialsSecret},
+							GitRepo:           "https://github.com/example/prior.git",
+							Ref:               "prior-sha",
+							SubPath:           "src",
+							ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredentialsSecret},
 						},
 					},
 				},

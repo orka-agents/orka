@@ -59,10 +59,10 @@ export const providers = [
     description: 'Enterprise OpenAI deployments running on Azure.',
   },
   {
-    name: 'Agent Runtimes',
+    name: 'ACP RuntimePools',
     href: '/docs/agent-runtimes',
     description:
-      'Delegate to Codex CLI, Claude Code CLI, or GitHub Copilot CLI for autonomous coding.',
+      'Run Codex, OpenCode, Claude, and Copilot in digest-pinned, scale-to-zero RuntimePools with brokered tools and clean-room delivery.',
   },
 ];
 

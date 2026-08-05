@@ -409,10 +409,9 @@ func TestCreateManualSecurityScan_ContextTokenAllowsRefOnlyWorkspaceWithBranchAn
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&run))
 	task := &corev1alpha1.Task{}
 	require.NoError(t, handlers.client.Get(context.Background(), clientObjectKey(run.TaskName), task))
-	require.NotNil(t, task.Spec.AgentRuntime)
-	require.NotNil(t, task.Spec.AgentRuntime.Workspace)
-	require.Empty(t, task.Spec.AgentRuntime.Workspace.Branch)
-	require.Equal(t, "refs/tags/v1.0.0", task.Spec.AgentRuntime.Workspace.Ref)
+	require.NotNil(t, task.Spec.Workspace)
+	require.Empty(t, task.Spec.Workspace.Branch)
+	require.Equal(t, "refs/tags/v1.0.0", task.Spec.Workspace.Ref)
 }
 
 func TestRepositoryScanMutations_ContextTokenTransactionContextAuthorizationDenials(t *testing.T) {
@@ -1295,10 +1294,9 @@ func TestCreateManualSecurityScan_ContextTokenStampsTaskRequesterAndTransaction(
 	require.Equal(t, testContextTokenTransactionID, task.Annotations[labels.AnnotationTransactionID])
 	require.Equal(t, security.StageThreatModel, envValue(task.Spec.Env, security.EnvStage))
 	require.Equal(t, "scan-1", envValue(task.Spec.Env, security.EnvRepositoryScanName))
-	require.NotNil(t, task.Spec.AgentRuntime)
-	require.NotNil(t, task.Spec.AgentRuntime.Workspace)
-	require.Empty(t, task.Spec.AgentRuntime.Workspace.Branch)
-	require.Equal(t, "refs/tags/v1.0.0", task.Spec.AgentRuntime.Workspace.Ref)
+	require.NotNil(t, task.Spec.Workspace)
+	require.Empty(t, task.Spec.Workspace.Branch)
+	require.Equal(t, "refs/tags/v1.0.0", task.Spec.Workspace.Ref)
 }
 
 func TestCreateSecurityPullRequest_ExistingPR(t *testing.T) {
@@ -1466,15 +1464,14 @@ func TestCreateSecurityPatchTaskRequiresPushedBranch(t *testing.T) {
 	task := &corev1alpha1.Task{}
 	require.NoError(t, fakeClient.Get(context.Background(), clientObjectKey(proposal.TaskName), task))
 	require.Equal(t, "true", envValue(task.Spec.Env, "ORKA_REQUIRE_PUSH_BRANCH"))
-	require.NotNil(t, task.Spec.AgentRuntime)
-	require.NotNil(t, task.Spec.AgentRuntime.Workspace)
+	require.NotNil(t, task.Spec.Workspace)
 	require.Equal(t, security.StagePatch, envValue(task.Spec.Env, security.EnvStage))
 	require.Equal(t, "scan-1", envValue(task.Spec.Env, security.EnvRepositoryScanName))
 	require.Equal(t, "fnd_123", envValue(task.Spec.Env, security.EnvFindingID))
 	require.Equal(t, proposal.Branch, envValue(task.Spec.Env, security.EnvPatchBranch))
-	require.Empty(t, task.Spec.AgentRuntime.Workspace.Branch)
-	require.Equal(t, "f00dbabe", task.Spec.AgentRuntime.Workspace.Ref)
-	require.Equal(t, proposal.Branch, task.Spec.AgentRuntime.Workspace.PushBranch)
+	require.Empty(t, task.Spec.Workspace.Branch)
+	require.Equal(t, "f00dbabe", task.Spec.Workspace.Ref)
+	require.Equal(t, proposal.Branch, task.Spec.Workspace.PushBranch)
 }
 
 func clientObjectKey(name string) client.ObjectKey {

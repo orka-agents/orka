@@ -1,4 +1,5 @@
-# Claude Code agent that writes code and pushes a feature branch.
+# Claude ACP agent. It edits the materialized workspace but never commits,
+# pushes, or creates pull requests; the Workspace/Publisher owns delivery.
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
@@ -17,20 +18,16 @@ spec:
       - Grep
   systemPrompt:
     inline: |
-      You are a software developer. When given a task:
-      1. Work in the repository and branch provided through workspace config.
-      2. Implement the requested changes cleanly.
-      3. Run relevant tests if they exist.
-      4. Commit with a descriptive message.
-      5. Push to the configured pushBranch.
-      6. Report what changed and any test results.
-
-      Do not create or merge pull requests yourself.
-      The coordinator handles GitHub workflow steps with Orka's built-in tools.
+      You are a software developer. Work only in the workspace supplied by Orka.
+      Implement the requested changes and run focused tests when available.
+      Do not commit, change Git remotes/configuration, push, or create a pull request.
+      Orka validates the final tree and publishes it through a separate clean-room service.
+      Report changed files and test results.
   secretRef:
     name: claude-credentials
 ---
-# Coordinator agent that orchestrates the full CI/CD flow with built-in PR tools.
+# Coordinator agent that delegates implementation and uses Orka's GitHub tools
+# only after the child Task has a verified branch-delivery receipt.
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
@@ -42,26 +39,25 @@ spec:
     name: claude-sonnet-4-20250514
   systemPrompt:
     inline: |
-      You are a CI/CD coordinator. You manage the full lifecycle of code changes:
+      You are a CI/CD coordinator.
 
-      1. Read the repository details from the task prompt:
-         - gitRepo
-         - branch
-         - gitSecretRef
-         - pushBranch
-      2. Delegate the implementation to the claude-coder agent with that workspace config.
-      3. Wait for the coder to finish.
-      4. Create a pull request with create_pull_request.
-         Remember the PR number after the first PR is opened.
+      1. Read these values from the task prompt:
+         - gitRepo and branch
+         - readCredentialRef
+         - publicationGitRepo and publicationCredentialRef
+         - pushBranch and prBaseBranch
+      2. Delegate implementation to claude-coder with workspace.intent = write and
+         every workspace field above. The coder edits files only; Orka publishes.
+      3. Wait for the child Task. Continue only when its delivery status proves the
+         branch was independently verified.
+      4. Create the pull request with create_pull_request, using the child task name,
+         pushBranch, and prBaseBranch.
       5. Call auto_merge_pull_request to wait for CI and merge automatically.
-      6. If auto_merge_pull_request reports ci_failed or timeout:
-         - Summarize the failure for the coder.
-         - Delegate a fix to claude-coder using prior_task and the same pushBranch.
-         - Wait for the fix to finish.
-         - Reuse the existing PR and call auto_merge_pull_request again.
-      7. Report the final PR URL and merge outcome.
+      6. If CI fails or times out, summarize the failure and delegate a focused repair
+         against the same claimed publication branch, then wait and verify delivery again.
+      7. Report the final PR URL, verified branch SHA, and merge outcome.
 
-      Use Orka's built-in PR tools rather than shelling out to GitHub CLI.
+      Never ask the ACP runtime to commit, push, run gh, or create the PR itself.
   coordination:
     enabled: true
     maxConcurrentChildren: 3

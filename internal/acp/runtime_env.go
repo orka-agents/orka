@@ -1,0 +1,394 @@
+package acp
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+const (
+	DefaultChildPath = "/usr/local/bin:/usr/bin:/bin"
+
+	// Linux process credentials are uint32 values, with all-bits-one reserved
+	// as the no-change sentinel by ownership syscalls.
+	maxRuntimeCredentialID int64 = (1 << 32) - 2
+)
+
+var (
+	ErrUIDRangeExhausted = errors.New("runtime session UID range exhausted")
+	ErrUIDReserveReached = errors.New("runtime session UID reserve reached")
+)
+
+var (
+	sessionPathComponentRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	environmentNameRE      = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+)
+
+type SessionPaths struct {
+	Root      string
+	Home      string
+	Temp      string
+	Workspace string
+	Config    string
+	Cache     string
+	Data      string
+	State     string
+}
+
+func PrepareSessionPaths(baseDir, sessionID string) (SessionPaths, error) {
+	baseDir = filepath.Clean(strings.TrimSpace(baseDir))
+	if baseDir == "." || !filepath.IsAbs(baseDir) {
+		return SessionPaths{}, fmt.Errorf("session base directory must be absolute")
+	}
+	if !sessionPathComponentRE.MatchString(sessionID) {
+		return SessionPaths{}, fmt.Errorf("invalid session path component %q", sessionID)
+	}
+	if err := ensureRealDirectory(baseDir, 0o711); err != nil {
+		return SessionPaths{}, err
+	}
+	root, err := os.MkdirTemp(baseDir, sessionID+"-")
+	if err != nil {
+		return SessionPaths{}, fmt.Errorf("create session root: %w", err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.RemoveAll(root)
+		}
+	}()
+	paths := SessionPaths{
+		Root:      root,
+		Home:      filepath.Join(root, "home"),
+		Temp:      filepath.Join(root, "tmp"),
+		Workspace: filepath.Join(root, "workspace"),
+		Config:    filepath.Join(root, "xdg", "config"),
+		Cache:     filepath.Join(root, "xdg", "cache"),
+		Data:      filepath.Join(root, "xdg", "data"),
+		State:     filepath.Join(root, "xdg", "state"),
+	}
+	for _, path := range []string{paths.Root, paths.Home, paths.Temp, paths.Workspace, paths.Config, paths.Cache, paths.Data, paths.State} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return SessionPaths{}, fmt.Errorf("create private session directory: %w", err)
+		}
+		if err := os.Chmod(path, 0o700); err != nil {
+			return SessionPaths{}, fmt.Errorf("chmod private session directory: %w", err)
+		}
+	}
+	cleanup = false
+	return paths, nil
+}
+
+func ensureRealDirectory(path string, mode os.FileMode) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(path, mode); err != nil {
+			return fmt.Errorf("create session base directory: %w", err)
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect session base directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("session base directory must be a real directory")
+	}
+	return nil
+}
+
+type EnvironmentConfig struct {
+	PATH       string
+	Values     map[string]string
+	UnsetNames []string
+}
+
+func BuildChildEnvironment(paths SessionPaths, cfg EnvironmentConfig) ([]string, error) {
+	for name, value := range map[string]string{
+		"HOME":            paths.Home,
+		"TMPDIR":          paths.Temp,
+		"XDG_CONFIG_HOME": paths.Config,
+		"XDG_CACHE_HOME":  paths.Cache,
+		"XDG_DATA_HOME":   paths.Data,
+		"XDG_STATE_HOME":  paths.State,
+		"ORKA_WORKSPACE":  paths.Workspace,
+		"PWD":             paths.Workspace,
+	} {
+		if strings.TrimSpace(value) == "" || !filepath.IsAbs(value) {
+			return nil, fmt.Errorf("%s must be an absolute session path", name)
+		}
+	}
+	pathValue := strings.TrimSpace(cfg.PATH)
+	if pathValue == "" {
+		pathValue = DefaultChildPath
+	}
+	values := map[string]string{
+		"HOME":            paths.Home,
+		"TMPDIR":          paths.Temp,
+		"XDG_CONFIG_HOME": paths.Config,
+		"XDG_CACHE_HOME":  paths.Cache,
+		"XDG_DATA_HOME":   paths.Data,
+		"XDG_STATE_HOME":  paths.State,
+		"ORKA_WORKSPACE":  paths.Workspace,
+		"PWD":             paths.Workspace,
+		"PATH":            pathValue,
+	}
+	for name, value := range cfg.Values {
+		name = strings.TrimSpace(name)
+		if !environmentNameRE.MatchString(name) {
+			return nil, fmt.Errorf("invalid child environment name %q", name)
+		}
+		if strings.IndexByte(value, 0) >= 0 {
+			return nil, fmt.Errorf("child environment %s contains NUL", name)
+		}
+		values[name] = value
+	}
+	for _, name := range cfg.UnsetNames {
+		delete(values, strings.TrimSpace(name))
+	}
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	env := make([]string, 0, len(names))
+	for _, name := range names {
+		env = append(env, name+"="+values[name])
+	}
+	return env, nil
+}
+
+type UIDAllocator struct {
+	mu        sync.Mutex
+	firstUID  int
+	firstGID  int
+	allocated int
+	capacity  int
+	persist   func(int) error
+}
+
+// NewUIDAllocator creates a never-reusing paired UID/GID allocator. firstGID
+// is the first primary GID in a range with the same capacity as the UID range.
+func NewUIDAllocator(firstUID, lastUID, firstGID int) (*UIDAllocator, error) {
+	if firstUID <= 0 || lastUID < firstUID || firstGID <= 0 {
+		return nil, fmt.Errorf("invalid UID allocator range %d-%d gid %d", firstUID, lastUID, firstGID)
+	}
+	capacity := int64(lastUID) - int64(firstUID) + 1
+	maxAllocatorID := maxRuntimeCredentialID
+	if maxInt := int64(^uint(0) >> 1); maxInt < maxAllocatorID {
+		maxAllocatorID = maxInt
+	}
+	if int64(lastUID) > maxAllocatorID ||
+		int64(firstGID) > maxAllocatorID-(capacity-1) {
+		return nil, fmt.Errorf("invalid UID allocator range %d-%d gid %d", firstUID, lastUID, firstGID)
+	}
+	return &UIDAllocator{
+		firstUID: firstUID,
+		firstGID: firstGID,
+		capacity: int(capacity),
+	}, nil
+}
+
+func (a *UIDAllocator) Allocate() (uid, gid int, err error) {
+	return a.AllocateAboveReserve(0)
+}
+
+// AllocateAboveReserve returns the next never-reused UID/GID pair only when
+// doing so leaves at least reserve pairs unused. The check and allocation use a
+// single shared offset in one critical section, so UID and primary GID cannot be
+// reused or paired with different sessions under concurrent creation.
+func (a *UIDAllocator) AllocateAboveReserve(reserve int) (uid, gid int, err error) {
+	if a == nil {
+		return 0, 0, fmt.Errorf("UID allocator is required")
+	}
+	if reserve < 0 {
+		return 0, 0, fmt.Errorf("UID allocator reserve must be non-negative")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	remaining := a.capacity - a.allocated
+	if remaining == 0 {
+		return 0, 0, ErrUIDRangeExhausted
+	}
+	if remaining <= reserve {
+		return 0, 0, ErrUIDReserveReached
+	}
+	offset := a.allocated
+	nextAllocated := a.allocated + 1
+	if a.persist != nil {
+		if err := a.persist(nextAllocated); err != nil {
+			return 0, 0, fmt.Errorf("persist runtime session identity high-water mark: %w", err)
+		}
+	}
+	a.allocated = nextAllocated
+	return a.firstUID + offset, a.firstGID + offset, nil
+}
+
+// ConfigurePersistence restores a previously committed allocation count and
+// installs the fail-closed callback that must durably commit each future count
+// before an identity is returned to a session.
+func (a *UIDAllocator) ConfigurePersistence(allocated int, persist func(int) error) error {
+	if a == nil {
+		return fmt.Errorf("UID allocator is required")
+	}
+	if persist == nil {
+		return fmt.Errorf("UID allocator persistence callback is required")
+	}
+	if allocated < 0 || allocated > a.capacity {
+		return fmt.Errorf("invalid persisted UID allocation count %d", allocated)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.allocated != 0 || a.persist != nil {
+		return fmt.Errorf("UID allocator persistence can only be configured once on a fresh allocator")
+	}
+	a.allocated = allocated
+	a.persist = persist
+	return nil
+}
+
+func (a *UIDAllocator) Capacity() int {
+	if a == nil {
+		return 0
+	}
+	return a.capacity
+}
+
+// Range returns the immutable paired UID/GID range represented by the
+// allocator. Callers use it to bind durable high-water state to one exact
+// identity configuration.
+func (a *UIDAllocator) Range() (firstUID, lastUID, firstGID, lastGID int) {
+	if a == nil {
+		return 0, 0, 0, 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.firstUID, a.firstUID + a.capacity - 1, a.firstGID, a.firstGID + a.capacity - 1
+}
+
+func (a *UIDAllocator) Remaining() int {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.capacity - a.allocated
+}
+
+func EnvironmentMap(env []string) map[string]string {
+	result := make(map[string]string, len(env))
+	for _, entry := range env {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			result[name] = value
+		}
+	}
+	return result
+}
+
+func SessionIdentityLabel(uid, generation int64) string {
+	return "uid-" + strconv.FormatInt(uid, 10) + "-g" + strconv.FormatInt(generation, 10)
+}
+
+// FinalizeSessionOwnership assigns the prepared session tree to its unique child
+// identity without following symlinks. It must run before the provider process is
+// started and after the trusted workspace artifact has been materialized.
+func FinalizeSessionOwnership(root string, uid, gid int) error {
+	root = filepath.Clean(strings.TrimSpace(root))
+	if root == "." || !filepath.IsAbs(root) || uid <= 0 || gid <= 0 {
+		return fmt.Errorf("absolute session root and non-root UID/GID are required")
+	}
+	if os.Geteuid() != 0 {
+		if uid == os.Getuid() && gid == os.Getgid() {
+			return nil
+		}
+		return fmt.Errorf("non-root supervisor cannot assign session ownership")
+	}
+	entries, err := sessionOwnershipEntries(root)
+	if err != nil {
+		return err
+	}
+	return assignSessionOwnership(entries, uid, gid, os.Chmod, os.Lchown)
+}
+
+// ReclaimSessionOwnership returns a frozen session tree to the supervisor so it
+// can validate workspace state without requiring DAC_OVERRIDE. Parent
+// directories are reclaimed before WalkDir descends into their children.
+func ReclaimSessionOwnership(root string) error {
+	root = filepath.Clean(strings.TrimSpace(root))
+	if root == "." || !filepath.IsAbs(root) {
+		return fmt.Errorf("absolute session root is required")
+	}
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	return reclaimSessionOwnership(root, os.Geteuid(), os.Getegid(), os.Lchown, os.Chmod)
+}
+
+func reclaimSessionOwnership(
+	root string,
+	uid, gid int,
+	lchown func(string, int, int) error,
+	chmod func(string, os.FileMode) error,
+) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := lchown(path, uid, gid); err != nil {
+			return fmt.Errorf("reclaim session path: %w", err)
+		}
+		if entry.IsDir() {
+			if err := chmod(path, 0o700); err != nil {
+				return fmt.Errorf("chmod reclaimed session directory: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+type sessionOwnershipEntry struct {
+	path      string
+	directory bool
+}
+
+func sessionOwnershipEntries(root string) ([]sessionOwnershipEntry, error) {
+	entries := make([]sessionOwnershipEntry, 0, 16)
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		entries = append(entries, sessionOwnershipEntry{path: path, directory: entry.IsDir()})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("inspect session tree: %w", err)
+	}
+	for left, right := 0, len(entries)-1; left < right; left, right = left+1, right-1 {
+		entries[left], entries[right] = entries[right], entries[left]
+	}
+	return entries, nil
+}
+
+func assignSessionOwnership(
+	entries []sessionOwnershipEntry,
+	uid, gid int,
+	chmod func(string, os.FileMode) error,
+	lchown func(string, int, int) error,
+) error {
+	for _, entry := range entries {
+		if entry.directory {
+			if err := chmod(entry.path, 0o700); err != nil {
+				return fmt.Errorf("chmod session directory: %w", err)
+			}
+		}
+		if err := lchown(entry.path, uid, gid); err != nil {
+			return fmt.Errorf("chown session path: %w", err)
+		}
+	}
+	return nil
+}

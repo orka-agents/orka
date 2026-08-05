@@ -2,31 +2,12 @@
 
 Validation steps for `$agent-substrate-deploy`. Read after the standard workflow completes.
 
-> **Known gate (verified live 2026-06): valid enabled provider-based agent
-> workspace requests are rejected during execution planning by the current
-> service-backed harness runtime.** After workspace validation/resolution, a
-> `provider: substrate` (or `agent-sandbox`) request fails with
-> `status.executionWorkspace.reason=WorkspaceValidationFailed` and message
-> `execution workspace is not supported by harness runtime yet`. The gate is in
-> `internal/controller/agent_execution_plan.go` (`planAgentExecution`), not a
-> misconfiguration — the agent CLI runtimes now
-> run through the long-lived `agent-harness-wrapper` service, and the
-> Task→workspace path for agents is not wired through it yet. The bundled e2e
-> reflects this: it prints `Skipping agent Task execution-workspace checks:
-> harness-wrapper runtime is service-backed`. The bundled e2e validates the
-> **direct** Substrate path (actor create/resume/router/daemon exec/suspend/delete)
-> plus Substrate-backed MCP tool create/reconcile/cleanup. It does not run a plain
-> agent Task. After clearing the fake `CODEX_CLI_PATH` override in standard
-> workflow step 4 (`Add the model proxy (vekil) — pause for the human`) of
-> `../SKILL.md`, use a **plain** agent Task (no `execution.workspace`) to validate
-> the harness + model proxy separately. Treat the Task YAML below as the intended
-> workspace API once the harness wires workspaces; until then, validate the
-> workspace provider via the e2e's direct-actor exercises.
+> **Known gate:** Orka ACP RuntimeSessions do not yet map to Substrate Actors. The bundled E2E validates direct Actor create/resume/exec/suspend/delete plus Substrate-backed MCP lifecycle; a provider-backed agent Task remains expected-failure evidence. Validate plain Codex/Claude ACP Tasks separately with `scripts/live-acp-runtime-e2e.sh`.
 
 The installer leaves a fully wired cluster. During standup it smoke-tests direct
 actor create/resume/exec/suspend/delete and Substrate-backed MCP tool lifecycle.
 It does **not** currently smoke-test retained workspace reuse for Orka agent
-Tasks because those execution-workspace checks are skipped by the harness gate.
+Tasks because those execution-workspace checks are skipped by the ACP workspace-dispatch gate.
 
 If you skipped standard workflow step 3 (`Export kubeconfig for follow-up
 kubectl commands`) in `../SKILL.md`, do it before any

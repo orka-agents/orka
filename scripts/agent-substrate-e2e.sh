@@ -7,9 +7,18 @@ KIND_REGISTRY_NAME="${KIND_REGISTRY_NAME:-kind-registry}"
 KIND_REGISTRY_PORT="${KIND_REGISTRY_PORT:-5001}"
 SUBSTRATE_REPO="${SUBSTRATE_REPO:-https://github.com/agent-substrate/substrate.git}"
 SUBSTRATE_REF="${SUBSTRATE_REF:-b80031d260959b1fc5c6f61e3099fe2a6d368af1}"
-# Git blob ID for cmd/servers/atelet/oci.go at the reviewed default pin.
+# Git blob IDs for the reviewed source files at the default pin. Every local
+# evaluation patch verifies these immutable upstream objects before applying.
 SUBSTRATE_ATELET_OCI_BLOB="a2ae14c0a264d8ff2fdc9527f5894901d913c0a4"
+SUBSTRATE_ATENET_EXTPROC_IN_BLOB="317511845fef40b7602861383f7664e915215a69"
+SUBSTRATE_ATENET_EXTPROC_IN_TEST_BLOB="09bb9a4c4e7d4f5c8185c41535ebcc40fc8ff57b"
+SUBSTRATE_ATENET_ENVOY_RUNNER_BLOB="8d38be29f09a7ce23886b71a051586354c8413e5"
+SUBSTRATE_ATENET_MANIFEST_BLOB="e309cad0a2e8435d1ed8dfd51ce347ab4f5a7521"
+SUBSTRATE_ATEOM_GVISOR_BLOB="7d79dd0a26709599223ed848d1b8f1ea19641cf6"
+SUBSTRATE_ATEOM_RUNSC_BLOB="6db499a549f2b6987a867b144e8d6b3828cad9ff"
 SUBSTRATE_ATELET_CAPABILITY_PATCH="${ROOT_DIR}/hack/agent-substrate/atelet-root-supervisor-capabilities.patch"
+SUBSTRATE_ATENET_REDACTION_PATCH="${ROOT_DIR}/hack/agent-substrate/atenet-router-authorization-redaction.patch"
+SUBSTRATE_ATEOM_DELETE_RECOVERY_PATCH="${ROOT_DIR}/hack/agent-substrate/ateom-runsc-delete-recovery.patch"
 IMAGE_TAG="${IMAGE_TAG:-agent-substrate-ci}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 TASK_TIMEOUT_SECONDS="${TASK_TIMEOUT_SECONDS:-900}"
@@ -18,27 +27,39 @@ MCP_TOOL_EXEC_ATTEMPTS="${MCP_TOOL_EXEC_ATTEMPTS:-3}"
 MCP_TOOL_EXEC_RETRY_DELAY_SECONDS="${MCP_TOOL_EXEC_RETRY_DELAY_SECONDS:-15}"
 SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME="${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME:-orka-substrate-bootstrap}"
 SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY="${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY:-token}"
-SUBSTRATE_BOOTSTRAP_TOKEN="${SUBSTRATE_BOOTSTRAP_TOKEN:-bootstrap-ci-$(date +%s%N)-${RANDOM}}"
+if [[ "${SUBSTRATE_BOOTSTRAP_TOKEN+x}" != "x" || -z "${SUBSTRATE_BOOTSTRAP_TOKEN}" ]]; then
+  printf -v SUBSTRATE_BOOTSTRAP_TOKEN 'bootstrap-ci-%s-%s' "$(date +%s%N)" "${RANDOM}"
+fi
 
 SUBSTRATE_DIR=""
 TMP_ROOT=""
 DOCKER_CONFIG_DIR=""
 PORT_FORWARD_PID=""
+RUNSC_DELETE_INJECTION_NODE=""
+RUNSC_DELETE_INJECTION_PATH=""
 
 log() {
   printf '\n[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"
 }
 
 redact() {
+  local bootstrap_name bootstrap_value handoff_name line
+  bootstrap_name="ORKA_WORKSPACE_BOOTSTRAP_""TOKEN"
+  bootstrap_value="${SUBSTRATE_BOOTSTRAP_TOKEN:-}"
+  handoff_name="ORKA_WORKSPACE_HANDOFF_""TOKEN"
   sed -E \
-    -e 's/(Authorization:[[:space:]]*Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/Ig' \
-    -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/Ig' \
-    -e 's/([Tt]xn-[Tt]oken:[[:space:]]*)[^[:space:]]+/\1[REDACTED]/g' \
-    -e 's/([Tt]oken["'\'']?[=:][[:space:]]*["'\'']?)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/g' \
-    -e 's/("name":"ORKA_WORKSPACE_BOOTSTRAP_TOKEN","value":")[^"]+/\1[REDACTED]/g' \
-    -e 's/("name":"ORKA_WORKSPACE_HANDOFF_TOKEN","value":")[^"]+/\1[REDACTED]/g' \
-    -e 's/(ORKA_WORKSPACE_HANDOFF_TOKEN=)[^[:space:]]+/\1[REDACTED]/g' \
-    -e 's/(ORKA_WORKSPACE_BOOTSTRAP_TOKEN=)[^[:space:]]+/\1[REDACTED]/g'
+    -e 's/((^|[^[:alnum:]_-])(Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-API-Key|API-Key|[A-Za-z0-9_-]*Token)[[:space:]"'\'']*[:=][[:space:]"'\'']*).*/\1[REDACTED]/I' \
+    -e 's/((Bearer|Basic)[[:space:]]+).*/\1[REDACTED]/I' \
+    -e "s/(\"name\":\"${bootstrap_name}\",\"value\":\")[^\"]+/\\1[REDACTED]/g" \
+    -e "s/(\"name\":\"${handoff_name}\",\"value\":\")[^\"]+/\\1[REDACTED]/g" \
+    -e "s/(${handoff_name}=).*/\\1[REDACTED]/g" \
+    -e "s/(${bootstrap_name}=).*/\\1[REDACTED]/g" |
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      if [[ -n "${bootstrap_value}" ]]; then
+        line="${line//"${bootstrap_value}"/[REDACTED]}"
+      fi
+      printf '%s\n' "${line}"
+    done
 }
 
 run_redacted() {
@@ -51,6 +72,27 @@ run_redacted() {
 
 kubectl_ate() {
   "${TMP_ROOT}/kubectl-ate" --context "kind-${KIND_CLUSTER}" "$@"
+}
+
+restore_runsc_delete_injector() {
+  local node="${RUNSC_DELETE_INJECTION_NODE:-}"
+  local path="${RUNSC_DELETE_INJECTION_PATH:-}"
+  if [[ -z "${node}" || -z "${path}" ]]; then
+    return 0
+  fi
+
+  if ! docker exec "${node}" /bin/sh -ceu '
+    path="$1"
+    if [ -e "${path}.orka-real" ]; then
+      rm -f "${path}"
+      mv "${path}.orka-real" "${path}"
+    fi
+    rm -f "${path}.orka-delete-failure-observed"
+  ' sh "${path}"; then
+    return 1
+  fi
+  RUNSC_DELETE_INJECTION_NODE=""
+  RUNSC_DELETE_INJECTION_PATH=""
 }
 
 dump_diagnostics() {
@@ -92,6 +134,7 @@ cleanup() {
   if [[ -n "${PORT_FORWARD_PID}" ]]; then
     kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
   fi
+  restore_runsc_delete_injector >/dev/null 2>&1 || true
   if [[ "${KEEP_CLUSTER}" != "1" ]]; then
     kind delete cluster --name "${KIND_CLUSTER}" >/dev/null 2>&1 || true
   else
@@ -221,22 +264,46 @@ wait_actor_status() {
 wait_actor_absent() {
   local actor_name="$1"
   local timeout_seconds="$2"
-  local started now output count
+  local started now output count rc observation
   started="$(date +%s)"
+  observation="not checked"
 
   while true; do
-    if ! output="$(kubectl_ate get actor "${actor_name}" -o json 2>/dev/null)"; then
+    if output="$(kubectl_ate get actor "${actor_name}" -o json 2>&1)"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    if [[ "${rc}" -ne 0 ]] && grep -Fq -- "code = NotFound desc = Actor ${actor_name} not found" <<<"${output}"; then
       log "actor/${actor_name}: absent"
       return 0
     fi
-    count="$(jq -r '.actors | length' <<<"${output}" 2>/dev/null || printf '1')"
-    if [[ "${count}" == "0" ]]; then
-      log "actor/${actor_name}: absent"
-      return 0
+    if [[ "${rc}" -eq 0 ]]; then
+      if count="$(jq -er '
+        if type != "object" then
+          error("actor response is not an object")
+        elif has("actors") then
+          if (.actors | type) == "array" then (.actors | length) else error("actors is not an array") end
+        elif length == 0 then
+          0
+        else
+          error("missing actors array")
+        end
+      ' <<<"${output}" 2>/dev/null)"; then
+        if [[ "${count}" == "0" ]]; then
+          log "actor/${actor_name}: absent"
+          return 0
+        fi
+        observation="actor query succeeded with ${count} result(s)"
+      else
+        observation="actor query succeeded with an invalid response"
+      fi
+    else
+      observation="kubectl-ate failed with exit ${rc} without an actor NotFound response"
     fi
     now="$(date +%s)"
     if (( now - started > timeout_seconds )); then
-      echo "timed out waiting for actor/${actor_name} to be absent" >&2
+      echo "timed out waiting for actor/${actor_name} to be absent; ${observation}" >&2
       return 1
     fi
     sleep 5
@@ -259,6 +326,58 @@ substrate_actor_pool_prefix() {
   printf 'orka-p-%s' "${hash:0:24}"
 }
 
+wait_worker_absent() {
+  local worker_name="$1"
+  local timeout_seconds="$2"
+  local started now count
+  started="$(date +%s)"
+
+  while true; do
+    count="$(kubectl_ate get workers -o json 2>/dev/null | jq --arg worker "${worker_name}" '[.workers[]? | select(.workerPod == $worker)] | length' 2>/dev/null || true)"
+    if [[ "${count}" == "0" ]]; then
+      log "worker/${worker_name}: absent from Substrate store"
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started > timeout_seconds )); then
+      echo "timed out waiting for worker/${worker_name} to leave the Substrate store" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+wait_worker_count_at_least() {
+  local minimum="$1"
+  local timeout_seconds="$2"
+  local started now count
+  started="$(date +%s)"
+
+  while true; do
+    count="$(kubectl_ate get workers -o json 2>/dev/null | jq '[.workers[]? | select(.workerPool == "orka-workers")] | length' 2>/dev/null || true)"
+    if [[ "${count}" =~ ^[0-9]+$ && "${count}" -ge "${minimum}" ]]; then
+      log "Substrate worker count: ${count}"
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started > timeout_seconds )); then
+      echo "timed out waiting for at least ${minimum} registered Substrate workers; got ${count:-<empty>}" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+assert_no_suspending_actors() {
+  local count
+  count="$(kubectl_ate get actors -o json | jq '[.actors[]? | select(.status == "STATUS_SUSPENDING")] | length')"
+  if [[ "${count}" != "0" ]]; then
+    echo "found ${count} Actor(s) stuck in STATUS_SUSPENDING" >&2
+    return 1
+  fi
+  log "No Actors are stuck in STATUS_SUSPENDING"
+}
+
 wait_resource_absent() {
   local namespace="$1"
   local resource="$2"
@@ -278,35 +397,6 @@ wait_resource_absent() {
       return 1
     fi
     sleep 5
-  done
-}
-
-wait_task_phase() {
-  local task="$1"
-  local expected="$2"
-  local timeout_seconds="${3:-${TASK_TIMEOUT_SECONDS}}"
-  local started now phase
-  started="$(date +%s)"
-
-  log "Waiting for task/${task} to become ${expected}"
-  while true; do
-    phase="$(kubectl -n default get task "${task}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    case "${phase}" in
-      "${expected}")
-        log "task/${task}: ${phase}"
-        return 0
-        ;;
-      Succeeded|Failed)
-        echo "task/${task} finished as ${phase}, expected ${expected}" >&2
-        return 1
-        ;;
-    esac
-    now="$(date +%s)"
-    if (( now - started > timeout_seconds )); then
-      echo "timed out waiting for task/${task}; current phase ${phase:-<empty>}" >&2
-      return 1
-    fi
-    sleep 10
   done
 }
 
@@ -336,55 +426,6 @@ wait_job_succeeded() {
   done
 }
 
-assert_task_jsonpath() {
-  local task="$1"
-  local path="$2"
-  local expected="$3"
-  local actual
-  actual="$(kubectl -n default get task "${task}" -o "jsonpath=${path}")"
-  if [[ "${actual}" != "${expected}" ]]; then
-    echo "task/${task} expected ${path}=${expected}, got ${actual:-<empty>}" >&2
-    exit 1
-  fi
-}
-
-task_jsonpath() {
-  local task="$1"
-  local path="$2"
-  kubectl -n default get task "${task}" -o "jsonpath=${path}" 2>/dev/null || true
-}
-
-assert_task_workspace_teleport_visibility() {
-  local task="$1"
-  local worker_pool worker_pod resume_latency worker_count actor_count actors_per_worker
-
-  worker_pool="$(task_jsonpath "${task}" "{.status.executionWorkspace.placement.workerPool}")"
-  worker_pod="$(task_jsonpath "${task}" "{.status.executionWorkspace.placement.workerPodName}")"
-  resume_latency="$(task_jsonpath "${task}" "{.status.executionWorkspace.resumeLatency}")"
-  worker_count="$(task_jsonpath "${task}" "{.status.executionWorkspace.density.workerCount}")"
-  actor_count="$(task_jsonpath "${task}" "{.status.executionWorkspace.density.actorCount}")"
-  actors_per_worker="$(task_jsonpath "${task}" "{.status.executionWorkspace.density.actorsPerWorker}")"
-
-  if [[ -z "${resume_latency}" ]]; then
-    echo "task/${task} missing Substrate teleport latency: resumeLatency=<empty>" >&2
-    exit 1
-  fi
-  if [[ ! "${worker_count}" =~ ^[0-9]+$ || "${worker_count}" -lt 1 ]]; then
-    echo "task/${task} missing Substrate density worker count: workerCount=${worker_count:-<empty>}" >&2
-    exit 1
-  fi
-  if [[ ! "${actor_count}" =~ ^[0-9]+$ || "${actor_count}" -lt 1 ]]; then
-    echo "task/${task} missing Substrate density actor count: actorCount=${actor_count:-<empty>}" >&2
-    exit 1
-  fi
-  if [[ -z "${actors_per_worker}" ]]; then
-    echo "task/${task} missing Substrate density ratio: actorsPerWorker=<empty>" >&2
-    exit 1
-  fi
-
-  log "task/${task} teleport visibility: workerPool=${worker_pool} workerPodName=${worker_pod} resumeLatency=${resume_latency} density=${actor_count}/${worker_count} actorsPerWorker=${actors_per_worker}"
-}
-
 patch_substrate_kind_registry_script() {
   local script="${SUBSTRATE_DIR}/hack/create-kind-cluster.sh"
   sed -i.bak \
@@ -398,9 +439,70 @@ patch_substrate_kind_registry_script() {
   fi
 }
 
+verify_substrate_source_blob() {
+  local target="$1"
+  local expected_blob="$2"
+  local patch_context="$3"
+  local actual_blob
+
+  if ! actual_blob="$(git -C "${SUBSTRATE_DIR}" rev-parse "HEAD:${target}" 2>/dev/null)"; then
+    echo "Substrate ref ${SUBSTRATE_REF} does not contain expected source ${target}" >&2
+    exit 1
+  fi
+  if [[ "${actual_blob}" != "${expected_blob}" ]]; then
+    echo "Substrate ref ${SUBSTRATE_REF} has unreviewed ${patch_context} context in ${target}" >&2
+    echo "expected blob ${expected_blob}, got ${actual_blob}; review the provider contract before updating the patch" >&2
+    exit 1
+  fi
+}
+
+verify_patch_paths() {
+  local patch_file="$1"
+  local expected_paths="$2"
+  local patch_paths
+
+  patch_paths="$(git -C "${SUBSTRATE_DIR}" apply --numstat "${patch_file}" | cut -f3- | LC_ALL=C sort)"
+  if [[ "${patch_paths}" != "${expected_paths}" ]]; then
+    echo "reviewed patch ${patch_file} changes unexpected files: ${patch_paths:-<none>}" >&2
+    exit 1
+  fi
+}
+
+apply_reviewed_substrate_patch() {
+  local label="$1"
+  local patch_file="$2"
+  local expected_paths="$3"
+  local -a paths=()
+  local path
+
+  if [[ ! -f "${patch_file}" ]]; then
+    echo "missing reviewed Substrate patch: ${patch_file}" >&2
+    exit 1
+  fi
+  verify_patch_paths "${patch_file}" "${expected_paths}"
+  if ! git -C "${SUBSTRATE_DIR}" apply --check --whitespace=error-all "${patch_file}"; then
+    echo "reviewed Substrate ${label} patch no longer applies cleanly" >&2
+    exit 1
+  fi
+
+  git -C "${SUBSTRATE_DIR}" apply --whitespace=error-all "${patch_file}"
+
+  if ! git -C "${SUBSTRATE_DIR}" apply --reverse --check "${patch_file}"; then
+    echo "failed to verify the applied Substrate ${label} patch" >&2
+    exit 1
+  fi
+  while IFS= read -r path; do
+    [[ -n "${path}" ]] && paths+=("${path}")
+  done <<< "${expected_paths}"
+  if ! git -C "${SUBSTRATE_DIR}" diff --check -- "${paths[@]}"; then
+    echo "applied Substrate ${label} patch introduced an invalid diff" >&2
+    exit 1
+  fi
+}
+
 apply_substrate_workspace_agent_capability_patch() {
   local target="cmd/servers/atelet/oci.go"
-  local actual_blob changed_files checkout_status
+  local changed_files checkout_status
 
   if [[ ! -f "${SUBSTRATE_ATELET_CAPABILITY_PATCH}" ]]; then
     echo "missing reviewed Substrate compatibility patch: ${SUBSTRATE_ATELET_CAPABILITY_PATCH}" >&2
@@ -411,15 +513,7 @@ apply_substrate_workspace_agent_capability_patch() {
     echo "refusing to patch a dirty Substrate checkout" >&2
     exit 1
   fi
-  if ! actual_blob="$(git -C "${SUBSTRATE_DIR}" rev-parse "HEAD:${target}" 2>/dev/null)"; then
-    echo "Substrate ref ${SUBSTRATE_REF} does not contain expected OCI source ${target}" >&2
-    exit 1
-  fi
-  if [[ "${actual_blob}" != "${SUBSTRATE_ATELET_OCI_BLOB}" ]]; then
-    echo "Substrate ref ${SUBSTRATE_REF} has unreviewed OCI capability context in ${target}" >&2
-    echo "expected blob ${SUBSTRATE_ATELET_OCI_BLOB}, got ${actual_blob}; review the provider contract before updating the patch" >&2
-    exit 1
-  fi
+  verify_substrate_source_blob "${target}" "${SUBSTRATE_ATELET_OCI_BLOB}" "OCI capability"
   if ! git -C "${SUBSTRATE_DIR}" apply --check --whitespace=error-all "${SUBSTRATE_ATELET_CAPABILITY_PATCH}"; then
     echo "reviewed Substrate workspace-agent capability patch no longer applies cleanly" >&2
     exit 1
@@ -452,6 +546,216 @@ apply_substrate_workspace_agent_capability_patch() {
   fi
 
   log "Applied reviewed Substrate root-supervisor capability compatibility patch"
+}
+
+apply_substrate_atenet_authorization_redaction_patch() {
+  local source="cmd/servers/atenet/app/router/extproc_in.go"
+  local source_test="cmd/servers/atenet/app/router/extproc_in_test.go"
+  local envoy_runner="cmd/servers/atenet/app/router/envoyrunner.go"
+  local install_manifest="manifests/ate-install/atenet-router.yaml"
+  local expected_paths
+  expected_paths="$(printf '%s\n' "${envoy_runner}" "${source}" "${source_test}" "${install_manifest}" | LC_ALL=C sort)"
+
+  verify_substrate_source_blob "${source}" "${SUBSTRATE_ATENET_EXTPROC_IN_BLOB}" "atenet request-metadata"
+  verify_substrate_source_blob "${source_test}" "${SUBSTRATE_ATENET_EXTPROC_IN_TEST_BLOB}" "atenet request-metadata test"
+  verify_substrate_source_blob "${envoy_runner}" "${SUBSTRATE_ATENET_ENVOY_RUNNER_BLOB}" "atenet Envoy runner logging"
+  verify_substrate_source_blob "${install_manifest}" "${SUBSTRATE_ATENET_MANIFEST_BLOB}" "atenet install manifest logging"
+  apply_reviewed_substrate_patch "atenet authorization-redaction" "${SUBSTRATE_ATENET_REDACTION_PATCH}" "${expected_paths}"
+
+  if [[ "$(grep -Fc 'case ":method", ":path", ":authority", "host", "x-request-id":' "${SUBSTRATE_DIR}/${source}" || true)" -ne 1 ]]; then
+    echo "Substrate atenet patch did not install the reviewed request-metadata allowlist" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'if !isSafeRequestMetadataHeader(k) {' "${SUBSTRATE_DIR}/${source}" || true)" -ne 1 ]]; then
+    echo "Substrate atenet patch does not reject headers before retaining their values" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'url.ParseRequestURI(value)' "${SUBSTRATE_DIR}/${source}" || true)" -ne 1 ]]; then
+    echo "Substrate atenet patch did not sanitize the request target before logging it" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'if requestURI.Opaque != "" {' "${SUBSTRATE_DIR}/${source}" || true)" -ne 1 ||
+        "$(grep -Fc 'requestURI, err = url.Parse(value)' "${SUBSTRATE_DIR}/${source}" || true)" -ne 1 ]]; then
+    echo "Substrate atenet patch did not preserve absolute-form paths while discarding authority credentials" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'func sanitizeRequestAuthority(value string) string {' "${SUBSTRATE_DIR}/${source}" || true)" -ne 1 ||
+        "$(grep -Fc 'authority.User != nil' "${SUBSTRATE_DIR}/${source}" || true)" -ne 1 ]]; then
+    echo "Substrate atenet patch did not reject credential-bearing authority values before logging" >&2
+    exit 1
+  fi
+  if grep -Eq 'redactedHeaderValue|sanitizeRequestHeaderValue|case "authorization"' "${SUBSTRATE_DIR}/${source}"; then
+    echo "Substrate atenet patch retained denylist-based request logging" >&2
+    exit 1
+  fi
+  for target in "${envoy_runner}" "${install_manifest}"; do
+    if grep -Fq 'upstream:debug,router:debug,ext_proc:debug' "${SUBSTRATE_DIR}/${target}"; then
+      echo "Substrate atenet patch retained credential-bearing Envoy debug logging in ${target}" >&2
+      exit 1
+    fi
+    grep -Fq 'upstream:info,router:info,ext_proc:info' "${SUBSTRATE_DIR}/${target}" || {
+      echo "Substrate atenet patch did not install bounded Envoy component logging in ${target}" >&2
+      exit 1
+    }
+  done
+
+  log "Applied reviewed Substrate atenet authorization-redaction patch"
+}
+
+apply_substrate_ateom_delete_recovery_patch() {
+  local service_source="cmd/servers/ateom-gvisor/ateom-gvisor.go"
+  local runsc_source="cmd/servers/ateom-gvisor/runsc.go"
+  local runsc_test="cmd/servers/ateom-gvisor/runsc_test.go"
+  local expected_paths
+  expected_paths="$(printf '%s\n' "${service_source}" "${runsc_source}" "${runsc_test}" | LC_ALL=C sort)"
+
+  verify_substrate_source_blob "${service_source}" "${SUBSTRATE_ATEOM_GVISOR_BLOB}" "ateom checkpoint"
+  verify_substrate_source_blob "${runsc_source}" "${SUBSTRATE_ATEOM_RUNSC_BLOB}" "runsc delete"
+  if git -C "${SUBSTRATE_DIR}" cat-file -e "HEAD:${runsc_test}" 2>/dev/null; then
+    echo "Substrate ref ${SUBSTRATE_REF} unexpectedly contains ${runsc_test}; review the local recovery patch" >&2
+    exit 1
+  fi
+  apply_reviewed_substrate_patch "ateom runsc-delete recovery" "${SUBSTRATE_ATEOM_DELETE_RECOVERY_PATCH}" "${expected_paths}"
+
+  if [[ "$(grep -Fc 'runscDeleteAttempts   = 4' "${SUBSTRATE_DIR}/${runsc_source}" || true)" -ne 1 ]]; then
+    echo "Substrate ateom patch did not install bounded runsc delete retries" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'failed closed while verifying container absence' "${SUBSTRATE_DIR}/${runsc_source}" || true)" -ne 1 ]]; then
+    echo "Substrate ateom patch did not retain the fail-closed absence postcondition" >&2
+    exit 1
+  fi
+  local prepare_line checkpoint_line validate_line commit_line restore_prepare_line restore_network_move_line restore_line delete_line
+  prepare_line="$(grep -n 'prepareCheckpointRecovery(checkpointPath, recoveryPath, expectedContainers)' "${SUBSTRATE_DIR}/${service_source}" | cut -d: -f1)"
+  checkpoint_line="$(grep -n 'rcmd.cmdCheckpoint(ctx, "pause", checkpointPath)' "${SUBSTRATE_DIR}/${service_source}" | cut -d: -f1)"
+  validate_line="$(grep -n 'rcmd.cmdValidateCheckpoint(ctx, recoveryPath)' "${SUBSTRATE_DIR}/${service_source}" | tail -n1 | cut -d: -f1)"
+  commit_line="$(grep -n 'commitCheckpointRecovery(recoveryPath, expectedContainers)' "${SUBSTRATE_DIR}/${service_source}" | tail -n1 | cut -d: -f1)"
+  if [[ -z "${prepare_line}" || -z "${checkpoint_line}" || -z "${validate_line}" || -z "${commit_line}" ||
+        "${prepare_line}" -ge "${checkpoint_line}" || "${checkpoint_line}" -ge "${validate_line}" ||
+        "${validate_line}" -ge "${commit_line}" ]]; then
+    echo "Substrate ateom patch did not enforce prepared -> checkpointed -> validated -> committed recovery ordering" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'checkpointRecoveryCommitName' "${SUBSTRATE_DIR}/${service_source}" || true)" -lt 3 ]]; then
+    echo "Substrate ateom patch did not install an explicit checkpoint commit record" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'checkpointRecoveryArtifact' "${SUBSTRATE_DIR}/${service_source}" || true)" -lt 4 ]]; then
+    echo "Substrate ateom patch did not inventory checkpoint artifacts" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'func materializeCheckpointTransport(checkpointPath, recoveryPath string) error {' "${SUBSTRATE_DIR}/${service_source}" || true)" -ne 1 ||
+        "$(grep -Fc 'compatibilityArtifacts := map[string]string{' "${SUBSTRATE_DIR}/${service_source}" || true)" -ne 1 ||
+        "$(grep -Fc 'for artifact, marker := range compatibilityArtifacts {' "${SUBSTRATE_DIR}/${service_source}" || true)" -ne 1 ||
+        "$(grep -Fc 'materializeCheckpointTransport(checkpointPath, recoveryPath)' "${SUBSTRATE_DIR}/${service_source}" || true)" -lt 2 ]]; then
+    echo "Substrate ateom patch did not preserve the legacy three-object checkpoint transport view" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'func prepareCheckpointRestore(checkpointDir string) error {' "${SUBSTRATE_DIR}/${service_source}" || true)" -ne 1 ||
+        "$(grep -Fc 'checkpointPagesCompatibilityMarker' "${SUBSTRATE_DIR}/${service_source}" || true)" -lt 3 ||
+        "$(grep -Fc 'checkpointPagesMetadataCompatibilityMarker' "${SUBSTRATE_DIR}/${service_source}" || true)" -lt 3 ]]; then
+    echo "Substrate ateom patch did not identify marked transport placeholders before compressed restore" >&2
+    exit 1
+  fi
+  restore_prepare_line="$(grep -n 'prepareCheckpointRestore(checkpointDir)' "${SUBSTRATE_DIR}/${service_source}" | cut -d: -f1)"
+  restore_network_move_line="$(grep -n 'netlink.LinkSetNsFd(eth0Link, int(s.interiorNetNS))' "${SUBSTRATE_DIR}/${service_source}" | tail -n1 | cut -d: -f1)"
+  if [[ -z "${restore_prepare_line}" || -z "${restore_network_move_line}" ||
+        "${restore_prepare_line}" -ge "${restore_network_move_line}" ]]; then
+    echo "Substrate ateom patch did not validate restore artifacts before moving worker networking" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc '"-compression=flate-best-speed"' "${SUBSTRATE_DIR}/${runsc_source}" || true)" -ne 1 ]]; then
+    echo "Substrate ateom patch did not pin the validated single-file checkpoint format" >&2
+    exit 1
+  fi
+  if grep -Fq '"-leave-running"' "${SUBSTRATE_DIR}/${runsc_source}"; then
+    echo "Substrate ateom patch resumed the sandbox before checkpoint commit" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'func (r *runsc) cmdValidateCheckpoint' "${SUBSTRATE_DIR}/${runsc_source}" || true)" -ne 1 ]]; then
+    echo "Substrate ateom patch did not validate the stopped runsc statefile" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'func (r *runsc) containerNamesLocked' "${SUBSTRATE_DIR}/${runsc_source}" || true)" -ne 1 ||
+        "$(grep -Fc 'return r.containerNamesLocked(ctx)' "${SUBSTRATE_DIR}/${runsc_source}" || true)" -ne 1 ]]; then
+    echo "Substrate ateom patch did not guard direct runsc list children from the PID 1 reaper" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'filepath.Dir(recoveryPath),' "${SUBSTRATE_DIR}/${service_source}" || true)" -ne 1 ]]; then
+    echo "Substrate ateom patch did not stage commit temporaries outside the inventoried recovery directory" >&2
+    exit 1
+  fi
+  if [[ "$(grep -Fc 'json.Unmarshal(stdout.Bytes(), &state)' "${SUBSTRATE_DIR}/${runsc_source}" || true)" -ne 1 ]] ||
+     grep -Fq 'cmd.Stderr = &stdout' "${SUBSTRATE_DIR}/${runsc_source}"; then
+    echo "Substrate ateom patch did not isolate runsc state JSON from stderr diagnostics" >&2
+    exit 1
+  fi
+  if grep -Fq 'os.Rename(checkpointPath, recoveryPath)' "${SUBSTRATE_DIR}/${service_source}"; then
+    echo "Substrate ateom patch retained the post-checkpoint rename crash window" >&2
+    exit 1
+  fi
+  local recovery_test
+  local recovery_tests=(
+    TestContainerNamesWaitsForReaperReadLock
+    TestContainerStatusIgnoresStderrDiagnostics
+    TestCmdCheckpointUsesStoppedSingleFileProtocol
+    TestCheckpointRecoveryRejectsUnexpectedOrCorruptArtifacts
+    TestCheckpointRecoveryReconcilesPreparationBeforeCheckpoint
+    TestCheckpointRecoveryReconcilesUncommittedSuccessfulCheckpoint
+    TestCheckpointRecoveryReconcilesInterruptedWrite
+    TestPrepareCheckpointRestoreRemovesMarkedCompatibilityFiles
+    TestPrepareCheckpointRestoreRecoversPartialCompatibilityCleanup
+    TestPrepareCheckpointRestorePreservesNativeMultiFileSnapshot
+    TestPrepareCheckpointRestoreRejectsPartialNativeState
+  )
+  for recovery_test in "${recovery_tests[@]}"; do
+    if [[ "$(grep -Fc "func ${recovery_test}" "${SUBSTRATE_DIR}/${runsc_test}" || true)" -ne 1 ]]; then
+      echo "Substrate ateom patch did not cover ${recovery_test}" >&2
+      exit 1
+    fi
+  done
+
+  restore_line="$(grep -n 'Restore the worker Pod network before fallible runsc cleanup' "${SUBSTRATE_DIR}/${service_source}" | cut -d: -f1)"
+  delete_line="$(grep -n 'Delete all application containers' "${SUBSTRATE_DIR}/${service_source}" | cut -d: -f1)"
+  if [[ -z "${restore_line}" || -z "${delete_line}" || "${restore_line}" -ge "${delete_line}" ]]; then
+    echo "Substrate ateom patch did not restore worker networking before fallible delete cleanup" >&2
+    exit 1
+  fi
+
+  log "Applied reviewed Substrate ateom runsc-delete recovery patch"
+}
+
+verify_reviewed_substrate_patch_set() {
+  local expected_files changed_files
+  expected_files="$(printf '%s\n' \
+    cmd/servers/atelet/oci.go \
+    cmd/servers/atenet/app/router/envoyrunner.go \
+    cmd/servers/atenet/app/router/extproc_in.go \
+    cmd/servers/atenet/app/router/extproc_in_test.go \
+    cmd/servers/ateom-gvisor/ateom-gvisor.go \
+    cmd/servers/ateom-gvisor/runsc.go \
+    cmd/servers/ateom-gvisor/runsc_test.go \
+    manifests/ate-install/atenet-router.yaml | LC_ALL=C sort)"
+  changed_files="$(git -C "${SUBSTRATE_DIR}" status --short | sed -E 's/^.. //' | LC_ALL=C sort)"
+  if [[ "${changed_files}" != "${expected_files}" ]]; then
+    echo "reviewed Substrate patch set changed unexpected files: ${changed_files:-<none>}" >&2
+    exit 1
+  fi
+
+  log "Running focused tests for the reviewed Substrate patches"
+  (
+    cd "${SUBSTRATE_DIR}"
+    go test ./cmd/servers/atelet ./cmd/servers/atenet/app/router -count=1
+    if [[ "$(go env GOOS)" == "linux" ]]; then
+      go test ./cmd/servers/ateom-gvisor -count=1
+    else
+      # The pinned netlink dependency does not expose Linux family constants on
+      # non-Linux hosts. Cross-compile the package here; Linux CI/live E2E runs
+      # the injected delete-recovery tests.
+      GOOS=linux GOARCH="$(go env GOARCH)" go test -c \
+        -o "${TMP_ROOT}/ateom-gvisor-patch-tests" ./cmd/servers/ateom-gvisor
+    fi
+  )
 }
 
 publish_ateom_image() {
@@ -595,7 +899,6 @@ YAML
 
 deploy_orka() {
   local controller_image="$1"
-  local codex_image="$2"
   local tmp_config
   tmp_config="$(mktemp -d "${TMP_ROOT}/orka-config.XXXXXX")"
 
@@ -606,26 +909,54 @@ deploy_orka() {
 
   cp -R "${ROOT_DIR}/config" "${tmp_config}/config"
   (cd "${tmp_config}/config/manager" && "${ROOT_DIR}/bin/kustomize" edit set image "controller=${controller_image}")
+  # Agent Substrate validation exercises the workspace provider directly. The
+  # initial ACP release does not dispatch RuntimeSessions to Substrate Actors, so
+  # omit the unrelated clean-room publisher workload and provide only the
+  # controller's required non-secret image metadata and local capability files.
   (
-    cd "${tmp_config}/config/harness-wrapper"
-    "${ROOT_DIR}/bin/kustomize" edit set image "ghcr.io/orka-agents/orka/agent-harness-wrapper=${codex_image}"
+    cd "${tmp_config}/config/default"
+    "${ROOT_DIR}/bin/kustomize" edit remove resource ../publisher
+    "${ROOT_DIR}/bin/kustomize" edit remove resource ../provider-proxy
+    "${ROOT_DIR}/bin/kustomize" edit remove resource ../scm-egress-proxy
   )
   kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
-  if ! kubectl -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then
-    local wrapper_token_file
-    wrapper_token_file="$(mktemp "${TMP_ROOT}/harness-wrapper-token.XXXXXX")"
-    chmod 0600 "${wrapper_token_file}"
-    dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n' >"${wrapper_token_file}"
-    kubectl -n orka-system create secret generic harness-wrapper-auth --from-file=token="${wrapper_token_file}" >/dev/null
-    rm -f "${wrapper_token_file}"
-  fi
+  local placeholder_digest
+  placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
+  kubectl -n orka-system create configmap acp-runtime-images \
+    --from-literal="ORKA_ACP_CODEX_RUNTIME_IMAGE=example.invalid/orka/acp-codex@${placeholder_digest}" \
+    --from-literal="ORKA_ACP_CLAUDE_RUNTIME_IMAGE=example.invalid/orka/acp-claude@${placeholder_digest}" \
+    --from-literal="ORKA_ACP_COPILOT_RUNTIME_IMAGE=example.invalid/orka/acp-copilot@${placeholder_digest}" \
+    --from-literal="ORKA_ACP_OPENCODE_RUNTIME_IMAGE=example.invalid/orka/acp-opencode@${placeholder_digest}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+  local capability_dir artifact_capability_field publisher_controller_field publisher_operation_field provider_field
+  capability_dir="$(mktemp -d "${TMP_ROOT}/acp-capabilities.XXXXXX")"
+  artifact_capability_field="capability-secret"
+  publisher_controller_field="controller-token"
+  publisher_operation_field="operation-capability-secret"
+  provider_field="token"
+  chmod 0700 "${capability_dir}"
+  dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/artifact-capability"
+  dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/publisher-token"
+  dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/publisher-capability"
+  dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/provider-token"
+  chmod 0600 "${capability_dir}"/*
+  kubectl -n orka-system create secret generic acp-artifact-capability \
+    --from-file="${artifact_capability_field}=${capability_dir}/artifact-capability" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n orka-system create secret generic workspace-publisher-auth \
+    --from-file="${publisher_controller_field}=${capability_dir}/publisher-token" \
+    --from-file="${publisher_operation_field}=${capability_dir}/publisher-capability" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n orka-system create secret generic provider-auth-proxy \
+    --from-file="${provider_field}=${capability_dir}/provider-token" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  rm -rf "${capability_dir}"
+
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/default" | kubectl apply -f -
-  kubectl -n orka-system set env deployment/orka-agent-harness-wrapper CODEX_CLI_PATH=/bin/true
-  kubectl -n orka-system rollout status deployment/orka-agent-harness-wrapper --timeout=5m
 
   local patch
   patch="$(jq -cn \
-    --arg codex_image "${codex_image}" \
     --arg bootstrap_secret_name "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}" \
     --arg bootstrap_secret_key "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}" \
     '{
@@ -635,6 +966,16 @@ deploy_orka() {
             containers: [
               {
                 name: "manager",
+                # The Substrate-only deployment removes the Publisher workload.
+                # Disable the client explicitly so fail-closed capability
+                # negotiation does not target a Service that is intentionally
+                # absent from this direct provider evaluation cluster.
+                env: [
+                  {
+                    name: "ORKA_WORKSPACE_PUBLISHER_URL",
+                    "$patch": "delete"
+                  }
+                ],
                 imagePullPolicy: "IfNotPresent",
                 resources: {
                   requests: { cpu: "250m", memory: "256Mi" },
@@ -658,6 +999,7 @@ deploy_orka() {
                   "--leader-elect",
                   "--health-probe-bind-address=:8081",
                   "--controller-url=http://orka-api.orka-system.svc:8080",
+                  "--acp-runtime-enabled=false",
                   "--execution-workspace-default-provider=substrate",
                   "--agent-sandbox-enabled=false",
                   "--substrate-enabled=true",
@@ -683,136 +1025,9 @@ deploy_orka() {
   kubectl -n orka-system rollout status deployment/orka-controller-manager --timeout=5m
 }
 
-create_agent() {
-  log "Creating Codex Agent"
-  kubectl apply -f - <<'YAML'
-apiVersion: core.orka.ai/v1alpha1
-kind: Agent
-metadata:
-  name: codex-substrate-ci
-  namespace: default
-spec:
-  runtime:
-    type: codex
-    defaultMaxTurns: 1
-    defaultAllowBash: true
-  model:
-    name: gpt-5.4
-  systemPrompt:
-    inline: |
-      You are a CI smoke-test agent. Run the requested command and stop.
-YAML
-}
-
-apply_task() {
-  local name="$1"
-  local workspace_yaml="$2"
-  kubectl apply -f - <<YAML
-apiVersion: core.orka.ai/v1alpha1
-kind: Task
-metadata:
-  name: ${name}
-  namespace: default
-spec:
-  type: agent
-  agentRef:
-    name: codex-substrate-ci
-  prompt: "Run the configured CLI and finish."
-  timeout: 10m
-  agentRuntime:
-    maxTurns: 1
-    allowBash: true
-  execution:
-    workspace:
-${workspace_yaml}
-YAML
-}
-
-run_retained_workspace_task() {
-  local task_name="$1"
-
-  log "Running retained-workspace task/${task_name}"
-  if ! apply_task "${task_name}" "      enabled: true
-      provider: substrate
-      templateRef:
-        name: orka-codex-ci
-        namespace: ate-demo
-      cleanupPolicy: retain"; then
-    return 1
-  fi
-
-  if wait_task_phase "${task_name}" "Succeeded"; then
-    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Retained"
-    assert_task_workspace_teleport_visibility "${task_name}"
-    return 0
-  fi
-
-  accept_task_cleanup_failure_after_result "${task_name}"
-}
-
-task_failed_workspace_cleanup() {
-  local task_name="$1"
-  local reason
-
-  reason="$(task_jsonpath "${task_name}" "{.status.executionWorkspace.reason}")"
-  [[ "${reason}" == "WorkspaceCleanupFailed" ]]
-}
-
-accept_task_cleanup_failure_after_result() {
-  local task_name="$1"
-
-  if ! task_failed_workspace_cleanup "${task_name}"; then
-    return 1
-  fi
-
-  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.provider}" "substrate"
-  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.templateRef.name}" "orka-codex-ci"
-  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Failed"
-  assert_task_jsonpath "${task_name}" "{.status.resultRef.available}" "true"
-  assert_task_workspace_teleport_visibility "${task_name}"
-  log "task/${task_name} produced a result but hit WorkspaceCleanupFailed; accepting known pinned Substrate runsc cleanup failure"
-}
-
-run_default_workspace_task() {
-  local task_name="$1"
-
-  log "Running default Substrate boot task/${task_name}"
-  if ! apply_task "${task_name}" "      enabled: true
-      boot: true"; then
-    return 1
-  fi
-
-  if wait_task_phase "${task_name}" "Succeeded"; then
-    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.provider}" "substrate"
-    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.templateRef.name}" "orka-codex-ci"
-    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Deleted"
-    assert_task_jsonpath "${task_name}" "{.status.resultRef.available}" "true"
-    assert_task_workspace_teleport_visibility "${task_name}"
-    return 0
-  fi
-
-  accept_task_cleanup_failure_after_result "${task_name}"
-}
-
 create_substrate_actor_pools() {
   log "Creating Orka SubstrateActorPools"
   kubectl apply -f - <<'YAML'
-apiVersion: core.orka.ai/v1alpha1
-kind: SubstrateActorPool
-metadata:
-  name: codex-substrate-pool-ci
-  namespace: default
-spec:
-  templateRef:
-    name: orka-codex-ci
-    namespace: ate-demo
-  workerPoolRef:
-    name: orka-workers
-    namespace: ate-demo
-  targetActors: 2
-  targetWorkers: 1
-  precreateActors: true
----
 apiVersion: core.orka.ai/v1alpha1
 kind: SubstrateActorPool
 metadata:
@@ -830,45 +1045,16 @@ spec:
   precreateActors: true
 YAML
 
-  for pool in codex-substrate-pool-ci mcp-substrate-pool-ci; do
-    wait_jsonpath_equals \
-      "substrateactorpool/${pool} readiness" \
-      "kubectl -n default get substrateactorpool ${pool} -o jsonpath='{.status.phase}'" \
-      "Ready" \
-      600
-    wait_jsonpath_int_at_least \
-      "substrateactorpool/${pool} actor count" \
-      "kubectl -n default get substrateactorpool ${pool} -o jsonpath='{.status.actorCount}'" \
-      2 \
-      600
-  done
-}
-
-run_pooled_workspace_task() {
-  local task_name="$1"
-
-  log "Running pooled Substrate task/${task_name}"
-  if ! apply_task "${task_name}" "      enabled: true
-      provider: substrate
-      templateRef:
-        name: orka-codex-ci
-        namespace: ate-demo
-      poolRef:
-        name: codex-substrate-pool-ci
-      boot: true"; then
-    return 1
-  fi
-
-  if wait_task_phase "${task_name}" "Succeeded"; then
-    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.provider}" "substrate"
-    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.templateRef.name}" "orka-codex-ci"
-    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Deleted"
-    assert_task_jsonpath "${task_name}" "{.status.resultRef.available}" "true"
-    assert_task_workspace_teleport_visibility "${task_name}"
-    return 0
-  fi
-
-  accept_task_cleanup_failure_after_result "${task_name}"
+  wait_jsonpath_equals \
+    "substrateactorpool/mcp-substrate-pool-ci readiness" \
+    "kubectl -n default get substrateactorpool mcp-substrate-pool-ci -o jsonpath='{.status.phase}'" \
+    "Ready" \
+    600
+  wait_jsonpath_int_at_least \
+    "substrateactorpool/mcp-substrate-pool-ci actor count" \
+    "kubectl -n default get substrateactorpool mcp-substrate-pool-ci -o jsonpath='{.status.actorCount}'" \
+    2 \
+    600
 }
 
 create_mcp_tool() {
@@ -1130,7 +1316,6 @@ verify_mcp_tool_cleanup() {
 exercise_orka_tasks() {
   local tool_client_image="$1"
 
-  create_agent
   create_substrate_actor_pools
 
   create_mcp_tool
@@ -1138,7 +1323,7 @@ exercise_orka_tasks() {
   verify_mcp_tool_boots_actor_once "${tool_client_image}"
   verify_mcp_tool_cleanup
 
-  log "Skipping agent Task execution-workspace checks: harness-wrapper runtime is service-backed and no longer runs agent tasks as Substrate Jobs"
+  log "Skipping workspace-backed ACP Task execution: RuntimeSession-to-Substrate Actor dispatch is deferred; direct Substrate and Orka-brokered MCP workspace paths were validated above"
 }
 
 wait_http_ok() {
@@ -1166,46 +1351,360 @@ wait_http_ok() {
   done
 }
 
-exercise_direct_substrate() {
-  local actor_name="orka-direct-ci"
-  local host_header="${actor_name}.actors.resources.substrate.ate.dev"
-  local token token_b64 response
+write_workspace_handoff_token() {
+  local url="$1"
+  local host_header="$2"
+  local token_b64="$3"
+  local timeout_seconds="$4"
+  local started now remaining attempt_timeout
+  started="$(date +%s)"
 
-  log "Running direct Substrate workspace-agent smoke"
+  while true; do
+    now="$(date +%s)"
+    remaining=$((timeout_seconds - (now - started)))
+    if (( remaining <= 0 )); then
+      echo "timed out installing workspace handoff token via Host ${host_header}" >&2
+      return 1
+    fi
+    attempt_timeout="${remaining}"
+    if (( attempt_timeout > 5 )); then
+      attempt_timeout=5
+    fi
+    # STATUS_RUNNING can precede the router's upstream connection becoming
+    # usable after worker replacement or runsc recovery. Keep credentials and
+    # response bodies private while retrying that bounded readiness window.
+    if curl -fsS \
+      --connect-timeout "${attempt_timeout}" \
+      --max-time "${attempt_timeout}" \
+      -H "Host: ${host_header}" \
+      -H "Authorization: Bearer ${SUBSTRATE_BOOTSTRAP_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -X PUT \
+      -d "{\"files\":[{\"path\":\"/app/orka-workspace-handoff-token\",\"data\":\"${token_b64}\",\"mode\":384}]}" \
+      "${url}" >/dev/null 2>&1; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started >= timeout_seconds )); then
+      echo "timed out installing workspace handoff token via Host ${host_header}" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+run_idempotent_workspace_exec() {
+  local url="$1"
+  local host_header="$2"
+  local handoff_token="$3"
+  local request_id="$4"
+  local timeout_seconds="$5"
+  local started now remaining attempt_timeout response
+  started="$(date +%s)"
+
+  while true; do
+    now="$(date +%s)"
+    remaining=$((timeout_seconds - (now - started)))
+    if (( remaining <= 0 )); then
+      echo "timed out executing idempotent workspace probe via Host ${host_header}" >&2
+      return 1
+    fi
+    attempt_timeout="${remaining}"
+    if (( attempt_timeout > 5 )); then
+      attempt_timeout=5
+    fi
+    # This exact command is deliberately idempotent. Retry only the live
+    # routing probe, never arbitrary user commands, while a replacement
+    # worker's Envoy upstream converges.
+    if response="$(curl -fsS \
+      --connect-timeout "${attempt_timeout}" \
+      --max-time "${attempt_timeout}" \
+      -H "Host: ${host_header}" \
+      -H "Authorization: Bearer ${handoff_token}" \
+      -H "X-Request-ID: ${request_id}" \
+      -H "Content-Type: application/json" \
+      -d '{"command":["/bin/sh","-lc","printf direct-ok"]}' \
+      "${url}" 2>/dev/null)"; then
+      printf '%s\n' "${response}"
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started >= timeout_seconds )); then
+      echo "timed out executing idempotent workspace probe via Host ${host_header}" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+verify_router_request_metadata_allowlist() {
+  local handoff_token="$1"
+  local request_id="$2"
+  local timeout_seconds="${3:-30}"
+  local started now raw_log_file
+  started="$(date +%s)"
+  raw_log_file="${TMP_ROOT}/atenet-router-raw-${request_id}.log"
+
+  while true; do
+    # Keep the provider output private and inspect it before any presentation
+    # redaction. Otherwise the test could erase the exact token leak it is meant
+    # to detect and then falsely pass on the safe request-ID evidence.
+    kubectl -n ate-system logs deployment/atenet-router --all-containers --since=2m       >"${raw_log_file}" 2>/dev/null || :
+    if grep -Fq -- "${SUBSTRATE_BOOTSTRAP_TOKEN}" "${raw_log_file}" ||
+       grep -Fq -- "${handoff_token}" "${raw_log_file}"; then
+      echo "atenet-router leaked an Authorization credential in its logs" >&2
+      grep -F -- "${request_id}" "${raw_log_file}" | redact >&2 || true
+      return 1
+    fi
+    if grep -Fq -- "${request_id}" "${raw_log_file}"; then
+      log "atenet-router logs retain the safe request ID while omitting request credentials"
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started > timeout_seconds )); then
+      echo "timed out waiting for atenet-router request-metadata allowlist evidence" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+run_direct_actor_lifecycle() {
+  local actor_name="$1"
+  local host_header="${actor_name}.actors.resources.substrate.ate.dev"
+  local token token_b64 request_id response
+
   kubectl_ate create actor "${actor_name}" --template ate-demo/orka-codex-ci
   kubectl_ate resume actor "${actor_name}"
-
-  kubectl -n ate-system port-forward svc/atenet-router 18082:80 >/tmp/orka-atenet-router-port-forward.log 2>&1 &
-  PORT_FORWARD_PID="$!"
-  sleep 3
-
+  wait_actor_status "${actor_name}" "STATUS_RUNNING" 300
   wait_http_ok "http://127.0.0.1:18082/healthz" "${host_header}" "" 300
-  token="$(printf 'ci-token-%s' "$(date +%s%N)")"
+
+  printf -v token 'ci-token-%s' "$(date +%s%N)"
   token_b64="$(printf '%s' "${token}" | base64 | tr -d '\n')"
-  curl -fsS \
-    -H "Host: ${host_header}" \
-    -H "Authorization: Bearer ${SUBSTRATE_BOOTSTRAP_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -X PUT \
-    -d "{\"files\":[{\"path\":\"/app/orka-workspace-handoff-token\",\"data\":\"${token_b64}\",\"mode\":384}]}" \
-    "http://127.0.0.1:18082/v1/files" >/dev/null
+  write_workspace_handoff_token "http://127.0.0.1:18082/v1/files" "${host_header}" "${token_b64}" 60
 
   wait_http_ok "http://127.0.0.1:18082/healthz" "${host_header}" "Authorization: Bearer ${token}" 60
-  response="$(curl -fsS \
-    -H "Host: ${host_header}" \
-    -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/json" \
-    -d '{"command":["/bin/sh","-lc","printf direct-ok"]}' \
-    "http://127.0.0.1:18082/v1/exec")"
-  if [[ "$(jq -r '.exitCode' <<<"${response}")" != "0" || "$(jq -r '.stdout' <<<"${response}")" != "direct-ok" ]]; then
-    echo "unexpected direct exec response" >&2
-    jq -c '{exitCode,stdout,stderr}' <<<"${response}" | redact >&2
-    exit 1
+  printf -v request_id 'orka-router-log-%s' "$(date +%s%N)"
+  response="$(run_idempotent_workspace_exec \
+    "http://127.0.0.1:18082/v1/exec" "${host_header}" "${token}" "${request_id}" 60)"
+  if [[ "$(jq -r '.exitCode' <<< "${response}")" != "0" || "$(jq -r '.stdout' <<< "${response}")" != "direct-ok" ]]; then
+    echo "unexpected direct exec response for actor/${actor_name}" >&2
+    jq -c '{exitCode,stdout,stderr}' <<< "${response}" | redact >&2
+    return 1
   fi
+  verify_router_request_metadata_allowlist "${token}" "${request_id}" 30
 
   kubectl_ate suspend actor "${actor_name}"
   wait_actor_status "${actor_name}" "STATUS_SUSPENDED" 300
   kubectl_ate delete actor "${actor_name}"
+  wait_actor_absent "${actor_name}" 120
+}
+
+# The ateom image is distroless, so the live fault injector must be a static
+# executable rather than a shell wrapper. It fails one delete before delegating
+# every later invocation to the checksum-verified runsc binary beside it.
+build_runsc_delete_failure_injector() {
+  local output_path="$1"
+  local architecture="$2"
+  local target_os="${3:-linux}"
+  local source_path="${TMP_ROOT}/runsc-delete-failure-injector.go"
+
+  cat >"${source_path}" <<'GO'
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"syscall"
+)
+
+func main() {
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolve runsc injector path: %v\n", err)
+		os.Exit(87)
+	}
+
+	isDelete := false
+	for _, arg := range os.Args[1:] {
+		if arg == "delete" {
+			isDelete = true
+			break
+		}
+	}
+	if isDelete {
+		marker := executable + ".orka-delete-failure-observed"
+		file, markerErr := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if markerErr == nil {
+			_ = file.Close()
+			fmt.Fprintln(os.Stderr, "injected one runsc delete failure before container removal")
+			os.Exit(86)
+		}
+		if !errors.Is(markerErr, os.ErrExist) {
+			fmt.Fprintf(os.Stderr, "create runsc delete injection marker: %v\n", markerErr)
+			os.Exit(87)
+		}
+	}
+
+	realPath := executable + ".orka-real"
+	argv := append([]string{realPath}, os.Args[1:]...)
+	if err := syscall.Exec(realPath, argv, os.Environ()); err != nil {
+		fmt.Fprintf(os.Stderr, "exec real runsc: %v\n", err)
+		os.Exit(87)
+	}
+}
+GO
+
+  CGO_ENABLED=0 GOOS="${target_os}" GOARCH="${architecture}" go build -trimpath -o "${output_path}" "${source_path}"
+}
+
+install_runsc_delete_failure_injector() {
+  local worker_name="$1"
+  local node architecture runsc_hash runsc_path injector_path node_injector_path
+
+  node="$(kubectl -n ate-demo get pod "${worker_name}" -o jsonpath='{.spec.nodeName}')"
+  architecture="$(kubectl get node "${node}" -o jsonpath='{.status.nodeInfo.architecture}')"
+  case "${architecture}" in
+    amd64 | arm64) ;;
+    *)
+      echo "unsupported kind node architecture for runsc delete injection: ${architecture:-<empty>}" >&2
+      return 1
+      ;;
+  esac
+  runsc_hash="$(kubectl -n ate-demo get actortemplate orka-codex-ci -o "jsonpath={.spec.runsc.${architecture}.sha256Hash}")"
+  if [[ -z "${node}" || -z "${runsc_hash}" ]]; then
+    echo "could not resolve the assigned worker node or runsc digest for delete injection" >&2
+    return 1
+  fi
+
+  runsc_path="/run/ateom-gvisor/static-files/runsc-${runsc_hash}"
+  injector_path="${TMP_ROOT}/runsc-delete-failure-injector-${architecture}"
+  node_injector_path="/root/orka-runsc-delete-failure-injector-$$-${RANDOM}"
+  build_runsc_delete_failure_injector "${injector_path}" "${architecture}"
+  docker cp "${injector_path}" "${node}:${node_injector_path}"
+
+  RUNSC_DELETE_INJECTION_NODE="${node}"
+  RUNSC_DELETE_INJECTION_PATH="${runsc_path}"
+  if ! docker exec "${node}" /bin/sh -ceu '
+    path="$1"
+    incoming="$2"
+    test -f "${path}"
+    test ! -e "${path}.orka-real"
+    rm -f "${path}.orka-delete-failure-observed"
+    mv "${path}" "${path}.orka-real"
+    if ! cp "${incoming}" "${path}" || ! chmod 0755 "${path}"; then
+      rm -f "${path}"
+      mv "${path}.orka-real" "${path}"
+      rm -f "${incoming}"
+      exit 1
+    fi
+    rm -f "${incoming}"
+  ' sh "${runsc_path}" "${node_injector_path}"; then
+    restore_runsc_delete_injector >/dev/null 2>&1 || true
+    return 1
+  fi
+}
+
+runsc_delete_failure_was_injected() {
+  [[ -n "${RUNSC_DELETE_INJECTION_NODE}" && -n "${RUNSC_DELETE_INJECTION_PATH}" ]] || return 1
+  docker exec "${RUNSC_DELETE_INJECTION_NODE}" /bin/sh -ceu \
+    'test -f "${1}.orka-delete-failure-observed"' sh "${RUNSC_DELETE_INJECTION_PATH}"
+}
+
+exercise_runsc_delete_retry_recovery() {
+  local actor_name="orka-delete-retry-ci"
+  local host_header="${actor_name}.actors.resources.substrate.ate.dev"
+  local actor_json worker_name worker_logs
+
+  log "Validating an injected runsc delete failure is retried on the live worker"
+  kubectl_ate create actor "${actor_name}" --template ate-demo/orka-codex-ci
+  kubectl_ate resume actor "${actor_name}"
+  wait_actor_status "${actor_name}" "STATUS_RUNNING" 300
+  wait_http_ok "http://127.0.0.1:18082/healthz" "${host_header}" "" 300
+
+  actor_json="$(kubectl_ate get actor "${actor_name}" -o json)"
+  worker_name="$(jq -r '.actors[0].ateomPodName // empty' <<<"${actor_json}")"
+  if [[ -z "${worker_name}" ]]; then
+    echo "actor/${actor_name} did not expose its assigned worker before delete injection" >&2
+    return 1
+  fi
+
+  install_runsc_delete_failure_injector "${worker_name}"
+  kubectl_ate suspend actor "${actor_name}"
+  wait_actor_status "${actor_name}" "STATUS_SUSPENDED" 300
+  if ! runsc_delete_failure_was_injected; then
+    restore_runsc_delete_injector >/dev/null 2>&1 || true
+    echo "runsc delete failure injector was not invoked for actor/${actor_name}" >&2
+    return 1
+  fi
+  restore_runsc_delete_injector
+
+  worker_logs="$(kubectl -n ate-demo logs "pod/${worker_name}" -c ateom --since=5m 2>&1)"
+  if ! grep -Fq 'runsc delete did not remove the container; retrying' <<<"${worker_logs}"; then
+    echo "actor/${actor_name} suspended without live evidence from the patched runsc delete retry path" >&2
+    return 1
+  fi
+  log "actor/${actor_name}: observed injected failure, verified-presence retry, and successful suspension"
+
+  kubectl -n ate-demo wait --for=condition=Ready "pod/${worker_name}" --timeout=2m
+  kubectl_ate delete actor "${actor_name}"
+  wait_actor_absent "${actor_name}" 120
+
+  # A fresh lifecycle after restoring the original binary proves that cleanup
+  # left the worker fleet routable rather than merely settling actor metadata.
+  run_direct_actor_lifecycle "orka-post-delete-retry-ci"
+  assert_no_suspending_actors
+}
+
+exercise_worker_replacement_recovery() {
+  local actor_name="orka-worker-loss-ci"
+  local host_header="${actor_name}.actors.resources.substrate.ate.dev"
+  local actor_json worker_name replacement_name
+
+  log "Validating worker-loss settlement and post-replacement direct routing"
+  kubectl_ate create actor "${actor_name}" --template ate-demo/orka-codex-ci
+  kubectl_ate resume actor "${actor_name}"
+  wait_actor_status "${actor_name}" "STATUS_RUNNING" 300
+  wait_http_ok "http://127.0.0.1:18082/healthz" "${host_header}" "" 300
+
+  actor_json="$(kubectl_ate get actor "${actor_name}" -o json)"
+  worker_name="$(jq -r '.actors[0].ateomPodName // empty' <<< "${actor_json}")"
+  if [[ -z "${worker_name}" ]]; then
+    echo "actor/${actor_name} did not expose its assigned worker before replacement" >&2
+    return 1
+  fi
+
+  kubectl -n ate-demo delete pod "${worker_name}" --wait=true
+  wait_worker_absent "${worker_name}" 120
+  kubectl -n ate-demo rollout status deployment/orka-workers-deployment --timeout=5m
+  wait_worker_count_at_least 3 180
+
+  kubectl_ate suspend actor "${actor_name}"
+  wait_actor_status "${actor_name}" "STATUS_SUSPENDED" 120
+  kubectl_ate delete actor "${actor_name}"
+  wait_actor_absent "${actor_name}" 120
+
+  replacement_name="orka-post-worker-loss-ci"
+  run_direct_actor_lifecycle "${replacement_name}"
+
+  # The dangling-worker path above cannot invoke CheckpointWorkload because the
+  # assigned Pod is gone. Inject one live runsc failure on the replacement fleet
+  # so the extended E2E proves the reviewed retry and verified-absence path.
+  exercise_runsc_delete_retry_recovery
+  assert_no_suspending_actors
+}
+
+exercise_direct_substrate() {
+  log "Running direct Substrate workspace-agent smoke"
+  kubectl -n ate-system port-forward svc/atenet-router 18082:80 >/tmp/orka-atenet-router-port-forward.log 2>&1 &
+  PORT_FORWARD_PID="$!"
+  sleep 3
+
+  run_direct_actor_lifecycle "orka-direct-ci"
+  if [[ "${SUBSTRATE_E2E_EXTENDED}" == "1" ]]; then
+    exercise_worker_replacement_recovery
+  fi
 
   kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
   PORT_FORWARD_PID=""
@@ -1232,6 +1731,9 @@ main() {
   git clone --quiet "${SUBSTRATE_REPO}" "${SUBSTRATE_DIR}"
   git -C "${SUBSTRATE_DIR}" checkout --quiet "${SUBSTRATE_REF}"
   apply_substrate_workspace_agent_capability_patch
+  apply_substrate_atenet_authorization_redaction_patch
+  apply_substrate_ateom_delete_recovery_patch
+  verify_reviewed_substrate_patch_set
   patch_substrate_kind_registry_script
 
   log "Creating kind cluster and installing Substrate"
@@ -1252,7 +1754,7 @@ main() {
   log "Building kubectl-ate"
   (cd "${SUBSTRATE_DIR}" && go build -o "${TMP_ROOT}/kubectl-ate" ./cmd/kubectl-ate)
 
-  local registry_ip registry_addr controller_image codex_image workspace_push_image workspace_actor_image mcp_push_image mcp_actor_image tool_client_image ateom_image
+  local registry_ip registry_addr controller_image workspace_push_image workspace_actor_image mcp_push_image mcp_actor_image tool_client_image ateom_image
   registry_ip="$(docker inspect -f '{{with index .NetworkSettings.Networks "kind"}}{{.IPAddress}}{{end}}' "${KIND_REGISTRY_NAME}")"
   if [[ -z "${registry_ip}" ]]; then
     registry_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{end}}' "${KIND_REGISTRY_NAME}" | head -n1)"
@@ -1263,7 +1765,6 @@ main() {
   fi
   registry_addr="localhost:${KIND_REGISTRY_PORT}"
   controller_image="${registry_addr}/orka/controller:${IMAGE_TAG}"
-  codex_image="${registry_addr}/orka/agent-harness-wrapper:${IMAGE_TAG}"
   workspace_push_image="${registry_addr}/orka/workspace-agent-root:${IMAGE_TAG}"
   workspace_actor_image="${registry_ip}:5000/orka/workspace-agent-root:${IMAGE_TAG}"
   mcp_push_image="${registry_addr}/orka/mcp-e2e-server:${IMAGE_TAG}"
@@ -1272,12 +1773,10 @@ main() {
 
   log "Building and pushing Orka images"
   docker build -t "${controller_image}" -f "${ROOT_DIR}/Dockerfile" "${ROOT_DIR}"
-  docker build -t "${codex_image}" -f "${ROOT_DIR}/workers/harness/Dockerfile" "${ROOT_DIR}"
   docker build -t "${workspace_push_image}" -f "${ROOT_DIR}/cmd/orka-workspace-agent/Dockerfile" "${ROOT_DIR}"
   docker build -t "${mcp_push_image}" -f "${ROOT_DIR}/cmd/orka-mcp-e2e-server/Dockerfile" "${ROOT_DIR}"
   docker build -t "${tool_client_image}" -f "${ROOT_DIR}/cmd/orka-tool-e2e-client/Dockerfile" "${ROOT_DIR}"
   docker push "${controller_image}"
-  docker push "${codex_image}"
   docker push "${workspace_push_image}"
   docker push "${mcp_push_image}"
   docker push "${tool_client_image}"
@@ -1285,11 +1784,14 @@ main() {
   log "Publishing Substrate ateom-gvisor image"
   ateom_image="$(publish_ateom_image)"
   create_substrate_resources "${ateom_image}" "${workspace_actor_image}" "${mcp_actor_image}"
-  deploy_orka "${controller_image}" "${codex_image}"
+  deploy_orka "${controller_image}"
   exercise_direct_substrate
   exercise_orka_tasks "${tool_client_image}"
+  assert_no_suspending_actors
 
   log "Agent Substrate E2E passed"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

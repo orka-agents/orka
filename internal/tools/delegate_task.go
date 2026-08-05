@@ -15,28 +15,58 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/labels"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"go.opentelemetry.io/otel/trace"
 )
 
-// DelegateTaskTool implements multi-agent task delegation
+const (
+	delegateRequestOperationField  = "operation"
+	delegateRequestParentTaskField = "parentTask"
+)
+
+// DelegateTaskSubjectTokenResolver resolves the exact subject token authorized
+// for one authenticated parent Task. Implementations must not fall back to
+// process-global worker credentials for brokered requests.
+type DelegateTaskSubjectTokenResolver func(context.Context, *corev1alpha1.Task, string) (string, error)
+
+// BrokeredDelegateTaskTransactionExchangeConfig carries controller-parsed TTS
+// settings and request-scoped dependencies for brokered child-token exchange.
+type BrokeredDelegateTaskTransactionExchangeConfig struct {
+	TTS                 contexttoken.TTSConfig
+	Exchanger           contexttoken.Exchanger
+	SubjectTokenType    string
+	ChildScope          string
+	ResolveSubjectToken DelegateTaskSubjectTokenResolver
+}
+
+// DelegateTaskTool implements multi-agent task delegation.
 type DelegateTaskTool struct {
-	k8sClient client.Client
+	k8sClient                   client.Client
+	brokeredTransactionExchange *BrokeredDelegateTaskTransactionExchangeConfig
 }
 
 // WorkspaceArgs specifies a git workspace for agent runtime tasks
 type WorkspaceArgs struct {
-	GitRepo      string `json:"gitRepo,omitempty"`
-	Branch       string `json:"branch,omitempty"`
-	Ref          string `json:"ref,omitempty"`
-	GitSecretRef string `json:"gitSecretRef,omitempty"`
-	PushBranch   string `json:"pushBranch,omitempty"`
+	Intent                       string `json:"intent,omitempty"`
+	GitRepo                      string `json:"gitRepo,omitempty"`
+	Branch                       string `json:"branch,omitempty"`
+	Ref                          string `json:"ref,omitempty"`
+	ReadCredentialRef            string `json:"readCredentialRef,omitempty"`
+	PublicationGitRepo           string `json:"publicationGitRepo,omitempty"`
+	PublicationReadCredentialRef string `json:"publicationReadCredentialRef,omitempty"`
+	PublicationCredentialRef     string `json:"publicationCredentialRef,omitempty"`
+	ForgeCredentialRef           string `json:"forgeCredentialRef,omitempty"`
+	PushBranch                   string `json:"pushBranch,omitempty"`
+	PRBaseBranch                 string `json:"prBaseBranch,omitempty"`
+	CreatePR                     bool   `json:"createPR,omitempty"`
 }
 
 // DelegateTaskArgs are the arguments for the delegate_task tool
@@ -82,6 +112,50 @@ func NewDelegateTaskTool(k8sClient client.Client) *DelegateTaskTool {
 	return &DelegateTaskTool{
 		k8sClient: k8sClient,
 	}
+}
+
+// NewBrokeredDelegateTaskTool creates a delegate_task implementation that uses
+// controller-parsed TTS settings and request-scoped subject-token resolution.
+// The configuration is copied so later caller mutation cannot change the live
+// broker policy.
+func NewBrokeredDelegateTaskTool(
+	k8sClient client.Client,
+	config BrokeredDelegateTaskTransactionExchangeConfig,
+) (*DelegateTaskTool, error) {
+	if k8sClient == nil {
+		return nil, fmt.Errorf("brokered delegate_task requires a Kubernetes client")
+	}
+	if config.TTS.Enabled() {
+		if config.Exchanger == nil {
+			return nil, fmt.Errorf("brokered delegate_task requires a transaction-token exchanger when TTS is enabled")
+		}
+		if config.ResolveSubjectToken == nil {
+			return nil, fmt.Errorf("brokered delegate_task requires request-scoped subject-token resolution when TTS is enabled")
+		}
+	}
+	copyConfig := config
+	return &DelegateTaskTool{
+		k8sClient:                   k8sClient,
+		brokeredTransactionExchange: &copyConfig,
+	}, nil
+}
+
+// RegisterBrokeredDelegateTaskTool replaces the generic delegate_task
+// registration with the controller-configured broker implementation.
+func RegisterBrokeredDelegateTaskTool(
+	registry *Registry,
+	k8sClient client.Client,
+	config BrokeredDelegateTaskTransactionExchangeConfig,
+) error {
+	if registry == nil {
+		return fmt.Errorf("brokered coordination tool registry is required")
+	}
+	tool, err := NewBrokeredDelegateTaskTool(k8sClient, config)
+	if err != nil {
+		return err
+	}
+	registry.Register(tool)
+	return nil
 }
 
 // Name returns the tool name
@@ -137,19 +211,48 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 					},
 					"branch": {
 						"type": "string",
-						"description": "Git branch name"
+						"description": "Git branch name. Omit with ref to resolve and freeze the repository's advertised default branch."
 					},
 					"ref": {
 						"type": "string",
 						"description": "Git ref (commit SHA or tag)"
 					},
-					"gitSecretRef": {
+					"intent": {
 						"type": "string",
-						"description": "Optional git credential Secret name. Omit to auto-discover git credentials or reuse the Copilot agent secret when available."
+						"enum": ["read", "write"],
+						"description": "Workspace intent. Defaults to read; publication fields require write."
+					},
+					"readCredentialRef": {
+						"type": "string",
+						"description": "Optional Secret name for clone/read credentials. Omit to auto-discover a read credential when available."
+					},
+					"publicationGitRepo": {
+						"type": "string",
+						"description": "Publication repository URL for write Tasks."
+					},
+					"publicationReadCredentialRef": {
+						"type": "string",
+						"description": "Optional Secret name for target-repository preflight and verification credentials."
+					},
+					"publicationCredentialRef": {
+						"type": "string",
+						"description": "Secret name for target-repository write credentials. Required for write intent."
+					},
+					"forgeCredentialRef": {
+						"type": "string",
+						"description": "Optional Secret name for forge API credentials used to reconcile pull requests."
 					},
 					"pushBranch": {
 						"type": "string",
-						"description": "Remote branch name to push changes to after the agent completes. When set, changes are committed and pushed automatically."
+						"description": "Publication branch name for a write Task."
+					},
+					"prBaseBranch": {
+						"type": "string",
+						"description": "Pull request base branch."
+					},
+					"createPR": {
+						"type": "boolean",
+						"description": "Reconcile a pull request after publication."
 					}
 				}
 			},
@@ -226,13 +329,45 @@ func namespacedDelegateAgent(namespace, name string) string {
 	return namespace + "/" + name
 }
 
-// parseDelegateArgs parses and validates the delegation arguments and environment.
+func validateDelegateNamespaceScope(toolCtx *ToolContext, resourceKind, namespace string) error {
+	if toolCtx == nil {
+		return nil
+	}
+	namespace = strings.TrimSpace(namespace)
+	if watchNamespace := strings.TrimSpace(toolCtx.WatchNamespace); watchNamespace != "" && namespace != watchNamespace {
+		return fmt.Errorf("%s namespace %q is outside watched namespace %q", resourceKind, namespace, watchNamespace)
+	}
+	if toolCtx.EnforceNamespaceIsolation {
+		requestNamespace := strings.TrimSpace(toolCtx.Namespace)
+		if namespace != requestNamespace {
+			return fmt.Errorf("%s namespace %q is outside request namespace %q", resourceKind, namespace, requestNamespace)
+		}
+	}
+	return nil
+}
+
+// parseDelegateArgs parses and validates delegation arguments against either
+// worker environment or an authenticated broker request context.
+//
+//nolint:gocyclo // Delegation keeps worker and authenticated broker policy checks auditable in one path.
 func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawMessage) (*delegationContext, error) {
 	parentName := os.Getenv(envOrkaTaskName)
 	parentNamespace := os.Getenv(envOrkaTaskNamespace)
 	depthStr := os.Getenv(envOrkaCoordinationDepth)
 	allowedAgents := os.Getenv(envOrkaCoordinationAllowedAgents)
 	maxDepthStr := os.Getenv(envOrkaCoordinationMaxDepth)
+	toolCtx := GetToolContext(ctx)
+	brokered := toolCtx != nil && toolCtx.Brokered
+	if brokered {
+		parentName = strings.TrimSpace(toolCtx.TaskID)
+		parentNamespace = strings.TrimSpace(toolCtx.Namespace)
+		depthStr = ""
+		allowedAgents = ""
+		maxDepthStr = ""
+		if parentName == "" || parentNamespace == "" {
+			return nil, fmt.Errorf("brokered delegation requires request-scoped task and namespace context")
+		}
+	}
 
 	var delegateArgs DelegateTaskArgs
 	if err := json.Unmarshal(args, &delegateArgs); err != nil {
@@ -244,29 +379,6 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 	}
 	if delegateArgs.Prompt == "" {
 		return nil, fmt.Errorf("prompt is required")
-	}
-
-	// Validate depth
-	currentDepth := 0
-	if depthStr != "" {
-		var err error
-		currentDepth, err = strconv.Atoi(depthStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid coordination depth %q: %w", depthStr, err)
-		}
-	}
-
-	maxDepth := 3
-	if maxDepthStr != "" {
-		var err error
-		maxDepth, err = strconv.Atoi(maxDepthStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid max coordination depth %q: %w", maxDepthStr, err)
-		}
-	}
-
-	if currentDepth+1 > maxDepth {
-		return nil, fmt.Errorf("coordination depth exceeded: current depth %d, max depth %d", currentDepth, maxDepth)
 	}
 
 	// Determine child task and target agent namespaces. The legacy namespace
@@ -295,13 +407,18 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		}
 	}
 
-	// Validate agent is allowed, including namespace when the allowlist entry is
-	// namespaced as namespace/name. Bare names retain existing same-name behavior.
-	if allowedAgents != "" && !delegatedAgentAllowed(delegateArgs.Agent, agentNS, taskNS, allowedAgents) {
-		return nil, fmt.Errorf("agent %q is not in the allowed agents list", namespacedDelegateAgent(agentNS, delegateArgs.Agent))
+	// Enforce the authenticated request's namespace boundary before any target
+	// Agent lookup or child creation. This keeps brokered execution at least as
+	// narrow as the controller's watch and namespace-isolation configuration.
+	if err := validateDelegateNamespaceScope(toolCtx, "child Task", taskNS); err != nil {
+		return nil, err
+	}
+	if err := validateDelegateNamespaceScope(toolCtx, "target Agent", agentNS); err != nil {
+		return nil, err
 	}
 
-	// Fetch parent Task for owner reference
+	// Fetch parent Task for owner reference. Brokered calls always require the
+	// exact authenticated Task; worker calls retain the legacy empty-parent path.
 	parentTask := &corev1alpha1.Task{}
 	if parentName != "" {
 		parentLookupNS := parentNamespace
@@ -313,7 +430,80 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		}
 	}
 
-	// Determine priority
+	if brokered {
+		authenticatedUID := strings.TrimSpace(toolCtx.TaskUID)
+		if authenticatedUID == "" || string(parentTask.UID) != authenticatedUID {
+			return nil, fmt.Errorf("brokered delegation parent Task identity changed")
+		}
+		depthStr = strings.TrimSpace(parentTask.Annotations[labels.AnnotationCoordinationDepth])
+		if depthStr == "" {
+			depthStr = "0"
+		}
+		if parentTask.Spec.AgentRef == nil || strings.TrimSpace(parentTask.Spec.AgentRef.Name) == "" {
+			return nil, fmt.Errorf("brokered delegation requires a parent Task with agentRef")
+		}
+		parentAgentNamespace := parentTask.Namespace
+		if value := strings.TrimSpace(parentTask.Spec.AgentRef.Namespace); value != "" {
+			parentAgentNamespace = value
+		}
+		parentAgent := &corev1alpha1.Agent{}
+		if err := t.k8sClient.Get(ctx, types.NamespacedName{
+			Name: parentTask.Spec.AgentRef.Name, Namespace: parentAgentNamespace,
+		}, parentAgent); err != nil {
+			return nil, fmt.Errorf("failed to get parent agent: %w", err)
+		}
+		coordination := parentAgent.Spec.Coordination
+		if coordination == nil || !coordination.Enabled {
+			return nil, fmt.Errorf("parent agent does not have coordination enabled")
+		}
+		if coordination.MaxDepth > 0 {
+			maxDepthStr = strconv.FormatInt(int64(coordination.MaxDepth), 10)
+		}
+		allowed := make([]string, 0, len(coordination.AllowedAgents))
+		for _, agent := range coordination.AllowedAgents {
+			name := strings.TrimSpace(agent.Name)
+			if name == "" {
+				continue
+			}
+			if namespace := strings.TrimSpace(agent.Namespace); namespace != "" {
+				allowed = append(allowed, namespacedDelegateAgent(namespace, name))
+			} else {
+				allowed = append(allowed, name)
+			}
+		}
+		allowedAgents = strings.Join(allowed, ",")
+	}
+
+	// Validate depth.
+	currentDepth := 0
+	if depthStr != "" {
+		var err error
+		currentDepth, err = strconv.Atoi(depthStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid coordination depth %q: %w", depthStr, err)
+		}
+	}
+
+	maxDepth := 3
+	if maxDepthStr != "" {
+		var err error
+		maxDepth, err = strconv.Atoi(maxDepthStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid max coordination depth %q: %w", maxDepthStr, err)
+		}
+	}
+
+	if currentDepth+1 > maxDepth {
+		return nil, fmt.Errorf("coordination depth exceeded: current depth %d, max depth %d", currentDepth, maxDepth)
+	}
+
+	// Validate agent is allowed, including namespace when the allowlist entry is
+	// namespaced as namespace/name. Bare names retain existing same-name behavior.
+	if (brokered || allowedAgents != "") && !delegatedAgentAllowed(delegateArgs.Agent, agentNS, taskNS, allowedAgents) {
+		return nil, fmt.Errorf("agent %q is not in the allowed agents list", namespacedDelegateAgent(agentNS, delegateArgs.Agent))
+	}
+
+	// Determine priority.
 	var priority *int32
 	if delegateArgs.Priority != nil {
 		priority = delegateArgs.Priority
@@ -321,7 +511,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		priority = parentTask.Spec.Priority
 	}
 
-	// Look up the target Agent to determine task type
+	// Look up the target Agent to determine task type.
 	targetAgent := &corev1alpha1.Agent{}
 	if err := t.k8sClient.Get(ctx, types.NamespacedName{
 		Name: delegateArgs.Agent, Namespace: agentNS,
@@ -443,17 +633,45 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 	childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
 
 	if dc.args.Workspace != nil {
-		childTask.Spec.AgentRuntime.Workspace = &corev1alpha1.WorkspaceConfig{
-			GitRepo:    dc.args.Workspace.GitRepo,
-			Branch:     dc.args.Workspace.Branch,
-			Ref:        dc.args.Workspace.Ref,
-			PushBranch: dc.args.Workspace.PushBranch,
+		intent := corev1alpha1.WorkspaceIntent(strings.ToLower(strings.TrimSpace(dc.args.Workspace.Intent)))
+		if intent == "" {
+			intent = corev1alpha1.WorkspaceIntentRead
 		}
-		secretRef, err := resolveWorkspaceGitSecretRef(ctx, t.k8sClient, dc.namespace, dc.targetAgent, dc.args.Workspace.GitSecretRef)
+		if intent != corev1alpha1.WorkspaceIntentRead && intent != corev1alpha1.WorkspaceIntentWrite {
+			return fmt.Errorf("workspace intent must be read or write")
+		}
+		workspace := &corev1alpha1.WorkspaceConfig{
+			Intent:             intent,
+			GitRepo:            dc.args.Workspace.GitRepo,
+			Branch:             dc.args.Workspace.Branch,
+			Ref:                dc.args.Workspace.Ref,
+			PublicationGitRepo: dc.args.Workspace.PublicationGitRepo,
+			PushBranch:         dc.args.Workspace.PushBranch,
+			PRBaseBranch:       dc.args.Workspace.PRBaseBranch,
+			CreatePR:           dc.args.Workspace.CreatePR,
+		}
+		if workspace.PublicationGitRepo != "" || workspace.PushBranch != "" || workspace.PRBaseBranch != "" || workspace.CreatePR {
+			workspace.Intent = corev1alpha1.WorkspaceIntentWrite
+		}
+		publicationCredential := strings.TrimSpace(dc.args.Workspace.PublicationCredentialRef)
+		if workspace.Intent == corev1alpha1.WorkspaceIntentWrite && publicationCredential == "" {
+			return fmt.Errorf("workspace publicationCredentialRef is required for write intent")
+		}
+		readRef, err := resolveWorkspaceCredentialRef(ctx, t.k8sClient, dc.namespace, dc.targetAgent, dc.args.Workspace.ReadCredentialRef)
 		if err != nil {
 			return err
 		}
-		childTask.Spec.AgentRuntime.Workspace.GitSecretRef = secretRef
+		workspace.ReadCredentialRef = readRef
+		if publicationReadCredential := strings.TrimSpace(dc.args.Workspace.PublicationReadCredentialRef); publicationReadCredential != "" {
+			workspace.PublicationReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: publicationReadCredential}
+		}
+		if publicationCredential != "" {
+			workspace.PublicationCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: publicationCredential}
+		}
+		if forgeCredential := strings.TrimSpace(dc.args.Workspace.ForgeCredentialRef); forgeCredential != "" {
+			workspace.ForgeCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: forgeCredential}
+		}
+		childTask.Spec.Workspace = workspace
 	}
 
 	if dc.args.MaxTurns != nil {
@@ -477,10 +695,7 @@ func (t *DelegateTaskTool) applyPriorTaskConfig(ctx context.Context, childTask *
 		// Copy workspace from prior task if not explicitly provided
 		if dc.args.Workspace == nil {
 			if priorWorkspace := taskWorkspace(priorTask); priorWorkspace != nil {
-				if childTask.Spec.AgentRuntime == nil {
-					childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
-				}
-				childTask.Spec.AgentRuntime.Workspace = priorWorkspace.DeepCopy()
+				childTask.Spec.Workspace = priorWorkspace.DeepCopy()
 			}
 		}
 
@@ -502,6 +717,134 @@ func (t *DelegateTaskTool) applyPriorTaskConfig(ctx context.Context, childTask *
 	}
 }
 
+func (t *DelegateTaskTool) shouldPrepareChildTransactionToken(
+	ctx context.Context,
+	parentTask *corev1alpha1.Task,
+) (bool, error) {
+	toolCtx := GetToolContext(ctx)
+	if toolCtx == nil || !toolCtx.Brokered {
+		return shouldPrepareChildTransactionToken(parentTask)
+	}
+	if parentTask == nil || parentTask.Spec.Transaction == nil {
+		return false, nil
+	}
+	if t.brokeredTransactionExchange == nil {
+		return false, fmt.Errorf("brokered delegate_task transaction-token exchange configuration is not registered")
+	}
+	return t.brokeredTransactionExchange.TTS.Enabled(), nil
+}
+
+func (t *DelegateTaskTool) prepareChildTransactionToken(
+	ctx context.Context,
+	parentTask, childTask *corev1alpha1.Task,
+	operation, agent string,
+) error {
+	toolCtx := GetToolContext(ctx)
+	if toolCtx == nil || !toolCtx.Brokered {
+		return prepareChildTransactionToken(ctx, t.k8sClient, parentTask, childTask, operation, agent)
+	}
+	return t.prepareBrokeredChildTransactionToken(ctx, parentTask, childTask, operation, agent)
+}
+
+func (t *DelegateTaskTool) prepareBrokeredChildTransactionToken(
+	ctx context.Context,
+	parentTask, childTask *corev1alpha1.Task,
+	operation, agent string,
+) error {
+	config := t.brokeredTransactionExchange
+	if config == nil {
+		return fmt.Errorf("brokered delegate_task transaction-token exchange configuration is not registered")
+	}
+	if !config.TTS.Enabled() || parentTask == nil || parentTask.Spec.Transaction == nil {
+		return nil
+	}
+	if parentTask.UID == "" {
+		return fmt.Errorf("parent task UID is required for child transaction token exchange")
+	}
+	if config.Exchanger == nil {
+		return fmt.Errorf("brokered delegate_task transaction-token exchanger is not configured")
+	}
+	if config.ResolveSubjectToken == nil {
+		return fmt.Errorf("brokered delegate_task request-scoped subject-token resolver is not configured")
+	}
+
+	scope := strings.TrimSpace(config.ChildScope)
+	if scope == "" {
+		return fmt.Errorf("context-token child scope is required when brokered TTS is enabled for child task tokens")
+	}
+	if err := validateChildTransactionScope(parentTask, scope); err != nil {
+		return err
+	}
+	subjectToken, err := config.ResolveSubjectToken(ctx, parentTask, config.TTS.TokenSource)
+	if err != nil {
+		return fmt.Errorf("resolving brokered child transaction subject token: %w", err)
+	}
+	if strings.TrimSpace(subjectToken) == "" {
+		return fmt.Errorf("resolving brokered child transaction subject token: resolved token is empty")
+	}
+	subjectTokenType := strings.TrimSpace(config.SubjectTokenType)
+	if subjectTokenType == "" {
+		subjectTokenType = contexttoken.SubjectTokenTypeForSource(config.TTS.TokenSource)
+	}
+
+	requestDetails := map[string]any{
+		delegateRequestOperationField:  operation,
+		delegateRequestParentTaskField: parentTask.Name,
+		namespaceField:                 childTask.Namespace,
+	}
+	if agent != "" {
+		requestDetails["agent"] = agent
+	}
+	if parentTask.Spec.Transaction.ID != "" {
+		requestDetails["txn"] = parentTask.Spec.Transaction.ID
+	}
+	token, err := config.Exchanger.Exchange(ctx, contexttoken.ExchangeRequest{
+		SubjectToken:     subjectToken,
+		SubjectTokenType: subjectTokenType,
+		Scope:            scope,
+		RequestedTTL:     config.TTS.ChildTokenTTL,
+		RequestDetails:   requestDetails,
+	})
+	if err != nil {
+		return fmt.Errorf("exchanging child transaction token: %w", err)
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return fmt.Errorf("exchanging child transaction token: TTS returned an empty token")
+	}
+
+	secretName, err := childTransactionTokenSecretName(parentTask.Name)
+	if err != nil {
+		return err
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            secretName,
+			Namespace:       childTask.Namespace,
+			OwnerReferences: taskOwnerReference(parentTask),
+			Labels: map[string]string{
+				labels.LabelParentTask: labels.SelectorValue(parentTask.Name),
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: parentTask.Name,
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"token": []byte(token),
+		},
+	}
+	if err := t.k8sClient.Create(ctx, secret); err != nil {
+		return fmt.Errorf("creating child transaction token secret: %w", err)
+	}
+	stampChildTransactionScope(childTask, scope)
+	if childTask.Annotations == nil {
+		childTask.Annotations = map[string]string{}
+	}
+	childTask.Annotations[labels.AnnotationTransactionTokenSecret] = secretName
+	return nil
+}
+
 // Execute delegates a task to another agent
 func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	dc, err := t.parseDelegateArgs(ctx, args)
@@ -520,13 +863,13 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return "", err
 	}
 
-	childTokenExchangeEnabled, err := shouldPrepareChildTransactionToken(dc.parentTask)
+	childTokenExchangeEnabled, err := t.shouldPrepareChildTransactionToken(ctx, dc.parentTask)
 	if err != nil {
 		return "", err
 	}
 	if childTokenExchangeEnabled {
 		markChildTransactionTokenPending(childTask)
-		if err := prepareChildTransactionToken(ctx, t.k8sClient, dc.parentTask, childTask, "delegateTask", dc.args.Agent); err != nil {
+		if err := t.prepareChildTransactionToken(ctx, dc.parentTask, childTask, "delegateTask", dc.args.Agent); err != nil {
 			return "", err
 		}
 	}

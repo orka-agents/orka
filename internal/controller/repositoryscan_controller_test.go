@@ -2412,10 +2412,8 @@ func patchTaskForFixture(fixture patchIngestFixture, resultAvailable bool) *core
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Prompt: fmt.Sprintf("REQUIRED_SECURITY_ARTIFACTS: %s, %s\n", diffName, summaryName),
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					PushBranch: fixture.proposal.Branch,
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				PushBranch: fixture.proposal.Branch,
 			},
 		},
 		Status: corev1alpha1.TaskStatus{

@@ -17,6 +17,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/test/utils"
 )
 
@@ -32,7 +33,7 @@ var _ = Describe("Agent Advanced Features", func() {
 		}
 	})
 
-	It("should include skill content metadata in the harness-wrapper turn", func() {
+	It("should reject skill-backed built-in ACP tasks before RuntimePool demand", func() {
 		skillName := prefix + "skill"
 		agentName := prefix + "skill-agent"
 		taskName := prefix + "skill-task"
@@ -77,6 +78,7 @@ var _ = Describe("Agent Advanced Features", func() {
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false
 				},
+				"model": {"name": "claude-sonnet-4-20250514"},
 				"skills": [{
 					"name": "%s"
 				}]
@@ -119,13 +121,24 @@ var _ = Describe("Agent Advanced Features", func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create task with skill agent")
 
-		By("verifying harness-wrapper metadata is planned for the skill task")
-		verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
-			"runtime":   "claude",
-			"wrapper":   "cli",
-			"maxTurns":  "1",
-			"allowBash": "false",
-		}, 2*time.Minute)
+		By("verifying unsupported skills fail before ACP queue admission")
+		Eventually(func(g Gomega) {
+			task := fetchTaskForACPAssertion(g, taskName)
+			g.Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			g.Expect(task.Status.Message).To(Equal(
+				"built-in ACP runtimes do not support Agent.spec.skills; refusing to omit declared skills",
+			))
+			g.Expect(task.Status.Attempts).To(BeZero())
+			g.Expect(task.Status.Execution).NotTo(BeNil())
+			g.Expect(task.Status.Execution.State).To(Equal(corev1alpha1.TaskExecutionStateFailed))
+			g.Expect(task.Status.Execution.Reason).To(Equal(corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile")))
+			g.Expect(task.Status.Execution.Attempt).To(BeZero())
+			g.Expect(task.Status.Execution.PromptID).To(BeEmpty())
+			g.Expect(task.Status.Execution.RuntimePoolName).To(BeEmpty())
+			g.Expect(task.Status.Delivery).NotTo(BeNil())
+			g.Expect(task.Status.Delivery.State).To(Equal(corev1alpha1.TaskDeliveryStateNotRequested))
+			g.Expect(task.Status.Delivery.Outcome).To(Equal(corev1alpha1.TaskDeliveryOutcomeNotRequested))
+		}, 30*time.Second, time.Second).Should(Succeed())
 
 		By("verifying the Task does not use a worker Job")
 		verifyNoJobForTask(taskName, 5*time.Second)
@@ -152,6 +165,7 @@ var _ = Describe("Agent Advanced Features", func() {
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false
 				},
+				"model": {"name": "claude-sonnet-4-20250514"},
 				"resources": {
 					"requests": {"memory": "128Mi", "cpu": "100m"},
 					"limits": {"memory": "256Mi", "cpu": "200m"}

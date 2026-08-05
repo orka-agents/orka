@@ -1,5 +1,9 @@
-# Use an explicit default provider for Execution Workspaces
+# ADR 0001: Use an explicit default provider for Execution Workspaces
 
-When a Task requests an Execution Workspace without setting `spec.execution.workspace.provider`, Orka resolves the provider from an operator-configured Default Workspace Provider and falls back to `agent-sandbox` for compatibility. Orka does not infer the provider from installed cluster components because ambient detection is ambiguous when multiple providers are installed, stale CRDs remain, or RBAC hides provider resources.
+## Status
 
-Standard Worker Execution is not a provider. Tasks that do not request an Execution Workspace keep the existing direct Kubernetes worker Job path.
+Superseded by the ACP core RuntimePool cutover.
+
+The earlier API allowed a Task to select an execution-workspace provider through `spec.execution.workspace.provider`. The current built-in agent path rejects `Task.spec.execution.workspace` and never auto-detects or defaults an upstream provider.
+
+Current agent repository input and publication policy belongs at top-level `Task.spec.workspace`. Future agent-sandbox or Substrate integration must be explicit, operator-configured, and implemented behind the `orka.harness.v2` RuntimeSession lifecycle; ambient provider discovery remains disallowed.

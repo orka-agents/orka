@@ -13,7 +13,6 @@ import (
 	"os"
 	"strings"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -44,12 +43,14 @@ func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
 	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, "image": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Container image to run. Leave empty to use the default worker image which includes common tools (kubectl, sh) and writes results to a ConfigMap. Only set a custom image if you need a specific runtime not in the default worker."},
 		"command": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Command to execute"},
 		"args":    map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Arguments to the command"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Git workspace for the command. Required when the command validates, builds, tests, or inspects repository files. Orka prepares /workspace before running the container and records workspace provenance in the result.", jsonSchemaPropertiesField: map[string]any{
-			"gitRepo":      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Git repository URL"},
-			"branch":       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Git branch to clone from (must exist). Omit to use the default branch."},
-			"ref":          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact git ref, commit SHA, or tag to checkout. Prefer this for validation."},
-			"gitSecretRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name containing git credentials. Omit for public repositories. Container tasks do not auto-discover git credentials."},
-			"subPath":      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo to run from"},
-			"pushBranch":   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Branch name to push command-produced changes to. Omit for read-only validation."},
+			"gitRepo":                  map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source Git repository URL"},
+			"branch":                   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist). Omit to use the default branch."},
+			"ref":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact source git ref, commit SHA, or tag to checkout. Prefer this for validation."},
+			"readCredentialRef":        map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for clone/read credentials. Omit for public repositories."},
+			"publicationGitRepo":       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication repository URL for command-produced changes"},
+			"publicationCredentialRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for publication credentials"},
+			"subPath":                  map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo to run from"},
+			"pushBranch":               map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication branch name. Omit for read-only validation."},
 		},
 		}, priorTaskField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional prior task whose structured diff should be applied before running the container command. If workspace is omitted, Orka copies the workspace from this prior task when available."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000"}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
 	}, jsonSchemaRequiredField: []string{nameField},
@@ -261,6 +262,14 @@ func validateContainerTaskWorkspace(task *corev1alpha1.Task) *ChatToolError {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeContainer {
 		return nil
 	}
+	if task.Spec.Workspace != nil && strings.TrimSpace(task.Spec.Workspace.PushBranch) != "" &&
+		(task.Spec.Workspace.PublicationCredentialRef == nil || strings.TrimSpace(task.Spec.Workspace.PublicationCredentialRef.Name) == "") {
+		return &ChatToolError{
+			Type:       "missing_publication_credential",
+			Message:    "container workspace.pushBranch requires an explicit workspace.publicationCredentialRef",
+			Suggestion: "Provide a publicationCredentialRef with write access to publicationGitRepo. Do not reuse readCredentialRef implicitly for publication.",
+		}
+	}
 	if task.Spec.Workspace != nil && task.Spec.Workspace.GitRepo != "" {
 		return nil
 	}
@@ -270,7 +279,7 @@ func validateContainerTaskWorkspace(task *corev1alpha1.Task) *ChatToolError {
 	return &ChatToolError{
 		Type:       "missing_workspace",
 		Message:    "container command appears to validate or inspect repository files, but no workspace.gitRepo was provided or inherited",
-		Suggestion: "Retry create_container_task with workspace.gitRepo, workspace.gitSecretRef when private, and workspace.ref or workspace.branch for the exact code under test. Alternatively provide prior_task for a task that already has a workspace.",
+		Suggestion: "Retry create_container_task with workspace.gitRepo, workspace.readCredentialRef when private, and workspace.ref or workspace.branch for the exact code under test. Alternatively provide prior_task for a task that already has a workspace.",
 	}
 }
 
@@ -327,11 +336,18 @@ func buildContainerTask(a map[string]any) *corev1alpha1.Task {
 			if subPath := chatGetStringArg(wsMap, "subPath"); subPath != "" {
 				wsCfg.SubPath = subPath
 			}
-			if pushBranch := chatGetStringArg(wsMap, "pushBranch"); pushBranch != "" {
-				wsCfg.PushBranch = pushBranch
+			if readCredentialRef := chatGetStringArg(wsMap, "readCredentialRef"); readCredentialRef != "" {
+				wsCfg.ReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: readCredentialRef}
 			}
-			if gitSecretRef := chatGetStringArg(wsMap, "gitSecretRef"); gitSecretRef != "" {
-				wsCfg.GitSecretRef = &corev1.LocalObjectReference{Name: gitSecretRef}
+			if publicationGitRepo := chatGetStringArg(wsMap, "publicationGitRepo"); publicationGitRepo != "" {
+				wsCfg.PublicationGitRepo = publicationGitRepo
+			}
+			if publicationCredentialRef := chatGetStringArg(wsMap, "publicationCredentialRef"); publicationCredentialRef != "" {
+				wsCfg.PublicationCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: publicationCredentialRef}
+			}
+			if pushBranch := chatGetStringArg(wsMap, "pushBranch"); pushBranch != "" {
+				wsCfg.Intent = corev1alpha1.WorkspaceIntentWrite
+				wsCfg.PushBranch = pushBranch
 			}
 			task.Spec.Workspace = wsCfg
 		}

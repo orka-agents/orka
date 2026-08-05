@@ -44,7 +44,7 @@ var _ = Describe("Agent Task", Ordered, func() {
 		dumpDebugInfo(taskName)
 	})
 
-	It("should start a harness-wrapper turn for an agent-type task", func() {
+	It("should queue an agent task on an ACP v2 RuntimePool", func() {
 		By("creating an Agent CRD with claude runtime")
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
@@ -58,7 +58,8 @@ var _ = Describe("Agent Task", Ordered, func() {
 					"type": "claude",
 					"defaultMaxTurns": 5,
 					"defaultAllowBash": false
-				}
+				},
+				"model": {"name": "claude-sonnet-4-20250514"}
 			}
 		}`, agentName, namespace)
 
@@ -92,12 +93,12 @@ var _ = Describe("Agent Task", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create agent Task")
 
-		By("verifying harness-wrapper metadata is planned for the agent task")
-		verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
-			"runtime":   "claude",
-			"wrapper":   "cli",
-			"maxTurns":  "3",
-			"allowBash": "false",
+		By("verifying ACP v2 execution and RuntimePool status")
+		verifyACPTaskRuntimeForTask(taskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(3),
+			AllowBash:       acpBool(false),
 		}, 2*time.Minute)
 
 		By("verifying the Task status transitions from Pending")

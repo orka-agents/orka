@@ -136,22 +136,13 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		}
 	})
 
-	It("runs authenticated ingress through a runtimeRef task and delivers the final reply", func() {
+	It("runs authenticated ingress and delivers the fail-closed runtime error", func() {
 		adapterDNSName := fmt.Sprintf("%s.%s.svc", gatewayE2EAdapterName, namespace)
 		adapterEndpoint := fmt.Sprintf("https://%s:%d", adapterDNSName, gatewayE2EAdapterPort)
-		runtimeEndpoint := fmt.Sprintf(
-			"http://%s.%s.svc.cluster.local:%d",
-			gatewayE2ERuntimeServiceName,
-			namespace,
-			gatewayE2ERuntimePort,
-		)
-
 		By("generating ephemeral Gateway authentication and TLS material")
 		inboundBearer, err := gatewayE2ERandomBearer()
 		Expect(err).NotTo(HaveOccurred())
 		outboundBearer, err := gatewayE2ERandomBearer()
-		Expect(err).NotTo(HaveOccurred())
-		runtimeBearer, err := gatewayE2ERandomBearer()
 		Expect(err).NotTo(HaveOccurred())
 		caPEM, serverCertPEM, serverKeyPEM, err := gatewayE2EGenerateTLS(adapterDNSName)
 		Expect(err).NotTo(HaveOccurred())
@@ -183,27 +174,7 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		Expect(applyManifestJSON(gatewayE2EAdapterManifest())).To(Succeed())
 		Expect(gatewayE2EWaitForDeployment(gatewayE2EAdapterName, 2*time.Minute)).To(Succeed())
 
-		By("deploying the deterministic external AgentRuntime fixture")
-		Expect(applyManifestJSON(agentRuntimeExternalGoodSecret(
-			gatewayE2ERuntimeAuthResourceName,
-			gatewayE2ERuntimeName,
-			runtimeEndpoint,
-			runtimeBearer,
-		))).To(Succeed())
-		Expect(applyManifestJSON(agentRuntimeExternalHarnessDeployment(
-			gatewayE2ERuntimeDeploymentName,
-			gatewayE2ERuntimeServiceName,
-			runtimeBearer,
-		))).To(Succeed())
-		Expect(gatewayE2EWaitForDeployment(gatewayE2ERuntimeDeploymentName, 2*time.Minute)).To(Succeed())
-		Expect(applyManifestJSON(agentRuntimeExternalRuntime(
-			gatewayE2ERuntimeName,
-			runtimeEndpoint,
-			gatewayE2ERuntimeAuthResourceName,
-		))).To(Succeed())
-		waitForAgentRuntimeReady(gatewayE2ERuntimeName, true, 2*time.Minute)
-
-		By("creating the runtime-backed Agent")
+		By("creating an Agent that references an unavailable external v2 runtime")
 		Expect(applyManifestJSON(gatewayE2EAgentManifest())).To(Succeed())
 
 		By("creating the GatewayClass, Gateway, and GatewayBinding")
@@ -304,19 +275,13 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		Expect(task.Annotations).To(HaveKeyWithValue(gatewayruntime.TaskGatewayNameAnnotation, gatewayE2EName))
 		Expect(task.Annotations).To(HaveKeyWithValue(gatewayruntime.TaskGatewayBindingAnnotation, gatewayE2EBindingName))
 
-		waitForTaskPhase(taskName, "Succeeded", 3*time.Minute)
+		waitForTaskPhase(taskName, "Failed", 3*time.Minute)
 		verifyNoJobForTask(taskName, 5*time.Second)
-		verifyResultAvailable(taskName)
-		assertTaskHarnessRuntimeStatus(
-			taskName,
-			gatewayE2ERuntimeName,
-			runtimeEndpoint,
-			gatewayE2ERuntimeAuthResourceName,
-		)
-		result := fetchTaskResultViaAPI(apiBaseURL, apiToken, taskName)
-		Expect(strings.TrimSpace(result)).To(Equal("ok"))
+		failedTask, err := gatewayE2EGetTask(taskName)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(failedTask.Status.Message).To(ContainSubstring("external AgentRuntime"))
 
-		By("waiting for durable completion and outbound delivery")
+		By("waiting for durable failure projection and outbound delivery")
 		event := waitForGatewayE2ECompletedEvent(apiBaseURL, apiToken, eventID, 4*time.Minute)
 		Expect(event.GatewayName).To(Equal(gatewayE2EName))
 		Expect(event.BindingName).To(Equal(gatewayE2EBindingName))
@@ -330,8 +295,8 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		Expect(delivery.EventID).To(Equal(eventID))
 		Expect(delivery.TaskName).To(Equal(taskName))
 		Expect(delivery.SessionName).To(Equal(event.SessionName))
-		Expect(delivery.Kind).To(Equal(protocol.DeliveryKindFinal))
-		Expect(delivery.Text).To(Equal(result))
+		Expect(delivery.Kind).To(Equal(protocol.DeliveryKindError))
+		Expect(delivery.Text).To(Equal("The task could not be completed."))
 		Expect(delivery.IdempotencyID).To(Equal(delivery.ID))
 		Expect(delivery.AttemptCount).To(Equal(1))
 		Expect(delivery.ProviderMessageID).To(Equal("reference:" + delivery.ID))
@@ -982,5 +947,4 @@ func dumpGatewayE2EDiagnostics(eventID, taskName string) {
 		_, _ = fmt.Fprintf(GinkgoWriter, "diagnostic: kubectl %s\n%s\n", strings.Join(args, " "), output)
 	}
 	dumpControllerManagerDiagnostics()
-	dumpAgentRuntimeExternalDiagnostics(gatewayE2ERuntimeName)
 }

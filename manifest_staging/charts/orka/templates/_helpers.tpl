@@ -78,16 +78,85 @@ suffix so long release names cannot collapse all trust tiers to one name.
 {{- printf "%s-container-worker" (include "orka.fullname" . | trunc 46 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{/*
-Create release-scoped harness-wrapper names while reserving room for suffixes
-that must remain valid DNS labels (notably the Service name).
-*/}}
-{{- define "orka.harnessWrapperName" -}}
-{{- printf "%s-agent-harness-wrapper" (include "orka.fullname" . | trunc 41 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- define "orka.controllerName" -}}
+{{- printf "%s-controller" (include "orka.fullname" . | trunc 52 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "orka.harnessWrapperAuthSecretName" -}}
-{{- printf "%s-harness-wrapper-auth" (include "orka.fullname" . | trunc 42 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- define "orka.publisherName" -}}
+{{- printf "%s-workspace-publisher" (include "orka.fullname" . | trunc 43 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.publisherAuthSecretName" -}}
+{{- printf "%s-workspace-publisher-auth" (include "orka.fullname" . | trunc 38 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.acpArtifactSecretName" -}}
+{{- printf "%s-acp-artifact-capability" (include "orka.fullname" . | trunc 39 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.providerProxyName" -}}
+{{- printf "%s-provider-auth-proxy" (include "orka.fullname" . | trunc 43 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.scmEgressProxyName" -}}
+{{- printf "%s-scm-egress-proxy" (include "orka.fullname" . | trunc 46 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.scmEgressProxyAuthSecretName" -}}
+{{- printf "%s-scm-egress-proxy-auth" (include "orka.fullname" . | trunc 41 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.storeName" -}}
+{{- printf "%s-store" (include "orka.fullname" . | trunc 57 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.vekilIngressPolicyName" -}}
+{{- printf "%s-vekil-ingress" (include "orka.fullname" . | trunc 49 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Create the name of the workspace publisher ServiceAccount to use.
+*/}}
+{{- define "orka.publisherServiceAccountName" -}}
+{{- if .Values.publisher.serviceAccount.create }}
+{{- default (include "orka.publisherName" .) .Values.publisher.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.publisher.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Reject mutable ACP runtime image references when a provider image is configured.
+An empty provider image leaves that provider unavailable; Tasks still fail closed
+because the ACP runtime remains enabled and has no legacy fallback.
+*/}}
+{{- define "orka.validateACPRuntimeImage" -}}
+{{- $name := .name -}}
+{{- $ref := default "" .ref -}}
+{{- if and $ref (not (regexMatch "^.+@sha256:[0-9a-f]{64}$" $ref)) -}}
+{{- fail (printf "%s must be an immutable image reference ending in @sha256:<64 lowercase hex characters>; got %q" $name $ref) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The chart-managed provider proxy is release-namespaced and its NetworkPolicies
+are intentionally pinned to the chart-supported Vekil Service.
+*/}}
+{{- define "orka.validateProviderProxyConfig" -}}
+{{- if .Values.providerProxy.enabled -}}
+{{- $configuredNamespace := trim (default "" .Values.controller.acpRuntime.providerProxyNamespace) -}}
+{{- if and $configuredNamespace (ne $configuredNamespace .Release.Namespace) -}}
+{{- fail (printf "controller.acpRuntime.providerProxyNamespace must be empty or match the Helm release namespace %q when providerProxy.enabled=true" .Release.Namespace) -}}
+{{- end -}}
+{{- $upstream := trimSuffix "/" (trim (default "" .Values.providerProxy.upstreamBaseURL)) -}}
+{{- if ne $upstream "http://vekil.vekil-system.svc:1337" -}}
+{{- fail "providerProxy.upstreamBaseURL must be http://vekil.vekil-system.svc:1337 (an optional trailing slash is accepted)" -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{- define "orka.providerProxyUpstreamBaseURL" -}}
+{{- trimSuffix "/" (trim (default "" .Values.providerProxy.upstreamBaseURL)) -}}
 {{- end }}
 
 
@@ -134,4 +203,13 @@ Create release-scoped static worker ClusterRoleBinding names.
 
 {{- define "orka.containerWorkerClusterRoleBindingName" -}}
 {{- printf "%s-container-worker-rolebinding" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
+{{- end }}
+
+{{/* Render repository@digest when an immutable digest is configured. */}}
+{{- define "orka.imageRef" -}}
+{{- if .digest -}}
+{{ printf "%s@%s" .repository .digest }}
+{{- else -}}
+{{ printf "%s:%s" .repository .tag }}
+{{- end -}}
 {{- end }}

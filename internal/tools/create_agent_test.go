@@ -9,16 +9,15 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
-	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestCreateAgentTool_Name(t *testing.T) {
@@ -48,6 +47,22 @@ func TestCreateAgentTool_Parameters(t *testing.T) {
 	}
 	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
+	}
+	required, ok := schema["required"].([]any)
+	if !ok {
+		t.Fatal("Parameters schema required field is not an array")
+	}
+	if slices.Contains(required, any("systemPrompt")) {
+		t.Error("Parameters schema must not require systemPrompt for OpenCode")
+	}
+	properties, ok := schema[jsonSchemaPropertiesField].(map[string]any)
+	if !ok {
+		t.Fatal("Parameters schema properties field is not an object")
+	}
+	systemPrompt, ok := properties["systemPrompt"].(map[string]any)
+	description, _ := systemPrompt[jsonSchemaDescriptionField].(string)
+	if !ok || !strings.Contains(description, "Required unless runtime.type is opencode") {
+		t.Fatalf("systemPrompt schema = %#v, want OpenCode omission guidance", systemPrompt)
 	}
 }
 
@@ -416,301 +431,238 @@ func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
 	}
 }
 
-func TestCreateAgentTool_Execute_PreservesExplicitRuntimeSecretRef(t *testing.T) {
-	t.Setenv(envOrkaTaskName, parentTaskName)
-	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-
-	k8sClient := newFakeClient(
-		parentTask(),
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: claudeCredentialsSecretName, Namespace: defaultNamespace}},
-	)
-	tool := NewCreateAgentTool(k8sClient)
-
-	args := json.RawMessage(`{
-		"role": "coder",
-		"systemPrompt": "You write code",
-		"runtime": {
-			"type": "claude",
-			"secretRef": "claude-credentials"
-		}
-	}`)
-
-	result, err := tool.Execute(context.Background(), args)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-
-	var agentResult CreateAgentResult
-	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
-		t.Fatalf("failed to unmarshal result: %v", err)
-	}
-
-	agent := &corev1alpha1.Agent{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name:      agentResult.AgentName,
-		Namespace: agentResult.Namespace,
-	}, agent); err != nil {
-		t.Fatalf("failed to get agent: %v", err)
-	}
-
-	if agent.Spec.Runtime == nil {
-		t.Fatal("agent.Spec.Runtime is nil")
-	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType(runtimeTypeClaude) {
-		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, runtimeTypeClaude)
-	}
-	if agent.Spec.SecretRef == nil {
-		t.Fatal("agent.Spec.SecretRef is nil")
-	}
-	if agent.Spec.SecretRef.Name != claudeCredentialsSecretName {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, claudeCredentialsSecretName)
-	}
-}
-
-func TestCreateAgentTool_Execute_AutoDiscoversRuntimeSecretRefWhenOmitted(t *testing.T) {
-	t.Setenv(envOrkaTaskName, parentTaskName)
-	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-
-	k8sClient := newFakeClient(
-		parentTask(),
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: claudeAPIKeySecretName, Namespace: defaultNamespace}},
-	)
-	tool := NewCreateAgentTool(k8sClient)
-
-	args := json.RawMessage(`{
-		"role": "coder",
-		"systemPrompt": "You write code",
-		"runtime": {
-			"type": "claude"
-		}
-	}`)
-
-	result, err := tool.Execute(context.Background(), args)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-
-	var agentResult CreateAgentResult
-	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
-		t.Fatalf("failed to unmarshal result: %v", err)
-	}
-
-	agent := &corev1alpha1.Agent{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name:      agentResult.AgentName,
-		Namespace: agentResult.Namespace,
-	}, agent); err != nil {
-		t.Fatalf("failed to get agent: %v", err)
-	}
-
-	if agent.Spec.Runtime == nil {
-		t.Fatal("agent.Spec.Runtime is nil")
-	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType(runtimeTypeClaude) {
-		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, runtimeTypeClaude)
-	}
-	if agent.Spec.SecretRef == nil {
-		t.Fatal("agent.Spec.SecretRef is nil")
-	}
-	if agent.Spec.SecretRef.Name != claudeAPIKeySecretName {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, claudeAPIKeySecretName)
-	}
-}
-
-func TestCreateAgentTool_Execute_AutoDiscoversCodexRuntimeSecretRefWhenOmitted(t *testing.T) {
-	t.Setenv(envOrkaTaskName, parentTaskName)
-	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-
-	k8sClient := newFakeClient(
-		parentTask(),
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: codexProxyTokenSecretName, Namespace: defaultNamespace}},
-	)
-	tool := NewCreateAgentTool(k8sClient)
-
-	args := json.RawMessage(`{
-		"role": "coder",
-		"systemPrompt": "You write code",
-		"runtime": {
-			"type": "codex"
-		}
-	}`)
-
-	result, err := tool.Execute(context.Background(), args)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-
-	var agentResult CreateAgentResult
-	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
-		t.Fatalf("failed to unmarshal result: %v", err)
-	}
-
-	agent := &corev1alpha1.Agent{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name:      agentResult.AgentName,
-		Namespace: agentResult.Namespace,
-	}, agent); err != nil {
-		t.Fatalf("failed to get agent: %v", err)
-	}
-
-	if agent.Spec.Runtime == nil {
-		t.Fatal("agent.Spec.Runtime is nil")
-	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType("codex") {
-		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, "codex")
-	}
-	if agent.Spec.SecretRef == nil {
-		t.Fatal("agent.Spec.SecretRef is nil")
-	}
-	if agent.Spec.SecretRef.Name != codexProxyTokenSecretName {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, codexProxyTokenSecretName)
-	}
-}
-
-func TestCreateAgentTool_Execute_AcceptsCustomRuntimeSecretRef(t *testing.T) {
-	t.Setenv(envOrkaTaskName, parentTaskName)
-	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-
-	k8sClient := newFakeClient(
-		parentTask(),
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testRuntimeCredsSecretName, Namespace: defaultNamespace}},
-	)
-	tool := NewCreateAgentTool(k8sClient)
-
-	args := json.RawMessage(`{
-		"role": "coder",
-		"systemPrompt": "You write code",
-		"runtime": {
-			"type": "claude",
-			"secretRef": "runtime-creds"
-		}
-	}`)
-
-	result, err := tool.Execute(context.Background(), args)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-
-	var agentResult CreateAgentResult
-	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
-		t.Fatalf("failed to unmarshal result: %v", err)
-	}
-
-	agent := &corev1alpha1.Agent{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name:      agentResult.AgentName,
-		Namespace: agentResult.Namespace,
-	}, agent); err != nil {
-		t.Fatalf("failed to get agent: %v", err)
-	}
-	if agent.Spec.SecretRef == nil {
-		t.Fatal("agent.Spec.SecretRef is nil")
-	}
-	if agent.Spec.SecretRef.Name != testRuntimeCredsSecretName {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, testRuntimeCredsSecretName)
-	}
-}
-
-func TestCreateAgentTool_Execute_AcceptsOpencodeRuntimeSecretRef(t *testing.T) {
-	t.Setenv(envOrkaTaskName, parentTaskName)
-	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-
-	k8sClient := newFakeClient(
-		parentTask(),
-		&corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: testRuntimeCredsSecretName, Namespace: defaultNamespace},
-			Data: map[string][]byte{
-				workerenv.OpenAIBaseURL: []byte("https://models.example.invalid/v1"),
-				workerenv.OpenAIAPIKey:  []byte("credential"),
-			},
+func TestCreateAgentTool_Execute_BuiltInRuntimesAreCredentialFree(t *testing.T) {
+	tests := []struct {
+		name        string
+		runtimeArgs string
+		runtimeType corev1alpha1.AgentRuntimeType
+	}{
+		{
+			name:        "claude without legacy secret",
+			runtimeArgs: `{"type":"claude"}`,
+			runtimeType: corev1alpha1.AgentRuntimeClaude,
 		},
+		{
+			name:        "codex without legacy secret",
+			runtimeArgs: `{"type":"codex"}`,
+			runtimeType: corev1alpha1.AgentRuntimeCodex,
+		},
+		{
+			name:        "copilot without legacy secret",
+			runtimeArgs: `{"type":"copilot"}`,
+			runtimeType: corev1alpha1.AgentRuntimeCopilot,
+		},
+		{
+			name:        "legacy secretRef is not retained",
+			runtimeArgs: `{"type":"claude","secretRef":"missing-legacy-secret"}`,
+			runtimeType: corev1alpha1.AgentRuntimeClaude,
+		},
+		{
+			name:        "runtime type is normalized",
+			runtimeArgs: `{"type":"  claude  "}`,
+			runtimeType: corev1alpha1.AgentRuntimeClaude,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(envOrkaTaskName, parentTaskName)
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+			k8sClient := newFakeClient(parentTask())
+			tool := NewCreateAgentTool(k8sClient)
+			args := json.RawMessage(`{"role":"coder","systemPrompt":"You write code","runtime":` + tt.runtimeArgs + `}`)
+
+			result, err := tool.Execute(context.Background(), args)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+
+			var agentResult CreateAgentResult
+			if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
+				t.Fatalf("failed to unmarshal result: %v", err)
+			}
+
+			agent := &corev1alpha1.Agent{}
+			if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+				Name:      agentResult.AgentName,
+				Namespace: agentResult.Namespace,
+			}, agent); err != nil {
+				t.Fatalf("failed to get agent: %v", err)
+			}
+
+			if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != tt.runtimeType {
+				t.Fatalf("runtime = %#v, want type %q", agent.Spec.Runtime, tt.runtimeType)
+			}
+			if agent.Spec.ProviderRef != nil {
+				t.Fatalf("providerRef = %#v, want nil for runtime agent", agent.Spec.ProviderRef)
+			}
+			if agent.Spec.SecretRef != nil {
+				t.Fatalf("secretRef = %#v, want nil for built-in ACP runtime", agent.Spec.SecretRef)
+			}
+		})
+	}
+}
+
+func TestCreateAgentTool_Execute_RejectsModelLimitsForNonOpenCodeBuiltIns(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		runtime   string
+		modelJSON string
+		wantError string
+	}{
+		{name: "codex context window", runtime: "codex", modelJSON: `{"name":"gpt-5.4","contextWindow":32768}`, wantError: "contextWindow"},
+		{name: "claude max tokens", runtime: "claude", modelJSON: `{"name":"claude-sonnet","maxTokens":4096}`, wantError: "maxTokens"},
+		{name: "copilot context window", runtime: "copilot", modelJSON: `{"name":"gpt-5.3-codex","contextWindow":32768}`, wantError: "contextWindow"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(envOrkaTaskName, parentTaskName)
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+			_, err := NewCreateAgentTool(newFakeClient(parentTask())).Execute(context.Background(), json.RawMessage(
+				`{"role":"coder","systemPrompt":"You write code","model":`+tt.modelJSON+`,"runtime":{"type":"`+tt.runtime+`"}}`,
+			))
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("Execute() error = %v, want %q rejection", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestNormalizedCreateAgentModelAcceptsQualifiedIDWithNestedSlashes(t *testing.T) {
+	contextWindow := int32(32768)
+	maxTokens := int32(4096)
+	got, err := normalizedCreateAgentModel(
+		&RuntimeArgs{Type: string(corev1alpha1.AgentRuntimeOpencode)},
+		&ModelArgs{Name: "openrouter/anthropic/claude-sonnet-4", ContextWindow: &contextWindow, MaxTokens: &maxTokens},
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "openrouter/anthropic/claude-sonnet-4" {
+		t.Fatalf("normalized model = %q, want full provider-scoped ID", got)
+	}
+}
+
+func TestCreateAgentTool_Execute_UsesBuiltInOpenCode(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
 
-	args := json.RawMessage(`{
-		"role": "coder",
-		"systemPrompt": "You write code",
-		"model": {"provider": "moonshotai", "name": "Kimi-K2-Instruct-0905"},
-		"runtime": {
-			"type": "opencode",
-			"secretRef": "runtime-creds"
-		}
-	}`)
-
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"role":"coder",
+		"model":{"provider":"moonshotai","name":"Kimi-K2-Instruct-0905","contextWindow":32768,"maxTokens":4096},
+		"runtime":{"type":"opencode"}
+	}`))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-
 	var agentResult CreateAgentResult
 	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
-		t.Fatalf("failed to unmarshal result: %v", err)
+		t.Fatal(err)
 	}
-
-	agent := &corev1alpha1.Agent{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name:      agentResult.AgentName,
-		Namespace: agentResult.Namespace,
-	}, agent); err != nil {
-		t.Fatalf("failed to get agent: %v", err)
+	var agent corev1alpha1.Agent
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: agentResult.AgentName, Namespace: agentResult.Namespace}, &agent); err != nil {
+		t.Fatal(err)
 	}
 	if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode {
 		t.Fatalf("runtime = %#v, want opencode", agent.Spec.Runtime)
 	}
-	if agent.Spec.Model == nil || agent.Spec.Model.Name != "moonshotai/Kimi-K2-Instruct-0905" {
+	if agent.Spec.Model == nil || agent.Spec.Model.Name != "moonshotai/Kimi-K2-Instruct-0905" || agent.Spec.Model.Provider != "" {
 		t.Fatalf("model = %#v, want provider-qualified OpenCode model", agent.Spec.Model)
 	}
-	if agent.Spec.Model.Provider != "" {
-		t.Fatalf("model.provider = %q, want empty for runtime agent", agent.Spec.Model.Provider)
+	wantTools := []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
+	if !slices.Equal(agent.Spec.Runtime.DefaultAllowedTools, wantTools) {
+		t.Fatalf("defaultAllowedTools = %#v, want %#v", agent.Spec.Runtime.DefaultAllowedTools, wantTools)
 	}
-	if agent.Spec.ProviderRef != nil {
-		t.Fatalf("providerRef = %#v, want nil for runtime agent", agent.Spec.ProviderRef)
+	if agent.Spec.Runtime.DefaultAllowBash == nil || !*agent.Spec.Runtime.DefaultAllowBash {
+		t.Fatalf("defaultAllowBash = %v, want true", agent.Spec.Runtime.DefaultAllowBash)
 	}
-	if agent.Spec.SecretRef == nil || agent.Spec.SecretRef.Name != testRuntimeCredsSecretName {
-		t.Fatalf("secretRef = %#v, want %q", agent.Spec.SecretRef, testRuntimeCredsSecretName)
+	if agent.Spec.ProviderRef != nil || agent.Spec.SecretRef != nil {
+		t.Fatalf("providerRef=%#v secretRef=%#v, want credential-free runtime", agent.Spec.ProviderRef, agent.Spec.SecretRef)
 	}
-}
-
-func TestCreateAgentTool_Execute_RejectsOpencodeWithoutModel(t *testing.T) {
-	t.Setenv(envOrkaTaskName, parentTaskName)
-	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-	t.Setenv(workerenv.AIModel, "coordinator-model")
-
-	tool := NewCreateAgentTool(newFakeClient(parentTask()))
-	args := json.RawMessage(`{
-		"role": "coder",
-		"systemPrompt": "You write code",
-		"runtime": {"type": "opencode"}
-	}`)
-
-	_, err := tool.Execute(context.Background(), args)
-	if err == nil || !strings.Contains(err.Error(), "model.name is required for opencode") {
-		t.Fatalf("Execute() error = %v, want missing OpenCode model rejection", err)
+	if agent.Spec.SystemPrompt != nil {
+		t.Fatalf("systemPrompt = %#v, want nil for OpenCode runtime", agent.Spec.SystemPrompt)
 	}
 }
 
-func TestCreateAgentTool_Execute_RejectsMissingRuntimeSecretRef(t *testing.T) {
+func TestCreateAgentTool_Execute_PreservesExplicitEmptyOpenCodeTools(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-
 	k8sClient := newFakeClient(parentTask())
-	tool := NewCreateAgentTool(k8sClient)
-
-	args := json.RawMessage(`{
-		"role": "coder",
-		"systemPrompt": "You write code",
-		"runtime": {
-			"type": "claude",
-			"secretRef": "runtime-creds"
-		}
-	}`)
-
-	_, err := tool.Execute(context.Background(), args)
-	if err == nil {
-		t.Fatal("expected error")
+	result, err := NewCreateAgentTool(k8sClient).Execute(context.Background(), json.RawMessage(`{
+		"role":"coder","model":{"name":"openai/gpt-5.4","contextWindow":32768,"maxTokens":4096},
+		"runtime":{"type":"opencode","defaultAllowedTools":[],"defaultAllowBash":false}
+	}`))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), notFoundMessage) {
-		t.Fatalf("error = %v, want it to mention not found", err)
+	var agentResult CreateAgentResult
+	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
+		t.Fatal(err)
+	}
+	var agent corev1alpha1.Agent
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: agentResult.AgentName, Namespace: agentResult.Namespace}, &agent); err != nil {
+		t.Fatal(err)
+	}
+	if agent.Spec.Runtime == nil || agent.Spec.Runtime.DefaultAllowedTools == nil || len(agent.Spec.Runtime.DefaultAllowedTools) != 0 {
+		t.Fatalf("defaultAllowedTools = %#v, want explicit empty", agent.Spec.Runtime)
+	}
+}
+
+func TestCreateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	_, err := NewCreateAgentTool(newFakeClient(parentTask())).Execute(context.Background(), json.RawMessage(`{
+		"role":"coder",
+		"systemPrompt":"You write code",
+		"model":{"name":"openai/gpt-5.4","contextWindow":32768,"maxTokens":4096},
+		"runtime":{"type":"opencode"}
+	}`))
+	if err == nil || !strings.Contains(err.Error(), "does not support systemPrompt") {
+		t.Fatalf("Execute() error = %v, want OpenCode systemPrompt rejection", err)
+	}
+}
+
+func TestCreateAgentTool_Execute_RejectsInvalidOpenCodeConfiguration(t *testing.T) {
+	for name, args := range map[string]string{
+		"missing model":     `{"role":"coder","runtime":{"type":"opencode"}}`,
+		"bare model":        `{"role":"coder","model":{"name":"gpt-5.4","contextWindow":32768,"maxTokens":4096},"runtime":{"type":"opencode"}}`,
+		"substitution":      `{"role":"coder","model":{"name":"{env:PROVIDER}/gpt","contextWindow":32768,"maxTokens":4096},"runtime":{"type":"opencode"}}`,
+		"provider conflict": `{"role":"coder","model":{"provider":"anthropic","name":"openai/gpt-5.4","contextWindow":32768,"maxTokens":4096},"runtime":{"type":"opencode"}}`,
+		"missing context":   `{"role":"coder","model":{"name":"openai/gpt-5.4","maxTokens":4096},"runtime":{"type":"opencode"}}`,
+		"missing output":    `{"role":"coder","model":{"name":"openai/gpt-5.4","contextWindow":32768},"runtime":{"type":"opencode"}}`,
+		"inverted limits":   `{"role":"coder","model":{"name":"openai/gpt-5.4","contextWindow":4096,"maxTokens":4096},"runtime":{"type":"opencode"}}`,
+		"legacy secret":     `{"role":"coder","model":{"name":"openai/gpt-5.4","contextWindow":32768,"maxTokens":4096},"runtime":{"type":"opencode","secretRef":"legacy"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(envOrkaTaskName, parentTaskName)
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+			_, err := NewCreateAgentTool(newFakeClient(parentTask())).Execute(context.Background(), json.RawMessage(args))
+			if err == nil {
+				t.Fatal("Execute() accepted invalid OpenCode configuration")
+			}
+		})
+	}
+}
+
+func TestCreateAgentTool_Execute_RejectsUnsupportedRuntime(t *testing.T) {
+	for _, runtimeArgs := range []string{
+		`{"type":"unknown"}`,
+		`{}`,
+		`{"type":"   "}`,
+	} {
+		t.Run(runtimeArgs, func(t *testing.T) {
+			t.Setenv(envOrkaTaskName, parentTaskName)
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+			k8sClient := newFakeClient(parentTask())
+			tool := NewCreateAgentTool(k8sClient)
+			args := json.RawMessage(`{"role":"coder","systemPrompt":"You write code","runtime":` + runtimeArgs + `}`)
+			_, err := tool.Execute(context.Background(), args)
+			if err == nil || (!strings.Contains(err.Error(), "unsupported runtime type") && !strings.Contains(err.Error(), "runtime.type is required")) {
+				t.Fatalf("Execute() error = %v, want invalid runtime rejection", err)
+			}
+		})
 	}
 }
 

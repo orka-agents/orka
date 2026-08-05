@@ -4,8 +4,9 @@ slug: /observability
 
 # Observability
 
-Orka emits OpenTelemetry traces and metrics for controller, chat, tool, AI
-worker, and harness-backed agent runtime paths when telemetry is enabled. The
+Orka emits OpenTelemetry traces and metrics for controller, chat, tool, and native AI
+worker paths when telemetry is enabled. ACP v2 execution is observed primarily through
+durable Task execution/delivery status, RuntimePool status, bounded events, and structured logs. The
 GenAI signals are backend instrumentation: they are exported over OTLP to your
 collector/backend and are separate from the Orka React UI.
 
@@ -73,23 +74,18 @@ Telemetry environment for AI workers is controller-owned: task-supplied
 preserve user-supplied telemetry env, because Orka does not instrument arbitrary
 container processes.
 
-Harness-wrapper and agent-runtime worker telemetry is explicit opt-in: set
-`ORKA_ENABLE_TELEMETRY=true` and OTLP exporter configuration on those workloads
-when you want their process-local spans exported.
+Managed ACP RuntimePools are not per-Task Jobs and do not inherit `Task.spec.env`.
+The current ACP supervisor does not copy controller OTLP configuration or W3C trace
+context into provider children. Use these current sources of truth instead:
 
-For the singleton CLI harness wrapper Deployment, opt in explicitly:
+- `Task.status.execution` for fenced attempt, RuntimePool, RuntimeSession, prompt, and terminal outcome;
+- `Task.status.delivery` for workspace validation/publication state and non-secret receipts;
+- `RuntimePool.status` for lifecycle, admission, exact Pod/boot identity, capacity, and pressure;
+- Task execution events and controller/runtime/publisher structured logs.
 
-```bash
-kubectl set env deployment/orka-agent-harness-wrapper -n orka-system \
-  ORKA_ENABLE_TELEMETRY=true \
-  OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector.otel.svc:4317 \
-  OTEL_EXPORTER_OTLP_INSECURE=true
-```
-
-For per-Task agent runtime Jobs, set telemetry env in the Task `spec.env` where
-you intentionally want that runtime process to export spans. Orka reserves and
-overwrites trace-context env (`ORKA_TRACEPARENT`, `ORKA_TRACESTATE`,
-`ORKA_BAGGAGE`) so user-supplied values cannot forge parentage.
+Do not add credential-bearing OTLP headers to runtime images or provider child environments.
+Any future ACP telemetry propagation must preserve the empty child-environment allowlist and
+bind trace context to the exact Task attempt and prompt operation.
 
 Credential-bearing OTLP header environment variables are not copied from the
 controller into task workloads. Use an in-cluster collector endpoint or a
@@ -121,10 +117,10 @@ of the model client span under the same agent/chat step, not children of the
 model client span.
 
 Task creation stamps the current W3C trace context into Task annotations. The
-controller extracts that context when reconciling the Task and injects
-`ORKA_TRACEPARENT` into worker Jobs or harness-wrapper turn metadata. Delegation
-stamps the active `execute_tool delegate_task` span context onto the child Task,
-so the child `task.run` span is linked to the parent tool call.
+controller extracts that context for supported native worker Tasks and injects
+`ORKA_TRACEPARENT` into their Jobs. ACP prompt requests do not currently carry
+that trace context. Delegation stamps the active `execute_tool delegate_task`
+span context onto the child Task so native child spans remain linked.
 
 Outbound HTTP and MCP Tool CRD requests receive W3C `traceparent` headers. If a
 Tool config supplies its own `traceparent` header, the active Orka trace context

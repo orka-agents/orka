@@ -10,7 +10,6 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"time"
@@ -21,440 +20,259 @@ import (
 	"github.com/orka-agents/orka/test/utils"
 )
 
-var _ = Describe("Workspace Advanced Features", func() {
+var _ = Describe("ACP Workspace Profiles", func() {
 	const prefix = "e2e-ws-adv-"
 
-	// --- Test 1: Private repo with gitSecretRef ---
+	cleanup := func(taskName, agentName string) {
+		dumpDebugInfo(taskName)
+		for _, resource := range []struct{ kind, name string }{
+			{"task", taskName},
+			{"agent", agentName},
+		} {
+			cmd := exec.Command("kubectl", "delete", resource.kind, resource.name,
+				"-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		}
+	}
 
-	Describe("Private repo with gitSecretRef", func() {
-		const (
-			agentName = prefix + "gitsecret-agent"
-			taskName  = prefix + "gitsecret-task"
-		)
+	createClaudeAgent := func(agentName string) {
+		manifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Agent",
+			"metadata": {"name": %q, "namespace": %q},
+			"spec": {
+				"runtime": {
+					"type": "claude",
+					"defaultMaxTurns": 5,
+					"defaultAllowBash": false
+				},
+				"model": {"name": "claude-sonnet-4-20250514"}
+			}
+		}`, agentName, namespace)
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(manifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create Agent")
+	}
 
-		AfterEach(func() {
-			dumpDebugInfo(taskName)
-			for _, r := range []struct{ kind, name string }{
-				{"task", taskName},
-				{"agent", agentName},
-			} {
-				cmd := exec.Command("kubectl", "delete", r.kind, r.name,
-					"-n", namespace, "--ignore-not-found")
+	It("uses a readCredentialRef only at the governed workspace boundary", func() {
+		skipIfNoKey("E2E_GITHUB_TOKEN")
+		agentName := prefix + "credential-agent"
+		taskName := prefix + "credential-task"
+		DeferCleanup(cleanup, taskName, agentName)
+		createClaudeAgent(agentName)
+
+		manifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Task",
+			"metadata": {"name": %q, "namespace": %q},
+			"spec": {
+				"type": "agent",
+				"agentRef": {"name": %q},
+				"prompt": "List files without modifying the workspace.",
+				"agentRuntime": {"maxTurns": 3},
+				"workspace": {
+					"intent": "read",
+					"gitRepo": "https://github.com/sozercan/ayna",
+					"readCredentialRef": {"name": "e2e-github-secret"}
+				}
+			}
+		}`, taskName, namespace, agentName)
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(manifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
+
+		verifyACPTaskRuntimeForTask(taskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(3),
+			AllowBash:       acpBool(false),
+			Workspace: &acpWorkspaceExpectation{
+				Intent:             "read",
+				GitRepo:            "https://github.com/sozercan/ayna",
+				ReadCredentialName: "e2e-github-secret",
+			},
+		}, 2*time.Minute)
+		verifyNoJobForTask(taskName, 5*time.Second)
+	})
+
+	It("includes subPath in the immutable read workspace profile", func() {
+		agentName := prefix + "subpath-agent"
+		taskName := prefix + "subpath-task"
+		DeferCleanup(cleanup, taskName, agentName)
+		createClaudeAgent(agentName)
+
+		manifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Task",
+			"metadata": {"name": %q, "namespace": %q},
+			"spec": {
+				"type": "agent",
+				"agentRef": {"name": %q},
+				"prompt": "Inspect the configured subdirectory.",
+				"agentRuntime": {"maxTurns": 3},
+				"workspace": {
+					"intent": "read",
+					"gitRepo": "https://github.com/example/monorepo",
+					"subPath": "packages/backend"
+				}
+			}
+		}`, taskName, namespace, agentName)
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(manifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
+
+		verifyACPTaskRuntimeForTask(taskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(3),
+			AllowBash:       acpBool(false),
+			Workspace: &acpWorkspaceExpectation{
+				Intent:  "read",
+				GitRepo: "https://github.com/example/monorepo",
+				SubPath: "packages/backend",
+			},
+		}, 2*time.Minute)
+	})
+
+	It("keeps an exact source ref on the top-level Task workspace", func() {
+		agentName := prefix + "ref-agent"
+		taskName := prefix + "ref-task"
+		DeferCleanup(cleanup, taskName, agentName)
+		createClaudeAgent(agentName)
+
+		manifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Task",
+			"metadata": {"name": %q, "namespace": %q},
+			"spec": {
+				"type": "agent",
+				"agentRef": {"name": %q},
+				"prompt": "Inspect the pinned revision.",
+				"agentRuntime": {"maxTurns": 3},
+				"workspace": {
+					"intent": "read",
+					"gitRepo": "https://github.com/example/repo",
+					"ref": "abc123def456"
+				}
+			}
+		}`, taskName, namespace, agentName)
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(manifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
+
+		verifyACPTaskRuntimeForTask(taskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(3),
+			AllowBash:       acpBool(false),
+			Workspace: &acpWorkspaceExpectation{
+				Intent:  "read",
+				GitRepo: "https://github.com/example/repo",
+				Ref:     "abc123def456",
+			},
+		}, 2*time.Minute)
+	})
+
+	It("models publication and PR fields as a write delivery profile", func() {
+		agentName := prefix + "publication-agent"
+		taskName := prefix + "publication-task"
+		publicationCredentialName := prefix + "publication-credential"
+		forgeCredentialName := prefix + "forge-credential"
+		DeferCleanup(func() {
+			cleanup(taskName, agentName)
+			for _, secretName := range []string{publicationCredentialName, forgeCredentialName} {
+				cmd := exec.Command("kubectl", "delete", "secret", secretName,
+					"-n", namespace, "--ignore-not-found", "--timeout=30s")
 				_, _ = utils.Run(cmd)
 			}
 		})
+		Expect(createK8sSecret(publicationCredentialName, namespace, map[string]string{
+			"token": "placeholder",
+		})).To(Succeed(), "Failed to create dummy publication credential Secret")
+		Expect(createK8sSecret(forgeCredentialName, namespace, map[string]string{
+			"token": "placeholder",
+		})).To(Succeed(), "Failed to create dummy forge credential Secret")
+		createClaudeAgent(agentName)
 
-		It("should mount git credentials when gitSecretRef is configured", func() {
-			skipIfNoKey("E2E_GITHUB_TOKEN")
-
-			By("creating an Agent with claude runtime")
-			agentManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Agent",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"runtime": {
-						"type": "claude",
-						"defaultMaxTurns": 5,
-						"defaultAllowBash": false
-					}
+		manifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Task",
+			"metadata": {"name": %q, "namespace": %q},
+			"spec": {
+				"type": "agent",
+				"agentRef": {"name": %q},
+				"prompt": "Prepare a reviewed change.",
+				"agentRuntime": {"maxTurns": 3},
+				"workspace": {
+					"intent": "write",
+					"gitRepo": "https://github.com/example/source",
+					"publicationGitRepo": "https://github.com/example/fork",
+					"publicationCredentialRef": {"name": %q, "key": "token"},
+					"forgeCredentialRef": {"name": %q, "key": "token"},
+					"pushBranch": "e2e/test-branch",
+					"prBaseBranch": "develop",
+					"createPR": true
 				}
-			}`, agentName, namespace)
-
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = stringReader(agentManifest)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create Agent")
-
-			By("creating an agent task with workspace gitRepo and gitSecretRef")
-			taskManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Task",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"type": "agent",
-					"agentRef": {"name": "%s"},
-					"prompt": "list files",
-					"agentRuntime": {
-						"maxTurns": 3,
-						"workspace": {
-							"gitRepo": "https://github.com/sozercan/ayna",
-							"gitSecretRef": {"name": "e2e-github-secret"}
-						}
-					}
-				}
-			}`, taskName, namespace, agentName)
-
-			cmd = exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = stringReader(taskManifest)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
-
-			By("verifying harness-wrapper workspace metadata")
-			verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
-				"runtime":   "claude",
-				"wrapper":   "cli",
-				"gitRepo":   "https://github.com/sozercan/ayna",
-				"maxTurns":  "3",
-				"allowBash": "false",
-			}, 2*time.Minute)
-
-			By("verifying the Task does not use a worker Job")
-			verifyNoJobForTask(taskName, 5*time.Second)
-		})
-	})
-
-	// --- Test 2: subPath workspace ---
-
-	Describe("subPath workspace", func() {
-		const (
-			agentName = prefix + "subpath-agent"
-			taskName  = prefix + "subpath-task"
-		)
-
-		AfterEach(func() {
-			dumpDebugInfo(taskName)
-			for _, r := range []struct{ kind, name string }{
-				{"task", taskName},
-				{"agent", agentName},
-			} {
-				cmd := exec.Command("kubectl", "delete", r.kind, r.name,
-					"-n", namespace, "--ignore-not-found")
-				_, _ = utils.Run(cmd)
 			}
-		})
+		}`, taskName, namespace, agentName, publicationCredentialName, forgeCredentialName)
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(manifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
 
-		It("should set ORKA_WORKSPACE_SUBPATH when subPath is configured", func() {
-			By("creating an Agent with claude runtime")
-			agentManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Agent",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"runtime": {
-						"type": "claude",
-						"defaultMaxTurns": 5,
-						"defaultAllowBash": false
-					}
-				}
-			}`, agentName, namespace)
-
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = stringReader(agentManifest)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create Agent")
-
-			By("creating an agent task with workspace subPath")
-			taskManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Task",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"type": "agent",
-					"agentRef": {"name": "%s"},
-					"prompt": "list files",
-					"agentRuntime": {
-						"maxTurns": 3,
-						"workspace": {
-							"gitRepo": "https://github.com/sozercan/ayna",
-							"subPath": "docs"
-						}
-					}
-				}
-			}`, taskName, namespace, agentName)
-
-			cmd = exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = stringReader(taskManifest)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
-
-			By("verifying harness-wrapper workspace metadata")
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "task", taskName, "-n", namespace, "-o", "json")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-
-				var task struct {
-					Metadata struct {
-						Annotations map[string]string `json:"annotations"`
-					} `json:"metadata"`
-				}
-				err = json.Unmarshal([]byte(output), &task)
-				g.Expect(err).NotTo(HaveOccurred())
-
-				rawMetadata := task.Metadata.Annotations["orka.ai/harness-wrapper-metadata"]
-				g.Expect(rawMetadata).NotTo(BeEmpty())
-				metadata := map[string]string{}
-				err = json.Unmarshal([]byte(rawMetadata), &metadata)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(metadata).To(HaveKeyWithValue("gitRepo", "https://github.com/sozercan/ayna"))
-				g.Expect(metadata).To(HaveKeyWithValue("workspaceSubPath", "docs"))
-			}, 30*time.Second, time.Second).Should(Succeed())
-		})
+		verifyACPTaskRuntimeForTask(taskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			WorkspaceIntent: "write",
+			MaxTurns:        acpInt32(3),
+			AllowBash:       acpBool(false),
+			Workspace: &acpWorkspaceExpectation{
+				Intent:                    "write",
+				GitRepo:                   "https://github.com/example/source",
+				PublicationGitRepo:        "https://github.com/example/fork",
+				PublicationCredentialName: publicationCredentialName,
+				PushBranch:                "e2e/test-branch",
+				PRBaseBranch:              "develop",
+				CreatePR:                  acpBool(true),
+			},
+		}, 2*time.Minute)
 	})
 
-	// --- Test 3: Specific ref checkout ---
+	It("queues sessionRef tasks without legacy turn annotations", func() {
+		agentName := prefix + "session-agent"
+		taskName := prefix + "session-task"
+		DeferCleanup(cleanup, taskName, agentName)
+		createClaudeAgent(agentName)
 
-	Describe("Specific ref checkout", func() {
-		const (
-			agentName = prefix + "ref-agent"
-			taskName  = prefix + "ref-task"
-		)
-
-		AfterEach(func() {
-			dumpDebugInfo(taskName)
-			for _, r := range []struct{ kind, name string }{
-				{"task", taskName},
-				{"agent", agentName},
-			} {
-				cmd := exec.Command("kubectl", "delete", r.kind, r.name,
-					"-n", namespace, "--ignore-not-found")
-				_, _ = utils.Run(cmd)
+		manifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Task",
+			"metadata": {"name": %q, "namespace": %q},
+			"spec": {
+				"type": "agent",
+				"agentRef": {"name": %q},
+				"sessionRef": {"name": "e2e-workspace-session", "create": true, "append": true},
+				"prompt": "Start a governed ACP session.",
+				"agentRuntime": {"maxTurns": 3},
+				"workspace": {"intent": "read"}
 			}
-		})
+		}`, taskName, namespace, agentName)
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(manifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
 
-		It("should set ORKA_GIT_REF when workspace ref is configured", func() {
-			By("creating an Agent with claude runtime")
-			agentManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Agent",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"runtime": {
-						"type": "claude",
-						"defaultMaxTurns": 5,
-						"defaultAllowBash": false
-					}
-				}
-			}`, agentName, namespace)
-
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = stringReader(agentManifest)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create Agent")
-
-			By("creating an agent task with workspace ref set to main")
-			taskManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Task",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"type": "agent",
-					"agentRef": {"name": "%s"},
-					"prompt": "list files",
-					"agentRuntime": {
-						"maxTurns": 3,
-						"workspace": {
-							"gitRepo": "https://github.com/sozercan/ayna",
-							"ref": "main"
-						}
-					}
-				}
-			}`, taskName, namespace, agentName)
-
-			cmd = exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = stringReader(taskManifest)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
-
-			By("verifying harness-wrapper workspace ref metadata")
-			verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
-				"runtime":   "claude",
-				"wrapper":   "cli",
-				"gitRepo":   "https://github.com/sozercan/ayna",
-				"gitRef":    "main",
-				"maxTurns":  "3",
-				"allowBash": "false",
-			}, 2*time.Minute)
-
-			By("verifying the Task does not use a worker Job")
-			verifyNoJobForTask(taskName, 5*time.Second)
-		})
-	})
-
-	// --- Test 4: Structural env vars (forkRepo, prBaseBranch) ---
-
-	Describe("Structural env vars for forkRepo and prBaseBranch", func() {
-		const (
-			agentName = prefix + "fork-agent"
-			taskName  = prefix + "fork-task"
-		)
-
-		AfterEach(func() {
-			dumpDebugInfo(taskName)
-			cmd := exec.Command("kubectl", "delete", "task", taskName,
-				"-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", agentName,
-				"-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-		})
-
-		It("should set ORKA_FORK_REPO and ORKA_PR_BASE_BRANCH env vars on the Job", func() {
-			By("creating an Agent with claude runtime")
-			agentManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Agent",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"runtime": {
-						"type": "claude",
-						"defaultMaxTurns": 5,
-						"defaultAllowBash": false
-					}
-				}
-			}`, agentName, namespace)
-
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = stringReader(agentManifest)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create Agent")
-
-			By("creating a Task with forkRepo and prBaseBranch in workspace")
-			taskManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Task",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"type": "agent",
-					"prompt": "list files",
-					"agentRef": {"name": "%s"},
-					"agentRuntime": {
-						"maxTurns": 3,
-						"workspace": {
-							"gitRepo": "https://github.com/upstream/repo",
-							"forkRepo": "https://github.com/fork/repo",
-							"prBaseBranch": "develop"
-						}
-					}
-				}
-			}`, taskName, namespace, agentName)
-
-			cmd = exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = stringReader(taskManifest)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
-
-			By("verifying harness-wrapper fork workspace metadata")
-			verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
-				"runtime":      "claude",
-				"wrapper":      "cli",
-				"gitRepo":      "https://github.com/upstream/repo",
-				"forkRepo":     "https://github.com/fork/repo",
-				"prBaseBranch": "develop",
-				"maxTurns":     "3",
-				"allowBash":    "false",
-			}, 2*time.Minute)
-
-			By("verifying the Task does not use a worker Job")
-			verifyNoJobForTask(taskName, 5*time.Second)
-		})
-	})
-
-	// --- Test 5: Init container for session transcript ---
-
-	Describe("Init container for session transcript", func() {
-		const (
-			agentName = prefix + "session-agent"
-			taskName  = prefix + "session-task"
-			sessionID = prefix + "test-session"
-		)
-
-		AfterEach(func() {
-			dumpDebugInfo(taskName)
-			cmd := exec.Command("kubectl", "delete", "task", taskName,
-				"-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", agentName,
-				"-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-		})
-
-		It("should start a harness-wrapper turn when sessionRef is set", func() {
-			By("creating an Agent with claude runtime")
-			agentManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Agent",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"runtime": {
-						"type": "claude",
-						"defaultMaxTurns": 5,
-						"defaultAllowBash": false
-					}
-				}
-			}`, agentName, namespace)
-
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = stringReader(agentManifest)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create Agent")
-
-			By("creating a Task with sessionRef")
-			taskManifest := fmt.Sprintf(`{
-				"apiVersion": "core.orka.ai/v1alpha1",
-				"kind": "Task",
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s"
-				},
-				"spec": {
-					"type": "agent",
-					"prompt": "say hello",
-					"agentRef": {"name": "%s"},
-					"sessionRef": {
-						"name": "%s",
-						"create": true,
-						"append": true
-					},
-					"agentRuntime": {
-						"maxTurns": 3
-					}
-				}
-			}`, taskName, namespace, agentName, sessionID)
-
-			cmd = exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = stringReader(taskManifest)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
-
-			By("verifying harness-wrapper metadata is planned for the session task")
-			verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
-				"runtime":   "claude",
-				"wrapper":   "cli",
-				"maxTurns":  "3",
-				"allowBash": "false",
-			}, 2*time.Minute)
-
-			By("verifying the Task does not use a worker Job")
-			verifyNoJobForTask(taskName, 5*time.Second)
-		})
+		verifyACPTaskRuntimeForTask(taskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(3),
+			AllowBash:       acpBool(false),
+			SessionName:     "e2e-workspace-session",
+			Workspace:       &acpWorkspaceExpectation{Intent: "read"},
+		}, 2*time.Minute)
+		verifyNoJobForTask(taskName, 5*time.Second)
 	})
 })

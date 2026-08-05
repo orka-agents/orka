@@ -9,6 +9,7 @@ controller:
   image:
     repository: ghcr.io/orka-agents/orka
     tag: "0.1.1"
+    digest: ""
     pullPolicy: IfNotPresent
 
   # Resource limits
@@ -44,25 +45,38 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
-  # Provider-neutral workspace.orka.ai control plane (disabled by default during rollout).
-  # Before enabling it during a Helm upgrade, apply the current chart CRDs explicitly;
-  # Helm does not upgrade CRDs from the crds/ directory and the chart fails closed otherwise.
-  workspaceProvider:
-    # Enable generic provider/class/pool/workspace coordination controllers.
-    apiEnabled: false
-    # Offline helm template --is-upgrade cannot use lookup. Set this only after
-    # independently verifying/applying the current workspace CRD schema.
-    crdUpgradeSchemaVerified: false
-    # Enable the development-only fake provider adapter.
-    fakeProviderEnabled: false
-    # Fail-closed Kubernetes admission required whenever apiEnabled is true.
-    classUseAdmission:
-      enabled: false
-      # Existing TLS Secret with tls.crt and tls.key for the webhook Service DNS name.
-      existingSecret: ""
-      # Base64-encoded PEM CA bundle trusted by the API server.
-      caBundle: ""
+  # Operation-scoped ACP artifact transport stored on the controller PVC.
+  acpArtifact:
+    existingSecret: ""
+    secretKey: capability-secret
+    secret: ""
+    maxBytes: 536870912
 
+  # Managed ACP core RuntimePools for built-in agent Tasks.
+  acpRuntime:
+    # The supported agent execution path is ACP-only; there is no legacy fallback.
+    enabled: false
+    namespace: orka-runtimes
+    # The chart-managed provider proxy always runs in the Helm release namespace.
+    # Leave empty or set exactly to .Release.Namespace; other values are rejected.
+    providerProxyNamespace: ""
+    # Configure each provider that should be available with an immutable
+    # repository@sha256:<digest> reference. Empty providers remain unavailable
+    # and Tasks selecting them fail closed.
+    codexImage: ""
+    claudeImage: ""
+    copilotImage: ""
+    opencodeImage: ""
+    # Planned controller upgrades use a same-binary preStop child to call a
+    # loopback-only coordinator. Keep terminationGracePeriodSeconds greater
+    # than timeout and triggerTimeout so SIGTERM shutdown still has headroom.
+    upgradeDrain:
+      enabled: true
+      port: 8083
+      timeout: 5m
+      pollInterval: 1s
+      triggerTimeout: 5m15s
+      terminationGracePeriodSeconds: 360
   # Provider-neutral external gateway plane.
   gateway:
     enabled: true
@@ -133,16 +147,16 @@ controller:
     # Namespace assigned to authorized OIDC callers for namespace isolation. Empty uses controller default.
     namespace: ""
 
-  # Transaction-token authentication, scoped authorization, and optional vendor-neutral TTS exchange.
+  # Context-token authentication, scoped authorization, and optional kontxt TTS exchange.
   # Empty values keep the controller defaults / corresponding environment variables.
   contextToken:
-    # Profile for external context tokens (supported: transaction-token).
+    # Profile for external context tokens (supported: kontxt).
     profile: ""
     # Issuer URL expected in context tokens. Requires profile and audience when set.
     issuer: ""
     # Audience expected in context tokens. Requires profile and issuer when set.
     audience: ""
-    # Optional JWKS URL. For transaction-token, defaults to <issuer>/.well-known/jwks.json.
+    # Optional JWKS URL. For kontxt, defaults to <issuer>/.well-known/jwks.json.
     jwksUrl: ""
     # Comma-separated token headers, e.g. Txn-Token or Txn-Token,Authorization:Bearer.
     headers: ""
@@ -158,7 +172,6 @@ controller:
       toolUse: ""
       providerUse: ""
       secretRead: ""
-      secretCredentialRead: ""
       agentRead: ""
       agentWrite: ""
       memoryRead: ""
@@ -175,8 +188,8 @@ controller:
       gatewayRead: ""
       gatewayOperate: ""
     tts:
-      # Exact TTS OAuth endpoint for child/outbound transaction-token exchange.
-      endpoint: ""
+      # kontxt TTS base URL for child/outbound token exchange.
+      url: ""
       # Optional exchange audience.
       audience: ""
       # Exchange timeout, e.g. 5s.
@@ -193,11 +206,127 @@ controller:
       childTokenTTL: ""
       toolTokenTTL: ""
 
-  outboundAccess:
-    # Exact namespace/name:port tuples trusted for cross-namespace gateway refs.
-    trustedGatewayServices: []
-    # Exact namespace/name:port tuples trusted for cross-namespace token endpoint refs.
-    trustedTokenEndpointServices: []
+# Clean-room Workspace/Publisher service.
+publisher:
+  enabled: true
+  image:
+    repository: ghcr.io/orka-agents/orka/workspace-publisher
+    tag: "0.1.1"
+    digest: ""
+    pullPolicy: IfNotPresent
+  allowedSCMHosts: github.com
+  githubPR:
+    enabled: true
+    apiBaseURL: https://api.github.com
+    requestTimeout: 15s
+    maxResponseBytes: 4194304
+  auth:
+    existingSecret: ""
+    controllerTokenKey: controller-token
+    capabilitySecretKey: operation-capability-secret
+    controllerToken: ""
+    capabilitySecret: ""
+    # Non-secret revision marker. When rotating the publisher auth Secret, bump
+    # this value in the same Helm upgrade to restart controller and publisher.
+    rolloutNonce: ""
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  persistence:
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+      ephemeral-storage: 2Gi
+
+# Authenticated, exact-host HTTPS egress boundary for the Workspace/Publisher.
+# The Publisher has no direct public 443 egress; Git and forge API traffic must
+# use this proxy, which re-resolves and validates every outbound connection.
+scmEgressProxy:
+  enabled: true
+  noProxy: localhost,127.0.0.1,::1,.svc,.cluster.local
+  maxRequestHeaderBytes: 32768
+  maxResponseHeaderBytes: 65536
+  maxRequestBytes: 4194304
+  maxResponseBytes: 8388608
+  maxTunnelBytes: 1073741824
+  maxConcurrent: 8
+  resolutionTimeout: 5s
+  connectTimeout: 10s
+  responseHeaderTimeout: 30s
+  forwardTimeout: 2m
+  idleTimeout: 30s
+  tunnelTimeout: 10m
+  auth:
+    existingSecret: ""
+    tokenKey: token
+    # Existing Secret tokens must use only RFC 3986 unreserved characters and
+    # be 32-256 bytes so they can be carried in authenticated proxy userinfo.
+    token: ""
+    # Non-secret revision marker. When rotating the SCM proxy auth Secret, bump
+    # this value in the same Helm upgrade to restart publisher and SCM proxy.
+    rolloutNonce: ""
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+      ephemeral-storage: 32Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+      ephemeral-storage: 128Mi
+
+# Authenticated boundary in front of the otherwise unauthenticated Vekil
+# service. ACP RuntimePods can reach only this Service, never Vekil directly.
+providerProxy:
+  enabled: false
+  # Only this chart-supported Vekil Service endpoint is accepted. One trailing
+  # slash is normalized; alternate hosts, namespaces, and ports are rejected.
+  upstreamBaseURL: http://vekil.vekil-system.svc:1337
+  # Mounted Secret files are reloaded atomically; no proxy Pod restart is
+  # required for token changes. Reload failures make readiness fail and disable
+  # all authenticated forwarding until both files are valid again.
+  tokenReloadInterval: 5s
+  # Maximum remaining lifetime accepted from the overlap token's absolute
+  # deadline. Periodic reloads and Pod restarts cannot extend it. Maximum: 24h.
+  previousTokenOverlap: 10m
+  # Optional operator-controlled restart input for binary/flag changes or
+  # recovery. Change it to force only the provider-auth-proxy Pod to roll.
+  rolloutNonce: ""
+  auth:
+    existingSecret: ""
+    tokenKey: token
+    token: ""
+    # Optional overlap key/value. Existing single-token Secrets remain valid
+    # when this key is absent. For proxy-first rotation, publish new as current
+    # and old here, wait for proxy reload, then roll controller/runtime pools.
+    # For controller-first use, first pre-stage new here while current remains
+    # old and verify it through the proxy; only then publish new as current and
+    # old here and roll controller/runtime pools. The pre-staged token covers a
+    # controller request that arrives before the proxy observes the role swap.
+    # Remove the old token after all workloads advertise the new generation.
+    # previousTokenValidUntil must be an absolute RFC3339/RFC3339Nano time no
+    # later than previousTokenOverlap from when the proxy loads it.
+    previousTokenKey: previous-token
+    previousToken: ""
+    previousTokenValidUntilKey: previous-token-valid-until
+    previousTokenValidUntil: ""
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+      ephemeral-storage: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+      ephemeral-storage: 128Mi
 
 # Worker configuration
 workers:
@@ -211,21 +340,6 @@ workers:
     image:
       repository: ghcr.io/orka-agents/orka/general-worker
       tag: "0.1.1"
-
-  harnessWrapper:
-    image:
-      repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
-      tag: "0.1.1"
-      pullPolicy: IfNotPresent
-    auth:
-      # Existing Secret containing the shared wrapper bearer token.
-      # When existingSecret and token are both empty, Helm generates a release-local token.
-      existingSecret: ""
-      tokenKey: token
-      token: ""
-    # Optional Codex CLI sandbox mode for the Codex adapter.
-    codexSandboxMode: ""
-    resources: {}
 
 # GitHub webhook and label-trigger configuration.
 # Configure a repository webhook to POST to /webhooks/github with the secret below.
@@ -307,7 +421,7 @@ annotations: {}
 store:
   path: /data/orka.db
   persistence:
-    enabled: true        # durable gateway inbox/outbox and Session history require a PVC
+    enabled: true        # ACP control records, gateway history, and Session state require durable RWO storage
     size: 1Gi
     storageClass: ""     # use cluster default
     accessMode: ReadWriteOnce

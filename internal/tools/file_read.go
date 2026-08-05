@@ -90,113 +90,119 @@ func (t *FileReadTool) Parameters() json.RawMessage {
 	}`)
 }
 
-// Execute reads the file
+// Execute reads the file.
 func (t *FileReadTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	_ = ctx
 	var readArgs FileReadArgs
 	if err := json.Unmarshal(args, &readArgs); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
-
 	if readArgs.Path == "" {
 		return "", fmt.Errorf("path is required")
 	}
-
-	// Resolve the path
-	filePath := readArgs.Path
-	if !filepath.IsAbs(filePath) {
-		filePath = filepath.Join(t.workDir, filePath)
+	if readArgs.Offset < 0 {
+		return "", fmt.Errorf("offset must be non-negative")
 	}
 
-	// Clean the path and check for traversal attacks
-	filePath = filepath.Clean(filePath)
-
-	// Resolve symlinks to prevent bypass
-	resolvedPath, err := filepath.EvalSymlinks(filePath)
-	if err != nil && !os.IsNotExist(err) {
-		return "", fmt.Errorf("access denied: cannot resolve path")
-	}
-	if err == nil {
-		filePath = resolvedPath
-	}
-
-	if !t.isPathAllowed(filePath) {
+	rootPath, relativePath, ok := t.allowedRootForPath(readArgs.Path)
+	if !ok {
 		return "", fmt.Errorf("access denied: path outside allowed directories")
 	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return "", fmt.Errorf("access denied: cannot open allowed directory")
+	}
+	defer func() { _ = root.Close() }()
 
-	// Check if file exists
-	info, err := os.Stat(filePath)
+	file, err := root.Open(relativePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", fmt.Errorf("file not found: %s", readArgs.Path)
 		}
+		return "", fmt.Errorf("failed to open file: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
 		return "", fmt.Errorf("failed to stat file: %w", err)
 	}
-
 	if info.IsDir() {
 		return "", fmt.Errorf("path is a directory, not a file")
 	}
-
-	// Open the file
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close() //nolint:errcheck
-
-	// Handle offset
 	if readArgs.Offset > 0 {
-		_, err = file.Seek(readArgs.Offset, io.SeekStart)
-		if err != nil {
+		if _, err := file.Seek(readArgs.Offset, io.SeekStart); err != nil {
 			return "", fmt.Errorf("failed to seek: %w", err)
 		}
 	}
 
-	// Set limit
-	limit := int64(65536) // Default 64KB
+	const (
+		defaultFileReadBytes = int64(65536)
+		maxFileReadBytes     = int64(1024 * 1024)
+	)
+	limit := defaultFileReadBytes
 	if readArgs.Limit > 0 {
 		limit = readArgs.Limit
 	}
-	if limit > t.maxFileSize {
+	if limit > maxFileReadBytes {
+		limit = maxFileReadBytes
+	}
+	if t.maxFileSize > 0 && limit > t.maxFileSize {
 		limit = t.maxFileSize
 	}
+	if limit < 0 {
+		return "", fmt.Errorf("invalid file read limit")
+	}
 
-	// Read the file
-	content := make([]byte, limit)
+	content := make([]byte, int(limit))
 	n, err := file.Read(content)
 	if err != nil && err != io.EOF {
 		return "", fmt.Errorf("failed to read file: %w", err)
 	}
 
+	remaining := max(info.Size()-readArgs.Offset, 0)
 	result := FileReadResult{
 		Content:   string(content[:n]),
 		Path:      readArgs.Path,
 		Size:      info.Size(),
-		Truncated: int64(n) < info.Size()-readArgs.Offset,
+		Truncated: int64(n) < remaining,
 	}
-
 	output, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return "", err
 	}
-
 	return string(output), nil
 }
 
-// isPathAllowed checks if the path is within allowed directories
-func (t *FileReadTool) isPathAllowed(path string) bool {
-	for _, allowedPath := range t.allowedPaths {
-		if path == allowedPath || strings.HasPrefix(path, allowedPath+"/") {
-			return true
-		}
-		// Also check with symlinks resolved for consistent comparison
-		resolved, err := filepath.EvalSymlinks(allowedPath)
-		if err == nil && resolved != allowedPath {
-			if path == resolved || strings.HasPrefix(path, resolved+"/") {
-				return true
-			}
-		}
+// allowedRootForPath maps a requested path to one os.Root-relative name. os.Root
+// enforces confinement across symlink traversal and closes the check/open race.
+func (t *FileReadTool) allowedRootForPath(requested string) (string, string, bool) {
+	candidate := requested
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(t.workDir, candidate)
 	}
-	return false
+	candidate, err := filepath.Abs(filepath.Clean(candidate))
+	if err != nil {
+		return "", "", false
+	}
+	for _, allowedPath := range t.allowedPaths {
+		allowed, err := filepath.Abs(filepath.Clean(allowedPath))
+		if err != nil {
+			continue
+		}
+		relative, err := filepath.Rel(allowed, candidate)
+		if err != nil || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return allowed, relative, true
+	}
+	return "", "", false
+}
+
+// isPathAllowed checks whether a path can be represented beneath an allowed os.Root.
+func (t *FileReadTool) isPathAllowed(path string) bool {
+	_, _, ok := t.allowedRootForPath(path)
+	return ok
 }
 
 // Ensure FileReadTool implements Tool

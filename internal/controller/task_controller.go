@@ -43,7 +43,9 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/artifactcap"
 	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -68,6 +70,7 @@ const (
 	maxRecentResolvedApprovalsForWorkerEnv        = 32
 	maxResolvedApprovalWorkerEnvFieldBytes        = 512
 	resolvedApprovalWorkerEnvJSONOverheadEstimate = 128
+	workspaceFinalizationTimeout                  = 5 * time.Minute
 
 	eventInvolvedObjectNameField = "involvedObject.name"
 	eventReasonField             = "reason"
@@ -114,6 +117,14 @@ type TaskReconciler struct {
 	MessageStore                       store.MessageStore
 	ArtifactStore                      store.ArtifactStore
 	ExecutionEventStore                store.ExecutionEventStore
+	DurableControlStore                store.DurableControlStore
+	ACPArtifactRetirer                 artifactcap.IdentityRetirer
+	ACPPublicationReclaimer            ACPPublicationReclaimer
+	ControllerEpochManager             *ControllerEpochManager
+	ACPAdmissionGate                   *ACPAdmissionGate
+	ACPRuntimeEnabled                  bool
+	ACPRuntimeImages                   ACPRuntimeImages
+	ACPRuntimeNamespace                string
 	EnforceNamespaceIsolation          bool
 	MaxTasksPerNamespace               int32
 	ExecutionWorkspaceDefaultProvider  corev1alpha1.WorkspaceProvider
@@ -182,6 +193,33 @@ type TaskReconciler struct {
 
 // updateStatusWithRetry updates the task status with retry on conflict.
 // It re-fetches the task on conflict, applies the mutate function, and retries.
+func (r *TaskReconciler) taskMetadataReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+func (r *TaskReconciler) patchTaskFinalizer(ctx context.Context, key types.NamespacedName, present bool) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Task{}
+		if err := r.taskMetadataReader().Get(ctx, key, current); err != nil {
+			return err
+		}
+		hasFinalizer := controllerutil.ContainsFinalizer(current, labels.TaskFinalizer)
+		if hasFinalizer == present {
+			return nil
+		}
+		base := current.DeepCopy()
+		if present {
+			controllerutil.AddFinalizer(current, labels.TaskFinalizer)
+		} else {
+			controllerutil.RemoveFinalizer(current, labels.TaskFinalizer)
+		}
+		return r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
 func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1alpha1.Task, mutate func(*corev1alpha1.Task)) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		// On retry, re-fetch the latest version
@@ -285,16 +323,11 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.handleDeletion(ctx, task)
 	}
 
-	// Add finalizer if not present
+	// Add the finalizer with a metadata-only optimistic patch. A full-object
+	// update can re-serialize equivalent duration strings (for example 12m as
+	// 12m0s) and trip immutable-spec admission rules.
 	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
-		controllerutil.AddFinalizer(task, labels.TaskFinalizer)
-		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-			if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, task); err != nil {
-				return err
-			}
-			controllerutil.AddFinalizer(task, labels.TaskFinalizer)
-			return r.Update(ctx, task)
-		}); err != nil {
+		if err := r.patchTaskFinalizer(ctx, req.NamespacedName, true); err != nil {
 			log.Error(err, "failed to add finalizer")
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -473,6 +506,27 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		ready, err := r.acpTaskDeletionReady(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ready {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		reclaimed, err := r.reclaimACPTaskPublicationBundles(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !reclaimed {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		retired, err := r.retireACPArtifactIdentities(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !retired {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
 		// Clean up result data from store
 		if r.ResultStore != nil {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
@@ -516,18 +570,6 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 		}
 
-		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task deleted"); cancelErr != nil {
-			if isAgentRuntimeDependencyNotReady(cancelErr) {
-				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-					return ctrl.Result{}, waitErr
-				} else if shouldWait {
-					log.Info("waiting to cancel deleted harness runtime turn", "error", cancelErr)
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-			}
-			log.Error(cancelErr, "failed to cancel deleted harness runtime turn")
-		}
-
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to delete Job")
@@ -553,9 +595,14 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 		}
 
-		// Remove finalizer
-		controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
-		if err := r.Update(ctx, task); err != nil && !apierrors.IsNotFound(err) {
+		// Remove the finalizer with the same metadata-only patch used for
+		// addition so immutable Task spec fields are never re-serialized.
+		key := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+		if err := r.patchTaskFinalizer(ctx, key, false); err != nil {
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
+
 			log.Error(err, "failed to remove finalizer")
 			return ctrl.Result{}, err
 		}
@@ -585,9 +632,16 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return r.handleTransactionTokenPending(ctx, task)
 	}
 
-	// If this is a scheduled task, validate cron and transition to Scheduled phase
+	// Scheduled parent Tasks own a recurring fire-time lifecycle; per-run timeout
+	// enforcement begins on the generated child Task rather than at parent creation.
 	if task.Spec.Schedule != "" {
 		return r.handleScheduledTask(ctx, task)
+	}
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.Execution == nil {
+		now := time.Now().UTC()
+		if deadline, ok := acpTaskDeadline(task, now); ok && !now.Before(deadline) {
+			return r.cancelACPTaskBeforeDurableAttempt(ctx, task, "task deadline exceeded before runtime admission")
+		}
 	}
 
 	// Check session lock if session is referenced
@@ -661,10 +715,12 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		switch plan.path {
 		case agentExecutionPathRejected:
 			return r.rejectPlannedAgentExecution(ctx, task, plan)
-		case agentExecutionPathWorkerJob:
-			return r.createTaskJob(ctx, task, agent, provider)
-		case agentExecutionPathHarnessWrapper:
-			return r.runHarnessWrapperTask(ctx, task, agent)
+		case agentExecutionPathACP:
+			return r.queueACPRuntimeTask(ctx, task, agent)
+		case agentExecutionPathExternal:
+			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(
+				externalAgentRuntimeDispatchUnsupportedReason(plan.externalRuntimeName),
+			))
 		default:
 			return ctrl.Result{}, fmt.Errorf("unknown agent execution path %q", plan.path)
 		}
@@ -835,7 +891,12 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 
 	log := logf.FromContext(ctx)
 	parentName := labels.ParentTaskName(task.Labels, task.Annotations)
-	depthInt, _ := strconv.Atoi(depthStr)
+	depthValue, parseErr := strconv.ParseInt(depthStr, 10, 32)
+	if parseErr != nil || depthValue < 0 || strconv.FormatInt(depthValue, 10) != depthStr {
+		result, err := r.failTask(ctx, task, "coordination depth annotation is invalid")
+		return result, err, true
+	}
+	depth := int32(depthValue)
 
 	// Look up parent task to find its agent's coordination config
 	parentTask := &corev1alpha1.Task{}
@@ -865,8 +926,8 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 	}
 
 	// Enforce maxDepth
-	if coord.MaxDepth > 0 && int32(depthInt) > coord.MaxDepth {
-		result, err := r.failTask(ctx, task, fmt.Sprintf("coordination depth %d exceeds max %d", depthInt, coord.MaxDepth))
+	if coord.MaxDepth > 0 && depth > coord.MaxDepth {
+		result, err := r.failTask(ctx, task, fmt.Sprintf("coordination depth %d exceeds max %d", depth, coord.MaxDepth))
 		return result, err, true
 	}
 
@@ -1623,6 +1684,12 @@ func taskExecutionWorkspaceReason(task *corev1alpha1.Task) corev1alpha1.Executio
 func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:gocyclo
 	log := logf.FromContext(ctx)
 
+	if taskManagedByACP(task) {
+		// The leader-elected ACPDispatcher owns the non-reconnectable prompt stream,
+		// lease renewal, cancellation barrier, and terminal status projection.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
 	// Check timeout
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
@@ -1631,26 +1698,12 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				return result, err
 			}
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
-			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task timed out"); cancelErr != nil {
-				if isAgentRuntimeDependencyNotReady(cancelErr) {
-					if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-						return ctrl.Result{}, waitErr
-					} else if shouldWait {
-						log.Info("waiting to cancel timed-out harness runtime turn", "error", cancelErr)
-						return ctrl.Result{RequeueAfter: time.Second}, nil
-					}
-				}
-				log.Error(cancelErr, "failed to cancel timed-out harness runtime turn")
-			}
 			return r.failTask(ctx, task, "task timed out")
 		}
 	}
 
-	if task.Spec.Type == corev1alpha1.TaskTypeAgent && taskHasHarnessWrapperTurn(task) {
-		return r.finishHarnessWrapperTask(ctx, task)
-	}
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent && strings.TrimSpace(task.Status.JobName) == "" {
-		return r.failTask(ctx, task, "harness runtime turn identity is missing")
+		return r.failTask(ctx, task, "agent task is not managed by the ACP runtime dispatcher")
 	}
 
 	// Populate ChildTaskStatus for coordinator tasks
@@ -2088,36 +2141,113 @@ func (r *TaskReconciler) handleFinalizing(
 	if outcome == nil {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "finalizing task is missing execution outcome")
 	}
-	workspaceStatus := task.Status.ExecutionWorkspace
-	if workspaceStatus != nil && workspaceStatus.AttachedEpoch > 0 {
-		attached := true
-		if condition := meta.FindStatusCondition(workspaceStatus.Conditions, "Attached"); condition != nil {
-			attached = condition.Status != metav1.ConditionFalse
+	if !outcome.RecordedAt.IsZero() && time.Since(outcome.RecordedAt.Time) >= workspaceFinalizationTimeout {
+		if err := r.quarantineFinalizingWorkspace(ctx, task); err != nil {
+			return ctrl.Result{}, err
 		}
-		if attached {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "workspace authority revocation timed out; workspace quarantined")
+	}
+	if taskExecutionWorkspaceNeedsFinalization(task) {
+		workspaceStatus := task.Status.ExecutionWorkspace
+		if workspaceStatus == nil || workspaceStatus.WorkspaceRef == nil || workspaceStatus.AttachedEpoch <= 0 {
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		workspaceObject := &workspacev1alpha1.ExecutionWorkspace{}
+		key := types.NamespacedName{Namespace: task.Namespace, Name: workspaceStatus.WorkspaceRef.Name}
+		if err := r.Get(ctx, key, workspaceObject); err != nil {
+			if apierrors.IsNotFound(err) {
+				return r.completeTask(ctx, task, outcome.Phase, outcome.Message)
+			}
+			return ctrl.Result{}, err
+		}
+		if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
+			return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
+		}
+		manager := WorkspaceAttachmentManager{Client: r.Client}
+		if err := manager.BeginRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	workspaceStatus := task.Status.ExecutionWorkspace
+	if workspaceStatus != nil && workspaceStatus.WorkspaceRef != nil && workspaceStatus.AttachedEpoch > 0 {
+		workspaceObject := &workspacev1alpha1.ExecutionWorkspace{}
+		key := types.NamespacedName{Namespace: task.Namespace, Name: workspaceStatus.WorkspaceRef.Name}
+		if err := r.Get(ctx, key, workspaceObject); err == nil {
+			if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
+				return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
+			}
+			manager := WorkspaceAttachmentManager{Client: r.Client}
+			if err := manager.FinalizeRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch, attachmentSecretName(workspaceObject.Name, workspaceStatus.AttachedEpoch)); err != nil {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
 		}
 	}
 	return r.completeTask(ctx, task, outcome.Phase, outcome.Message)
 }
 
+func (r *TaskReconciler) quarantineFinalizingWorkspace(ctx context.Context, task *corev1alpha1.Task) error {
+	if task == nil {
+		return nil
+	}
+	status := task.Status.ExecutionWorkspace
+	workspaces := []workspacev1alpha1.ExecutionWorkspace{}
+	if status != nil && status.WorkspaceRef != nil && strings.TrimSpace(status.WorkspaceRef.Name) != "" {
+		workspaceObject := workspacev1alpha1.ExecutionWorkspace{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: status.WorkspaceRef.Name}, &workspaceObject)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		if err == nil {
+			workspaces = append(workspaces, workspaceObject)
+		}
+	} else {
+		workspaceList := workspacev1alpha1.ExecutionWorkspaceList{}
+		if err := r.List(ctx, &workspaceList, client.InNamespace(task.Namespace)); err != nil {
+			return err
+		}
+		for index := range workspaceList.Items {
+			owner := metav1.GetControllerOf(&workspaceList.Items[index])
+			if owner != nil && owner.Kind == "Task" && owner.UID == task.UID {
+				workspaces = append(workspaces, workspaceList.Items[index])
+			}
+		}
+	}
+	for index := range workspaces {
+		workspaceObject := &workspaces[index]
+		if status != nil && status.WorkspaceRef != nil && status.WorkspaceRef.UID != "" && string(workspaceObject.UID) != status.WorkspaceRef.UID {
+			return fmt.Errorf("execution workspace UID changed during quarantine")
+		}
+		epoch := workspaceObject.Spec.AttachmentEpoch
+		if status != nil {
+			epoch = max(epoch, status.AttachedEpoch)
+		}
+		before := workspaceObject.DeepCopy()
+		workspaceObject.Spec.AttachmentEpoch = epoch
+		workspaceObject.Spec.Attachment = nil
+		workspaceObject.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+		if err := r.Patch(ctx, workspaceObject, client.MergeFrom(before)); err != nil {
+			return err
+		}
+		if epoch > 0 {
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: attachmentSecretName(workspaceObject.Name, epoch), Namespace: workspaceObject.Namespace}}
+			if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+		lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: attachmentLeaseName(workspaceObject.Name), Namespace: workspaceObject.Namespace}}
+		if err := r.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
-	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
-		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task cancelled"); cancelErr != nil {
-			if isAgentRuntimeDependencyNotReady(cancelErr) {
-				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-					return ctrl.Result{}, waitErr
-				} else if shouldWait {
-					log.Info("waiting to cancel harness runtime turn for cancelled task", "error", cancelErr)
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-			}
-			log.Error(cancelErr, "failed to cancel harness runtime turn for cancelled task")
-		}
-	}
-
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
 	if err != nil {
 		log.Error(err, "failed to clean up terminal task Job")
@@ -2135,7 +2265,32 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Send webhook if configured and not already sent
+	if !terminalEventRecorded {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	if r.ACPArtifactRetirer != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.Execution != nil && r.DurableControlStore != nil {
+		ready, readyErr := r.acpTaskDeletionReady(ctx, task)
+		if readyErr != nil {
+			log.Error(readyErr, "failed to verify ACP artifact retirement readiness")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if !ready {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		retired, retireErr := r.retireACPArtifactIdentities(ctx, task)
+		if retireErr != nil {
+			log.Error(retireErr, "failed to retire ACP artifact identities")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if !retired {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+	}
+
+	// Send optional webhooks only after durable ACP artifact identities have
+	// retired. Failed delivery may retry indefinitely without delaying artifact
+	// reclamation; retirement itself retains the capability safety grace period.
 	if task.Spec.WebhookURL != "" && !task.Status.WebhookDelivered {
 		if err := r.WebhookNotifier.Notify(ctx, task); err != nil {
 			log.Error(err, "failed to send webhook")
@@ -2152,10 +2307,6 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	if err := r.enforceParentScheduledTaskHistory(ctx, task); err != nil {
 		return ctrl.Result{}, err
 	}
-	if !terminalEventRecorded {
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	}
-
 	return ctrl.Result{}, nil
 }
 
@@ -2262,17 +2413,66 @@ func (r *TaskReconciler) completeExecutedTask(
 	phase corev1alpha1.TaskPhase,
 	message string,
 ) (ctrl.Result, error) {
+	if taskExecutionWorkspaceNeedsFinalization(task) {
+		return r.beginTaskFinalization(ctx, task, phase, message)
+	}
 	return r.completeTaskWithOutcome(ctx, task, phase, phase, message, true)
 }
 
-func (r *TaskReconciler) completeAfterSuccessfulExecutionError(
+func taskExecutionWorkspaceNeedsFinalization(task *corev1alpha1.Task) bool {
+	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
+		return false
+	}
+	request := task.Spec.Execution.Workspace
+	if !request.Enabled && request.ClassRef == nil {
+		return false
+	}
+	status := task.Status.ExecutionWorkspace
+	if status == nil {
+		return true
+	}
+	if status.AttachedEpoch <= 0 {
+		return false
+	}
+	condition := meta.FindStatusCondition(status.Conditions, "Attached")
+	return condition == nil || condition.Status != metav1.ConditionFalse
+}
+
+func (r *TaskReconciler) beginTaskFinalization(
 	ctx context.Context,
 	task *corev1alpha1.Task,
+	outcomePhase corev1alpha1.TaskPhase,
 	message string,
 ) (ctrl.Result, error) {
-	return r.completeTaskWithOutcome(
-		ctx, task, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseSucceeded, message, true,
-	)
+	log := logf.FromContext(ctx)
+	if err := r.collectResult(ctx, task); err != nil {
+		log.Error(err, "failed to collect result before workspace finalization")
+	}
+	now := metav1.Now()
+	resultRef := task.Status.ResultRef
+	if err := r.updateStatusWithRetry(ctx, task, func(current *corev1alpha1.Task) {
+		current.Status.Phase = corev1alpha1.TaskPhaseFinalizing
+		current.Status.CompletionTime = nil
+		current.Status.Message = message
+		current.Status.ResultRef = resultRef
+		if current.Status.ExecutionOutcome == nil {
+			attempt := max(current.Status.Attempts, 1)
+			current.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{
+				Phase: outcomePhase, Attempt: attempt, ResultRef: resultRef, RecordedAt: now, Message: message,
+			}
+		}
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type: ConditionTypeWaitingForApproval, Status: metav1.ConditionFalse, LastTransitionTime: now,
+			Reason: "TaskFinalizing", Message: "task execution is settled",
+		})
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type: ConditionTypeComplete, Status: metav1.ConditionFalse, LastTransitionTime: now,
+			Reason: "TaskFinalizing", Message: "workspace authority is being revoked",
+		})
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 }
 
 func (r *TaskReconciler) completeTaskWithOutcome(
@@ -2342,7 +2542,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 		t.Status.ResultRef = resultRef
 		if recordOutcome && t.Status.ExecutionOutcome == nil {
 			attempt := max(t.Status.Attempts, 1)
-			t.Status.ExecutionOutcome = &corev1alpha1.TaskExecutionOutcome{
+			t.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{
 				Phase:      outcomePhase,
 				Attempt:    attempt,
 				ResultRef:  resultRef,
@@ -2408,7 +2608,7 @@ func (r *TaskReconciler) failTask(ctx context.Context, task *corev1alpha1.Task, 
 // executionOutcomePreventsReplay treats every recorded outcome as final.
 // Retryable failed attempts are routed through retryTask before
 // completeExecutedTask records an outcome; once recorded, no attempt is replayed.
-func executionOutcomePreventsReplay(outcome *corev1alpha1.TaskExecutionOutcome) bool {
+func executionOutcomePreventsReplay(outcome *corev1alpha1.TaskWorkloadExecutionOutcome) bool {
 	return outcome != nil
 }
 
@@ -2966,14 +3166,8 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 	if task != nil && task.Spec.SecretRef != nil && strings.TrimSpace(task.Spec.SecretRef.Name) != "" {
 		return fmt.Errorf("runtimeRef custom runtimes do not support task secretRef credential delivery")
 	}
-	if ws := effectiveWorkspace(task); ws != nil && ws.GitSecretRef != nil && strings.TrimSpace(ws.GitSecretRef.Name) != "" {
-		return fmt.Errorf("runtimeRef custom runtimes do not support workspace gitSecretRef credential delivery")
-	}
 	if task != nil && task.Spec.PriorTaskRef != nil {
 		return fmt.Errorf("runtimeRef custom runtimes do not support priorTaskRef workspace handoff")
-	}
-	if taskRequestsReadOnlyAgent(task) {
-		return fmt.Errorf("read-only agent tasks do not support runtimeRef custom runtimes because Orka cannot enforce remote tool side effects")
 	}
 	return nil
 }
@@ -3000,7 +3194,6 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 		return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
 	}
 	hasRuntimeRef := agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
-	hasFrozenRuntimeRef := taskHasPlannedHarnessWrapperTurn(task) && task.Status.HarnessRuntime != nil && strings.TrimSpace(task.Status.HarnessRuntime.RuntimeRefName) != ""
 	hasBuiltInRuntime := strings.TrimSpace(string(agent.Spec.Runtime.Type)) != ""
 	switch {
 	case hasRuntimeRef && hasBuiltInRuntime:
@@ -3010,7 +3203,8 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 			return err
 		}
 	case hasBuiltInRuntime:
-		if err := validateBuiltInRuntimeTaskCompatibility(task, agent, hasFrozenRuntimeRef); err != nil {
+		if err := validateBuiltInRuntimeTaskCompatibility(task, agent); err != nil {
+
 			return err
 		}
 	default:
@@ -3026,8 +3220,8 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 	if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
 		return fmt.Errorf("agent %q has both runtime and model.provider set (mutually exclusive for agent tasks)", agent.Name)
 	}
-	if err := validateHarnessWrapperTaskEnv(task.Spec.Env); err != nil {
-		return err
+	if len(task.Spec.Env) > 0 {
+		return fmt.Errorf("type: agent ACP runtime tasks do not support arbitrary task env; use the reviewed runtime profile")
 	}
 	if agent.Spec.Coordination != nil && len(agent.Spec.Coordination.ApprovalRequiredTools) > 0 {
 		return fmt.Errorf("agent %q approvalRequiredTools is only supported for type: ai autonomous tasks", agent.Name)
@@ -3039,31 +3233,27 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 	return nil
 }
 
-func validateBuiltInRuntimeTaskCompatibility(
-	task *corev1alpha1.Task, agent *corev1alpha1.Agent, hasFrozenRuntimeRef bool,
-) error {
-	if hasFrozenRuntimeRef {
-		if err := validateRuntimeRefAgentTaskRestrictions(task, agent); err != nil {
-			return err
-		}
-	}
+func validateBuiltInRuntimeTaskCompatibility(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	if err := validateBuiltInAgentRuntime(agent.Spec.Runtime.Type); err != nil {
 		return err
 	}
-	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode &&
-		(agent.Spec.Model == nil || strings.TrimSpace(agent.Spec.Model.Name) == "") {
-		return fmt.Errorf("agent %q opencode runtime requires spec.model.name", agent.Name)
+	if err := validateBuiltInACPAgentCredentialSecretRef(agent); err != nil {
+		return err
+	}
+	if isBuiltInACPProviderRuntime(agent.Spec.Runtime.Type) && task.Spec.SecretRef != nil {
+		return fmt.Errorf("built-in ACP runtime %q does not support task secretRef; provider credentials are controller-managed", agent.Spec.Runtime.Type)
+	}
+	if err := ValidateOpenCodeAgentSpec(agent); err != nil {
+		return err
 	}
 	return validateReadOnlyBuiltInAgentRuntime(task, agent.Spec.Runtime.Type)
 }
 
 func validateBuiltInAgentRuntime(runtimeType corev1alpha1.AgentRuntimeType) error {
-	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode:
+	if isBuiltInACPProviderRuntime(runtimeType) {
 		return nil
-	default:
-		return fmt.Errorf("agent runtime %q does not have a harness adapter configured", runtimeType)
 	}
+	return fmt.Errorf("agent runtime %q does not have an ACP runtime profile configured", runtimeType)
 }
 
 func validateReadOnlyBuiltInAgentRuntime(task *corev1alpha1.Task, runtimeType corev1alpha1.AgentRuntimeType) error {
@@ -3071,10 +3261,11 @@ func validateReadOnlyBuiltInAgentRuntime(task *corev1alpha1.Task, runtimeType co
 		return nil
 	}
 	switch runtimeType {
+	case corev1alpha1.AgentRuntimeCodex:
+		return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed")
 	case corev1alpha1.AgentRuntimeCopilot:
-		return fmt.Errorf("read-only agent tasks do not support copilot runtime because GitHub tokens can allow repository mutation")
-	case corev1alpha1.AgentRuntimeOpencode:
-		return fmt.Errorf("read-only agent tasks do not support opencode runtime because the OpenCode adapter pre-approves file edits")
+		return fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
+
 	default:
 		return nil
 	}

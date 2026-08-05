@@ -16,8 +16,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/test/utils"
-	workercommon "github.com/orka-agents/orka/workers/common"
 )
 
 const (
@@ -29,31 +29,26 @@ const (
 
 var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 	const (
-		codexSecretName        = "e2e-live-runtime-codex-secret"
 		codexAgentName         = "e2e-live-runtime-codex-agent"
-		codexTaskWriteName     = "e2e-live-runtime-codex-write"
 		codexTaskReadName      = "e2e-live-runtime-codex-read"
-		codexMarker            = "ORKA_LIVE_RUNTIME_MARKER_1"
-		codexMarkerFile        = "live-runtime-marker.txt"
-		claudeSecretName       = "e2e-live-runtime-claude-secret"
+		opencodeAgentName      = "e2e-live-runtime-opencode-agent"
+		opencodeTaskReadName   = "e2e-live-runtime-opencode-read"
 		claudeAgentName        = "e2e-live-runtime-claude-agent"
 		claudeTaskName         = "e2e-live-runtime-claude-task"
 		claudeExpectedResponse = "ORKA_LIVE_CLAUDE_OK"
-		claudeProxyPFPort      = 18189
-		copilotAgentName       = "e2e-live-runtime-copilot-agent"
-		copilotTaskName        = "e2e-live-runtime-copilot-task"
 	)
 
 	var (
-		apiBaseURL         string
-		cancelControllerPF context.CancelFunc
-		controllerPFCmd    *exec.Cmd
-		token              string
-		gptModel           string
-		gptModelSkipReason string
-		claudeModel        string
-		geminiModel        string
-		claudeSessionName  string
+		apiBaseURL              string
+		cancelControllerPF      context.CancelFunc
+		controllerPFCmd         *exec.Cmd
+		token                   string
+		gptModel                string
+		gptModelSkipReason      string
+		opencodeModel           string
+		opencodeModelSkipReason string
+		claudeModel             string
+		claudeSessionName       string
 	)
 
 	BeforeAll(func() {
@@ -74,18 +69,18 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 
 		By("verifying the live proxy is ready")
 		ready := waitForProxyReadyViaServiceProxy(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			liveCopilotProxyServicePort(),
+			liveACPProviderProxyServiceNamespace(),
+			liveACPProviderProxyServiceName(),
+			liveACPProviderProxyServicePort(),
 		)
 		Expect(ready.Status).To(Equal("ready"))
 		Expect(ready.Error).To(BeEmpty())
 
 		By("discovering live runtime models by family")
 		runtimeCatalog, err := fetchProxyModelCatalogViaServiceProxy(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			liveCopilotProxyServicePort(),
+			liveACPProviderProxyServiceNamespace(),
+			liveACPProviderProxyServiceName(),
+			liveACPProviderProxyServicePort(),
 		)
 		Expect(err).NotTo(HaveOccurred())
 		gptModel = strings.TrimSpace(os.Getenv("E2E_LIVE_CODEX_RUNTIME_MODEL"))
@@ -105,32 +100,34 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 				gptModelSkipReason = "no Codex-family GPT model with /responses support exposed"
 			}
 		}
-		By("probing Claude-family models through the live Anthropic Messages endpoint")
-		proxyBaseURL, cancelProxyPF, proxyPFCmd, err := startServicePortForward(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			claudeProxyPFPort,
-			liveCopilotProxyServicePort(),
-		)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() {
-			stopPortForward(cancelProxyPF, proxyPFCmd)
-		})
+		opencodeModel = strings.TrimSpace(os.Getenv("E2E_LIVE_OPENCODE_RUNTIME_MODEL"))
+		if opencodeModel != "" {
+			if !openCodeModelSupportsEndpoint(runtimeCatalog, opencodeModel, "/chat/completions") {
+				opencodeModelSkipReason = "configured E2E_LIVE_OPENCODE_RUNTIME_MODEL does not advertise /chat/completions support"
+				opencodeModel = ""
+			}
+		} else {
+			opencodeModel = firstPreferredProxyModelSupportingEndpoint(
+				runtimeCatalog,
+				"/chat/completions",
+				liveCopilotProxyChatGPTModelPreferences,
+				liveCopilotProxyGPTModelPrefixes...,
+			)
+			if opencodeModel == "" {
+				opencodeModelSkipReason = "no GPT-family model with /chat/completions support exposed"
+			}
+		}
 
-		claudeModel, err = firstUsableProxyAnthropicMessagesModel(
-			proxyBaseURL,
+		if opencodeModel != "" && !strings.Contains(opencodeModel, "/") {
+			opencodeModel = "openai/" + opencodeModel
+		}
+
+		claudeModel = firstPreferredProxyModel(
 			runtimeCatalog,
 			liveCopilotProxyClaudeModelPreferences,
 			liveCopilotProxyClaudeModelPrefixes...,
 		)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(claudeModel).NotTo(BeEmpty(), "proxy service should expose a usable Claude-family model")
-		geminiModel = firstPreferredProxyModel(
-			runtimeCatalog,
-			liveCopilotProxyGeminiModelPreferences,
-			liveCopilotProxyGeminiModelPrefixes...,
-		)
-		Expect(geminiModel).NotTo(BeEmpty(), "proxy service should expose a Gemini-family model")
+		Expect(claudeModel).NotTo(BeEmpty(), "proxy service should expose a Claude-family model")
 
 		claudeSessionName = fmt.Sprintf("e2e-live-runtime-claude-%d", time.Now().UnixNano())
 	})
@@ -141,102 +138,121 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 
 	AfterEach(func() {
 		dumpDebugInfo(
-			codexTaskWriteName,
 			codexTaskReadName,
+			opencodeTaskReadName,
 			claudeTaskName,
-			copilotTaskName,
 		)
 		dumpLiveCopilotProxyDebugInfo()
 	})
 
-	It("should let codex consume priorTaskRef state on a git workspace", func() {
+	It("should run Codex through ACP v2 against a pinned read workspace", func() {
 		if gptModel == "" {
 			Skip("Skipping Codex runtime live proxy check: " + gptModelSkipReason)
 		}
 
 		DeferCleanup(func() {
-			for _, resource := range []struct {
-				kind string
-				name string
-			}{
-				{"task", codexTaskReadName},
-				{"task", codexTaskWriteName},
-				{"agent", codexAgentName},
-				{"secret", codexSecretName},
-			} {
-				cmd := exec.Command("kubectl", "delete", resource.kind, resource.name, "-n", namespace, "--ignore-not-found")
-				_, _ = utils.Run(cmd)
-			}
+			cmd := exec.Command("kubectl", "delete", "task", codexTaskReadName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "agent", codexAgentName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
 		})
-
-		By("creating the prior task that writes the marker file into the pinned repository")
-		writeMarkerCommand := fmt.Sprintf(
-			"printf '%%s\\n' %s > %s && echo CREATED",
-			shellSingleQuote(codexMarker),
-			shellSingleQuote(codexMarkerFile),
-		)
-		err := applyManifestJSON(runtimeContainerTaskManifest(
-			codexTaskWriteName,
-			[]string{"sh", "-c"},
-			[]string{writeMarkerCommand},
-			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
-		))
-		Expect(err).NotTo(HaveOccurred())
-
-		By("verifying the prior task has the expected workspace and runtime wiring")
-		verifyJobCreatedForTask(codexTaskWriteName, 2*time.Minute)
-		runtimeAssertJobBasics(
-			codexTaskWriteName,
-			generalWorkerImage,
-			map[string]string{
-				"ORKA_GIT_REPO": liveRuntimeRepoURL,
-				"ORKA_GIT_REF":  liveRuntimeRepoRef,
-			},
-			"",
-			nil,
-			nil,
-		)
-
-		By("waiting for the prior task to succeed and emit a structured diff result")
-		waitForCodexRuntimeTaskOrSkip(apiBaseURL, token, codexTaskWriteName, liveRuntimeTimeout)
-		verifyResultAvailable(codexTaskWriteName)
-		firstResult := workercommon.ParseStructuredResult(fetchTaskResultViaAPI(apiBaseURL, token, codexTaskWriteName))
-		Expect(strings.TrimSpace(firstResult.Summary)).To(ContainSubstring("CREATED"))
-		Expect(strings.TrimSpace(firstResult.Diff)).NotTo(BeEmpty(), "prior task should produce a diff for priorTaskRef")
-		Expect(firstResult.Files).To(ContainElement(codexMarkerFile))
-
-		By("creating a Codex runtime secret that routes OpenAI traffic through the live proxy")
-		err = createK8sSecret(codexSecretName, namespace, map[string]string{
-			"OPENAI_API_KEY":  "dummy-live-codex-key",
-			"OPENAI_BASE_URL": e2eLiveCopilotProxyBaseURL,
-		})
-		Expect(err).NotTo(HaveOccurred())
 
 		By("creating a Codex agent backed by the discovered GPT-family model")
-		err = applyManifestJSON(runtimeAgentManifest(codexAgentName, "codex", codexSecretName, gptModel, 5, true))
+		err := applyManifestJSON(runtimeAgentManifest(codexAgentName, "codex", gptModel, 5, nil))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("creating the Codex task that reads the file through priorTaskRef")
+		By("creating a Codex task against a pinned public repo/ref")
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskReadName,
 			codexAgentName,
-			fmt.Sprintf("The priorTaskRef workspace diff has already been applied to this checkout before you start. Do not run commands or inspect files. Reply with exactly %s and nothing else.", codexMarker),
-			1,
-			boolPtr(true),
+			fmt.Sprintf("Read README in the repository root and reply with exactly %s and nothing else.", liveRuntimeRepoSentinel),
+			4,
+			nil,
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
-			codexTaskWriteName,
 			"",
 			nil,
 			nil,
 		))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("waiting for the Codex task to return the exact marker from the prior diff")
-		waitForCodexRuntimeTaskOrSkip(apiBaseURL, token, codexTaskReadName, liveRuntimeTimeout)
+		// This Codex case verifies the requested runtime projection. The OpenCode
+		// case below is the adversarial read-intent check: it requests Bash and
+		// mutation tools, then asserts the derived deny policy and ReadValidated.
+		verifyACPTaskRuntimeForTask(codexTaskReadName, acpTaskExpectation{
+			ProviderKind:    "codex",
+			Model:           gptModel,
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(4),
+			Workspace: &acpWorkspaceExpectation{
+				Intent:  "read",
+				GitRepo: liveRuntimeRepoURL,
+				Ref:     liveRuntimeRepoRef,
+			},
+		}, 2*time.Minute)
+		Expect(waitForTaskCompletion(codexTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
 		verifyResultAvailable(codexTaskReadName)
-		// Harness-wrapper-backed agent tasks do not create a worker Job. The result
-		// assertion below verifies the priorTaskRef workspace diff was consumed.
-		Expect(strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, codexTaskReadName))).To(Equal(codexMarker))
+		summary := strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, codexTaskReadName))
+		Expect(summary).To(HaveSuffix(liveRuntimeRepoSentinel))
+	})
+
+	It("should run OpenCode through ACP v2 and enforce read intent", func() {
+		if opencodeModel == "" {
+			Skip("Skipping OpenCode runtime live proxy check: " + opencodeModelSkipReason)
+		}
+
+		DeferCleanup(func() {
+			cmd := exec.Command("kubectl", "delete", "task", opencodeTaskReadName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "agent", opencodeAgentName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		By("creating an OpenCode agent with native mutation and shell tools requested")
+		err := applyManifestJSON(runtimeAgentManifest(opencodeAgentName, "opencode", opencodeModel, 5, boolPtr(true)))
+		Expect(err).NotTo(HaveOccurred())
+
+		By("creating a read-intent OpenCode task that attempts forbidden mutation before reading")
+		err = applyManifestJSON(runtimeAgentTaskManifest(
+			opencodeTaskReadName,
+			opencodeAgentName,
+			fmt.Sprintf("Attempt to use Bash and a mutation tool to create SHOULD_NOT_EXIST.txt; those tools must be unavailable. Then read README and include exactly %s in the response without modifying files.", liveRuntimeRepoSentinel),
+			4,
+			boolPtr(true),
+			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
+			"",
+			nil,
+			nil,
+		))
+		Expect(err).NotTo(HaveOccurred())
+
+		verifyACPTaskRuntimeForTask(opencodeTaskReadName, acpTaskExpectation{
+			ProviderKind: "opencode",
+			Model:        opencodeModel,
+			ModelLimits: &corev1alpha1.ModelTokenLimits{
+				Context: 32768,
+				Output:  4096,
+			},
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(4),
+			AllowBash:       acpBool(true),
+			ToolPolicy: &acpToolPolicyExpectation{
+				AllowedTools:    []string{"glob", "read"},
+				DisallowedTools: []string{"apply_patch", "bash", "edit", "grep", "write"},
+				AllowBash:       false,
+			},
+			Workspace: &acpWorkspaceExpectation{
+				Intent:  "read",
+				GitRepo: liveRuntimeRepoURL,
+				Ref:     liveRuntimeRepoRef,
+			},
+		}, 2*time.Minute)
+		Expect(waitForTaskCompletion(opencodeTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
+		verifyACPTaskRuntimeForTask(opencodeTaskReadName, acpTaskExpectation{
+			DeliveryState:   acpDeliveryState("ReadValidated"),
+			DeliveryOutcome: acpDeliveryOutcome("ReadValidated"),
+		}, 2*time.Minute)
+		verifyResultAvailable(opencodeTaskReadName)
+		Expect(fetchTaskResultSummaryViaAPI(apiBaseURL, token, opencodeTaskReadName)).To(ContainSubstring(liveRuntimeRepoSentinel))
 	})
 
 	It("should run claude code through the live proxy with session wiring and exact output", func() {
@@ -244,8 +260,6 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			cmd := exec.Command("kubectl", "delete", "task", claudeTaskName, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 			cmd = exec.Command("kubectl", "delete", "agent", claudeAgentName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "secret", claudeSecretName, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 			_, _, _ = doAuthorizedJSONRequest(
 				http.MethodDelete,
@@ -256,37 +270,32 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			)
 		})
 
-		By("creating a Claude runtime secret that routes Anthropic traffic through the live proxy")
-		err := createK8sSecret(claudeSecretName, namespace, map[string]string{
-			"ANTHROPIC_API_KEY":  "dummy-live-claude-key",
-			"ANTHROPIC_BASE_URL": liveCopilotProxyRootURL(),
-		})
-		Expect(err).NotTo(HaveOccurred())
-
 		By("creating a Claude agent backed by the discovered Claude-family model")
-		err = applyManifestJSON(runtimeAgentManifest(claudeAgentName, "claude", claudeSecretName, claudeModel, 5, false))
+		err := applyManifestJSON(runtimeAgentManifest(claudeAgentName, "claude", claudeModel, 5, boolPtr(false)))
 		Expect(err).NotTo(HaveOccurred())
 
 		By("creating a Claude task with sessionRef wiring")
-		claudeTask := runtimeAgentTaskManifest(
+		err = applyManifestJSON(runtimeAgentTaskManifest(
 			claudeTaskName,
 			claudeAgentName,
 			fmt.Sprintf("Reply with exactly %s and nothing else.", claudeExpectedResponse),
 			3,
 			boolPtr(false),
 			nil,
-			"",
 			claudeSessionName,
 			boolPtr(true),
 			boolPtr(true),
-		)
-		claudeTaskSpec, ok := claudeTask["spec"].(map[string]any)
-		Expect(ok).To(BeTrue())
-		claudeTaskSpec["env"] = []map[string]string{
-			{"name": "CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "value": "1"},
-		}
-		err = applyManifestJSON(claudeTask)
+		))
 		Expect(err).NotTo(HaveOccurred())
+
+		verifyACPTaskRuntimeForTask(claudeTaskName, acpTaskExpectation{
+			ProviderKind:    "claude",
+			Model:           claudeModel,
+			WorkspaceIntent: "read",
+			MaxTurns:        acpInt32(3),
+			AllowBash:       acpBool(false),
+			SessionName:     claudeSessionName,
+		}, 2*time.Minute)
 
 		By("waiting for the Claude task to return the exact sentinel")
 		Expect(waitForTaskCompletion(claudeTaskName, liveRuntimeTimeout)).To(Equal("Succeeded"))
@@ -295,44 +304,18 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(fetchSessionViaAPI(apiBaseURL, token, claudeSessionName)).To(ContainSubstring(claudeExpectedResponse))
 	})
 
-	It("should run copilot against a pinned public checkout with a Gemini-family model", func() {
-		skipIfNoKey("E2E_GITHUB_TOKEN")
-
-		DeferCleanup(func() {
-			cmd := exec.Command("kubectl", "delete", "task", copilotTaskName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", copilotAgentName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-		})
-
-		By("creating a Copilot agent backed by the discovered Gemini-family model")
-		err := applyManifestJSON(runtimeAgentManifest(copilotAgentName, "copilot", "e2e-github-secret", geminiModel, 5, true))
-		Expect(err).NotTo(HaveOccurred())
-
-		By("creating a Copilot task against a pinned public repo/ref")
-		err = applyManifestJSON(runtimeAgentTaskManifest(
-			copilotTaskName,
-			copilotAgentName,
-			fmt.Sprintf("Read the README file in the repository root and reply with exactly %s and nothing else.", liveRuntimeRepoSentinel),
-			4,
-			boolPtr(true),
-			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
-			"",
-			"",
-			nil,
-			nil,
-		))
-		Expect(err).NotTo(HaveOccurred())
-
-		By("waiting for the Copilot task to return the exact README sentinel")
-		Expect(waitForTaskCompletion(copilotTaskName, liveRuntimeTimeout)).To(Equal("Succeeded"))
-		verifyResultAvailable(copilotTaskName)
-		Expect(strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, copilotTaskName))).To(Equal(liveRuntimeRepoSentinel))
+	It("should publish a digest-pinned Copilot ACP image for admission coverage", func() {
+		Expect(acpCopilotRuntimeRef).To(MatchRegexp(`@sha256:[a-f0-9]{64}$`))
 	})
 })
 
-func shellSingleQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+func openCodeModelSupportsEndpoint(catalog proxyModelCatalog, model, endpoint string) bool {
+	model = strings.TrimSpace(model)
+	if catalog.modelSupportsEndpoint(model, endpoint) {
+		return true
+	}
+	_, bare, ok := strings.Cut(model, "/")
+	return ok && strings.TrimSpace(bare) != "" && catalog.modelSupportsEndpoint(strings.TrimSpace(bare), endpoint)
 }
 
 type runtimeWorkspaceConfig struct {
@@ -340,38 +323,27 @@ type runtimeWorkspaceConfig struct {
 	Ref     string
 }
 
-func waitForCodexRuntimeTaskOrSkip(apiBaseURL, token, taskName string, timeout time.Duration) {
-	phase := waitForTaskCompletion(taskName, timeout)
-	if phase == "Succeeded" {
-		return
+func runtimeAgentManifest(name, runtimeType, modelName string, defaultMaxTurns int, defaultAllowBash *bool) map[string]any {
+	runtime := map[string]any{
+		"type":            runtimeType,
+		"defaultMaxTurns": defaultMaxTurns,
 	}
-	result := fetchTaskResultViaAPI(apiBaseURL, token, taskName)
-	summary := workercommon.ParseStructuredResult(result).Summary
-	if isLiveCopilotCodexModelUnavailable(result) || isLiveCopilotCodexModelUnavailable(summary) {
-		Skip("Skipping Codex runtime live proxy check: selected model is unavailable for copilot-language-server integrator")
+	if defaultAllowBash != nil {
+		runtime["defaultAllowBash"] = *defaultAllowBash
 	}
-	Expect(phase).To(Equal("Succeeded"), "Codex runtime task failed: %s", summary)
-}
-
-func isLiveCopilotCodexModelUnavailable(text string) bool {
-	lower := strings.ToLower(text)
-	return strings.Contains(lower, "model_not_available_for_integrator") ||
-		(strings.Contains(lower, "requested model is not available") && strings.Contains(lower, "copilot-language-server"))
-}
-
-func runtimeAgentManifest(name, runtimeType, secretName, modelName string, defaultMaxTurns int, defaultAllowBash bool) map[string]any {
 	spec := map[string]any{
-		"runtime": map[string]any{
-			"type":             runtimeType,
-			"defaultMaxTurns":  defaultMaxTurns,
-			"defaultAllowBash": defaultAllowBash,
-		},
+		"runtime": runtime,
 	}
-	if secretName != "" {
-		spec["secretRef"] = map[string]any{"name": secretName}
+	if runtimeType == "opencode" {
+		spec["runtime"].(map[string]any)["defaultAllowedTools"] = []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
 	}
 	if modelName != "" {
-		spec["model"] = map[string]any{"name": modelName}
+		model := map[string]any{"name": modelName}
+		if runtimeType == "opencode" {
+			model["contextWindow"] = 32768
+			model["maxTokens"] = 4096
+		}
+		spec["model"] = model
 	}
 
 	return map[string]any{
@@ -390,7 +362,6 @@ func runtimeAgentTaskManifest(
 	maxTurns int,
 	allowBash *bool,
 	workspace *runtimeWorkspaceConfig,
-	priorTaskName string,
 	sessionName string,
 	sessionCreate, sessionAppend *bool,
 ) map[string]any {
@@ -400,21 +371,18 @@ func runtimeAgentTaskManifest(
 	if allowBash != nil {
 		agentRuntime["allowBash"] = *allowBash
 	}
-	if workspace != nil {
-		agentRuntime["workspace"] = map[string]any{
-			"gitRepo": workspace.GitRepo,
-			"ref":     workspace.Ref,
-		}
-	}
-
 	spec := map[string]any{
 		"type":         "agent",
 		"prompt":       prompt,
 		"agentRef":     map[string]any{"name": agentName},
 		"agentRuntime": agentRuntime,
 	}
-	if priorTaskName != "" {
-		spec["priorTaskRef"] = map[string]any{"name": priorTaskName}
+	if workspace != nil {
+		spec["workspace"] = map[string]any{
+			"intent":  "read",
+			"gitRepo": workspace.GitRepo,
+			"ref":     workspace.Ref,
+		}
 	}
 	if sessionName != "" {
 		sessionRef := map[string]any{"name": sessionName}
@@ -438,37 +406,6 @@ func runtimeAgentTaskManifest(
 	}
 }
 
-func runtimeContainerTaskManifest(
-	name string,
-	command []string,
-	args []string,
-	workspace *runtimeWorkspaceConfig,
-) map[string]any {
-	spec := map[string]any{
-		"type":    "container",
-		"command": command,
-	}
-	if len(args) > 0 {
-		spec["args"] = args
-	}
-	if workspace != nil {
-		spec["workspace"] = map[string]any{
-			"gitRepo": workspace.GitRepo,
-			"ref":     workspace.Ref,
-		}
-	}
-
-	return map[string]any{
-		"apiVersion": "core.orka.ai/v1alpha1",
-		"kind":       "Task",
-		"metadata": map[string]any{
-			"name":      name,
-			"namespace": namespace,
-		},
-		"spec": spec,
-	}
-}
-
 func applyManifestJSON(manifest any) error {
 	payload, err := json.Marshal(manifest)
 	if err != nil {
@@ -479,116 +416,6 @@ func applyManifestJSON(manifest any) error {
 	cmd.Stdin = strings.NewReader(string(payload))
 	_, err = utils.Run(cmd)
 	return err
-}
-
-func runtimeAssertJobBasics(
-	taskName, expectedImage string,
-	requiredEnv map[string]string,
-	expectedSecret string,
-	forbiddenEnvKeys []string,
-	expectedInitContainers []string,
-) {
-	snapshot := runtimeFetchTaskJobSnapshot(taskName)
-	Expect(snapshot.Containers).NotTo(BeEmpty())
-
-	container := snapshot.Containers[0]
-	Expect(container.Image).To(Equal(expectedImage))
-
-	envMap := runtimeEnvMapFromContainer(container)
-	for key, value := range requiredEnv {
-		Expect(envMap).To(HaveKeyWithValue(key, value))
-	}
-	for _, key := range forbiddenEnvKeys {
-		Expect(envMap).NotTo(HaveKey(key))
-	}
-
-	if expectedSecret != "" {
-		Expect(runtimeSecretNamesFromEnvFrom(container.EnvFrom)).To(ContainElement(expectedSecret))
-	}
-
-	if len(expectedInitContainers) > 0 {
-		initNames := make([]string, 0, len(snapshot.InitContainers))
-		for _, initContainer := range snapshot.InitContainers {
-			initNames = append(initNames, initContainer.Name)
-		}
-		for _, initName := range expectedInitContainers {
-			Expect(initNames).To(ContainElement(initName))
-		}
-	}
-}
-
-func runtimeFetchTaskJobSnapshot(taskName string) runtimeJobPodSpecSnapshot {
-	var snapshot runtimeJobPodSpecSnapshot
-	Eventually(func(g Gomega) {
-		cmd := exec.Command("kubectl", "get", "jobs",
-			"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-			"-o", "json",
-			"-n", namespace,
-		)
-		output, err := utils.Run(cmd)
-		g.Expect(err).NotTo(HaveOccurred(), "Failed to get Job for task %s", taskName)
-
-		var payload runtimeJobListSnapshot
-		g.Expect(json.Unmarshal([]byte(output), &payload)).To(Succeed())
-		g.Expect(payload.Items).NotTo(BeEmpty(), "Job list should not be empty")
-
-		snapshot = payload.Items[0].Spec.Template.Spec
-		g.Expect(snapshot.Containers).NotTo(BeEmpty(), "Job should have at least one container")
-	}, 2*time.Minute, time.Second).Should(Succeed())
-
-	return snapshot
-}
-
-func runtimeEnvMapFromContainer(container runtimeJobContainerSnapshot) map[string]string {
-	envMap := make(map[string]string, len(container.Env))
-	for _, envVar := range container.Env {
-		envMap[envVar.Name] = envVar.Value
-	}
-	return envMap
-}
-
-func runtimeSecretNamesFromEnvFrom(envFrom []runtimeJobEnvFromSnapshot) []string {
-	names := make([]string, 0, len(envFrom))
-	for _, source := range envFrom {
-		if source.SecretRef != nil && strings.TrimSpace(source.SecretRef.Name) != "" {
-			names = append(names, strings.TrimSpace(source.SecretRef.Name))
-		}
-	}
-	return names
-}
-
-type runtimeJobSecretRefSnapshot struct {
-	Name string `json:"name"`
-}
-
-type runtimeJobEnvFromSnapshot struct {
-	SecretRef *runtimeJobSecretRefSnapshot `json:"secretRef,omitempty"`
-}
-
-type runtimeJobContainerSnapshot struct {
-	Name    string                      `json:"name"`
-	Image   string                      `json:"image"`
-	Env     []envVar                    `json:"env"`
-	EnvFrom []runtimeJobEnvFromSnapshot `json:"envFrom"`
-}
-
-type runtimeJobPodSpecSnapshot struct {
-	Containers     []runtimeJobContainerSnapshot `json:"containers"`
-	InitContainers []runtimeJobContainerSnapshot `json:"initContainers"`
-}
-
-type runtimeJobTemplateSnapshot struct {
-	Spec runtimeJobPodSpecSnapshot `json:"spec"`
-}
-
-type runtimeJobSpecSnapshot struct {
-	Template runtimeJobTemplateSnapshot `json:"template"`
-}
-
-type runtimeJobListSnapshot struct {
-	Items []struct {
-		Spec runtimeJobSpecSnapshot `json:"spec"`
-	} `json:"items"`
 }
 
 func boolPtr(v bool) *bool {
