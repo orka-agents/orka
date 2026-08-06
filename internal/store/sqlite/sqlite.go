@@ -1075,6 +1075,9 @@ func migrate(db *sql.DB) error {
 	if err := migrateControlStore(db); err != nil {
 		return err
 	}
+	if err := migrateAgentExecutionCoexistence(db); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -1262,6 +1265,10 @@ type Store struct {
 	db               *sql.DB
 	dbPath           string
 	executionEventMu sync.Mutex
+
+	// snapshotCipher encrypts immutable agent execution snapshot bodies at
+	// rest. Snapshot persistence fails closed while it is nil.
+	snapshotCipher *AgentExecutionSnapshotCipher
 
 	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
 	// multi-connection proposal-apply races after an accepted proposal is read.

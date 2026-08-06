@@ -1,0 +1,425 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package store
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+)
+
+// AgentExecutionSnapshotSchemaVersion is the current immutable execution
+// snapshot schema version.
+const AgentExecutionSnapshotSchemaVersion int32 = 1
+
+// AgentExecutionSnapshotKey identifies one immutable, content-addressed
+// execution snapshot.
+type AgentExecutionSnapshotKey struct {
+	TaskUID string
+	// Digest is the canonical sha256 digest of the plaintext snapshot body.
+	Digest string
+}
+
+// ID returns the canonical snapshot identity <task-uid>/sha256:<digest>.
+func (k AgentExecutionSnapshotKey) ID() string {
+	return k.TaskUID + "/" + k.Digest
+}
+
+// Validate rejects incomplete snapshot keys.
+func (k AgentExecutionSnapshotKey) Validate() error {
+	if strings.TrimSpace(k.TaskUID) == "" {
+		return ValidationErrorf("snapshot task UID is required")
+	}
+	if err := ValidateCanonicalDigest("snapshot digest", k.Digest); err != nil {
+		return err
+	}
+	return nil
+}
+
+// AgentExecutionSnapshot is the immutable non-secret executable input record
+// for one Task binding. The body is sensitive (resolved prompts, Skill
+// content, repository identities, endpoint metadata, policy configuration)
+// even though raw credentials and TxTokens are prohibited; it is encrypted at
+// rest and must never enter logs, events, metrics, or ordinary API output.
+type AgentExecutionSnapshot struct {
+	TaskUID       string
+	Digest        string
+	SchemaVersion int32
+	// Body is the canonical JSON plaintext. Digest must equal
+	// CanonicalAgentExecutionSnapshotDigest(Body).
+	Body      []byte
+	CreatedAt time.Time
+}
+
+// CanonicalAgentExecutionSnapshotDigest returns the canonical digest of a
+// plaintext snapshot body.
+func CanonicalAgentExecutionSnapshotDigest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// AgentExecutionSnapshotStore persists immutable execution snapshots.
+// Implementations must encrypt snapshot bodies at rest and fail closed when no
+// encryption key is configured.
+type AgentExecutionSnapshotStore interface {
+	// PersistAgentExecutionSnapshot idempotently stores an immutable snapshot
+	// keyed by Task UID and digest. An existing identical snapshot succeeds; an
+	// existing snapshot with the same key but different content returns
+	// ErrDuplicateMismatch. The snapshot digest must match the body.
+	PersistAgentExecutionSnapshot(ctx context.Context, snapshot AgentExecutionSnapshot) error
+
+	// GetAgentExecutionSnapshot decrypts and returns one snapshot, verifying
+	// body integrity against the stored digest.
+	GetAgentExecutionSnapshot(ctx context.Context, key AgentExecutionSnapshotKey) (*AgentExecutionSnapshot, error)
+
+	// ListAgentExecutionSnapshotKeys returns every stored snapshot key for a
+	// Task UID, for retention checks and inventory.
+	ListAgentExecutionSnapshotKeys(ctx context.Context, taskUID string) ([]AgentExecutionSnapshotKey, error)
+
+	// DeleteAgentExecutionSnapshots removes every snapshot for a Task UID. The
+	// caller is responsible for proving all binding, attempt, lineage,
+	// finalizer, quarantine, adjudication, and retention references are
+	// released first.
+	DeleteAgentExecutionSnapshots(ctx context.Context, taskUID string) error
+}
+
+// SessionLineageProvenance records how a Session runtime lineage was created.
+type SessionLineageProvenance string
+
+const (
+	// SessionLineageFirstUse marks lineage established atomically on first
+	// executable use of a fresh Session.
+	SessionLineageFirstUse SessionLineageProvenance = "first-use"
+	// SessionLineageLegacyAdopted marks lineage classified from authoritative
+	// evidence during the sealed migration inventory.
+	SessionLineageLegacyAdopted SessionLineageProvenance = "legacy-adopted"
+	// SessionLineageTranscriptBootstrap marks a new Session lineage created by
+	// an explicit named migration from a reconciled canonical transcript.
+	SessionLineageTranscriptBootstrap SessionLineageProvenance = "transcript-bootstrap"
+)
+
+// SessionLineage durably records the execution protocol and runtime identity
+// of one conversation Session. LineageGeneration is independent of the Session
+// mutation-lease generation and any v2 RuntimeSession generation; it changes
+// only through an explicit named migration.
+type SessionLineage struct {
+	Namespace    string
+	SessionName  string
+	NamespaceUID string
+	SessionUID   string
+	// ContractVersion is orka.harness.v1 or orka.harness.v2.
+	ContractVersion   string
+	LineageGeneration int64
+	// RuntimeIdentity is the built-in runtime type or the AgentRuntime UID.
+	RuntimeIdentity string
+	// ConfigDigest is the configuration/snapshot digest recorded when the
+	// lineage was established.
+	ConfigDigest string
+	Provenance   SessionLineageProvenance
+	Version      int64
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// ClaimSessionLineageRequest atomically establishes or verifies a Session
+// lineage. Callers must invoke it under the same serialization that acquires
+// the Session mutation lease so two concurrent first-use Tasks cannot
+// establish different protocols.
+type ClaimSessionLineageRequest struct {
+	Namespace       string
+	SessionName     string
+	NamespaceUID    string
+	SessionUID      string
+	ContractVersion string
+	RuntimeIdentity string
+	ConfigDigest    string
+	Provenance      SessionLineageProvenance
+
+	// EstablishIfAbsent permits creating the lineage row. It must be true only
+	// when the caller has proven the Session is genuinely fresh or is running
+	// the sealed classification sweep: a non-empty pre-existing Session is
+	// never silently treated as unclaimed.
+	EstablishIfAbsent bool
+}
+
+// Validate rejects incomplete lineage claims.
+func (r ClaimSessionLineageRequest) Validate() error {
+	switch {
+	case strings.TrimSpace(r.Namespace) == "":
+		return ValidationErrorf("session lineage namespace is required")
+	case strings.TrimSpace(r.SessionName) == "":
+		return ValidationErrorf("session lineage session name is required")
+	case strings.TrimSpace(r.NamespaceUID) == "":
+		return ValidationErrorf("session lineage namespace UID is required")
+	case strings.TrimSpace(r.SessionUID) == "":
+		return ValidationErrorf("session lineage session UID is required")
+	case r.ContractVersion != "orka.harness.v1" && r.ContractVersion != "orka.harness.v2":
+		return ValidationErrorf("session lineage contract version %q must be orka.harness.v1 or orka.harness.v2", r.ContractVersion)
+	case strings.TrimSpace(r.RuntimeIdentity) == "":
+		return ValidationErrorf("session lineage runtime identity is required")
+	}
+	switch r.Provenance {
+	case SessionLineageFirstUse, SessionLineageLegacyAdopted, SessionLineageTranscriptBootstrap:
+	default:
+		return ValidationErrorf("session lineage provenance %q is not supported", string(r.Provenance))
+	}
+	if r.ConfigDigest != "" {
+		if err := ValidateCanonicalDigest("session lineage config digest", r.ConfigDigest); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SessionLineageStore persists Session protocol/runtime lineage.
+type SessionLineageStore interface {
+	// ClaimSessionLineage establishes the lineage exactly once or verifies the
+	// claim against the existing record. A mismatched contract version,
+	// Session UID, namespace UID, or runtime identity returns ErrConflict; a
+	// missing record with EstablishIfAbsent=false returns ErrNotFound.
+	// Concurrent first-use claims converge on exactly one lineage.
+	ClaimSessionLineage(ctx context.Context, request ClaimSessionLineageRequest) (*SessionLineage, error)
+
+	// GetSessionLineage returns the lineage for one Session, or ErrNotFound.
+	GetSessionLineage(ctx context.Context, namespace, sessionName string) (*SessionLineage, error)
+
+	// DeleteSessionLineage removes the lineage during Session cleanup.
+	DeleteSessionLineage(ctx context.Context, namespace, sessionName string) error
+}
+
+// HarnessV1AttemptState is the durable harness v1 attempt state machine.
+type HarnessV1AttemptState string
+
+const (
+	HarnessV1AttemptPrepared         HarnessV1AttemptState = "Prepared"
+	HarnessV1AttemptSubmitting       HarnessV1AttemptState = "Submitting"
+	HarnessV1AttemptRejected         HarnessV1AttemptState = "Rejected"
+	HarnessV1AttemptSubmittedUnknown HarnessV1AttemptState = "SubmittedUnknown"
+	HarnessV1AttemptAccepted         HarnessV1AttemptState = "Accepted"
+	HarnessV1AttemptRunning          HarnessV1AttemptState = "Running"
+	HarnessV1AttemptCancelRequested  HarnessV1AttemptState = "CancelRequested"
+	HarnessV1AttemptSettling         HarnessV1AttemptState = "Settling"
+	HarnessV1AttemptSucceeded        HarnessV1AttemptState = "Succeeded"
+	HarnessV1AttemptFailed           HarnessV1AttemptState = "Failed"
+	HarnessV1AttemptCancelled        HarnessV1AttemptState = "Cancelled"
+	HarnessV1AttemptOutcomeUnknown   HarnessV1AttemptState = "OutcomeUnknown"
+)
+
+var harnessV1AttemptTransitions = map[HarnessV1AttemptState][]HarnessV1AttemptState{
+	HarnessV1AttemptPrepared:   {HarnessV1AttemptSubmitting, HarnessV1AttemptRejected, HarnessV1AttemptCancelled},
+	HarnessV1AttemptSubmitting: {HarnessV1AttemptRejected, HarnessV1AttemptSubmittedUnknown, HarnessV1AttemptAccepted},
+	HarnessV1AttemptSubmittedUnknown: {
+		HarnessV1AttemptRejected, HarnessV1AttemptAccepted, HarnessV1AttemptOutcomeUnknown,
+	},
+	HarnessV1AttemptAccepted: {
+		HarnessV1AttemptRunning, HarnessV1AttemptCancelRequested, HarnessV1AttemptSettling,
+		HarnessV1AttemptSucceeded, HarnessV1AttemptFailed, HarnessV1AttemptCancelled, HarnessV1AttemptOutcomeUnknown,
+	},
+	HarnessV1AttemptRunning: {
+		HarnessV1AttemptCancelRequested, HarnessV1AttemptSettling,
+		HarnessV1AttemptSucceeded, HarnessV1AttemptFailed, HarnessV1AttemptCancelled, HarnessV1AttemptOutcomeUnknown,
+	},
+	HarnessV1AttemptCancelRequested: {
+		HarnessV1AttemptSettling, HarnessV1AttemptSucceeded, HarnessV1AttemptFailed,
+		HarnessV1AttemptCancelled, HarnessV1AttemptOutcomeUnknown,
+	},
+	HarnessV1AttemptSettling: {
+		HarnessV1AttemptSucceeded, HarnessV1AttemptFailed, HarnessV1AttemptCancelled, HarnessV1AttemptOutcomeUnknown,
+	},
+}
+
+// IsTerminalHarnessV1AttemptState reports whether a state admits no further
+// transitions. Rejected is terminal for the attempt and is the only
+// submission-state path eligible for a safe resend through a new attempt.
+func IsTerminalHarnessV1AttemptState(state HarnessV1AttemptState) bool {
+	switch state {
+	case HarnessV1AttemptRejected, HarnessV1AttemptSucceeded, HarnessV1AttemptFailed,
+		HarnessV1AttemptCancelled, HarnessV1AttemptOutcomeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateHarnessV1AttemptTransition rejects illegal state transitions.
+func ValidateHarnessV1AttemptTransition(from, to HarnessV1AttemptState) error {
+	if slices.Contains(harnessV1AttemptTransitions[from], to) {
+		return nil
+	}
+	return ValidationErrorf("harness v1 attempt transition %s -> %s is not allowed", from, to)
+}
+
+// HarnessV1AttemptKey identifies one durable v1 attempt.
+type HarnessV1AttemptKey struct {
+	Namespace string
+	TaskUID   string
+	Attempt   int32
+}
+
+// CanonicalID returns the canonical attempt record identity.
+func (k HarnessV1AttemptKey) CanonicalID() string {
+	return fmt.Sprintf("%s/%s/%d", k.Namespace, k.TaskUID, k.Attempt)
+}
+
+// Validate rejects incomplete attempt keys.
+func (k HarnessV1AttemptKey) Validate() error {
+	switch {
+	case strings.TrimSpace(k.Namespace) == "":
+		return ValidationErrorf("harness v1 attempt namespace is required")
+	case strings.TrimSpace(k.TaskUID) == "":
+		return ValidationErrorf("harness v1 attempt task UID is required")
+	case k.Attempt < 1:
+		return ValidationErrorf("harness v1 attempt number must be positive")
+	}
+	return nil
+}
+
+// HarnessV1AttemptRetryClass bounds retry eligibility recorded from the
+// immutable snapshot classification.
+type HarnessV1AttemptRetryClass string
+
+const (
+	// HarnessV1RetryClassNone forbids retry regardless of failure shape.
+	HarnessV1RetryClassNone HarnessV1AttemptRetryClass = "none"
+	// HarnessV1RetryClassDuplicateSafe permits retry only after a definitive
+	// pre-submission rejection or definitive retryable terminal failure.
+	HarnessV1RetryClassDuplicateSafe HarnessV1AttemptRetryClass = "duplicate-safe"
+)
+
+// HarnessV1Attempt is the durable v1 attempt aggregate. Attempt-specific state
+// stays separate from the lifetime Task binding; every record carries the
+// binding digest.
+type HarnessV1Attempt struct {
+	Namespace string
+	TaskName  string
+	TaskUID   string
+	Attempt   int32
+
+	BindingDigest  string
+	SnapshotDigest string
+	RequestDigest  string
+
+	TurnID           string
+	RuntimeSessionID string
+	CorrelationID    string
+
+	// Backend identifies the executor: built-in wrapper or external endpoint.
+	Backend string
+	// BackendEndpoint is the non-secret endpoint identity selected at dispatch.
+	BackendEndpoint string
+
+	AuthSecretName            string
+	AuthSecretKey             string
+	AuthSecretUID             string
+	AuthSecretResourceVersion string
+
+	State HarnessV1AttemptState
+	// LastEventSeq is the highest persisted frame sequence.
+	LastEventSeq int64
+	// CancelRequestedAt is set when cancellation was requested; CancelAccepted
+	// remains nonterminal until a terminal frame or settlement receipt.
+	CancelRequestedAt *time.Time
+	// TerminalReceiptDigest digests the authoritative terminal or
+	// OutcomeUnknown receipt.
+	TerminalReceiptDigest string
+	// TerminalReason is a bounded reason code for terminal states.
+	TerminalReason string
+
+	DuplicateSafe bool
+	RetryClass    HarnessV1AttemptRetryClass
+
+	ControllerEpochName string
+	ControllerEpoch     int64
+	LastOperationID     string
+	LastOperationDigest string
+	Version             int64
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+// Validate rejects incomplete attempt records at creation.
+func (a *HarnessV1Attempt) Validate() error {
+	if a == nil {
+		return ValidationErrorf("harness v1 attempt is required")
+	}
+	key := HarnessV1AttemptKey{Namespace: a.Namespace, TaskUID: a.TaskUID, Attempt: a.Attempt}
+	if err := key.Validate(); err != nil {
+		return err
+	}
+	if err := ValidateCanonicalDigest("harness v1 attempt binding digest", a.BindingDigest); err != nil {
+		return err
+	}
+	if err := ValidateCanonicalDigest("harness v1 attempt snapshot digest", a.SnapshotDigest); err != nil {
+		return err
+	}
+	if err := ValidateCanonicalDigest("harness v1 attempt request digest", a.RequestDigest); err != nil {
+		return err
+	}
+	if strings.TrimSpace(a.TurnID) == "" {
+		return ValidationErrorf("harness v1 attempt turn ID is required")
+	}
+	if a.State != HarnessV1AttemptPrepared {
+		return ValidationErrorf("harness v1 attempts are created in Prepared state, got %q", string(a.State))
+	}
+	switch a.RetryClass {
+	case HarnessV1RetryClassNone, HarnessV1RetryClassDuplicateSafe:
+	default:
+		return ValidationErrorf("harness v1 attempt retry class %q is not supported", string(a.RetryClass))
+	}
+	return nil
+}
+
+// HarnessV1AttemptUpdates carries optional field updates applied atomically
+// with a state transition.
+type HarnessV1AttemptUpdates struct {
+	RuntimeSessionID      *string
+	CorrelationID         *string
+	BackendEndpoint       *string
+	LastEventSeq          *int64
+	CancelRequestedAt     *time.Time
+	TerminalReceiptDigest *string
+	TerminalReason        *string
+}
+
+// HarnessV1AttemptTransition is a fenced, idempotent CAS state transition.
+type HarnessV1AttemptTransition struct {
+	Key             HarnessV1AttemptKey
+	ExpectedVersion int64
+	ExpectedState   HarnessV1AttemptState
+	TargetState     HarnessV1AttemptState
+	OperationID     string
+	OperationDigest string
+	Fence           ControllerEpochFence
+	Updates         HarnessV1AttemptUpdates
+}
+
+// HarnessV1AttemptStore persists durable v1 attempt aggregates.
+type HarnessV1AttemptStore interface {
+	// CreateHarnessV1Attempt persists a new Prepared attempt exactly once. A
+	// duplicate identical create is idempotent; a duplicate with different
+	// content returns ErrDuplicateMismatch.
+	CreateHarnessV1Attempt(ctx context.Context, attempt *HarnessV1Attempt) error
+
+	// GetHarnessV1Attempt returns one attempt or ErrNotFound.
+	GetHarnessV1Attempt(ctx context.Context, key HarnessV1AttemptKey) (*HarnessV1Attempt, error)
+
+	// ListHarnessV1AttemptsByTask returns every attempt for one Task UID.
+	ListHarnessV1AttemptsByTask(ctx context.Context, namespace, taskUID string) ([]HarnessV1Attempt, error)
+
+	// ListActiveHarnessV1Attempts returns every nonterminal attempt for drain
+	// and retirement inventory.
+	ListActiveHarnessV1Attempts(ctx context.Context) ([]HarnessV1Attempt, error)
+
+	// TransitionHarnessV1Attempt applies a fenced CAS transition. A replay with
+	// the same operation ID and digest against the already-applied state is
+	// idempotent; conflicting expectations return ErrConflict.
+	TransitionHarnessV1Attempt(ctx context.Context, transition HarnessV1AttemptTransition) (*HarnessV1Attempt, error)
+}
