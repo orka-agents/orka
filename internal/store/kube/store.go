@@ -48,6 +48,21 @@ func WithSessionTurnPersistence(turns store.SessionTurnPersistenceStore) Option 
 	}
 }
 
+// WithHarnessV1Attempts supplies the route-specific receipt store used when a
+// protocol-neutral SessionTurn references a harness v1 attempt rather than a
+// v2 PromptAttempt. Kubernetes SessionControl and Lease state remain the
+// mutation authority; this store is consulted only for immutable attempt
+// identity and terminal-receipt validation.
+func WithHarnessV1Attempts(attempts store.HarnessV1AttemptStore) Option {
+	return func(s *Store) error {
+		if attempts == nil {
+			return store.ValidationErrorf("harness v1 attempt store must not be nil")
+		}
+		s.harnessV1Attempts = attempts
+		return nil
+	}
+}
+
 // WithAPIReader configures the uncached reader used for authoritative control
 // records. Controller-runtime cached clients remain the writer, but must not be
 // trusted for immediate read-after-write recovery decisions.
@@ -87,12 +102,13 @@ func WithSessionCleanupPersistence(cleanup store.SessionCleanupPersistenceStore)
 
 // Store maps ACP control-store interfaces to Kubernetes CR status and Leases.
 type Store struct {
-	client           client.Client
-	reader           client.Reader
-	controlNamespace string
-	sessionTurns     store.SessionTurnPersistenceStore
-	outbox           store.OutboxPersistenceStore
-	sessionCleanup   store.SessionCleanupPersistenceStore
+	client            client.Client
+	reader            client.Reader
+	controlNamespace  string
+	sessionTurns      store.SessionTurnPersistenceStore
+	harnessV1Attempts store.HarnessV1AttemptStore
+	outbox            store.OutboxPersistenceStore
+	sessionCleanup    store.SessionCleanupPersistenceStore
 }
 
 // NewComposite constructs the hard-cutover DurableControlStore: Kubernetes is
@@ -104,6 +120,9 @@ func NewComposite(kubeClient client.Client, controlNamespace string, persistence
 	}
 	combined := make([]Option, 0, len(options)+3)
 	combined = append(combined, WithSessionTurnPersistence(persistence), WithOutboxPersistence(persistence), WithSessionCleanupPersistence(persistence))
+	if attempts, ok := persistence.(store.HarnessV1AttemptStore); ok {
+		combined = append(combined, WithHarnessV1Attempts(attempts))
+	}
 	combined = append(combined, options...)
 	return New(kubeClient, controlNamespace, combined...)
 }

@@ -7,6 +7,7 @@ require (
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/distribution/reference v0.6.0
+	github.com/github/copilot-sdk/go v0.1.25
 	github.com/go-logr/logr v1.4.4
 	github.com/gofiber/fiber/v3 v3.4.0
 	github.com/google/uuid v1.6.0
@@ -101,6 +102,7 @@ require (
 	github.com/google/cel-go v0.27.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect

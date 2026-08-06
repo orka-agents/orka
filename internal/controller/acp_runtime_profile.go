@@ -188,23 +188,6 @@ func acpRuntimePoolBindingMatches(status *corev1alpha1.TaskExecutionStatus, pool
 		strings.TrimSpace(status.RuntimePoolUID) == string(pool.UID)
 }
 
-func acpQueuedTaskRequestMatchesPlan(
-	task *corev1alpha1.Task,
-	agent *corev1alpha1.Agent,
-	plan ACPRuntimePlan,
-	status *corev1alpha1.TaskExecutionStatus,
-) (bool, error) {
-	if task == nil || agent == nil || status == nil || status.Attempt < 1 || strings.TrimSpace(status.PromptID) == "" ||
-		strings.TrimSpace(status.RequestDigest) == "" {
-		return false, nil
-	}
-	digest, err := acpTaskRequestDigest(task, agent, plan, status.Attempt, status.PromptID)
-	if err != nil {
-		return false, err
-	}
-	return digest == status.RequestDigest, nil
-}
-
 func effectiveACPWorkspaceIntent(task *corev1alpha1.Task) corev1alpha1.WorkspaceIntent {
 	if task == nil {
 		return corev1alpha1.WorkspaceIntentRead

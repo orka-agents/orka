@@ -33,6 +33,7 @@ COPY --from=ui-builder /app/dist/ internal/uiembed/dist/
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager ./cmd/main.go \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o orka-admission ./cmd/orka-admission \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o provider-auth-proxy ./cmd/orka-provider-auth-proxy \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o scm-egress-proxy ./cmd/orka-scm-egress-proxy
 
@@ -41,6 +42,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
 WORKDIR /
 COPY --from=builder /workspace/manager .
+COPY --from=builder /workspace/orka-admission .
 COPY --from=builder /workspace/provider-auth-proxy .
 COPY --from=builder /workspace/scm-egress-proxy .
 USER 65532:65532

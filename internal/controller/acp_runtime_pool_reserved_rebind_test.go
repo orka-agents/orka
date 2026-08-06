@@ -20,14 +20,14 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-//nolint:gocyclo // The table verifies rebind and no-rebind durable lifecycle invariants together.
-func TestQueueACPRuntimeTaskRebindsOnlyQuiescentReservedAttemptAfterRuntimeImageRotation(t *testing.T) {
+//nolint:gocyclo // The table verifies frozen pool and reservation lifecycle invariants together.
+func TestQueueACPRuntimeTaskKeepsFrozenPoolForReservedAttemptAfterRuntimeImageRotation(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
 		activeReservation bool
 		wantRebound       bool
 	}{
-		{name: "recovered without active reservation", wantRebound: true},
+		{name: "recovered without active reservation", wantRebound: false},
 		{name: "active old-pool reservation blocks rebind", activeReservation: true, wantRebound: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,7 +113,8 @@ func TestQueueACPRuntimeTaskRebindsOnlyQuiescentReservedAttemptAfterRuntimeImage
 				ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
 				ACPRuntimeImages: ACPRuntimeImages{Codex: oldImage},
 			}
-			if _, err := reconciler.queueACPRuntimeTask(ctx, task.DeepCopy(), agent); err != nil {
+			bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
+			if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
 				t.Fatalf("initial queue: %v", err)
 			}
 
@@ -234,7 +235,7 @@ func TestRebindPreSubmissionACPRuntimeTaskRejectsPostSubmissionStates(t *testing
 				}},
 			}
 			rebound, err := (&TaskReconciler{}).rebindQueuedACPRuntimeTask(
-				context.Background(), task, &corev1alpha1.Agent{}, ACPRuntimePlan{}, pool,
+				context.Background(), task, nil, pool,
 			)
 			if err != nil {
 				t.Fatal(err)

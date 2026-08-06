@@ -72,6 +72,9 @@ spec:
           - --health-probe-bind-address=:8081
           - --store-backend=sqlite
           - --store-path=/data/orka.db
+          - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
+          - --agent-execution-snapshot-retention=720h
+          - --agent-execution-snapshot-retention-interval=1h
           - --controller-url=http://orka-api.orka-system.svc:8080
           - --acp-runtime-enabled=true
           - --acp-upgrade-drain-bind-address=127.0.0.1:8083
@@ -191,6 +194,9 @@ spec:
           - name: provider-auth-proxy
             mountPath: /var/run/orka/provider-auth
             readOnly: true
+          - name: agent-execution-snapshot-key
+            mountPath: /var/run/orka/agent-execution-snapshot
+            readOnly: true
       volumes:
         - name: store
           persistentVolumeClaim:
@@ -215,5 +221,12 @@ spec:
             items:
               - key: token
                 path: token
+        - name: agent-execution-snapshot-key
+          secret:
+            secretName: agent-execution-snapshot-key
+            defaultMode: 0400
+            items:
+              - key: snapshot-key
+                path: key
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 360

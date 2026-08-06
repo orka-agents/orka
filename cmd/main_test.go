@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -367,6 +368,7 @@ func TestManagerCacheOptions(t *testing.T) {
 		wantDefault        []string
 		wantRuntimeChild   []string
 		wantChildOverrides bool
+		wantControl        []string
 	}{
 		{
 			name:             "cluster-wide watch is unrestricted",
@@ -379,6 +381,7 @@ func TestManagerCacheOptions(t *testing.T) {
 			wantDefault:        []string{"tenant-a"},
 			wantRuntimeChild:   []string{"orka-runtimes", "tenant-a"},
 			wantChildOverrides: true,
+			wantControl:        []string{corev1alpha1.AgentExecutionControlNamespace},
 		},
 		{
 			name:               "identical tenant and runtime namespaces are deduplicated",
@@ -387,6 +390,7 @@ func TestManagerCacheOptions(t *testing.T) {
 			wantDefault:        []string{"tenant-a"},
 			wantRuntimeChild:   []string{"tenant-a"},
 			wantChildOverrides: true,
+			wantControl:        []string{corev1alpha1.AgentExecutionControlNamespace},
 		},
 		{
 			name:               "runtime cleanup watches remain active when admission is disabled",
@@ -395,6 +399,7 @@ func TestManagerCacheOptions(t *testing.T) {
 			wantDefault:        []string{"tenant-a"},
 			wantRuntimeChild:   []string{"orka-runtimes", "tenant-a"},
 			wantChildOverrides: true,
+			wantControl:        []string{corev1alpha1.AgentExecutionControlNamespace},
 		},
 		{
 			name:             "blank runtime namespace keeps tenant defaults",
@@ -402,6 +407,7 @@ func TestManagerCacheOptions(t *testing.T) {
 			runtimeNamespace: " ",
 			wantDefault:      []string{"tenant-a"},
 			wantRuntimeChild: []string{"tenant-a"},
+			wantControl:      []string{corev1alpha1.AgentExecutionControlNamespace},
 		},
 	}
 
@@ -421,11 +427,21 @@ func TestManagerCacheOptions(t *testing.T) {
 				assertCacheNamespaces(t, effectiveCacheNamespaces(options, object), tt.wantDefault)
 			}
 
-			if got := len(options.ByObject); tt.wantChildOverrides && got != len(childTypes) {
-				t.Fatalf("ByObject override count = %d, want %d", got, len(childTypes))
-			} else if !tt.wantChildOverrides && got != 0 {
-				t.Fatalf("ByObject override count = %d, want 0", got)
+			wantOverrides := 0
+			if len(tt.wantControl) != 0 {
+				wantOverrides++
 			}
+			if tt.wantChildOverrides {
+				wantOverrides += len(childTypes)
+			}
+			if got := len(options.ByObject); got != wantOverrides {
+				t.Fatalf("ByObject override count = %d, want %d", got, wantOverrides)
+			}
+			_, controlOverridden := cacheByObjectForType(options, &corev1alpha1.AgentExecutionControl{})
+			if controlOverridden != (len(tt.wantControl) != 0) {
+				t.Fatalf("AgentExecutionControl ByObject override = %t, want %t", controlOverridden, len(tt.wantControl) != 0)
+			}
+			assertCacheNamespaces(t, effectiveCacheNamespaces(options, &corev1alpha1.AgentExecutionControl{}), tt.wantControl)
 			for _, object := range childTypes {
 				_, overridden := cacheByObjectForType(options, object)
 				if overridden != tt.wantChildOverrides {
@@ -519,5 +535,36 @@ func TestValidateWorkspaceProviderSecurityConfig(t *testing.T) {
 	}
 	if err := validateWorkspaceProviderSecurityConfig(true, false); err == nil {
 		t.Fatal("workspace API enabled without class-use admission")
+	}
+}
+
+func TestValidateAgentExecutionSnapshotRetentionOptions(t *testing.T) {
+	tests := []struct {
+		name      string
+		keyFile   string
+		retention time.Duration
+		interval  time.Duration
+		wantError bool
+	}{
+		{name: "disabled", retention: -time.Hour, interval: 0},
+		{name: "enabled", keyFile: "/var/run/orka/snapshot/key", retention: 30 * 24 * time.Hour, interval: time.Hour},
+		{name: "zero retention", keyFile: "/var/run/orka/snapshot/key", retention: 0, interval: time.Hour, wantError: true},
+		{
+			name: "negative retention", keyFile: "/var/run/orka/snapshot/key",
+			retention: -time.Hour, interval: time.Hour, wantError: true,
+		},
+		{name: "zero interval", keyFile: "/var/run/orka/snapshot/key", retention: time.Hour, interval: 0, wantError: true},
+		{
+			name: "negative interval", keyFile: "/var/run/orka/snapshot/key",
+			retention: time.Hour, interval: -time.Minute, wantError: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAgentExecutionSnapshotRetentionOptions(tt.keyFile, tt.retention, tt.interval)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("validation error = %v, wantError = %t", err, tt.wantError)
+			}
+		})
 	}
 }

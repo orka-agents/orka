@@ -406,7 +406,7 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 	if err != nil {
 		return nil, nil, err
 	}
-	existingLease, expectedExistingLeaseDigest, err := matchingTaskSessionLease(control, task)
+	existingLease, _, err := matchingTaskSessionLease(control, task)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -420,13 +420,13 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 		return nil, nil, err
 	}
 
-	lease := existingACPSessionLease(control, existingLease, expectedExistingLeaseDigest, task)
-	if lease == nil {
-		lease, err = d.acquireTaskSessionLease(ctx, task, fence, control, lineage)
-		if err != nil {
-			_ = d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
-			return nil, nil, err
-		}
+	// Re-enter exact lease acquisition even when the Lease already exists. This
+	// is idempotent and completes a lineage payload projection that may have
+	// failed after the Kubernetes-authoritative status CAS.
+	lease, err := d.acquireTaskSessionLease(ctx, task, fence, control, lineage)
+	if err != nil {
+		_ = d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+		return nil, nil, err
 	}
 	if lease.Key.LeaseGeneration != leaseGeneration {
 		err := fmt.Errorf("%w: acquired ACP Session lease generation changed after PromptAttempt binding", store.ErrConflict)
@@ -586,21 +586,6 @@ func matchingTaskSessionLease(control *store.SessionControl, task *corev1alpha1.
 		return nil, expectedDigest, nil
 	}
 	return existing, expectedDigest, nil
-}
-
-func existingACPSessionLease(
-	control *store.SessionControl,
-	existing *store.SessionMutationLease,
-	expectedDigest string,
-	task *corev1alpha1.Task,
-) *ACPSessionLease {
-	if existing == nil || existing.RequestDigest != expectedDigest {
-		return nil
-	}
-	return &ACPSessionLease{Session: *control, Key: store.SessionTurnKey{
-		SessionUID: control.SessionUID, LeaseGeneration: existing.Generation,
-		TaskUID: string(task.UID), Attempt: int64(task.Status.Execution.Attempt), PromptID: task.Status.Execution.PromptID,
-	}}
 }
 
 func (d *ACPDispatcher) acquireTaskSessionLease(

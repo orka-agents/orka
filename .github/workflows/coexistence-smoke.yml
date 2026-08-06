@@ -1,0 +1,101 @@
+name: Coexistence Smoke
+
+on:
+  push:
+    paths:
+      - ".github/workflows/coexistence-smoke.yml"
+      - "api/**"
+      - "cmd/build/helmify/**"
+      - "cmd/orka-admission/**"
+      - "cmd/orka-agent-harness-wrapper/**"
+      - "config/harness-wrapper/**"
+      - "config/orka-admission/**"
+      - "config/orka-admission-webhooks/**"
+      - "go.mod"
+      - "go.sum"
+      - "internal/admission/**"
+      - "internal/controller/agent_execution*"
+      - "internal/controller/harness_v1*"
+      - "internal/harness/**"
+      - "internal/store/**"
+      - "pkg/harness/**"
+      - "scripts/check-legacy-wrapper-resources.sh"
+      - "scripts/coexistence-*"
+      - "workers/harness/**"
+  pull_request:
+    paths:
+      - ".github/workflows/coexistence-smoke.yml"
+      - "api/**"
+      - "cmd/build/helmify/**"
+      - "cmd/orka-admission/**"
+      - "cmd/orka-agent-harness-wrapper/**"
+      - "config/harness-wrapper/**"
+      - "config/orka-admission/**"
+      - "config/orka-admission-webhooks/**"
+      - "go.mod"
+      - "go.sum"
+      - "internal/admission/**"
+      - "internal/controller/agent_execution*"
+      - "internal/controller/harness_v1*"
+      - "internal/harness/**"
+      - "internal/store/**"
+      - "pkg/harness/**"
+      - "scripts/check-legacy-wrapper-resources.sh"
+      - "scripts/coexistence-*"
+      - "workers/harness/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coexistence-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-go:
+    name: Focused Go tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Create UI embed stub
+        run: make ensure-ui-embed
+
+      - name: Run coexistence-focused tests
+        run: |
+          go test \
+            ./api/v1alpha1 \
+            ./internal/admission \
+            ./internal/controller \
+            ./internal/harness/... \
+            ./internal/store/... \
+            ./workers/harness/... \
+            ./cmd/orka-admission \
+            ./cmd/orka-agent-harness-wrapper \
+            -run '(AgentExecution|AgentContract|AgentRuntimeContract|TaskExecutionAuthority|TaskResolution|HarnessV1|RecoverAmbiguousSubmission|RecoverActiveAttempt|DurableAdmission|DurableTurn|Ledger|SessionLineage|ReceiptPersistence|AdmissionClose)' \
+            -count=1
+
+  shell-syntax:
+    name: Coexistence shell syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate scripts
+        run: |
+          bash -n scripts/coexistence-bridge-crd-validate.sh
+          bash -n scripts/check-legacy-wrapper-resources.sh

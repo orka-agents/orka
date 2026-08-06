@@ -29,6 +29,8 @@ func migrateControlStore(db *sql.DB) error {
 			session_lease_generation INTEGER NOT NULL DEFAULT 0 CHECK(session_lease_generation >= 0),
 			runtime_instance_id      TEXT NOT NULL DEFAULT '',
 			request_digest           TEXT NOT NULL,
+			binding_digest           TEXT NOT NULL DEFAULT '',
+			snapshot_digest          TEXT NOT NULL DEFAULT '',
 			execution_state          TEXT NOT NULL CHECK(execution_state IN (
 				'Queued','Reserved','SessionStarting','Planned','Submitting','SubmittedUnknown',
 				'Accepted','Running','Settling','Succeeded','Failed','Cancelled','OutcomeUnknown'
@@ -293,6 +295,12 @@ func migrateControlStore(db *sql.DB) error {
 		return fmt.Errorf("control-store migration failed: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("control-store migration failed: %w", err)
+	}
+	if err := ensureSQLiteColumns(db, "prompt_attempts", []sqliteColumnMigration{
+		{Name: "binding_digest", Definition: "binding_digest TEXT NOT NULL DEFAULT ''"},
+		{Name: "snapshot_digest", Definition: "snapshot_digest TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
 		return fmt.Errorf("control-store migration failed: %w", err)
 	}
 	return nil

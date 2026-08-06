@@ -200,6 +200,57 @@ spec:
                 - v1
                 - v2
                 type: object
+              classification:
+                description: |-
+                  Classification is the controller-owned, source-aware sealed inventory
+                  marker. Binding and every execution/mutating runnable must verify an exact
+                  Sealed marker through an uncached read; readiness alone is not authority.
+                properties:
+                  controlGeneration:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  controlUID:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                  inventoryDigest:
+                    description: |-
+                      InventoryDigest commits to the exact source identities, resource
+                      versions, evidence, and resulting dispositions observed by the sweep.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  inventoryID:
+                    description: |-
+                      InventoryID identifies the bounded sealed migration sweep that wrote
+                      legacy Task dispositions and Session lineage.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  observedAt:
+                    description: |-
+                      ObservedAt is the first observation time for an Open digest and the seal
+                      time for a Sealed digest.
+                    format: date-time
+                    type: string
+                  state:
+                    description: |-
+                      AgentExecutionClassificationState is the controller-owned migration
+                      inventory state. Execution remains closed while the inventory is Open.
+                    enum:
+                    - Open
+                    - Sealed
+                    type: string
+                required:
+                - controlGeneration
+                - controlUID
+                - inventoryDigest
+                - inventoryID
+                - observedAt
+                - state
+                type: object
               observedGeneration:
                 format: int64
                 type: integer

@@ -56,6 +56,8 @@ type ACPDispatcher struct {
 	APIReader                client.Reader
 	Store                    store.DurableControlStore
 	ResultStore              store.ResultStore
+	Snapshots                store.AgentExecutionSnapshotStore
+	BindingReservations      store.AgentExecutionBindingReservationStore
 	Epochs                   *ControllerEpochManager
 	Sessions                 *ACPSessionContinuity
 	Publisher                *publisherservice.Client
@@ -79,8 +81,9 @@ type ACPDispatcher struct {
 func (d *ACPDispatcher) NeedLeaderElection() bool { return true }
 
 func (d *ACPDispatcher) Start(ctx context.Context) error {
-	if d.Client == nil || d.Store == nil || d.ResultStore == nil || d.Epochs == nil {
-		return fmt.Errorf("ACP dispatcher requires Kubernetes client, durable control store, result store, and epoch manager")
+	if d.Client == nil || d.Store == nil || d.ResultStore == nil || d.Snapshots == nil ||
+		d.BindingReservations == nil || d.Epochs == nil {
+		return fmt.Errorf("ACP dispatcher requires Kubernetes client, durable control store, result store, immutable snapshot/reservation stores, and epoch manager")
 	}
 	if d.APIReader == nil {
 		d.APIReader = d.Client
@@ -623,11 +626,74 @@ func (d *ACPDispatcher) executeTask(ctx context.Context, queued *corev1alpha1.Ta
 	return d.executeReservedTask(ctx, task, target)
 }
 
+// loadVerifiedACPDispatchExecution re-establishes the immutable dispatch
+// authority after RuntimePool reservation and immediately before the first
+// supervisor RPC. Agent and Tool resources are deliberately not read here:
+// every executable value comes from the encrypted, content-addressed snapshot.
+func (d *ACPDispatcher) loadVerifiedACPDispatchExecution(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (*verifiedAgentExecution, error) {
+	if d.Snapshots == nil || d.BindingReservations == nil {
+		return nil, errors.New("ACP dispatch requires immutable execution snapshot and binding reservation stores")
+	}
+	if task == nil || task.Status.AgentExecutionBinding == nil || task.Status.Execution == nil {
+		return nil, errors.New("ACP dispatch requires a Task execution binding and queued attempt")
+	}
+	verifier := TaskReconciler{
+		Client:                            d.Client,
+		APIReader:                         d.APIReader,
+		AgentExecutionSnapshots:           d.Snapshots,
+		AgentExecutionBindingReservations: d.BindingReservations,
+	}
+	bound, err := verifier.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
+	if err != nil {
+		return nil, fmt.Errorf("verify immutable ACP execution: %w", err)
+	}
+	matches, err := acpQueuedTaskRequestMatchesBinding(bound, task.Status.Execution)
+	if err != nil {
+		return nil, fmt.Errorf("verify frozen ACP request identity: %w", err)
+	}
+	if !matches {
+		return nil, errors.New("queued ACP request digest does not match the immutable execution binding and snapshot")
+	}
+	attemptID, err := promptAttemptIDFromTask(task)
+	if err != nil {
+		return nil, err
+	}
+	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		return nil, fmt.Errorf("load frozen ACP PromptAttempt: %w", err)
+	}
+	if !queuedPromptAttemptMatchesTask(attempt, task) || attempt.BindingDigest != bound.binding.BindingDigest ||
+		attempt.SnapshotDigest != bound.snapshot.Digest || attempt.ExecutionState != store.PromptExecutionReserved {
+		return nil, errors.New("reserved ACP PromptAttempt does not exactly match the immutable Task binding, snapshot, and request")
+	}
+	bound.frozenTask.Status = *task.Status.DeepCopy()
+	return bound, nil
+}
+
+func validateFrozenACPDispatchTarget(
+	task *corev1alpha1.Task,
+	target acpDispatchTarget,
+	bound *verifiedAgentExecution,
+) error {
+	if task == nil || task.Status.Execution == nil || target.pool == nil || bound == nil || bound.binding == nil {
+		return errors.New("frozen ACP Task, RuntimePool target, and execution binding are required")
+	}
+	if target.pool.Name != bound.plan.PoolName || target.pool.Spec.Runtime.Image != bound.plan.Image ||
+		target.pool.Spec.Runtime.Profile.Digest != bound.body.ProfileDigest ||
+		task.Status.Execution.RuntimePoolName != target.pool.Name ||
+		task.Status.Execution.RuntimePoolUID != string(target.pool.UID) {
+		return errors.New("reserved RuntimePool does not exactly match the immutable execution snapshot")
+	}
+	return nil
+}
+
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alpha1.Task, target acpDispatchTarget) (retErr error) {
 	reservationLease := newACPRuntimePoolReservationLease(d, target.reservation)
 	if reservationLease != nil {
-		reservationLease.startRenewal(ctx)
 		defer func() {
 			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
@@ -635,6 +701,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				logf.FromContext(ctx).Error(releaseErr, "release ACP RuntimePool reservation", "namespace", task.Namespace, "task", task.Name)
 			}
 		}()
+	}
+	bound, err := d.loadVerifiedACPDispatchExecution(ctx, task)
+	if err != nil {
+		return err
+	}
+	task = bound.frozenTask
+	if err := validateFrozenACPDispatchTarget(task, target, bound); err != nil {
+		return err
+	}
+	if reservationLease != nil {
+		reservationLease.startRenewal(ctx)
 	}
 	runtimeCtx, cancelRuntime := d.newTaskRuntimeContext(ctx, task)
 	defer cancelRuntime()
@@ -666,67 +743,22 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return d.requeueReservedTask(ctx, task, fmt.Errorf("RuntimePool supervisor is waiting for Agent session configuration support"))
 		}
 	}
-	agent, err := d.taskAgent(runtimeCtx, task)
-	if err != nil {
-		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
-			return deadlineErr
-		}
-		return d.requeueReservedTask(ctx, task, err)
+	runtimeProfileDigest, digestErr := harnessv2.CanonicalProfileDigest(profile)
+	if digestErr != nil || runtimeFence.RuntimeProfileDigest != bound.plan.Digest || runtimeProfileDigest != bound.plan.Digest {
+		return d.requeueReservedTask(ctx, task, errors.New("RuntimePool profile does not match the immutable execution snapshot"))
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
-	var agentConfiguration harnessv2.AgentSessionConfiguration
+	profile = bound.plan.Profile
+	agentConfiguration := bound.configuration
 	var agentConfigurationRef *harnessv2.AgentSessionConfiguration
 	if target.pool != nil {
-		agentConfiguration, err = resolveACPAgentSessionConfiguration(runtimeCtx, reader, task, agent)
-		if err != nil {
-			if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
-				return deadlineErr
-			}
-			if !isPermanentACPAgentConfigurationError(err) {
-				return d.requeueReservedTask(ctx, task, err)
-			}
-			if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "agent-configuration-invalid"); transitionErr != nil {
-				return errors.Join(err, transitionErr)
-			}
-			return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "InvalidAgentConfiguration", err.Error())
-		}
-		agentConfigurationDigest, digestErr := harnessv2.CanonicalAgentConfigurationDigest(agentConfiguration)
-		legacyAgentConfigurationDigest, legacyErr := harnessv2.CanonicalLegacyAgentConfigurationDigest(
-			agentConfiguration, effectiveACPAllowBash(task, agent),
-		)
-		configurationMatches := digestErr == nil && agentConfigurationDigest == profile.AgentConfigurationDigest
-		legacyConfigurationMatches := legacyErr == nil && legacyAgentConfigurationDigest == profile.AgentConfigurationDigest
-		if !configurationMatches && !legacyConfigurationMatches {
-			configurationErr := fmt.Errorf("resolved ACP Agent configuration does not match the reserved RuntimePool profile")
-			if digestErr != nil {
-				configurationErr = fmt.Errorf("digest resolved ACP Agent configuration: %w", digestErr)
-			} else if legacyErr != nil {
-				configurationErr = fmt.Errorf("digest legacy ACP Agent configuration: %w", legacyErr)
-			}
-			if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "agent-configuration-drift"); transitionErr != nil {
-				return errors.Join(configurationErr, transitionErr)
-			}
-			return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "AgentConfigurationChanged", configurationErr.Error())
-		}
 		agentConfigurationRef = &agentConfiguration
 	}
-	mcpConfiguration, err := buildRuntimeSessionMCPConfigurationWithRegistry(
-		runtimeCtx, reader, task, agent, profile, d.MCPRegistry,
-	)
-	if err != nil {
-		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
-			return deadlineErr
-		}
-		return d.requeueReservedTask(ctx, task, err)
-	}
+	mcpConfiguration := bound.mcpConfiguration
 	mcpBindingDigest, err := acpDomainDigest("runtime-session-mcp-configuration", mcpConfiguration)
 	if err != nil {
 		return d.requeueReservedTask(ctx, task, err)
 	}
-	lineage := acpSessionLineageIdentity{RuntimeIdentity: string(agent.Spec.Runtime.Type)}
+	lineage := acpSessionLineageIdentity{RuntimeIdentity: bound.body.RuntimeType}
 	if task.Spec.SessionRef != nil && d.Sessions.RecordsLineage() {
 		taskNamespace := &corev1.Namespace{}
 		if err := d.APIReader.Get(runtimeCtx, client.ObjectKey{Name: task.Namespace}, taskNamespace); err != nil {
@@ -950,17 +982,34 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	runtimeSessionRetirementRequired := sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite
 	runtimeSessionCleanupPending := sessionExecution != nil && workspace.Intent == harnessv2.WorkspaceIntentWrite
+	runtimeSessionSettlementRequired := false
+	runtimePublicationFinalizationRequired := false
+	runtimePublicationFinalized := false
 	var runtimePublicationFinalization *runtimeSessionPublicationFinalization
+	finalizePreparedRuntimeSession := func() error {
+		if !runtimePublicationFinalizationRequired || runtimePublicationFinalized {
+			return nil
+		}
+		if runtimePublicationFinalization == nil {
+			return fmt.Errorf("%w: prepared RuntimeSession publication lacks a terminal finalization receipt", store.ErrNotReady)
+		}
+		if err := d.finalizeRuntimeSessionPublication(
+			context.WithoutCancel(ctx), runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, *runtimePublicationFinalization,
+		); err != nil {
+			return err
+		}
+		runtimePublicationFinalized = true
+		return nil
+	}
 	cleanupRuntimeSession := func(reason string) error {
 		if !runtimeSessionCleanupPending {
 			return nil
 		}
-		if runtimePublicationFinalization != nil {
-			if finalizeErr := d.finalizeRuntimeSessionPublication(
-				context.WithoutCancel(ctx), runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, *runtimePublicationFinalization,
-			); finalizeErr != nil {
-				return finalizeErr
-			}
+		if err := finalizePreparedRuntimeSession(); err != nil {
+			return err
+		}
+		if runtimeSessionSettlementRequired && sessionExecution != nil && sessionExecution.Turn != nil && !sessionExecution.finalized {
+			return fmt.Errorf("%w: RuntimeSession deletion requires durable Session terminal settlement", store.ErrNotReady)
 		}
 		cleanupErr := d.deleteRuntimeSession(
 			context.WithoutCancel(ctx), runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, reason,
@@ -1131,6 +1180,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		summary, streamErr := runtimeClient.StreamPrompt(runtimeCtx, createRequest.RuntimeSessionID, promptRequest, func(event harnessv2.Event) error {
 			switch event.Type {
 			case harnessv2.EventAccepted:
+				runtimeSessionSettlementRequired = true
 				if !accepted {
 					if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionSubmitting, store.PromptExecutionAccepted, "accepted", nil); err != nil {
 						return err
@@ -1172,6 +1222,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return nil
 		})
 		stopLease()
+		if accepted || summary.Accepted || streamErr == nil || !isACPRateLimitedClientError(streamErr) {
+			runtimeSessionSettlementRequired = true
+		}
 		if streamErr == nil {
 			break
 		}
@@ -1287,6 +1340,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.failTaskForDelivery(ctx, task, status, "workspace validation failed")
 	}
+	runtimePublicationFinalizationRequired = delta.Delta.State == harnessv2.WorkspaceDeltaPrepared
 	if err := d.saveTaskResult(ctx, task, []byte(resultText)); err != nil {
 		return err
 	}
@@ -1373,11 +1427,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			if errors.Is(publicationErr, errACPPublicationCancelled) {
 				projectionPhase = corev1alpha1.TaskPhaseCancelled
 			}
-			if err := d.finalizeTaskSessionResult(
-				ctx, task, fence, sessionExecution, resultText, publicationID, projectionPhase, deliveryStatus,
-			); err != nil {
-				return err
-			}
 			var finalization runtimeSessionPublicationFinalization
 			var finalizationErr error
 			if publicationID != "" {
@@ -1389,6 +1438,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				return finalizationErr
 			}
 			runtimePublicationFinalization = &finalization
+			if err := finalizePreparedRuntimeSession(); err != nil {
+				return err
+			}
+			if err := d.finalizeTaskSessionResult(
+				ctx, task, fence, sessionExecution, resultText, publicationID, projectionPhase, deliveryStatus,
+			); err != nil {
+				return err
+			}
 			if cleanupErr := cleanupRuntimeSession("write_task_finalized"); cleanupErr != nil {
 				return cleanupErr
 			}
@@ -1410,11 +1467,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err := d.patchDeliveryStatus(ctx, task, deliveryStatus); err != nil {
 		return err
 	}
-	if err := d.finalizeTaskSessionResult(
-		ctx, task, fence, sessionExecution, resultText, publicationID, corev1alpha1.TaskPhaseSucceeded, deliveryStatus,
-	); err != nil {
-		return err
-	}
 	// Write sessions are always recreated from the independently verified remote
 	// branch. Task-scoped sessions are also deleted after finalization.
 	if workspace.Intent == harnessv2.WorkspaceIntentWrite && publicationID != "" {
@@ -1423,6 +1475,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return finalizationErr
 		}
 		runtimePublicationFinalization = &finalization
+	}
+	if err := finalizePreparedRuntimeSession(); err != nil {
+		return err
+	}
+	if err := d.finalizeTaskSessionResult(
+		ctx, task, fence, sessionExecution, resultText, publicationID, corev1alpha1.TaskPhaseSucceeded, deliveryStatus,
+	); err != nil {
+		return err
 	}
 	if sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite {
 		if cleanupErr := cleanupRuntimeSession("task_finalized"); cleanupErr != nil {

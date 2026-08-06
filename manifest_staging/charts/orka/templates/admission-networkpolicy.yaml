@@ -1,0 +1,25 @@
+{{- include "orka.validateAdmission" . }}
+{{- if .Values.admission.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "orka.admissionName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "orka.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: admission
+  policyTypes: [Ingress, Egress]
+  # The ClusterIP is not externally exposed. Permit kube-apiserver sources on
+  # only the webhook port; control-plane source CIDRs vary across providers.
+  ingress:
+    - ports: [{protocol: TCP, port: 9443}]
+  # Coexistence validators use a dedicated read-only Kubernetes client. Network
+  # policy cannot portably select an externally hosted kube-apiserver endpoint,
+  # so allow only TCP/443; the ServiceAccount RBAC contains no Lease or writes.
+  egress:
+    - ports: [{protocol: TCP, port: 443}]
+{{- end }}

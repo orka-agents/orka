@@ -165,6 +165,53 @@ type AgentExecutionBackendsStatus struct {
 	V2 AgentExecutionBackendStatus `json:"v2"`
 }
 
+// AgentExecutionClassificationState is the controller-owned migration
+// inventory state. Execution remains closed while the inventory is Open.
+// +kubebuilder:validation:Enum=Open;Sealed
+type AgentExecutionClassificationState string
+
+const (
+	// AgentExecutionClassificationOpen means the source-aware legacy inventory
+	// has not yet reached a complete, stable fixed point.
+	AgentExecutionClassificationOpen AgentExecutionClassificationState = "Open"
+	// AgentExecutionClassificationSealed means two stable uncached inventory
+	// passes proved every execution- and cleanup-relevant object classified.
+	AgentExecutionClassificationSealed AgentExecutionClassificationState = "Sealed"
+)
+
+// AgentExecutionClassificationStatus is the durable execution gate for the
+// coexistence bridge. ControlUID and ControlGeneration bind a seal to one
+// exact AgentExecutionControl incarnation and desired-state generation; a
+// recreated or edited control therefore closes execution immediately.
+type AgentExecutionClassificationStatus struct {
+	// +kubebuilder:validation:Required
+	State AgentExecutionClassificationState `json:"state"`
+
+	// +kubebuilder:validation:Required
+	ControlUID types.UID `json:"controlUID"`
+
+	// +kubebuilder:validation:Minimum=1
+	ControlGeneration int64 `json:"controlGeneration"`
+
+	// InventoryID identifies the bounded sealed migration sweep that wrote
+	// legacy Task dispositions and Session lineage.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	InventoryID string `json:"inventoryID"`
+
+	// InventoryDigest commits to the exact source identities, resource
+	// versions, evidence, and resulting dispositions observed by the sweep.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	InventoryDigest string `json:"inventoryDigest"`
+
+	// ObservedAt is the first observation time for an Open digest and the seal
+	// time for a Sealed digest.
+	// +kubebuilder:validation:Required
+	ObservedAt metav1.Time `json:"observedAt"`
+}
+
 // AgentExecutionControlStatus is the controller-owned observed admission and
 // ownership state.
 type AgentExecutionControlStatus struct {
@@ -176,6 +223,12 @@ type AgentExecutionControlStatus struct {
 
 	// +optional
 	Backends *AgentExecutionBackendsStatus `json:"backends,omitempty"`
+
+	// Classification is the controller-owned, source-aware sealed inventory
+	// marker. Binding and every execution/mutating runnable must verify an exact
+	// Sealed marker through an uncached read; readiness alone is not authority.
+	// +optional
+	Classification *AgentExecutionClassificationStatus `json:"classification,omitempty"`
 }
 
 // +kubebuilder:object:root=true

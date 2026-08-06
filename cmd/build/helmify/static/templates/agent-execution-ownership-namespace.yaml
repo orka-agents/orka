@@ -1,0 +1,17 @@
+{{- if and .Values.controller.agentExecutionControl.create .Values.controller.agentExecutionControl.createNamespace (ne .Release.Namespace "orka-system") }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-system
+  annotations:
+    # The fixed ownership scope can outlive one Helm release and may contain
+    # durable control/fence state. Never remove the namespace on uninstall.
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/name: {{ include "orka.name" . }}
+    app.kubernetes.io/component: agent-execution-ownership
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+{{- end }}

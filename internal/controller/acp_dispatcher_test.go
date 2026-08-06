@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -34,24 +36,73 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-func bindDispatcherProfileToAgent(
+func prepareBoundACPDispatcherTaskForTest(
 	t *testing.T,
-	profile *harnessv2.RuntimeProfile,
+	ctx context.Context,
+	kubeClient client.Client,
+	scheme *runtime.Scheme,
+	controlStore *sqlite.Store,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
-) {
+	images ACPRuntimeImages,
+) *corev1alpha1.Task {
+	t.Helper()
+	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x61}, sqlite.AgentExecutionSnapshotKeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlStore.SetAgentExecutionSnapshotCipher(cipher)
+	binder := &TaskReconciler{
+		Client:                            kubeClient,
+		APIReader:                         kubeClient,
+		Scheme:                            scheme,
+		DurableControlStore:               controlStore,
+		AgentExecutionSnapshots:           controlStore,
+		AgentExecutionBindingReservations: controlStore,
+		ACPRuntimeEnabled:                 true,
+		ACPRuntimeImages:                  images,
+	}
+	bound := bindACPQueueTaskForTest(t, ctx, binder, task, agent)
+	verified, err := binder.loadVerifiedBoundExecution(ctx, bound, bound.Status.AgentExecutionBinding)
+	if err != nil {
+		t.Fatalf("load frozen dispatcher test execution: %v", err)
+	}
+	requestDigest, err := acpBoundTaskRequestDigest(
+		verified, bound.Status.Execution.Attempt, bound.Status.Execution.PromptID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(bound), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Execution.RequestDigest = requestDigest
+	if err := kubeClient.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(bound), current); err != nil {
+		t.Fatal(err)
+	}
+	return current
+}
+
+func frozenACPDispatcherPlanForTest(
+	t *testing.T,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	images ACPRuntimeImages,
+) ACPRuntimePlan {
 	t.Helper()
 	configuration, err := buildACPAgentSessionConfiguration(task, agent, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest, err := harnessv2.CanonicalAgentConfigurationDigest(configuration)
+	plan, err := PlanACPRuntimeWithConfiguration(task, agent, images, configuration)
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile.ProviderKind = configuration.ProviderKind
-	profile.Model = configuration.Model
-	profile.AgentConfigurationDigest = digest
+	return plan
 }
 
 func TestRuntimeSessionCreateTimeoutCoversColdAdapterInitialization(t *testing.T) {
@@ -362,7 +413,7 @@ func TestACPDispatcherExplicitRuntimeRPCFailureIsPromptFailed(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,32 +491,18 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
-	profile := harnessProfileForTest()
-	profile.Model = acpTestModel
-	bindDispatcherProfileToAgent(t, &profile, task, agent)
-	var err error
-	allowedTools := effectiveACPAllowedTools(task, agent)
-	disallowedTools := sortedUnique(task.Spec.AgentRuntime.DisallowedTools)
-	profile.ToolPolicyDigest, err = harnessv2.CanonicalRuntimeToolPolicyDigest(allowedTools, disallowedTools, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.ApprovalPolicyDigest, err = harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.MCPConfigurationDigest, err = harnessv2.CanonicalMCPConfigurationDigest(allowedTools)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
+	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
+	profile := plan.Profile
+	profileDigest := plan.Digest
+	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
+	task.Status.Execution.RuntimePoolName = plan.PoolName
 	server := newDispatcherRuntimeServer(t, profile, profileDigest)
 	defer server.Close()
 	parsed, err := url.Parse(server.URL)
@@ -473,11 +510,10 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool := &corev1alpha1.RuntimePool{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: types.UID("pool-uid"), Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: plan.PoolName, UID: types.UID("pool-uid"), Generation: 1},
 		Spec: corev1alpha1.RuntimePoolSpec{
 			RuntimeNamespace: "orka-runtimes", Runtime: corev1alpha1.RuntimePoolRuntimeSpec{
-				Image:   "docker.io/example/acp@sha256:" + strings.Repeat("a", 64),
-				Profile: RuntimePoolProfileFromPlan(ACPRuntimePlan{Profile: profile, Digest: profileDigest}),
+				Image: plan.Image, Profile: RuntimePoolProfileFromPlan(plan),
 			}, DesiredReplicas: 1,
 		},
 		Status: corev1alpha1.RuntimePoolStatus{
@@ -512,15 +548,17 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		BindingDigest: task.Status.AgentExecutionBinding.BindingDigest, SnapshotDigest: task.Status.AgentExecutionBinding.Snapshot.Digest,
 		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence); err != nil {
+	}), fence); err != nil {
 		t.Fatal(err)
 	}
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
@@ -529,7 +567,10 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs, Sessions: continuity}
+	dispatcher := &ACPDispatcher{
+		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore,
+		Snapshots: controlStore, BindingReservations: controlStore, Epochs: epochs, Sessions: continuity,
+	}
 	if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
 		t.Fatal(err)
 	}
@@ -576,6 +617,221 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	}
 }
 
+func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(context.Context, client.Client, *corev1alpha1.Agent, *corev1alpha1.Tool) error
+	}{
+		{
+			name: "mutated",
+			change: func(ctx context.Context, kubeClient client.Client, agent *corev1alpha1.Agent, tool *corev1alpha1.Tool) error {
+				currentAgent := &corev1alpha1.Agent{}
+				if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(agent), currentAgent); err != nil {
+					return err
+				}
+				currentAgent.Generation++
+				currentAgent.Spec.Model.Name = "mutated-model"
+				currentAgent.Spec.Runtime.DefaultAllowedTools = []string{"different-tool"}
+				if err := kubeClient.Update(ctx, currentAgent); err != nil {
+					return err
+				}
+				currentTool := &corev1alpha1.Tool{}
+				if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(tool), currentTool); err != nil {
+					return err
+				}
+				currentTool.Generation++
+				currentTool.Spec.Description = "mutated tool description"
+				currentTool.Status.Endpoint = "https://mutated.example.test/tool"
+				return kubeClient.Update(ctx, currentTool)
+			},
+		},
+		{
+			name: "deleted",
+			change: func(ctx context.Context, kubeClient client.Client, agent *corev1alpha1.Agent, tool *corev1alpha1.Tool) error {
+				if err := kubeClient.Delete(ctx, agent.DeepCopy()); err != nil {
+					return err
+				}
+				return kubeClient.Delete(ctx, tool.DeepCopy())
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+
+			const toolName = "frozen-custom-tool"
+			taskUID := types.UID("frozen-" + test.name + "-task-uid")
+			promptID := "prompt-" + string(taskUID) + "-1"
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: "frozen-" + test.name, UID: taskUID,
+					Labels: map[string]string{acpRuntimeTaskPoolLabel: "pending"},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent, Prompt: "use the frozen configuration",
+					AgentRef: &corev1alpha1.AgentReference{Name: "frozen-agent"},
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhasePending, Attempts: 1,
+					Execution: &corev1alpha1.TaskExecutionStatus{
+						State: corev1alpha1.TaskExecutionStateQueued, Attempt: 1, PromptID: promptID,
+						RuntimePoolName: "pending", RuntimePoolUID: "frozen-pool-uid",
+						RequestDigest: testControlDigestForDispatcher("pre-binding-request"), ControllerEpoch: 1,
+					},
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: "frozen-agent", UID: types.UID("frozen-agent-uid"), Generation: 1,
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+					Runtime: &corev1alpha1.AgentCLIRuntime{
+						Type: corev1alpha1.AgentRuntimeClaude, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+						DefaultAllowedTools: []string{toolName},
+					},
+				},
+			}
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: toolName, UID: types.UID("frozen-tool-uid"), Generation: 1,
+				},
+				Spec: corev1alpha1.ToolSpec{
+					Description:       "original frozen tool description",
+					BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+					HTTP:              &corev1alpha1.HTTPExecution{URL: "https://original.example.test/tool", Method: http.MethodPost},
+				},
+				Status: corev1alpha1.ToolStatus{Available: true, Endpoint: "https://original.example.test/tool"},
+			}
+			images := ACPRuntimeImages{Claude: "docker.io/example/claude@sha256:" + strings.Repeat("a", 64)}
+			plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
+			task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
+			task.Status.Execution.RuntimePoolName = plan.PoolName
+
+			createRequests := make(chan harnessv2.CreateRuntimeSessionRequest, 1)
+			server := newDispatcherRuntimeServer(t, plan.Profile, plan.Digest, func(request harnessv2.CreateRuntimeSessionRequest) {
+				createRequests <- request
+			})
+			defer server.Close()
+			parsed, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool := &corev1alpha1.RuntimePool{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: plan.PoolName, UID: types.UID("frozen-pool-uid"), Generation: 1,
+				},
+				Spec: corev1alpha1.RuntimePoolSpec{
+					RuntimeNamespace: "orka-runtimes",
+					Runtime:          corev1alpha1.RuntimePoolRuntimeSpec{Image: plan.Image, Profile: RuntimePoolProfileFromPlan(plan)},
+					DesiredReplicas:  1,
+				},
+				Status: corev1alpha1.RuntimePoolStatus{
+					Lifecycle:      corev1alpha1.RuntimePoolLifecycleServing,
+					AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
+					ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
+						PodNamespace: "orka-runtimes", PodName: "runtime-pod", PodAddress: parsed.Host,
+						PodUID: "pod-uid", BootID: "boot-id", RuntimeInstanceID: "pod-uid.boot-id", ControllerEpoch: 1,
+						ProtocolVersion:            corev1alpha1.RuntimePoolProtocolHarnessV2,
+						ProfileDigest:              string(plan.Digest),
+						ProfileDigestSchemaVersion: strconv.FormatUint(uint64(harnessv2.ProfileDigestSchemaVersion), 10),
+					},
+				},
+			}
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "orka-runtimes", Name: "frozen-pool-auth",
+					Labels: map[string]string{runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID)},
+				},
+				Data: map[string][]byte{
+					runtimePoolControllerTokenKey:  []byte(strings.Repeat("t", 32)),
+					runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32)),
+				},
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).
+				WithObjects(task, pool, secret, agent, tool).Build()
+			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "frozen-dispatch.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close() //nolint:errcheck
+			controlStore := sqlite.NewStore(db, "frozen-dispatch-test")
+			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "frozen-"+test.name)
+			defer stopEpoch()
+			fence, err := epochs.CurrentFence(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
+			verifier := TaskReconciler{
+				Client: kubeClient, APIReader: kubeClient,
+				AgentExecutionSnapshots: controlStore, AgentExecutionBindingReservations: controlStore,
+			}
+			frozen, err := verifier.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantAgentConfiguration := frozen.configuration
+			wantMCPConfiguration := frozen.mcpConfiguration
+			wantDescriptor, ok := wantMCPConfiguration.ToolPolicy.Descriptor(toolName)
+			if !ok || wantDescriptor.Description != tool.Spec.Description || wantDescriptor.DefinitionDigest == "" {
+				t.Fatalf("frozen custom Tool descriptor = %#v", wantDescriptor)
+			}
+			attemptKey := store.PromptAttemptKey{
+				Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID,
+			}
+			attemptID, err := attemptKey.CanonicalID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+				ID: attemptID, Key: attemptKey, RequestDigest: task.Status.Execution.RequestDigest,
+				BindingDigest:  task.Status.AgentExecutionBinding.BindingDigest,
+				SnapshotDigest: task.Status.AgentExecutionBinding.Snapshot.Digest,
+				ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+			}), fence); err != nil {
+				t.Fatal(err)
+			}
+			if err := test.change(ctx, kubeClient, agent, tool); err != nil {
+				t.Fatal(err)
+			}
+
+			dispatcher := &ACPDispatcher{
+				Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore,
+				Snapshots: controlStore, BindingReservations: controlStore, Epochs: epochs,
+			}
+			if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
+				t.Fatal(err)
+			}
+			var got harnessv2.CreateRuntimeSessionRequest
+			select {
+			case got = <-createRequests:
+			default:
+				t.Fatal("runtime did not receive CreateRuntimeSession")
+			}
+			if got.AgentConfiguration == nil || *got.AgentConfiguration != wantAgentConfiguration {
+				t.Fatalf("runtime Agent configuration = %#v, want frozen %#v", got.AgentConfiguration, wantAgentConfiguration)
+			}
+			if !got.MCPConfiguration.Matches(wantMCPConfiguration) {
+				t.Fatalf("runtime MCP configuration drifted from frozen snapshot: got=%#v want=%#v", got.MCPConfiguration, wantMCPConfiguration)
+			}
+			gotDescriptor, ok := got.MCPConfiguration.ToolPolicy.Descriptor(toolName)
+			if !ok || gotDescriptor.Description != wantDescriptor.Description ||
+				gotDescriptor.DefinitionDigest != wantDescriptor.DefinitionDigest {
+				t.Fatalf("runtime custom Tool descriptor = %#v, want frozen %#v", gotDescriptor, wantDescriptor)
+			}
+		})
+	}
+}
+
 //nolint:goconst,gocyclo // The end-to-end write-session lifecycle assertions intentionally stay together.
 func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCleanupReceipt(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -612,33 +868,18 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
-	profile := harnessProfileForTest()
-	profile.Model = acpTestModel
-	bindDispatcherProfileToAgent(t, &profile, task, agent)
-	profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
-	var err error
-	allowedTools := effectiveACPAllowedTools(task, agent)
-	disallowedTools := sortedUnique(task.Spec.AgentRuntime.DisallowedTools)
-	profile.ToolPolicyDigest, err = harnessv2.CanonicalRuntimeToolPolicyDigest(allowedTools, disallowedTools, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.ApprovalPolicyDigest, err = harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.MCPConfigurationDigest, err = harnessv2.CanonicalMCPConfigurationDigest(allowedTools)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
+	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
+	profile := plan.Profile
+	profileDigest := plan.Digest
+	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
+	task.Status.Execution.RuntimePoolName = plan.PoolName
 	var operationMu sync.Mutex
 	operations := make([]string, 0, 2)
 	var finalizationRequest harnessv2.FinalizeRuntimeSessionPublicationRequest
@@ -662,11 +903,10 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 		t.Fatal(err)
 	}
 	pool := &corev1alpha1.RuntimePool{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: types.UID("pool-uid"), Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: plan.PoolName, UID: types.UID("pool-uid"), Generation: 1},
 		Spec: corev1alpha1.RuntimePoolSpec{
 			RuntimeNamespace: "orka-runtimes", Runtime: corev1alpha1.RuntimePoolRuntimeSpec{
-				Image:   "docker.io/example/acp@sha256:" + strings.Repeat("a", 64),
-				Profile: RuntimePoolProfileFromPlan(ACPRuntimePlan{Profile: profile, Digest: profileDigest}),
+				Image: plan.Image, Profile: RuntimePoolProfileFromPlan(plan),
 			}, DesiredReplicas: 1,
 		},
 		Status: corev1alpha1.RuntimePoolStatus{
@@ -711,6 +951,7 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	if err != nil {
 		t.Fatal(err)
 	}
+	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
 	if err != nil {
@@ -727,15 +968,24 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 			ResourceVersion: workspaceCredential.ResourceVersion,
 		})
 	}
-	if _, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		BindingDigest: task.Status.AgentExecutionBinding.BindingDigest, SnapshotDigest: task.Status.AgentExecutionBinding.Snapshot.Digest,
 		CredentialBindings: credentialBindings,
 		ExecutionState:     store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence); err != nil {
+	}), fence); err != nil {
 		t.Fatal(err)
 	}
+	recordingControls := &orderedSessionControlStore{
+		SessionControlStore: controlStore,
+		onFinalized: func() {
+			operationMu.Lock()
+			defer operationMu.Unlock()
+			operations = append(operations, "settle")
+		},
+	}
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
-		SessionControls: controlStore, Transcripts: controlStore, Publications: controlStore, BranchClaims: controlStore,
+		SessionControls: recordingControls, Transcripts: controlStore, Publications: controlStore, BranchClaims: controlStore,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -755,6 +1005,7 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
+		Snapshots: controlStore, BindingReservations: controlStore,
 		Sessions: continuity, Publisher: publisherClient, ArtifactCapabilitySecret: []byte(strings.Repeat("d", 32)),
 		ArtifactReservations: acceptingArtifactReservations{},
 	}
@@ -791,8 +1042,8 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	gotOperations := append([]string(nil), operations...)
 	gotFinalization := finalizationRequest
 	operationMu.Unlock()
-	if fmt.Sprint(gotOperations) != "[finalize delete]" {
-		t.Fatalf("runtime cleanup operations = %v, want publication finalization before deletion", gotOperations)
+	if fmt.Sprint(gotOperations) != "[finalize settle delete]" {
+		t.Fatalf("runtime cleanup operations = %v, want publication finalization, Session settlement, then deletion", gotOperations)
 	}
 	if gotFinalization.WorkspaceDeltaID != harnessv2.WorkspaceDeltaID("delta-"+promptID) ||
 		gotFinalization.PublicationID != publicationIDForTask(completed) ||
@@ -829,32 +1080,18 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
-	profile := harnessProfileForTest()
-	profile.Model = acpTestModel
-	bindDispatcherProfileToAgent(t, &profile, task, agent)
-	allowedTools := effectiveACPAllowedTools(task, agent)
-	disallowedTools := sortedUnique(task.Spec.AgentRuntime.DisallowedTools)
-	var err error
-	profile.ToolPolicyDigest, err = harnessv2.CanonicalRuntimeToolPolicyDigest(allowedTools, disallowedTools, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.ApprovalPolicyDigest, err = harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.MCPConfigurationDigest, err = harnessv2.CanonicalMCPConfigurationDigest(allowedTools)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
+	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
+	profile := plan.Profile
+	profileDigest := plan.Digest
+	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
+	task.Status.Execution.RuntimePoolName = plan.PoolName
 	var deleteCalls atomic.Int32
 	deadlineCancels := make(chan context.CancelCauseFunc, 1)
 	server := newDispatcherTimeoutRuntimeServer(t, profile, profileDigest, &deleteCalls, func() {
@@ -866,11 +1103,10 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 		t.Fatal(err)
 	}
 	pool := &corev1alpha1.RuntimePool{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: types.UID("pool-uid"), Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: plan.PoolName, UID: types.UID("pool-uid"), Generation: 1},
 		Spec: corev1alpha1.RuntimePoolSpec{
 			RuntimeNamespace: "orka-runtimes", Runtime: corev1alpha1.RuntimePoolRuntimeSpec{
-				Image:   "docker.io/example/acp@sha256:" + strings.Repeat("a", 64),
-				Profile: RuntimePoolProfileFromPlan(ACPRuntimePlan{Profile: profile, Digest: profileDigest}),
+				Image: plan.Image, Profile: RuntimePoolProfileFromPlan(plan),
 			}, DesiredReplicas: 1,
 		},
 		Status: corev1alpha1.RuntimePoolStatus{
@@ -905,19 +1141,22 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		BindingDigest: task.Status.AgentExecutionBinding.BindingDigest, SnapshotDigest: task.Status.AgentExecutionBinding.Snapshot.Digest,
 		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence); err != nil {
+	}), fence); err != nil {
 		t.Fatal(err)
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
+		Snapshots: controlStore, BindingReservations: controlStore,
 		runtimeContextFactory: func(parent context.Context, _ *corev1alpha1.Task) (context.Context, context.CancelFunc) {
 			runtimeCtx, cancelCause := context.WithCancelCause(parent)
 			deadlineCancels <- cancelCause
@@ -969,7 +1208,7 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 		}},
 	}
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1110,10 +1349,10 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
 		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence)
+	}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1694,7 +1933,12 @@ func newDispatcherWriteRuntimeServer(
 	return httptest.NewServer(mux)
 }
 
-func newDispatcherRuntimeServer(t *testing.T, profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest) *httptest.Server {
+func newDispatcherRuntimeServer(
+	t *testing.T,
+	profile harnessv2.RuntimeProfile,
+	digest harnessv2.ProfileDigest,
+	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
+) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	limits := harnessv2.DefaultProtocolLimits()
@@ -1723,6 +1967,11 @@ func newDispatcherRuntimeServer(t *testing.T, profile harnessv2.RuntimeProfile, 
 			t.Errorf("decode create: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
+		}
+		for _, inspect := range onCreate {
+			if inspect != nil {
+				inspect(request)
+			}
 		}
 		now := time.Now().UTC()
 		created := harnessv2.RuntimeSessionDescriptor{
@@ -1852,6 +2101,19 @@ func testControlDigestForDispatcher(value string) string {
 	return digest
 }
 
+func boundPromptAttemptForTest(attempt *store.PromptAttempt) *store.PromptAttempt {
+	if attempt == nil {
+		return nil
+	}
+	if attempt.BindingDigest == "" {
+		attempt.BindingDigest = testControlDigestForDispatcher("test-v2-binding")
+	}
+	if attempt.SnapshotDigest == "" {
+		attempt.SnapshotDigest = testControlDigestForDispatcher("test-v2-snapshot")
+	}
+	return attempt
+}
+
 func TestACPDispatcherRejectsPersistedExternalRuntimeAttemptsWithoutExecution(t *testing.T) {
 	for _, state := range []corev1alpha1.TaskExecutionState{
 		corev1alpha1.TaskExecutionStateQueued,
@@ -1910,9 +2172,9 @@ func TestACPDispatcherRejectsPersistedExternalRuntimeAttemptsWithoutExecution(t 
 				WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.AgentRuntime{}).
 				WithObjects(task, runtimeRegistration).Build()
 			key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-			attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+			attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 				Key: key, RequestDigest: requestDigest, ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-			}, fence)
+			}), fence)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2179,10 +2441,10 @@ func runACPDispatcherPreAdmissionSettlementTest(
 		cancelEpoch()
 		t.Fatal(err)
 	}
-	if _, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
 		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence); err != nil {
+	}), fence); err != nil {
 		cancelEpoch()
 		t.Fatal(err)
 	}
@@ -2312,10 +2574,10 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
 		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence); err != nil {
+	}), fence); err != nil {
 		t.Fatal(err)
 	}
 	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore, Epochs: epochs}
@@ -2416,7 +2678,7 @@ func TestACPDispatcherQuiescesInterruptedSessionPreparation(t *testing.T) {
 			}
 			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task.DeepCopy()).Build()
 			key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-			attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+			attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2533,7 +2795,7 @@ func TestACPDispatcherAbortsLeaseWhenSessionTurnOpenFails(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task.DeepCopy()).Build()
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := baseStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+	attempt, err := baseStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2575,6 +2837,22 @@ func (s *failSessionTurnOpenStore) CreateSessionTurn(context.Context, store.Crea
 }
 func (s *failSessionTurnOpenStore) GetSessionTurn(context.Context, string) (*store.SessionTurn, error) {
 	return nil, store.ErrNotFound
+}
+
+type orderedSessionControlStore struct {
+	store.SessionControlStore
+	onFinalized func()
+}
+
+func (s *orderedSessionControlStore) FinalizeSessionTurn(
+	ctx context.Context,
+	request store.FinalizeSessionTurnRequest,
+) (*store.SessionTurn, error) {
+	turn, err := s.SessionControlStore.FinalizeSessionTurn(ctx, request)
+	if err == nil && s.onFinalized != nil {
+		s.onFinalized()
+	}
+	return turn, err
 }
 
 func TestACPWorkspaceDeltaLimitsFromTaskPolicy(t *testing.T) {
@@ -2638,7 +2916,7 @@ func TestACPDispatcherGatewaySessionUsesTranscriptBackedPrompt(t *testing.T) {
 		}},
 	}
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2828,7 +3106,7 @@ func TestACPDispatcherPromptIncludedSessionAppendsAssistantOnly(t *testing.T) {
 		}},
 	}
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}

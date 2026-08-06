@@ -139,8 +139,9 @@ func TestQueueACPRuntimeTaskRejectsEnabledAgentToolsBeforePoolDemand(t *testing.
 		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
 		ACPRuntimeImages: acpAgentToolTestImages(),
 	}
-	if _, err := reconciler.queueACPRuntimeTask(ctx, task.DeepCopy(), agent); err != nil {
-		t.Fatalf("queueACPRuntimeTask() error = %v, want terminal InvalidRuntimeProfile status", err)
+	current := configureAgentExecutionBindingTest(t, ctx, reconciler, task)
+	if result, err, handled := reconciler.ensureAgentExecutionBinding(ctx, current, agent); err != nil || !handled {
+		t.Fatalf("invalid tools binding result=%#v handled=%v err=%v", result, handled, err)
 	}
 
 	var pools corev1alpha1.RuntimePoolList

@@ -1,0 +1,293 @@
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
+)
+
+func harnessV1SessionAttemptReference(attempt *store.HarnessV1Attempt) string {
+	if attempt == nil {
+		return ""
+	}
+	return harnessV1AttemptKey(attempt).SessionReferenceID()
+}
+
+func harnessV1SessionRuntimeIdentity(binding *corev1alpha1.AgentExecutionBinding) string {
+	if binding == nil {
+		return ""
+	}
+	if binding.RuntimeRef != nil && binding.RuntimeRef.UID != "" {
+		return string(binding.RuntimeRef.UID)
+	}
+	return string(binding.RuntimeType)
+}
+
+func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	verified *verifiedHarnessV1Execution,
+	attempt *store.HarnessV1Attempt,
+	fence store.ControllerEpochFence,
+) error {
+	if verified == nil || verified.frozenTask == nil || verified.frozenTask.Spec.SessionRef == nil {
+		return nil
+	}
+	if d.Sessions == nil {
+		return errors.New("harness v1 Session continuity is not configured")
+	}
+	ref := verified.frozenTask.Spec.SessionRef
+	name := strings.TrimSpace(ref.Name)
+	if name == "" {
+		return store.ValidationErrorf("harness v1 SessionRef name is required")
+	}
+	transcriptBackedPrompt := ref.PromptIncluded && strings.TrimSpace(ref.ThroughMessageID) != ""
+	if !ref.Create && !transcriptBackedPrompt {
+		if _, err := d.Sessions.controls.GetSessionControl(ctx, task.Namespace, name); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("session %s/%s does not exist and create=false: %w", task.Namespace, name, store.ErrNotFound)
+			}
+			return err
+		}
+	}
+	sessionType := defaultACPSessionType
+	if ref.PromptIncluded && strings.HasPrefix(ref.ThroughMessageID, "gateway:") {
+		sessionType = store.SessionTypeGateway
+	}
+	control, err := d.Sessions.EnsureSession(ctx, ACPEnsureSessionRequest{
+		Namespace:                 task.Namespace,
+		SessionName:               name,
+		SessionType:               sessionType,
+		RequireExistingTranscript: transcriptBackedPrompt && !ref.Create,
+		Fence:                     fence,
+		CreatedAt:                 time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	expiresAt := time.Now().UTC().Add(defaultHarnessV1TurnTimeout + time.Minute)
+	if verified.frozenTask.Spec.Timeout != nil && verified.frozenTask.Spec.Timeout.Duration > 0 {
+		expiresAt = time.Now().UTC().Add(verified.frozenTask.Spec.Timeout.Duration + time.Minute)
+	}
+	lease, err := d.Sessions.AcquireMutationLease(ctx, ACPAcquireSessionLeaseRequest{
+		Session:             *control,
+		Fence:               fence,
+		TaskUID:             string(task.UID),
+		Attempt:             int64(attempt.Attempt),
+		PromptID:            attempt.TurnID,
+		PromptRequestDigest: attempt.RequestDigest,
+		AcquiredAt:          time.Now().UTC(),
+		ExpiresAt:           &expiresAt,
+		NamespaceUID:        string(verified.binding.Task.NamespaceUID),
+		ContractVersion:     corev1alpha1.AgentRuntimeContractHarnessV1,
+		LineageGeneration:   1,
+		LineageProvenance:   store.SessionLineageFirstUse,
+		RuntimeIdentity:     harnessV1SessionRuntimeIdentity(verified.binding),
+		ConfigDigest:        verified.binding.Snapshot.Digest,
+	})
+	if err != nil {
+		return err
+	}
+	appendPolicy := acpSessionTranscriptAppendPolicyForTask(verified.frozenTask)
+	_, err = d.Sessions.OpenTurn(ctx, ACPOpenSessionTurnRequest{
+		Lease:                *lease,
+		Fence:                fence,
+		PromptAttemptID:      harnessV1SessionAttemptReference(attempt),
+		PromptRequestDigest:  attempt.RequestDigest,
+		UserPrompt:           verified.frozenTask.Spec.Prompt,
+		SkipTranscriptAppend: appendPolicy.skipTranscriptAppend,
+		SkipUserPromptAppend: appendPolicy.skipUserPromptAppend,
+		OpenedAt:             time.Now().UTC(),
+	})
+	return err
+}
+
+func (d *HarnessV1Dispatcher) recoverHarnessV1TaskSession(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	verified *verifiedHarnessV1Execution,
+	attempt *store.HarnessV1Attempt,
+) (*ACPSessionTurn, error) {
+	if verified == nil || verified.frozenTask == nil || verified.frozenTask.Spec.SessionRef == nil {
+		return nil, nil
+	}
+	if d.Sessions == nil {
+		return nil, errors.New("harness v1 Session continuity is not configured")
+	}
+	name := strings.TrimSpace(verified.frozenTask.Spec.SessionRef.Name)
+	control, err := d.Sessions.controls.GetSessionControl(ctx, task.Namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	lineage := control.Lineage
+	if lineage == nil || lineage.ContractVersion != string(corev1alpha1.AgentRuntimeContractHarnessV1) ||
+		lineage.NamespaceUID != string(verified.binding.Task.NamespaceUID) ||
+		lineage.RuntimeIdentity != harnessV1SessionRuntimeIdentity(verified.binding) ||
+		lineage.ConfigDigest != verified.binding.Snapshot.Digest {
+		return nil, fmt.Errorf("%w: harness v1 Session lineage does not match the immutable Task binding", store.ErrConflict)
+	}
+	key := store.SessionTurnKey{
+		SessionUID: control.SessionUID, LeaseGeneration: control.LeaseGeneration,
+		TaskUID: string(task.UID), Attempt: int64(attempt.Attempt), PromptID: attempt.TurnID,
+	}
+	turnID, err := key.CanonicalID()
+	if err != nil {
+		return nil, err
+	}
+	turn, err := d.Sessions.controls.GetSessionTurn(ctx, turnID)
+	if err != nil {
+		return nil, err
+	}
+	if turn.PromptAttemptID != harnessV1SessionAttemptReference(attempt) || turn.Key != key {
+		return nil, fmt.Errorf("%w: harness v1 SessionTurn identity does not match the durable attempt", store.ErrConflict)
+	}
+	lease := ACPSessionLease{Session: *control, Key: key}
+	if turn.State == store.SessionTurnOpen {
+		if err := validateACPSessionLease(control, key); err != nil {
+			return nil, err
+		}
+	}
+	appendPolicy := acpSessionTranscriptAppendPolicyForTask(verified.frozenTask)
+	return &ACPSessionTurn{
+		Lease: lease, Turn: *turn,
+		SkipTranscriptAppend: appendPolicy.skipTranscriptAppend,
+		SkipUserPromptAppend: appendPolicy.skipUserPromptAppend,
+	}, nil
+}
+
+func harnessV1SessionCanBeAbsent(attempt *store.HarnessV1Attempt) bool {
+	if attempt == nil || attempt.TerminalReceiptDigest != "" {
+		return false
+	}
+	if attempt.State == store.HarnessV1AttemptCancelled {
+		return true
+	}
+	if attempt.State != store.HarnessV1AttemptRejected {
+		return false
+	}
+	switch attempt.TerminalReason {
+	case harnessV1ReasonBackendDisabled, harnessV1ReasonCredentialChanged, harnessV1ReasonInvalidBinding:
+		return true
+	default:
+		return false
+	}
+}
+
+func harnessV1RuntimeProjection(
+	task *corev1alpha1.Task,
+	attempt *store.HarnessV1Attempt,
+	message string,
+) *corev1alpha1.HarnessRuntimeStatus {
+	projected := &corev1alpha1.HarnessRuntimeStatus{}
+	if task.Status.HarnessRuntime != nil {
+		projected = task.Status.HarnessRuntime.DeepCopy()
+	}
+	state, outcome, _ := harnessV1TaskProjection(attempt.State)
+	projected.Attempt = attempt.Attempt
+	projected.TurnID = attempt.TurnID
+	projected.RuntimeSessionID = attempt.RuntimeSessionID
+	projected.State = state
+	projected.Outcome = outcome
+	projected.Reason = attempt.TerminalReason
+	projected.TerminalReceiptDigest = attempt.TerminalReceiptDigest
+	projected.RequestDigest = attempt.RequestDigest
+	projected.ControllerEpoch = attempt.ControllerEpoch
+	projected.LastEventSeq = attempt.LastEventSeq
+	projected.Message = message
+	if attempt.CancelRequestedAt != nil {
+		when := metav1.NewTime(attempt.CancelRequestedAt.UTC())
+		projected.CancelRequestedAt = &when
+	} else {
+		projected.CancelRequestedAt = nil
+	}
+	return projected
+}
+
+func (d *HarnessV1Dispatcher) finalizeHarnessV1TaskSession(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	verified *verifiedHarnessV1Execution,
+	attempt *store.HarnessV1Attempt,
+	fence store.ControllerEpochFence,
+	retrying bool,
+) (bool, error) {
+	if verified == nil || verified.frozenTask == nil || verified.frozenTask.Spec.SessionRef == nil {
+		return false, nil
+	}
+	sessionTurn, err := d.recoverHarnessV1TaskSession(ctx, task, verified, attempt)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) && harnessV1SessionCanBeAbsent(attempt) {
+			return false, nil
+		}
+		return false, err
+	}
+	if sessionTurn == nil {
+		return false, nil
+	}
+	if sessionTurn.Turn.State == store.SessionTurnFinalized {
+		_, err := d.Sessions.ResumeSessionTurnFinalization(ctx, ACPResumeSessionTurnFinalizationRequest{
+			SessionTurn: *sessionTurn, Fence: fence,
+		})
+		return true, err
+	}
+	message := d.terminalMessage(attempt)
+	_, _, phase := harnessV1TaskProjection(attempt.State)
+	if retrying {
+		phase = corev1alpha1.TaskPhaseRunning
+		sessionTurn.SkipTranscriptAppend = true
+		sessionTurn.SkipUserPromptAppend = false
+		message = "harness v1 attempt settled; a safe retry is pending"
+	}
+	payload, err := json.Marshal(taskTerminalProjection{
+		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: attempt.Attempt,
+		Phase: phase, Message: message, BindingDigest: attempt.BindingDigest,
+		HarnessRuntime: harnessV1RuntimeProjection(task, attempt, message),
+	})
+	if err != nil {
+		return false, err
+	}
+	projection := ACPFinalizationProjection{
+		ProjectionKind: "TaskTerminalStatus", Payload: payload, AvailableAt: time.Now().UTC(),
+	}
+	finalizedAt := time.Now().UTC()
+	switch attempt.State {
+	case store.HarnessV1AttemptSucceeded:
+		result, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+		if err != nil {
+			return false, err
+		}
+		_, err = d.Sessions.FinalizeAssistantResult(ctx, ACPFinalizeAssistantRequest{
+			SessionTurn: *sessionTurn, Fence: fence, AssistantResult: string(result),
+			Projection: projection, FinalizedAt: finalizedAt,
+		})
+		return true, err
+	case store.HarnessV1AttemptOutcomeUnknown:
+		reason := strings.TrimSpace(attempt.TerminalReason)
+		if reason == "" {
+			reason = harnessV1OutcomeUnknownMessage
+		}
+		_, err = d.Sessions.FinalizeOutcomeUnknown(ctx, ACPFinalizeOutcomeUnknownRequest{
+			SessionTurn: *sessionTurn, Fence: fence, Reason: reason,
+			Projection: projection, FinalizedAt: finalizedAt,
+		})
+		return true, err
+	default:
+		reason := strings.TrimSpace(attempt.TerminalReason)
+		if reason == "" {
+			reason = string(attempt.State)
+		}
+		_, err = d.Sessions.FinalizeOutcomeMarker(ctx, ACPFinalizeOutcomeMarkerRequest{
+			SessionTurn: *sessionTurn, Fence: fence, Kind: string(attempt.State), Reason: reason,
+			Projection: projection, FinalizedAt: finalizedAt,
+		})
+		return true, err
+	}
+}

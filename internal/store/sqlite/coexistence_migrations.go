@@ -12,11 +12,12 @@ import (
 )
 
 // migrateAgentExecutionCoexistence creates the harness v1/v2 coexistence
-// payload tables: immutable encrypted execution snapshots, Session
-// protocol/runtime lineage, and durable harness v1 attempt aggregates. All
-// statements are idempotent and run inside one transaction. Kubernetes control
-// CRDs and coordination Leases remain authoritative for lifecycle and fences;
-// these tables are payload persistence.
+// tables: immutable encrypted execution snapshots, Session protocol/runtime
+// lineage, durable binding admission reservations, and durable harness v1
+// attempt aggregates. All statements are idempotent and run inside one
+// transaction. Kubernetes control CRDs and coordination Leases remain
+// authoritative for lifecycle and fences; the reservation gate is the
+// store-local linearization point for new Task bindings.
 func migrateAgentExecutionCoexistence(db *sql.DB) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS agent_execution_snapshots (
@@ -48,6 +49,51 @@ func migrateAgentExecutionCoexistence(db *sql.DB) error {
 			UNIQUE (session_uid)
 		)`,
 
+		`CREATE TABLE IF NOT EXISTS agent_execution_binding_reservation_gates (
+			backend            TEXT PRIMARY KEY CHECK(backend IN ('v1','v2')),
+			control_uid        TEXT NOT NULL,
+			control_generation INTEGER NOT NULL CHECK(control_generation > 0),
+			mode_revision      INTEGER NOT NULL CHECK(mode_revision > 0),
+			open               BOOLEAN NOT NULL CHECK(open IN (0,1)),
+			version            INTEGER NOT NULL CHECK(version > 0),
+			updated_at         TIMESTAMP NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS agent_execution_binding_reservation_watermarks (
+			backend   TEXT PRIMARY KEY CHECK(backend IN ('v1','v2')),
+			watermark INTEGER NOT NULL CHECK(watermark >= 0)
+		)`,
+		`CREATE TABLE IF NOT EXISTS agent_execution_binding_reservations (
+			id                 TEXT PRIMARY KEY,
+			task_namespace     TEXT NOT NULL,
+			task_name          TEXT NOT NULL,
+			task_uid           TEXT NOT NULL UNIQUE,
+			control_uid        TEXT NOT NULL,
+			control_generation INTEGER NOT NULL CHECK(control_generation > 0),
+			backend            TEXT NOT NULL CHECK(backend IN ('v1','v2')),
+			mode_revision      INTEGER NOT NULL CHECK(mode_revision > 0),
+			binding_digest     TEXT NOT NULL,
+			snapshot_digest    TEXT NOT NULL,
+			state              TEXT NOT NULL CHECK(state IN ('Open','Bound','Rejected')),
+			terminal_reason    TEXT NOT NULL DEFAULT '',
+			version            INTEGER NOT NULL CHECK(version > 0),
+			reserved_at        TIMESTAMP NOT NULL,
+			settled_at         TIMESTAMP,
+			updated_at         TIMESTAMP NOT NULL,
+			CHECK(
+				(state = 'Open' AND settled_at IS NULL AND terminal_reason = '') OR
+				(state = 'Bound' AND settled_at IS NOT NULL AND terminal_reason = '') OR
+				(state = 'Rejected' AND settled_at IS NOT NULL AND terminal_reason <> '')
+			)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_execution_binding_reservations_revision
+			ON agent_execution_binding_reservations(
+				backend, control_uid, control_generation, mode_revision, reserved_at ASC, id ASC
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_execution_binding_reservations_open
+			ON agent_execution_binding_reservations(
+				backend, control_uid, control_generation, mode_revision, reserved_at ASC, id ASC
+			) WHERE state = 'Open'`,
+
 		`CREATE TABLE IF NOT EXISTS harness_v1_attempts (
 			id                           TEXT PRIMARY KEY,
 			namespace                    TEXT NOT NULL,
@@ -62,6 +108,7 @@ func migrateAgentExecutionCoexistence(db *sql.DB) error {
 			correlation_id               TEXT NOT NULL DEFAULT '',
 			backend                      TEXT NOT NULL DEFAULT '',
 			backend_endpoint             TEXT NOT NULL DEFAULT '',
+			auth_secret_namespace        TEXT NOT NULL DEFAULT '',
 			auth_secret_name             TEXT NOT NULL DEFAULT '',
 			auth_secret_key              TEXT NOT NULL DEFAULT '',
 			auth_secret_uid              TEXT NOT NULL DEFAULT '',

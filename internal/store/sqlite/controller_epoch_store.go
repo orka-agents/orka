@@ -126,6 +126,90 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 	return &current, nil
 }
 
+// SyncControllerEpochMirror records the exact Kubernetes-authoritative epoch
+// used to fence SQLite payload mutations. It may move a stale mirror forward
+// after a crash between authoritative acquisition and mirror persistence, but
+// never rewinds or replaces conflicting evidence at the same epoch.
+func (s *Store) SyncControllerEpochMirror(ctx context.Context, authoritative store.ControllerEpoch) error {
+	name, err := normalizeControllerEpochName(authoritative.Name)
+	if err != nil {
+		return err
+	}
+	authoritative.Name = name
+	authoritative.HolderID = strings.TrimSpace(authoritative.HolderID)
+	if err := store.ValidateControlIdentifier("controller epoch holder ID", authoritative.HolderID); err != nil {
+		return err
+	}
+	if err := store.ValidateCanonicalDigest("controller epoch request digest", authoritative.RequestDigest); err != nil {
+		return err
+	}
+	if authoritative.Epoch < 1 || authoritative.Version < 1 {
+		return store.ValidationErrorf("mirrored controller epoch and version must be positive")
+	}
+	authoritative.AcquiredAt = normalizeControlTime(authoritative.AcquiredAt)
+	authoritative.UpdatedAt = normalizeControlTime(authoritative.UpdatedAt)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin controller epoch mirror sync: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	current, err := getControllerEpoch(ctx, tx, authoritative.Name)
+	if errors.Is(err, store.ErrNotFound) {
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO controller_epochs(name, epoch, holder_id, request_digest, version, acquired_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			authoritative.Name, authoritative.Epoch, authoritative.HolderID, authoritative.RequestDigest,
+			authoritative.Version, authoritative.AcquiredAt, authoritative.UpdatedAt,
+		)
+		if err != nil {
+			if isSQLiteConstraintError(err) {
+				return controlConflict("controller epoch mirror %q was created concurrently", authoritative.Name)
+			}
+			return fmt.Errorf("create controller epoch mirror: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit controller epoch mirror create: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read controller epoch mirror: %w", err)
+	}
+	if current.Epoch > authoritative.Epoch {
+		return controlConflict(
+			"controller epoch mirror %q is ahead at %d, authoritative epoch is %d",
+			authoritative.Name, current.Epoch, authoritative.Epoch,
+		)
+	}
+	if current.Epoch == authoritative.Epoch {
+		if current.HolderID != authoritative.HolderID || current.RequestDigest != authoritative.RequestDigest {
+			return controlConflict(
+				"controller epoch mirror %q conflicts at epoch %d", authoritative.Name, authoritative.Epoch,
+			)
+		}
+		return nil
+	}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE controller_epochs
+		 SET epoch = ?, holder_id = ?, request_digest = ?, version = ?, acquired_at = ?, updated_at = ?
+		 WHERE name = ? AND epoch = ? AND holder_id = ?`,
+		authoritative.Epoch, authoritative.HolderID, authoritative.RequestDigest, authoritative.Version,
+		authoritative.AcquiredAt, authoritative.UpdatedAt,
+		authoritative.Name, current.Epoch, current.HolderID,
+	)
+	if err != nil {
+		return fmt.Errorf("update controller epoch mirror: %w", err)
+	}
+	if err := rowsAffectedExactlyOne(result, "controller epoch mirror"); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit controller epoch mirror update: %w", err)
+	}
+	return nil
+}
+
 func getControllerEpoch(ctx context.Context, q controlQueryRower, name string) (store.ControllerEpoch, error) {
 	var epoch store.ControllerEpoch
 	err := q.QueryRowContext(ctx,

@@ -107,6 +107,11 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 	}
 	continuitySession := task.Spec.SessionRef != nil && sessionBound
 	if store.IsTerminalPromptExecutionState(attempt.ExecutionState) && store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
+		if continuitySession {
+			if err := d.finalizeRecoveredTerminalSession(ctx, task, attempt, fence); err != nil {
+				return err
+			}
+		}
 		cleanupComplete, cleanupErr := d.cleanupRecoveredTaskScopedRuntimeSession(ctx, task)
 		if cleanupErr != nil {
 			return cleanupErr
@@ -235,8 +240,20 @@ func (d *ACPDispatcher) markTaskScopedRuntimeSessionCleanupComplete(
 	})
 }
 
-//nolint:gocyclo // Recovery keeps exact runtime-state and fence cleanup decisions in one fail-closed boundary.
+func (d *ACPDispatcher) prepareRecoveredTaskScopedRuntimeSessionForSettlement(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	return d.reconcileRecoveredTaskScopedRuntimeSession(ctx, task, false)
+}
+
 func (d *ACPDispatcher) cleanupRecoveredTaskScopedRuntimeSession(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	return d.reconcileRecoveredTaskScopedRuntimeSession(ctx, task, true)
+}
+
+//nolint:gocyclo // Recovery keeps exact runtime-state and fence cleanup decisions in one fail-closed boundary.
+func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	deleteAfterSettlement bool,
+) (bool, error) {
 	if task == nil || task.Status.Execution == nil || strings.TrimSpace(task.Status.Execution.RuntimeSessionUID) == "" ||
 		task.Status.Execution.RuntimeSessionGeneration < 1 {
 		return true, nil
@@ -253,6 +270,9 @@ func (d *ACPDispatcher) cleanupRecoveredTaskScopedRuntimeSession(ctx context.Con
 		pool := &corev1alpha1.RuntimePool{}
 		if err := d.APIReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: poolName}, pool); err != nil {
 			if apierrors.IsNotFound(err) {
+				if !deleteAfterSettlement {
+					return true, nil
+				}
 				if markErr := d.markTaskScopedRuntimeSessionCleanupComplete(ctx, task, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration); markErr != nil {
 					return false, markErr
 				}
@@ -266,6 +286,9 @@ func (d *ACPDispatcher) cleanupRecoveredTaskScopedRuntimeSession(ctx context.Con
 			return false, err
 		}
 		if active == nil || active.RuntimeInstanceID != execution.RuntimeInstanceID {
+			if !deleteAfterSettlement {
+				return true, nil
+			}
 			if markErr := d.markTaskScopedRuntimeSessionCleanupComplete(ctx, task, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration); markErr != nil {
 				return false, markErr
 			}
@@ -284,6 +307,9 @@ func (d *ACPDispatcher) cleanupRecoveredTaskScopedRuntimeSession(ctx context.Con
 			return false, err
 		}
 		if string(runtime.UID) != execution.AgentRuntimeUID || runtime.Status.ObservedCapabilities.RuntimeInstanceID != execution.RuntimeInstanceID {
+			if !deleteAfterSettlement {
+				return true, nil
+			}
 			if markErr := d.markTaskScopedRuntimeSessionCleanupComplete(ctx, task, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration); markErr != nil {
 				return false, markErr
 			}
@@ -312,6 +338,9 @@ func (d *ACPDispatcher) cleanupRecoveredTaskScopedRuntimeSession(ctx context.Con
 	}
 	observed, present := runtimeSessionStatusForFence(status.Sessions, runtimeFence)
 	if !present {
+		if !deleteAfterSettlement {
+			return true, nil
+		}
 		if markErr := d.markTaskScopedRuntimeSessionCleanupComplete(
 			ctx, task, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration,
 		); markErr != nil {
@@ -321,13 +350,13 @@ func (d *ACPDispatcher) cleanupRecoveredTaskScopedRuntimeSession(ctx context.Con
 	}
 	switch observed.State {
 	case harnessv2.RuntimeSessionStatePublicationPrepared:
-		if task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite || task.Status.Delivery == nil ||
-			task.Status.Delivery.Outcome == corev1alpha1.TaskDeliveryOutcomeNoChange {
-			return false, fmt.Errorf("recover RuntimeSession publication finalization: prepared session lacks terminal write delivery")
+		if task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite {
+			return false, fmt.Errorf("recover RuntimeSession publication finalization: prepared session is not bound to a write workspace")
 		}
 		deltaID := harnessv2.WorkspaceDeltaID("delta-" + execution.PromptID)
 		finalization, finalizationErr := d.runtimeSessionPublicationFinalization(ctx, publicationIDForTask(task), deltaID)
-		if errors.Is(finalizationErr, store.ErrNotFound) && task.Status.Delivery != nil {
+		if errors.Is(finalizationErr, store.ErrNotFound) && task.Status.Delivery != nil &&
+			task.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeNoChange {
 			finalization, finalizationErr = runtimeSessionDeltaAbandonmentFinalization(task, deltaID, *task.Status.Delivery)
 		}
 		if finalizationErr != nil {
@@ -344,6 +373,9 @@ func (d *ACPDispatcher) cleanupRecoveredTaskScopedRuntimeSession(ctx context.Con
 		return false, nil
 	default:
 		return false, nil
+	}
+	if !deleteAfterSettlement {
+		return true, nil
 	}
 	if err := d.deleteRuntimeSession(
 		context.WithoutCancel(ctx), runtimeClient, harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)), task, runtimeFence, "terminal_recovery",
@@ -599,6 +631,13 @@ func (d *ACPDispatcher) recoveredTaskSession(ctx context.Context, task *corev1al
 }
 
 func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, fence store.ControllerEpochFence) error {
+	prepared, err := d.prepareRecoveredTaskScopedRuntimeSessionForSettlement(ctx, task)
+	if err != nil {
+		return err
+	}
+	if !prepared {
+		return fmt.Errorf("%w: RuntimeSession publication finalization is not ready for Session settlement", store.ErrNotReady)
+	}
 	session, err := d.recoveredTaskSession(ctx, task, attempt)
 	if err != nil || session == nil {
 		return err

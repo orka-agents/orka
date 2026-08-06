@@ -1,0 +1,55 @@
+# Defense-in-depth admission for every absent-to-present adjudication
+# resolution reference. Object-specific Applied-adjudication proof remains in
+# the fail-closed webhooks; this policy prevents trusted-identity bypass and
+# requires the exact current Sealed classification authority.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-agent-execution-resolution
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: core.orka.ai/v1alpha1
+    kind: AgentExecutionControl
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["core.orka.ai"]
+        apiVersions: ["v1alpha1"]
+        operations: ["UPDATE"]
+        resources: ["tasks", "tasks/status", "runtimesessioncontrols/status"]
+  matchConditions:
+    - name: resolution-reference-introduced
+      expression: >-
+        object.?status.?agentExecutionResolutionRef.hasValue() &&
+        !oldObject.?status.?agentExecutionResolutionRef.hasValue()
+  validations:
+    - expression: >-
+        params != null &&
+        params.metadata.name == 'cluster' &&
+        params.metadata.namespace == 'orka-system' &&
+        string(params.metadata.uid) != '' &&
+        params.metadata.generation > 0 &&
+        params.status.observedGeneration == params.metadata.generation &&
+        params.?status.?classification.hasValue() &&
+        params.status.classification.state == 'Sealed' &&
+        string(params.status.classification.controlUID) == string(params.metadata.uid) &&
+        params.status.classification.controlGeneration == params.metadata.generation &&
+        params.status.classification.inventoryID != '' &&
+        params.status.classification.inventoryDigest.matches('^sha256:[a-f0-9]{64}$')
+      message: resolution references require the exact live Sealed classification authority
+    - expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:orka-system:orka-controller-manager'
+      message: resolution references are restricted to the adjudication controller identity
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-agent-execution-resolution
+spec:
+  policyName: orka-agent-execution-resolution
+  validationActions: ["Deny"]
+  paramRef:
+    name: cluster
+    namespace: orka-system
+    parameterNotFoundAction: Deny

@@ -2219,6 +2219,14 @@ spec:
                     - orka.harness.v1
                     - orka.harness.v2
                     type: string
+                  migrationInventoryID:
+                    description: |-
+                      MigrationInventoryID binds legacy cleanup-only authority to the exact
+                      sealed classification inventory that admitted it. It is absent from all
+                      executable and ordinary legacy-adopted bindings.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
                   mode:
                     description: AgentExecutionBindingMode bounds what the binding
                       authorizes.
@@ -2374,6 +2382,10 @@ spec:
                     'orka.harness.v2'
                 - message: legacy-cleanup-only provenance requires cleanup-only mode
                   rule: self.provenance != 'legacy-cleanup-only' || self.mode == 'cleanup-only'
+                - message: migrationInventoryID is required only for legacy-cleanup-only
+                    provenance
+                  rule: 'self.provenance == ''legacy-cleanup-only'' ? has(self.migrationInventoryID)
+                    : !has(self.migrationInventoryID)'
               agentExecutionNoExecution:
                 description: |-
                   AgentExecutionNoExecution records authoritative proof that this Task has
@@ -2460,15 +2472,14 @@ spec:
                     description: |-
                       AgentExecutionAdjudicationAction is a one-way operator resolution. Actions
                       never authorize prompt replay, publication replay, or protocol mutation.
+                      The coexistence API currently admits only cleanup actions whose exact
+                      Applied resolution can be consumed by route-aware finalization. The other
+                      constants below are reserved until their required receipt, break-glass, or
+                      destination-lineage evidence is represented by the API.
                     enum:
-                    - ConfirmV1Outcome
-                    - ConfirmV2Outcome
                     - CleanupV1
                     - CleanupV2
                     - CleanupBoth
-                    - MarkNoExecution
-                    - AbandonOutcomeUnknown
-                    - BootstrapNewLineage
                     type: string
                   adjudicationName:
                     maxLength: 253
@@ -3256,6 +3267,11 @@ spec:
                   routing metadata and Secret references, never bearer values. Compatibility
                   surface for harness v1 bindings.
                 properties:
+                  attempt:
+                    description: Attempt is the durable harness v1 attempt number.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   authRefField:
                     description: AuthRefField is the Secret data field selected when
                       the turn started.
@@ -3269,13 +3285,60 @@ spec:
                       AuthRefResourceVersion is the auth Secret resourceVersion validated
                       before starting the turn.
                     type: string
+                  cancelRequestedAt:
+                    description: |-
+                      CancelRequestedAt records a durable cancellation request. Cancellation
+                      remains nonterminal until a terminal frame or ledger receipt is observed.
+                    format: date-time
+                    type: string
                   contractVersion:
                     description: ContractVersion is the Orka harness contract version
                       used for the turn.
                     type: string
+                  controllerEpoch:
+                    description: ControllerEpoch records the fenced controller epoch
+                      driving the attempt.
+                    format: int64
+                    minimum: 0
+                    type: integer
                   endpoint:
                     description: Endpoint is the non-secret harness base URL selected
                       when the turn started.
+                    type: string
+                  lastEventSeq:
+                    description: LastEventSeq is the highest durably mapped harness
+                      frame sequence.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  lastTransitionTime:
+                    description: |-
+                      LastTransitionTime is the last durable v1 attempt transition projected to
+                      the Task.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is bounded, sanitized execution context.
+                    maxLength: 1024
+                    type: string
+                  outcome:
+                    description: Outcome is set only for a terminal harness v1 attempt.
+                    enum:
+                    - Succeeded
+                    - Failed
+                    - Cancelled
+                    - OutcomeUnknown
+                    type: string
+                  reason:
+                    description: Reason is a bounded machine-readable terminal reason
+                      code.
+                    maxLength: 256
+                    type: string
+                  requestDigest:
+                    description: |-
+                      RequestDigest binds the canonical StartTurn request admitted by the
+                      durable wrapper ledger.
+                    pattern: ^sha256:[a-f0-9]{64}$
                     type: string
                   runtimeGeneration:
                     description: RuntimeGeneration is the AgentRuntime generation
@@ -3292,7 +3355,47 @@ spec:
                       RuntimeRefName is the AgentRuntime name for custom runtimeRef turns.
                       Empty means built-in CLI wrapper.
                     type: string
+                  runtimeSessionID:
+                    description: RuntimeSessionID is the deterministic, non-secret
+                      v1 runtime-session identity.
+                    type: string
+                  state:
+                    description: State is the durable harness v1 attempt state projected
+                      for operators.
+                    enum:
+                    - Queued
+                    - Reserved
+                    - SessionStarting
+                    - Planned
+                    - Submitting
+                    - SubmittedUnknown
+                    - Accepted
+                    - Running
+                    - Settling
+                    - Succeeded
+                    - Failed
+                    - Cancelled
+                    - OutcomeUnknown
+                    type: string
+                  terminalReceiptDigest:
+                    description: TerminalReceiptDigest identifies the authoritative
+                      terminal or unknown receipt.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  turnID:
+                    description: TurnID is the deterministic, non-secret harness turn
+                      identity.
+                    type: string
                 type: object
+                x-kubernetes-validations:
+                - message: terminal harness state requires an outcome
+                  rule: '!has(self.state) || !(self.state in [''Succeeded'', ''Failed'',
+                    ''Cancelled'', ''OutcomeUnknown'']) || has(self.outcome)'
+                - message: harness outcome requires a terminal state
+                  rule: '!has(self.outcome) || self.state in [''Succeeded'', ''Failed'',
+                    ''Cancelled'', ''OutcomeUnknown'']'
+                - message: OutcomeUnknown harness state requires OutcomeUnknown outcome
+                  rule: self.state != 'OutcomeUnknown' || self.outcome == 'OutcomeUnknown'
               iteration:
                 description: |-
                   Iteration is the current autonomous loop iteration (0-based).
@@ -3378,6 +3481,12 @@ spec:
                 != ''orka.harness.v2'' || !has(self.harnessRuntime) || (has(oldSelf.harnessRuntime)
                 && self.harnessRuntime == oldSelf.harnessRuntime)'
         type: object
+        x-kubernetes-validations:
+        - message: Task spec is immutable after execution authority or a migration
+            disposition is recorded
+          rule: '!has(oldSelf.status) || (!(has(oldSelf.status.agentExecutionBinding)
+            || has(oldSelf.status.agentExecutionNoExecution) || has(oldSelf.status.agentExecutionQuarantine))
+            || self.spec == oldSelf.spec)'
     served: true
     storage: true
     subresources:

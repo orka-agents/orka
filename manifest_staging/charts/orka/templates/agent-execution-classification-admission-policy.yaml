@@ -1,0 +1,65 @@
+{{- include "orka.validateAdmission" . }}
+{{- if .Values.admission.webhooks.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.agentExecutionClassificationAdmissionPolicyName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: core.orka.ai/v1alpha1
+    kind: AgentExecutionControl
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        operations: [UPDATE]
+        resources: [agents, agentruntimes]
+  matchConditions:
+    - name: contract-classification-introduced
+      expression: >-
+        (request.resource.resource == 'agents' &&
+        object.?spec.?runtime.?contractVersion.hasValue() &&
+        !oldObject.?spec.?runtime.?contractVersion.hasValue()) ||
+        (request.resource.resource == 'agentruntimes' &&
+        object.?spec.?contractVersion.hasValue() &&
+        !oldObject.?spec.?contractVersion.hasValue())
+  validations:
+    - expression: >-
+        params != null &&
+        params.metadata.name == 'cluster' &&
+        params.metadata.namespace == 'orka-system' &&
+        string(params.metadata.uid) != '' &&
+        params.metadata.generation > 0 &&
+        params.?status.?classification.hasValue() &&
+        params.status.classification.state == 'Open' &&
+        string(params.status.classification.controlUID) == string(params.metadata.uid) &&
+        params.status.classification.controlGeneration == params.metadata.generation &&
+        params.status.classification.inventoryID != '' &&
+        params.status.classification.inventoryDigest.matches('^sha256:[a-f0-9]{64}$')
+      message: contract classification requires the exact live Open migration inventory
+    - expression: >-
+        request.userInfo.username == {{ include "orka.admissionControllerUsername" . | quote }}
+        {{- range .Values.admission.identity.classificationUsernames }} ||
+        request.userInfo.username == {{ . | quote }}
+        {{- end }}
+      message: contract classification is restricted to an authorized bridge classifier identity
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.agentExecutionClassificationAdmissionPolicyName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+spec:
+  policyName: {{ include "orka.agentExecutionClassificationAdmissionPolicyName" . }}
+  validationActions: [Deny]
+  paramRef:
+    name: cluster
+    namespace: orka-system
+    parameterNotFoundAction: Deny
+{{- end }}

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -81,8 +82,42 @@ func bindingTestNamespace() *corev1.Namespace {
 	}}
 }
 
+func bindingTestControl() *corev1alpha1.AgentExecutionControl {
+	return &corev1alpha1.AgentExecutionControl{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  corev1alpha1.AgentExecutionControlNamespace,
+			Name:       corev1alpha1.AgentExecutionControlName,
+			UID:        types.UID("44444444-4444-4444-4444-444444444444"),
+			Generation: 1,
+		},
+		Spec: corev1alpha1.AgentExecutionControlSpec{Backends: corev1alpha1.AgentExecutionBackendsSpec{
+			V1: corev1alpha1.AgentExecutionBackendSpec{DesiredMode: corev1alpha1.AgentExecutionModeDisabled},
+			V2: corev1alpha1.AgentExecutionBackendSpec{DesiredMode: corev1alpha1.AgentExecutionModeEnabled},
+		}},
+		Status: corev1alpha1.AgentExecutionControlStatus{
+			ObservedGeneration: 1,
+			Backends: &corev1alpha1.AgentExecutionBackendsStatus{
+				V1: corev1alpha1.AgentExecutionBackendStatus{EffectiveMode: corev1alpha1.AgentExecutionEffectiveModeDisabled, ModeRevision: 1},
+				V2: corev1alpha1.AgentExecutionBackendStatus{EffectiveMode: corev1alpha1.AgentExecutionEffectiveModeEnabled, ModeRevision: 7},
+			},
+		},
+	}
+}
+
 func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReconciler, *sqlite.Store) {
 	t.Helper()
+	control := bindingTestControl()
+	hasControl := false
+	for _, object := range objects {
+		if candidate, ok := object.(*corev1alpha1.AgentExecutionControl); ok {
+			hasControl = true
+			control = candidate
+			break
+		}
+	}
+	if !hasControl {
+		objects = append(objects, control)
+	}
 	scheme := bindingTestScheme(t)
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}, &corev1alpha1.AgentExecutionControl{}).
@@ -98,10 +133,14 @@ func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReco
 		t.Fatal(err)
 	}
 	snapshotStore.SetAgentExecutionSnapshotCipher(cipher)
+	configureAgentExecutionBindingTestGate(
+		t, context.Background(), snapshotStore, control, store.AgentExecutionBackendV2,
+	)
 	return &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10),
-		AgentExecutionSnapshots: snapshotStore,
-		ACPRuntimeEnabled:       true, ACPRuntimeNamespace: "orka-runtimes",
+		AgentExecutionSnapshots:           snapshotStore,
+		AgentExecutionBindingReservations: snapshotStore,
+		ACPRuntimeEnabled:                 true, ACPRuntimeNamespace: "orka-runtimes",
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}, snapshotStore
 }
@@ -113,8 +152,8 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 	agent := bindingTestAgent()
 	reconciler, snapshots := newBindingTestReconciler(t, task, bindingTestNamespace())
 
-	if !reconciler.agentExecutionBindingEnabled() {
-		t.Fatal("binding stage must be enabled when a snapshot store is configured")
+	if reconciler.AgentExecutionSnapshots == nil {
+		t.Fatal("binding stage requires a snapshot store")
 	}
 
 	live := task.DeepCopy()
@@ -265,27 +304,42 @@ func TestPersistAgentExecutionBindingRefusesDeletingTask(t *testing.T) {
 	}
 }
 
+func TestPersistAgentExecutionBindingRejectsSpecGenerationRace(t *testing.T) {
+	ctx := context.Background()
+	task := bindingTestTask()
+	agent := bindingTestAgent()
+	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
+	candidate, err := reconciler.resolveAgentExecutionCandidate(ctx, task, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Generation++
+	current.Spec.Prompt = "changed concurrently"
+	if err := reconciler.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.persistAgentExecutionBinding(ctx, task, candidate); err == nil ||
+		!strings.Contains(err.Error(), "spec generation changed") {
+		t.Fatalf("expected stale candidate refusal, got %v", err)
+	}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.AgentExecutionBinding != nil {
+		t.Fatal("generation race persisted a stale immutable binding")
+	}
+}
+
 func TestResolveCandidateEnforcesBackendControlModes(t *testing.T) {
 	ctx := context.Background()
 	task := bindingTestTask()
 	agent := bindingTestAgent()
 
-	control := &corev1alpha1.AgentExecutionControl{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:  corev1alpha1.AgentExecutionControlNamespace,
-			Name:       corev1alpha1.AgentExecutionControlName,
-			UID:        types.UID("44444444-4444-4444-4444-444444444444"),
-			Generation: 1,
-		},
-		Spec: corev1alpha1.AgentExecutionControlSpec{Backends: corev1alpha1.AgentExecutionBackendsSpec{
-			V1: corev1alpha1.AgentExecutionBackendSpec{DesiredMode: corev1alpha1.AgentExecutionModeDisabled},
-			V2: corev1alpha1.AgentExecutionBackendSpec{DesiredMode: corev1alpha1.AgentExecutionModeEnabled},
-		}},
-		Status: corev1alpha1.AgentExecutionControlStatus{Backends: &corev1alpha1.AgentExecutionBackendsStatus{
-			V1: corev1alpha1.AgentExecutionBackendStatus{EffectiveMode: corev1alpha1.AgentExecutionEffectiveModeDisabled, ModeRevision: 1},
-			V2: corev1alpha1.AgentExecutionBackendStatus{EffectiveMode: corev1alpha1.AgentExecutionEffectiveModeEnabled, ModeRevision: 7},
-		}},
-	}
+	control := bindingTestControl()
 	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), control)
 
 	candidate, err := reconciler.resolveAgentExecutionCandidate(ctx, task, agent)
@@ -311,6 +365,43 @@ func TestResolveCandidateEnforcesBackendControlModes(t *testing.T) {
 	}
 }
 
+func TestResolveCandidateFailsClosedWithoutCurrentControlOrSnapshotStore(t *testing.T) {
+	ctx := context.Background()
+	task := bindingTestTask()
+	agent := bindingTestAgent()
+
+	t.Run("snapshot store", func(t *testing.T) {
+		reconciler, _ := newBindingTestReconciler(t, task.DeepCopy(), bindingTestNamespace())
+		reconciler.AgentExecutionSnapshots = nil
+		if _, err := reconciler.resolveAgentExecutionCandidate(ctx, task, agent); err == nil ||
+			!strings.Contains(err.Error(), "snapshot store is required") {
+			t.Fatalf("expected missing snapshot store refusal, got %v", err)
+		}
+	})
+
+	t.Run("missing control", func(t *testing.T) {
+		control := bindingTestControl()
+		reconciler, _ := newBindingTestReconciler(t, task.DeepCopy(), bindingTestNamespace(), control)
+		if err := reconciler.Delete(ctx, control.DeepCopy()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reconciler.resolveAgentExecutionCandidate(ctx, task, agent); err == nil ||
+			!strings.Contains(err.Error(), "is missing") {
+			t.Fatalf("expected missing control refusal, got %v", err)
+		}
+	})
+
+	t.Run("stale observed generation", func(t *testing.T) {
+		control := bindingTestControl()
+		control.Status.ObservedGeneration = 0
+		reconciler, _ := newBindingTestReconciler(t, task.DeepCopy(), bindingTestNamespace(), control)
+		if _, err := reconciler.resolveAgentExecutionCandidate(ctx, task, agent); err == nil ||
+			!strings.Contains(err.Error(), "not exactly observed") {
+			t.Fatalf("expected stale control refusal, got %v", err)
+		}
+	})
+}
+
 func TestVerifyBoundExecutionDetectsDriftAndDeletion(t *testing.T) {
 	ctx := context.Background()
 	task := bindingTestTask()
@@ -325,6 +416,18 @@ func TestVerifyBoundExecutionDetectsDriftAndDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := reconciler.persistAgentExecutionSnapshot(ctx, task, candidate); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := reconciler.createAgentExecutionBindingReservation(ctx, task, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.settleAgentExecutionBindingReservation(
+		ctx, reservation, store.AgentExecutionBindingReservationBound, "",
+	); err != nil {
+		t.Fatal(err)
+	}
 	if err := reconciler.verifyBoundExecution(ctx, task, binding); err != nil {
 		t.Fatalf("verify bound execution: %v", err)
 	}
@@ -333,5 +436,186 @@ func TestVerifyBoundExecutionDetectsDriftAndDeletion(t *testing.T) {
 	drifted.BindingDigest = "sha256:" + strings.Repeat("f", 64)
 	if err := reconciler.verifyBoundExecution(ctx, task, drifted); err == nil {
 		t.Fatal("digest drift must block dispatch")
+	}
+}
+
+func TestQueueACPRuntimeTaskRequiresBindingSnapshotAndExactControlRevision(t *testing.T) {
+	ctx := context.Background()
+	task := bindingTestTask()
+	agent := bindingTestAgent()
+	reconciler, snapshots := newBindingTestReconciler(t, task, bindingTestNamespace())
+
+	if _, err := reconciler.queueACPRuntimeTask(ctx, task.DeepCopy(), agent); err == nil ||
+		!strings.Contains(err.Error(), "binding is required") {
+		t.Fatalf("expected unbound queue refusal, got %v", err)
+	}
+	var pools corev1alpha1.RuntimePoolList
+	if err := reconciler.List(ctx, &pools); err != nil {
+		t.Fatal(err)
+	}
+	if len(pools.Items) != 0 {
+		t.Fatalf("unbound queue created RuntimePools: %#v", pools.Items)
+	}
+
+	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), agent); err != nil || handled {
+		t.Fatalf("ensure binding = handled=%v err=%v", handled, err)
+	}
+	bound := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+		t.Fatal(err)
+	}
+
+	control := &corev1alpha1.AgentExecutionControl{}
+	if err := reconciler.Get(ctx, client.ObjectKey{
+		Namespace: corev1alpha1.AgentExecutionControlNamespace, Name: corev1alpha1.AgentExecutionControlName,
+	}, control); err != nil {
+		t.Fatal(err)
+	}
+	control.Status.Backends.V2.ModeRevision++
+	if err := reconciler.Status().Update(ctx, control); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.queueACPRuntimeTask(ctx, bound.DeepCopy(), agent); err == nil ||
+		!strings.Contains(err.Error(), "mode revision is stale") {
+		t.Fatalf("expected stale control revision refusal, got %v", err)
+	}
+
+	control.Status.Backends.V2.ModeRevision--
+	if err := reconciler.Status().Update(ctx, control); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshots.DeleteAgentExecutionSnapshots(ctx, string(task.UID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.queueACPRuntimeTask(ctx, bound.DeepCopy(), agent); err == nil ||
+		!strings.Contains(err.Error(), "load immutable execution snapshot") {
+		t.Fatalf("expected missing snapshot refusal, got %v", err)
+	}
+}
+
+func TestQueueACPRuntimeTaskRejectsTaskSpecGenerationRace(t *testing.T) {
+	ctx := context.Background()
+	task := bindingTestTask()
+	agent := bindingTestAgent()
+	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
+	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), agent); err != nil || handled {
+		t.Fatalf("ensure binding = handled=%v err=%v", handled, err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Generation++
+	current.Spec.Prompt = "changed after binding"
+	if err := reconciler.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.queueACPRuntimeTask(ctx, current, agent); err == nil ||
+		!strings.Contains(err.Error(), "spec generation no longer exactly matches") {
+		t.Fatalf("expected Task generation race refusal, got %v", err)
+	}
+	var pools corev1alpha1.RuntimePoolList
+	if err := reconciler.List(ctx, &pools); err != nil {
+		t.Fatal(err)
+	}
+	if len(pools.Items) != 0 {
+		t.Fatalf("Task generation race created RuntimePools: %#v", pools.Items)
+	}
+}
+
+func TestEnsureAgentExecutionBindingUsesUncachedExistingBinding(t *testing.T) {
+	ctx := context.Background()
+	task := bindingTestTask()
+	agent := bindingTestAgent()
+	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
+	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), agent); err != nil || handled {
+		t.Fatalf("ensure binding = handled=%v err=%v", handled, err)
+	}
+	mutatedAgent := agent.DeepCopy()
+	mutatedAgent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "changed after binding"}
+	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), mutatedAgent); err != nil || handled {
+		t.Fatalf("stale cache should verify uncached binding, handled=%v err=%v", handled, err)
+	}
+}
+
+func TestQueueACPRuntimeTaskUsesFrozenSnapshotAfterLiveInputsMutate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	task := bindingTestTask()
+	agent := bindingTestAgent()
+	reconciler, durableStore := newBindingTestReconciler(t, task, bindingTestNamespace())
+	reconciler.DurableControlStore = durableStore
+	epochs := NewControllerEpochManager(durableStore, "binding-queue-test")
+	reconciler.ControllerEpochManager = epochs
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	defer func() {
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Errorf("stop epoch manager: %v", err)
+		}
+	}()
+	if _, err := epochs.CurrentFence(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), agent); err != nil || handled {
+		t.Fatalf("ensure binding = handled=%v err=%v", handled, err)
+	}
+	boundTask := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), boundTask); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := reconciler.loadVerifiedBoundExecution(ctx, boundTask, boundTask.Status.AgentExecutionBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantImage := verified.plan.Image
+	wantProfileDigest := string(verified.plan.Digest)
+	wantRequestDigest, err := acpBoundTaskRequestDigest(verified, 1, fmt.Sprintf("prompt-%s-1", task.UID))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mutatedTask := boundTask.DeepCopy()
+	mutatedTask.Spec.Prompt = "mutable prompt must be ignored"
+	mutatedTask.Spec.Workspace.GitRepo = "https://example.invalid/mutated.git"
+	mutatedAgent := agent.DeepCopy()
+	mutatedAgent.Spec.Model.Name = "mutated/model"
+	mutatedAgent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "mutable system prompt must be ignored"}
+	reconciler.ACPRuntimeImages.Codex = "docker.io/example/mutated@sha256:" + strings.Repeat("b", 64)
+
+	if _, err := reconciler.queueACPRuntimeTask(ctx, mutatedTask, mutatedAgent); err != nil {
+		t.Fatal(err)
+	}
+	var pools corev1alpha1.RuntimePoolList
+	if err := reconciler.List(ctx, &pools); err != nil {
+		t.Fatal(err)
+	}
+	if len(pools.Items) != 1 || pools.Items[0].Spec.Runtime.Image != wantImage ||
+		pools.Items[0].Spec.Runtime.Profile.Digest != wantProfileDigest {
+		t.Fatalf("RuntimePool did not use frozen plan: %#v", pools.Items)
+	}
+	queued := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), queued); err != nil {
+		t.Fatal(err)
+	}
+	attemptID, err := promptAttemptIDFromTask(queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := durableStore.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.RequestDigest != wantRequestDigest ||
+		attempt.BindingDigest != verified.binding.BindingDigest || attempt.SnapshotDigest != verified.snapshot.Digest {
+		t.Fatalf("PromptAttempt immutable digests = request:%s binding:%s snapshot:%s, want %s/%s/%s",
+			attempt.RequestDigest, attempt.BindingDigest, attempt.SnapshotDigest,
+			wantRequestDigest, verified.binding.BindingDigest, verified.snapshot.Digest)
 	}
 }

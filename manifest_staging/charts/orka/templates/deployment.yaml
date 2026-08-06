@@ -1,4 +1,7 @@
 {{- include "orka.validateProviderProxyConfig" . }}
+{{- include "orka.validateSQLiteController" . }}
+{{- include "orka.validateAgentExecutionSnapshot" . }}
+{{- include "orka.validateAgentExecutionControl" . }}
 {{- if .Values.controller.acpRuntime.enabled }}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) }}
 {{- fail "controller.image.digest must be a sha256 digest when controller.acpRuntime.enabled=true" }}
@@ -42,10 +45,8 @@ metadata:
     app.kubernetes.io/component: controller
 spec:
   replicas: {{ .Values.controller.replicas }}
-  {{- if .Values.store.persistence.enabled }}
   strategy:
     type: Recreate
-  {{- end }}
   selector:
     matchLabels:
       {{- include "orka.selectorLabels" . | nindent 6 }}
@@ -89,6 +90,21 @@ spec:
             {{- end }}
             - --leader-elect={{ .Values.controller.leaderElect }}
             - --acp-runtime-enabled={{ .Values.controller.acpRuntime.enabled }}
+            - --harness-v1-enabled={{ .Values.harnessV1.enabled }}
+            {{- if .Values.harnessV1.enabled }}
+            - --harness-v1-endpoint=http://{{ include "orka.harnessV1Name" . }}.{{ .Release.Namespace }}.svc:8080
+            - --harness-v1-auth-secret-namespace={{ .Release.Namespace }}
+            - --harness-v1-auth-secret-name={{ .Values.harnessV1.auth.existingSecret | default (include "orka.harnessV1AuthSecretName" .) }}
+            - --harness-v1-auth-secret-key={{ .Values.harnessV1.auth.tokenKey }}
+            - --harness-v1-policy-name={{ .Values.harnessV1.policy.name }}
+            - --harness-v1-dispatch-interval={{ .Values.harnessV1.dispatch.interval }}
+            - --harness-v1-dispatch-workers={{ .Values.harnessV1.dispatch.workers }}
+            {{- end }}
+            {{- if or .Values.controller.acpRuntime.enabled .Values.harnessV1.enabled }}
+            - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
+            - --agent-execution-snapshot-retention={{ .Values.controller.agentExecutionSnapshot.retention }}
+            - --agent-execution-snapshot-retention-interval={{ .Values.controller.agentExecutionSnapshot.retentionInterval }}
+            {{- end }}
             - --acp-runtime-namespace={{ .Values.controller.acpRuntime.namespace }}
             {{- if and .Values.controller.acpRuntime.enabled .Values.controller.acpRuntime.upgradeDrain.enabled }}
             - --acp-upgrade-drain-bind-address=127.0.0.1:{{ .Values.controller.acpRuntime.upgradeDrain.port }}
@@ -445,6 +461,11 @@ spec:
               mountPath: /var/run/orka/provider-auth
               readOnly: true
             {{- end }}
+            {{- if or .Values.controller.acpRuntime.enabled .Values.harnessV1.enabled }}
+            - name: agent-execution-snapshot-key
+              mountPath: /var/run/orka/agent-execution-snapshot
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -481,6 +502,15 @@ spec:
             items:
               - key: {{ .Values.providerProxy.auth.tokenKey | default "token" }}
                 path: token
+        {{- end }}
+        {{- if or .Values.controller.acpRuntime.enabled .Values.harnessV1.enabled }}
+        - name: agent-execution-snapshot-key
+          secret:
+            secretName: {{ .Values.controller.agentExecutionSnapshot.existingSecret | quote }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.controller.agentExecutionSnapshot.key | quote }}
+                path: key
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

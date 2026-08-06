@@ -502,9 +502,9 @@ func createTerminalBranchClaimReclamationAttempt(
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err := controlStore.CreatePromptAttempt(context.Background(), &store.PromptAttempt{
+	attempt, err := controlStore.CreatePromptAttempt(context.Background(), boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
-	}, fence)
+	}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}

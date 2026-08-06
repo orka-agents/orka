@@ -51,6 +51,43 @@ func TestControllerEpochManagerCreatesAndAdvances(t *testing.T) {
 	}
 }
 
+func TestControllerEpochManagerMirrorsAuthoritativeFenceBeforeReadiness(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	mirrorDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "mirror.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mirrorDB.Close() })
+	authority := sqlite.NewStore(authorityDB, "authority")
+	mirror := sqlite.NewStore(mirrorDB, "mirror")
+	manager := NewControllerEpochManager(authority, "controller-a").WithMirror(mirror)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Start(ctx) }()
+	fence, err := fenceWithTimeout(manager)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	mirrored, err := mirror.GetControllerEpoch(context.Background(), fence.Name)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	if mirrored.Epoch != fence.Epoch || mirrored.HolderID != fence.HolderID {
+		cancel()
+		t.Fatalf("mirrored epoch = %#v, want fence %#v", mirrored, fence)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestControllerEpochManagerRequiresHolderAndStore(t *testing.T) {
 	manager := NewControllerEpochManager(nil, "holder")
 	if err := manager.Start(context.Background()); err == nil {

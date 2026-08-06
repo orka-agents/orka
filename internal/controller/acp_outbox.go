@@ -204,14 +204,16 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 }
 
 type taskTerminalProjection struct {
-	Namespace string                           `json:"namespace"`
-	Task      string                           `json:"task"`
-	TaskUID   string                           `json:"taskUID"`
-	Attempt   int32                            `json:"attempt"`
-	Phase     corev1alpha1.TaskPhase           `json:"phase"`
-	Message   string                           `json:"message,omitempty"`
-	Execution corev1alpha1.TaskExecutionStatus `json:"execution"`
-	Delivery  *corev1alpha1.TaskDeliveryStatus `json:"delivery,omitempty"`
+	Namespace      string                             `json:"namespace"`
+	Task           string                             `json:"task"`
+	TaskUID        string                             `json:"taskUID"`
+	Attempt        int32                              `json:"attempt"`
+	Phase          corev1alpha1.TaskPhase             `json:"phase"`
+	Message        string                             `json:"message,omitempty"`
+	BindingDigest  string                             `json:"bindingDigest,omitempty"`
+	HarnessRuntime *corev1alpha1.HarnessRuntimeStatus `json:"harnessRuntime,omitempty"`
+	Execution      corev1alpha1.TaskExecutionStatus   `json:"execution"`
+	Delivery       *corev1alpha1.TaskDeliveryStatus   `json:"delivery,omitempty"`
 }
 
 func mergeTerminalExecutionStatus(existing *corev1alpha1.TaskExecutionStatus, projected corev1alpha1.TaskExecutionStatus) corev1alpha1.TaskExecutionStatus {
@@ -260,6 +262,36 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 		}
 		if string(task.UID) != payload.TaskUID {
 			return fmt.Errorf("task UID does not match outbox projection")
+		}
+		if payload.HarnessRuntime != nil {
+			binding := task.Status.AgentExecutionBinding
+			if binding == nil || binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 ||
+				payload.BindingDigest == "" || binding.BindingDigest != payload.BindingDigest {
+				return fmt.Errorf("harness v1 task binding does not match outbox projection")
+			}
+			if task.Status.HarnessRuntime != nil && task.Status.HarnessRuntime.Attempt > payload.Attempt {
+				deliveredResourceVersion = task.ResourceVersion
+				return nil
+			}
+			base := task.DeepCopy()
+			now := metav1.Now()
+			task.Status.Phase = payload.Phase
+			task.Status.Message = payload.Message
+			task.Status.Attempts = payload.Attempt
+			harnessRuntime := payload.HarnessRuntime.DeepCopy()
+			harnessRuntime.LastTransitionTime = &now
+			task.Status.HarnessRuntime = harnessRuntime
+			switch payload.Phase {
+			case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+				task.Status.CompletionTime = &now
+			default:
+				task.Status.CompletionTime = nil
+			}
+			if err := p.Client.Status().Patch(ctx, task, client.MergeFrom(base)); err != nil {
+				return err
+			}
+			deliveredResourceVersion = task.ResourceVersion
+			return nil
 		}
 		if task.Status.Execution != nil && task.Status.Execution.Attempt > payload.Attempt {
 			return fmt.Errorf("task has advanced beyond projected attempt")

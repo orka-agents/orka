@@ -41,7 +41,19 @@ const (
 )
 
 //nolint:gocyclo // ACP queueing keeps durable planning, recovery, and binding gates auditable together.
-func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (ctrl.Result, error) {
+func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1alpha1.Task, _ *corev1alpha1.Agent) (ctrl.Result, error) {
+	if err := r.checkAgentExecutionClassification(ctx); err != nil {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if task == nil || task.Status.AgentExecutionBinding == nil {
+		return ctrl.Result{}, errors.New("immutable v2 execution binding is required before ACP queueing")
+	}
+	bound, err := r.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("verify immutable v2 execution before ACP queueing: %w", err)
+	}
+	frozenTask := bound.frozenTask
+	plan := bound.plan
 	if err := r.ACPAdmissionGate.Check(); err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
@@ -51,23 +63,12 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if handled, result, err := r.reconcileDurableACPPlanningFailure(ctx, task); handled || err != nil {
 		return result, err
 	}
-	if err := validateACPWorkspacePreflight(task); err != nil {
+	if err := validateACPWorkspacePreflight(frozenTask); err != nil {
 		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
 	}
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
-	}
-	agentConfiguration, err := resolveACPAgentSessionConfiguration(ctx, reader, task, agent)
-	if err != nil {
-		if !isPermanentACPAgentConfigurationError(err) {
-			return ctrl.Result{}, err
-		}
-		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error())
-	}
-	plan, err := PlanACPRuntimeWithConfiguration(task, agent, r.ACPRuntimeImages, agentConfiguration)
-	if err != nil {
-		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error())
 	}
 	pool, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan)
 	if err != nil {
@@ -76,7 +77,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if task.Status.Execution != nil && !taskExecutionStateTerminal(task.Status.Execution.State) {
 		if task.Status.Execution.State == corev1alpha1.TaskExecutionStateQueued ||
 			task.Status.Execution.State == corev1alpha1.TaskExecutionStateReserved {
-			rebound, rebindErr := r.rebindQueuedACPRuntimeTask(ctx, task, agent, plan, pool)
+			rebound, rebindErr := r.rebindQueuedACPRuntimeTask(ctx, task, bound, pool)
 			if rebindErr != nil {
 				return ctrl.Result{}, rebindErr
 			}
@@ -96,7 +97,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	attemptNumber := task.Status.Attempts + 1
 	queuedAt := time.Now().UTC()
 	promptID := fmt.Sprintf("prompt-%s-%d", task.UID, attemptNumber)
-	requestDigest, err := acpTaskRequestDigest(task, agent, plan, attemptNumber, promptID)
+	requestDigest, err := acpBoundTaskRequestDigest(bound, attemptNumber, promptID)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -105,7 +106,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	credentialBindings, credentialVersions, err := resolvePromptCredentialBindings(ctx, reader, task)
+	credentialBindings, credentialVersions, err := resolvePromptCredentialBindings(ctx, reader, frozenTask)
 	if err != nil {
 		credentialErr := fmt.Errorf("freeze ACP credential bindings: %w", err)
 		if !apierrors.IsNotFound(err) {
@@ -114,8 +115,10 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), credentialErr.Error())
 	}
 	attempt, err := r.DurableControlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
-		ID: attemptID, Key: key, RequestDigest: requestDigest, CredentialBindings: credentialBindings,
-		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested, CreatedAt: queuedAt,
+		ID: attemptID, Key: key, RequestDigest: requestDigest,
+		BindingDigest: bound.binding.BindingDigest, SnapshotDigest: bound.snapshot.Digest,
+		CredentialBindings: credentialBindings,
+		ExecutionState:     store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested, CreatedAt: queuedAt,
 	}, fence)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("persist ACP prompt attempt: %w", err)
@@ -162,8 +165,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 func (r *TaskReconciler) rebindQueuedACPRuntimeTask(
 	ctx context.Context,
 	task *corev1alpha1.Task,
-	agent *corev1alpha1.Agent,
-	plan ACPRuntimePlan,
+	bound *verifiedAgentExecution,
 	pool *corev1alpha1.RuntimePool,
 ) (bool, error) {
 	if task == nil || task.Status.Execution == nil ||
@@ -175,7 +177,7 @@ func (r *TaskReconciler) rebindQueuedACPRuntimeTask(
 	if acpRuntimePoolBindingMatches(task.Status.Execution, pool) {
 		return r.patchACPRuntimePoolTaskLabel(ctx, task, pool)
 	}
-	requestMatches, err := acpQueuedTaskRequestMatchesPlan(task, agent, plan, task.Status.Execution)
+	requestMatches, err := acpQueuedTaskRequestMatchesBinding(bound, task.Status.Execution)
 	if err != nil {
 		return false, err
 	}
@@ -1102,13 +1104,30 @@ func (r *TaskReconciler) ensureACPRuntimePool(ctx context.Context, namespace str
 	return pool, nil
 }
 
-func acpTaskRequestDigest(task *corev1alpha1.Task, agent *corev1alpha1.Agent, plan ACPRuntimePlan, attempt int32, promptID string) (string, error) {
-	workspace := task.Spec.Workspace
+func acpBoundTaskRequestDigest(bound *verifiedAgentExecution, attempt int32, promptID string) (string, error) {
+	if bound == nil || bound.binding == nil || bound.snapshot == nil {
+		return "", errors.New("verified binding and execution snapshot are required for ACP request identity")
+	}
 	return acpDomainDigest("task-request", map[string]any{
-		"taskUID": string(task.UID), "taskGeneration": task.Generation, "attempt": attempt, "promptID": promptID,
-		"prompt": task.Spec.Prompt, "agentUID": string(agent.UID), "agentGeneration": agent.Generation,
-		"runtimeProfileDigest": string(plan.Digest), "workspace": workspace,
+		"taskUID": bound.binding.Task.UID, "taskGeneration": bound.binding.Task.BoundSpecGeneration,
+		"attempt": attempt, "promptID": promptID, "prompt": bound.body.Prompt,
+		"agentUID": bound.body.Agent.UID, "agentGeneration": bound.body.Agent.Generation,
+		"agentConfiguration":   bound.configuration,
+		"runtimeProfileDigest": bound.body.ProfileDigest, "workspace": bound.body.Workspace,
+		"bindingDigest": bound.binding.BindingDigest, "snapshotDigest": bound.snapshot.Digest,
 	})
+}
+
+func acpQueuedTaskRequestMatchesBinding(bound *verifiedAgentExecution, status *corev1alpha1.TaskExecutionStatus) (bool, error) {
+	if bound == nil || status == nil || status.Attempt < 1 || strings.TrimSpace(status.PromptID) == "" ||
+		strings.TrimSpace(status.RequestDigest) == "" {
+		return false, nil
+	}
+	digest, err := acpBoundTaskRequestDigest(bound, status.Attempt, status.PromptID)
+	if err != nil {
+		return false, err
+	}
+	return digest == status.RequestDigest, nil
 }
 
 func taskExecutionStateTerminal(state corev1alpha1.TaskExecutionState) bool {

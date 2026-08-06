@@ -13,13 +13,19 @@ import (
 
 // AgentExecutionAdjudicationAction is a one-way operator resolution. Actions
 // never authorize prompt replay, publication replay, or protocol mutation.
-// +kubebuilder:validation:Enum=ConfirmV1Outcome;ConfirmV2Outcome;CleanupV1;CleanupV2;CleanupBoth;MarkNoExecution;AbandonOutcomeUnknown;BootstrapNewLineage
+// The coexistence API currently admits only cleanup actions whose exact
+// Applied resolution can be consumed by route-aware finalization. The other
+// constants below are reserved until their required receipt, break-glass, or
+// destination-lineage evidence is represented by the API.
+// +kubebuilder:validation:Enum=CleanupV1;CleanupV2;CleanupBoth
 type AgentExecutionAdjudicationAction string
 
 const (
-	// AgentExecutionAdjudicationConfirmV1Outcome confirms a proven terminal v1 outcome.
+	// AgentExecutionAdjudicationConfirmV1Outcome is reserved for a future API
+	// carrying an exact terminal v1 receipt and outcome.
 	AgentExecutionAdjudicationConfirmV1Outcome AgentExecutionAdjudicationAction = "ConfirmV1Outcome"
-	// AgentExecutionAdjudicationConfirmV2Outcome confirms a proven terminal v2 outcome.
+	// AgentExecutionAdjudicationConfirmV2Outcome is reserved for a future API
+	// carrying an exact terminal v2 receipt and outcome.
 	AgentExecutionAdjudicationConfirmV2Outcome AgentExecutionAdjudicationAction = "ConfirmV2Outcome"
 	// AgentExecutionAdjudicationCleanupV1 authorizes cleanup of the discovered v1 lineage.
 	AgentExecutionAdjudicationCleanupV1 AgentExecutionAdjudicationAction = "CleanupV1"
@@ -27,14 +33,14 @@ const (
 	AgentExecutionAdjudicationCleanupV2 AgentExecutionAdjudicationAction = "CleanupV2"
 	// AgentExecutionAdjudicationCleanupBoth authorizes cleanup of both discovered lineages.
 	AgentExecutionAdjudicationCleanupBoth AgentExecutionAdjudicationAction = "CleanupBoth"
-	// AgentExecutionAdjudicationMarkNoExecution confirms UnboundNoExecution from
-	// independently verified evidence.
+	// AgentExecutionAdjudicationMarkNoExecution is reserved until sealed
+	// inventory proof can be fenced without replacing quarantine evidence.
 	AgentExecutionAdjudicationMarkNoExecution AgentExecutionAdjudicationAction = "MarkNoExecution"
-	// AgentExecutionAdjudicationAbandonOutcomeUnknown permanently abandons an
-	// unprovable effect as OutcomeUnknown.
+	// AgentExecutionAdjudicationAbandonOutcomeUnknown is reserved until exact
+	// effect identity and break-glass authorization are represented.
 	AgentExecutionAdjudicationAbandonOutcomeUnknown AgentExecutionAdjudicationAction = "AbandonOutcomeUnknown"
-	// AgentExecutionAdjudicationBootstrapNewLineage bootstraps a new Session
-	// lineage from a reconciled canonical transcript.
+	// AgentExecutionAdjudicationBootstrapNewLineage is reserved until the
+	// destination Session identity and canonical transcript digest are represented.
 	AgentExecutionAdjudicationBootstrapNewLineage AgentExecutionAdjudicationAction = "BootstrapNewLineage"
 )
 

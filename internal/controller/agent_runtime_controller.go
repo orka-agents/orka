@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,6 +28,8 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/harness"
+	v1conformance "github.com/orka-agents/orka/internal/harness/conformance"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 )
@@ -45,10 +48,12 @@ const (
 	agentRuntimeAuthEndpointAnnotation = "orka.ai/agent-runtime-endpoint"
 )
 
-// AgentRuntimeReconciler reconciles external orka.harness.v2 registry entries.
+// AgentRuntimeReconciler reconciles external harness v1 and v2 registry entries.
 type AgentRuntimeReconciler struct {
 	client.Client
-	Scheme *k8sruntime.Scheme
+	APIReader                        client.Reader
+	Scheme                           *k8sruntime.Scheme
+	AgentExecutionClassificationGate *AgentExecutionClassificationGate
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch;create;update;patch;delete
@@ -57,9 +62,14 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 
-// Reconcile validates one exact external v2 runtime and publishes condition-ready status.
+// Reconcile validates one exact external runtime and publishes condition-ready status.
 func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	if r.AgentExecutionClassificationGate != nil {
+		if err := r.AgentExecutionClassificationGate.Check(ctx); err != nil {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+	}
 	runtime := &corev1alpha1.AgentRuntime{}
 	if err := r.Get(ctx, req.NamespacedName, runtime); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -82,6 +92,9 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	}
 	if err := r.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
 		return nil, false, "", "", err.Error()
+	}
+	if runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV1 {
+		return r.probeHarnessV1AgentRuntime(ctx, runtime)
 	}
 	auth, err := r.agentRuntimeAuthMaterial(ctx, runtime)
 	if err != nil {
@@ -148,6 +161,234 @@ func agentRuntimeAuthenticatedIdentityChanged(
 		previous.ProfileDigestSchemaVersion != int32(fence.ProfileDigestSchemaVersion)
 }
 
+func (r *AgentRuntimeReconciler) probeHarnessV1AgentRuntime(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (*corev1alpha1.AgentRuntimeObservedCapabilities, bool, string, string, string) {
+	auth, err := r.agentRuntimeV1BearerAuthMaterial(ctx, runtime)
+	if err != nil {
+		return nil, false, "", "", err.Error()
+	}
+	deepProbe := runtime.Status.ObservedGeneration != runtime.Generation || !runtime.Status.Ready ||
+		runtime.Status.ObservedAuthRefResourceVersion != auth.secretResourceVersion
+	probeCtx, cancel := context.WithTimeout(ctx, agentRuntimeProbeTimeout)
+	defer cancel()
+	target := v1conformance.Target{
+		BaseURL:        runtime.Spec.Deployment.Endpoint,
+		BearerToken:    auth.bearerToken,
+		ControlTimeout: agentRuntimeProbeTimeout,
+		RequireAuth:    true,
+	}
+	var probe v1conformance.Result
+	if deepProbe {
+		probe = v1conformance.CheckReadiness(probeCtx, target)
+	} else {
+		probe = v1conformance.Check(probeCtx, target)
+	}
+	observed := observedHarnessV1CapabilitiesFromConformance(probe.ObservedCapabilities)
+	if !probe.Passed {
+		return observed, false, auth.secretResourceVersion, "", sanitizeAgentRuntimeStatusMessage(probe.Message)
+	}
+	if err := validateHarnessV1AgentRuntimeRequiredCapabilities(runtime, probe.ObservedCapabilities); err != nil {
+		return observed, false, auth.secretResourceVersion, "", err.Error()
+	}
+	if err := validateHarnessV1AgentRuntimeExecutableCapabilities(probe.ObservedCapabilities); err != nil {
+		return observed, false, auth.secretResourceVersion, "", err.Error()
+	}
+	if err := r.requireCurrentAgentRuntimeV1BearerAuthMaterial(ctx, runtime, auth); err != nil {
+		return observed, false, auth.secretResourceVersion, "", err.Error()
+	}
+	return observed, true, auth.secretResourceVersion, "", "authenticated orka.harness.v1 conformance passed"
+}
+
+func validateHarnessV1AgentRuntimeRequiredCapabilities(
+	runtime *corev1alpha1.AgentRuntime,
+	capabilities *harness.CapabilitiesResponse,
+) error {
+	if runtime == nil {
+		return fmt.Errorf("AgentRuntime is required")
+	}
+	if capabilities == nil {
+		return fmt.Errorf("observed harness v1 capabilities are missing")
+	}
+	required := runtime.Spec.Capabilities
+	if required == nil {
+		return nil
+	}
+	if required.SupportsCancel != nil && *required.SupportsCancel && !capabilities.SupportsCancel {
+		return fmt.Errorf("runtime does not advertise required supportsCancel capability")
+	}
+	if required.SupportsRuntimeSessions != nil && *required.SupportsRuntimeSessions && !capabilities.SupportsRuntimeSessions {
+		return fmt.Errorf("runtime does not advertise required supportsRuntimeSessions capability")
+	}
+	if required.SupportsContinuation != nil && *required.SupportsContinuation && !capabilities.SupportsContinuation {
+		return fmt.Errorf("runtime does not advertise required supportsContinuation capability")
+	}
+	if required.SupportsArtifacts != nil && *required.SupportsArtifacts && !capabilities.SupportsArtifacts {
+		return fmt.Errorf("runtime does not advertise required supportsArtifacts capability")
+	}
+	for _, requiredMode := range required.ToolExecutionModes {
+		if !slices.ContainsFunc(capabilities.ToolExecutionModes, func(observed harness.ToolExecutionMode) bool {
+			return string(observed) == string(requiredMode)
+		}) {
+			return fmt.Errorf("runtime does not advertise required toolExecutionMode %q", requiredMode)
+		}
+	}
+	for _, requiredClass := range required.BrokeredToolClasses {
+		if !slices.ContainsFunc(capabilities.BrokeredToolClasses, func(observed harness.BrokeredToolClass) bool {
+			return string(observed) == string(requiredClass)
+		}) {
+			return fmt.Errorf("runtime does not advertise required brokeredToolClass %q", requiredClass)
+		}
+	}
+	return nil
+}
+
+func validateHarnessV1AgentRuntimeExecutableCapabilities(capabilities *harness.CapabilitiesResponse) error {
+	if capabilities == nil {
+		return fmt.Errorf("observed harness v1 capabilities are missing")
+	}
+	if capabilities.RuntimeName != sanitizeAgentRuntimeCapabilityValue(capabilities.RuntimeName) {
+		return fmt.Errorf("runtimeName contains unsafe text or exceeds status length limits")
+	}
+	for _, mode := range capabilities.ToolExecutionModes {
+		if !harness.IsKnownToolExecutionMode(mode) {
+			return fmt.Errorf("unsupported toolExecutionMode %q", mode)
+		}
+	}
+	for _, class := range capabilities.BrokeredToolClasses {
+		if !harness.IsKnownBrokeredToolClass(class) {
+			return fmt.Errorf("unsupported brokeredToolClass %q", class)
+		}
+	}
+	if !capabilities.SupportsRuntimeSessions {
+		return fmt.Errorf("runtime does not advertise required supportsRuntimeSessions capability")
+	}
+	observed := slices.Contains(capabilities.ToolExecutionModes, harness.ToolExecutionModeObserved)
+	brokered := slices.Contains(capabilities.ToolExecutionModes, harness.ToolExecutionModeBrokered)
+	if !observed && !brokered {
+		return fmt.Errorf("runtime must advertise toolExecutionMode %q or %q",
+			corev1alpha1.AgentRuntimeToolExecutionModeObserved, corev1alpha1.AgentRuntimeToolExecutionModeBrokered)
+	}
+	if observed && !capabilities.SupportsCancel {
+		return fmt.Errorf("runtime advertises observed mode but not supportsCancel")
+	}
+	if brokered && !capabilities.SupportsContinuation {
+		return fmt.Errorf("runtime advertises brokered mode but not supportsContinuation")
+	}
+	if brokered && len(capabilities.BrokeredToolClasses) == 0 {
+		return fmt.Errorf("runtime advertises brokered mode but no brokeredToolClasses")
+	}
+	return nil
+}
+
+func observedHarnessV1CapabilitiesFromConformance(
+	capabilities *harness.CapabilitiesResponse,
+) *corev1alpha1.AgentRuntimeObservedCapabilities {
+	if capabilities == nil {
+		return nil
+	}
+	modes := make([]corev1alpha1.AgentRuntimeToolExecutionMode, 0, len(capabilities.ToolExecutionModes))
+	seenModes := make(map[corev1alpha1.AgentRuntimeToolExecutionMode]struct{}, len(capabilities.ToolExecutionModes))
+	for _, mode := range capabilities.ToolExecutionModes {
+		converted := corev1alpha1.AgentRuntimeToolExecutionMode(mode)
+		if _, duplicate := seenModes[converted]; duplicate || !harness.IsKnownToolExecutionMode(mode) {
+			continue
+		}
+		seenModes[converted] = struct{}{}
+		modes = append(modes, converted)
+	}
+	classes := make([]corev1alpha1.AgentRuntimeBrokeredToolClass, 0, len(capabilities.BrokeredToolClasses))
+	seenClasses := make(map[corev1alpha1.AgentRuntimeBrokeredToolClass]struct{}, len(capabilities.BrokeredToolClasses))
+	for _, class := range capabilities.BrokeredToolClasses {
+		converted := corev1alpha1.AgentRuntimeBrokeredToolClass(class)
+		if _, duplicate := seenClasses[converted]; duplicate || !harness.IsKnownBrokeredToolClass(class) {
+			continue
+		}
+		seenClasses[converted] = struct{}{}
+		classes = append(classes, converted)
+	}
+	return &corev1alpha1.AgentRuntimeObservedCapabilities{
+		ProtocolVersion:           sanitizeAgentRuntimeCapabilityValue(capabilities.ProtocolVersion),
+		Transport:                 sanitizeAgentRuntimeCapabilityValue(capabilities.Transport),
+		RuntimeName:               sanitizeAgentRuntimeCapabilityValue(capabilities.RuntimeName),
+		RuntimeVersion:            sanitizeAgentRuntimeCapabilityValue(capabilities.RuntimeVersion),
+		ProviderKind:              sanitizeAgentRuntimeCapabilityValue(string(capabilities.ProviderKind)),
+		ToolExecutionModes:        modes,
+		BrokeredToolClasses:       classes,
+		SupportsCancel:            capabilities.SupportsCancel,
+		SupportsRuntimeSessions:   capabilities.SupportsRuntimeSessions,
+		SupportsContinuation:      capabilities.SupportsContinuation,
+		SupportsArtifacts:         capabilities.SupportsArtifacts,
+		SupportsSuspend:           capabilities.SupportsSuspend,
+		SupportsWorkspaceSnapshot: capabilities.SupportsWorkspaceSnapshot,
+		MaxConcurrentTurns:        capabilities.MaxConcurrentTurns,
+		MaxTurnSeconds:            capabilities.MaxTurnSeconds,
+		MaxOutputBytes:            capabilities.MaxOutputBytes,
+	}
+}
+
+type agentRuntimeV1AuthMaterial struct {
+	bearerToken           string
+	secretUID             types.UID
+	secretResourceVersion string
+}
+
+func (r *AgentRuntimeReconciler) agentRuntimeV1BearerAuthMaterial(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (agentRuntimeV1AuthMaterial, error) {
+	if runtime == nil || runtime.Spec.ClientAuth.BearerAuthRef == nil {
+		return agentRuntimeV1AuthMaterial{}, fmt.Errorf("AgentRuntime v1 bearerTokenSecretRef is required")
+	}
+	if r.APIReader == nil {
+		return agentRuntimeV1AuthMaterial{}, fmt.Errorf("uncached APIReader is required for exact AgentRuntime v1 bearer Secret validation")
+	}
+	ref := *runtime.Spec.ClientAuth.BearerAuthRef
+	var secret corev1.Secret
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: runtime.Namespace, Name: ref.Name}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return agentRuntimeV1AuthMaterial{}, fmt.Errorf("AgentRuntime bearer token Secret %s/%s not found", runtime.Namespace, ref.Name)
+		}
+		return agentRuntimeV1AuthMaterial{}, fmt.Errorf("get AgentRuntime bearer token Secret %s/%s: %w", runtime.Namespace, ref.Name, err)
+	}
+	if err := validateAgentRuntimeAuthSecretUse(runtime.Name, runtime.Spec.Deployment.Endpoint, &secret); err != nil {
+		return agentRuntimeV1AuthMaterial{}, err
+	}
+	if secret.UID == "" {
+		return agentRuntimeV1AuthMaterial{}, fmt.Errorf("AgentRuntime bearer token Secret %s/%s UID is required", secret.Namespace, secret.Name)
+	}
+	resourceVersion := strings.TrimSpace(secret.ResourceVersion)
+	if resourceVersion == "" {
+		return agentRuntimeV1AuthMaterial{}, fmt.Errorf("AgentRuntime bearer token Secret %s/%s resourceVersion is required", secret.Namespace, secret.Name)
+	}
+	token := strings.TrimSpace(string(secret.Data[ref.Key]))
+	if token == "" {
+		return agentRuntimeV1AuthMaterial{}, fmt.Errorf("AgentRuntime bearer token Secret %s/%s key %q is empty or missing", secret.Namespace, secret.Name, ref.Key)
+	}
+	return agentRuntimeV1AuthMaterial{
+		bearerToken: token, secretUID: secret.UID, secretResourceVersion: resourceVersion,
+	}, nil
+}
+
+func (r *AgentRuntimeReconciler) requireCurrentAgentRuntimeV1BearerAuthMaterial(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+	expected agentRuntimeV1AuthMaterial,
+) error {
+	current, err := r.agentRuntimeV1BearerAuthMaterial(ctx, runtime)
+	if err != nil {
+		return fmt.Errorf("revalidate AgentRuntime v1 bearer auth after conformance: %w", err)
+	}
+	if current.secretUID != expected.secretUID {
+		return fmt.Errorf("AgentRuntime v1 bearer token Secret was replaced during conformance; readiness fails closed")
+	}
+	if current.secretResourceVersion != expected.secretResourceVersion {
+		return fmt.Errorf("AgentRuntime v1 bearer token Secret changed during conformance; readiness fails closed")
+	}
+	return nil
+}
+
 type agentRuntimeAuthMaterial struct {
 	controllerBearerToken     string
 	operationCapabilitySecret []byte
@@ -159,10 +400,9 @@ func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 	if runtime == nil {
 		return fmt.Errorf("AgentRuntime is required")
 	}
-	switch runtime.RegisteredContractVersion() {
-	case corev1alpha1.AgentRuntimeContractHarnessV2:
-	case corev1alpha1.AgentRuntimeContractHarnessV1:
-		return fmt.Errorf("orka.harness.v1 AgentRuntime registration is preserved but not probeable until the coexistence v1 dispatcher is enabled")
+	contract := runtime.RegisteredContractVersion()
+	switch contract {
+	case corev1alpha1.AgentRuntimeContractHarnessV1, corev1alpha1.AgentRuntimeContractHarnessV2:
 	default:
 		return fmt.Errorf("AgentRuntime contractVersion is unclassified; explicit %q or %q classification is required and omission is never protocol evidence",
 			corev1alpha1.AgentRuntimeContractHarnessV1, corev1alpha1.AgentRuntimeContractHarnessV2)
@@ -170,13 +410,32 @@ func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 	if runtime.Spec.Deployment.Mode != corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint {
 		return fmt.Errorf("unsupported AgentRuntime deployment mode %q", runtime.Spec.Deployment.Mode)
 	}
-	if err := validateAgentRuntimeEndpointSpec(runtime.Spec.Deployment.Endpoint); err != nil {
-		return err
+	switch contract {
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		if err := validateHarnessV1AgentRuntimeEndpointSpec(runtime.Spec.Deployment.Endpoint); err != nil {
+			return err
+		}
+		if err := validateHarnessV1AgentRuntimeClientAuthSpec(runtime.Spec.ClientAuth); err != nil {
+			return err
+		}
+		return validateHarnessV1AgentRuntimeCapabilitiesSpec(runtime.Spec.Capabilities)
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		if err := validateAgentRuntimeEndpointSpec(runtime.Spec.Deployment.Endpoint); err != nil {
+			return err
+		}
+		if err := validateAgentRuntimeClientAuthSpec(runtime.Spec.ClientAuth); err != nil {
+			return err
+		}
+		return validateAgentRuntimeCapabilitiesSpec(runtime.Spec.Capabilities)
 	}
-	if err := validateAgentRuntimeClientAuthSpec(runtime.Spec.ClientAuth); err != nil {
-		return err
+	return nil
+}
+
+func validateHarnessV1AgentRuntimeEndpointSpec(endpoint string) error {
+	if _, err := harness.NewClient(endpoint); err != nil {
+		return fmt.Errorf("AgentRuntime endpoint is invalid: %w", err)
 	}
-	return validateAgentRuntimeCapabilitiesSpec(runtime.Spec.Capabilities)
+	return nil
 }
 
 func validateAgentRuntimeEndpointSpec(endpoint string) error {
@@ -198,6 +457,54 @@ func validateAgentRuntimeClientAuthSpec(auth corev1alpha1.AgentRuntimeClientAuth
 	}
 	if *auth.ControllerBearerTokenSecretRef == *auth.OperationCapabilitySecretRef {
 		return fmt.Errorf("controller bearer token and operation capability must use distinct Secret keys")
+	}
+	return nil
+}
+
+func validateHarnessV1AgentRuntimeClientAuthSpec(auth corev1alpha1.AgentRuntimeClientAuth) error {
+	if auth.ControllerBearerTokenSecretRef != nil || auth.OperationCapabilitySecretRef != nil {
+		return fmt.Errorf("orka.harness.v1 AgentRuntime must not carry the v2 controller bearer or operation capability auth shape")
+	}
+	if auth.BearerAuthRef == nil || strings.TrimSpace(auth.BearerAuthRef.Name) == "" || strings.TrimSpace(auth.BearerAuthRef.Key) == "" {
+		return fmt.Errorf("AgentRuntime bearerTokenSecretRef name and key are required")
+	}
+	return nil
+}
+
+func validateHarnessV1AgentRuntimeCapabilitiesSpec(capabilities *corev1alpha1.AgentRuntimeCapabilitiesSpec) error {
+	if capabilities == nil {
+		return nil
+	}
+	if strings.TrimSpace(capabilities.RuntimeInstanceID) != "" || capabilities.Profile != nil ||
+		capabilities.Limits != nil || capabilities.WorkspaceGovernance != nil ||
+		capabilities.SupportsDrain || capabilities.SupportsPublicationFinalization {
+		return fmt.Errorf("orka.harness.v1 AgentRuntime capabilities must not carry harness v2 capability fields")
+	}
+	seenModes := make(map[corev1alpha1.AgentRuntimeToolExecutionMode]struct{}, len(capabilities.ToolExecutionModes))
+	for _, mode := range capabilities.ToolExecutionModes {
+		switch mode {
+		case corev1alpha1.AgentRuntimeToolExecutionModeObserved, corev1alpha1.AgentRuntimeToolExecutionModeBrokered:
+		default:
+			return fmt.Errorf("orka.harness.v1 AgentRuntime tool execution mode %q is unsupported", mode)
+		}
+		if _, duplicate := seenModes[mode]; duplicate {
+			return fmt.Errorf("orka.harness.v1 AgentRuntime tool execution mode %q is duplicated", mode)
+		}
+		seenModes[mode] = struct{}{}
+	}
+	seenClasses := make(map[corev1alpha1.AgentRuntimeBrokeredToolClass]struct{}, len(capabilities.BrokeredToolClasses))
+	for _, class := range capabilities.BrokeredToolClasses {
+		switch class {
+		case corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			corev1alpha1.AgentRuntimeBrokeredToolClassWrite,
+			corev1alpha1.AgentRuntimeBrokeredToolClassCoordination:
+		default:
+			return fmt.Errorf("orka.harness.v1 AgentRuntime brokered tool class %q is unsupported", class)
+		}
+		if _, duplicate := seenClasses[class]; duplicate {
+			return fmt.Errorf("orka.harness.v1 AgentRuntime brokered tool class %q is duplicated", class)
+		}
+		seenClasses[class] = struct{}{}
 	}
 	return nil
 }
@@ -518,9 +825,19 @@ func (r *AgentRuntimeReconciler) updateAgentRuntimeStatus(
 	runtime.Status.Ready = ready
 	runtime.Status.ObservedGeneration = runtime.Generation
 	runtime.Status.ObservedCapabilities = observed
-	runtime.Status.ObservedControllerAuthRefResourceVersion = controllerAuthResourceVersion
-	runtime.Status.ObservedOperationCapabilityRefResourceVersion = capabilityAuthResourceVersion
-	runtime.Status.ObservedAuthRefResourceVersion = controllerAuthResourceVersion
+	runtime.Status.ObservedControllerAuthRefResourceVersion = ""
+	runtime.Status.ObservedOperationCapabilityRefResourceVersion = ""
+	runtime.Status.ObservedAuthRefResourceVersion = ""
+	switch runtime.RegisteredContractVersion() {
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		runtime.Status.ObservedAuthRefResourceVersion = controllerAuthResourceVersion
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		runtime.Status.ObservedControllerAuthRefResourceVersion = controllerAuthResourceVersion
+		runtime.Status.ObservedOperationCapabilityRefResourceVersion = capabilityAuthResourceVersion
+		// Preserve the historical v2 status alias during coexistence. V1 never
+		// writes the two v2-specific auth version fields.
+		runtime.Status.ObservedAuthRefResourceVersion = controllerAuthResourceVersion
+	}
 	runtime.Status.LastValidated = &now
 	runtime.Status.Message = sanitizeAgentRuntimeStatusMessage(message)
 	condition := metav1.Condition{

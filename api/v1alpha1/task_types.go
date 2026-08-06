@@ -714,6 +714,7 @@ type ChildTaskStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Priority",type=integer,JSONPath=`.spec.priority`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || (!(has(oldSelf.status.agentExecutionBinding) || has(oldSelf.status.agentExecutionNoExecution) || has(oldSelf.status.agentExecutionQuarantine)) || self.spec == oldSelf.spec)",message="Task spec is immutable after execution authority or a migration disposition is recorded"
 
 // Task is the Schema for the tasks API
 type Task struct {
@@ -845,8 +846,13 @@ type LegacyAgentWorkspaceConfig struct {
 	PushBranch string `json:"pushBranch,omitempty"`
 }
 
-// HarnessRuntimeStatus records the resolved harness v1 runtime selected by the
-// controller. Restored verbatim as the v1 compatibility status surface.
+// HarnessRuntimeStatus records the resolved harness v1 runtime and its durable
+// attempt projection. Harness v1 cannot write the v2-only execution/delivery
+// surfaces, so terminal ambiguity is represented here without weakening route
+// exclusivity.
+// +kubebuilder:validation:XValidation:rule="!has(self.state) || !(self.state in ['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown']) || has(self.outcome)",message="terminal harness state requires an outcome"
+// +kubebuilder:validation:XValidation:rule="!has(self.outcome) || self.state in ['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown']",message="harness outcome requires a terminal state"
+// +kubebuilder:validation:XValidation:rule="self.state != 'OutcomeUnknown' || self.outcome == 'OutcomeUnknown'",message="OutcomeUnknown harness state requires OutcomeUnknown outcome"
 type HarnessRuntimeStatus struct {
 	// RuntimeRefName is the AgentRuntime name for custom runtimeRef turns.
 	// Empty means built-in CLI wrapper.
@@ -882,6 +888,68 @@ type HarnessRuntimeStatus struct {
 	// before starting the turn.
 	// +optional
 	AuthRefResourceVersion string `json:"authRefResourceVersion,omitempty"`
+
+	// Attempt is the durable harness v1 attempt number.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	Attempt int32 `json:"attempt,omitempty"`
+
+	// TurnID is the deterministic, non-secret harness turn identity.
+	// +optional
+	TurnID string `json:"turnID,omitempty"`
+
+	// RuntimeSessionID is the deterministic, non-secret v1 runtime-session identity.
+	// +optional
+	RuntimeSessionID string `json:"runtimeSessionID,omitempty"`
+
+	// State is the durable harness v1 attempt state projected for operators.
+	// +optional
+	State TaskExecutionState `json:"state,omitempty"`
+
+	// Outcome is set only for a terminal harness v1 attempt.
+	// +optional
+	Outcome TaskExecutionOutcome `json:"outcome,omitempty"`
+
+	// Reason is a bounded machine-readable terminal reason code.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// TerminalReceiptDigest identifies the authoritative terminal or unknown receipt.
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	// +optional
+	TerminalReceiptDigest string `json:"terminalReceiptDigest,omitempty"`
+
+	// RequestDigest binds the canonical StartTurn request admitted by the
+	// durable wrapper ledger.
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	// +optional
+	RequestDigest string `json:"requestDigest,omitempty"`
+
+	// ControllerEpoch records the fenced controller epoch driving the attempt.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ControllerEpoch int64 `json:"controllerEpoch,omitempty"`
+
+	// LastEventSeq is the highest durably mapped harness frame sequence.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	LastEventSeq int64 `json:"lastEventSeq,omitempty"`
+
+	// CancelRequestedAt records a durable cancellation request. Cancellation
+	// remains nonterminal until a terminal frame or ledger receipt is observed.
+	// +optional
+	CancelRequestedAt *metav1.Time `json:"cancelRequestedAt,omitempty"`
+
+	// Message is bounded, sanitized execution context.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// LastTransitionTime is the last durable v1 attempt transition projected to
+	// the Task.
+	// +optional
+	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 }
 
 // WorkspaceConfig defines repository workspace, validation, and publication intent.

@@ -91,6 +91,67 @@ type AgentExecutionSnapshotStore interface {
 	DeleteAgentExecutionSnapshots(ctx context.Context, taskUID string) error
 }
 
+// AgentExecutionSnapshotMetadata is the non-secret lifecycle view of one
+// encrypted snapshot. It intentionally excludes the nonce and ciphertext as
+// well as the decrypted body.
+type AgentExecutionSnapshotMetadata struct {
+	Key           AgentExecutionSnapshotKey
+	SchemaVersion int32
+	CreatedAt     time.Time
+}
+
+// Validate rejects corrupt lifecycle metadata before retention code acts on
+// it. Stored snapshot keys remain integrity references, not authorization.
+func (m AgentExecutionSnapshotMetadata) Validate() error {
+	if err := m.Key.Validate(); err != nil {
+		return err
+	}
+	if m.SchemaVersion < 1 {
+		return ValidationErrorf("snapshot metadata schema version must be positive")
+	}
+	if m.CreatedAt.IsZero() {
+		return ValidationErrorf("snapshot metadata creation time is required")
+	}
+	return nil
+}
+
+// AgentExecutionSnapshotReferenceCounts reports every durable SQLite
+// reference that can retain a snapshot. Session lineage references are
+// intentionally digest-wide because session_lineages predates Task-scoped
+// snapshot keys and stores only the configuration digest.
+type AgentExecutionSnapshotReferenceCounts struct {
+	BindingReservations int64
+	HarnessV1Attempts   int64
+	PromptAttempts      int64
+	SessionLineages     int64
+}
+
+// Total returns the number of durable references across all known sources.
+func (c AgentExecutionSnapshotReferenceCounts) Total() int64 {
+	return c.BindingReservations + c.HarnessV1Attempts + c.PromptAttempts + c.SessionLineages
+}
+
+// AgentExecutionSnapshotLifecycleStore is an optional retention/GC extension
+// to AgentExecutionSnapshotStore. It exposes metadata only, reports durable
+// references, and deletes one exact key without changing the existing broad
+// Task-UID deletion contract.
+type AgentExecutionSnapshotLifecycleStore interface {
+	// ListAgentExecutionSnapshotMetadataBefore returns snapshots created
+	// strictly before cutoff, ordered by creation time, Task UID, and digest.
+	ListAgentExecutionSnapshotMetadataBefore(ctx context.Context, cutoff time.Time) ([]AgentExecutionSnapshotMetadata, error)
+
+	// CountAgentExecutionSnapshotReferences returns a consistent count across
+	// binding reservations, v1 attempts, v2 prompt attempts, and Session
+	// lineages. The first three sources match Task UID and digest; Session
+	// lineages conservatively match every occurrence of the digest.
+	CountAgentExecutionSnapshotReferences(ctx context.Context, key AgentExecutionSnapshotKey) (AgentExecutionSnapshotReferenceCounts, error)
+
+	// DeleteAgentExecutionSnapshot idempotently deletes one exact Task
+	// UID/digest key. The caller must first prove that all references and the
+	// configured retention interval have cleared.
+	DeleteAgentExecutionSnapshot(ctx context.Context, key AgentExecutionSnapshotKey) error
+}
+
 // SessionLineageProvenance records how a Session runtime lineage was created.
 type SessionLineageProvenance string
 
@@ -129,6 +190,29 @@ type SessionLineage struct {
 	UpdatedAt    time.Time
 }
 
+// Validate rejects an incomplete authoritative Session lineage.
+func (l SessionLineage) Validate() error {
+	claim := ClaimSessionLineageRequest{
+		Namespace: l.Namespace, SessionName: l.SessionName, NamespaceUID: l.NamespaceUID,
+		SessionUID: l.SessionUID, ContractVersion: l.ContractVersion,
+		LineageGeneration: l.LineageGeneration, RuntimeIdentity: l.RuntimeIdentity, ConfigDigest: l.ConfigDigest,
+		Provenance: l.Provenance,
+	}
+	if err := claim.Validate(); err != nil {
+		return err
+	}
+	if l.LineageGeneration < 1 {
+		return ValidationErrorf("session lineage generation must be at least 1")
+	}
+	if l.Version < 1 {
+		return ValidationErrorf("session lineage projection version must be at least 1")
+	}
+	if l.CreatedAt.IsZero() || l.UpdatedAt.IsZero() {
+		return ValidationErrorf("session lineage creation and update times are required")
+	}
+	return nil
+}
+
 // ClaimSessionLineageRequest atomically establishes or verifies a Session
 // lineage. Callers must invoke it under the same serialization that acquires
 // the Session mutation lease so two concurrent first-use Tasks cannot
@@ -139,9 +223,12 @@ type ClaimSessionLineageRequest struct {
 	NamespaceUID    string
 	SessionUID      string
 	ContractVersion string
-	RuntimeIdentity string
-	ConfigDigest    string
-	Provenance      SessionLineageProvenance
+	// LineageGeneration is independent of mutation-lease and runtime-session
+	// generations. Ordinary first use establishes generation 1.
+	LineageGeneration int64
+	RuntimeIdentity   string
+	ConfigDigest      string
+	Provenance        SessionLineageProvenance
 
 	// EstablishIfAbsent permits creating the lineage row. It must be true only
 	// when the caller has proven the Session is genuinely fresh or is running
@@ -163,6 +250,8 @@ func (r ClaimSessionLineageRequest) Validate() error {
 		return ValidationErrorf("session lineage session UID is required")
 	case r.ContractVersion != "orka.harness.v1" && r.ContractVersion != "orka.harness.v2":
 		return ValidationErrorf("session lineage contract version %q must be orka.harness.v1 or orka.harness.v2", r.ContractVersion)
+	case r.LineageGeneration < 1:
+		return ValidationErrorf("session lineage generation must be at least 1")
 	case strings.TrimSpace(r.RuntimeIdentity) == "":
 		return ValidationErrorf("session lineage runtime identity is required")
 	}
@@ -171,22 +260,20 @@ func (r ClaimSessionLineageRequest) Validate() error {
 	default:
 		return ValidationErrorf("session lineage provenance %q is not supported", string(r.Provenance))
 	}
-	if r.ConfigDigest != "" {
-		if err := ValidateCanonicalDigest("session lineage config digest", r.ConfigDigest); err != nil {
-			return err
-		}
+	if err := ValidateCanonicalDigest("session lineage config digest", r.ConfigDigest); err != nil {
+		return err
 	}
 	return nil
 }
 
-// SessionLineageStore persists Session protocol/runtime lineage.
+// SessionLineageStore persists a payload projection of Kubernetes-authoritative
+// Session protocol/runtime lineage. Projection failure may block dispatch but
+// never changes or releases the Kubernetes lineage/Lease authority.
 type SessionLineageStore interface {
-	// ClaimSessionLineage establishes the lineage exactly once or verifies the
-	// claim against the existing record. A mismatched contract version,
-	// Session UID, namespace UID, or runtime identity returns ErrConflict; a
-	// missing record with EstablishIfAbsent=false returns ErrNotFound.
-	// Concurrent first-use claims converge on exactly one lineage.
-	ClaimSessionLineage(ctx context.Context, request ClaimSessionLineageRequest) (*SessionLineage, error)
+	// ProjectSessionLineage idempotently stores the exact authoritative record.
+	// Any mismatch returns ErrConflict and must be repaired explicitly; SQLite
+	// never adjudicates which lineage owns a Session.
+	ProjectSessionLineage(ctx context.Context, lineage SessionLineage) (*SessionLineage, error)
 
 	// GetSessionLineage returns the lineage for one Session, or ErrNotFound.
 	GetSessionLineage(ctx context.Context, namespace, sessionName string) (*SessionLineage, error)
@@ -269,6 +356,14 @@ func (k HarnessV1AttemptKey) CanonicalID() string {
 	return fmt.Sprintf("%s/%s/%d", k.Namespace, k.TaskUID, k.Attempt)
 }
 
+// SessionReferenceID returns the bounded content-derived identity stored in a
+// protocol-neutral SessionTurn. The attempt store continues to use the
+// human-readable CanonicalID as its primary key; this separate identifier
+// prevents a v1 attempt from being confused with a v2 PromptAttempt.
+func (k HarnessV1AttemptKey) SessionReferenceID() string {
+	return CanonicalControlID("harness-v1-attempt", k.Namespace, k.TaskUID, fmt.Sprint(k.Attempt))
+}
+
 // Validate rejects incomplete attempt keys.
 func (k HarnessV1AttemptKey) Validate() error {
 	switch {
@@ -316,6 +411,7 @@ type HarnessV1Attempt struct {
 	// BackendEndpoint is the non-secret endpoint identity selected at dispatch.
 	BackendEndpoint string
 
+	AuthSecretNamespace       string
 	AuthSecretName            string
 	AuthSecretKey             string
 	AuthSecretUID             string
@@ -401,12 +497,23 @@ type HarnessV1AttemptTransition struct {
 	Updates         HarnessV1AttemptUpdates
 }
 
+// ReclaimHarnessV1AttemptsRequest removes Task-owned v1 attempt aggregates
+// only after terminal state and, for continuity Tasks, durable SessionTurn and
+// delivered outbox barriers have been re-proven in the same transaction.
+type ReclaimHarnessV1AttemptsRequest struct {
+	Namespace       string
+	TaskUID         string
+	BindingDigest   string
+	SessionRequired bool
+	Fence           ControllerEpochFence
+}
+
 // HarnessV1AttemptStore persists durable v1 attempt aggregates.
 type HarnessV1AttemptStore interface {
 	// CreateHarnessV1Attempt persists a new Prepared attempt exactly once. A
 	// duplicate identical create is idempotent; a duplicate with different
 	// content returns ErrDuplicateMismatch.
-	CreateHarnessV1Attempt(ctx context.Context, attempt *HarnessV1Attempt) error
+	CreateHarnessV1Attempt(ctx context.Context, attempt *HarnessV1Attempt, fence ControllerEpochFence) error
 
 	// GetHarnessV1Attempt returns one attempt or ErrNotFound.
 	GetHarnessV1Attempt(ctx context.Context, key HarnessV1AttemptKey) (*HarnessV1Attempt, error)
@@ -422,4 +529,8 @@ type HarnessV1AttemptStore interface {
 	// the same operation ID and digest against the already-applied state is
 	// idempotent; conflicting expectations return ErrConflict.
 	TransitionHarnessV1Attempt(ctx context.Context, transition HarnessV1AttemptTransition) (*HarnessV1Attempt, error)
+
+	// ReclaimHarnessV1Attempts deletes all terminal attempts for one immutable
+	// Task. Active attempts or incomplete Session/outbox settlement fail closed.
+	ReclaimHarnessV1Attempts(ctx context.Context, request ReclaimHarnessV1AttemptsRequest) (int, error)
 }

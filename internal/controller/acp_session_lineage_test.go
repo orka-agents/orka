@@ -15,164 +15,239 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	coordinationv1 "k8s.io/api/coordination/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func newACPLineageTestContinuity(t *testing.T, s *sqlite.Store) *ACPSessionContinuity {
+type acpLineageTestFixture struct {
+	continuity  *ACPSessionContinuity
+	controls    *kubestore.Store
+	persistence *sqlite.Store
+	fence       store.ControllerEpochFence
+}
+
+func newACPLineageTestFixture(t *testing.T, wrapProjection func(store.SessionLineageStore) store.SessionLineageStore) *acpLineageTestFixture {
 	t.Helper()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "lineage.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	persistence := sqlite.NewStore(db, "lineage-test")
+
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	rawClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.ControllerEpoch{}, &corev1alpha1.RuntimeSessionControl{}).
+		Build()
+	controls, err := kubestore.NewComposite(rawClient, "orka-system", persistence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := controls.CompareAndSwapControllerEpoch(context.Background(), store.ControllerEpochCAS{
+		ExpectedVersion: 0, ExpectedEpoch: 0, NewEpoch: 1,
+		HolderID: "lineage-controller", RequestDigest: acpSessionTestDigest("lineage-epoch"),
+		UpdatedAt: time.Date(2026, 8, 5, 9, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := store.SessionLineageStore(persistence)
+	if wrapProjection != nil {
+		projection = wrapProjection(projection)
+	}
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
-		SessionControls: s, Transcripts: s, Publications: s, BranchClaims: s,
-		Lineages:      s,
+		SessionControls: controls, Transcripts: persistence, Publications: controls, BranchClaims: controls,
+		Lineages:      projection,
 		NewSessionUID: func() (string, error) { return "acp-lineage-session-uid", nil },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return continuity
+	return &acpLineageTestFixture{
+		continuity: continuity, controls: controls, persistence: persistence,
+		fence: store.ControllerEpochFence{Name: epoch.Name, Epoch: epoch.Epoch, HolderID: epoch.HolderID},
+	}
 }
 
-func acpLineageLeaseRequest(control *store.SessionControl, fence store.ControllerEpochFence, taskUID, runtimeIdentity string) ACPAcquireSessionLeaseRequest {
+func (f *acpLineageTestFixture) ensureSession(t *testing.T, name string) *store.SessionControl {
+	t.Helper()
+	control, err := f.continuity.EnsureSession(context.Background(), ACPEnsureSessionRequest{
+		Namespace: "ns", SessionName: name, SessionType: "task", Fence: f.fence,
+		CreatedAt: time.Date(2026, 8, 5, 9, 5, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return control
+}
+
+func acpLineageLeaseRequest(
+	control *store.SessionControl,
+	fence store.ControllerEpochFence,
+	taskUID string,
+) ACPAcquireSessionLeaseRequest {
 	return ACPAcquireSessionLeaseRequest{
 		Session: *control, Fence: fence, TaskUID: taskUID, Attempt: 1, PromptID: "prompt-" + taskUID,
 		PromptRequestDigest: acpSessionTestDigest("request-" + taskUID),
 		AcquiredAt:          time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC),
 		NamespaceUID:        "ns-uid-1",
-		RuntimeIdentity:     runtimeIdentity,
+		RuntimeIdentity:     "codex",
 		ConfigDigest:        acpSessionTestDigest("profile-1"),
 	}
 }
 
-func TestAcquireMutationLeaseClaimsSessionLineageAtomically(t *testing.T) {
+func TestAcquireMutationLeaseEstablishesKubernetesAuthoritativeLineage(t *testing.T) {
 	ctx := context.Background()
-	s, fence, cleanup := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "lineage.db"))
-	defer cleanup()
-	continuity := newACPLineageTestContinuity(t, s)
-	control := ensureACPSessionForTest(t, continuity, fence, "lineage-session")
+	fixture := newACPLineageTestFixture(t, nil)
+	control := fixture.ensureSession(t, "lineage-session")
 
-	lease, err := continuity.AcquireMutationLease(ctx, acpLineageLeaseRequest(control, fence, "task-1", "codex"))
+	lease, err := fixture.continuity.AcquireMutationLease(ctx, acpLineageLeaseRequest(control, fixture.fence, "task-1"))
 	if err != nil {
 		t.Fatalf("acquire with lineage: %v", err)
 	}
-
-	lineage, err := s.GetSessionLineage(ctx, "ns", "lineage-session")
-	if err != nil {
-		t.Fatalf("get lineage: %v", err)
+	if lease.Session.Lineage == nil || lease.Session.Lineage.ContractVersion != string(corev1alpha1.AgentRuntimeContractHarnessV2) ||
+		lease.Session.Lineage.RuntimeIdentity != "codex" || lease.Session.Lineage.NamespaceUID != "ns-uid-1" ||
+		lease.Session.Lineage.LineageGeneration != 1 || lease.Session.Lineage.ConfigDigest != acpSessionTestDigest("profile-1") {
+		t.Fatalf("authoritative lineage = %+v", lease.Session.Lineage)
 	}
-	if lineage.ContractVersion != string(corev1alpha1.AgentRuntimeContractHarnessV2) ||
-		lineage.RuntimeIdentity != "codex" || lineage.SessionUID != control.SessionUID ||
-		lineage.Provenance != store.SessionLineageFirstUse || lineage.NamespaceUID != "ns-uid-1" {
-		t.Fatalf("unexpected lineage: %+v", lineage)
-	}
-
-	// Release, then continuation on the same runtime verifies the lineage.
-	if _, err := continuity.ReleaseMutationLease(ctx, ACPReleaseSessionLeaseRequest{Lease: *lease, Fence: fence}); err != nil {
-		t.Fatal(err)
-	}
-	refreshed, err := s.GetSessionControl(ctx, "ns", "lineage-session")
+	authoritative, err := fixture.controls.GetSessionControl(ctx, "ns", "lineage-session")
 	if err != nil {
 		t.Fatal(err)
 	}
-	nextLease, err := continuity.AcquireMutationLease(ctx, acpLineageLeaseRequest(refreshed, fence, "task-2", "codex"))
-	if err != nil {
-		t.Fatalf("continuation acquire: %v", err)
+	if authoritative.Lineage == nil || authoritative.Lease == nil || authoritative.Version != 2 {
+		t.Fatalf("lineage and Lease were not committed together: %+v", authoritative)
 	}
-	if _, err := continuity.ReleaseMutationLease(ctx, ACPReleaseSessionLeaseRequest{Lease: *nextLease, Fence: fence}); err != nil {
+	projected, err := fixture.persistence.GetSessionLineage(ctx, "ns", "lineage-session")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if projected.SessionUID != authoritative.SessionUID || projected.ConfigDigest != authoritative.Lineage.ConfigDigest {
+		t.Fatalf("SQLite projection = %+v, authority = %+v", projected, authoritative.Lineage)
 	}
 }
 
-func TestAcquireMutationLeaseRejectsLineageConflictAndReleasesLease(t *testing.T) {
+func TestAcquireMutationLeaseRejectsNonemptyUnclassifiedSession(t *testing.T) {
 	ctx := context.Background()
-	s, fence, cleanup := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "lineage-conflict.db"))
-	defer cleanup()
-	continuity := newACPLineageTestContinuity(t, s)
-	control := ensureACPSessionForTest(t, continuity, fence, "conflict-session")
-
-	lease, err := continuity.AcquireMutationLease(ctx, acpLineageLeaseRequest(control, fence, "task-1", "codex"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := continuity.ReleaseMutationLease(ctx, ACPReleaseSessionLeaseRequest{Lease: *lease, Fence: fence}); err != nil {
+	fixture := newACPLineageTestFixture(t, nil)
+	control := fixture.ensureSession(t, "unclassified-session")
+	if err := fixture.persistence.AppendMessages(ctx, "ns", "unclassified-session", []store.SessionMessage{{Role: "user", Content: "legacy transcript"}}); err != nil {
 		t.Fatal(err)
 	}
 
-	// A different runtime identity can never silently continue this Session.
-	refreshed, err := s.GetSessionControl(ctx, "ns", "conflict-session")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = continuity.AcquireMutationLease(ctx, acpLineageLeaseRequest(refreshed, fence, "task-2", "opencode"))
+	_, err := fixture.continuity.AcquireMutationLease(ctx, acpLineageLeaseRequest(control, fixture.fence, "task-1"))
 	if !errors.Is(err, store.ErrConflict) {
-		t.Fatalf("expected lineage conflict, got %v", err)
+		t.Fatalf("nonempty unclassified acquisition error = %v, want conflict", err)
 	}
-
-	// The failed acquisition released its lease so the Session is not stuck.
-	after, err := s.GetSessionControl(ctx, "ns", "conflict-session")
-	if err != nil {
-		t.Fatal(err)
+	after, getErr := fixture.controls.GetSessionControl(ctx, "ns", "unclassified-session")
+	if getErr != nil {
+		t.Fatal(getErr)
 	}
-	if after.Lease != nil {
-		t.Fatalf("lease must be released after a lineage conflict: %+v", after.Lease)
+	if after.Lineage != nil || after.Lease != nil || after.LeaseGeneration != 0 {
+		t.Fatalf("unclassified Session mutated authority: %+v", after)
 	}
-	if after.Availability != store.SessionAvailable {
-		t.Fatalf("session availability = %s", after.Availability)
-	}
-
-	// The original lineage is untouched.
-	lineage, err := s.GetSessionLineage(ctx, "ns", "conflict-session")
-	if err != nil || lineage.RuntimeIdentity != "codex" {
-		t.Fatalf("lineage after conflict = %+v, %v", lineage, err)
+	if _, getErr := fixture.persistence.GetSessionLineage(ctx, "ns", "unclassified-session"); !errors.Is(getErr, store.ErrNotFound) {
+		t.Fatalf("unclassified Session gained SQLite lineage: %v", getErr)
 	}
 }
 
-func TestAcquireMutationLeaseRequiresLineageIdentityWhenRecording(t *testing.T) {
+func TestAcquireMutationLeaseRejectsLineageIdentityAndConfigMismatch(t *testing.T) {
 	ctx := context.Background()
-	s, fence, cleanup := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "lineage-required.db"))
-	defer cleanup()
-	continuity := newACPLineageTestContinuity(t, s)
-	control := ensureACPSessionForTest(t, continuity, fence, "identity-required")
-
-	request := acpLineageLeaseRequest(control, fence, "task-1", "")
-	if _, err := continuity.AcquireMutationLease(ctx, request); err == nil {
-		t.Fatal("missing runtime identity must fail lineage recording closed")
-	}
-	after, err := s.GetSessionControl(ctx, "ns", "identity-required")
+	fixture := newACPLineageTestFixture(t, nil)
+	control := fixture.ensureSession(t, "mismatch-session")
+	lease, err := fixture.continuity.AcquireMutationLease(ctx, acpLineageLeaseRequest(control, fixture.fence, "task-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Lease != nil {
-		t.Fatal("lease must be released when lineage identity is missing")
+	if _, err := fixture.continuity.ReleaseMutationLease(ctx, ACPReleaseSessionLeaseRequest{Lease: *lease, Fence: fixture.fence}); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := fixture.controls.GetSessionControl(ctx, "ns", "mismatch-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*ACPAcquireSessionLeaseRequest)
+	}{
+		{name: "runtime", mutate: func(request *ACPAcquireSessionLeaseRequest) { request.RuntimeIdentity = "opencode" }},
+		{name: "configuration", mutate: func(request *ACPAcquireSessionLeaseRequest) { request.ConfigDigest = acpSessionTestDigest("profile-2") }},
+		{name: "namespace UID", mutate: func(request *ACPAcquireSessionLeaseRequest) { request.NamespaceUID = "ns-uid-recreated" }},
+		{name: "Session UID", mutate: func(request *ACPAcquireSessionLeaseRequest) { request.Session.SessionUID = "session-uid-recreated" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := acpLineageLeaseRequest(baseline, fixture.fence, "task-2")
+			test.mutate(&request)
+			if _, err := fixture.continuity.AcquireMutationLease(ctx, request); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("mismatch error = %v, want conflict", err)
+			}
+			after, err := fixture.controls.GetSessionControl(ctx, "ns", "mismatch-session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Lease != nil || after.LeaseGeneration != baseline.LeaseGeneration || after.Lineage == nil || after.Lineage.RuntimeIdentity != "codex" {
+				t.Fatalf("mismatch changed Session authority: %+v", after)
+			}
+		})
 	}
 }
 
-func TestAcquireMutationLeaseAdoptsPreexistingTranscriptAsV2(t *testing.T) {
+type failOnceLineageProjection struct {
+	store.SessionLineageStore
+	fail bool
+}
+
+func (s *failOnceLineageProjection) ProjectSessionLineage(ctx context.Context, lineage store.SessionLineage) (*store.SessionLineage, error) {
+	if s.fail {
+		s.fail = false
+		return nil, errors.New("simulated SQLite projection failure")
+	}
+	return s.SessionLineageStore.ProjectSessionLineage(ctx, lineage)
+}
+
+func TestAcquireMutationLeaseRecoversProjectionAfterKubernetesCommit(t *testing.T) {
 	ctx := context.Background()
-	s, fence, cleanup := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "lineage-adopt.db"))
-	defer cleanup()
-	continuity := newACPLineageTestContinuity(t, s)
-	control := ensureACPSessionForTest(t, continuity, fence, "adopted-session")
+	var projection *failOnceLineageProjection
+	fixture := newACPLineageTestFixture(t, func(delegate store.SessionLineageStore) store.SessionLineageStore {
+		projection = &failOnceLineageProjection{SessionLineageStore: delegate, fail: true}
+		return projection
+	})
+	control := fixture.ensureSession(t, "projection-recovery")
+	request := acpLineageLeaseRequest(control, fixture.fence, "task-1")
 
-	// Simulate a pre-upgrade v2 session: transcript exists, no lineage row.
-	if err := s.AppendMessages(ctx, "ns", "adopted-session", []store.SessionMessage{
-		{Role: "user", Content: "earlier prompt"},
-		{Role: "assistant", Content: "earlier answer"},
-	}); err != nil {
-		t.Fatal(err)
+	if _, err := fixture.continuity.AcquireMutationLease(ctx, request); err == nil {
+		t.Fatal("expected simulated projection failure")
 	}
-
-	lease, err := continuity.AcquireMutationLease(ctx, acpLineageLeaseRequest(control, fence, "task-1", "claude"))
-	if err != nil {
-		t.Fatalf("adoption acquire: %v", err)
-	}
-	defer func() {
-		_, _ = continuity.ReleaseMutationLease(ctx, ACPReleaseSessionLeaseRequest{Lease: *lease, Fence: fence})
-	}()
-
-	lineage, err := s.GetSessionLineage(ctx, "ns", "adopted-session")
+	authoritative, err := fixture.controls.GetSessionControl(ctx, "ns", "projection-recovery")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lineage.Provenance != store.SessionLineageLegacyAdopted || lineage.RuntimeIdentity != "claude" {
-		t.Fatalf("adopted lineage = %+v", lineage)
+	if authoritative.Lineage == nil || authoritative.Lease == nil {
+		t.Fatalf("Kubernetes must retain lineage and exact Lease after projection failure: %+v", authoritative)
+	}
+	if _, err := fixture.persistence.GetSessionLineage(ctx, "ns", "projection-recovery"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("failed projection unexpectedly became visible: %v", err)
+	}
+
+	request.Session = *authoritative
+	recovered, err := fixture.continuity.AcquireMutationLease(ctx, request)
+	if err != nil {
+		t.Fatalf("retry exact authoritative Lease: %v", err)
+	}
+	if recovered.Key.LeaseGeneration != authoritative.LeaseGeneration {
+		t.Fatalf("retry advanced Lease generation: got %d want %d", recovered.Key.LeaseGeneration, authoritative.LeaseGeneration)
+	}
+	if _, err := fixture.persistence.GetSessionLineage(ctx, "ns", "projection-recovery"); err != nil {
+		t.Fatalf("projection was not recovered: %v", err)
 	}
 }

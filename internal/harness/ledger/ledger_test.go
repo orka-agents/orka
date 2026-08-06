@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -99,6 +100,28 @@ func TestLedgerTerminalReceiptsSurviveRestart(t *testing.T) {
 	}
 	if string(record.TerminalReceipt) != string(receipt) {
 		t.Fatalf("terminal receipt payload mismatch: %s", record.TerminalReceipt)
+	}
+}
+
+func TestLedgerRejectsCorruptTerminalReceiptAtReadBoundary(t *testing.T) {
+	ctx := context.Background()
+	l, _ := openTestLedger(t)
+	if _, _, err := l.AdmitTurn(ctx, "turn-1", "task-uid", 1, "sha256:aaaa"); err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	if err := l.MarkTurnAccepted(ctx, "turn-1"); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := l.RecordTurnTerminal(ctx, "turn-1", []byte(`{"outcome":"succeeded"}`), false); err != nil {
+		t.Fatalf("terminal: %v", err)
+	}
+	if _, err := l.db.ExecContext(ctx, `UPDATE turn_admissions SET terminal_receipt = ? WHERE turn_id = ?`,
+		[]byte(`{"outcome":"corrupt"}`), "turn-1"); err != nil {
+		t.Fatalf("corrupt receipt fixture: %v", err)
+	}
+
+	if _, err := l.GetTurn(ctx, "turn-1"); err == nil || !strings.Contains(err.Error(), "receipt digest mismatch") {
+		t.Fatalf("GetTurn() error = %v, want receipt digest mismatch", err)
 	}
 }
 

@@ -27,6 +27,16 @@ type mockHealthChecker struct{}
 
 func (m *mockHealthChecker) HealthCheck(_ context.Context) error { return nil }
 
+type recordingAgentExecutionClassificationGate struct {
+	err    error
+	checks int
+}
+
+func (g *recordingAgentExecutionClassificationGate) Check(_ context.Context) error {
+	g.checks++
+	return g.err
+}
+
 func TestNewServer(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -51,6 +61,57 @@ func TestNewServer(t *testing.T) {
 	}
 	if server.config.Port != 8080 {
 		t.Errorf("Port = %d, want 8080", server.config.Port)
+	}
+}
+
+func TestServer_AgentExecutionClassificationGate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	gate := &recordingAgentExecutionClassificationGate{err: fmt.Errorf("classification is open")}
+	server := NewServer(fakeClient, nil, ServerConfig{
+		AgentExecutionClassificationGate: gate,
+	})
+
+	server.app.Get("/classification-gate-test", func(c fiber.Ctx) error {
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+	server.app.Post("/classification-gate-test", func(c fiber.Ctx) error {
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+
+	response, err := server.app.Test(httptest.NewRequest(http.MethodGet, "/classification-gate-test", nil))
+	if err != nil {
+		t.Fatalf("GET request failed: %v", err)
+	}
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("GET status = %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+	if gate.checks != 0 {
+		t.Fatalf("gate checks after read-only request = %d, want 0", gate.checks)
+	}
+
+	response, err = server.app.Test(httptest.NewRequest(http.MethodPost, "/classification-gate-test", nil))
+	if err != nil {
+		t.Fatalf("closed-gate POST request failed: %v", err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("closed-gate POST status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+	if gate.checks != 1 {
+		t.Fatalf("gate checks after closed-gate request = %d, want 1", gate.checks)
+	}
+
+	gate.err = nil
+	response, err = server.app.Test(httptest.NewRequest(http.MethodPost, "/classification-gate-test", nil))
+	if err != nil {
+		t.Fatalf("open-gate POST request failed: %v", err)
+	}
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("open-gate POST status = %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+	if gate.checks != 2 {
+		t.Fatalf("gate checks after open-gate request = %d, want 2", gate.checks)
 	}
 }
 

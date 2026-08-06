@@ -165,6 +165,7 @@ type AgentExecutionRuntimeRef struct {
 // +kubebuilder:validation:XValidation:rule="self.backend != 'harness-wrapper' || self.contractVersion == 'orka.harness.v1'",message="the harness-wrapper backend requires an orka.harness.v1 binding"
 // +kubebuilder:validation:XValidation:rule="self.backend != 'runtime-pool' || self.contractVersion == 'orka.harness.v2'",message="the runtime-pool backend requires an orka.harness.v2 binding"
 // +kubebuilder:validation:XValidation:rule="self.provenance != 'legacy-cleanup-only' || self.mode == 'cleanup-only'",message="legacy-cleanup-only provenance requires cleanup-only mode"
+// +kubebuilder:validation:XValidation:rule="self.provenance == 'legacy-cleanup-only' ? has(self.migrationInventoryID) : !has(self.migrationInventoryID)",message="migrationInventoryID is required only for legacy-cleanup-only provenance"
 type AgentExecutionBinding struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=1
@@ -192,6 +193,14 @@ type AgentExecutionBinding struct {
 
 	// +kubebuilder:validation:Required
 	Task AgentExecutionBindingTaskRef `json:"task"`
+
+	// MigrationInventoryID binds legacy cleanup-only authority to the exact
+	// sealed classification inventory that admitted it. It is absent from all
+	// executable and ordinary legacy-adopted bindings.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	MigrationInventoryID string `json:"migrationInventoryID,omitempty"`
 
 	// BackendControl is absent only on legacy-adopted and legacy-cleanup-only
 	// bindings created by the sealed migration inventory before durable backend

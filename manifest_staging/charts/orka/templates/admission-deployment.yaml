@@ -1,0 +1,98 @@
+{{- include "orka.validateAdmission" . }}
+{{- if .Values.admission.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orka.admissionName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+spec:
+  replicas: {{ .Values.admission.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "orka.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: admission
+  template:
+    metadata:
+      labels:
+        {{- include "orka.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: admission
+        orka.ai/network-role: admission
+    spec:
+      serviceAccountName: {{ include "orka.admissionName" . }}
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "orka.selectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: admission
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: admission
+          image: {{ include "orka.imageRef" .Values.controller.image | quote }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          command: [/orka-admission]
+          args:
+            - --health-probe-bind-address=:8081
+            - --webhook-cert-path=/var/run/orka/admission/tls
+            - {{ printf "--webhook-cert-name=%s" .Values.admission.tls.certKey | quote }}
+            - {{ printf "--webhook-cert-key=%s" .Values.admission.tls.privateKeyKey | quote }}
+            - {{ printf "--controller-username=%s" (include "orka.admissionControllerUsername" .) | quote }}
+            - {{ printf "--adjudication-controller-username=%s" (include "orka.admissionAdjudicationControllerUsername" .) | quote }}
+            - {{ printf "--admin-groups=%s" (join "," .Values.admission.identity.adminGroups) | quote }}
+            - {{ printf "--task-provenance-trusted-users=%s" (include "orka.admissionControllerUsername" .) | quote }}
+            - {{ printf "--task-provenance-trusted-service-accounts=%s,%s" (include "orka.aiWorkerServiceAccountName" .) (include "orka.vendorWorkerServiceAccountName" .) | quote }}
+            {{- with .Values.admission.identity.classificationUsernames }}
+            - {{ printf "--classification-usernames=%s" (join "," .) | quote }}
+            {{- end }}
+          ports:
+            - {name: webhook, containerPort: 9443, protocol: TCP}
+            - {name: health, containerPort: 8081, protocol: TCP}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities: {drop: [ALL]}
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.admission.resources | nindent 12 }}
+          volumeMounts:
+            - name: tls
+              mountPath: /var/run/orka/admission/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.admission.tls.existingSecret | quote }}
+            optional: false
+            items:
+              - key: {{ .Values.admission.tls.certKey | quote }}
+                path: {{ .Values.admission.tls.certKey | quote }}
+              - key: {{ .Values.admission.tls.privateKeyKey | quote }}
+                path: {{ .Values.admission.tls.privateKeyKey | quote }}
+{{- end }}

@@ -32,13 +32,19 @@ const (
 // provider-native fields or performs provider lifecycle calls directly.
 type ExecutionWorkspaceReconciler struct {
 	client.Client
-	APIReader               client.Reader
-	RESTMapper              apimeta.RESTMapper
-	AdmissionLeaseNamespace string
-	CleanupOnly             bool
+	APIReader                        client.Reader
+	RESTMapper                       apimeta.RESTMapper
+	AgentExecutionClassificationGate *AgentExecutionClassificationGate
+	AdmissionLeaseNamespace          string
+	CleanupOnly                      bool
 }
 
 func (r *ExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if r.AgentExecutionClassificationGate != nil {
+		if err := r.AgentExecutionClassificationGate.Check(ctx); err != nil {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := r.Get(ctx, req.NamespacedName, workspace); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)

@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
@@ -119,10 +120,20 @@ type TaskReconciler struct {
 	ExecutionEventStore                store.ExecutionEventStore
 	DurableControlStore                store.DurableControlStore
 	AgentExecutionSnapshots            store.AgentExecutionSnapshotStore
+	MCPRegistry                        *tools.Registry
 	ACPArtifactRetirer                 artifactcap.IdentityRetirer
 	ACPPublicationReclaimer            ACPPublicationReclaimer
 	ControllerEpochManager             *ControllerEpochManager
 	ACPAdmissionGate                   *ACPAdmissionGate
+	AgentExecutionClassificationGate   *AgentExecutionClassificationGate
+	HarnessV1Enabled                   bool
+	HarnessV1Endpoint                  string
+	HarnessV1AuthSecretNamespace       string
+	HarnessV1AuthSecretName            string
+	HarnessV1AuthSecretKey             string
+	HarnessV1PolicyName                string
+	HarnessV1Attempts                  store.HarnessV1AttemptStore
+	AgentExecutionBindingReservations  store.AgentExecutionBindingReservationStore
 	ACPRuntimeEnabled                  bool
 	ACPRuntimeImages                   ACPRuntimeImages
 	ACPRuntimeNamespace                string
@@ -270,6 +281,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	task := &corev1alpha1.Task{}
 	if err := r.Get(ctx, req.NamespacedName, task); err != nil {
 		if apierrors.IsNotFound(err) {
+			if err := r.checkAgentExecutionClassification(ctx); err != nil {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			if cleanupErr := r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(ctx, req.Namespace); cleanupErr != nil {
 				return ctrl.Result{}, cleanupErr
 			}
@@ -277,6 +291,12 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 		log.Error(err, "unable to fetch Task")
 		return ctrl.Result{}, err
+	}
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		if err := r.checkAgentExecutionClassification(ctx); err != nil {
+			log.Info("agent Task reconciliation withheld until execution classification is sealed", "reason", err.Error())
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 	}
 
 	if tx := task.Spec.Transaction; tx != nil {
@@ -502,31 +522,56 @@ func executionEventTypeForTaskPhase(phase corev1alpha1.TaskPhase) string {
 	}
 }
 
-// handleDeletion handles Task cleanup when deleted
-func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:unparam // Result is always nil but kept for interface consistency
+// handleDeletion handles Task cleanup when deleted.
+//
+//nolint:gocyclo,unparam // Cleanup ordering is intentionally kept in one auditable flow; Result is retained for consistency.
+func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
-		ready, err := r.acpTaskDeletionReady(ctx, task)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if !ready {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-		}
-		reclaimed, err := r.reclaimACPTaskPublicationBundles(ctx, task)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if !reclaimed {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-		}
-		retired, err := r.retireACPArtifactIdentities(ctx, task)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if !retired {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		if task.Status.AgentExecutionNoExecution != nil {
+			// A migration-proven no-execution disposition guarantees that neither
+			// harness ever acquired route-specific state. Skip v1/v2 reclamation
+			// and continue through the common Job, lease, Session, and finalizer
+			// cleanup below.
+		} else if task.Status.AgentExecutionQuarantine != nil {
+			ready, err := r.quarantinedAgentTaskDeletionReady(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !ready {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+		} else if taskManagedByHarnessV1(task) {
+			ready, err := r.harnessV1TaskDeletionReady(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !ready {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+		} else {
+			ready, err := r.acpTaskDeletionReady(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !ready {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			reclaimed, err := r.reclaimACPTaskPublicationBundles(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !reclaimed {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			retired, err := r.retireACPArtifactIdentities(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !retired {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
 		}
 		// Clean up result data from store
 		if r.ResultStore != nil {
@@ -615,13 +660,41 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	return ctrl.Result{}, nil
 }
 
-// handlePending handles Tasks in Pending phase
+// handlePending handles Tasks in Pending phase.
+//
+//nolint:gocyclo // Pending routing keeps every mutually exclusive execution path in one auditable state machine.
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	if outcome := task.Status.ExecutionOutcome; outcome != nil {
 		log.Info("refusing to replay task with immutable execution outcome", "outcome", outcome.Phase)
 		return r.completeTask(ctx, task, outcome.Phase, outcome.Message)
+	}
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		if quarantine := task.Status.AgentExecutionQuarantine; quarantine != nil {
+			// Quarantine is an immutable routing authority. It must be consulted
+			// before mutable Agent resolution or any snapshot, reservation, lease,
+			// demand, runtime, publication, or retry side effect. Adjudication may
+			// authorize observation and cleanup, but never execution or replay.
+			log.Info("agent task execution remains quarantined",
+				"reason", quarantine.Reason,
+				"migrationInventoryID", quarantine.MigrationInventoryID,
+			)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if noExecution := task.Status.AgentExecutionNoExecution; noExecution != nil {
+			// A proven no-execution disposition permits common terminal cleanup
+			// only and can never be converted into an executable binding.
+			message := fmt.Sprintf(
+				"agent task classified %s by migration inventory %s; execution is permanently disabled",
+				noExecution.State, noExecution.MigrationInventoryID,
+			)
+			log.Info("refusing execution for agent task with no-execution disposition",
+				"state", noExecution.State,
+				"migrationInventoryID", noExecution.MigrationInventoryID,
+			)
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
+		}
 	}
 
 	if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
@@ -645,8 +718,17 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
-	// Check session lock if session is referenced
-	if task.Spec.SessionRef != nil {
+	// A persisted execution binding is the sole routing and recovery authority.
+	// Do not resolve mutable Agent/configuration state, or acquire the legacy
+	// SQLite Session lock, after a Task has been bound to either harness plane.
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.AgentExecutionBinding != nil {
+		return r.handleBoundAgentTaskPending(ctx, task)
+	}
+
+	// Non-agent workers retain the legacy Session lock lifecycle. Agent Tasks
+	// claim protocol lineage and a fenced SessionTurn in their dispatcher only
+	// after the immutable execution binding has selected v1 or v2.
+	if task.Spec.SessionRef != nil && task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		if result, err, locked := r.acquireSessionLock(ctx, task); locked {
 			return result, err
 		}
@@ -717,12 +799,15 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		case agentExecutionPathRejected:
 			return r.rejectPlannedAgentExecution(ctx, task, plan)
 		case agentExecutionPathACP:
-			if r.agentExecutionBindingEnabled() {
-				if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
-					return result, err
-				}
+			if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
+				return result, err
 			}
 			return r.queueACPRuntimeTask(ctx, task, agent)
+		case agentExecutionPathHarnessV1:
+			if result, err, handled := r.ensureHarnessV1ExecutionBinding(ctx, task, agent); handled {
+				return result, err
+			}
+			return r.queueHarnessV1Task(ctx, task)
 		case agentExecutionPathExternal:
 			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(
 				externalAgentRuntimeDispatchUnsupportedReason(plan.externalRuntimeName),
@@ -733,6 +818,32 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	return r.createTaskJob(ctx, task, agent, provider)
+}
+
+func (r *TaskReconciler) handleBoundAgentTaskPending(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (ctrl.Result, error) {
+	binding := task.Status.AgentExecutionBinding
+	if binding == nil {
+		return ctrl.Result{}, errors.New("bound agent Task is missing its execution binding")
+	}
+	switch binding.ContractVersion {
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		if result, err, handled := r.ensureHarnessV1ExecutionBinding(ctx, task, nil); handled {
+			return result, err
+		}
+		return r.queueHarnessV1Task(ctx, task)
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, nil); handled {
+			return result, err
+		}
+		return r.queueACPRuntimeTask(ctx, task, nil)
+	default:
+		return r.failTask(ctx, task, fmt.Sprintf(
+			"immutable execution binding has unsupported contract %q", binding.ContractVersion,
+		))
+	}
 }
 
 func taskTransactionTokenPending(task *corev1alpha1.Task) bool {
@@ -1695,6 +1806,11 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		// lease renewal, cancellation barrier, and terminal status projection.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
+	if taskManagedByHarnessV1(task) {
+		// HarnessV1Dispatcher owns submission, stream recovery, cancellation,
+		// terminal settlement, and Task projection for binding-gated v1 work.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 
 	// Check timeout
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
@@ -1895,6 +2011,12 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func taskManagedByHarnessV1(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent &&
+		task.Status.AgentExecutionBinding != nil &&
+		task.Status.AgentExecutionBinding.ContractVersion == corev1alpha1.AgentRuntimeContractHarnessV1
 }
 
 func podWaitingForMountInitialization(pod *corev1.Pod) bool {
@@ -2169,8 +2291,8 @@ func (r *TaskReconciler) handleFinalizing(
 		if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
 			return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 		}
-		manager := WorkspaceAttachmentManager{Client: r.Client}
-		if err := manager.BeginRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch); err != nil {
+		attachmentManager := WorkspaceAttachmentManager{Client: r.Client}
+		if err := attachmentManager.BeginRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
@@ -2183,8 +2305,8 @@ func (r *TaskReconciler) handleFinalizing(
 			if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
 				return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 			}
-			manager := WorkspaceAttachmentManager{Client: r.Client}
-			if err := manager.FinalizeRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch, attachmentSecretName(workspaceObject.Name, workspaceStatus.AttachedEpoch)); err != nil {
+			attachmentManager := WorkspaceAttachmentManager{Client: r.Client}
+			if err := attachmentManager.FinalizeRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch, attachmentSecretName(workspaceObject.Name, workspaceStatus.AttachedEpoch)); err != nil {
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
 		} else if !apierrors.IsNotFound(err) {
@@ -3572,13 +3694,26 @@ func (r *trustedServiceReadCleanupRunnable) Start(ctx context.Context) error {
 
 func (*trustedServiceReadCleanupRunnable) NeedLeaderElection() bool { return true }
 
+func (r *TaskReconciler) checkAgentExecutionClassification(ctx context.Context) error {
+	if r == nil || r.AgentExecutionClassificationGate == nil {
+		return nil
+	}
+	return r.AgentExecutionClassificationGate.Check(ctx)
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Recorder = mgr.GetEventRecorderFor("task-controller") //nolint:staticcheck
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
-	if err := mgr.Add(&trustedServiceReadCleanupRunnable{reconciler: r}); err != nil {
+	var cleanup manager.Runnable = &trustedServiceReadCleanupRunnable{reconciler: r}
+	if r.AgentExecutionClassificationGate != nil {
+		cleanup = &AgentExecutionClassificationGatedRunnable{
+			Gate: r.AgentExecutionClassificationGate, Runnable: cleanup,
+		}
+	}
+	if err := mgr.Add(cleanup); err != nil {
 		return fmt.Errorf("register trusted Service RBAC startup cleanup: %w", err)
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex); err != nil {

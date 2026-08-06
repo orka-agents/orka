@@ -280,22 +280,3 @@ func providerNativeToolEffect(name string) harnessv2.MCPToolEffect {
 		return harnessv2.MCPToolEffectConsequential
 	}
 }
-
-func (d *ACPDispatcher) taskAgent(ctx context.Context, task *corev1alpha1.Task) (*corev1alpha1.Agent, error) {
-	if task == nil || task.Spec.AgentRef == nil || strings.TrimSpace(task.Spec.AgentRef.Name) == "" {
-		return nil, fmt.Errorf("ACP Task requires agentRef")
-	}
-	namespace := task.Namespace
-	if value := strings.TrimSpace(task.Spec.AgentRef.Namespace); value != "" {
-		namespace = value
-	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
-	agent := &corev1alpha1.Agent{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: task.Spec.AgentRef.Name}, agent); err != nil {
-		return nil, err
-	}
-	return agent, nil
-}

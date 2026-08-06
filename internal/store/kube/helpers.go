@@ -30,6 +30,7 @@ const (
 	annotationTaskUID           = "core.orka.ai/task-uid"
 	annotationAttempt           = "core.orka.ai/attempt"
 	annotationPromptID          = "core.orka.ai/prompt-id"
+	annotationSessionLineage    = "core.orka.ai/session-lineage-digest"
 	annotationLeaseExpiresAt    = "core.orka.ai/lease-expires-at"
 	annotationOperationID       = "core.orka.ai/operation-id"
 	annotationOperationDigest   = "core.orka.ai/operation-digest"

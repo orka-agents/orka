@@ -1,0 +1,16 @@
+{{- include "orka.validateAdmission" . }}
+{{- if .Values.admission.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "orka.admissionName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "orka.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: admission
+{{- end }}

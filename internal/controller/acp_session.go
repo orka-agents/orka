@@ -34,9 +34,9 @@ type ACPSessionContinuityConfig struct {
 	BootstrapLimits ACPBootstrapLimits
 	NewSessionUID   func() (string, error)
 
-	// Lineages records Session protocol/runtime lineage atomically with lease
-	// acquisition. Optional during the pre-coexistence transition; production
-	// wiring always supplies it, and the coexistence release requires it.
+	// Lineages receives an idempotent SQLite payload projection only after the
+	// Kubernetes SessionControl store has established or verified lineage in
+	// the same status CAS that records the mutation Lease.
 	Lineages store.SessionLineageStore
 }
 
@@ -263,11 +263,14 @@ type ACPAcquireSessionLeaseRequest struct {
 	ExpiresAt           *time.Time
 
 	// NamespaceUID, RuntimeIdentity, and ConfigDigest establish or verify the
-	// Session protocol/runtime lineage atomically with the lease claim when
-	// lineage recording is configured.
-	NamespaceUID    string
-	RuntimeIdentity string
-	ConfigDigest    string
+	// Kubernetes-authoritative Session protocol/runtime lineage atomically with
+	// the lease status CAS when lineage projection is configured.
+	NamespaceUID      string
+	ContractVersion   corev1alpha1.AgentRuntimeContractVersion
+	LineageGeneration int64
+	LineageProvenance store.SessionLineageProvenance
+	RuntimeIdentity   string
+	ConfigDigest      string
 }
 
 // ACPSessionLease is the exact mutation fence that must be used when opening
@@ -291,29 +294,40 @@ func (c *ACPSessionContinuity) AcquireMutationLease(ctx context.Context, request
 		return nil, fmt.Errorf("%w: session %s/%s is reconciliation-blocked", store.ErrConflict,
 			request.Session.Namespace, request.Session.SessionName)
 	}
-	if request.Session.Lease != nil {
-		return nil, fmt.Errorf("%w: session %s/%s already has a mutation lease", store.ErrConflict,
-			request.Session.Namespace, request.Session.SessionName)
-	}
 	if err := store.ValidateCanonicalDigest("prompt request digest", request.PromptRequestDigest); err != nil {
 		return nil, err
 	}
+	leaseGeneration := request.Session.LeaseGeneration + 1
+	if request.Session.Lease != nil {
+		leaseGeneration = request.Session.Lease.Generation
+	}
 	leaseDigest, err := acpSessionMutationLeaseDigest(
-		request.Session.SessionUID, request.Session.LeaseGeneration+1,
+		request.Session.SessionUID, leaseGeneration,
 		request.TaskUID, request.Attempt, request.PromptID, request.PromptRequestDigest,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("digest ACP session mutation lease: %w", err)
 	}
+	if existing := request.Session.Lease; existing != nil &&
+		(existing.TaskUID != request.TaskUID || existing.Attempt != request.Attempt ||
+			existing.PromptID != request.PromptID || existing.RequestDigest != leaseDigest) {
+		return nil, fmt.Errorf("%w: session %s/%s is already leased by a different prompt operation",
+			store.ErrConflict, request.Session.Namespace, request.Session.SessionName)
+	}
 	acquiredAt := request.AcquiredAt.UTC()
 	if acquiredAt.IsZero() {
 		acquiredAt = time.Now().UTC()
+	}
+	lineageClaim, err := c.prepareSessionLineageClaim(ctx, request)
+	if err != nil {
+		return nil, err
 	}
 	control, err := c.controls.AcquireSessionMutationLease(ctx, store.AcquireSessionMutationLeaseRequest{
 		Namespace: request.Session.Namespace, SessionName: request.Session.SessionName, SessionUID: request.Session.SessionUID,
 		Fence: request.Fence, ExpectedVersion: request.Session.Version, ExpectedLeaseGeneration: request.Session.LeaseGeneration,
 		TaskUID: request.TaskUID, Attempt: request.Attempt, PromptID: request.PromptID,
 		RequestDigest: leaseDigest, AcquiredAt: acquiredAt, ExpiresAt: request.ExpiresAt,
+		Lineage: lineageClaim,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("acquire ACP session mutation lease: %w", err)
@@ -326,71 +340,67 @@ func (c *ACPSessionContinuity) AcquireMutationLease(ctx context.Context, request
 		return nil, err
 	}
 	lease := &ACPSessionLease{Session: *control, Key: key}
-	if err := c.claimSessionLineage(ctx, request, lease); err != nil {
-		return nil, err
+	if c.lineages != nil {
+		if control.Lineage == nil {
+			return nil, fmt.Errorf("kubernetes session lease committed without authoritative lineage")
+		}
+		if _, err := c.lineages.ProjectSessionLineage(ctx, *control.Lineage); err != nil {
+			// Retain the exact Kubernetes lease on projection failure. Releasing it
+			// would allow another owner to proceed before the payload projection is
+			// repaired; an idempotent retry completes the projection first.
+			return nil, fmt.Errorf("project Kubernetes-authoritative Session lineage: %w", err)
+		}
 	}
 	return lease, nil
 }
 
-// claimSessionLineage establishes or verifies the Session protocol/runtime
-// lineage under the just-acquired mutation lease, so concurrent first-use
-// Tasks serialize on the lease and converge on exactly one lineage. A lineage
-// conflict releases the lease and fails the acquisition: implicit
-// cross-protocol continuation and recreated same-name identities are rejected.
-func (c *ACPSessionContinuity) claimSessionLineage(
-	ctx context.Context,
-	request ACPAcquireSessionLeaseRequest,
-	lease *ACPSessionLease,
-) error {
+// prepareSessionLineageClaim determines only whether an absent authoritative
+// lineage may be established. Kubernetes remains the decision point: a stale
+// caller that observes a nonempty transcript can still verify a lineage that a
+// concurrent first user already committed, but it cannot establish one.
+func (c *ACPSessionContinuity) prepareSessionLineageClaim(ctx context.Context, request ACPAcquireSessionLeaseRequest) (*store.ClaimSessionLineageRequest, error) {
 	if c.lineages == nil {
-		return nil
+		return nil, nil
 	}
-	if strings.TrimSpace(request.RuntimeIdentity) == "" || strings.TrimSpace(request.NamespaceUID) == "" {
-		return c.releaseLeaseAfterLineageFailure(ctx, request, lease,
-			fmt.Errorf("session lineage recording requires the runtime identity and namespace UID"))
+	contractVersion := request.ContractVersion
+	if contractVersion == "" {
+		contractVersion = corev1alpha1.AgentRuntimeContractHarnessV2
 	}
-	provenance := store.SessionLineageFirstUse
-	record, err := c.transcripts.GetSession(ctx, lease.Session.Namespace, lease.Session.SessionName)
-	switch {
-	case err == nil && record != nil && record.MessageCount > 0:
-		// This controller line is a pure v2 baseline: a pre-existing transcript
-		// without a lineage row is authoritative single-protocol evidence, so
-		// it is adopted as v2 rather than quarantined. The dual-controller
-		// sealed-inventory classification replaces this adoption rule.
-		provenance = store.SessionLineageLegacyAdopted
-	case err != nil && !errors.Is(err, store.ErrNotFound):
-		return c.releaseLeaseAfterLineageFailure(ctx, request, lease,
-			fmt.Errorf("read session transcript for lineage freshness: %w", err))
+	lineageGeneration := request.LineageGeneration
+	if lineageGeneration == 0 {
+		lineageGeneration = 1
 	}
-	if _, err := c.lineages.ClaimSessionLineage(ctx, store.ClaimSessionLineageRequest{
-		Namespace:         lease.Session.Namespace,
-		SessionName:       lease.Session.SessionName,
+	provenance := request.LineageProvenance
+	if provenance == "" {
+		provenance = store.SessionLineageFirstUse
+	}
+	claim := &store.ClaimSessionLineageRequest{
+		Namespace:         request.Session.Namespace,
+		SessionName:       request.Session.SessionName,
 		NamespaceUID:      request.NamespaceUID,
-		SessionUID:        lease.Session.SessionUID,
-		ContractVersion:   string(corev1alpha1.AgentRuntimeContractHarnessV2),
+		SessionUID:        request.Session.SessionUID,
+		ContractVersion:   string(contractVersion),
+		LineageGeneration: lineageGeneration,
 		RuntimeIdentity:   request.RuntimeIdentity,
 		ConfigDigest:      request.ConfigDigest,
 		Provenance:        provenance,
-		EstablishIfAbsent: true,
-	}); err != nil {
-		return c.releaseLeaseAfterLineageFailure(ctx, request, lease,
-			fmt.Errorf("session lineage claim: %w", err))
 	}
-	return nil
-}
-
-func (c *ACPSessionContinuity) releaseLeaseAfterLineageFailure(
-	ctx context.Context,
-	request ACPAcquireSessionLeaseRequest,
-	lease *ACPSessionLease,
-	cause error,
-) error {
-	if _, releaseErr := c.ReleaseMutationLease(ctx, ACPReleaseSessionLeaseRequest{
-		Lease: *lease, Fence: request.Fence, ReleasedAt: time.Now().UTC(),
-	}); releaseErr != nil {
-		return errors.Join(cause, fmt.Errorf("release session lease after lineage failure: %w", releaseErr))
+	if request.Session.Lineage != nil {
+		claim.Provenance = request.Session.Lineage.Provenance
+		claim.LineageGeneration = request.Session.Lineage.LineageGeneration
+	} else {
+		record, err := c.transcripts.GetSession(ctx, request.Session.Namespace, request.Session.SessionName)
+		if err != nil {
+			return nil, fmt.Errorf("read session transcript for lineage classification: %w", err)
+		}
+		// A nonempty unclassified Session is never adopted implicitly. The
+		// sealed inventory/adjudication path must establish its lineage first.
+		claim.EstablishIfAbsent = record.MessageCount == 0
 	}
-	return cause
+	if err := claim.Validate(); err != nil {
+		return nil, err
+	}
+	return claim, nil
 }
 
 func (c *ACPSessionContinuity) ReleaseMutationLease(ctx context.Context, request ACPReleaseSessionLeaseRequest) (*store.SessionControl, error) {
@@ -609,9 +619,6 @@ func (c *ACPSessionContinuity) ResumeSessionTurnFinalization(ctx context.Context
 // assistant result, snapshots any durable publication receipt, releases only
 // the matching lease, and derives baseline advancement inside the store.
 func (c *ACPSessionContinuity) FinalizeAssistantResult(ctx context.Context, request ACPFinalizeAssistantRequest) (*ACPSessionFinalization, error) {
-	if strings.TrimSpace(request.AssistantResult) == "" {
-		return nil, store.ValidationErrorf("assistant result is required")
-	}
 	if err := store.ValidateControlText("assistant result", request.AssistantResult); err != nil {
 		return nil, err
 	}
@@ -684,6 +691,9 @@ func (c *ACPSessionContinuity) finalizeTurn(
 	finalizationIdentity := map[string]any{
 		"turnID": sessionTurn.Turn.ID, "terminalKind": terminalKind, "terminalContent": terminalContent,
 		"publicationID": publicationID, "projectionID": projection.ID, "projectionPayloadDigest": projection.PayloadDigest,
+	}
+	if blockReason != "" {
+		finalizationIdentity["blockReason"] = blockReason
 	}
 	if sessionTurn.SkipTranscriptAppend {
 		finalizationIdentity["skipTranscriptAppend"] = true

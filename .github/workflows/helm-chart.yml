@@ -8,6 +8,7 @@ on:
     paths:
       - "api/**"
       - "cmd/build/helmify/**"
+      - "cmd/orka-agent-harness-wrapper/**"
       - "config/**"
       - "internal/controller/**"
       - "manifest_staging/**"
@@ -16,12 +17,15 @@ on:
       - "go.mod"
       - "go.sum"
       - "Makefile"
+      - "workers/harness/**"
       - "scripts/apply-helm-crds.sh"
+      - "scripts/coexistence-bridge-crd-validate.sh"
       - ".github/workflows/helm-chart.yml"
   pull_request:
     paths:
       - "api/**"
       - "cmd/build/helmify/**"
+      - "cmd/orka-agent-harness-wrapper/**"
       - "config/**"
       - "internal/controller/**"
       - "manifest_staging/**"
@@ -30,7 +34,9 @@ on:
       - "go.mod"
       - "go.sum"
       - "Makefile"
+      - "workers/harness/**"
       - "scripts/apply-helm-crds.sh"
+      - "scripts/coexistence-bridge-crd-validate.sh"
       - ".github/workflows/helm-chart.yml"
   workflow_dispatch:
 
@@ -69,6 +75,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          bash -n scripts/coexistence-bridge-crd-validate.sh
           make manifests
           if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
             echo "Generated staging manifests are stale." >&2
@@ -81,7 +88,7 @@ jobs:
             test "$(grep -c "secretName: ${secret}" manifest_staging/deploy/orka.yaml)" -ge 1
           done
           if grep -Fq 'harness-wrapper' manifest_staging/deploy/orka.yaml; then
-            echo "The staged installer reintroduced the removed v1 harness wrapper." >&2
+            echo "The default ACP Kustomize installer must not enable the opt-in harness v1 wrapper." >&2
             exit 1
           fi
           if grep -q '^kind: Secret$' manifest_staging/deploy/orka.yaml; then
@@ -105,7 +112,11 @@ jobs:
           long_provider_secret=$(mktemp)
           long_scm_service=$(mktemp)
           long_scm_secret=$(mktemp)
-          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}"' EXIT
+          harness_v1_render=$(mktemp)
+          harness_v1_deployment=$(mktemp)
+          harness_v1_network_policy=$(mktemp)
+          harness_v1_kustomize=$(mktemp)
+          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}" "${harness_v1_render}" "${harness_v1_deployment}" "${harness_v1_network_policy}" "${harness_v1_kustomize}"' EXIT
           helm template orka manifest_staging/charts/orka             --namespace "${NAMESPACE}"             > "${default_render}"
           helm template secondary manifest_staging/charts/orka             --namespace "${NAMESPACE}"             > "${secondary_render}"
           helm template secondary manifest_staging/charts/orka             --namespace "${NAMESPACE}"             --show-only templates/rbac.yaml             > "${secondary_rbac}"
@@ -121,6 +132,18 @@ jobs:
           helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --show-only templates/scm-egress-proxy-service.yaml > "${long_scm_service}"
           helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --show-only templates/scm-egress-proxy-secret.yaml > "${long_scm_secret}"
 
+          harness_v1_digest="sha256:$(printf '1%.0s' {1..64})"
+          harness_v1_args=(
+            --namespace "${NAMESPACE}"
+            --set harnessV1.enabled=true
+            --set-string "harnessV1.image.digest=${harness_v1_digest}"
+            --set-string harnessV1.auth.existingSecret=harness-wrapper-auth
+          )
+          helm template coexistence manifest_staging/charts/orka "${harness_v1_args[@]}" > "${harness_v1_render}"
+          helm template coexistence manifest_staging/charts/orka "${harness_v1_args[@]}" --show-only templates/harness-wrapper-deployment.yaml > "${harness_v1_deployment}"
+          helm template coexistence manifest_staging/charts/orka "${harness_v1_args[@]}" --show-only templates/harness-wrapper-networkpolicy.yaml > "${harness_v1_network_policy}"
+          "$(pwd)/bin/kustomize" build config/harness-wrapper > "${harness_v1_kustomize}"
+
           grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
           grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc:8080" "${secondary_render}"
           grep -Fq -- "--ai-worker-service-account-name=orka-ai-worker" "${default_render}"
@@ -128,6 +151,33 @@ jobs:
             echo "Default chart values must not require an undeclared external Vekil namespace." >&2
             exit 1
           fi
+          if grep -Fq -- "agent-harness-wrapper" "${default_render}"; then
+            echo "Default Helm values must keep harness v1 disabled." >&2
+            exit 1
+          fi
+          if helm template unsafe manifest_staging/charts/orka --namespace "${NAMESPACE}" --set harnessV1.enabled=true >/dev/null 2>&1; then
+            echo "Harness v1 must reject an enabled render without an immutable image digest." >&2
+            exit 1
+          fi
+          for kind in Deployment Service ServiceAccount PersistentVolumeClaim NetworkPolicy; do
+            grep -Fq -- "kind: ${kind}" "${harness_v1_render}"
+          done
+          grep -Fq -- "agent-harness-wrapper@${harness_v1_digest}" "${harness_v1_deployment}"
+          grep -Fq -- "type: Recreate" "${harness_v1_deployment}"
+          grep -Fq -- "automountServiceAccountToken: false" "${harness_v1_deployment}"
+          grep -Fq -- "ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH" "${harness_v1_deployment}"
+          grep -Fq -- "/var/lib/orka/harness-v1/admission-ledger.db" "${harness_v1_deployment}"
+          if grep -Eq -- 'ORKA_SA_TOKEN_PATH|upload-token|GIT_TOKEN|GITHUB_TOKEN|ORKA_WORKSPACE_PUBLISHER|provider-auth' "${harness_v1_deployment}"; then
+            echo "Harness v1 received an ambient Git, publication, or provider credential surface." >&2
+            exit 1
+          fi
+          grep -Fq -- "app.kubernetes.io/component: controller" "${harness_v1_network_policy}"
+          grep -Fq -- "kubernetes.io/metadata.name: kube-system" "${harness_v1_network_policy}"
+          grep -Fq -- "cidr: 0.0.0.0/0" "${harness_v1_network_policy}"
+          grep -Fq -- "port: 443" "${harness_v1_network_policy}"
+          grep -Fq -- "agent-harness-wrapper@sha256:0000000000000000000000000000000000000000000000000000000000000000" "${harness_v1_kustomize}"
+          grep -Fq -- "ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH" "${harness_v1_kustomize}"
+          grep -Fq -- "kind: NetworkPolicy" "${harness_v1_kustomize}"
           for tier in ai vendor container; do
             account="secondary-orka-${tier}-worker"
             grep -Fq -- "--${tier}-worker-service-account-name=${account}" "${secondary_render}"
@@ -155,10 +205,9 @@ jobs:
             echo "AI workers must not receive an unrestricted TokenRequest ClusterRole." >&2
             exit 1
           fi
-          if grep -Rq 'harness-wrapper' manifest_staging/charts/orka/templates; then
-            echo "The generated chart reintroduced removed v1 harness-wrapper templates." >&2
-            exit 1
-          fi
+          for template in deployment service serviceaccount secret pvc networkpolicy; do
+            test -f "manifest_staging/charts/orka/templates/harness-wrapper-${template}.yaml"
+          done
 
           mkdir -p cr-release-packages
           helm package manifest_staging/charts/orka --destination cr-release-packages
@@ -168,7 +217,7 @@ jobs:
             echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
             exit 1
           fi
-          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 26
+          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 29
 
       - name: Install kind
         run: |
@@ -200,6 +249,9 @@ jobs:
           chart_package=${chart_packages[0]}
 
           expected_crds=$(cat <<'CRDS'
+          agentexecutionadjudications.core.orka.ai
+          agentexecutioncontrols.core.orka.ai
+          agentexecutionpolicies.core.orka.ai
           agentruntimes.core.orka.ai
           agents.core.orka.ai
           branchclaims.core.orka.ai
@@ -264,6 +316,7 @@ jobs:
             --set scmEgressProxy.enabled=false
 
           assert_all_orka_crds "after helm install"
+          NAMESPACE="${NAMESPACE}-bridge" scripts/coexistence-bridge-crd-validate.sh
 
           kubectl patch crd tasks.core.orka.ai --type=json -p='[
             {"op":"add","path":"/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/staleReviewField","value":{"type":"string"}}

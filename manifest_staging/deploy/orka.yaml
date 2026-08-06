@@ -897,6 +897,43 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agentexecutionadjudications
+  - agentexecutioncontrols
+  - agentexecutionpolicies
+  - outboundaccesspolicies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agentexecutionadjudications/status
+  - agentexecutioncontrols/status
+  - agentruntimes/status
+  - agents/status
+  - branchclaims/status
+  - controllerepochs/status
+  - externaleffects/status
+  - outboundaccesspolicies/status
+  - promptattempts/status
+  - providers/status
+  - publications/status
+  - repositorymonitors/status
+  - repositoryscans/status
+  - runtimepools/status
+  - runtimesessioncontrols/status
+  - skills/status
+  - substrateactorpools/status
+  - tasks/status
+  - tools/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - core.orka.ai
+  resources:
   - agentruntimes
   - agents
   - branchclaims
@@ -943,38 +980,6 @@ rules:
   - tools/finalizers
   verbs:
   - update
-- apiGroups:
-  - core.orka.ai
-  resources:
-  - agentruntimes/status
-  - agents/status
-  - branchclaims/status
-  - controllerepochs/status
-  - externaleffects/status
-  - outboundaccesspolicies/status
-  - promptattempts/status
-  - providers/status
-  - publications/status
-  - repositorymonitors/status
-  - repositoryscans/status
-  - runtimepools/status
-  - runtimesessioncontrols/status
-  - skills/status
-  - substrateactorpools/status
-  - tasks/status
-  - tools/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - core.orka.ai
-  resources:
-  - outboundaccesspolicies
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - discovery.k8s.io
   resources:
@@ -2056,6 +2061,9 @@ spec:
         - --health-probe-bind-address=:8081
         - --store-backend=sqlite
         - --store-path=/data/orka.db
+        - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
+        - --agent-execution-snapshot-retention=720h
+        - --agent-execution-snapshot-retention-interval=1h
         - --controller-url=http://orka-api.orka-system.svc:8080
         - --acp-runtime-enabled=true
         - --acp-upgrade-drain-bind-address=127.0.0.1:8083
@@ -2174,6 +2182,9 @@ spec:
         - mountPath: /var/run/orka/provider-auth
           name: provider-auth-proxy
           readOnly: true
+        - mountPath: /var/run/orka/agent-execution-snapshot
+          name: agent-execution-snapshot-key
+          readOnly: true
       securityContext:
         fsGroup: 65532
         runAsNonRoot: true
@@ -2205,6 +2216,13 @@ spec:
           - key: token
             path: token
           secretName: provider-auth-proxy
+      - name: agent-execution-snapshot-key
+        secret:
+          defaultMode: 256
+          items:
+          - key: snapshot-key
+            path: key
+          secretName: agent-execution-snapshot-key
 ---
 apiVersion: apps/v1
 kind: Deployment

@@ -64,15 +64,14 @@ spec:
                 description: |-
                   AgentExecutionAdjudicationAction is a one-way operator resolution. Actions
                   never authorize prompt replay, publication replay, or protocol mutation.
+                  The coexistence API currently admits only cleanup actions whose exact
+                  Applied resolution can be consumed by route-aware finalization. The other
+                  constants below are reserved until their required receipt, break-glass, or
+                  destination-lineage evidence is represented by the API.
                 enum:
-                - ConfirmV1Outcome
-                - ConfirmV2Outcome
                 - CleanupV1
                 - CleanupV2
                 - CleanupBoth
-                - MarkNoExecution
-                - AbandonOutcomeUnknown
-                - BootstrapNewLineage
                 type: string
               blockedStateDigest:
                 description: BlockedStateDigest matches the blocked Session state

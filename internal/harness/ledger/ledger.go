@@ -392,5 +392,27 @@ func scanTurn(row rowScanner) (*TurnRecord, error) {
 	record.State = TurnState(state)
 	record.CreatedAt = record.CreatedAt.UTC()
 	record.UpdatedAt = record.UpdatedAt.UTC()
+	if err := validateTurnRecordIntegrity(record); err != nil {
+		return nil, err
+	}
 	return &record, nil
+}
+
+func validateTurnRecordIntegrity(record TurnRecord) error {
+	switch record.State {
+	case TurnTerminal, TurnOutcomeUnknown:
+		if len(record.TerminalReceipt) == 0 || strings.TrimSpace(record.TerminalReceiptDigest) == "" {
+			return fmt.Errorf("corrupt terminal turn record: receipt and digest are required")
+		}
+		if ReceiptDigest(record.TerminalReceipt) != record.TerminalReceiptDigest {
+			return fmt.Errorf("corrupt terminal turn record: receipt digest mismatch")
+		}
+	case TurnAdmitted, TurnAccepted, TurnRejected:
+		if len(record.TerminalReceipt) != 0 || record.TerminalReceiptDigest != "" {
+			return fmt.Errorf("corrupt nonterminal turn record: unexpected terminal receipt")
+		}
+	default:
+		return fmt.Errorf("corrupt turn record: unsupported state %q", record.State)
+	}
+	return nil
 }

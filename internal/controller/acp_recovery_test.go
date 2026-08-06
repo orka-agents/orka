@@ -183,9 +183,9 @@ func TestACPDispatcherRecoveryReusesExistingTaskScopedTerminalProjection(t *test
 		},
 	}
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		Key: key, RequestDigest: task.Status.Execution.RequestDigest,
-	}, oldFence)
+	}), oldFence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t *te
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task, pool, secret).Build()
 	attemptKey := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: attemptKey, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: attemptKey, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,22 +460,45 @@ func TestRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t *te
 
 func TestRecoveredWriteSessionPublicationCleanupByRuntimeState(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		state      harnessv2.RuntimeSessionState
-		operations []string
+		name              string
+		state             harnessv2.RuntimeSessionState
+		omitTaskDelivery  bool
+		prepareOperations []string
+		finalOperations   []string
 	}{
-		{name: "publication prepared", state: harnessv2.RuntimeSessionStatePublicationPrepared, operations: []string{"finalize", "delete"}},
-		{name: "finalizing", state: harnessv2.RuntimeSessionStateFinalizing, operations: []string{"delete"}},
+		{
+			name: "publication prepared", state: harnessv2.RuntimeSessionStatePublicationPrepared,
+			prepareOperations: []string{"finalize"}, finalOperations: []string{"finalize", "delete"},
+		},
+		{
+			name: "publication prepared before Task delivery projection", state: harnessv2.RuntimeSessionStatePublicationPrepared,
+			omitTaskDelivery: true, prepareOperations: []string{"finalize"}, finalOperations: []string{"finalize", "delete"},
+		},
+		{name: "finalizing", state: harnessv2.RuntimeSessionStateFinalizing, finalOperations: []string{"delete"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newRecoveredWriteCleanupFixture(t, recoveredWriteCleanupOptions{state: test.state})
+			if test.omitTaskDelivery {
+				fixture.task.Status.Delivery = nil
+			}
+			prepared, err := fixture.dispatcher.prepareRecoveredTaskScopedRuntimeSessionForSettlement(fixture.ctx, fixture.task.DeepCopy())
+			if err != nil || !prepared {
+				t.Fatalf("prepare for settlement = ready:%v err:%v, want ready", prepared, err)
+			}
+			operations, _, deletes := fixture.trace.snapshot()
+			if fmt.Sprint(operations) != fmt.Sprint(test.prepareOperations) {
+				t.Fatalf("pre-settlement operations = %v, want %v", operations, test.prepareOperations)
+			}
+			if len(deletes) != 0 {
+				t.Fatalf("pre-settlement delete requests = %d, want 0", len(deletes))
+			}
 			complete, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, fixture.task.DeepCopy())
 			if err != nil || !complete {
 				t.Fatalf("cleanup = complete:%v err:%v, want complete", complete, err)
 			}
 			operations, finalizations, deletes := fixture.trace.snapshot()
-			if fmt.Sprint(operations) != fmt.Sprint(test.operations) {
-				t.Fatalf("cleanup operations = %v, want %v", operations, test.operations)
+			if fmt.Sprint(operations) != fmt.Sprint(test.finalOperations) {
+				t.Fatalf("cleanup operations = %v, want %v", operations, test.finalOperations)
 			}
 			if len(deletes) != 1 {
 				t.Fatalf("delete requests = %d, want 1", len(deletes))
@@ -735,7 +758,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 		t.Fatal(err)
 	}
 	attemptKey := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(taskUID), Attempt: 1, PromptID: promptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: attemptKey, RequestDigest: testControlDigestForDispatcher("session-crash")}, oldFence)
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: attemptKey, RequestDigest: testControlDigestForDispatcher("session-crash")}), oldFence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -743,6 +766,8 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 	lease, err := continuity.AcquireMutationLease(ctx, ACPAcquireSessionLeaseRequest{
 		Session: *control, Fence: oldFence, TaskUID: string(taskUID), Attempt: 1, PromptID: promptID,
 		PromptRequestDigest: attempt.RequestDigest, AcquiredAt: time.Date(2026, 7, 25, 12, 1, 0, 0, time.UTC),
+		NamespaceUID: "default-namespace-uid", RuntimeIdentity: "codex",
+		ConfigDigest: testControlDigestForDispatcher("session-crash-profile"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -885,6 +910,7 @@ type recoveredWriteCleanupTrace struct {
 	operations    []string
 	finalizations []harnessv2.FinalizeRuntimeSessionPublicationRequest
 	deletes       []harnessv2.DeleteRuntimeSessionRequest
+	finalized     bool
 	deleted       bool
 }
 
@@ -997,14 +1023,19 @@ func newRecoveredWriteCleanupFixture(t *testing.T, options recoveredWriteCleanup
 			now := time.Now().UTC()
 			trace.mu.Lock()
 			deleted := trace.deleted
+			finalized := trace.finalized
 			trace.mu.Unlock()
 			sessions := []harnessv2.RuntimeSessionStatus(nil)
 			resident := uint32(0)
 			if !deleted || !options.omitDeletedSessionFromStatus {
+				state := options.state
+				if finalized && state == harnessv2.RuntimeSessionStatePublicationPrepared {
+					state = harnessv2.RuntimeSessionStateFinalizing
+				}
 				sessions = []harnessv2.RuntimeSessionStatus{{
 					RuntimeSessionID: "runtime-session-recovered-write", RuntimeSessionUID: "session-recovered-write",
-					Generation: 1, State: options.state,
-					ReservedForFinalization: options.state == harnessv2.RuntimeSessionStateFinalizing,
+					Generation: 1, State: state,
+					ReservedForFinalization: state == harnessv2.RuntimeSessionStateFinalizing,
 					LastTransitionAt:        now,
 				}}
 				resident = 1
@@ -1029,6 +1060,7 @@ func newRecoveredWriteCleanupFixture(t *testing.T, options recoveredWriteCleanup
 			trace.mu.Lock()
 			trace.operations = append(trace.operations, "finalize")
 			trace.finalizations = append(trace.finalizations, request)
+			trace.finalized = true
 			trace.mu.Unlock()
 			now := time.Now().UTC()
 			writeDispatcherJSON(w, harnessv2.FinalizeRuntimeSessionPublicationResponse{
@@ -1185,9 +1217,11 @@ func transitionACPRecoveryAttempt(
 
 func newACPRecoveryContinuity(t *testing.T, controls store.DurableControlStore, transcripts store.SessionStore, sessionUID string) *ACPSessionContinuity {
 	t.Helper()
+	lineages, _ := transcripts.(store.SessionLineageStore)
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 		SessionControls: controls, Transcripts: transcripts,
 		Publications: controls, BranchClaims: controls,
+		Lineages:      lineages,
 		NewSessionUID: func() (string, error) { return sessionUID, nil },
 	})
 	if err != nil {
@@ -1253,9 +1287,9 @@ func newACPRecoveryFixture(t *testing.T, target store.PromptExecutionState) *rec
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: testControlDigestForDispatcher("recovery"),
-	}, oldFence)
+	}), oldFence)
 	if err != nil {
 		t.Fatal(err)
 	}

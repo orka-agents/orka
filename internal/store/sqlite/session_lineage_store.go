@@ -12,18 +12,16 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// ClaimSessionLineage implements store.SessionLineageStore. The claim is
-// serialized by the single-writer SQLite connection plus an immediate
-// transaction, so two concurrent first-use claims converge on exactly one
-// lineage: the second claim either verifies successfully against the first or
-// fails with ErrConflict.
-func (s *Store) ClaimSessionLineage(ctx context.Context, request store.ClaimSessionLineageRequest) (*store.SessionLineage, error) {
-	if err := request.Validate(); err != nil {
+// ProjectSessionLineage implements store.SessionLineageStore. Kubernetes has
+// already established the authoritative lineage and mutation Lease before
+// this idempotent payload projection runs. A conflicting row is an integrity
+// failure to repair explicitly, never a SQLite decision about Session owner.
+func (s *Store) ProjectSessionLineage(ctx context.Context, lineage store.SessionLineage) (*store.SessionLineage, error) {
+	if err := lineage.Validate(); err != nil {
 		return nil, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -33,15 +31,15 @@ func (s *Store) ClaimSessionLineage(ctx context.Context, request store.ClaimSess
 	defer func() { _ = tx.Rollback() }()
 
 	existing, err := scanSessionLineage(tx.QueryRowContext(ctx, sessionLineageSelectSQL+`
-		WHERE namespace = ? AND session_name = ?`, request.Namespace, request.SessionName))
+		WHERE namespace = ? AND session_name = ?`, lineage.Namespace, lineage.SessionName))
 	switch {
 	case err == nil:
-		if mismatch := sessionLineageMismatch(existing, request); mismatch != "" {
+		if mismatch := sessionLineageProjectionMismatch(existing, lineage); mismatch != "" {
 			return nil, fmt.Errorf("%w: session %s/%s lineage %s", store.ErrConflict,
-				request.Namespace, request.SessionName, mismatch)
+				lineage.Namespace, lineage.SessionName, mismatch)
 		}
 		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("commit session lineage verification: %w", err)
+			return nil, fmt.Errorf("commit session lineage projection verification: %w", err)
 		}
 		return existing, nil
 	case errors.Is(err, sql.ErrNoRows):
@@ -49,38 +47,22 @@ func (s *Store) ClaimSessionLineage(ctx context.Context, request store.ClaimSess
 		return nil, fmt.Errorf("read session lineage: %w", err)
 	}
 
-	if !request.EstablishIfAbsent {
-		return nil, fmt.Errorf("%w: session %s/%s has no established lineage and this claim may not establish one",
-			store.ErrNotFound, request.Namespace, request.SessionName)
-	}
-
-	now := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO session_lineages
 		(namespace, session_name, namespace_uid, session_uid, contract_version,
 		 lineage_generation, runtime_identity, config_digest, provenance, version, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?)`,
-		request.Namespace, request.SessionName, request.NamespaceUID, request.SessionUID,
-		request.ContractVersion, request.RuntimeIdentity, request.ConfigDigest,
-		string(request.Provenance), now, now); err != nil {
-		return nil, fmt.Errorf("establish session lineage: %w", err)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		lineage.Namespace, lineage.SessionName, lineage.NamespaceUID, lineage.SessionUID,
+		lineage.ContractVersion, lineage.LineageGeneration, lineage.RuntimeIdentity, lineage.ConfigDigest,
+		string(lineage.Provenance), lineage.Version, lineage.CreatedAt.UTC(), lineage.UpdatedAt.UTC()); err != nil {
+		return nil, fmt.Errorf("project session lineage: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit session lineage claim: %w", err)
+		return nil, fmt.Errorf("commit session lineage projection: %w", err)
 	}
-	return &store.SessionLineage{
-		Namespace:         request.Namespace,
-		SessionName:       request.SessionName,
-		NamespaceUID:      request.NamespaceUID,
-		SessionUID:        request.SessionUID,
-		ContractVersion:   request.ContractVersion,
-		LineageGeneration: 1,
-		RuntimeIdentity:   request.RuntimeIdentity,
-		ConfigDigest:      request.ConfigDigest,
-		Provenance:        request.Provenance,
-		Version:           1,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}, nil
+	result := lineage
+	result.CreatedAt = result.CreatedAt.UTC()
+	result.UpdatedAt = result.UpdatedAt.UTC()
+	return &result, nil
 }
 
 // GetSessionLineage implements store.SessionLineageStore.
@@ -137,20 +119,24 @@ func scanSessionLineage(row sessionLineageScanner) (*store.SessionLineage, error
 	return &lineage, nil
 }
 
-// sessionLineageMismatch reports the first identity mismatch between an
-// existing lineage and a claim, or empty when the claim verifies. ConfigDigest
-// is intentionally not compared: configuration may evolve within one lineage,
-// and profile-identity changes are enforced at dispatch, not here.
-func sessionLineageMismatch(existing *store.SessionLineage, request store.ClaimSessionLineageRequest) string {
+// sessionLineageProjectionMismatch reports any immutable difference between
+// the Kubernetes-authoritative record and its SQLite payload projection.
+func sessionLineageProjectionMismatch(existing *store.SessionLineage, lineage store.SessionLineage) string {
 	switch {
-	case existing.ContractVersion != request.ContractVersion:
-		return fmt.Sprintf("is bound to contract %s, not %s", existing.ContractVersion, request.ContractVersion)
-	case existing.SessionUID != request.SessionUID:
+	case existing.ContractVersion != lineage.ContractVersion:
+		return fmt.Sprintf("is bound to contract %s, not %s", existing.ContractVersion, lineage.ContractVersion)
+	case existing.SessionUID != lineage.SessionUID:
 		return "belongs to a different Session UID; a recreated same-name Session never attaches to old runtime state"
-	case existing.NamespaceUID != request.NamespaceUID:
+	case existing.NamespaceUID != lineage.NamespaceUID:
 		return "belongs to a different namespace UID; a recreated same-name namespace never attaches to old runtime state"
-	case existing.RuntimeIdentity != request.RuntimeIdentity:
-		return fmt.Sprintf("is bound to runtime identity %q, not %q", existing.RuntimeIdentity, request.RuntimeIdentity)
+	case existing.RuntimeIdentity != lineage.RuntimeIdentity:
+		return fmt.Sprintf("is bound to runtime identity %q, not %q", existing.RuntimeIdentity, lineage.RuntimeIdentity)
+	case existing.ConfigDigest != lineage.ConfigDigest:
+		return fmt.Sprintf("is bound to configuration digest %q, not %q", existing.ConfigDigest, lineage.ConfigDigest)
+	case existing.LineageGeneration != lineage.LineageGeneration:
+		return fmt.Sprintf("has lineage generation %d, not %d", existing.LineageGeneration, lineage.LineageGeneration)
+	case existing.Provenance != lineage.Provenance:
+		return fmt.Sprintf("has provenance %q, not %q", existing.Provenance, lineage.Provenance)
 	default:
 		return ""
 	}

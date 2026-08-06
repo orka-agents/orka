@@ -28,12 +28,12 @@ func TestReclaimPromptAttemptsDefersWhileReferencesRemain(t *testing.T) {
 			name: "nonterminal attempt",
 			block: func(t *testing.T, ctx context.Context, kubeStore *Store, _ client.Client, fence controlstore.ControllerEpochFence, attempt *controlstore.PromptAttempt) {
 				t.Helper()
-				if _, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{
+				if _, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{
 					Key: controlstore.PromptAttemptKey{
 						Namespace: attempt.Key.Namespace, TaskUID: attempt.Key.TaskUID, Attempt: 1, PromptID: "prompt-old",
 					},
 					RequestDigest: testDigest("prompt-old"),
-				}, fence); err != nil {
+				}), fence); err != nil {
 					t.Fatalf("create nonterminal attempt: %v", err)
 				}
 			},
@@ -340,10 +340,10 @@ func TestCreatePromptAttemptRejectsDeletingOrMissingTaskOwner(t *testing.T) {
 	kubeStore, kubeClient, fence := newPromptAttemptReclaimStore(t)
 	const taskUID = "task-reclaim-late-create"
 	createDeletingAgentTask(t, ctx, kubeClient, "tenant-a", taskUID, taskUID)
-	attempt := &controlstore.PromptAttempt{
+	attempt := boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{
 		Key:           controlstore.PromptAttemptKey{Namespace: "tenant-a", TaskUID: taskUID, Attempt: 1, PromptID: "late"},
 		RequestDigest: testDigest("late-create"),
-	}
+	})
 	if _, err := kubeStore.CreatePromptAttempt(ctx, attempt, fence); !errors.Is(err, controlstore.ErrConflict) {
 		t.Fatalf("CreatePromptAttempt(deleting Task) error = %v, want ErrConflict", err)
 	}
@@ -464,12 +464,12 @@ func createFailedPromptAttempt(
 ) *controlstore.PromptAttempt {
 	t.Helper()
 	ensureActiveAgentTask(t, ctx, kubeStore.client, "tenant-a", taskUID, taskUID)
-	attempt, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{
+	attempt, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{
 		Key: controlstore.PromptAttemptKey{
 			Namespace: "tenant-a", TaskUID: taskUID, Attempt: attemptNumber, PromptID: promptID,
 		},
 		RequestDigest: testDigest(taskUID + ":" + promptID),
-	}, fence)
+	}), fence)
 	if err != nil {
 		t.Fatalf("CreatePromptAttempt: %v", err)
 	}

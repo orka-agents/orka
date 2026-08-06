@@ -5802,6 +5802,93 @@ func TestReconcile_CompletedPhase(t *testing.T) {
 // handlePending — transaction token pending
 // ---------------------------------------------------------------------------
 
+func TestHandlePending_QuarantineStopsBeforeExecutionBinding(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "quarantined-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			// Deliberately omit AgentRef: reaching mutable Agent resolution would
+			// fail the Task instead of preserving the immutable quarantine.
+			Prompt: "must never execute",
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhasePending,
+			AgentExecutionQuarantine: &corev1alpha1.AgentExecutionQuarantine{
+				SchemaVersion:        1,
+				Reason:               corev1alpha1.AgentExecutionQuarantineMixedEvidence,
+				MigrationInventoryID: "sealed-inventory-1",
+				V1EvidenceDigest:     "sha256:" + strings.Repeat("1", 64),
+				V2EvidenceDigest:     "sha256:" + strings.Repeat("2", 64),
+				RecordedAt:           metav1.NewTime(time.Date(2026, 8, 6, 1, 0, 0, 0, time.UTC)),
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+
+	result, err := r.handlePending(context.Background(), task.DeepCopy())
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	current := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhasePending ||
+		current.Status.AgentExecutionBinding != nil || current.Status.Execution != nil ||
+		current.Status.HarnessRuntime != nil {
+		t.Fatalf("quarantined Task acquired execution state: %#v", current.Status)
+	}
+	assertNoJobsForTask(t, r, task)
+}
+
+func TestHandlePending_NoExecutionDispositionUsesCommonTerminalPath(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "no-execution-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			// Deliberately omit AgentRef to prove the disposition is authoritative.
+			Prompt: "must never execute",
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhasePending,
+			AgentExecutionNoExecution: &corev1alpha1.AgentExecutionNoExecution{
+				SchemaVersion:        1,
+				State:                corev1alpha1.AgentExecutionNoExecutionUnbound,
+				MigrationInventoryID: "sealed-inventory-1",
+				EvidenceDigest:       "sha256:" + strings.Repeat("3", 64),
+				RecordedAt:           metav1.NewTime(time.Date(2026, 8, 6, 1, 0, 0, 0, time.UTC)),
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+
+	result, err := r.handlePending(context.Background(), task.DeepCopy())
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("result = %#v, want one-second terminal common-cleanup follow-up", result)
+	}
+	current := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseCancelled ||
+		current.Status.AgentExecutionBinding != nil || current.Status.Execution != nil ||
+		current.Status.HarnessRuntime != nil {
+		t.Fatalf("no-execution Task acquired execution state: %#v", current.Status)
+	}
+	if !strings.Contains(current.Status.Message, "UnboundNoExecution") {
+		t.Fatalf("message = %q, want immutable no-execution disposition", current.Status.Message)
+	}
+	assertNoJobsForTask(t, r, task)
+}
+
 func TestHandlePending_TransactionTokenPendingRequeuesWithoutJob(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -5839,7 +5926,10 @@ func TestHandlePending_BuiltInAgentRuntimeFailsClosedWhenACPDisabled(t *testing.
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeCodex,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	task := &corev1alpha1.Task{
@@ -7188,10 +7278,10 @@ func TestHandlePending_ExpiredAgentSettlesDurableAttemptBeforeStatusBinding(t *t
 	}
 	promptID := fmt.Sprintf("prompt-%s-1", task.UID)
 	attemptKey := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		Key: attemptKey, RequestDigest: testControlDigestForDispatcher("expired-durable-attempt"),
 		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence)
+	}), fence)
 	if err != nil {
 		cancelEpoch()
 		t.Fatal(err)
@@ -8939,6 +9029,220 @@ func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
 	}
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHandleDeletionNoExecutionSkipsHarnessReclamation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "no-execution-delete", Namespace: defaultNS, UID: types.UID("no-execution-delete-uid"),
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseCancelled,
+			AgentExecutionNoExecution: &corev1alpha1.AgentExecutionNoExecution{
+				SchemaVersion:        1,
+				State:                corev1alpha1.AgentExecutionNoExecutionUnbound,
+				MigrationInventoryID: "sealed-inventory-1",
+				EvidenceDigest:       "sha256:" + strings.Repeat("d", 64),
+				RecordedAt:           metav1.NewTime(time.Date(2026, 8, 6, 2, 0, 0, 0, time.UTC)),
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	base, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	durable := sqlite.NewStore(db, "no-execution-finalizer-test")
+	controlStore, err := storekube.NewComposite(base, defaultNS, durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epochs := NewControllerEpochManager(controlStore, "no-execution-finalizer-controller").WithMirror(durable)
+	epochCtx, cancelEpoch := context.WithCancel(ctx)
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	defer func() {
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Errorf("stop epoch manager: %v", err)
+		}
+	}()
+	if _, err := epochs.CurrentFence(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r.DurableControlStore = controlStore
+	r.ControllerEpochManager = epochs
+	r.APIReader = base
+
+	acpProtocolInventoryReads := 0
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, delegate client.WithWatch, list client.ObjectList, options ...client.ListOption) error {
+			if _, ok := list.(*corev1alpha1.ExternalEffectList); ok {
+				acpProtocolInventoryReads++
+				return errors.New("ACP protocol inventory must not run for a no-execution disposition")
+			}
+			return delegate.List(ctx, list, options...)
+		},
+	})
+
+	current := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := r.handleDeletion(ctx, current)
+	if err != nil {
+		t.Fatalf("handleDeletion() error = %v; no-execution disposition must not require a harness store", err)
+	}
+	if result != (ctrl.Result{}) {
+		t.Fatalf("handleDeletion() result = %#v, want no requeue", result)
+	}
+	if acpProtocolInventoryReads != 0 {
+		t.Fatalf("ACP protocol inventory reads = %d, want zero for immutable no-execution cleanup", acpProtocolInventoryReads)
+	}
+	deleted := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), deleted); err == nil {
+		if controllerutil.ContainsFinalizer(deleted, labels.TaskFinalizer) {
+			t.Fatalf("Task finalizer remained after common no-execution cleanup: %#v", deleted.Finalizers)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestHandleDeletionWaitsForHarnessV1AttemptReclamation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	scheme := newTestScheme()
+	bindingDigest := "sha256:" + strings.Repeat("a", 64)
+	snapshotDigest := "sha256:" + strings.Repeat("b", 64)
+	requestDigest := "sha256:" + strings.Repeat("c", 64)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "v1-active-delete", Namespace: "default", UID: types.UID("v1-active-delete-uid"),
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
+			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+			BindingDigest:   bindingDigest,
+			Snapshot:        corev1alpha1.AgentExecutionSnapshotRef{Digest: snapshotDigest},
+		}},
+	}
+	r := newUnitReconciler(scheme, task)
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	durable := sqlite.NewStore(db, "v1-finalizer-test")
+	controlStore, err := storekube.NewComposite(r.Client, "default", durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epochs := NewControllerEpochManager(controlStore, "v1-finalizer-controller").WithMirror(durable)
+	epochCtx, cancelEpoch := context.WithCancel(ctx)
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	defer func() {
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Errorf("stop epoch manager: %v", err)
+		}
+	}()
+	fence, err := epochs.CurrentFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := &store.HarnessV1Attempt{
+		Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID), Attempt: 1,
+		BindingDigest: bindingDigest, SnapshotDigest: snapshotDigest, RequestDigest: requestDigest,
+		TurnID: "turn-v1-active-delete", State: store.HarnessV1AttemptPrepared,
+		RetryClass: store.HarnessV1RetryClassNone,
+	}
+	if err := durable.CreateHarnessV1Attempt(ctx, attempt, fence); err != nil {
+		t.Fatal(err)
+	}
+	r.HarnessV1Attempts = durable
+	r.ControllerEpochManager = epochs
+	r.APIReader = r.Client
+
+	current := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	result, err := r.handleDeletion(ctx, current)
+	if err != nil {
+		t.Fatalf("handleDeletion() with active v1 attempt: %v", err)
+	}
+	if result.RequeueAfter != 2*time.Second {
+		t.Fatalf("active v1 deletion requeue = %v, want 2s", result.RequeueAfter)
+	}
+	retained := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), retained); err != nil {
+		t.Fatal(err)
+	}
+	if !controllerutil.ContainsFinalizer(retained, labels.TaskFinalizer) {
+		t.Fatal("active harness v1 attempt did not retain the Task finalizer")
+	}
+	persisted, err := durable.GetHarnessV1Attempt(ctx, store.HarnessV1AttemptKey{
+		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason := "BackendDisabled"
+	if _, err := durable.TransitionHarnessV1Attempt(ctx, store.HarnessV1AttemptTransition{
+		Key:             store.HarnessV1AttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1},
+		ExpectedVersion: persisted.Version,
+		ExpectedState:   store.HarnessV1AttemptPrepared,
+		TargetState:     store.HarnessV1AttemptRejected,
+		OperationID:     "reject-before-delete",
+		OperationDigest: store.CanonicalAgentExecutionSnapshotDigest([]byte("reject-before-delete")),
+		Fence:           fence,
+		Updates:         store.HarnessV1AttemptUpdates{TerminalReason: &reason},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.handleDeletion(ctx, retained); err != nil {
+		t.Fatalf("handleDeletion() after terminal v1 attempt: %v", err)
+	}
+	if _, err := durable.GetHarnessV1Attempt(ctx, store.HarnessV1AttemptKey{
+		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1,
+	}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("reclaimed harness v1 attempt error = %v, want not found", err)
+	}
+	deleted := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), deleted); err == nil {
+		if controllerutil.ContainsFinalizer(deleted, labels.TaskFinalizer) {
+			t.Fatalf("Task finalizer remained after terminal v1 reclamation: %#v", deleted.Finalizers)
+		}
+	} else if !apierrors.IsNotFound(err) {
 		t.Fatal(err)
 	}
 }

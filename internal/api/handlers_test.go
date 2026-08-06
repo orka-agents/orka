@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
@@ -37,6 +38,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -2649,6 +2651,72 @@ func TestHandlers_GetSession_Success(t *testing.T) {
 	if result["messageCount"] != float64(3) {
 		t.Errorf("messageCount = %v, want 3", result["messageCount"])
 	}
+}
+
+func TestHandlers_GetSessionProjectsSafeExecutionControl(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	const sessionName = "lineage-session"
+	control := &corev1alpha1.RuntimeSessionControl{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            storekube.RuntimeSessionControlObjectName(sessionName),
+			Namespace:       "default",
+			ResourceVersion: "42",
+		},
+		Spec: corev1alpha1.RuntimeSessionControlSpec{
+			SessionName:          sessionName,
+			SessionUID:           "session-uid",
+			RuntimePoolRef:       "opencode-read",
+			RuntimeProfileDigest: "sha256:" + strings.Repeat("a", 64),
+		},
+		Status: corev1alpha1.RuntimeSessionControlStatus{
+			Generation:              3,
+			Lifecycle:               corev1alpha1.RuntimeSessionControlLifecycle("Finalizing"),
+			Availability:            corev1alpha1.RuntimeSessionControlAvailability("ReconciliationBlocked"),
+			MutationLeaseGeneration: 8,
+			BlockedReason:           "publication outcome unknown",
+			RelatedPublicationID:    "publication-1",
+			Lineage: &corev1alpha1.RuntimeSessionLineageStatus{
+				NamespaceUID:    "namespace-uid",
+				SessionUID:      "session-uid",
+				ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+				Generation:      1,
+				RuntimeIdentity: "opencode",
+				ConfigDigest:    "sha256:" + strings.Repeat("b", 64),
+				Provenance:      corev1alpha1.RuntimeSessionLineageFirstUse,
+				EstablishedAt:   metav1.NewTime(time.Date(2026, time.August, 6, 0, 0, 0, 0, time.UTC)),
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(control).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: "default", Name: sessionName, SessionType: "task",
+	}))
+
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: fakeClient, SessionStore: ss})
+	app := fiber.New()
+	app.Get("/sessions/:id", handlers.GetSession)
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions/"+sessionName, nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	projected := result["executionControl"].(map[string]any)
+	require.Equal(t, "session-uid", projected["sessionUID"])
+	require.Equal(t, "ReconciliationBlocked", projected["availability"])
+	require.Equal(t, "publication outcome unknown", projected["blockedReason"])
+	lineage := projected["lineage"].(map[string]any)
+	require.Equal(t, "orka.harness.v2", lineage["contractVersion"])
+	require.Equal(t, "opencode", lineage["runtimeIdentity"])
+	require.NotContains(t, projected, "mutationLease")
+	require.NotContains(t, projected, "controllerEpoch")
 }
 
 func TestHandlers_GetSession_HidesGatewaySession(t *testing.T) {

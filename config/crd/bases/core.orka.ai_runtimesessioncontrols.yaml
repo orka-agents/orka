@@ -133,6 +133,57 @@ spec:
               RuntimeSessionControlStatus contains the lifecycle, generation, mutation
               Lease, and independently verified recovery baseline.
             properties:
+              agentExecutionResolutionRef:
+                description: |-
+                  AgentExecutionResolutionRef is the immutable reference to an Applied
+                  adjudication that authorizes a one-way resolution of blocked Session
+                  state. It never changes the recorded lineage.
+                properties:
+                  action:
+                    description: |-
+                      AgentExecutionAdjudicationAction is a one-way operator resolution. Actions
+                      never authorize prompt replay, publication replay, or protocol mutation.
+                      The coexistence API currently admits only cleanup actions whose exact
+                      Applied resolution can be consumed by route-aware finalization. The other
+                      constants below are reserved until their required receipt, break-glass, or
+                      destination-lineage evidence is represented by the API.
+                    enum:
+                    - CleanupV1
+                    - CleanupV2
+                    - CleanupBoth
+                    type: string
+                  adjudicationName:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  adjudicationUID:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                  appliedAt:
+                    format: date-time
+                    type: string
+                  operationDigest:
+                    description: OperationDigest matches the applying adjudication's
+                      status.operationDigest.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  resolutionDigest:
+                    description: |-
+                      ResolutionDigest is the canonical digest of this resolution reference and
+                      matches the adjudication's status.resolutionRefDigest.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                required:
+                - action
+                - adjudicationName
+                - adjudicationUID
+                - appliedAt
+                - operationDigest
+                - resolutionDigest
+                type: object
               availability:
                 description: RuntimeSessionControlAvailability gates the Session mutation
                   lease.
@@ -198,6 +249,70 @@ spec:
                 - Deleting
                 - Deleted
                 type: string
+              lineage:
+                description: |-
+                  Lineage is established or verified in the same RuntimeSessionControl
+                  status CAS that mirrors the authoritative mutation Lease.
+                properties:
+                  configDigest:
+                    description: |-
+                      ConfigDigest freezes the configuration/execution-snapshot identity used
+                      when the lineage was established.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  contractVersion:
+                    description: |-
+                      AgentRuntimeContractVersion identifies the Orka-facing runtime contract.
+                      During harness coexistence both protocol values are schema-valid; omission is
+                      never protocol evidence and is tolerated only for stored objects awaiting the
+                      one-time bridge classification.
+                    enum:
+                    - orka.harness.v1
+                    - orka.harness.v2
+                    type: string
+                  establishedAt:
+                    format: date-time
+                    type: string
+                  generation:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  namespaceUID:
+                    description: |-
+                      NamespaceUID prevents a same-name recreated namespace from attaching to
+                      durable state owned by the previous namespace identity.
+                    type: string
+                  provenance:
+                    description: |-
+                      RuntimeSessionLineageProvenance records how the immutable Session runtime
+                      lineage was established.
+                    enum:
+                    - first-use
+                    - legacy-adopted
+                    - transcript-bootstrap
+                    type: string
+                  runtimeIdentity:
+                    description: RuntimeIdentity is the built-in runtime type or AgentRuntime
+                      UID.
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  sessionUid:
+                    description: SessionUID repeats the immutable control identity
+                      at the lineage fence.
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                required:
+                - configDigest
+                - contractVersion
+                - establishedAt
+                - generation
+                - namespaceUID
+                - provenance
+                - runtimeIdentity
+                - sessionUid
+                type: object
               mutationLease:
                 description: |-
                   RuntimeSessionMutationLeaseStatus mirrors the namespaced Kubernetes Lease
@@ -300,9 +415,19 @@ spec:
             - message: reconciliation-blocked sessions require a reason
               rule: '!has(self.availability) || self.availability != ''ReconciliationBlocked''
                 || (has(self.blockedReason) && size(self.blockedReason) > 0)'
+            - message: runtime Session lineage is append-once and immutable
+              rule: '!has(oldSelf.lineage) || (has(self.lineage) && self.lineage ==
+                oldSelf.lineage)'
+            - message: agentExecutionResolutionRef is append-once and immutable
+              rule: '!has(oldSelf.agentExecutionResolutionRef) || (has(self.agentExecutionResolutionRef)
+                && self.agentExecutionResolutionRef == oldSelf.agentExecutionResolutionRef)'
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: runtime Session lineage UID must match the immutable control Session
+            UID
+          rule: '!has(self.status.lineage) || self.status.lineage.sessionUid == self.spec.sessionUid'
     served: true
     storage: true
     subresources:

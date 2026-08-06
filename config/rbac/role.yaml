@@ -164,6 +164,43 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agentexecutionadjudications
+  - agentexecutioncontrols
+  - agentexecutionpolicies
+  - outboundaccesspolicies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agentexecutionadjudications/status
+  - agentexecutioncontrols/status
+  - agentruntimes/status
+  - agents/status
+  - branchclaims/status
+  - controllerepochs/status
+  - externaleffects/status
+  - outboundaccesspolicies/status
+  - promptattempts/status
+  - providers/status
+  - publications/status
+  - repositorymonitors/status
+  - repositoryscans/status
+  - runtimepools/status
+  - runtimesessioncontrols/status
+  - skills/status
+  - substrateactorpools/status
+  - tasks/status
+  - tools/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - core.orka.ai
+  resources:
   - agentruntimes
   - agents
   - branchclaims
@@ -210,38 +247,6 @@ rules:
   - tools/finalizers
   verbs:
   - update
-- apiGroups:
-  - core.orka.ai
-  resources:
-  - agentruntimes/status
-  - agents/status
-  - branchclaims/status
-  - controllerepochs/status
-  - externaleffects/status
-  - outboundaccesspolicies/status
-  - promptattempts/status
-  - providers/status
-  - publications/status
-  - repositorymonitors/status
-  - repositoryscans/status
-  - runtimepools/status
-  - runtimesessioncontrols/status
-  - skills/status
-  - substrateactorpools/status
-  - tasks/status
-  - tools/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - core.orka.ai
-  resources:
-  - outboundaccesspolicies
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - discovery.k8s.io
   resources:

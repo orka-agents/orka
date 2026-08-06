@@ -187,6 +187,94 @@ func (s *Store) ListAgentExecutionSnapshotKeys(ctx context.Context, taskUID stri
 	return keys, rows.Err()
 }
 
+// ListAgentExecutionSnapshotMetadataBefore implements
+// store.AgentExecutionSnapshotLifecycleStore. The cutoff is strict so a
+// retention pass can use one stable timestamp without collecting records
+// created exactly at that boundary.
+func (s *Store) ListAgentExecutionSnapshotMetadataBefore(
+	ctx context.Context,
+	cutoff time.Time,
+) ([]store.AgentExecutionSnapshotMetadata, error) {
+	if cutoff.IsZero() {
+		return nil, store.ValidationErrorf("snapshot metadata cutoff is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT task_uid, digest, schema_version, created_at
+		FROM agent_execution_snapshots
+		WHERE created_at < ?
+		ORDER BY created_at ASC, task_uid ASC, digest ASC`, cutoff.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("list agent execution snapshot metadata: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	metadata := make([]store.AgentExecutionSnapshotMetadata, 0)
+	for rows.Next() {
+		var item store.AgentExecutionSnapshotMetadata
+		if err := rows.Scan(&item.Key.TaskUID, &item.Key.Digest, &item.SchemaVersion, &item.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan agent execution snapshot metadata: %w", err)
+		}
+		item.CreatedAt = item.CreatedAt.UTC()
+		if err := item.Validate(); err != nil {
+			return nil, fmt.Errorf("validate stored agent execution snapshot metadata: %w", err)
+		}
+		metadata = append(metadata, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agent execution snapshot metadata: %w", err)
+	}
+	return metadata, nil
+}
+
+// CountAgentExecutionSnapshotReferences implements
+// store.AgentExecutionSnapshotLifecycleStore. All counts are read by one SQL
+// statement so the result is one consistent SQLite snapshot.
+func (s *Store) CountAgentExecutionSnapshotReferences(
+	ctx context.Context,
+	key store.AgentExecutionSnapshotKey,
+) (store.AgentExecutionSnapshotReferenceCounts, error) {
+	if err := key.Validate(); err != nil {
+		return store.AgentExecutionSnapshotReferenceCounts{}, err
+	}
+	var counts store.AgentExecutionSnapshotReferenceCounts
+	err := s.db.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM agent_execution_binding_reservations
+			WHERE task_uid = ? AND snapshot_digest = ?),
+		(SELECT COUNT(*) FROM harness_v1_attempts
+			WHERE task_uid = ? AND snapshot_digest = ?),
+		(SELECT COUNT(*) FROM prompt_attempts
+			WHERE task_uid = ? AND snapshot_digest = ?),
+		(SELECT COUNT(*) FROM session_lineages
+			WHERE config_digest = ?)`,
+		key.TaskUID, key.Digest,
+		key.TaskUID, key.Digest,
+		key.TaskUID, key.Digest,
+		key.Digest,
+	).Scan(
+		&counts.BindingReservations,
+		&counts.HarnessV1Attempts,
+		&counts.PromptAttempts,
+		&counts.SessionLineages,
+	)
+	if err != nil {
+		return store.AgentExecutionSnapshotReferenceCounts{}, fmt.Errorf("count agent execution snapshot references: %w", err)
+	}
+	return counts, nil
+}
+
+// DeleteAgentExecutionSnapshot implements
+// store.AgentExecutionSnapshotLifecycleStore. It deliberately does not alter
+// the Task-scoped broad deletion method above or perform lifecycle policy.
+func (s *Store) DeleteAgentExecutionSnapshot(ctx context.Context, key store.AgentExecutionSnapshotKey) error {
+	if err := key.Validate(); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_execution_snapshots
+		WHERE task_uid = ? AND digest = ?`, key.TaskUID, key.Digest); err != nil {
+		return fmt.Errorf("delete agent execution snapshot: %w", err)
+	}
+	return nil
+}
+
 // DeleteAgentExecutionSnapshots implements store.AgentExecutionSnapshotStore.
 func (s *Store) DeleteAgentExecutionSnapshots(ctx context.Context, taskUID string) error {
 	if strings.TrimSpace(taskUID) == "" {

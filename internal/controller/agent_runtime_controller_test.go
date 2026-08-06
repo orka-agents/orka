@@ -1,8 +1,6 @@
 package controller
 
 import (
-	"k8s.io/utils/ptr"
-
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,15 +11,21 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness/harnesstest"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
 )
+
+const agentRuntimeV1TestBearer = "harness-v1-test-bearer"
 
 func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
@@ -241,21 +245,146 @@ func TestAgentRuntimeReconcilerRechecksHostileCycleAfterAuthRotation(t *testing.
 	}
 }
 
-func TestAgentRuntimeReconcilerPreservesV1ContractNotReady(t *testing.T) {
-	runtimeObject := &corev1alpha1.AgentRuntime{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "legacy", Generation: 1},
-		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
-			Deployment:      corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: "https://runtime.example.com"},
-		},
-	}
-	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject)
+func TestAgentRuntimeReconcilerMarksHarnessV1RuntimeReady(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{
+		RuntimeName: "external-v1", AuthToken: agentRuntimeV1TestBearer,
+	})
+	defer server.Close()
+	runtimeObject, secret := testHarnessV1AgentRuntimeAndSecret(server.URL())
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
 	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
 		t.Fatal(err)
 	}
 	updated := getAgentRuntime(t, reconciler, runtimeObject)
-	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "preserved but not probeable") {
-		t.Fatalf("legacy runtime status = %#v", updated.Status)
+	if !updated.Status.Ready {
+		t.Fatalf("harness v1 runtime Ready = false, message=%q", updated.Status.Message)
+	}
+	if updated.Status.ObservedCapabilities == nil ||
+		updated.Status.ObservedCapabilities.ProtocolVersion != harness.ProtocolVersion ||
+		updated.Status.ObservedCapabilities.Transport != harness.HTTPTransport ||
+		updated.Status.ObservedCapabilities.RuntimeName != "external-v1" {
+		t.Fatalf("observed harness v1 capabilities = %#v", updated.Status.ObservedCapabilities)
+	}
+	if updated.Status.ObservedAuthRefResourceVersion == "" ||
+		updated.Status.ObservedControllerAuthRefResourceVersion != "" ||
+		updated.Status.ObservedOperationCapabilityRefResourceVersion != "" {
+		t.Fatalf("contract-specific observed auth versions = %#v", updated.Status)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, agentRuntimeReadyCondition)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != agentRuntimeReasonReady {
+		t.Fatalf("Ready condition = %#v", condition)
+	}
+	encodedStatus := updated.Status.Message + updated.Status.ObservedCapabilities.RuntimeName +
+		updated.Status.ObservedCapabilities.RuntimeVersion
+	if strings.Contains(encodedStatus, agentRuntimeV1TestBearer) {
+		t.Fatal("harness v1 status leaked the bearer token")
+	}
+}
+
+func TestAgentRuntimeReconcilerHarnessV1RequiresDeclaredCapabilitySubset(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeV1TestBearer})
+	defer server.Close()
+	runtimeObject, secret := testHarnessV1AgentRuntimeAndSecret(server.URL())
+	required := true
+	runtimeObject.Spec.Capabilities.SupportsArtifacts = &required
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "supportsArtifacts") {
+		t.Fatalf("missing declared harness v1 capability status = %#v", updated.Status)
+	}
+}
+
+func TestAgentRuntimeReconcilerHarnessV1AuthRotationForcesConformance(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeV1TestBearer})
+	defer server.Close()
+	runtimeObject, secret := testHarnessV1AgentRuntimeAndSecret(server.URL())
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	ready := getAgentRuntime(t, reconciler, runtimeObject)
+	if !ready.Status.Ready {
+		t.Fatalf("initial harness v1 readiness = %#v", ready.Status)
+	}
+	stored := &corev1.Secret{}
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(secret), stored); err != nil {
+		t.Fatal(err)
+	}
+	stored.Data["token"] = []byte("rotated-token-not-accepted-by-runtime")
+	if err := reconciler.Update(t.Context(), stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if updated.Status.Ready ||
+		(!strings.Contains(updated.Status.Message, "unauthorized") && !strings.Contains(updated.Status.Message, "401")) {
+		t.Fatalf("rotated harness v1 auth did not fail closed = %#v", updated.Status)
+	}
+	if updated.Status.ObservedAuthRefResourceVersion == ready.Status.ObservedAuthRefResourceVersion {
+		t.Fatalf("observed harness v1 auth resourceVersion did not advance: before=%q after=%q",
+			ready.Status.ObservedAuthRefResourceVersion, updated.Status.ObservedAuthRefResourceVersion)
+	}
+}
+
+func TestAgentRuntimeReconcilerHarnessV1RejectsSecretIdentityChangeDuringConformance(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*corev1.Secret)
+		wantMessage string
+	}{
+		{
+			name:        "UID replacement",
+			mutate:      func(secret *corev1.Secret) { secret.UID = types.UID("replacement-secret-uid") },
+			wantMessage: "replaced during conformance",
+		},
+		{
+			name:        "resourceVersion rotation",
+			mutate:      func(secret *corev1.Secret) { secret.ResourceVersion = "rotated-resource-version" },
+			wantMessage: "changed during conformance",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeV1TestBearer})
+			defer server.Close()
+			runtimeObject, secret := testHarnessV1AgentRuntimeAndSecret(server.URL())
+			reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+			reconciler.APIReader = &agentRuntimeMutateSecondSecretReadClient{
+				Client: reconciler.Client, SecretKey: client.ObjectKeyFromObject(secret), Mutate: test.mutate,
+			}
+			allowAgentRuntimeLoopback(t)
+			if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+				t.Fatal(err)
+			}
+			updated := getAgentRuntime(t, reconciler, runtimeObject)
+			if updated.Status.Ready || !strings.Contains(updated.Status.Message, test.wantMessage) {
+				t.Fatalf("Secret identity race status = %#v", updated.Status)
+			}
+		})
+	}
+}
+
+func TestAgentRuntimeReconcilerHarnessV1RequiresSecretUID(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeV1TestBearer})
+	defer server.Close()
+	runtimeObject, secret := testHarnessV1AgentRuntimeAndSecret(server.URL())
+	secret.UID = ""
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "UID is required") {
+		t.Fatalf("missing bearer Secret UID status = %#v", updated.Status)
 	}
 }
 
@@ -498,6 +627,41 @@ func testAgentRuntimeAndSecret(t *testing.T, endpoint string, config conformance
 	return runtimeObject, secret
 }
 
+func testHarnessV1AgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *corev1.Secret) {
+	supportsCancel := true
+	supportsRuntimeSessions := true
+	runtimeObject := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-v1", Generation: 1},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
+			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
+				Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: endpoint,
+			},
+			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{
+				BearerAuthRef: &corev1alpha1.AgentRuntimeBearerAuthReference{Name: "runtime-v1-auth", Key: "token"},
+			},
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				ToolExecutionModes: []corev1alpha1.AgentRuntimeToolExecutionMode{
+					corev1alpha1.AgentRuntimeToolExecutionModeObserved,
+				},
+				SupportsCancel:          &supportsCancel,
+				SupportsRuntimeSessions: &supportsRuntimeSessions,
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-v1-auth", UID: types.UID("runtime-v1-auth-uid"), ResourceVersion: "1",
+			Labels: map[string]string{
+				agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: runtimeObject.Name,
+			},
+			Annotations: map[string]string{agentRuntimeAuthEndpointAnnotation: endpoint},
+		},
+		Data: map[string][]byte{"token": []byte(agentRuntimeV1TestBearer)},
+	}
+	return runtimeObject, secret
+}
+
 func testAgentRuntimeProfileClaimsAndLimits() (harnessv2.RuntimeProfile, v2conformance.WorkspaceGovernanceClaims, harnessv2.ProtocolLimits) {
 	toolPolicy := harnessv2.MCPToolPolicy{AllowedToolNames: []string{}, Tools: []harnessv2.MCPToolDescriptor{}}
 	toolPolicyDigest, _ := harnessv2.CanonicalRuntimeToolPolicyDigest(toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)
@@ -540,7 +704,7 @@ func newAgentRuntimeUnitReconciler(t *testing.T, objects ...client.Object) *Agen
 		t.Fatal(err)
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.AgentRuntime{}).WithObjects(objects...).Build()
-	return &AgentRuntimeReconciler{Client: fakeClient, Scheme: scheme}
+	return &AgentRuntimeReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme}
 }
 
 func getAgentRuntime(t *testing.T, reconciler *AgentRuntimeReconciler, object *corev1alpha1.AgentRuntime) corev1alpha1.AgentRuntime {
@@ -556,4 +720,31 @@ func allowAgentRuntimeLoopback(t *testing.T) {
 	t.Helper()
 	agentRuntimeAllowInsecureLoopbackForTests = true
 	t.Cleanup(func() { agentRuntimeAllowInsecureLoopbackForTests = false })
+}
+
+type agentRuntimeMutateSecondSecretReadClient struct {
+	client.Client
+	SecretKey client.ObjectKey
+	Mutate    func(*corev1.Secret)
+	reads     int
+}
+
+func (c *agentRuntimeMutateSecondSecretReadClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	if err := c.Client.Get(ctx, key, object, options...); err != nil {
+		return err
+	}
+	secret, ok := object.(*corev1.Secret)
+	if !ok || key != c.SecretKey {
+		return nil
+	}
+	c.reads++
+	if c.reads == 2 && c.Mutate != nil {
+		c.Mutate(secret)
+	}
+	return nil
 }

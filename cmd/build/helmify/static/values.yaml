@@ -33,7 +33,7 @@ controller:
   # Health probe port
   healthPort: 8082
 
-  # Enable leader election for HA
+  # Leader election is mandatory for the singleton SQLite controller.
   leaderElect: true
 
   # Log level (debug, info, warn, error)
@@ -51,6 +51,30 @@ controller:
     secretKey: capability-secret
     secret: ""
     maxBytes: 536870912
+
+  # Encryption key for immutable agent execution snapshots. When either agent
+  # execution protocol is enabled, both fields must reference an existing
+  # Secret. The selected value must contain exactly 32 raw bytes or its base64
+  # encoding.
+  agentExecutionSnapshot:
+    existingSecret: ""
+    key: ""
+    # A snapshot must remain unreferenced for this full period before GC.
+    retention: 720h
+    # Reference-aware GC scan cadence.
+    retentionInterval: 1h
+
+  # Durable singleton backend-mode authority. Empty installations still need
+  # this object so ownership readiness and later mode transitions fail closed.
+  agentExecutionControl:
+    create: true
+    # The ownership namespace is fixed at orka-system. Leave this enabled for
+    # the chart to create it, or set false only when the operator creates that
+    # namespace in an earlier bootstrap wave. The chart retains a namespace it
+    # creates during uninstall so shared ownership state is not deleted.
+    createNamespace: true
+    v1Mode: disabled
+    v2Mode: enabled
 
   # Managed ACP core RuntimePools for built-in agent Tasks.
   acpRuntime:
@@ -206,6 +230,47 @@ controller:
       childTokenTTL: ""
       toolTokenTTL: ""
 
+# Stateless fail-closed admission plane. Deploy and verify the replicas first,
+# then enable the protected webhook configurations in a separate Helm upgrade.
+admission:
+  enabled: false
+  replicas: 2
+  identity:
+    # Empty values resolve to the chart controller ServiceAccount identity.
+    # Add only reviewed one-time migration identities to classificationUsernames.
+    controllerUsername: ""
+    adjudicationControllerUsername: ""
+    classificationUsernames: []
+    # Groups allowed to author AgentExecutionControl/Policy specs and create
+    # adjudications. Keep this list narrow and backed by cluster authentication.
+    adminGroups:
+      - system:masters
+  tls:
+    # Required when enabled. The chart never generates admission certificates.
+    existingSecret: ""
+    certKey: tls.crt
+    privateKeyKey: tls.key
+  webhooks:
+    # Enable only after the Service has at least two ready endpoints and an
+    # AdmissionReview smoke test succeeds. All installed webhooks fail closed.
+    enabled: false
+    # Base64-encoded PEM CA bundle. Leave empty when an injector annotation is
+    # configured below.
+    caBundle: ""
+    # For example:
+    # cert-manager.io/inject-ca-from-secret: orka-system/orka-admission-tls
+    caInjectionAnnotations: {}
+    timeoutSeconds: 10
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+      ephemeral-storage: 32Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+      ephemeral-storage: 128Mi
+
 # Clean-room Workspace/Publisher service.
 publisher:
   enabled: true
@@ -327,6 +392,60 @@ providerProxy:
       cpu: 250m
       memory: 128Mi
       ephemeral-storage: 128Mi
+
+# Time-bounded orka.harness.v1 compatibility data plane. This is disabled by
+# default and is never an automatic fallback from ACP v2.
+harnessV1:
+  enabled: false
+  policy:
+    # Set create=false to use a separately administered policy with this name.
+    create: true
+    name: compatibility
+    # Empty places the policy in controller.watchNamespace when set, otherwise
+    # in the Helm release namespace. Create one policy per admitted trust domain.
+    namespace: ""
+    # Cleanup-only is the fail-closed default. Enabling the wrapper does not
+    # by itself authorize new v1 bindings; operators must opt in explicitly.
+    allowNewV1Bindings: false
+    allowedBuiltInRuntimeTypes:
+      - codex
+      - claude
+      - copilot
+    allowTrustedObservedModeRuntimes: false
+    retryEligibility: none
+    networkIsolationProfile: default-deny
+  dispatch:
+    interval: 1s
+    workers: 4
+  image:
+    repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
+    tag: "0.1.1"
+    # Required when enabled. Tags are never accepted for a running wrapper.
+    digest: ""
+    pullPolicy: IfNotPresent
+  auth:
+    # Use a dedicated existing Secret, or leave empty for a chart-managed
+    # release-local Secret. Do not reuse provider, publisher, or Git Secrets.
+    existingSecret: ""
+    tokenKey: token
+    # Optional explicit token for a chart-managed Secret. Empty generates a
+    # cryptographically random value; explicit values must be at least 32 chars.
+    token: ""
+  ledger:
+    # The admission ledger is always PVC-backed when harness v1 is enabled.
+    size: 1Gi
+    storageClass: ""
+  # Codex defaults to workspace-write. Broader modes require explicit policy.
+  codexSandboxMode: workspace-write
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+      ephemeral-storage: 2Gi
 
 # Worker configuration
 workers:

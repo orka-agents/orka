@@ -8,6 +8,14 @@ type ControllerEpochStore interface {
 	CompareAndSwapControllerEpoch(ctx context.Context, change ControllerEpochCAS) (*ControllerEpoch, error)
 }
 
+// ControllerEpochMirror receives the exact epoch acquired from the
+// Kubernetes-authoritative ControllerEpochStore. Mirrors are subordinate
+// fencing records for SQLite payload transactions; they never select or
+// advance controller ownership themselves.
+type ControllerEpochMirror interface {
+	SyncControllerEpochMirror(ctx context.Context, epoch ControllerEpoch) error
+}
+
 // PromptAttemptStore persists the full prompt execution and delivery state machines.
 type PromptAttemptStore interface {
 	CreatePromptAttempt(ctx context.Context, attempt *PromptAttempt, fence ControllerEpochFence) (*PromptAttempt, error)

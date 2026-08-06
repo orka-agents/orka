@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -1264,6 +1265,7 @@ func sqlitePrimaryKeyColumns(db *sql.DB, table string) ([]string, error) {
 type Store struct {
 	db               *sql.DB
 	dbPath           string
+	processLock      io.Closer
 	executionEventMu sync.Mutex
 
 	// snapshotCipher encrypts immutable agent execution snapshot bodies at
@@ -1285,6 +1287,23 @@ func NewStore(db *sql.DB, dbPath string) *Store {
 	return &Store{db: db, dbPath: dbPath}
 }
 
+// OpenLockedStore acquires the process-lifetime filesystem lock adjacent to
+// path before SQLite is opened or migrated. Production controller wiring must
+// use this constructor so overlapping Pods or releases cannot migrate or write
+// the same database even if Kubernetes ownership fencing is misconfigured.
+func OpenLockedStore(path string) (*Store, error) {
+	lock, err := lockDatabaseFile(path)
+	if err != nil {
+		return nil, err
+	}
+	db, err := NewDB(path)
+	if err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	return &Store{db: db, dbPath: path, processLock: lock}, nil
+}
+
 // Start runs background maintenance and blocks until ctx is cancelled,
 // then optimizes and closes the database.
 // It satisfies the controller-runtime manager.Runnable interface.
@@ -1304,11 +1323,30 @@ func (s *Store) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			s.db.Exec("PRAGMA optimize") //nolint:errcheck
-			return s.db.Close()
+			return s.close()
 		case <-ticker.C:
 			s.updateDBSizeMetric()
 		}
 	}
+}
+
+// NeedLeaderElection keeps SQLite-backed background mutation behind the
+// controller-runtime leader gate. The filesystem lock remains held for the
+// whole process lifetime, including standby/startup, and is the final defense
+// against overlapping writers.
+func (s *Store) NeedLeaderElection() bool { return true }
+
+func (s *Store) close() error {
+	dbErr := s.db.Close()
+	var lockErr error
+	if s.processLock != nil {
+		lockErr = s.processLock.Close()
+		s.processLock = nil
+	}
+	if dbErr != nil {
+		return dbErr
+	}
+	return lockErr
 }
 
 // updateDBSizeMetric reads the database file size and updates the gauge.

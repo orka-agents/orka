@@ -66,6 +66,13 @@ spec:
                 format: int64
                 minimum: 1
                 type: integer
+              bindingDigest:
+                description: |-
+                  BindingDigest identifies the immutable Task-lifetime v2 execution
+                  binding. It is optional only so pre-coexistence records remain readable;
+                  all PromptAttempts newly created through DurableControlStore require it.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
               credentialBindings:
                 description: CredentialBindings is the immutable, role-separated Secret
                   identity set.
@@ -131,6 +138,13 @@ spec:
                   input.
                 pattern: ^sha256:[a-f0-9]{64}$
                 type: string
+              snapshotDigest:
+                description: |-
+                  SnapshotDigest identifies the immutable encrypted execution snapshot.
+                  It is optional only so pre-coexistence records remain readable; all
+                  PromptAttempts newly created through DurableControlStore require it.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
               taskUid:
                 description: TaskUID is the immutable Kubernetes UID of the Task.
                 maxLength: 1024
@@ -146,6 +160,8 @@ spec:
             x-kubernetes-validations:
             - message: prompt attempt spec is immutable
               rule: self == oldSelf
+            - message: bindingDigest and snapshotDigest must be recorded together
+              rule: has(self.bindingDigest) == has(self.snapshotDigest)
           status:
             description: PromptAttemptStatus holds the exact execution and delivery
               state machines.

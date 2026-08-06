@@ -1,0 +1,244 @@
+{{- include "orka.validateAdmission" . }}
+{{- if .Values.admission.webhooks.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "orka.admissionName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+  {{- with .Values.admission.webhooks.caInjectionAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+webhooks:
+  - name: taskprovenance.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.admission.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.admissionName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-task-provenance
+        port: 443
+      {{- with .Values.admission.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE]
+        apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [tasks]
+        scope: Namespaced
+  - name: taskworkspaceclassuse.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.admission.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.admissionName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-task-workspace-class-use
+        port: 443
+      {{- with .Values.admission.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE]
+        apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [tasks]
+        scope: Namespaced
+  - name: toolworkspaceclassuse.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.admission.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.admissionName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-tool-workspace-class-use
+        port: 443
+      {{- with .Values.admission.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE]
+        apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [tools]
+        scope: Namespaced
+  - name: agentcontract.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.admission.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.admissionName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-agent-contract
+        port: 443
+      {{- with .Values.admission.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE]
+        apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [agents]
+        scope: Namespaced
+  - name: agentruntimecontract.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.admission.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.admissionName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-agentruntime-contract
+        port: 443
+      {{- with .Values.admission.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE]
+        apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [agentruntimes]
+        scope: Namespaced
+  - name: taskexecutionauthority.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.admission.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.admissionName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-task-execution-authority
+        port: 443
+      {{- with .Values.admission.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE]
+        apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [tasks, tasks/status]
+        scope: Namespaced
+    matchConditions:
+      - name: route-unless-controller-cleanup-safe
+        expression: >-
+          !(request.userInfo.username == {{ include "orka.admissionControllerUsername" . | quote }} &&
+          request.operation == 'UPDATE' &&
+          (!has(object.status) ||
+          (!has(object.status.agentExecutionBinding) &&
+          !has(object.status.agentExecutionNoExecution) &&
+          !has(object.status.agentExecutionQuarantine) &&
+          !has(object.status.agentExecutionResolutionRef))) &&
+          (!has(oldObject.status) ||
+          (!has(oldObject.status.agentExecutionBinding) &&
+          !has(oldObject.status.agentExecutionNoExecution) &&
+          !has(oldObject.status.agentExecutionQuarantine) &&
+          !has(oldObject.status.agentExecutionResolutionRef))))
+  - name: agentexecutionadjudication.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.admission.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.admissionName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-agentexecutionadjudication
+        port: 443
+      {{- with .Values.admission.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE, DELETE]
+        apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [agentexecutionadjudications]
+        scope: Namespaced
+  - name: agentexecutionadjudicationstatus.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.admission.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.admissionName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-agentexecutionadjudication
+        port: 443
+      {{- with .Values.admission.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [UPDATE]
+        apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [agentexecutionadjudications/status]
+        scope: Namespaced
+    matchConditions:
+      - name: route-unless-adjudication-controller
+        expression: >-
+          request.userInfo.username != {{ include "orka.admissionAdjudicationControllerUsername" . | quote }}
+  - name: agentexecutioncontrolpolicy.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.admission.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.admissionName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-agentexecution-control-policy
+        port: 443
+      {{- with .Values.admission.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [CREATE, UPDATE, DELETE]
+        apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [agentexecutioncontrols, agentexecutionpolicies]
+        scope: Namespaced
+  - name: sessionresolution.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.admission.webhooks.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ include "orka.admissionName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-session-resolution
+        port: 443
+      {{- with .Values.admission.webhooks.caBundle }}
+      caBundle: {{ . | quote }}
+      {{- end }}
+    rules:
+      - operations: [UPDATE]
+        apiGroups: [core.orka.ai]
+        apiVersions: [v1alpha1]
+        resources: [runtimesessioncontrols/status]
+        scope: Namespaced
+{{- end }}

@@ -58,6 +58,7 @@ func (s *Store) CreatePromptAttempt(ctx context.Context, attempt *store.PromptAt
 		Spec: corev1alpha1.PromptAttemptSpec{
 			ID: normalized.ID, TaskUID: normalized.Key.TaskUID, Attempt: normalized.Key.Attempt,
 			PromptID: normalized.Key.PromptID, RequestDigest: normalized.RequestDigest,
+			BindingDigest: normalized.BindingDigest, SnapshotDigest: normalized.SnapshotDigest,
 			CredentialBindings: promptCredentialBindingsToAPI(normalized.CredentialBindings),
 		},
 	}
@@ -1264,6 +1265,12 @@ func normalizePromptAttemptForCreate(attempt *store.PromptAttempt, fence store.C
 	if err := store.ValidateCanonicalDigest("prompt attempt request digest", normalized.RequestDigest); err != nil {
 		return store.PromptAttempt{}, store.ControllerEpochFence{}, err
 	}
+	if err := store.ValidateCanonicalDigest("prompt attempt binding digest", normalized.BindingDigest); err != nil {
+		return store.PromptAttempt{}, store.ControllerEpochFence{}, err
+	}
+	if err := store.ValidateCanonicalDigest("prompt attempt snapshot digest", normalized.SnapshotDigest); err != nil {
+		return store.PromptAttempt{}, store.ControllerEpochFence{}, err
+	}
 	normalized.CredentialBindings = append([]store.PromptCredentialBinding(nil), normalized.CredentialBindings...)
 	sort.Slice(normalized.CredentialBindings, func(i, j int) bool {
 		return normalized.CredentialBindings[i].Role < normalized.CredentialBindings[j].Role
@@ -1383,6 +1390,7 @@ func validatePromptExecutionTransition(transition *store.PromptAttemptExecutionT
 func samePromptAttemptSpec(object *corev1alpha1.PromptAttempt, attempt store.PromptAttempt) bool {
 	return object.Namespace == attempt.Key.Namespace && object.Spec.ID == attempt.ID && object.Spec.TaskUID == attempt.Key.TaskUID &&
 		object.Spec.Attempt == attempt.Key.Attempt && object.Spec.PromptID == attempt.Key.PromptID && object.Spec.RequestDigest == attempt.RequestDigest &&
+		object.Spec.BindingDigest == attempt.BindingDigest && object.Spec.SnapshotDigest == attempt.SnapshotDigest &&
 		reflect.DeepEqual(promptCredentialBindingsFromAPI(object.Spec.CredentialBindings), attempt.CredentialBindings)
 }
 
@@ -1428,6 +1436,8 @@ func promptAttemptFromObject(object *corev1alpha1.PromptAttempt) store.PromptAtt
 		SessionLeaseGeneration: object.Status.SessionLeaseGeneration,
 		RuntimeInstanceID:      object.Status.RuntimeInstanceID,
 		RequestDigest:          object.Spec.RequestDigest,
+		BindingDigest:          object.Spec.BindingDigest,
+		SnapshotDigest:         object.Spec.SnapshotDigest,
 		CredentialBindings:     promptCredentialBindingsFromAPI(object.Spec.CredentialBindings),
 		ExecutionState:         store.PromptExecutionState(object.Status.ExecutionState),
 		DeliveryState:          store.PromptDeliveryState(object.Status.DeliveryState),

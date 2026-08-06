@@ -33,33 +33,40 @@ import (
 
 var log = logf.Log.WithName("api-server")
 
+// AgentExecutionClassificationGate authorizes mutating API traffic only while
+// the coexistence classification inventory remains sealed.
+type AgentExecutionClassificationGate interface {
+	Check(context.Context) error
+}
+
 // ServerConfig holds configuration for the API server
 type ServerConfig struct {
-	Port                      int
-	MetricsPort               int
-	WatchNamespace            string
-	EnforceNamespaceIsolation bool
-	OIDC                      OIDCConfig
-	ContextTokens             ContextTokenConfig
-	ContextTokenAuthorization ContextTokenAuthorizationConfig
-	Chat                      ChatConfig
-	ResultStore               store.ResultStore
-	SessionStore              store.SessionStore
-	PlanStore                 store.PlanStore
-	MessageStore              store.MessageStore
-	ArtifactStore             store.ArtifactStore
-	ArtifactReservations      artifactcap.CapabilityReservationRecorder
-	MemoryStore               store.MemoryStore
-	MemoryProposalStore       store.MemoryProposalStore
-	SecurityStore             store.SecurityStore
-	RepositoryMonitorStore    store.RepositoryMonitorStore
-	ExecutionEventStore       store.ExecutionEventStore
-	GatewayEventStore         store.GatewayEventStore
-	GatewayDeliveryStore      store.GatewayDeliveryStore
-	GatewayService            *gatewayruntime.Service
-	HealthChecker             store.HealthChecker
-	Clientset                 kubernetes.Interface
-	APIReader                 client.Reader
+	Port                             int
+	MetricsPort                      int
+	WatchNamespace                   string
+	EnforceNamespaceIsolation        bool
+	OIDC                             OIDCConfig
+	ContextTokens                    ContextTokenConfig
+	ContextTokenAuthorization        ContextTokenAuthorizationConfig
+	Chat                             ChatConfig
+	ResultStore                      store.ResultStore
+	SessionStore                     store.SessionStore
+	PlanStore                        store.PlanStore
+	MessageStore                     store.MessageStore
+	ArtifactStore                    store.ArtifactStore
+	ArtifactReservations             artifactcap.CapabilityReservationRecorder
+	MemoryStore                      store.MemoryStore
+	MemoryProposalStore              store.MemoryProposalStore
+	SecurityStore                    store.SecurityStore
+	RepositoryMonitorStore           store.RepositoryMonitorStore
+	ExecutionEventStore              store.ExecutionEventStore
+	GatewayEventStore                store.GatewayEventStore
+	GatewayDeliveryStore             store.GatewayDeliveryStore
+	GatewayService                   *gatewayruntime.Service
+	HealthChecker                    store.HealthChecker
+	Clientset                        kubernetes.Interface
+	APIReader                        client.Reader
+	AgentExecutionClassificationGate AgentExecutionClassificationGate
 }
 
 // Server is the REST API server
@@ -202,6 +209,33 @@ func (s *Server) setupMiddleware() {
 
 	// Metrics middleware
 	s.app.Use(NewMetricsMiddleware())
+
+	// Mutating API routes may write SQLite or create new execution demand. Keep
+	// them closed until the coexistence classification inventory is sealed. This
+	// is global so routes registered after NewServer (for example the ACP MCP
+	// broker) cannot accidentally bypass the gate.
+	s.app.Use(s.requireAgentExecutionClassification)
+}
+
+func (s *Server) requireAgentExecutionClassification(c fiber.Ctx) error {
+	if requestMethodIsReadOnly(c.Method()) || s.config.AgentExecutionClassificationGate == nil {
+		return c.Next()
+	}
+	if err := s.config.AgentExecutionClassificationGate.Check(c.Context()); err != nil {
+		log.Error(err, "rejecting mutating API request while agent execution classification is not sealed",
+			"method", c.Method(), "path", c.Path())
+		return fiber.NewError(fiber.StatusServiceUnavailable, "agent execution mutations are unavailable")
+	}
+	return c.Next()
+}
+
+func requestMethodIsReadOnly(method string) bool {
+	switch method {
+	case fiber.MethodGet, fiber.MethodHead, fiber.MethodOptions:
+		return true
+	default:
+		return false
+	}
 }
 
 func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
