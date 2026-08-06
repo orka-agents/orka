@@ -82,9 +82,11 @@ func migrate(db *sql.DB) error {
 			session_type  TEXT NOT NULL DEFAULT 'task',
 			owner_type    TEXT NOT NULL DEFAULT '',
 			owner_ref     TEXT NOT NULL DEFAULT '',
-			active_task     TEXT NOT NULL DEFAULT '',
-			active_task_uid TEXT NOT NULL DEFAULT '',
-			message_count   INTEGER NOT NULL DEFAULT 0,
+			active_task          TEXT NOT NULL DEFAULT '',
+			active_task_uid      TEXT NOT NULL DEFAULT '',
+			chat_turn_id         TEXT NOT NULL DEFAULT '',
+			chat_turn_expires_at TIMESTAMP,
+			message_count        INTEGER NOT NULL DEFAULT 0,
 			input_tokens  INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
 			cancelled     BOOLEAN NOT NULL DEFAULT FALSE,
@@ -834,6 +836,8 @@ func migrate(db *sql.DB) error {
 		{Name: "owner_type", Definition: "owner_type TEXT NOT NULL DEFAULT ''"},
 		{Name: "owner_ref", Definition: "owner_ref TEXT NOT NULL DEFAULT ''"},
 		{Name: "active_task_uid", Definition: "active_task_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "chat_turn_id", Definition: "chat_turn_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "chat_turn_expires_at", Definition: "chat_turn_expires_at TIMESTAMP"},
 	}); err != nil {
 		return err
 	}

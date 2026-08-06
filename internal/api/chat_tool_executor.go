@@ -152,6 +152,13 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		recordRejectedToolCall(ctx, toolCall, resultStr)
 		return resultStr, marshalErr
 	}
+	if sessionRef, _ := args["sessionRef"].(string); strings.TrimSpace(sessionRef) != "" &&
+		strings.TrimSpace(sessionRef) == strings.TrimSpace(e.sessionID) {
+		result := toolError("invalid_arguments", "child task sessionRef cannot reuse the active chat session", "Use a different session name or omit sessionRef")
+		resultStr, err := marshalResult(result)
+		recordRejectedToolCall(ctx, toolCall, resultStr)
+		return resultStr, err
+	}
 
 	toolCtx, cancel := context.WithTimeout(ctx, e.toolTimeout)
 	defer cancel()

@@ -816,6 +816,70 @@ func TestNamespaceTaskCapacityAvailableCountsFinalizingButNotTerminalTasks(t *te
 	}
 }
 
+func TestProjectTerminalsLeavesFinalizingTaskOwnedByGateway(t *testing.T) {
+	service, sqliteStore, _ := newGatewayServiceFixture(t)
+	ctx := context.Background()
+	accepted, err := service.AdmitEvent(
+		ctx,
+		"default",
+		"chat",
+		"Bearer inbound-token",
+		gatewayEventBody(t, "finalizing-task", "user-1"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	event, err := sqliteStore.GetGatewayEvent(ctx, "default", accepted.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{}
+	key := client.ObjectKey{Namespace: event.Namespace, Name: event.TaskName}
+	if err := service.freshReader().Get(ctx, key, task); err != nil {
+		t.Fatal(err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhaseFinalizing
+	if err := service.Client.Status().Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.ProjectTerminals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	event, err = sqliteStore.GetGatewayEvent(ctx, "default", accepted.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.State != store.GatewayEventTaskCreated {
+		t.Fatalf("Finalizing event state = %s, want TaskCreated", event.State)
+	}
+	session, err := sqliteStore.GetSession(ctx, event.Namespace, event.SessionName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.ActiveTask != task.Name || session.ActiveTaskUID != string(task.UID) {
+		t.Fatalf(
+			"Finalizing session lock = (%q, %q), want (%q, %q)",
+			session.ActiveTask, session.ActiveTaskUID, task.Name, task.UID,
+		)
+	}
+	if len(session.Messages) != 1 || session.Messages[0].Role != "user" {
+		t.Fatalf("Finalizing session transcript = %#v, want only admitted user message", session.Messages)
+	}
+	deliveries, err := sqliteStore.ListGatewayDeliveries(ctx, store.GatewayDeliveryFilter{
+		Namespace: event.Namespace, EventID: event.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deliveries) != 0 {
+		t.Fatalf("Finalizing Task created terminal deliveries: %#v", deliveries)
+	}
+}
+
 func TestDispatchOnceCountsFinalizingTaskTowardNamespaceLimitAcrossSessions(t *testing.T) {
 	service, sqliteStore, _ := newGatewayServiceFixture(t)
 	service.Config.MaxTasksPerNamespace = 1
