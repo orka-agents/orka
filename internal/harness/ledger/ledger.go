@@ -23,6 +23,7 @@ MIT License - see LICENSE file for details.
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -35,6 +36,8 @@ import (
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver
 )
+
+const maxTurnOutputBytes = 50 << 20
 
 // TurnState is the durable ledger state of one admitted turn.
 type TurnState string
@@ -71,12 +74,22 @@ type TurnRecord struct {
 	TaskUID               string
 	Attempt               int32
 	RequestDigest         string
+	RuntimeSessionID      string
+	CorrelationID         string
 	State                 TurnState
 	RejectReason          string
 	TerminalReceipt       []byte
 	TerminalReceiptDigest string
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
+}
+
+// TurnOutput is the bounded output payload referenced by a terminal receipt.
+// It is committed atomically with the receipt so a durable OutputRef never
+// points at process-local or partially persisted state.
+type TurnOutput struct {
+	Ref  string
+	Data []byte
 }
 
 // Settled reports whether the record needs no further settlement work.
@@ -107,8 +120,18 @@ type Ledger struct {
 
 // Open opens (creating if needed) the ledger database at path.
 func Open(path string) (*Ledger, error) {
+	return OpenWithGeneration(path, "1")
+}
+
+// OpenWithGeneration opens the ledger and initializes a newly created control
+// table with the caller's deployment generation. An existing ledger keeps its
+// durable generation and still requires the explicit close/drain rollover CAS.
+func OpenWithGeneration(path, initialGeneration string) (*Ledger, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("ledger path is required")
+	}
+	if err := validateGeneration(initialGeneration); err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -127,7 +150,7 @@ func Open(path string) (*Ledger, error) {
 			return nil, fmt.Errorf("configure wrapper admission ledger: %w", err)
 		}
 	}
-	if err := migrate(db); err != nil {
+	if err := migrate(db, strings.TrimSpace(initialGeneration)); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -139,7 +162,7 @@ func (l *Ledger) Close() error {
 	return l.db.Close()
 }
 
-func migrate(db *sql.DB) error {
+func migrate(db *sql.DB, initialGeneration string) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS ledger_control (
 			key   TEXT PRIMARY KEY,
@@ -150,6 +173,8 @@ func migrate(db *sql.DB) error {
 			task_uid                TEXT NOT NULL,
 			attempt                 INTEGER NOT NULL CHECK(attempt > 0),
 			request_digest          TEXT NOT NULL,
+			runtime_session_id      TEXT NOT NULL DEFAULT '',
+			correlation_id          TEXT NOT NULL DEFAULT '',
 			state                   TEXT NOT NULL CHECK(state IN ('Admitted','Accepted','Rejected','Terminal','OutcomeUnknown')),
 			reject_reason           TEXT NOT NULL DEFAULT '',
 			terminal_receipt        BLOB,
@@ -160,13 +185,76 @@ func migrate(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_turn_admissions_unsettled
 			ON turn_admissions(state, updated_at ASC)
 			WHERE state IN ('Admitted','Accepted')`,
-		`INSERT INTO ledger_control (key, value) VALUES ('generation', '1')
-			ON CONFLICT(key) DO NOTHING`,
+		`CREATE TABLE IF NOT EXISTS turn_outputs (
+			turn_id        TEXT PRIMARY KEY,
+			output_ref     TEXT NOT NULL,
+			output_payload BLOB NOT NULL,
+			output_digest  TEXT NOT NULL,
+			output_size    INTEGER NOT NULL CHECK(output_size >= 0),
+			created_at     TIMESTAMP NOT NULL,
+			FOREIGN KEY(turn_id) REFERENCES turn_admissions(turn_id) ON DELETE CASCADE
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
 			return fmt.Errorf("migrate wrapper admission ledger: %w", err)
 		}
+	}
+	if _, err := db.Exec(`INSERT INTO ledger_control (key, value) VALUES ('generation', ?)
+		ON CONFLICT(key) DO NOTHING`, initialGeneration); err != nil {
+		return fmt.Errorf("initialize wrapper admission ledger generation: %w", err)
+	}
+	// These ALTERs support ledgers created by the first coexistence preview.
+	// Existing unsettled rows are reconciled conservatively by the wrapper;
+	// terminal rows already carry their exact identity inside the receipt.
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "runtime_session_id", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "correlation_id", definition: "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureTurnAdmissionColumn(db, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureTurnAdmissionColumn(db *sql.DB, name, definition string) error {
+	rows, err := db.Query(`PRAGMA table_info(turn_admissions)`)
+	if err != nil {
+		return fmt.Errorf("inspect wrapper admission ledger columns: %w", err)
+	}
+	found := false
+	for rows.Next() {
+		var (
+			cid       int
+			column    string
+			dataType  string
+			notNull   int
+			defaultV  sql.NullString
+			primaryID int
+		)
+		if err := rows.Scan(&cid, &column, &dataType, &notNull, &defaultV, &primaryID); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan wrapper admission ledger columns: %w", err)
+		}
+		if column == name {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close wrapper admission ledger column scan: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspect wrapper admission ledger columns: %w", err)
+	}
+	if found {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE turn_admissions ADD COLUMN ` + name + ` ` + definition); err != nil {
+		return fmt.Errorf("add wrapper admission ledger column %s: %w", name, err)
 	}
 	return nil
 }
@@ -180,10 +268,16 @@ func ReceiptDigest(receipt []byte) string {
 // AdmitTurn durably admits one turn before StartTurn is written. The same
 // turn ID with the same request digest is idempotent; the same turn ID with a
 // different digest fails permanently; a closed admission fails closed.
-func (l *Ledger) AdmitTurn(ctx context.Context, turnID, taskUID string, attempt int32, requestDigest string) (AdmitOutcome, *TurnRecord, error) {
+func (l *Ledger) AdmitTurn(
+	ctx context.Context,
+	turnID, taskUID string,
+	attempt int32,
+	requestDigest, runtimeSessionID, correlationID string,
+) (AdmitOutcome, *TurnRecord, error) {
 	if strings.TrimSpace(turnID) == "" || strings.TrimSpace(taskUID) == "" ||
-		attempt < 1 || strings.TrimSpace(requestDigest) == "" {
-		return "", nil, fmt.Errorf("turn ID, task UID, positive attempt, and request digest are required")
+		attempt < 1 || strings.TrimSpace(requestDigest) == "" ||
+		strings.TrimSpace(runtimeSessionID) == "" || strings.TrimSpace(correlationID) == "" {
+		return "", nil, fmt.Errorf("turn ID, task UID, positive attempt, request digest, runtime session ID, and correlation ID are required")
 	}
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -194,7 +288,8 @@ func (l *Ledger) AdmitTurn(ctx context.Context, turnID, taskUID string, attempt 
 	existing, err := scanTurn(tx.QueryRowContext(ctx, turnSelectSQL+` WHERE turn_id = ?`, turnID))
 	switch {
 	case err == nil:
-		if existing.RequestDigest != requestDigest {
+		if existing.RequestDigest != requestDigest ||
+			existing.RuntimeSessionID != runtimeSessionID || existing.CorrelationID != correlationID {
 			return "", nil, fmt.Errorf("%w: turn %s", ErrDigestMismatch, turnID)
 		}
 		if err := tx.Commit(); err != nil {
@@ -216,9 +311,9 @@ func (l *Ledger) AdmitTurn(ctx context.Context, turnID, taskUID string, attempt 
 
 	now := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO turn_admissions
-		(turn_id, task_uid, attempt, request_digest, state, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		turnID, taskUID, attempt, requestDigest, string(TurnAdmitted), now, now); err != nil {
+		(turn_id, task_uid, attempt, request_digest, runtime_session_id, correlation_id, state, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		turnID, taskUID, attempt, requestDigest, runtimeSessionID, correlationID, string(TurnAdmitted), now, now); err != nil {
 		return "", nil, fmt.Errorf("admit turn: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -226,6 +321,7 @@ func (l *Ledger) AdmitTurn(ctx context.Context, turnID, taskUID string, attempt 
 	}
 	return AdmitOutcomeAdmitted, &TurnRecord{
 		TurnID: turnID, TaskUID: taskUID, Attempt: attempt, RequestDigest: requestDigest,
+		RuntimeSessionID: runtimeSessionID, CorrelationID: correlationID,
 		State: TurnAdmitted, CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
@@ -246,13 +342,81 @@ func (l *Ledger) MarkTurnRejected(ctx context.Context, turnID, reason string) er
 // explicit permanent OutcomeUnknown when outcomeUnknown is true. A replay with
 // the same receipt digest is idempotent; a conflicting receipt fails.
 func (l *Ledger) RecordTurnTerminal(ctx context.Context, turnID string, receipt []byte, outcomeUnknown bool) error {
+	return l.RecordTurnTerminalWithOutput(ctx, turnID, receipt, outcomeUnknown, nil)
+}
+
+// RecordTurnTerminalWithOutput atomically records the canonical terminal
+// receipt and its optional locally referenced output payload.
+func (l *Ledger) RecordTurnTerminalWithOutput(
+	ctx context.Context,
+	turnID string,
+	receipt []byte,
+	outcomeUnknown bool,
+	output *TurnOutput,
+) error {
+	if strings.TrimSpace(turnID) == "" || len(receipt) == 0 {
+		return fmt.Errorf("turn ID and terminal receipt are required")
+	}
+	if output != nil {
+		if strings.TrimSpace(output.Ref) == "" {
+			return fmt.Errorf("turn output ref is required")
+		}
+		if len(output.Data) > maxTurnOutputBytes {
+			return fmt.Errorf("turn output exceeds durable ledger limit")
+		}
+	}
 	target := TurnTerminal
 	if outcomeUnknown {
 		target = TurnOutcomeUnknown
 	}
 	digest := ReceiptDigest(receipt)
-	return l.transition(ctx, turnID, target, "", receipt, digest,
-		[]TurnState{TurnAdmitted, TurnAccepted, target})
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin terminal turn transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	existing, err := scanTurn(tx.QueryRowContext(ctx, turnSelectSQL+` WHERE turn_id = ?`, turnID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: turn %s", ErrNotFound, turnID)
+	}
+	if err != nil {
+		return fmt.Errorf("read turn admission: %w", err)
+	}
+	if existing.State == target {
+		if existing.TerminalReceiptDigest != digest {
+			return fmt.Errorf("turn %s already recorded a different terminal receipt", turnID)
+		}
+		if output != nil {
+			persisted, outputErr := getTurnOutput(ctx, tx, turnID, output.Ref)
+			if outputErr != nil || !bytes.Equal(persisted, output.Data) {
+				return fmt.Errorf("turn %s already recorded different terminal output", turnID)
+			}
+		}
+		return tx.Commit()
+	}
+	if existing.State != TurnAdmitted && existing.State != TurnAccepted {
+		return fmt.Errorf("turn %s cannot move from %s to %s", turnID, existing.State, target)
+	}
+	if outcomeUnknown && output != nil {
+		return fmt.Errorf("outcome-unknown turn cannot store referenced output")
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `UPDATE turn_admissions SET
+			state = ?, reject_reason = '', terminal_receipt = ?, terminal_receipt_digest = ?, updated_at = ?
+			WHERE turn_id = ?`, string(target), receipt, digest, now, turnID); err != nil {
+		return fmt.Errorf("transition terminal turn: %w", err)
+	}
+	if output != nil {
+		outputDigest := ReceiptDigest(output.Data)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO turn_outputs
+			(turn_id, output_ref, output_payload, output_digest, output_size, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			turnID, output.Ref, output.Data, outputDigest, len(output.Data), now); err != nil {
+			return fmt.Errorf("persist terminal turn output: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (l *Ledger) transition(ctx context.Context, turnID string, target TurnState, rejectReason string, receipt []byte, receiptDigest string, validFrom []TurnState) error {
@@ -306,6 +470,46 @@ func (l *Ledger) GetTurn(ctx context.Context, turnID string) (*TurnRecord, error
 	return record, nil
 }
 
+// GetTurnOutput returns a validated output payload only for a terminal turn
+// and the exact opaque reference recorded with its terminal receipt.
+func (l *Ledger) GetTurnOutput(ctx context.Context, turnID, outputRef string) ([]byte, error) {
+	if strings.TrimSpace(turnID) == "" || strings.TrimSpace(outputRef) == "" {
+		return nil, fmt.Errorf("turn ID and output ref are required")
+	}
+	return getTurnOutput(ctx, l.db, turnID, outputRef)
+}
+
+type queryScanner interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func getTurnOutput(ctx context.Context, q queryScanner, turnID, outputRef string) ([]byte, error) {
+	var (
+		state   string
+		ref     string
+		payload []byte
+		digest  string
+		size    int
+	)
+	err := q.QueryRowContext(ctx, `SELECT a.state, o.output_ref, o.output_payload, o.output_digest, o.output_size
+		FROM turn_admissions AS a
+		JOIN turn_outputs AS o ON o.turn_id = a.turn_id
+		WHERE a.turn_id = ?`, turnID).Scan(&state, &ref, &payload, &digest, &size)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: output for turn %s", ErrNotFound, turnID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read terminal turn output: %w", err)
+	}
+	if TurnState(state) != TurnTerminal || ref != outputRef {
+		return nil, fmt.Errorf("%w: output for turn %s", ErrNotFound, turnID)
+	}
+	if size != len(payload) || size < 0 || size > maxTurnOutputBytes || ReceiptDigest(payload) != digest {
+		return nil, fmt.Errorf("corrupt terminal turn output")
+	}
+	return append([]byte(nil), payload...), nil
+}
+
 // ListUnsettledTurns returns every Admitted or Accepted turn for drain
 // inventory and shutdown proof.
 func (l *Ledger) ListUnsettledTurns(ctx context.Context) ([]TurnRecord, error) {
@@ -341,6 +545,123 @@ func (l *Ledger) AdmissionClosed(ctx context.Context) (bool, time.Time, error) {
 	return admissionClosed(ctx, l.db)
 }
 
+// PrepareRollover records the exact generation that may reopen admission after
+// a completed drain. It is idempotent for the same generation. A later rollout
+// may supersede an unactivated preparation because admission is still closed
+// and the no-unsettled-turn invariant is rechecked in the same transaction.
+func (l *Ledger) PrepareRollover(ctx context.Context, nextGeneration string) (string, error) {
+	if err := validateGeneration(nextGeneration); err != nil {
+		return "", err
+	}
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin wrapper ledger rollover preparation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	current, found, err := controlValue(ctx, tx, "generation")
+	if err != nil || !found {
+		if err == nil {
+			err = errors.New("generation is missing")
+		}
+		return "", fmt.Errorf("read wrapper ledger generation: %w", err)
+	}
+	if current == nextGeneration {
+		return "", fmt.Errorf("next wrapper ledger generation must differ from current generation")
+	}
+	closed, _, err := admissionClosed(ctx, tx)
+	if err != nil {
+		return "", err
+	}
+	if !closed {
+		return "", fmt.Errorf("wrapper admission must be closed before rollover preparation")
+	}
+	unsettled, err := unsettledTurnCount(ctx, tx)
+	if err != nil {
+		return "", err
+	}
+	if unsettled != 0 {
+		return "", fmt.Errorf("wrapper drain is incomplete: %d turn(s) remain unsettled", unsettled)
+	}
+	pending, pendingFound, err := controlValue(ctx, tx, "pending-generation")
+	if err != nil {
+		return "", fmt.Errorf("read pending wrapper ledger generation: %w", err)
+	}
+	if pendingFound {
+		if pending == nextGeneration {
+			if err := tx.Commit(); err != nil {
+				return "", fmt.Errorf("commit idempotent wrapper ledger rollover preparation: %w", err)
+			}
+			return current, nil
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE ledger_control SET value = ? WHERE key = 'pending-generation'`, nextGeneration); err != nil {
+			return "", fmt.Errorf("supersede wrapper ledger generation preparation: %w", err)
+		}
+	} else if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_control (key, value) VALUES ('pending-generation', ?)`, nextGeneration); err != nil {
+		return "", fmt.Errorf("prepare wrapper ledger generation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit wrapper ledger rollover preparation: %w", err)
+	}
+	return current, nil
+}
+
+// ActivateGeneration atomically reopens a fully drained ledger only for the
+// exact generation prepared by the prior wrapper. Starting the same generation
+// is always permitted but never removes a durable close marker.
+func (l *Ledger) ActivateGeneration(ctx context.Context, desiredGeneration string) error {
+	if err := validateGeneration(desiredGeneration); err != nil {
+		return err
+	}
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin wrapper ledger generation activation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	current, found, err := controlValue(ctx, tx, "generation")
+	if err != nil || !found {
+		if err == nil {
+			err = errors.New("generation is missing")
+		}
+		return fmt.Errorf("read wrapper ledger generation: %w", err)
+	}
+	if current == desiredGeneration {
+		return tx.Commit()
+	}
+	pending, pendingFound, err := controlValue(ctx, tx, "pending-generation")
+	if err != nil {
+		return fmt.Errorf("read pending wrapper ledger generation: %w", err)
+	}
+	if !pendingFound || pending != desiredGeneration {
+		return fmt.Errorf("wrapper ledger generation %q was not prepared", desiredGeneration)
+	}
+	closed, _, err := admissionClosed(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !closed {
+		return fmt.Errorf("wrapper admission must remain closed until generation activation")
+	}
+	unsettled, err := unsettledTurnCount(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if unsettled != 0 {
+		return fmt.Errorf("wrapper drain is incomplete: %d turn(s) remain unsettled", unsettled)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE ledger_control SET value = ? WHERE key = 'generation'`, desiredGeneration); err != nil {
+		return fmt.Errorf("activate wrapper ledger generation: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ledger_control WHERE key IN ('pending-generation', 'admission-closed-at')`); err != nil {
+		return fmt.Errorf("reopen wrapper admission for activated generation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit wrapper ledger generation activation: %w", err)
+	}
+	return nil
+}
+
 // Generation returns the ledger generation watermark for inventory reports.
 func (l *Ledger) Generation(ctx context.Context) (string, error) {
 	var value string
@@ -349,6 +670,41 @@ func (l *Ledger) Generation(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("read ledger generation: %w", err)
 	}
 	return value, nil
+}
+
+func validateGeneration(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return fmt.Errorf("wrapper ledger generation must contain 1 to 128 characters")
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || strings.ContainsRune("._:-", char) {
+			continue
+		}
+		return fmt.Errorf("wrapper ledger generation contains unsupported characters")
+	}
+	return nil
+}
+
+func controlValue(ctx context.Context, q queryRower, key string) (string, bool, error) {
+	var value string
+	err := q.QueryRowContext(ctx, `SELECT value FROM ledger_control WHERE key = ?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
+func unsettledTurnCount(ctx context.Context, q queryRower) (int, error) {
+	var count int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM turn_admissions WHERE state IN ('Admitted','Accepted')`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count unsettled wrapper turns: %w", err)
+	}
+	return count, nil
 }
 
 type queryRower interface {
@@ -371,7 +727,8 @@ func admissionClosed(ctx context.Context, q queryRower) (bool, time.Time, error)
 	return true, closedAt, nil
 }
 
-const turnSelectSQL = `SELECT turn_id, task_uid, attempt, request_digest, state,
+const turnSelectSQL = `SELECT turn_id, task_uid, attempt, request_digest,
+	runtime_session_id, correlation_id, state,
 	reject_reason, terminal_receipt, terminal_receipt_digest, created_at, updated_at
 	FROM turn_admissions`
 
@@ -385,7 +742,8 @@ func scanTurn(row rowScanner) (*TurnRecord, error) {
 		state  string
 	)
 	if err := row.Scan(&record.TurnID, &record.TaskUID, &record.Attempt, &record.RequestDigest,
-		&state, &record.RejectReason, &record.TerminalReceipt, &record.TerminalReceiptDigest,
+		&record.RuntimeSessionID, &record.CorrelationID, &state,
+		&record.RejectReason, &record.TerminalReceipt, &record.TerminalReceiptDigest,
 		&record.CreatedAt, &record.UpdatedAt); err != nil {
 		return nil, err
 	}

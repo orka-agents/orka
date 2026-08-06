@@ -375,6 +375,332 @@ func TestRecoverActiveAttemptSettlesDurableTerminalReceiptWithoutStreaming(t *te
 	}
 }
 
+func TestRecoverAmbiguousSubmissionPrefersPersistedTerminalOverDurableOutcomeUnknown(t *testing.T) {
+	fixture := newHarnessV1DispatcherPreparedFixture(t)
+	var err error
+	fixture.attempt, err = fixture.dispatcher.transitionAttempt(
+		fixture.ctx,
+		fixture.attempt,
+		fixture.fence,
+		store.HarnessV1AttemptSubmitting,
+		"test-submitting",
+		store.HarnessV1AttemptUpdates{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.attempt, err = fixture.dispatcher.transitionAttempt(
+		fixture.ctx,
+		fixture.attempt,
+		fixture.fence,
+		store.HarnessV1AttemptSubmittedUnknown,
+		"test-submission-unknown",
+		store.HarnessV1AttemptUpdates{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := harnessV1CompletedFrame(fixture.request, "persisted ambiguous result")
+	appendPersistedHarnessV1Frame(t, fixture, frame)
+	protocolClient := &recordingHarnessV1RecoveryClient{
+		status: durableHarnessV1OutcomeUnknownStatus(t, fixture),
+	}
+
+	if err := fixture.dispatcher.recoverAmbiguousSubmission(
+		fixture.ctx,
+		fixture.task,
+		fixture.verified,
+		protocolClient,
+		fixture.request,
+		fixture.attempt,
+		fixture.fence,
+	); err != nil {
+		t.Fatalf("recoverAmbiguousSubmission: %v", err)
+	}
+	persisted := assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSucceeded)
+	wantReceipt, err := harness.DurableTurnTerminalReceiptFromFrame(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReceiptDigest, err := harness.DurableTurnTerminalReceiptDigest(wantReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.TerminalReceiptDigest != wantReceiptDigest {
+		t.Fatalf("terminal receipt digest = %q, want persisted frame digest %q", persisted.TerminalReceiptDigest, wantReceiptDigest)
+	}
+	result, err := fixture.durable.GetResult(fixture.ctx, fixture.task.Namespace, fixture.task.Name)
+	if err != nil {
+		t.Fatalf("GetResult: %v", err)
+	}
+	if string(result) != frame.Completed.Result {
+		t.Fatalf("result = %q, want %q", result, frame.Completed.Result)
+	}
+	if protocolClient.statusCalls != 1 || protocolClient.startCalls != 0 || protocolClient.streamCalls != 0 {
+		t.Fatalf(
+			"ambiguous recovery calls: status=%d StartTurn=%d StreamFrames=%d, want 1/0/0",
+			protocolClient.statusCalls, protocolClient.startCalls, protocolClient.streamCalls,
+		)
+	}
+}
+
+func TestRecoverActiveAttemptPrefersPersistedTerminalOverDurableOutcomeUnknown(t *testing.T) {
+	fixture := newHarnessV1DispatcherStateFixture(t)
+	frame := harnessV1CompletedFrame(fixture.request, "persisted active result")
+	appendPersistedHarnessV1Frame(t, fixture, frame)
+	protocolClient := &recordingHarnessV1RecoveryClient{
+		status: durableHarnessV1OutcomeUnknownStatus(t, fixture),
+	}
+
+	if err := fixture.dispatcher.recoverActiveAttempt(
+		fixture.ctx,
+		fixture.task,
+		fixture.verified,
+		protocolClient,
+		fixture.request,
+		fixture.attempt,
+		fixture.fence,
+	); err != nil {
+		t.Fatalf("recoverActiveAttempt: %v", err)
+	}
+	persisted := assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSucceeded)
+	wantReceipt, err := harness.DurableTurnTerminalReceiptFromFrame(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReceiptDigest, err := harness.DurableTurnTerminalReceiptDigest(wantReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.TerminalReceiptDigest != wantReceiptDigest {
+		t.Fatalf("terminal receipt digest = %q, want persisted frame digest %q", persisted.TerminalReceiptDigest, wantReceiptDigest)
+	}
+	result, err := fixture.durable.GetResult(fixture.ctx, fixture.task.Namespace, fixture.task.Name)
+	if err != nil {
+		t.Fatalf("GetResult: %v", err)
+	}
+	if string(result) != frame.Completed.Result {
+		t.Fatalf("result = %q, want %q", result, frame.Completed.Result)
+	}
+	if protocolClient.statusCalls != 1 || protocolClient.startCalls != 0 || protocolClient.streamCalls != 0 {
+		t.Fatalf(
+			"active recovery calls: status=%d StartTurn=%d StreamFrames=%d, want 1/0/0",
+			protocolClient.statusCalls, protocolClient.startCalls, protocolClient.streamCalls,
+		)
+	}
+}
+
+func TestHarnessV1DispatcherSettlingRetryUsesPersistedTerminalEvidence(t *testing.T) {
+	recoveries := []struct {
+		name    string
+		fixture func(*testing.T) *harnessV1DispatcherStateFixture
+		recover func(*harnessV1DispatcherStateFixture, *recordingHarnessV1RecoveryClient) error
+	}{
+		{
+			name:    "ambiguous",
+			fixture: newHarnessV1DispatcherAmbiguousFixture,
+			recover: func(f *harnessV1DispatcherStateFixture, c *recordingHarnessV1RecoveryClient) error {
+				return f.dispatcher.recoverAmbiguousSubmission(
+					f.ctx, f.task, f.verified, c, f.request, f.attempt, f.fence,
+				)
+			},
+		},
+		{
+			name:    "active",
+			fixture: newHarnessV1DispatcherStateFixture,
+			recover: func(f *harnessV1DispatcherStateFixture, c *recordingHarnessV1RecoveryClient) error {
+				return f.dispatcher.recoverActiveAttempt(
+					f.ctx, f.task, f.verified, c, f.request, f.attempt, f.fence,
+				)
+			},
+		},
+	}
+	failures := []struct {
+		name    string
+		install func(*harnessV1DispatcherStateFixture, error)
+	}{
+		{
+			name: "save-result",
+			install: func(f *harnessV1DispatcherStateFixture, transientErr error) {
+				f.dispatcher.ResultStore = &failingOnceHarnessV1ResultStore{
+					ResultStore: f.durable,
+					err:         transientErr,
+				}
+			},
+		},
+		{
+			name: "final-cas",
+			install: func(f *harnessV1DispatcherStateFixture, transientErr error) {
+				f.dispatcher.Attempts = &failingOnceHarnessV1AttemptStore{
+					HarnessV1AttemptStore: f.durable,
+					target:                store.HarnessV1AttemptSucceeded,
+					err:                   transientErr,
+				}
+			},
+		},
+	}
+
+	for _, recovery := range recoveries {
+		for _, failure := range failures {
+			t.Run(recovery.name+"/"+failure.name, func(t *testing.T) {
+				fixture := recovery.fixture(t)
+				frame := harnessV1CompletedFrame(fixture.request, recovery.name+" "+failure.name)
+				appendPersistedHarnessV1Frame(t, fixture, frame)
+				protocolClient := &recordingHarnessV1RecoveryClient{
+					status: durableHarnessV1OutcomeUnknownStatus(t, fixture),
+				}
+				transientErr := errors.New("transient " + failure.name)
+				failure.install(fixture, transientErr)
+
+				if err := recovery.recover(fixture, protocolClient); !errors.Is(err, transientErr) {
+					t.Fatalf("initial recovery error = %v, want %v", err, transientErr)
+				}
+				persisted := assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSettling)
+				receipt, err := harness.DurableTurnTerminalReceiptFromFrame(frame)
+				if err != nil {
+					t.Fatal(err)
+				}
+				receiptDigest, err := harness.DurableTurnTerminalReceiptDigest(receipt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if persisted.TerminalReceiptDigest != receiptDigest {
+					t.Fatalf("settling digest = %q, want %q", persisted.TerminalReceiptDigest, receiptDigest)
+				}
+
+				if err := fixture.dispatcher.recoverSettlingAttempt(
+					fixture.ctx,
+					fixture.task,
+					protocolClient,
+					fixture.request,
+					persisted,
+					fixture.fence,
+				); err != nil {
+					t.Fatalf("recoverSettlingAttempt: %v", err)
+				}
+				assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSucceeded)
+				result, err := fixture.durable.GetResult(fixture.ctx, fixture.task.Namespace, fixture.task.Name)
+				if err != nil {
+					t.Fatalf("GetResult: %v", err)
+				}
+				if string(result) != frame.Completed.Result {
+					t.Fatalf("result = %q, want %q", result, frame.Completed.Result)
+				}
+				if protocolClient.statusCalls != 2 || protocolClient.startCalls != 0 || protocolClient.streamCalls != 0 {
+					t.Fatalf(
+						"recovery calls: status=%d StartTurn=%d StreamFrames=%d, want 2/0/0",
+						protocolClient.statusCalls, protocolClient.startCalls, protocolClient.streamCalls,
+					)
+				}
+			})
+		}
+	}
+}
+
+func TestHarnessV1DispatcherAdmissionClosedRecoveryEventuallyAccepts(t *testing.T) {
+	fixture := newHarnessV1DispatcherPreparedFixture(t)
+	markHarnessV1AdmissionClosedAttempt(t, fixture)
+	protocolClient := &recordingHarnessV1RecoveryClient{
+		statusErr: harness.ClientError{StatusCode: http.StatusNotFound, Message: "turn not found"},
+	}
+	protocolClient.start = func(
+		_ context.Context,
+		request harness.StartTurnRequest,
+	) (*harness.StartTurnResponse, error) {
+		if protocolClient.startCalls == 1 {
+			return nil, harness.ClientError{StatusCode: http.StatusConflict, Message: "wrapper admission is closed"}
+		}
+		return &harness.StartTurnResponse{
+			Version: harness.ProtocolVersion, Accepted: true,
+			RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID,
+			CorrelationID: request.CorrelationID,
+		}, nil
+	}
+	protocolClient.stream = func(
+		_ context.Context,
+		_ harness.HarnessTurnID,
+		_ int64,
+		onFrame func(harness.HarnessEventFrame) error,
+	) error {
+		return onFrame(harnessV1CompletedFrame(fixture.request, "accepted after reopen"))
+	}
+
+	if err := fixture.dispatcher.recoverAmbiguousSubmission(
+		fixture.ctx, fixture.task, fixture.verified, protocolClient, fixture.request, fixture.attempt, fixture.fence,
+	); err != nil {
+		t.Fatalf("recover while admission remains closed: %v", err)
+	}
+	persisted := assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSubmittedUnknown)
+	if !harnessV1AttemptHasAdmissionClosedProof(persisted) || protocolClient.startCalls != 1 {
+		t.Fatalf("closed recovery = attempt %#v StartTurn=%d", persisted, protocolClient.startCalls)
+	}
+	fixture.attempt = persisted
+
+	if err := fixture.dispatcher.recoverAmbiguousSubmission(
+		fixture.ctx, fixture.task, fixture.verified, protocolClient, fixture.request, fixture.attempt, fixture.fence,
+	); err != nil {
+		t.Fatalf("recover after admission reopened: %v", err)
+	}
+	assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSucceeded)
+	if protocolClient.statusCalls != 2 || protocolClient.startCalls != 2 || protocolClient.streamCalls != 1 {
+		t.Fatalf(
+			"reopen calls: status=%d StartTurn=%d StreamFrames=%d, want 2/2/1",
+			protocolClient.statusCalls, protocolClient.startCalls, protocolClient.streamCalls,
+		)
+	}
+}
+
+func TestHarnessV1DispatcherAdmissionClosedAmbiguousRetryWaitsForLedger(t *testing.T) {
+	fixture := newHarnessV1DispatcherPreparedFixture(t)
+	markHarnessV1AdmissionClosedAttempt(t, fixture)
+	protocolClient := &recordingHarnessV1RecoveryClient{
+		statusErr: harness.ClientError{StatusCode: http.StatusNotFound, Message: "turn not found"},
+		start: func(context.Context, harness.StartTurnRequest) (*harness.StartTurnResponse, error) {
+			return nil, harness.ClientError{RemoteAcceptanceUnknown: true, Message: "response lost"}
+		},
+	}
+	ambiguousErr := fixture.dispatcher.recoverAmbiguousSubmission(
+		fixture.ctx, fixture.task, fixture.verified, protocolClient, fixture.request, fixture.attempt, fixture.fence,
+	)
+	if ambiguousErr == nil {
+		t.Fatal("ambiguous StartTurn retry error = nil")
+	}
+	persisted := assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSubmittedUnknown)
+	if !harnessV1AttemptHasAdmissionClosedProof(persisted) || protocolClient.startCalls != 1 || protocolClient.streamCalls != 0 {
+		t.Fatalf(
+			"ambiguous retry = attempt %#v StartTurn=%d StreamFrames=%d",
+			persisted, protocolClient.startCalls, protocolClient.streamCalls,
+		)
+	}
+	fixture.attempt = persisted
+	protocolClient.statusErr = nil
+	protocolClient.status = &harness.DurableTurnStatus{
+		TurnID: fixture.attempt.TurnID, TaskUID: fixture.attempt.TaskUID, Attempt: fixture.attempt.Attempt,
+		RequestDigest: fixture.attempt.RequestDigest, State: harness.DurableTurnAccepted,
+	}
+	protocolClient.stream = func(
+		_ context.Context,
+		_ harness.HarnessTurnID,
+		_ int64,
+		onFrame func(harness.HarnessEventFrame) error,
+	) error {
+		return onFrame(harnessV1CompletedFrame(fixture.request, "accepted despite lost response"))
+	}
+
+	if err := fixture.dispatcher.recoverAmbiguousSubmission(
+		fixture.ctx, fixture.task, fixture.verified, protocolClient, fixture.request, fixture.attempt, fixture.fence,
+	); err != nil {
+		t.Fatalf("recover accepted ambiguous retry: %v", err)
+	}
+	assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSucceeded)
+	if protocolClient.startCalls != 1 || protocolClient.statusCalls != 2 || protocolClient.streamCalls != 1 {
+		t.Fatalf(
+			"ambiguous recovery calls: StartTurn=%d status=%d StreamFrames=%d, want 1/2/1",
+			protocolClient.startCalls, protocolClient.statusCalls, protocolClient.streamCalls,
+		)
+	}
+}
+
 func TestHarnessV1DispatcherPreparedSnapshotDispatchSucceeds(t *testing.T) {
 	fixture := newHarnessV1DispatcherPreparedFixture(t)
 	fixture.dispatcher.Epochs = readyHarnessV1TestEpochManager(fixture.durable, fixture.fence)
@@ -615,6 +941,69 @@ type harnessV1DispatcherStateFixture struct {
 	fence      store.ControllerEpochFence
 }
 
+func newHarnessV1DispatcherAmbiguousFixture(t *testing.T) *harnessV1DispatcherStateFixture {
+	t.Helper()
+	fixture := newHarnessV1DispatcherPreparedFixture(t)
+	var err error
+	fixture.attempt, err = fixture.dispatcher.transitionAttempt(
+		fixture.ctx,
+		fixture.attempt,
+		fixture.fence,
+		store.HarnessV1AttemptSubmitting,
+		"test-submitting",
+		store.HarnessV1AttemptUpdates{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.attempt, err = fixture.dispatcher.transitionAttempt(
+		fixture.ctx,
+		fixture.attempt,
+		fixture.fence,
+		store.HarnessV1AttemptSubmittedUnknown,
+		"test-submission-unknown",
+		store.HarnessV1AttemptUpdates{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func markHarnessV1AdmissionClosedAttempt(t *testing.T, fixture *harnessV1DispatcherStateFixture) {
+	t.Helper()
+	var err error
+	fixture.attempt, err = fixture.dispatcher.transitionAttempt(
+		fixture.ctx,
+		fixture.attempt,
+		fixture.fence,
+		store.HarnessV1AttemptSubmitting,
+		"test-submitting",
+		store.HarnessV1AttemptUpdates{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protocolClient := &recordingHarnessV1RecoveryClient{}
+	err = fixture.dispatcher.handleStartTurnError(
+		fixture.ctx,
+		fixture.task,
+		fixture.verified,
+		protocolClient,
+		fixture.request,
+		fixture.attempt,
+		fixture.fence,
+		harness.ClientError{StatusCode: http.StatusConflict, Message: "wrapper admission is closed"},
+	)
+	if err != nil {
+		t.Fatalf("handleStartTurnError(admission closed): %v", err)
+	}
+	fixture.attempt = assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSubmittedUnknown)
+	if !harnessV1AttemptHasAdmissionClosedProof(fixture.attempt) {
+		t.Fatalf("attempt operation = %q, want durable admission-closed proof", fixture.attempt.LastOperationID)
+	}
+}
+
 func newHarnessV1DispatcherStateFixture(t *testing.T) *harnessV1DispatcherStateFixture {
 	t.Helper()
 	fixture := newHarnessV1DispatcherPreparedFixture(t)
@@ -726,6 +1115,60 @@ func harnessV1CompletedFrame(request harness.StartTurnRequest, result string) ha
 	}
 }
 
+func durableHarnessV1OutcomeUnknownStatus(
+	t *testing.T,
+	fixture *harnessV1DispatcherStateFixture,
+) *harness.DurableTurnStatus {
+	t.Helper()
+	receipt := harness.DurableTurnTerminalReceipt{
+		Version:          harness.ProtocolVersion,
+		Kind:             harness.DurableTurnTerminalOutcomeUnknown,
+		RuntimeSessionID: fixture.request.RuntimeSessionID,
+		TurnID:           fixture.request.TurnID,
+		CorrelationID:    fixture.request.CorrelationID,
+		OutcomeUnknown:   &harness.DurableTurnOutcomeUnknownReceipt{Reason: "wrapper outcome unknown"},
+	}
+	digest, err := harness.DurableTurnTerminalReceiptDigest(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &harness.DurableTurnStatus{
+		TurnID:                fixture.attempt.TurnID,
+		TaskUID:               fixture.attempt.TaskUID,
+		Attempt:               fixture.attempt.Attempt,
+		RequestDigest:         fixture.attempt.RequestDigest,
+		State:                 harness.DurableTurnOutcomeUnknown,
+		TerminalReceiptDigest: digest,
+		TerminalReceipt:       &receipt,
+	}
+}
+
+func appendPersistedHarnessV1Frame(
+	t *testing.T,
+	fixture *harnessV1DispatcherStateFixture,
+	frame harness.HarnessEventFrame,
+) {
+	t.Helper()
+	journalState, err := (harness.TurnJournal{
+		EventStore: fixture.dispatcher.EventStore,
+		MapContext: harness.EventMapContext{
+			Namespace:   fixture.task.Namespace,
+			TaskName:    fixture.task.Name,
+			SessionName: fixture.request.SessionName,
+			AgentName:   fixture.task.Status.AgentExecutionBinding.Agent.Name,
+			StreamID:    fixture.task.Name,
+		},
+	}).Open(fixture.ctx)
+	if err != nil {
+		t.Fatalf("open harness v1 turn journal: %v", err)
+	}
+	if _, appended, err := journalState.AppendFrameIfNew(fixture.ctx, frame); err != nil {
+		t.Fatalf("append persisted harness v1 frame: %v", err)
+	} else if !appended {
+		t.Fatal("persisted harness v1 frame was not appended")
+	}
+}
+
 func assertHarnessV1AttemptState(
 	t *testing.T,
 	fixture *harnessV1DispatcherStateFixture,
@@ -755,6 +1198,42 @@ type recordingHarnessV1RecoveryClient struct {
 }
 
 type failingHarnessV1ResultStore struct{ err error }
+
+type failingOnceHarnessV1ResultStore struct {
+	store.ResultStore
+	err    error
+	failed bool
+}
+
+func (s *failingOnceHarnessV1ResultStore) SaveResult(
+	ctx context.Context,
+	namespace, taskName string,
+	result []byte,
+) error {
+	if !s.failed {
+		s.failed = true
+		return s.err
+	}
+	return s.ResultStore.SaveResult(ctx, namespace, taskName, result)
+}
+
+type failingOnceHarnessV1AttemptStore struct {
+	store.HarnessV1AttemptStore
+	target store.HarnessV1AttemptState
+	err    error
+	failed bool
+}
+
+func (s *failingOnceHarnessV1AttemptStore) TransitionHarnessV1Attempt(
+	ctx context.Context,
+	transition store.HarnessV1AttemptTransition,
+) (*store.HarnessV1Attempt, error) {
+	if !s.failed && transition.TargetState == s.target {
+		s.failed = true
+		return nil, s.err
+	}
+	return s.HarnessV1AttemptStore.TransitionHarnessV1Attempt(ctx, transition)
+}
 
 func (s failingHarnessV1ResultStore) SaveResult(context.Context, string, string, []byte) error {
 	return s.err
@@ -814,3 +1293,5 @@ func (c *recordingHarnessV1RecoveryClient) CancelTurn(
 
 var _ harnessV1ProtocolClient = (*recordingHarnessV1RecoveryClient)(nil)
 var _ store.ResultStore = failingHarnessV1ResultStore{}
+var _ store.ResultStore = (*failingOnceHarnessV1ResultStore)(nil)
+var _ store.HarnessV1AttemptStore = (*failingOnceHarnessV1AttemptStore)(nil)

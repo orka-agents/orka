@@ -5,6 +5,10 @@ kind: Kustomization
 # its explicit vekil-system namespace.
 resources:
   - ../acp-workload
+  - agent_execution_control.yaml
+  # Runtime resources only. The fail-closed webhook/VAP base is applied after
+  # TLS, endpoint, control, and handler-smoke checks.
+  - ../orka-admission
   - ../vekil-ingress
 configMapGenerator:
   - name: acp-runtime-images
@@ -17,6 +21,9 @@ generatorOptions:
 # Fail-closed placeholders: direct rendering is immutable but not runnable
 # until an operator replaces all four runtime digests (make deploy does this atomically).
 images:
+  - name: controller
+    newName: docker.io/sozercan/orka
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   - name: ghcr.io/orka-agents/orka
     newName: docker.io/sozercan/orka
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

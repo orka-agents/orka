@@ -49,6 +49,8 @@ spec:
               value: /var/run/orka/harness-wrapper/token
             - name: ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH
               value: /var/lib/orka/harness-v1/admission-ledger.db
+            - name: ORKA_HARNESS_WRAPPER_LEDGER_GENERATION
+              value: "1"
             - name: ORKA_ALLOW_BASH
               value: "true"
             - name: ORKA_HARNESS_WRAPPER_CHILD_UID
@@ -87,7 +89,7 @@ spec:
             periodSeconds: 20
           readinessProbe:
             httpGet:
-              path: /v1/health
+              path: /v1/ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10

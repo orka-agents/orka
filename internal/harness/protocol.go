@@ -18,12 +18,14 @@ const (
 )
 
 const (
-	HealthPath       = "/v1/health"
-	CapabilitiesPath = "/v1/capabilities"
-	TurnsPath        = "/v1/turns"
-	AdminTurnsPath   = "/v1/admin/turns"
-	AdminDrainPath   = "/v1/admin/drain"
-	AdminClosePath   = "/v1/admin/admission/close"
+	HealthPath        = "/v1/health"
+	ReadinessPath     = "/v1/ready"
+	CapabilitiesPath  = "/v1/capabilities"
+	TurnsPath         = "/v1/turns"
+	AdminTurnsPath    = "/v1/admin/turns"
+	AdminDrainPath    = "/v1/admin/drain"
+	AdminClosePath    = "/v1/admin/admission/close"
+	AdminRolloverPath = "/v1/admin/admission/prepare-rollover"
 )
 
 // Durable harness v1 admission metadata is safe, non-secret identity copied
@@ -358,6 +360,16 @@ type DurableDrainStatus struct {
 
 type DurableAdmissionCloseResponse struct {
 	AdmissionClosed bool `json:"admissionClosed"`
+}
+
+type DurableRolloverPrepareRequest struct {
+	NextGeneration string `json:"nextGeneration"`
+}
+
+type DurableRolloverPrepareResponse struct {
+	CurrentGeneration string `json:"currentGeneration"`
+	NextGeneration    string `json:"nextGeneration"`
+	Prepared          bool   `json:"prepared"`
 }
 
 type ToolExecutionMode string

@@ -130,6 +130,10 @@ verify-helm-crds: ## Verify generated and promoted Helm chart CRDs are identical
 test-helm-crd-sync: ## Test Helm CRD synchronization and drift detection.
 	bash scripts/tests/sync-helm-crds-test.sh
 
+.PHONY: test-coexistence-deploy-gate
+test-coexistence-deploy-gate: ## Test the coexistence CRD and wrapper deployment gate.
+	bash scripts/tests/coexistence-deploy-gate-test.sh
+
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -440,21 +444,20 @@ verify-acp-runtime-images: ## Require digest-pinned ACP runtime images for suppo
 		fi; \
 	done
 
-.PHONY: verify-acp-crd-cutover
-verify-acp-crd-cutover: ## Refuse workload deployment until the ACP v2 hard cutover is complete.
-	@for crd in runtimepools promptattempts runtimesessioncontrols branchclaims publications controllerepochs externaleffects; do \
-		"$(KUBECTL)" get crd "$$crd.core.orka.ai" >/dev/null || { echo "missing ACP control CRD: $$crd.core.orka.ai; run scripts/upgrade-orka-crds.sh first" >&2; exit 1; }; \
+.PHONY: verify-coexistence-crds
+verify-coexistence-crds: ## Refuse workload deployment until the reviewed v1/v2 bridge CRDs are installed.
+	@for crd in runtimepools promptattempts runtimesessioncontrols branchclaims publications controllerepochs externaleffects agentexecutioncontrols agentexecutionpolicies agentexecutionadjudications agentruntimes; do \
+		"$(KUBECTL)" get crd "$$crd.core.orka.ai" >/dev/null || { echo "missing coexistence CRD: $$crd.core.orka.ai; apply the reviewed coexistence CRD upgrade wave before workloads" >&2; exit 1; }; \
+		"$(KUBECTL)" wait --for=condition=Established --timeout=60s "crd/$$crd.core.orka.ai" >/dev/null || { echo "coexistence CRD is not Established: $$crd.core.orka.ai" >&2; exit 1; }; \
 	done
 	@"$(KUBECTL)" get crd agentruntimes.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] | all(. == ["orka.harness.v2"])' >/dev/null || \
-		{ echo "AgentRuntime CRD is not the ACP v2-only schema; run scripts/upgrade-orka-crds.sh" >&2; exit 1; }
-	@if "$(KUBECTL)" get agentruntimes.core.orka.ai -A -o json | jq -e 'any(.items[]?; .spec.contractVersion == "orka.harness.v1")' >/dev/null; then \
-		echo "legacy orka.harness.v1 AgentRuntime objects remain" >&2; exit 1; \
-	fi
-	@KUBECTL="$(KUBECTL)" scripts/check-legacy-wrapper-resources.sh
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] as $$enums | \
+		($$enums | length) > 0 and ($$enums | all(sort == ["orka.harness.v1","orka.harness.v2"]))' >/dev/null || \
+		{ echo "AgentRuntime CRD is not the dual orka.harness.v1/orka.harness.v2 bridge schema; apply the reviewed coexistence CRD upgrade wave before workloads" >&2; exit 1; }
+	@COEXISTENCE=1 KUBECTL="$(KUBECTL)" scripts/check-legacy-wrapper-resources.sh
 
 .PHONY: deploy
-deploy: verify-acp-runtime-images verify-acp-crd-cutover manifests kustomize ## Deploy ACP workloads after verified CRD hard cutover.
+deploy: verify-acp-runtime-images verify-coexistence-crds manifests kustomize ## Deploy ACP workloads after the coexistence CRD upgrade wave.
 	@"$(KUBECTL)" create namespace orka-system --dry-run=client -o yaml | "$(KUBECTL)" apply -f -
 	@if ! "$(KUBECTL)" -n orka-system get secret acp-artifact-capability >/dev/null 2>&1; then \
 		secret="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
@@ -481,6 +484,7 @@ deploy: verify-acp-runtime-images verify-acp-crd-cutover manifests kustomize ## 
 			"${ACP_CODEX_RUNTIME_IMG}" "${ACP_CLAUDE_RUNTIME_IMG}" "${ACP_COPILOT_RUNTIME_IMG}" "${ACP_OPENCODE_RUNTIME_IMG}"; \
 		cd "$$tmp/config/acp-production"; \
 		"$(KUSTOMIZE)" edit set image \
+			controller=${IMG} \
 			ghcr.io/orka-agents/orka=${IMG} \
 			docker.io/sozercan/orka-workspace-publisher=${WORKSPACE_PUBLISHER_IMG}; \
 		"$(CURDIR)/scripts/apply-acp-production.sh" "$$PWD" "$(KUSTOMIZE)" "$(KUBECTL)"

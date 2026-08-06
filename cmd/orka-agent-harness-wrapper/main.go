@@ -32,8 +32,13 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) > 0 && args[0] == "copilot-turn" {
-		return cliwrapper.RunCopilotTurnCLI(context.Background(), os.Stdin, os.Stdout)
+	if len(args) > 0 {
+		switch args[0] {
+		case "copilot-turn":
+			return cliwrapper.RunCopilotTurnCLI(context.Background(), os.Stdin, os.Stdout)
+		case "drain":
+			return runDrain(args[1:])
+		}
 	}
 	cfg, err := cliwrapper.LoadConfigFromEnvUnvalidated()
 	if err != nil {
@@ -66,6 +71,12 @@ func run(args []string) error {
 		"admission-ledger-path",
 		cfg.AdmissionLedgerPath,
 		"durable wrapper admission ledger path",
+	)
+	fs.StringVar(
+		&cfg.LedgerGeneration,
+		"ledger-generation",
+		cfg.LedgerGeneration,
+		"durable wrapper admission ledger generation",
 	)
 	fs.StringVar(&cfg.Copilot.Path, "copilot-cli-path", cfg.Copilot.Path, "Copilot CLI path for the copilot adapter")
 	fs.StringVar(

@@ -20,6 +20,10 @@ spec:
             matchLabels:
               app.kubernetes.io/name: orka
               control-plane: controller-manager
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orka
+              app.kubernetes.io/component: agent-harness-wrapper-drain
       ports:
         - protocol: TCP
           port: 8080

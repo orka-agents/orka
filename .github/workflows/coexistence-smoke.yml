@@ -4,11 +4,14 @@ on:
   push:
     paths:
       - ".github/workflows/coexistence-smoke.yml"
+      - "Makefile"
       - "api/**"
       - "cmd/build/helmify/**"
       - "cmd/orka-admission/**"
       - "cmd/orka-agent-harness-wrapper/**"
       - "config/harness-wrapper/**"
+      - "config/acp-production/**"
+      - "config/acp-workload/**"
       - "config/orka-admission/**"
       - "config/orka-admission-webhooks/**"
       - "go.mod"
@@ -20,16 +23,22 @@ on:
       - "internal/store/**"
       - "pkg/harness/**"
       - "scripts/check-legacy-wrapper-resources.sh"
+      - "scripts/apply-acp-production.sh"
       - "scripts/coexistence-*"
+      - "scripts/tests/acp-runtime-image-rollout-test.sh"
+      - "scripts/tests/coexistence-deploy-gate-test.sh"
       - "workers/harness/**"
   pull_request:
     paths:
       - ".github/workflows/coexistence-smoke.yml"
+      - "Makefile"
       - "api/**"
       - "cmd/build/helmify/**"
       - "cmd/orka-admission/**"
       - "cmd/orka-agent-harness-wrapper/**"
       - "config/harness-wrapper/**"
+      - "config/acp-production/**"
+      - "config/acp-workload/**"
       - "config/orka-admission/**"
       - "config/orka-admission-webhooks/**"
       - "go.mod"
@@ -41,7 +50,10 @@ on:
       - "internal/store/**"
       - "pkg/harness/**"
       - "scripts/check-legacy-wrapper-resources.sh"
+      - "scripts/apply-acp-production.sh"
       - "scripts/coexistence-*"
+      - "scripts/tests/acp-runtime-image-rollout-test.sh"
+      - "scripts/tests/coexistence-deploy-gate-test.sh"
       - "workers/harness/**"
   workflow_dispatch:
 
@@ -86,9 +98,9 @@ jobs:
             -count=1
 
   shell-syntax:
-    name: Coexistence shell syntax
+    name: Coexistence deployment scripts
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,3 +111,14 @@ jobs:
         run: |
           bash -n scripts/coexistence-bridge-crd-validate.sh
           bash -n scripts/check-legacy-wrapper-resources.sh
+          bash -n scripts/apply-acp-production.sh
+          bash -n scripts/tests/acp-runtime-image-rollout-test.sh
+          bash -n scripts/tests/coexistence-deploy-gate-test.sh
+
+      - name: Install kustomize
+        run: make kustomize
+
+      - name: Run coexistence deployment tests
+        run: |
+          bash scripts/tests/coexistence-deploy-gate-test.sh
+          KUSTOMIZE="$PWD/bin/kustomize" bash scripts/tests/acp-runtime-image-rollout-test.sh

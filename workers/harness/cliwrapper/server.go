@@ -31,8 +31,9 @@ import (
 )
 
 const (
-	maxTerminalResultBytes = 512 * 1024
-	localOutputRef         = "cliwrapper-result-v1"
+	maxTerminalResultBytes      = 512 * 1024
+	localOutputRef              = "cliwrapper-result-v1"
+	terminalLedgerPersistFailed = "persist-failed"
 )
 
 type Server struct {
@@ -90,13 +91,65 @@ func NewServer(cfg Config, adapter RuntimeAdapter, opts ...ServerOption) (*Serve
 		}
 	}
 	if ledgerPath := strings.TrimSpace(cfg.AdmissionLedgerPath); ledgerPath != "" {
-		admissionLedger, err := ledger.Open(ledgerPath)
+		admissionLedger, err := ledger.OpenWithGeneration(ledgerPath, cfg.LedgerGeneration)
 		if err != nil {
 			return nil, err
 		}
 		s.ledger = admissionLedger
+		if err := s.reconcileOrphanedDurableTurns(context.Background()); err != nil {
+			_ = admissionLedger.Close()
+			s.ledger = nil
+			return nil, err
+		}
+		if err := admissionLedger.ActivateGeneration(context.Background(), cfg.LedgerGeneration); err != nil {
+			_ = admissionLedger.Close()
+			s.ledger = nil
+			return nil, fmt.Errorf("activate wrapper ledger generation: %w", err)
+		}
 	}
 	return s, nil
+}
+
+func (s *Server) reconcileOrphanedDurableTurns(ctx context.Context) error {
+	records, err := s.ledger.ListUnsettledTurns(ctx)
+	if err != nil {
+		return fmt.Errorf("list orphaned durable turns: %w", err)
+	}
+	for i := range records {
+		record := &records[i]
+		switch record.State {
+		case ledger.TurnAdmitted:
+			if err := s.ledger.MarkTurnRejected(ctx, record.TurnID, "wrapper-restarted-before-acceptance"); err != nil {
+				return fmt.Errorf("reject orphaned admitted turn: %w", err)
+			}
+		case ledger.TurnAccepted:
+			runtimeSessionID := strings.TrimSpace(record.RuntimeSessionID)
+			if runtimeSessionID == "" {
+				runtimeSessionID = "unknown-after-wrapper-restart"
+			}
+			correlationID := strings.TrimSpace(record.CorrelationID)
+			if correlationID == "" {
+				correlationID = "unknown-after-wrapper-restart"
+			}
+			receipt, marshalErr := harness.MarshalDurableTurnTerminalReceipt(harness.DurableTurnTerminalReceipt{
+				Version:          harness.ProtocolVersion,
+				Kind:             harness.DurableTurnTerminalOutcomeUnknown,
+				RuntimeSessionID: harness.RuntimeSessionID(runtimeSessionID),
+				TurnID:           harness.HarnessTurnID(record.TurnID),
+				CorrelationID:    correlationID,
+				OutcomeUnknown: &harness.DurableTurnOutcomeUnknownReceipt{
+					Reason: "wrapper-restarted-after-acceptance",
+				},
+			})
+			if marshalErr != nil {
+				return fmt.Errorf("encode orphaned accepted turn receipt: %w", marshalErr)
+			}
+			if err := s.ledger.RecordTurnTerminal(ctx, record.TurnID, receipt, true); err != nil {
+				return fmt.Errorf("settle orphaned accepted turn: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // Close releases the durable wrapper admission ledger. The HTTP server must be
@@ -113,12 +166,14 @@ func (s *Server) Close() error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, s.handleHealth)
+	mux.HandleFunc(harness.ReadinessPath, s.handleReadiness)
 	mux.HandleFunc(harness.CapabilitiesPath, s.handleCapabilities)
 	mux.HandleFunc(harness.TurnsPath, s.handleStartTurn)
 	mux.HandleFunc(harness.TurnsPath+"/", s.handleTurn)
 	mux.HandleFunc(harness.AdminTurnsPath+"/", s.handleAdminTurn)
 	mux.HandleFunc(harness.AdminDrainPath, s.handleAdminDrain)
 	mux.HandleFunc(harness.AdminClosePath, s.handleAdminClose)
+	mux.HandleFunc(harness.AdminRolloverPath, s.handleAdminRollover)
 	return mux
 }
 
@@ -146,7 +201,21 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 func (s *Server) finishTurn(turn *turnState) {
 	if s.ledger != nil {
 		receipt, outcomeUnknown := s.durableTerminalReceipt(turn)
-		if err := s.ledger.RecordTurnTerminal(context.Background(), string(turn.id()), receipt, outcomeUnknown); err != nil {
+		var durableOutput *ledger.TurnOutput
+		if !outcomeUnknown && turn.terminalOutputRef() == localOutputRef {
+			data, ok, err := turn.output()
+			if err != nil || !ok {
+				if err == nil {
+					err = errors.New("terminal output payload is missing")
+				}
+				s.setTerminalLedgerError(err)
+				return
+			}
+			durableOutput = &ledger.TurnOutput{Ref: localOutputRef, Data: data}
+		}
+		if err := s.ledger.RecordTurnTerminalWithOutput(
+			context.Background(), string(turn.id()), receipt, outcomeUnknown, durableOutput,
+		); err != nil {
 			// Do not expose stream completion, release capacity, or schedule
 			// eviction until the authoritative terminal receipt is durable. The
 			// unhealthy readiness response surfaces the failure without leaking
@@ -199,6 +268,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	harness.WriteJSON(w, http.StatusOK, s.healthResponse())
+}
+
+func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	response := s.healthResponse()
+	statusCode := http.StatusOK
+	if !response.Ready {
+		statusCode = http.StatusServiceUnavailable
+	}
+	harness.WriteJSON(w, statusCode, response)
+}
+
+func (s *Server) healthResponse() harness.HealthResponse {
 	status := harness.HealthStatusOK
 	ready := true
 	metadata := map[string]string{
@@ -208,15 +294,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !s.terminalLedgerHealthy() {
 		status = harness.HealthStatusUnhealthy
 		ready = false
-		metadata["terminalLedger"] = "persist-failed"
+		metadata["terminalLedger"] = terminalLedgerPersistFailed
 	}
-	harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{
+	return harness.HealthResponse{
 		Version:   harness.ProtocolVersion,
 		Status:    status,
 		Ready:     ready,
 		CheckedAt: s.now().UTC(),
 		Metadata:  metadata,
-	})
+	}
 }
 
 func (s *Server) currentAuthValue() (string, error) {
@@ -440,6 +526,36 @@ func (s *Server) handleAdminDrain(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleAdminRollover(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.ledger == nil {
+		writeSafeError(w, http.StatusServiceUnavailable, "durable admission ledger is not configured")
+		return
+	}
+	var request harness.DurableRolloverPrepareRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeSafeError(w, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	nextGeneration := strings.TrimSpace(request.NextGeneration)
+	currentGeneration, err := s.ledger.PrepareRollover(r.Context(), nextGeneration)
+	if err != nil {
+		writeSafeError(w, http.StatusConflict, "durable rollover preparation failed")
+		return
+	}
+	harness.WriteJSON(w, http.StatusOK, harness.DurableRolloverPrepareResponse{
+		CurrentGeneration: currentGeneration,
+		NextGeneration:    nextGeneration,
+		Prepared:          true,
+	})
+}
+
 func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(w, r) {
 		return
@@ -472,6 +588,7 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		outcome, existing, admitErr := s.ledger.AdmitTurn(
 			r.Context(), string(request.TurnID), durable.taskUID, durable.attempt, durable.requestDigest,
+			string(request.RuntimeSessionID), request.CorrelationID,
 		)
 		if admitErr != nil {
 			switch {
@@ -557,6 +674,10 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	turn := s.turnRegistry.lookup(turnID)
+	if turn == nil && resource == "output" && r.Method == http.MethodGet && s.ledger != nil {
+		s.handleDurableOutput(w, r, turnID)
+		return
+	}
 	if turn == nil {
 		writeSafeError(w, http.StatusNotFound, "turn not found")
 		return
@@ -628,6 +749,25 @@ func (s *Server) handleOutput(w http.ResponseWriter, r *http.Request, turn *turn
 	if _, err := w.Write(data); err == nil {
 		turn.markOutputFetched()
 	}
+}
+
+func (s *Server) handleDurableOutput(w http.ResponseWriter, r *http.Request, turnID harness.HarnessTurnID) {
+	ref := strings.TrimSpace(r.URL.Query().Get("ref"))
+	if ref != localOutputRef {
+		writeSafeError(w, http.StatusNotFound, "output not found")
+		return
+	}
+	data, err := s.ledger.GetTurnOutput(r.Context(), string(turnID), ref)
+	if err != nil {
+		if errors.Is(err, ledger.ErrNotFound) {
+			writeSafeError(w, http.StatusNotFound, "output not found")
+			return
+		}
+		writeSafeError(w, http.StatusServiceUnavailable, "failed to read durable turn output")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	_, _ = w.Write(data)
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, turn *turnState) {
@@ -1547,6 +1687,20 @@ func (t *turnState) terminalFrame() (harness.HarnessEventFrame, bool) {
 		}
 	}
 	return harness.HarnessEventFrame{}, false
+}
+
+func (t *turnState) terminalOutputRef() string {
+	frame, found := t.terminalFrame()
+	if !found {
+		return ""
+	}
+	if frame.Completed != nil {
+		return strings.TrimSpace(frame.Completed.OutputRef)
+	}
+	if frame.Failed != nil {
+		return strings.TrimSpace(frame.Failed.OutputRef)
+	}
+	return ""
 }
 
 func (s *Server) durableTerminalReceipt(turn *turnState) ([]byte, bool) {

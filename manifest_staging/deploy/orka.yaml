@@ -11,6 +11,17 @@ metadata:
   name: orka-system
 ---
 apiVersion: v1
+automountServiceAccountToken: true
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+  namespace: orka-system
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: orka-ai-worker
@@ -107,6 +118,43 @@ rules:
   verbs:
   - create
   - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+rules:
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agentexecutioncontrols
+  - tasks
+  - agentexecutionadjudications
+  verbs:
+  - get
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - runtimesessioncontrols
+  verbs:
+  - get
+  - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -1818,6 +1866,23 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-admission
+subjects:
+- kind: ServiceAccount
+  name: orka-admission
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
   name: orka-ai-worker-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -1911,6 +1976,25 @@ metadata:
     orka.ai/acp-runtime-images: "true"
   name: acp-runtime-images-2cc58tc8m7
   namespace: orka-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+  namespace: orka-system
+spec:
+  ports:
+  - name: https
+    port: 443
+    protocol: TCP
+    targetPort: webhook
+  selector:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/name: orka
 ---
 apiVersion: v1
 kind: Service
@@ -2027,6 +2111,121 @@ spec:
   resources:
     requests:
       storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+  namespace: orka-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: admission
+      app.kubernetes.io/name: orka
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: admission
+        app.kubernetes.io/name: orka
+        orka.ai/network-role: admission
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/component: admission
+                  app.kubernetes.io/name: orka
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+      automountServiceAccountToken: true
+      containers:
+      - args:
+        - --health-probe-bind-address=:8081
+        - --webhook-cert-path=/var/run/orka/admission/tls
+        - --webhook-cert-name=tls.crt
+        - --webhook-cert-key=tls.key
+        - --controller-username=system:serviceaccount:orka-system:orka-controller-manager
+        - --adjudication-controller-username=system:serviceaccount:orka-system:orka-controller-manager
+        - --classification-usernames=system:serviceaccount:orka-system:orka-controller-manager
+        - --admin-groups=system:masters
+        - --task-provenance-trusted-users=system:serviceaccount:orka-system:orka-controller-manager
+        - --task-provenance-trusted-service-accounts=orka-ai-worker,orka-vendor-worker
+        command:
+        - /orka-admission
+        image: docker.io/sozercan/orka@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: health
+          periodSeconds: 10
+        name: admission
+        ports:
+        - containerPort: 9443
+          name: webhook
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /readyz
+            port: health
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 500m
+            ephemeral-storage: 128Mi
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            ephemeral-storage: 32Mi
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+        volumeMounts:
+        - mountPath: /var/run/orka/admission/tls
+          name: tls
+          readOnly: true
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: orka-admission
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: tls
+        secret:
+          items:
+          - key: tls.crt
+            path: tls.crt
+          - key: tls.key
+            path: tls.key
+          optional: false
+          secretName: orka-admission-tls
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -2546,6 +2745,22 @@ spec:
             path: operation-capability-secret
           secretName: workspace-publisher-auth
 ---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+  namespace: orka-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: admission
+      app.kubernetes.io/name: orka
+---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -2736,6 +2951,44 @@ spec:
   policyName: orka-gateway-task-protection
   validationActions:
   - Deny
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentExecutionControl
+metadata:
+  name: cluster
+  namespace: orka-system
+spec:
+  backends:
+    v1:
+      desiredMode: disabled
+    v2:
+      desiredMode: enabled
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+  namespace: orka-system
+spec:
+  egress:
+  - ports:
+    - port: 443
+      protocol: TCP
+  ingress:
+  - ports:
+    - port: 9443
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: admission
+      app.kubernetes.io/name: orka
+  policyTypes:
+  - Ingress
+  - Egress
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

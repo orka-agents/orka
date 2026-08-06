@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -103,6 +104,70 @@ func requireHelmRender(t *testing.T, args ...string) string {
 		t.Fatalf("helm template failed: %v\n%s", err, output)
 	}
 	return output
+}
+
+func requireHarnessV1UpgradeDrainHookRender(t *testing.T, matchesDesiredGeneration bool, args ...string) string {
+	t.Helper()
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm is required for static chart render tests")
+	}
+
+	chartDir := filepath.Join(t.TempDir(), "static")
+	if err := os.CopyFS(chartDir, os.DirFS("static")); err != nil {
+		t.Fatalf("copy static chart: %v", err)
+	}
+	hookPath := filepath.Join(chartDir, "templates", "harness-wrapper-drain-hook.yaml")
+	hook, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read wrapper drain hook: %v", err)
+	}
+	lookup := `{{- $existingWrapper := lookup "apps/v1" "Deployment" .Release.Namespace $wrapperName }}`
+	existingGeneration := `"current-generation"`
+	if matchesDesiredGeneration {
+		existingGeneration = `$desiredGeneration`
+	}
+	currentImage := "registry.example/current-wrapper@sha256:" + strings.Repeat("2", 64)
+	forcedLookup := strings.Join([]string{
+		`{{- $existingWrapper := dict`,
+		`"metadata" (dict "name" $wrapperName)`,
+		`"spec" (dict "template" (dict "spec" (dict`,
+		`"containers" (list (dict "name" "wrapper"`,
+		`"image" "` + currentImage + `" "imagePullPolicy" "Always"`,
+		`"env" (list (dict "name" "ORKA_HARNESS_WRAPPER_LEDGER_GENERATION"`,
+		`"value" ` + existingGeneration + `))))`,
+		`"volumes" (list (dict "name" "auth" "secret"`,
+		`(dict "secretName" "current-wrapper-auth" "items"`,
+		`(list (dict "key" "current-token" "path" "token")))))))) }}`,
+	}, " ")
+	forced := strings.Replace(string(hook), lookup, forcedLookup, 1)
+	if forced == string(hook) {
+		t.Fatalf("wrapper drain hook is not gated by the exact existing Deployment lookup")
+	}
+	if err := os.WriteFile(hookPath, []byte(forced), 0o600); err != nil {
+		t.Fatalf("force existing wrapper lookup in copied chart: %v", err)
+	}
+
+	commandArgs := []string{"template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade"}
+	commandArgs = append(commandArgs, args...)
+	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template forced wrapper upgrade hook failed: %v\n%s", err, output)
+	}
+	return string(output)
+}
+
+var harnessV1GenerationPattern = regexp.MustCompile(
+	`(?m)name: ORKA_HARNESS_WRAPPER_LEDGER_GENERATION\n\s+value: "([a-f0-9]{64})"`,
+)
+
+func harnessV1RenderedGeneration(t *testing.T, rendered string) string {
+	t.Helper()
+	match := harnessV1GenerationPattern.FindStringSubmatch(rendered)
+	if len(match) != 2 {
+		t.Fatalf("rendered harness v1 Deployment is missing a canonical generation:\n%s", rendered)
+	}
+	return match[1]
 }
 
 func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
@@ -534,6 +599,113 @@ func TestStaticChartManagedHarnessV1PolicyCanBeCleanupOnly(t *testing.T) {
 	}
 }
 
+func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("1", 64)
+	args := []string{
+		"--set", "harnessV1.enabled=true",
+		"--set", "store.persistence.enabled=true",
+		"--set-string", "harnessV1.image.digest=" + digest,
+		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.upgradeDrain.timeout=9m",
+		"--set-string", "harnessV1.upgradeDrain.pollInterval=3s",
+		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
+		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
+	}
+
+	// Client-only Helm rendering has no live Deployment for lookup, so even an
+	// upgrade render must not emit the hook on a fresh installation.
+	fresh := requireHelmRender(t, append(append([]string{}, args...), "--is-upgrade")...)
+	if strings.Contains(fresh, "app.kubernetes.io/component: agent-harness-wrapper-drain") ||
+		strings.Contains(fresh, "helm.sh/hook: pre-upgrade") {
+		t.Fatalf("fresh harness v1 render unexpectedly contains an upgrade drain hook:\n%s", fresh)
+	}
+
+	// Render the unchanged hook body from a copied chart with only lookup's
+	// result replaced, so the existing-Deployment branch remains Helm-validated.
+	hook := requireHarnessV1UpgradeDrainHookRender(t, false, args...)
+	for _, marker := range []string{
+		"kind: NetworkPolicy",
+		"kind: Job",
+		"app.kubernetes.io/component: agent-harness-wrapper-rollover-drain",
+		"app.kubernetes.io/component: agent-harness-wrapper-delete-drain",
+		"helm.sh/hook: pre-upgrade,pre-rollback",
+		"helm.sh/hook: pre-delete",
+		`helm.sh/hook-weight: "-20"`,
+		`helm.sh/hook-weight: "-10"`,
+		"helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded",
+		"backoffLimit: 0",
+		"serviceAccountName: test-orka-agent-harness-wrapper",
+		"automountServiceAccountToken: false",
+		"runAsNonRoot: true",
+		"readOnlyRootFilesystem: true",
+		"drop: [ALL]",
+		`image: "registry.example/current-wrapper@sha256:` + strings.Repeat("2", 64) + `"`,
+		"imagePullPolicy: Always",
+		`command: ["/orka-agent-harness-wrapper"]`,
+		"- drain",
+		`- "--endpoint=http://test-orka-agent-harness-wrapper:8080"`,
+		"- --bearer-token-file=/var/run/orka/harness-wrapper/token",
+		`- "--timeout=9m"`,
+		`- "--poll-interval=3s"`,
+		`secretName: "current-wrapper-auth"`,
+		`key: "current-token"`,
+		`secretName: "harness-wrapper-auth"`,
+		"defaultMode: 0440",
+	} {
+		if !strings.Contains(hook, marker) {
+			t.Fatalf("harness v1 drain hook is missing %q:\n%s", marker, hook)
+		}
+	}
+	if got := strings.Count(hook, "helm.sh/hook: pre-upgrade,pre-rollback"); got != 3 {
+		t.Fatalf("rollover hook annotation count = %d, want 3:\n%s", got, hook)
+	}
+	if got := strings.Count(hook, "helm.sh/hook: pre-delete"); got != 3 {
+		t.Fatalf("pre-delete hook annotation count = %d, want 3:\n%s", got, hook)
+	}
+	if !regexp.MustCompile(`--next-generation=[a-f0-9]{64}`).MatchString(hook) {
+		t.Fatalf("rollover hook is missing its canonical replacement generation:\n%s", hook)
+	}
+	if strings.Contains(hook, "/usr/local/bin/node") {
+		t.Fatalf("delete drain hook assumes an unavailable Node runtime:\n%s", hook)
+	}
+	if strings.Contains(hook, strings.Repeat("x", 32)) {
+		t.Fatalf("harness v1 drain hook rendered a raw bearer token:\n%s", hook)
+	}
+
+	unchanged := requireHarnessV1UpgradeDrainHookRender(t, true, args...)
+	if strings.Contains(unchanged, "helm.sh/hook: pre-upgrade,pre-rollback") ||
+		strings.Contains(unchanged, "agent-harness-wrapper-rollover-drain") {
+		t.Fatalf("unchanged wrapper Pod template unexpectedly triggered a rollover drain:\n%s", unchanged)
+	}
+	if !strings.Contains(unchanged, "helm.sh/hook: pre-delete") {
+		t.Fatalf("enabled release lost its uninstall drain hook:\n%s", unchanged)
+	}
+}
+
+func TestStaticChartHarnessV1GenerationTracksOnlyPodTemplate(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("3", 64)
+	args := []string{
+		"--set", "harnessV1.enabled=true",
+		"--set", "store.persistence.enabled=true",
+		"--set-string", "harnessV1.image.digest=" + digest,
+		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
+		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
+		"--show-only", "templates/harness-wrapper-deployment.yaml",
+	}
+	first := requireHelmRender(t, append(append([]string{}, args...), "--set", "controller.apiPort=8080")...)
+	second := requireHelmRender(t, append(append([]string{}, args...), "--set", "controller.apiPort=9090")...)
+	firstGeneration := harnessV1RenderedGeneration(t, first)
+	if secondGeneration := harnessV1RenderedGeneration(t, second); secondGeneration != firstGeneration {
+		t.Fatalf("unrelated controller value changed wrapper generation: %s != %s", secondGeneration, firstGeneration)
+	}
+	changedArgs := append(append([]string{}, args...), "--set", "harnessV1.codexSandboxMode=read-only")
+	changed := requireHelmRender(t, changedArgs...)
+	if changedGeneration := harnessV1RenderedGeneration(t, changed); changedGeneration == firstGeneration {
+		t.Fatalf("wrapper Pod-template change preserved generation %s", changedGeneration)
+	}
+}
+
 func TestStaticChartRendersExplicitAgentExecutionBackendModes(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("2", 64)
 	v1Args := []string{
@@ -683,6 +855,24 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			},
 			wantError: "harnessV1.codexSandboxMode must be read-only, workspace-write, or danger-full-access",
 		},
+		{
+			name: "invalid upgrade drain timeout",
+			args: []string{
+				"--set", "harnessV1.enabled=true",
+				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.upgradeDrain.timeout=0s",
+			},
+			wantError: "harnessV1.upgradeDrain.timeout must be a positive Go duration",
+		},
+		{
+			name: "invalid upgrade drain poll interval",
+			args: []string{
+				"--set", "harnessV1.enabled=true",
+				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.upgradeDrain.pollInterval=immediate",
+			},
+			wantError: "harnessV1.upgradeDrain.pollInterval must be a positive Go duration",
+		},
 	}
 
 	for _, tt := range tests {
@@ -737,6 +927,7 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"automountServiceAccountToken: false",
 		"name: ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH",
 		"value: /var/lib/orka/harness-v1/admission-ledger.db",
+		"name: ORKA_HARNESS_WRAPPER_LEDGER_GENERATION",
 		"mountPath: /var/lib/orka/harness-v1",
 		"claimName: test-orka-harness-v1-ledger",
 		`secretName: "harness-wrapper-auth"`,
@@ -771,6 +962,7 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"templates/harness-wrapper-pvc.yaml": {
 			"kind: PersistentVolumeClaim",
 			"name: test-orka-harness-v1-ledger",
+			"helm.sh/resource-policy: keep",
 			"storage: 1Gi",
 		},
 		"templates/harness-wrapper-networkpolicy.yaml": {
@@ -790,6 +982,7 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 			}
 		}
 	}
+	harnessV1RenderedGeneration(t, deployment)
 }
 
 func TestStaticChartRejectsUnsupportedProviderProxyOverrides(t *testing.T) {

@@ -2091,15 +2091,15 @@ func currentPodNamespace() string {
 }
 
 // loadAgentExecutionSnapshotCipher reads the AES-256 snapshot key from a file
-// holding either 32 raw bytes or their base64 encoding.
+// holding either exactly 32 raw bytes or whitespace-padded base64 text.
 func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapshotCipher, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied key path.
 	if err != nil {
 		return nil, err
 	}
-	key := bytes.TrimSpace(raw)
+	key := raw
 	if len(key) != sqlite.AgentExecutionSnapshotKeyBytes {
-		decoded, decodeErr := base64.StdEncoding.DecodeString(string(key))
+		decoded, decodeErr := base64.StdEncoding.DecodeString(string(bytes.TrimSpace(raw)))
 		if decodeErr != nil || len(decoded) != sqlite.AgentExecutionSnapshotKeyBytes {
 			return nil, fmt.Errorf("snapshot key must be %d raw bytes or their base64 encoding", sqlite.AgentExecutionSnapshotKeyBytes)
 		}

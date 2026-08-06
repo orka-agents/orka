@@ -35,17 +35,19 @@ const (
 	DefaultHarnessV1DispatchWorkers  = 4
 	defaultHarnessV1TurnTimeout      = 30 * time.Minute
 
-	harnessV1ReasonRejected          = "PromptNotAccepted"
-	harnessV1ReasonFailed            = "PromptFailed"
-	harnessV1ReasonRetryableFailure  = "RetryablePromptFailure"
-	harnessV1ReasonCancelled         = "Cancelled"
-	harnessV1ReasonOutcomeUnknown    = "RuntimeLost"
-	harnessV1ReasonInvalidBinding    = "InvalidBinding"
-	harnessV1ReasonBackendDisabled   = "BackendDisabled"
-	harnessV1ReasonCredentialChanged = "CredentialChanged"
-	harnessV1ReasonProtocolViolation = "ProtocolViolation"
-	harnessV1ReasonOutputUnavailable = "OutputUnavailable"
-	harnessV1OutcomeUnknownMessage   = "harness v1 submission or terminal outcome cannot be proven"
+	harnessV1ReasonRejected           = "PromptNotAccepted"
+	harnessV1ReasonFailed             = "PromptFailed"
+	harnessV1ReasonRetryableFailure   = "RetryablePromptFailure"
+	harnessV1ReasonCancelled          = "Cancelled"
+	harnessV1ReasonOutcomeUnknown     = "RuntimeLost"
+	harnessV1ReasonInvalidBinding     = "InvalidBinding"
+	harnessV1ReasonBackendDisabled    = "BackendDisabled"
+	harnessV1ReasonCredentialChanged  = "CredentialChanged"
+	harnessV1ReasonProtocolViolation  = "ProtocolViolation"
+	harnessV1ReasonOutputUnavailable  = "OutputUnavailable"
+	harnessV1OutcomeUnknownMessage    = "harness v1 submission or terminal outcome cannot be proven"
+	harnessV1AdmissionClosedOperation = "admission-closed"
+	harnessV1AdmissionClosedMessage   = "harness v1 wrapper admission is temporarily closed"
 )
 
 var errHarnessV1TerminalFrame = errors.New("harness v1 terminal frame received")
@@ -542,6 +544,19 @@ func (d *HarnessV1Dispatcher) handleStartTurnError(
 				return err
 			}
 			return d.recoverAmbiguousSubmission(ctx, task, verified, protocolClient, request, unknown, fence)
+		case isHarnessV1AdmissionClosedError(clientErr):
+			recoverable, err := d.transitionAttempt(
+				ctx,
+				attempt,
+				fence,
+				store.HarnessV1AttemptSubmittedUnknown,
+				harnessV1AdmissionClosedOperation,
+				store.HarnessV1AttemptUpdates{},
+			)
+			if err != nil {
+				return err
+			}
+			return d.projectAttemptState(ctx, task, recoverable, harnessV1AdmissionClosedMessage)
 		default:
 			return d.failUnsubmittedAttempt(ctx, task, attempt, fence, harnessV1ReasonRejected)
 		}
@@ -553,6 +568,81 @@ func (d *HarnessV1Dispatcher) handleStartTurnError(
 	return d.recoverAmbiguousSubmission(ctx, task, verified, protocolClient, request, unknown, fence)
 }
 
+func isHarnessV1AdmissionClosedError(err harness.ClientError) bool {
+	return err.StatusCode == http.StatusConflict && err.Message == "wrapper admission is closed"
+}
+
+func isHarnessV1DurableTurnNotFoundError(err error) bool {
+	var clientErr harness.ClientError
+	return errors.As(err, &clientErr) && clientErr.StatusCode == http.StatusNotFound && clientErr.Message == "turn not found"
+}
+
+func harnessV1AttemptHasAdmissionClosedProof(attempt *store.HarnessV1Attempt) bool {
+	return attempt != nil && attempt.State == store.HarnessV1AttemptSubmittedUnknown &&
+		strings.HasPrefix(attempt.LastOperationID, harnessV1AdmissionClosedOperation+"-")
+}
+
+func (d *HarnessV1Dispatcher) retryAdmissionClosedStartTurn(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	verified *verifiedHarnessV1Execution,
+	protocolClient harnessV1ProtocolClient,
+	request harness.StartTurnRequest,
+	attempt *store.HarnessV1Attempt,
+	fence store.ControllerEpochFence,
+) error {
+	accepted, startErr := protocolClient.StartTurn(ctx, request)
+	if startErr != nil {
+		var clientErr harness.ClientError
+		if !errors.As(startErr, &clientErr) {
+			// The request-write outcome is ambiguous. Preserve the durable
+			// admission-closed proof and require another exact ledger lookup
+			// before any later resend.
+			return startErr
+		}
+		switch {
+		case isHarnessV1AdmissionClosedError(clientErr):
+			return d.projectAttemptState(ctx, task, attempt, harnessV1AdmissionClosedMessage)
+		case clientErr.RemoteAccepted:
+			acceptedAttempt, err := d.transitionAttempt(
+				ctx, attempt, fence, store.HarnessV1AttemptAccepted,
+				"accepted-response-invalid-after-admission-reopen", store.HarnessV1AttemptUpdates{},
+			)
+			if err != nil {
+				return err
+			}
+			return d.streamAcceptedAttempt(ctx, task, verified, protocolClient, request, acceptedAttempt, fence)
+		case clientErr.IsDuplicateTurn(), clientErr.RemoteAcceptanceUnknown:
+			// Do not recursively resend after an ambiguous response. A future
+			// reconciliation must consult the durable ledger again.
+			return startErr
+		default:
+			return d.failUnsubmittedAttempt(ctx, task, attempt, fence, harnessV1ReasonRejected)
+		}
+	}
+
+	runtimeSessionID := string(accepted.RuntimeSessionID)
+	correlationID := accepted.CorrelationID
+	if correlationID == "" {
+		correlationID = attempt.CorrelationID
+	}
+	acceptedAttempt, err := d.transitionAttempt(
+		ctx,
+		attempt,
+		fence,
+		store.HarnessV1AttemptAccepted,
+		"accepted-after-admission-reopen",
+		store.HarnessV1AttemptUpdates{
+			RuntimeSessionID: &runtimeSessionID,
+			CorrelationID:    &correlationID,
+		},
+	)
+	if err != nil {
+		return err
+	}
+	return d.streamAcceptedAttempt(ctx, task, verified, protocolClient, request, acceptedAttempt, fence)
+}
+
 type persistedHarnessV1Evidence struct {
 	found     bool
 	lastSeq   int64
@@ -561,6 +651,7 @@ type persistedHarnessV1Evidence struct {
 	failed    *harness.TurnFailed
 }
 
+//nolint:gocyclo // Submission recovery keeps every durable evidence branch in one auditable state machine.
 func (d *HarnessV1Dispatcher) recoverAmbiguousSubmission(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -570,6 +661,7 @@ func (d *HarnessV1Dispatcher) recoverAmbiguousSubmission(
 	attempt *store.HarnessV1Attempt,
 	fence store.ControllerEpochFence,
 ) error {
+	var durableOutcomeUnknownReceiptDigest string
 	status, statusErr := protocolClient.DurableTurnStatus(ctx, request.TurnID)
 	if statusErr == nil {
 		if status.TaskUID != attempt.TaskUID || status.Attempt != attempt.Attempt || status.RequestDigest != attempt.RequestDigest {
@@ -585,7 +677,7 @@ func (d *HarnessV1Dispatcher) recoverAmbiguousSubmission(
 			if err := validateHarnessV1DurableTerminalReceipt(status, request, true); err != nil {
 				return d.markOutcomeUnknown(ctx, task, attempt, fence, harnessV1ReasonProtocolViolation)
 			}
-			return d.markOutcomeUnknownWithReceipt(ctx, task, attempt, fence, harnessV1ReasonOutcomeUnknown, status.TerminalReceiptDigest)
+			durableOutcomeUnknownReceiptDigest = status.TerminalReceiptDigest
 		case harness.DurableTurnTerminal:
 			if err := validateHarnessV1DurableTerminalReceipt(status, request, false); err != nil {
 				return d.markOutcomeUnknown(ctx, task, attempt, fence, harnessV1ReasonProtocolViolation)
@@ -615,7 +707,16 @@ func (d *HarnessV1Dispatcher) recoverAmbiguousSubmission(
 		return err
 	}
 	if evidence.terminal != "" {
-		return d.settlePersistedTerminal(ctx, task, protocolClient, request, attempt, fence, evidence)
+		accepted, err := d.ensureAttemptAccepted(ctx, attempt, fence, "")
+		if err != nil {
+			return err
+		}
+		return d.settlePersistedTerminal(ctx, task, protocolClient, request, accepted, fence, evidence)
+	}
+	if durableOutcomeUnknownReceiptDigest != "" {
+		return d.markOutcomeUnknownWithReceipt(
+			ctx, task, attempt, fence, harnessV1ReasonOutcomeUnknown, durableOutcomeUnknownReceiptDigest,
+		)
 	}
 	if evidence.found {
 		accepted, err := d.ensureAttemptAccepted(ctx, attempt, fence, "")
@@ -623,6 +724,14 @@ func (d *HarnessV1Dispatcher) recoverAmbiguousSubmission(
 			return err
 		}
 		return d.streamAcceptedAttempt(ctx, task, verified, protocolClient, request, accepted, fence)
+	}
+	if harnessV1AttemptHasAdmissionClosedProof(attempt) && statusErr != nil {
+		if isHarnessV1DurableTurnNotFoundError(statusErr) {
+			return d.retryAdmissionClosedStartTurn(
+				ctx, task, verified, protocolClient, request, attempt, fence,
+			)
+		}
+		return fmt.Errorf("recover admission-closed harness v1 turn status: %w", statusErr)
 	}
 	if statusErr == nil && status != nil && status.State != harness.DurableTurnRejected {
 		accepted, err := d.ensureAttemptAccepted(ctx, attempt, fence, status.TerminalReceiptDigest)
@@ -654,6 +763,7 @@ func (d *HarnessV1Dispatcher) recoverActiveAttempt(
 	attempt *store.HarnessV1Attempt,
 	fence store.ControllerEpochFence,
 ) error {
+	var durableOutcomeUnknownReceiptDigest string
 	status, statusErr := protocolClient.DurableTurnStatus(ctx, request.TurnID)
 	if statusErr == nil {
 		if status == nil || status.TurnID != attempt.TurnID || status.TaskUID != attempt.TaskUID ||
@@ -676,9 +786,7 @@ func (d *HarnessV1Dispatcher) recoverActiveAttempt(
 			if err := validateHarnessV1DurableTerminalReceipt(status, request, true); err != nil {
 				return d.markOutcomeUnknown(ctx, task, attempt, fence, harnessV1ReasonProtocolViolation)
 			}
-			return d.markOutcomeUnknownWithReceipt(
-				ctx, task, attempt, fence, harnessV1ReasonOutcomeUnknown, status.TerminalReceiptDigest,
-			)
+			durableOutcomeUnknownReceiptDigest = status.TerminalReceiptDigest
 		case harness.DurableTurnRejected:
 			// An active durable attempt cannot also have definitive
 			// non-acceptance evidence.
@@ -688,6 +796,18 @@ func (d *HarnessV1Dispatcher) recoverActiveAttempt(
 		default:
 			return d.markOutcomeUnknown(ctx, task, attempt, fence, harnessV1ReasonProtocolViolation)
 		}
+	}
+	if durableOutcomeUnknownReceiptDigest != "" {
+		evidence, err := d.persistedEvidence(ctx, task, attempt)
+		if err != nil {
+			return err
+		}
+		if evidence.terminal != "" {
+			return d.settlePersistedTerminal(ctx, task, protocolClient, request, attempt, fence, evidence)
+		}
+		return d.markOutcomeUnknownWithReceipt(
+			ctx, task, attempt, fence, harnessV1ReasonOutcomeUnknown, durableOutcomeUnknownReceiptDigest,
+		)
 	}
 	return d.streamAcceptedAttempt(ctx, task, verified, protocolClient, request, attempt, fence)
 }
@@ -736,20 +856,14 @@ func (d *HarnessV1Dispatcher) recoverSettlingAttempt(
 	if err := store.ValidateCanonicalDigest("harness v1 settling terminal receipt digest", attempt.TerminalReceiptDigest); err != nil {
 		return err
 	}
-	status, err := protocolClient.DurableTurnStatus(ctx, request.TurnID)
-	if err != nil {
-		return fmt.Errorf("recover settling harness v1 terminal receipt: %w", err)
+	status, statusErr := protocolClient.DurableTurnStatus(ctx, request.TurnID)
+	if statusErr == nil {
+		if status == nil || status.TurnID != attempt.TurnID || status.TaskUID != attempt.TaskUID ||
+			status.Attempt != attempt.Attempt || status.RequestDigest != attempt.RequestDigest {
+			return errors.New("settling durable turn status does not match the immutable attempt")
+		}
 	}
-	if status == nil || status.TurnID != attempt.TurnID || status.TaskUID != attempt.TaskUID ||
-		status.Attempt != attempt.Attempt || status.RequestDigest != attempt.RequestDigest {
-		return errors.New("settling durable turn status does not match the immutable attempt")
-	}
-	switch status.State {
-	case harness.DurableTurnAdmitted, harness.DurableTurnAccepted:
-		// The terminal frame can become visible immediately before the wrapper
-		// commits its ledger receipt. Preserve Settling and retry the lookup.
-		return fmt.Errorf("durable terminal receipt is not yet available for settling turn %s", request.TurnID)
-	case harness.DurableTurnTerminal:
+	if statusErr == nil && status.State == harness.DurableTurnTerminal {
 		if err := validateHarnessV1DurableTerminalReceipt(status, request, false); err != nil {
 			return fmt.Errorf("validate settling durable terminal receipt: %w", err)
 		}
@@ -763,9 +877,36 @@ func (d *HarnessV1Dispatcher) recoverSettlingAttempt(
 		return d.settleTerminalFrameWithReceiptDigest(
 			ctx, task, protocolClient, request, attempt, fence, frame, status.TerminalReceiptDigest,
 		)
-	default:
-		return fmt.Errorf("settling durable turn has incompatible ledger state %q", status.State)
 	}
+	if statusErr == nil {
+		switch status.State {
+		case harness.DurableTurnAdmitted, harness.DurableTurnAccepted:
+			// The terminal frame can become visible immediately before the wrapper
+			// commits its ledger receipt. Persisted mapped evidence may already be
+			// sufficient to finish controller-side settlement.
+		case harness.DurableTurnOutcomeUnknown:
+			if err := validateHarnessV1DurableTerminalReceipt(status, request, true); err != nil {
+				return fmt.Errorf("validate settling durable outcome-unknown receipt: %w", err)
+			}
+		default:
+			return fmt.Errorf("settling durable turn has incompatible ledger state %q", status.State)
+		}
+	}
+
+	evidence, err := d.persistedEvidence(ctx, task, attempt)
+	if err != nil {
+		return fmt.Errorf("recover settling persisted terminal evidence: %w", err)
+	}
+	if evidence.terminal != "" {
+		// settlePersistedTerminal reconstructs the canonical receipt and
+		// settleTerminalFrameWithReceiptDigest requires its digest to match the
+		// immutable digest already stored on the Settling attempt.
+		return d.settlePersistedTerminal(ctx, task, protocolClient, request, attempt, fence, evidence)
+	}
+	if statusErr != nil {
+		return fmt.Errorf("recover settling harness v1 terminal receipt: %w", statusErr)
+	}
+	return fmt.Errorf("durable terminal receipt is not yet available for settling turn %s", request.TurnID)
 }
 
 func (d *HarnessV1Dispatcher) ensureAttemptAccepted(

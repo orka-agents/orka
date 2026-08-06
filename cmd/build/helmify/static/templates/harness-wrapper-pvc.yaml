@@ -7,6 +7,8 @@ metadata:
   labels:
     {{- include "orka.labels" . | nindent 4 }}
     app.kubernetes.io/component: agent-harness-wrapper
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   accessModes:
     - ReadWriteOnce

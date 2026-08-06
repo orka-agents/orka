@@ -29,6 +29,7 @@ const (
 	EnvAllowUnauthenticated = "ORKA_HARNESS_WRAPPER_ALLOW_UNAUTHENTICATED"
 	EnvTurnRetention        = "ORKA_HARNESS_WRAPPER_TURN_RETENTION"
 	EnvAdmissionLedgerPath  = "ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH"
+	EnvLedgerGeneration     = "ORKA_HARNESS_WRAPPER_LEDGER_GENERATION"
 	EnvCopilotCLIPath       = "ORKA_HARNESS_WRAPPER_COPILOT_CLI_PATH"
 	EnvCopilotHelperPath    = "ORKA_HARNESS_WRAPPER_COPILOT_HELPER_PATH"
 )
@@ -49,6 +50,7 @@ const (
 	DefaultTurnRetention    = 5 * time.Minute
 	DefaultPromptEnv        = "ORKA_TURN_PROMPT"
 	DefaultWrapperWorkDir   = "/workspace"
+	DefaultLedgerGeneration = "1"
 )
 
 type Config struct {
@@ -64,6 +66,7 @@ type Config struct {
 	AllowUnauthenticated bool
 	TurnRetention        time.Duration
 	AdmissionLedgerPath  string
+	LedgerGeneration     string
 	Generic              GenericAdapterConfig
 	Codex                CodexAdapterConfig
 	Claude               ClaudeAdapterConfig
@@ -113,6 +116,7 @@ func DefaultConfig() Config {
 		StderrLimitBytes: DefaultOutputLimitBytes,
 		CancelGrace:      DefaultCancelGrace,
 		TurnRetention:    DefaultTurnRetention,
+		LedgerGeneration: DefaultLedgerGeneration,
 		Generic: GenericAdapterConfig{
 			PromptMode: PromptModeStdin,
 			PromptEnv:  DefaultPromptEnv,
@@ -223,6 +227,9 @@ func LoadConfigFromEnvUnvalidated() (Config, error) {
 	if v := strings.TrimSpace(os.Getenv(EnvAdmissionLedgerPath)); v != "" {
 		cfg.AdmissionLedgerPath = v
 	}
+	if v := strings.TrimSpace(os.Getenv(EnvLedgerGeneration)); v != "" {
+		cfg.LedgerGeneration = v
+	}
 	if v := strings.TrimSpace(os.Getenv(EnvCopilotCLIPath)); v != "" {
 		cfg.Copilot.Path = v
 	}
@@ -253,6 +260,9 @@ func (c Config) Validate() error {
 	}
 	if !c.AllowUnauthenticated && strings.TrimSpace(c.AdmissionLedgerPath) == "" {
 		return fmt.Errorf("durable admission ledger path is required unless %s=true", EnvAllowUnauthenticated)
+	}
+	if strings.TrimSpace(c.AdmissionLedgerPath) != "" && strings.TrimSpace(c.LedgerGeneration) == "" {
+		return fmt.Errorf("durable admission ledger generation is required")
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Runtime)) {
 	case "", RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeOpencode, RuntimeMulti:

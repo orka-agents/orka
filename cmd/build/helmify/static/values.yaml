@@ -417,6 +417,21 @@ harnessV1:
   dispatch:
     interval: 1s
     workers: 4
+  upgradeDrain:
+    # Before an upgrade, rollback, or deletion mutates an existing wrapper, a
+    # Helm hook durably closes admission and proves that no unsettled turns
+    # remain. Keep this below Helm's default five-minute operation timeout.
+    timeout: 4m
+    pollInterval: 2s
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+        ephemeral-storage: 16Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+        ephemeral-storage: 64Mi
   image:
     repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
     tag: "0.1.1"

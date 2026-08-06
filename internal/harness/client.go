@@ -263,6 +263,30 @@ func (c *Client) DurableDrainStatus(ctx context.Context) (_ *DurableDrainStatus,
 	return &response, nil
 }
 
+// PrepareDurableRollover seals a completed drain to the exact replacement
+// ledger generation. The replacement activates it during startup.
+func (c *Client) PrepareDurableRollover(
+	ctx context.Context,
+	nextGeneration string,
+) (_ *DurableRolloverPrepareResponse, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
+	nextGeneration = strings.TrimSpace(nextGeneration)
+	if nextGeneration == "" {
+		return nil, safeClientError("prepare_durable_rollover", 0, "next generation is required")
+	}
+	var response DurableRolloverPrepareResponse
+	if err := c.postJSON(ctx, AdminRolloverPath, DurableRolloverPrepareRequest{
+		NextGeneration: nextGeneration,
+	}, &response); err != nil {
+		return nil, err
+	}
+	if !response.Prepared || response.NextGeneration != nextGeneration ||
+		strings.TrimSpace(response.CurrentGeneration) == "" || response.CurrentGeneration == nextGeneration {
+		return nil, safeClientError("prepare_durable_rollover", 0, "wrapper returned invalid rollover preparation")
+	}
+	return &response, nil
+}
+
 func (c *Client) sanitizeHealthResponse(response HealthResponse) (HealthResponse, error) {
 	for name, value := range map[string]string{
 		"version":          response.Version,

@@ -24,3 +24,30 @@ The wrapper has a dedicated ServiceAccount with token automount disabled, a
 PVC-backed admission ledger, controller-only ingress, and egress limited to DNS
 and public HTTPS provider/read-only SCM endpoints. Do not mount Git, forge,
 publisher, provider-proxy, or other publication credentials into this Pod.
+
+Before changing any wrapper Pod-template field, run the authenticated drain
+client from the currently deployed wrapper image and wait for it to succeed:
+
+```bash
+/orka-agent-harness-wrapper drain \
+  --endpoint=http://agent-harness-wrapper:8080 \
+  --bearer-token-file=/var/run/orka/harness-wrapper/token \
+  --timeout=15m \
+  --poll-interval=2s \
+  --next-generation=2
+```
+
+Run the command from a narrowly isolated Pod labeled
+`app.kubernetes.io/name=orka,app.kubernetes.io/component=agent-harness-wrapper-drain`
+that can read only the dedicated wrapper auth Secret and reach only the wrapper
+Service. Never place the bearer token on the command line or in logs. A timeout
+aborts the rollout: do not mutate the Deployment. After a successful drain, update
+`ORKA_HARNESS_WRAPPER_LEDGER_GENERATION` in the overlay to the same
+`--next-generation` value and apply the Deployment change. Increment the value
+exactly once for every later wrapper Pod-template replacement; ordinary Pod
+restart with an unchanged template keeps the current generation.
+
+For permanent shutdown or uninstall, omit `--next-generation`; this leaves the
+durable admission close in place and never authorizes a replacement wrapper to
+reopen it. Retain the ledger PVC until the reviewed v1 removal gate and backup
+procedure have completed.

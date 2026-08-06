@@ -2,7 +2,9 @@
 
 This is the canonical direct-Kustomize deployment surface. It includes the
 cross-namespace Vekil ingress policy and renders controller, provider proxy,
-SCM proxy, and Workspace/Publisher images by immutable digest.
+SCM proxy, replicated stateless admission runtime, and Workspace/Publisher
+images by immutable digest. The fail-closed admission policies remain a
+separate post-readiness wave and are intentionally absent from this overlay.
 
 The checked-in all-zero digests are intentional fail-closed placeholders. Use
 `make deploy` with digest-pinned `IMG`, `WORKSPACE_PUBLISHER_IMG`,
@@ -11,7 +13,25 @@ The checked-in all-zero digests are intentional fail-closed placeholders. Use
 runtime entries in `runtime-images.env` before applying. Never deploy a rendered
 all-zero placeholder.
 
-The production overlay intentionally excludes CRDs. Before the first workload
-deployment, run `scripts/upgrade-orka-crds.sh` with verified backup markers and
-resolve every reported v1/legacy blocker. `make deploy` verifies that cutover
-state before applying only workload resources.
+The production overlay intentionally excludes CRDs. Apply the reviewed dual
+v1/v2 bridge CRDs as an explicit upgrade wave before the first workload wave;
+fresh clusters may use `make install`. Existing installations require the
+source-aware coexistence migration procedure and must not use the v2-only
+`scripts/upgrade-orka-crds.sh` hard-cutover helper. `make deploy` verifies the
+live dual AgentRuntime schema and all coexistence control CRDs before applying
+only workload resources.
+
+The supported `make deploy` path creates the snapshot-encryption Secret when it
+is absent, retains and validates an existing key without printing it, and
+creates the fixed `orka-system/cluster` `AgentExecutionControl` only when it is
+absent. Later deploys never reapply the bootstrap modes, so operator-managed
+coexistence transitions are preserved.
+
+Before `make deploy`, provision `orka-system/orka-admission-tls` with
+`tls.crt`, `tls.key`, and `ca.crt`; the serving certificate must cover
+`orka-admission.orka-system.svc`. Deployment fails closed when that material is
+missing. The apply script rolls out two admission replicas, waits for two ready
+Service endpoints and current control status, sends an AdmissionReview smoke
+request to every protected handler through the Kubernetes Service proxy, pins
+the webhook CA bundle from `ca.crt`, and only then applies
+`../orka-admission-webhooks`.

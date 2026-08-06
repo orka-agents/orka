@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -564,6 +565,43 @@ func TestValidateAgentExecutionSnapshotRetentionOptions(t *testing.T) {
 			err := validateAgentExecutionSnapshotRetentionOptions(tt.keyFile, tt.retention, tt.interval)
 			if (err != nil) != tt.wantError {
 				t.Fatalf("validation error = %v, wantError = %t", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestLoadAgentExecutionSnapshotCipherAcceptsDeploymentKeyFormats(t *testing.T) {
+	raw := []byte(strings.Repeat("k", 32))
+	rawWithWhitespaceEdges := append([]byte{' '}, []byte(strings.Repeat("r", 30))...)
+	rawWithWhitespaceEdges = append(rawWithWhitespaceEdges, '\n')
+	encoded := base64.StdEncoding.EncodeToString(raw)
+
+	tests := []struct {
+		name      string
+		contents  []byte
+		wantError bool
+	}{
+		{name: "exact raw bytes", contents: raw},
+		{name: "exact raw bytes with whitespace edges", contents: rawWithWhitespaceEdges},
+		{name: "base64", contents: []byte(encoded)},
+		{name: "base64 with normal trailing newline", contents: []byte(encoded + "\n")},
+		{name: "base64 with surrounding whitespace", contents: []byte(" \t" + encoded + "\r\n")},
+		{
+			name:     "trimmed raw bytes are not silently accepted",
+			contents: []byte(" " + strings.Repeat("x", 31) + " "), wantError: true,
+		},
+		{name: "malformed", contents: []byte("not-a-snapshot-key"), wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "snapshot-key")
+			if err := os.WriteFile(path, tt.contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := loadAgentExecutionSnapshotCipher(path)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("loadAgentExecutionSnapshotCipher() error = %v, wantError = %t", err, tt.wantError)
 			}
 		})
 	}

@@ -67,6 +67,7 @@ func TestServerReceiptPersistenceFailureRetainsTurnAndClosesReadiness(t *testing
 	}
 	if _, _, err := server.ledger.AdmitTurn(
 		context.Background(), string(request.TurnID), durable.taskUID, durable.attempt, durable.requestDigest,
+		string(request.RuntimeSessionID), request.CorrelationID,
 	); err != nil {
 		t.Fatalf("admit durable turn: %v", err)
 	}
@@ -107,8 +108,22 @@ func TestServerReceiptPersistenceFailureRetainsTurnAndClosesReadiness(t *testing
 		t.Fatalf("decode health response: %v", err)
 	}
 	if health.Ready || health.Status != harness.HealthStatusUnhealthy ||
-		health.Metadata["terminalLedger"] != "persist-failed" {
+		health.Metadata["terminalLedger"] != terminalLedgerPersistFailed {
 		t.Fatalf("health after receipt persistence failure = %#v", health)
+	}
+	readinessRecorder := httptest.NewRecorder()
+	readinessRequest := httptest.NewRequest(http.MethodGet, harness.ReadinessPath, nil)
+	server.Handler().ServeHTTP(readinessRecorder, readinessRequest)
+	if readinessRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status code = %d, want 503", readinessRecorder.Code)
+	}
+	var readiness harness.HealthResponse
+	if err := json.Unmarshal(readinessRecorder.Body.Bytes(), &readiness); err != nil {
+		t.Fatalf("decode readiness response: %v", err)
+	}
+	if readiness.Ready || readiness.Status != harness.HealthStatusUnhealthy ||
+		readiness.Metadata["terminalLedger"] != terminalLedgerPersistFailed {
+		t.Fatalf("readiness after receipt persistence failure = %#v", readiness)
 	}
 }
 

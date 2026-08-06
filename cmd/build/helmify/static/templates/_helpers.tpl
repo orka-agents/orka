@@ -94,6 +94,187 @@ longest suffix so names remain valid DNS labels for long Helm release names.
 {{- printf "%s-harness-v1-ledger" (include "orka.fullname" . | trunc 45 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "orka.harnessV1DrainName" -}}
+{{- printf "%s-drain" (include "orka.harnessV1Name" . | trunc 57 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.harnessV1DrainEgressName" -}}
+{{- printf "%s-egress" (include "orka.harnessV1DrainName" . | trunc 56 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.harnessV1DeleteDrainName" -}}
+{{- printf "%s-delete" (include "orka.harnessV1Name" . | trunc 56 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.harnessV1DeleteDrainEgressName" -}}
+{{- printf "%s-egress" (include "orka.harnessV1DeleteDrainName" . | trunc 56 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Render the complete harness v1 Pod template from one canonical helper. The
+ledger generation hashes this structure with a fixed sentinel in place of the
+generation itself, so only a real Pod-template change advances the generation.
+*/}}
+{{- define "orka.harnessV1PodTemplate" -}}
+{{- $root := .root -}}
+{{- $generation := .generation -}}
+metadata:
+  labels:
+    {{- include "orka.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: agent-harness-wrapper
+    orka.ai/network-role: harness-v1
+spec:
+  serviceAccountName: {{ include "orka.harnessV1Name" $root }}
+  automountServiceAccountToken: false
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: wrapper
+      image: {{ include "orka.imageRef" $root.Values.harnessV1.image | quote }}
+      imagePullPolicy: {{ $root.Values.harnessV1.image.pullPolicy }}
+      ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+      env:
+        - name: ORKA_HARNESS_WRAPPER_RUNTIME
+          value: multi
+        - name: ORKA_HARNESS_WRAPPER_LISTEN_ADDR
+          value: :8080
+        - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
+          value: /var/run/orka/harness-wrapper/token
+        - name: ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH
+          value: /var/lib/orka/harness-v1/admission-ledger.db
+        - name: ORKA_HARNESS_WRAPPER_LEDGER_GENERATION
+          value: {{ $generation | quote }}
+        - name: ORKA_ALLOW_BASH
+          value: "true"
+        - name: ORKA_HARNESS_WRAPPER_CHILD_UID
+          value: "1000"
+        - name: ORKA_HARNESS_WRAPPER_CHILD_GID
+          value: "1000"
+        - name: ORKA_CODEX_SANDBOX_MODE
+          value: {{ $root.Values.harnessV1.codexSandboxMode | quote }}
+      volumeMounts:
+        - name: auth
+          mountPath: /var/run/orka/harness-wrapper
+          readOnly: true
+        - name: ledger
+          mountPath: /var/lib/orka/harness-v1
+        - name: tmp
+          mountPath: /tmp
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsUser: 0
+        runAsGroup: 0
+        capabilities:
+          drop:
+            - ALL
+          add:
+            - SETUID
+            - SETGID
+            - CHOWN
+            - KILL
+            - FOWNER
+      livenessProbe:
+        httpGet:
+          path: /v1/health
+          port: http
+        initialDelaySeconds: 10
+        periodSeconds: 20
+      readinessProbe:
+        httpGet:
+          path: /v1/ready
+          port: http
+        initialDelaySeconds: 5
+        periodSeconds: 10
+      {{- with $root.Values.harnessV1.resources }}
+      resources:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumes:
+    - name: auth
+      secret:
+        secretName: {{ $root.Values.harnessV1.auth.existingSecret | default (include "orka.harnessV1AuthSecretName" $root) | quote }}
+        defaultMode: 0400
+        items:
+          - key: {{ $root.Values.harnessV1.auth.tokenKey | quote }}
+            path: token
+    - name: ledger
+      persistentVolumeClaim:
+        claimName: {{ include "orka.harnessV1LedgerName" $root }}
+    - name: tmp
+      emptyDir: {}
+{{- end }}
+
+{{- define "orka.harnessV1PodTemplateGeneration" -}}
+{{- $template := include "orka.harnessV1PodTemplate" (dict "root" . "generation" "ORKA_HARNESS_V1_TEMPLATE_GENERATION") | fromYaml -}}
+{{- toJson $template | sha256sum -}}
+{{- end }}
+
+{{/* Read the live wrapper inputs used by rollover hooks. */}}
+{{- define "orka.harnessV1ExistingImage" -}}
+{{- $image := "" -}}
+{{- range (dig "spec" "template" "spec" "containers" (list) .) -}}
+{{- if eq (default "" .name) "wrapper" -}}
+{{- $image = default "" .image -}}
+{{- end -}}
+{{- end -}}
+{{- required "existing harness v1 wrapper Deployment is missing the wrapper image" $image -}}
+{{- end }}
+
+{{- define "orka.harnessV1ExistingImagePullPolicy" -}}
+{{- $pullPolicy := "IfNotPresent" -}}
+{{- range (dig "spec" "template" "spec" "containers" (list) .) -}}
+{{- if eq (default "" .name) "wrapper" -}}
+{{- $pullPolicy = default "IfNotPresent" .imagePullPolicy -}}
+{{- end -}}
+{{- end -}}
+{{- $pullPolicy -}}
+{{- end }}
+
+{{- define "orka.harnessV1ExistingGeneration" -}}
+{{- $generation := "" -}}
+{{- range (dig "spec" "template" "spec" "containers" (list) .) -}}
+{{- if eq (default "" .name) "wrapper" -}}
+{{- range (default (list) .env) -}}
+{{- if eq (default "" .name) "ORKA_HARNESS_WRAPPER_LEDGER_GENERATION" -}}
+{{- $generation = default "" .value -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $generation -}}
+{{- end }}
+
+{{- define "orka.harnessV1ExistingAuthSecretName" -}}
+{{- $secretName := "" -}}
+{{- range (dig "spec" "template" "spec" "volumes" (list) .) -}}
+{{- if eq (default "" .name) "auth" -}}
+{{- $secretName = dig "secret" "secretName" "" . -}}
+{{- end -}}
+{{- end -}}
+{{- required "existing harness v1 wrapper Deployment is missing the auth Secret name" $secretName -}}
+{{- end }}
+
+{{- define "orka.harnessV1ExistingAuthSecretKey" -}}
+{{- $secretKey := "" -}}
+{{- range (dig "spec" "template" "spec" "volumes" (list) .) -}}
+{{- if eq (default "" .name) "auth" -}}
+{{- range (dig "secret" "items" (list) .) -}}
+{{- if eq (default "" .path) "token" -}}
+{{- $secretKey = default "" .key -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- required "existing harness v1 wrapper Deployment is missing the auth Secret token key" $secretKey -}}
+{{- end }}
+
 {{- define "orka.harnessV1PolicyNamespace" -}}
 {{- if .Values.harnessV1.policy.namespace -}}
 {{- .Values.harnessV1.policy.namespace -}}
@@ -339,6 +520,12 @@ release-local Secret, but operator-supplied tokens must have adequate entropy.
 {{- end -}}
 {{- if lt (int .Values.harnessV1.dispatch.workers) 1 -}}
 {{- fail "harnessV1.dispatch.workers must be positive when harnessV1.enabled=true" -}}
+{{- end -}}
+{{- if not (regexMatch "^([1-9][0-9]*(ns|us|µs|ms|s|m|h))+$" (trim (default "" .Values.harnessV1.upgradeDrain.timeout))) -}}
+{{- fail "harnessV1.upgradeDrain.timeout must be a positive Go duration when harnessV1.enabled=true" -}}
+{{- end -}}
+{{- if not (regexMatch "^([1-9][0-9]*(ns|us|µs|ms|s|m|h))+$" (trim (default "" .Values.harnessV1.upgradeDrain.pollInterval))) -}}
+{{- fail "harnessV1.upgradeDrain.pollInterval must be a positive Go duration when harnessV1.enabled=true" -}}
 {{- end -}}
 {{- $sandboxMode := trim (default "" .Values.harnessV1.codexSandboxMode) -}}
 {{- if and $sandboxMode (not (has $sandboxMode (list "read-only" "workspace-write" "danger-full-access"))) -}}

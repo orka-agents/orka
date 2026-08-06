@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness/ledger"
 )
 
 const durableAdmissionControllerToken = "controller-token"
@@ -46,6 +47,174 @@ func TestDurableAdmissionSurvivesWrapperRestart(t *testing.T) {
 	}
 	if status.State != harness.DurableTurnTerminal || status.TerminalReceiptDigest == "" {
 		t.Fatalf("durable status = %#v, want terminal receipt", status)
+	}
+}
+
+func TestDurableTurnOutputSurvivesWrapperRestart(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AuthValue = durableAdmissionControllerToken
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	want := "result bytes retained across wrapper restart"
+	cfg.Generic = GenericAdapterConfig{
+		Command:    wrapperTestShellPath,
+		Args:       []string{"-c", "printf '%s' '" + want + "' > result.txt"},
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeFile,
+		ResultFile: "result.txt",
+	}
+	request := validWrapperStartTurnRequest()
+
+	baseURL, stop := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Completed == nil || last.Completed.OutputRef != localOutputRef {
+		t.Fatalf("terminal frame = %#v, want durable local output ref", last)
+	}
+	stop()
+
+	baseURL, stop = startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer stop()
+	client, err = harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.FetchTurnOutput(context.Background(), request.TurnID, last.Completed.OutputRef)
+	if err != nil {
+		t.Fatalf("FetchTurnOutput(after restart): %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("fetched output = %q, want %q", got, want)
+	}
+}
+
+func TestDurableAdmissionReconcilesOrphansOnWrapperRestart(t *testing.T) {
+	ctx := context.Background()
+	cfg := DefaultConfig()
+	cfg.AuthValue = durableAdmissionControllerToken
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	cfg.Generic.Command = testEchoCommand
+	digest := "sha256:" + strings.Repeat("a", 64)
+
+	l, err := ledger.Open(cfg.AdmissionLedgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := l.AdmitTurn(
+		ctx, "admitted-orphan", "task-uid", 1, digest, "runtime-admitted", "correlation-admitted",
+	); err != nil {
+		t.Fatalf("admit orphan: %v", err)
+	}
+	if _, _, err := l.AdmitTurn(
+		ctx, "accepted-orphan", "task-uid", 2, digest, "runtime-accepted", "correlation-accepted",
+	); err != nil {
+		t.Fatalf("admit accepted orphan: %v", err)
+	}
+	if err := l.MarkTurnAccepted(ctx, "accepted-orphan"); err != nil {
+		t.Fatalf("accept orphan: %v", err)
+	}
+	if err := l.CloseAdmission(ctx); err != nil {
+		t.Fatalf("close admission: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close seed ledger: %v", err)
+	}
+
+	baseURL, stop := startWrapperServerWithConfig(t, cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	defer stop()
+	client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := client.DurableTurnStatus(ctx, "admitted-orphan")
+	if err != nil {
+		t.Fatalf("DurableTurnStatus(admitted orphan): %v", err)
+	}
+	if admitted.State != harness.DurableTurnRejected {
+		t.Fatalf("admitted orphan state = %s, want Rejected", admitted.State)
+	}
+	accepted, err := client.DurableTurnStatus(ctx, "accepted-orphan")
+	if err != nil {
+		t.Fatalf("DurableTurnStatus(accepted orphan): %v", err)
+	}
+	if accepted.State != harness.DurableTurnOutcomeUnknown || accepted.TerminalReceipt == nil ||
+		accepted.TerminalReceipt.Kind != harness.DurableTurnTerminalOutcomeUnknown ||
+		accepted.TerminalReceipt.RuntimeSessionID != "runtime-accepted" ||
+		accepted.TerminalReceipt.CorrelationID != "correlation-accepted" {
+		t.Fatalf("accepted orphan status = %#v, want exact OutcomeUnknown identity", accepted)
+	}
+	drain, err := client.DurableDrainStatus(ctx)
+	if err != nil {
+		t.Fatalf("DurableDrainStatus: %v", err)
+	}
+	if !drain.AdmissionClosed || !drain.Completed || len(drain.Unsettled) != 0 {
+		t.Fatalf("drain after orphan reconciliation = %#v, want completed", drain)
+	}
+}
+
+func TestDurableRolloverReopensOnlyPreparedReplacementGeneration(t *testing.T) {
+	ctx := context.Background()
+	cfg := DefaultConfig()
+	cfg.AuthValue = durableAdmissionControllerToken
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	cfg.Generic.Command = testEchoCommand
+	request := validWrapperStartTurnRequest()
+
+	baseURL, stop := startWrapperServerWithConfig(t, cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.StartTurn(ctx, request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	_ = collectWrapperFrames(t, client, request.TurnID, 0)
+	if _, err := client.CloseDurableAdmission(ctx); err != nil {
+		t.Fatalf("CloseDurableAdmission: %v", err)
+	}
+	if status, err := client.DurableDrainStatus(ctx); err != nil || !status.Completed {
+		t.Fatalf("DurableDrainStatus() = %#v, %v, want completed", status, err)
+	}
+	prepared, err := client.PrepareDurableRollover(ctx, "2")
+	if err != nil {
+		t.Fatalf("PrepareDurableRollover: %v", err)
+	}
+	if !prepared.Prepared || prepared.CurrentGeneration != "1" || prepared.NextGeneration != "2" {
+		t.Fatalf("rollover preparation = %#v", prepared)
+	}
+	stop()
+
+	cfg.LedgerGeneration = "2"
+	baseURL, stop = startWrapperServerWithConfig(t, cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	defer stop()
+	client, err = harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain, err := client.DurableDrainStatus(ctx)
+	if err != nil {
+		t.Fatalf("DurableDrainStatus(after rollover): %v", err)
+	}
+	if drain.AdmissionClosed || drain.Completed {
+		t.Fatalf("replacement drain status = %#v, want admission reopened", drain)
+	}
+	next := validWrapperStartTurnRequest()
+	next.TurnID = "turn-after-rollover"
+	next.CorrelationID = "correlation-after-rollover"
+	next = sealDurableWrapperRequest(next)
+	if _, err := client.StartTurn(ctx, next); err != nil {
+		t.Fatalf("StartTurn(after rollover): %v", err)
+	}
+	_ = collectWrapperFrames(t, client, next.TurnID, 0)
+	status, err := client.DurableTurnStatus(ctx, request.TurnID)
+	if err != nil || status.State != harness.DurableTurnTerminal {
+		t.Fatalf("pre-rollover tombstone = %#v, %v", status, err)
 	}
 }
 
