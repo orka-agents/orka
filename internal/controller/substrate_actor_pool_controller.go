@@ -12,10 +12,13 @@ import (
 	"strings"
 	"time"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -210,30 +213,48 @@ func (r *SubstrateActorPoolReconciler) updateSubstrateActorPoolStatus(
 	message string,
 ) (ctrl.Result, error) {
 	now := metav1.Now()
-	pool.Status.Phase = phase
-	pool.Status.ObservedGeneration = pool.Generation
-	pool.Status.WorkerCount = int32(max(density.WorkerCount, 0))
-	pool.Status.ActorCount = int32(max(density.ActorCount, 0))
-	pool.Status.RunningActorCount = int32(max(density.RunningActorCount, 0))
-	pool.Status.SuspendedActorCount = int32(max(density.SuspendedActorCount, 0))
-	pool.Status.ActorsPerWorker = density.ActorsPerWorker
-	pool.Status.Message = sanitizeSubstrateActorPoolMessage(message)
-	condition := metav1.Condition{
-		Type:               "Ready",
-		LastTransitionTime: now,
-		ObservedGeneration: pool.Generation,
-	}
-	if phase == corev1alpha1.SubstrateActorPoolPhaseReady {
-		condition.Status = metav1.ConditionTrue
-		condition.Reason = "PoolReady"
-		condition.Message = "Substrate actor pool is ready"
-	} else {
-		condition.Status = metav1.ConditionFalse
-		condition.Reason = reasonPoolNotReady
-		condition.Message = pool.Status.Message
-	}
-	meta.SetStatusCondition(&pool.Status.Conditions, condition)
-	if err := r.Status().Update(ctx, pool); err != nil {
+	observedGeneration := pool.Generation
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.SubstrateActorPool{}
+		if err := r.Get(ctx, types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, current); err != nil {
+			return err
+		}
+
+		desired := current.Status.DeepCopy()
+		desired.Phase = phase
+		desired.ObservedGeneration = observedGeneration
+		desired.WorkerCount = int32(max(density.WorkerCount, 0))
+		desired.ActorCount = int32(max(density.ActorCount, 0))
+		desired.RunningActorCount = int32(max(density.RunningActorCount, 0))
+		desired.SuspendedActorCount = int32(max(density.SuspendedActorCount, 0))
+		desired.ActorsPerWorker = density.ActorsPerWorker
+		desired.Message = sanitizeSubstrateActorPoolMessage(message)
+		condition := metav1.Condition{
+			Type:               "Ready",
+			LastTransitionTime: now,
+			ObservedGeneration: observedGeneration,
+		}
+		if phase == corev1alpha1.SubstrateActorPoolPhaseReady {
+			condition.Status = metav1.ConditionTrue
+			condition.Reason = "PoolReady"
+			condition.Message = "Substrate actor pool is ready"
+		} else {
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = reasonPoolNotReady
+			condition.Message = desired.Message
+		}
+		meta.SetStatusCondition(&desired.Conditions, condition)
+		if apiequality.Semantic.DeepEqual(current.Status, *desired) {
+			pool.Status = *current.Status.DeepCopy()
+			return nil
+		}
+		current.Status = *desired
+		if err := r.Status().Update(ctx, current); err != nil {
+			return err
+		}
+		pool.Status = *current.Status.DeepCopy()
+		return nil
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: substrateActorPoolRequeue}, nil
