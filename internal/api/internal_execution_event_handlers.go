@@ -32,9 +32,6 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if namespace == "" || streamType == "" || streamID == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace, streamType, and streamID are required")
 	}
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
-		return err
-	}
 	if h.executionEventStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
 	}

@@ -77,6 +77,13 @@ func TestInternalCallerAuthorizerVerifyTaskWorker(t *testing.T) {
 	}
 
 	err = authorizer.verifyTaskWorker(context.Background(), &UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:worker"}, task)
+	if !errorsAsFiber(err, &fiberErr) || fiberErr.Code != http.StatusForbidden || fiberErr.Message != "ServiceAccount namespace required" {
+		t.Fatalf("missing namespace error = %v, want ServiceAccount namespace required", err)
+	}
+
+	err = authorizer.verifyTaskWorker(context.Background(), &UserInfo{
+		AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:worker", Namespace: "default",
+	}, task)
 	if !errorsAsFiber(err, &fiberErr) || fiberErr.Code != http.StatusForbidden || fiberErr.Message != "caller pod identity required" {
 		t.Fatalf("missing pod extras error = %v, want pod identity required", err)
 	}
@@ -85,24 +92,28 @@ func TestInternalCallerAuthorizerVerifyTaskWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid worker error = %v, want nil", err)
 	}
-	task.Status.JobName = ""
-	err = authorizer.verifyTaskWorker(context.Background(), internalCallerAuthWorkerUser("pod-a", "pod-uid"), task)
-	if !errorsAsFiber(err, &fiberErr) || fiberErr.Code != http.StatusForbidden || fiberErr.Message != "task has no active worker job" {
-		t.Fatalf("worker before JobName status error = %v, want task has no active worker job", err)
+	taskWithoutCurrentJob := task.DeepCopy()
+	taskWithoutCurrentJob.Status.JobName = ""
+	authorizer = internalCallerAuthorizer{k8sReader: fake.NewClientBuilder().WithScheme(scheme).WithObjects(taskWithoutCurrentJob, job, pod).Build()}
+	err = authorizer.verifyTaskWorker(context.Background(), internalCallerAuthWorkerUser("pod-a", "pod-uid"), taskWithoutCurrentJob)
+	if !errorsAsFiber(err, &fiberErr) || fiberErr.Code != http.StatusForbidden {
+		t.Fatalf("worker before JobName status error = %v, want forbidden", err)
 	}
 }
 
-func TestSubmitResultRemainsNamespaceOnlyWithKubernetesClient(t *testing.T) {
+func TestSubmitResultRequiresCurrentTaskWorkerWithKubernetesClient(t *testing.T) {
 	scheme := internalCallerAuthScheme(t)
 	task := internalCallerAuthTask()
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	job := internalCallerAuthJob(task, "job-a", "job-uid")
+	pod := internalCallerAuthPod(task, "pod-a", "pod-uid", job)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, pod).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	store := sqlite.NewStore(db, ":memory:")
-	h := NewInternalHandlers(store, store, store, store, store, InternalHandlersConfig{Client: k8sClient})
+	h := NewInternalHandlers(store, store, store, store, store, InternalHandlersConfig{Client: k8sClient, APIReader: k8sClient})
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
-		c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker"})
+		c.Locals(UserInfoContextKey, internalCallerAuthWorkerUser("pod-a", "pod-uid"))
 		return c.Next()
 	})
 	app.Post("/internal/v1/results/:namespace/:taskName", h.SubmitResult)
@@ -124,7 +135,7 @@ func internalCallerAuthScheme(t *testing.T) *runtime.Scheme {
 func internalCallerAuthTask() *corev1alpha1.Task {
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "task-a", Namespace: "default", UID: types.UID("task-uid")},
-		Status:     corev1alpha1.TaskStatus{JobName: "job-a"},
+		Status:     corev1alpha1.TaskStatus{JobName: "job-a", Phase: corev1alpha1.TaskPhaseRunning},
 	}
 }
 
@@ -134,12 +145,9 @@ func internalCallerAuthJob(task *corev1alpha1.Task, name, uid string) *batchv1.J
 			Name:      name,
 			Namespace: task.Namespace,
 			UID:       types.UID(uid),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: corev1alpha1.GroupVersion.String(),
-				Kind:       "Task",
-				Name:       task.Name,
-				UID:        task.UID,
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				corev1alpha1.GroupVersion.String(), kubernetesTaskKind, task.Name, task.UID,
+			)},
 		},
 	}
 }
@@ -151,20 +159,49 @@ func internalCallerAuthPod(task *corev1alpha1.Task, name, uid string, job *batch
 			Namespace: task.Namespace,
 			UID:       types.UID(uid),
 			Labels:    map[string]string{labels.LabelTask: labels.SelectorValue(task.Name)},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: batchv1.SchemeGroupVersion.String(),
-				Kind:       "Job",
-				Name:       job.Name,
-				UID:        job.UID,
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				batchv1.SchemeGroupVersion.String(), kubernetesJobKind, job.Name, job.UID,
+			)},
 		},
+		Spec:   corev1.PodSpec{ServiceAccountName: "worker"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+}
+
+func internalCallerAuthTaskObject(name, uid, jobName, parentTask, sessionName string) *corev1alpha1.Task {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "default", UID: types.UID(uid),
+			Labels: map[string]string{}, Annotations: map[string]string{},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{JobName: jobName, Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	if parentTask != "" {
+		task.Labels[labels.LabelParentTask] = labels.SelectorValue(parentTask)
+		task.Annotations[labels.AnnotationParentTaskName] = parentTask
+		task.OwnerReferences = []metav1.OwnerReference{internalCallerAuthOwnerReference(
+			corev1alpha1.GroupVersion.String(), kubernetesTaskKind, parentTask, types.UID(parentTask+"-uid"),
+		)}
+	}
+	if sessionName != "" {
+		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: sessionName}
+	}
+	return task
+}
+
+func internalCallerAuthOwnerReference(apiVersion, kind, name string, uid types.UID) metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: apiVersion, Kind: kind, Name: name, UID: uid, Controller: &controller,
 	}
 }
 
 func internalCallerAuthWorkerUser(podName, podUID string) *UserInfo {
 	return &UserInfo{
-		Username: "system:serviceaccount:default:worker",
-		AuthType: AuthTypeTokenReview,
+		Username:  "system:serviceaccount:default:worker",
+		Namespace: "default",
+		AuthType:  AuthTypeTokenReview,
 		Extra: map[string]authenticationv1.ExtraValue{
 			"authentication.kubernetes.io/pod-name": {podName},
 			"authentication.kubernetes.io/pod-uid":  {podUID},

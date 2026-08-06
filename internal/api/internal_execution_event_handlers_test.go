@@ -221,7 +221,7 @@ func TestInternalSubmitExecutionEventRejectsWrongOrDeletingTask(t *testing.T) {
 
 func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
-	authenticatedApp := setupInternalExecutionEventApp(eventStore, &UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default"})
+	authenticatedApp := setupOwnedInternalExecutionEventApp(t, eventStore, "task-1", "worker-pod", "worker-pod-uid")
 
 	tests := []struct {
 		name string
@@ -329,37 +329,34 @@ func setupOwnedInternalExecutionEventApp(t *testing.T, eventStore store.Executio
 		Name:      taskName + "-job",
 		Namespace: "default",
 		UID:       jobUID,
-		OwnerReferences: []metav1.OwnerReference{{
-			APIVersion: corev1alpha1.GroupVersion.String(),
-			Kind:       "Task",
-			Name:       taskName,
-			UID:        taskUID,
-		}},
+		OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+			corev1alpha1.GroupVersion.String(), kubernetesTaskKind, taskName, taskUID,
+		)},
 	}}
-	workerPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name:      "worker-pod",
-		Namespace: "default",
-		UID:       types.UID("worker-pod-uid"),
-		Labels:    map[string]string{labels.LabelTask: labels.SelectorValue(taskName)},
-		OwnerReferences: []metav1.OwnerReference{{
-			APIVersion: batchv1.SchemeGroupVersion.String(),
-			Kind:       "Job",
-			Name:       taskName + "-job",
-			UID:        jobUID,
-		}},
-	}}
-	otherPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name:      "other-pod",
-		Namespace: "default",
-		UID:       types.UID("other-pod-uid"),
-		Labels:    map[string]string{labels.LabelTask: labels.SelectorValue("other-task")},
-		OwnerReferences: []metav1.OwnerReference{{
-			APIVersion: batchv1.SchemeGroupVersion.String(),
-			Kind:       "Job",
-			Name:       taskName + "-job",
-			UID:        jobUID,
-		}},
-	}}
+	workerPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-pod",
+			Namespace: "default",
+			UID:       types.UID("worker-pod-uid"),
+			Labels:    map[string]string{labels.LabelTask: labels.SelectorValue(taskName)},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				batchv1.SchemeGroupVersion.String(), kubernetesJobKind, taskName+"-job", jobUID,
+			)},
+		},
+		Spec: corev1.PodSpec{ServiceAccountName: "worker"},
+	}
+	otherPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-pod",
+			Namespace: "default",
+			UID:       types.UID("other-pod-uid"),
+			Labels:    map[string]string{labels.LabelTask: labels.SelectorValue("other-task")},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				batchv1.SchemeGroupVersion.String(), kubernetesJobKind, taskName+"-job", jobUID,
+			)},
+		},
+		Spec: corev1.PodSpec{ServiceAccountName: "worker"},
+	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, workerPod, otherPod).Build()
 	h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{Client: k8sClient, ExecutionEventStore: eventStore})
 	return setupInternalExecutionEventAppWithHandler(h, &UserInfo{
@@ -441,12 +438,9 @@ func testInternalExecutionEventOwnedWorkerObjects(taskName string) (*corev1alpha
 			Name:      jobName,
 			Namespace: "default",
 			UID:       jobUID,
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: corev1alpha1.GroupVersion.String(),
-				Kind:       "Task",
-				Name:       taskName,
-				UID:        taskUID,
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				corev1alpha1.GroupVersion.String(), kubernetesTaskKind, taskName, taskUID,
+			)},
 		},
 	}
 	pod := &corev1.Pod{
@@ -457,13 +451,11 @@ func testInternalExecutionEventOwnedWorkerObjects(taskName string) (*corev1alpha
 			Labels: map[string]string{
 				labels.LabelTask: labels.SelectorValue(taskName),
 			},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: batchv1.SchemeGroupVersion.String(),
-				Kind:       "Job",
-				Name:       jobName,
-				UID:        jobUID,
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				batchv1.SchemeGroupVersion.String(), kubernetesJobKind, jobName, jobUID,
+			)},
 		},
+		Spec: corev1.PodSpec{ServiceAccountName: "worker"},
 	}
 	return task, job, pod
 }

@@ -677,4 +677,22 @@ func TestTranscriptSearch(t *testing.T) {
 	if len([]rune(results[0].Snippet)) > 92 { // allow ellipsis on both sides
 		t.Fatalf("snippet too long: %d %q", len([]rune(results[0].Snippet)), results[0].Snippet)
 	}
+
+	sessionNames := make([]string, 0, 2001)
+	for i := range 2000 {
+		sessionNames = append(sessionNames, fmt.Sprintf("missing-%d", i))
+	}
+	sessionNames = append(sessionNames, "current")
+	results, err = s.SearchTranscript(ctx, store.TranscriptSearchFilter{
+		Namespace:    "ns-transcript",
+		Query:        "needle",
+		SessionNames: sessionNames,
+		Limit:        5,
+	})
+	if err != nil {
+		t.Fatalf("SearchTranscript with session set: %v", err)
+	}
+	if len(results) != 1 || results[0].SessionName != "current" {
+		t.Fatalf("session-set results = %+v, want current only", results)
+	}
 }
