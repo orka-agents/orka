@@ -6,6 +6,7 @@ on:
       - "v*"
 
 env:
+  MEMORY_RELEASE_STAGE: foundation
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ${{ github.repository }}
 
@@ -66,14 +67,20 @@ jobs:
             echo "Tag ${tag} requires charts/orka appVersion ${tag}; found ${app_version}." >&2
             exit 1
           fi
+          chart_memory_release_stage=$(awk '$1 == "memory.orka.ai/release-stage:" { print $2; exit }' charts/orka/Chart.yaml)
+          if [[ "${chart_memory_release_stage}" != "${MEMORY_RELEASE_STAGE}" ]]; then
+            echo "Release artifact requires memory stage ${MEMORY_RELEASE_STAGE}; found ${chart_memory_release_stage:-missing}." >&2
+            exit 1
+          fi
 
           diff --no-dereference --recursive --unified manifest_staging/charts/orka charts/orka
           diff --no-dereference --recursive --unified manifest_staging/deploy deploy
           helm lint charts/orka
-          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 19
+          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 20
 
           rendered_chart=$(mktemp)
-          trap 'rm -f "${rendered_chart}"' EXIT
+          foundation_activation_error=$(mktemp)
+          trap 'rm -f "${rendered_chart}" "${foundation_activation_error}"' EXIT
           helm template release-validation charts/orka \
             --namespace orka-system \
             --set-string workers.harnessWrapper.auth.token=mock-token \
@@ -90,9 +97,20 @@ jobs:
             echo "Expected two rendered runtime images; found ${#runtime_images[@]}." >&2
             exit 1
           fi
-          for image_ref in "${runtime_images[@]}"; do
-            if [[ "${image_ref##*:}" != "${expected_version}" ]]; then
-              echo "Tag ${tag} requires runtime image ${image_ref} to use ${expected_version}." >&2
+          expected_runtime_images=(
+            "${REGISTRY}/${IMAGE_PREFIX}:${expected_version}"
+            "${REGISTRY}/${IMAGE_PREFIX}/agent-harness-wrapper:${expected_version}"
+          )
+          for expected_image in "${expected_runtime_images[@]}"; do
+            matches=0
+            for image_ref in "${runtime_images[@]}"; do
+              if [[ "${image_ref}" == "${expected_image}" ]]; then
+                matches=$((matches + 1))
+              fi
+            done
+            if [[ ${matches} -ne 1 ]]; then
+              echo "Tag ${tag} requires exactly one rendered runtime image ${expected_image}." >&2
+              printf 'Rendered runtime image: %s\n' "${runtime_images[@]}" >&2
               exit 1
             fi
           done
@@ -102,11 +120,24 @@ jobs:
             while IFS= read -r worker_line; do
               worker_refs+=("${worker_line#*=}")
             done < <(grep -E "^[[:space:]]+- --${worker}-worker-image=" "${rendered_chart}")
-            if [[ ${#worker_refs[@]} -ne 1 || "${worker_refs[0]##*:}" != "${expected_version}" ]]; then
-              echo "Tag ${tag} requires exactly one rendered ${worker} worker image using ${expected_version}." >&2
+            expected_worker_ref="${REGISTRY}/${IMAGE_PREFIX}/${worker}-worker:${expected_version}"
+            if [[ ${#worker_refs[@]} -ne 1 || "${worker_refs[0]}" != "${expected_worker_ref}" ]]; then
+              echo "Tag ${tag} requires exactly one rendered ${worker} worker image ${expected_worker_ref}." >&2
               exit 1
             fi
           done
+
+          if helm template release-validation-foundation charts/orka \
+            --namespace orka-system \
+            --set controller.memoryBackend.enabled=true \
+            --set controller.memoryBackend.activationEnabled=true \
+            --set controller.memoryBackend.crdsReadyOverride=true \
+            --set-string controller.memoryBackend.clusterId=release-validation \
+            >/dev/null 2>"${foundation_activation_error}"; then
+            echo "Foundation release chart unexpectedly enabled remote memory activation." >&2
+            exit 1
+          fi
+          grep -Fq 'controller.memoryBackend.activationEnabled is unavailable in the foundation release artifact' "${foundation_activation_error}"
 
       - name: Package promoted chart
         run: |
@@ -121,8 +152,8 @@ jobs:
             echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
             exit 1
           fi
-          if [[ $(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$') -ne 19 ]]; then
-            echo "Packaged Orka chart must contain exactly 19 CRDs." >&2
+          if [[ $(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$') -ne 20 ]]; then
+            echo "Packaged Orka chart must contain exactly 20 CRDs." >&2
             exit 1
           fi
 

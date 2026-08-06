@@ -1,11 +1,13 @@
-{{- if .Values.store.persistence.enabled }}
+{{- if and .Values.store.persistence.enabled (not .Values.store.persistence.existingClaim) }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "orka.fullname" . }}-store
+  name: {{ include "orka.storePVCName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
     app.kubernetes.io/component: store
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   accessModes:
     - {{ .Values.store.persistence.accessMode }}

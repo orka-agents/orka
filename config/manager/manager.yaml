@@ -75,6 +75,8 @@ spec:
           - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
           - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
           - --gateway-enabled=true
+          - --memory-backend-enabled=false
+          - --memory-remote-activation-enabled=false
           - --gateway-pending-per-session=100
           - --gateway-max-records-per-gateway=1000
           - --gateway-max-rejected-records-per-gateway=250

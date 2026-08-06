@@ -1198,18 +1198,18 @@ func (h *Handlers) contextTokenSecurityScanAllowed(c fiber.Ctx, scan *corev1alph
 	if !h.contextTokenAuthorization.Enabled() {
 		return true
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return true
 	}
-	failures := contextTokenSecurityScanFailures(ui.ContextToken, scan, agentRef)
+	failures := contextTokenSecurityScanFailures(token, scan, agentRef)
 	if len(failures) == 0 {
 		return true
 	}
 	if h.contextTokenAuthorization.enforcing() {
 		return false
 	}
-	_ = h.handleContextTokenAuthorizationFailures(ui.ContextToken, "listRepositoryScans", failures)
+	_ = h.handleContextTokenAuthorizationFailures(token, "listRepositoryScans", failures)
 	return true
 }
 
@@ -1217,12 +1217,10 @@ func (h *Handlers) authorizeContextTokenSecurityScanTask(c fiber.Ctx, action str
 	if !h.contextTokenAuthorization.Enabled() {
 		return nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return nil
 	}
-
-	token := ui.ContextToken
 	failures := contextTokenSecurityScanFailures(token, scan, agentRef)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")

@@ -1,0 +1,31 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: MemoryBackend
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: default
+spec:
+  protocol:
+    omsVersion: "0.1"
+    profile: orka.oms.v0alpha1
+  deployment:
+    mode: external-endpoint
+    endpoint: https://memory.example.com
+  clientAuth:
+    bearerTokenSecretRef:
+      name: memory-backend-auth
+      key: token
+  store:
+    name: operator-precreated-store
+  lifecycleState: Staged
+
+# Create the bearer Secret separately after the Namespace and MemoryBackend UIDs
+# are known. It must be in the same namespace, carry
+# memory.orka.ai/client-auth=true, and bind these exact annotations:
+#   memory.orka.ai/backend-uid
+#   memory.orka.ai/endpoint          (canonical HTTPS endpoint identity)
+#   memory.orka.ai/store-name
+#   memory.orka.ai/namespace-uid
+#   memory.orka.ai/tenant-id
+# Staged validation remains fail-closed until every binding matches.

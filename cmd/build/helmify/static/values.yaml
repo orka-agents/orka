@@ -2,7 +2,9 @@
 
 # Controller configuration
 controller:
-  # Number of controller replicas
+  # Number of controller replicas. MemoryBackend support currently requires 1
+  # because the durable SQLite authority is single-writer and upgrades use a
+  # Recreate barrier between foundation and activation release artifacts.
   replicas: 1
 
   # Controller image
@@ -80,6 +82,28 @@ controller:
     claimLease: 1m
     pollInterval: 500ms
     batchSize: 25
+
+  # Namespaced remote memory control plane. Both gates are disabled by default.
+  # Apply the exact target MemoryBackend CRD before enabling this during an upgrade.
+  memoryBackend:
+    enabled: false
+    # The second release gate. The foundation chart artifact rejects true even
+    # when supplied with --set; a later activation release must carry the
+    # explicit activation source/chart gate.
+    activationEnabled: false
+    # Stable non-secret identity shared by all controller replicas.
+    clusterId: ""
+    # Offline rendering cannot use lookup; set only after separately applying/verifying the CRD.
+    crdsReadyOverride: false
+    validationTTL: 5m
+    probeTimeout: 15s
+    dispatcherInterval: 1s
+    dispatcherGlobalConcurrency: 16
+    dispatcherNamespaceConcurrency: 2
+    dispatcherGlobalRPS: 100
+    dispatcherNamespaceRPS: 10
+    dispatcherGlobalBurst: 16
+    dispatcherNamespaceBurst: 2
 
   # Experimental agent sandbox workspace support (disabled by default)
   executionWorkspace:
@@ -163,6 +187,8 @@ controller:
       agentWrite: ""
       memoryRead: ""
       memoryWrite: ""
+      memoryOperate: ""
+      memorySearchRemote: ""
       sessionRead: ""
       sessionWrite: ""
       securityRead: ""
@@ -308,6 +334,7 @@ store:
   path: /data/orka.db
   persistence:
     enabled: true        # durable gateway inbox/outbox and Session history require a PVC
+    existingClaim: ""    # optional pre-created PVC; chart-created PVCs are retained on uninstall
     size: 1Gi
     storageClass: ""     # use cluster default
     accessMode: ReadWriteOnce

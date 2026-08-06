@@ -44,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -51,14 +52,19 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
+	"github.com/orka-agents/orka/internal/transactiontoken"
+	workerpkg "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
-	staleResourceLabelKey   = "stale"
-	staleResourceLabelValue = scheduledRunLabelValue
-	testSubstrateActorID    = "actor-1"
+	staleResourceLabelKey       = "stale"
+	staleResourceLabelValue     = scheduledRunLabelValue
+	testSubstrateActorID        = "actor-1"
+	directTokenRuntimeAgentName = "runtime-agent"
+	directTokenMemoryReadScope  = "orka:memory:read"
+	directTokenMemoryWriteScope = "orka:memory:write"
 )
 
 // newTestScheme creates a scheme with all types needed for unit tests.
@@ -5632,36 +5638,271 @@ func TestReconcile_CompletedPhase(t *testing.T) {
 // handlePending — transaction token pending
 // ---------------------------------------------------------------------------
 
-func TestHandlePending_TransactionTokenPendingRequeuesWithoutJob(t *testing.T) {
-	scheme := newTestScheme()
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pending-token",
-			Namespace: "default",
-			Annotations: map[string]string{
-				labels.AnnotationTransactionTokenPending: "true",
+func TestHandlePending_TransactionTokenPendingGatesJobAndRuntimeRefExecution(t *testing.T) {
+	tests := []struct {
+		name  string
+		task  *corev1alpha1.Task
+		agent *corev1alpha1.Agent
+	}{
+		{
+			name: "job-backed AI task",
+			task: &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "pending-ai-token", Namespace: defaultNS},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 			},
 		},
-		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		{
+			name: "runtimeRef agent task",
+			task: &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "pending-runtime-token", Namespace: defaultNS},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeAgent,
+					AgentRef: &corev1alpha1.AgentReference{Name: directTokenRuntimeAgentName},
+				},
+			},
+			agent: &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: directTokenRuntimeAgentName, Namespace: defaultNS},
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
+				}},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			task := test.task.DeepCopy()
+			task.Annotations = map[string]string{labels.AnnotationTransactionTokenPending: scheduledRunLabelValue}
+			task.Status.Phase = corev1alpha1.TaskPhasePending
+			objects := []client.Object{task}
+			if test.agent != nil {
+				objects = append(objects, test.agent.DeepCopy())
+			}
+			r := newUnitReconciler(newTestScheme(), objects...)
+
+			result, err := r.handlePending(context.Background(), task)
+			if err != nil {
+				t.Fatalf("handlePending() error = %v", err)
+			}
+			if result.RequeueAfter != time.Second {
+				t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+			}
+
+			jobs := &batchv1.JobList{}
+			if err := r.List(context.Background(), jobs, client.InNamespace(task.Namespace)); err != nil {
+				t.Fatalf("list jobs: %v", err)
+			}
+			if len(jobs.Items) != 0 {
+				t.Fatalf("created %d Jobs while transaction token setup was pending", len(jobs.Items))
+			}
+			updated := &corev1alpha1.Task{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
+				t.Fatalf("get pending task: %v", err)
+			}
+			if updated.Status.HarnessRuntime != nil {
+				t.Fatal("runtimeRef execution started while transaction token setup was pending")
+			}
+		})
+	}
+}
+
+func TestHandlePending_DirectTaskTransactionTokenExchangeCompletesBeforeExecution(t *testing.T) {
+	tests := []struct {
+		name  string
+		task  *corev1alpha1.Task
+		agent *corev1alpha1.Agent
+	}{
+		{
+			name: "job-backed AI task",
+			task: &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "direct-ai-token", Namespace: defaultNS, UID: types.UID("direct-ai-uid")},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			},
+		},
+		{
+			name: "runtimeRef agent task",
+			task: &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "direct-runtime-token", Namespace: defaultNS, UID: types.UID("direct-runtime-uid")},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeAgent,
+					AgentRef: &corev1alpha1.AgentReference{Name: directTokenRuntimeAgentName},
+				},
+			},
+			agent: &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: directTokenRuntimeAgentName, Namespace: defaultNS},
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
+				}},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const subjectToken = "verified-caller-transaction-token"
+			taskToken := taskTokenJWTForTest(t, time.Now().Add(transactiontoken.MinimumProjectedTokenRequestedTTL), "initial")
+			task := test.task.DeepCopy()
+			secretName := task.Name + "-transaction"
+			task.Annotations = map[string]string{
+				labels.AnnotationTransactionTokenPending:      scheduledRunLabelValue,
+				labels.AnnotationTransactionTokenPendingSince: time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano),
+				labels.AnnotationTransactionTokenSecret:       secretName,
+			}
+			task.Spec.Transaction = &corev1alpha1.TaskTransaction{
+				ID: "txn-direct", Scope: directTokenMemoryReadScope + " " + directTokenMemoryWriteScope,
+				Scopes: []string{directTokenMemoryReadScope, directTokenMemoryWriteScope},
+			}
+			task.Status.Phase = corev1alpha1.TaskPhasePending
+			secret := directTaskTokenWorkloadSecretForTest(task, secretName)
+			authority := directTaskTokenAuthoritySecretForTest(task, subjectToken)
+			objects := []client.Object{task, secret, authority}
+			if test.agent != nil {
+				objects = append(objects, test.agent.DeepCopy())
+			}
+			r := newUnitReconciler(newTestScheme(), objects...)
+			exchanger := &recordingTaskTokenExchanger{token: taskToken}
+			r.BrokeredTransactionExchange = &workerpkg.TransactionExchangeConfig{
+				TTS: contexttoken.TTSConfig{
+					Endpoint: "https://transactions.example.test/token", TokenSource: contexttoken.TTSTokenSourceIncoming,
+					ChildTokenTTL: transactiontoken.MinimumProjectedTokenRequestedTTL,
+				},
+				Exchanger: exchanger,
+			}
+
+			result, err := r.handlePending(context.Background(), task)
+			if err != nil {
+				t.Fatalf("handlePending() error = %v", err)
+			}
+			if result.RequeueAfter <= 0 {
+				t.Fatalf("RequeueAfter = %v, want immediate requeue after token setup", result.RequeueAfter)
+			}
+			updatedTask := &corev1alpha1.Task{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), updatedTask); err != nil {
+				t.Fatalf("get updated task: %v", err)
+			}
+			if _, ok := updatedTask.Annotations[labels.AnnotationTransactionTokenPending]; ok {
+				t.Fatal("task remained pending after task-bound token exchange")
+			}
+			updatedSecret := &corev1.Secret{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(secret), updatedSecret); err != nil {
+				t.Fatalf("get updated Secret: %v", err)
+			}
+			if string(updatedSecret.Data[transactiontoken.TokenSecretKey]) != taskToken {
+				t.Fatal("Secret does not contain the exchanged task-bound token")
+			}
+			if _, ok := updatedSecret.Data[transactiontoken.SubjectSecretKey]; ok {
+				t.Fatal("workload Secret exposed the renewal authority")
+			}
+			updatedAuthority := &corev1.Secret{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(authority), updatedAuthority); err != nil ||
+				string(updatedAuthority.Data[transactiontoken.SubjectSecretKey]) != subjectToken {
+				t.Fatal("controller-only renewal authority was not retained")
+			}
+			if len(updatedSecret.Data[taskTokenExpiresAtSecretKey]) == 0 ||
+				len(updatedSecret.Data[taskTokenRefreshAtSecretKey]) == 0 ||
+				string(updatedSecret.Data[taskTokenGenerationSecretKey]) != "1" {
+				t.Fatal("renewable task token metadata was not persisted")
+			}
+			if test.agent != nil {
+				runtimeToken, _, err := r.harnessBrokeredTransactionAuthority(context.Background(), updatedTask)
+				if err != nil {
+					t.Fatalf("resolve runtimeRef transaction authority: %v", err)
+				}
+				if runtimeToken != taskToken {
+					t.Fatal("runtimeRef task did not resolve the exchanged task-bound token")
+				}
+			}
+			if exchanger.calls != 1 || exchanger.request.Scope != task.Spec.Transaction.Scope {
+				t.Fatalf("exchange calls/scope = %d/%q, want 1/%q", exchanger.calls, exchanger.request.Scope, task.Spec.Transaction.Scope)
+			}
+			if exchanger.request.RequestDetails[taskTokenRequestTaskNameKey] != task.Name ||
+				exchanger.request.RequestDetails[taskTokenRequestTaskUIDKey] != string(task.UID) {
+				t.Fatalf("exchange request is not bound to the Task identity: %#v", exchanger.request.RequestDetails)
+			}
+			jobs := &batchv1.JobList{}
+			if err := r.List(context.Background(), jobs, client.InNamespace(task.Namespace)); err != nil {
+				t.Fatalf("list Jobs: %v", err)
+			}
+			switch test.task.Spec.Type {
+			case corev1alpha1.TaskTypeAI:
+				if len(jobs.Items) != 1 {
+					t.Fatalf("Job-backed Task created %d Jobs after token setup, want 1", len(jobs.Items))
+				}
+			case corev1alpha1.TaskTypeAgent:
+				if len(jobs.Items) != 0 || updatedTask.Status.JobName != "" {
+					t.Fatal("runtimeRef Task incorrectly created a Kubernetes Job")
+				}
+			}
+		})
+	}
+}
+
+func TestHandlePending_DirectTaskTransactionTokenExchangeFailureCleansUpAndFailsClosed(t *testing.T) {
+	const subjectToken = "verified-caller-transaction-token"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "direct-token-failure", Namespace: defaultNS, UID: types.UID("direct-token-failure-uid"),
+			Annotations: map[string]string{
+				labels.AnnotationTransactionTokenPending:      scheduledRunLabelValue,
+				labels.AnnotationTransactionTokenPendingSince: time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano),
+				labels.AnnotationTransactionTokenSecret:       "direct-token-failure-secret",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			Transaction: &corev1alpha1.TaskTransaction{
+				ID: "txn-failure", Scope: directTokenMemoryReadScope, Scopes: []string{directTokenMemoryReadScope},
+			},
+		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
-	r := newUnitReconciler(scheme, task)
-
-	result, err := r.handlePending(context.Background(), task)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	secret := directTaskTokenWorkloadSecretForTest(task, "direct-token-failure-secret")
+	authority := directTaskTokenAuthoritySecretForTest(task, subjectToken)
+	r := newUnitReconciler(newTestScheme(), task, secret, authority)
+	r.BrokeredTransactionExchange = &workerpkg.TransactionExchangeConfig{
+		TTS: contexttoken.TTSConfig{
+			Endpoint: "https://transactions.example.test/token", TokenSource: contexttoken.TTSTokenSourceIncoming,
+		},
+		Exchanger: &recordingTaskTokenExchanger{err: errors.New("exchange unavailable")},
 	}
-	if result.RequeueAfter != time.Second {
-		t.Fatalf("expected 1s requeue while transaction token is pending, got %v", result.RequeueAfter)
-	}
 
+	if _, err := r.handlePending(context.Background(), task); err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatalf("get failed task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("task phase = %s, want Failed", updated.Status.Phase)
+	}
+	if strings.Contains(updated.Status.Message, subjectToken) {
+		t.Fatal("failed task status leaked the caller transaction token")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(secret), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("transaction token workload Secret remained after exchange failure: %v", err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(authority), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("transaction renewal authority remained after exchange failure: %v", err)
+	}
 	jobs := &batchv1.JobList{}
 	if err := r.List(context.Background(), jobs, client.InNamespace(task.Namespace)); err != nil {
-		t.Fatalf("list jobs: %v", err)
+		t.Fatalf("list Jobs: %v", err)
 	}
 	if len(jobs.Items) != 0 {
-		t.Fatalf("expected no Job to be created while transaction token is pending, got %d", len(jobs.Items))
+		t.Fatalf("created %d Jobs after transaction token exchange failure", len(jobs.Items))
 	}
+}
+
+type recordingTaskTokenExchanger struct {
+	request contexttoken.ExchangeRequest
+	token   string
+	err     error
+	calls   int
+}
+
+func (e *recordingTaskTokenExchanger) Exchange(_ context.Context, request contexttoken.ExchangeRequest) (string, error) {
+	e.calls++
+	e.request = request
+	return e.token, e.err
 }
 
 func TestHandlePending_AgentRuntimeWithoutSecretUsesHarnessWrapperNotJob(t *testing.T) {

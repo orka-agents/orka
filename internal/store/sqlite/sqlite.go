@@ -221,12 +221,16 @@ func migrate(db *sql.DB) error {
 			status            TEXT NOT NULL DEFAULT 'pending',
 			reviewer          TEXT NOT NULL DEFAULT '',
 			review_note       TEXT NOT NULL DEFAULT '',
-			applied_memory_id TEXT NOT NULL DEFAULT '',
-			applied_by        TEXT NOT NULL DEFAULT '',
-			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			applied_memory_id            TEXT NOT NULL DEFAULT '',
+			apply_operation_id           TEXT NOT NULL DEFAULT '',
+			applied_by                  TEXT NOT NULL DEFAULT '',
+			application_abandoned_by     TEXT NOT NULL DEFAULT '',
+			application_abandoned_reason TEXT NOT NULL DEFAULT '',
+			created_at                   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			reviewed_at       TIMESTAMP,
-			applied_at        TIMESTAMP
+			reviewed_at                 TIMESTAMP,
+			applied_at                  TIMESTAMP,
+			application_abandoned_at    TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_proposals_status
 			ON memory_proposals(namespace, status, created_at DESC)`,
@@ -1040,6 +1044,9 @@ func migrate(db *sql.DB) error {
 		ON memories(namespace, source_proposal_id)
 		WHERE source_proposal_id <> ''`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
+	}
+	if err := migrateMemoryGovernance(db); err != nil {
+		return err
 	}
 
 	return nil

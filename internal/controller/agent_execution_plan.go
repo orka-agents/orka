@@ -14,6 +14,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 )
 
 type agentExecutionPath string
@@ -99,8 +100,10 @@ func agentHarnessWrapperUnsupportedReason(task *corev1alpha1.Task, agent *corev1
 		return ""
 	}
 	switch {
-	case task.Spec.Transaction != nil:
-		return "agent CLI runtime tasks do not support transaction token delegation with the harness wrapper yet"
+	case task.Spec.Transaction != nil && agentHarnessRuntimeRefName(agent) == "":
+		return "agent CLI runtime tasks do not support transaction token delegation without runtimeRef"
+	case task.Spec.Transaction != nil && !transactionalRuntimeRefTaskTokenConfigured(task, agent):
+		return "agent CLI runtime tasks require a completed task-scoped transaction token setup for runtimeRef execution"
 	case effectiveAgentResources(task, agent):
 		return "agent CLI runtime tasks do not support custom Kubernetes resources with the harness wrapper yet"
 	case resolveExecution(task, agent) != nil:
@@ -108,6 +111,14 @@ func agentHarnessWrapperUnsupportedReason(task *corev1alpha1.Task, agent *corev1
 	default:
 		return ""
 	}
+}
+
+func transactionalRuntimeRefTaskTokenConfigured(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if task == nil || task.Spec.Transaction == nil || agentHarnessRuntimeRefName(agent) == "" ||
+		taskTransactionTokenPending(task) || task.Annotations == nil {
+		return false
+	}
+	return strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret]) != ""
 }
 
 func effectiveAgentResources(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {

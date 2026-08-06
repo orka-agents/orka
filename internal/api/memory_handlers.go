@@ -7,18 +7,25 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/requestid"
 
+	"github.com/orka-agents/orka/internal/apierror"
+	memoryruntime "github.com/orka-agents/orka/internal/memory"
 	"github.com/orka-agents/orka/internal/store"
 )
 
 func (h *Handlers) ensureMemoryStore() error {
-	if h.memoryStore == nil {
+	if h.memoryService == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "memory store not configured")
 	}
 	return nil
@@ -40,49 +47,61 @@ func (h *Handlers) ListMemories(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenAction(c, "listMemories", h.contextTokenAuthorization.MemoryReadScopes); err != nil {
-		return err
-	}
 	filter, err := parseMemoryFilter(c, namespace)
 	if err != nil {
 		return err
 	}
-
-	memories, err := h.memoryStore.ListMemories(c.Context(), filter)
-	if err != nil {
-		return memoryStoreError("list memories", "memory", err)
+	if err := h.authorizeMemoryReadVisibility(c, "listMemories", filter.IncludeDisabled); err != nil {
+		return err
 	}
-	return c.JSON(ListResponse{Items: memories, Metadata: ListMeta{}})
+	page, err := h.memoryService.ListMemoriesPageWithSearchContext(c.Context(), filter, h.memorySearchContext(c))
+	if err != nil {
+		return memoryServiceError(err)
+	}
+	if !page.Paginated {
+		return c.JSON(ListResponse{Items: page.Items, Metadata: ListMeta{}})
+	}
+	return c.JSON(memoryListResponse{
+		Items: page.Items,
+		Metadata: memoryListMetadata{
+			Continue: page.Cursor, Exhausted: page.Exhausted, Complete: page.Complete,
+		},
+	})
 }
 
-// CreateMemory creates a namespace-scoped memory.
+type memoryListResponse struct {
+	Items    []store.Memory     `json:"items"`
+	Metadata memoryListMetadata `json:"metadata"`
+}
+
+type memoryListMetadata struct {
+	Continue  string `json:"continue,omitempty"`
+	Exhausted bool   `json:"exhausted"`
+	Complete  bool   `json:"complete"`
+}
+
 func (h *Handlers) CreateMemory(c fiber.Ctx) error {
 	if err := h.ensureMemoryStore(); err != nil {
 		return err
 	}
-	var memory store.Memory
-	if err := c.Bind().JSON(&memory); err != nil {
+	var request memoryruntime.CreateRequest
+	if err := bindStrictMemoryJSON(c, &request); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	namespace, err := h.resolveNamespace(c, memory.Namespace)
+	namespace, err := h.resolveNamespace(c, request.Namespace)
 	if err != nil {
 		return err
 	}
 	if err := h.authorizeContextTokenAction(c, "createMemory", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
 		return err
 	}
-	memory.Namespace = namespace
-	if strings.TrimSpace(memory.Content) == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "content is required")
+	result, err := h.memoryService.CreateMemory(c.Context(), namespace, request, memoryMutationContext(c, "createMemory", "memory created"))
+	if err != nil {
+		return memoryServiceError(err)
 	}
-
-	if err := h.memoryStore.CreateMemory(c.Context(), &memory); err != nil {
-		return memoryStoreError("create memory", "memory", err)
-	}
-	return c.Status(fiber.StatusCreated).JSON(memory)
+	return sendMemoryMutationResult(c, result)
 }
 
-// GetMemory gets a memory by ID.
 func (h *Handlers) GetMemory(c fiber.Ctx) error {
 	if err := h.ensureMemoryStore(); err != nil {
 		return err
@@ -91,28 +110,31 @@ func (h *Handlers) GetMemory(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenAction(c, "getMemory", h.contextTokenAuthorization.MemoryReadScopes); err != nil {
+	includeDisabled := c.Query("includeDisabled", "") == queryTrue
+	if err := h.authorizeMemoryReadVisibility(c, "getMemory", includeDisabled); err != nil {
 		return err
 	}
-	memory, err := h.memoryStore.GetMemory(c.Context(), namespace, c.Params("id"))
+	memory, err := h.memoryService.GetMemoryWithVisibility(c.Context(), namespace, c.Params("id"), includeDisabled)
 	if err != nil {
-		return memoryStoreError("get memory", "memory", err)
+		return memoryServiceError(err)
 	}
 	return c.JSON(memory)
 }
 
-// UpdateMemory updates mutable fields on a memory.
 func (h *Handlers) UpdateMemory(c fiber.Ctx) error {
 	if err := h.ensureMemoryStore(); err != nil {
 		return err
 	}
-	var req store.Memory
-	if err := c.Bind().JSON(&req); err != nil {
+	var request memoryruntime.UpdateRequest
+	if err := bindStrictMemoryJSON(c, &request); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 	explicitNamespace := c.Query("namespace", "")
+	if explicitNamespace != "" && request.Namespace != "" && request.Namespace != explicitNamespace {
+		return fiber.NewError(fiber.StatusBadRequest, "memory namespace mismatch")
+	}
 	if explicitNamespace == "" {
-		explicitNamespace = req.Namespace
+		explicitNamespace = request.Namespace
 	}
 	namespace, err := h.resolveNamespace(c, explicitNamespace)
 	if err != nil {
@@ -121,29 +143,14 @@ func (h *Handlers) UpdateMemory(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "updateMemory", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
 		return err
 	}
-
-	memory, err := h.memoryStore.GetMemory(c.Context(), namespace, c.Params("id"))
+	result, err := h.memoryService.UpdateMemory(c.Context(), namespace, c.Params("id"), request,
+		memoryMutationContext(c, "updateMemory", "memory updated"))
 	if err != nil {
-		return memoryStoreError("get memory", "memory", err)
+		return memoryServiceError(err)
 	}
-	applyMemoryUpdate(memory, req)
-	memory.Namespace = namespace
-	memory.ID = c.Params("id")
-	if strings.TrimSpace(memory.Content) == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "content is required")
-	}
-
-	if err := h.memoryStore.UpdateMemory(c.Context(), memory); err != nil {
-		return memoryStoreError("update memory", "memory", err)
-	}
-	updated, err := h.memoryStore.GetMemory(c.Context(), namespace, c.Params("id"))
-	if err != nil {
-		return memoryStoreError("get memory", "memory", err)
-	}
-	return c.JSON(updated)
+	return sendMemoryMutationResult(c, result)
 }
 
-// DeleteMemory soft-deletes a memory.
 func (h *Handlers) DeleteMemory(c fiber.Ctx) error {
 	if err := h.ensureMemoryStore(); err != nil {
 		return err
@@ -155,13 +162,14 @@ func (h *Handlers) DeleteMemory(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "deleteMemory", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
 		return err
 	}
-	if err := h.memoryStore.DeleteMemory(c.Context(), namespace, c.Params("id")); err != nil {
-		return memoryStoreError("delete memory", "memory", err)
+	result, err := h.memoryService.DeleteMemory(c.Context(), namespace, c.Params("id"),
+		memoryMutationContext(c, "deleteMemory", "memory deleted"))
+	if err != nil {
+		return memoryServiceError(err)
 	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return sendMemoryMutationResult(c, result)
 }
 
-// DisableMemory disables a memory for recall without deleting it.
 func (h *Handlers) DisableMemory(c fiber.Ctx) error {
 	return h.setMemoryDisabled(c, true)
 }
@@ -182,8 +190,9 @@ func (h *Handlers) setMemoryDisabled(c fiber.Ctx, disabled bool) error {
 	if err := h.authorizeContextTokenAction(c, "setMemoryDisabled", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
 		return err
 	}
-	if err := h.memoryStore.SetMemoryDisabled(c.Context(), namespace, c.Params("id"), disabled); err != nil {
-		return memoryStoreError("update memory", "memory", err)
+	actor, _ := memoryActor(c)
+	if err := h.memoryService.SetMemoryDisabled(c.Context(), namespace, c.Params("id"), disabled, actor, requestid.FromContext(c)); err != nil {
+		return memoryServiceError(err)
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }
@@ -216,23 +225,23 @@ func (h *Handlers) CreateMemoryProposal(c fiber.Ctx) error {
 	if err := h.ensureMemoryProposalStore(); err != nil {
 		return err
 	}
-	var proposal store.MemoryProposal
-	if err := c.Bind().JSON(&proposal); err != nil {
+	var request memoryProposalCreateRequest
+	if err := bindStrictMemoryJSON(c, &request); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	namespace, err := h.resolveNamespace(c, proposal.Namespace)
+	namespace, err := h.resolveNamespace(c, request.Namespace)
 	if err != nil {
 		return err
 	}
 	if err := h.authorizeContextTokenAction(c, "createMemoryProposal", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
 		return err
 	}
-	proposal.Namespace = namespace
+	proposal := request.toStore(namespace)
 	if strings.TrimSpace(proposal.Title) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "title is required")
 	}
 
-	if err := h.memoryProposalStore.CreateMemoryProposal(c.Context(), &proposal); err != nil {
+	if err := h.memoryProposalStore.CreateMemoryProposal(c.Context(), proposal); err != nil {
 		return memoryStoreError("create memory proposal", "memory proposal", err)
 	}
 	return c.Status(fiber.StatusCreated).JSON(proposal)
@@ -270,13 +279,13 @@ func (h *Handlers) ReviewMemoryProposal(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenAction(c, "reviewMemoryProposal", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
+	if err := h.authorizeContextTokenAction(c, "reviewMemoryProposal", h.contextTokenAuthorization.MemoryOperateScopes); err != nil {
 		return err
 	}
 	review.Namespace = namespace
 	if review.Reviewer == "" {
-		if ui := GetUserInfo(c); ui != nil {
-			review.Reviewer = ui.Username
+		if actor, _ := memoryActor(c); actor != "" {
+			review.Reviewer = actor
 		}
 	}
 	if err := h.memoryProposalStore.ReviewMemoryProposal(c.Context(), review); err != nil {
@@ -319,17 +328,38 @@ func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "applyMemoryProposal", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
 		return err
 	}
-	apply.Namespace = namespace
+	if err := h.authorizeContextTokenAction(c, "applyMemoryProposal", h.contextTokenAuthorization.MemoryOperateScopes); err != nil {
+		return err
+	}
+	actor, _ := memoryActor(c)
 	if apply.AppliedBy == "" {
-		if ui := GetUserInfo(c); ui != nil {
-			apply.AppliedBy = ui.Username
-		}
+		apply.AppliedBy = actor
 	}
-	memory, err := h.memoryProposalStore.ApplyMemoryProposal(c.Context(), apply)
+	result, err := h.memoryService.ApplyMemoryProposal(c.Context(), namespace, apply.ID, apply.AppliedBy,
+		memoryMutationContext(c, "applyMemoryProposal", "memory proposal applied"))
 	if err != nil {
-		return memoryStoreError("apply memory proposal", "memory proposal", err)
+		return memoryServiceError(err)
 	}
-	return c.JSON(memory)
+	return sendMemoryMutationResult(c, result)
+}
+
+type memoryProposalCreateRequest struct {
+	Namespace   string `json:"namespace,omitempty"`
+	TaskName    string `json:"taskName,omitempty"`
+	AgentName   string `json:"agentName,omitempty"`
+	Type        string `json:"type,omitempty"`
+	SkillName   string `json:"skillName,omitempty"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Content     string `json:"content,omitempty"`
+	Patch       string `json:"patch,omitempty"`
+}
+
+func (r memoryProposalCreateRequest) toStore(namespace string) *store.MemoryProposal {
+	return &store.MemoryProposal{
+		Namespace: namespace, TaskName: r.TaskName, AgentName: r.AgentName, Type: r.Type,
+		SkillName: r.SkillName, Title: r.Title, Description: r.Description, Content: r.Content, Patch: r.Patch,
+	}
 }
 
 func parseMemoryFilter(c fiber.Ctx, namespace string) (store.MemoryFilter, error) {
@@ -351,10 +381,21 @@ func parseMemoryFilter(c fiber.Ctx, namespace string) (store.MemoryFilter, error
 		Source:          c.Query("source", ""),
 		Tags:            splitCSV(c.Query("tags", "")),
 		IDs:             splitCSV(c.Query("ids", "")),
+		Trust:           parseMemoryTrust(c.Query("trust", "")),
 		IncludeDisabled: c.Query("includeDisabled", "") == queryTrue,
 		IncludeDeleted:  c.Query("includeDeleted", "") == queryTrue,
 		Limit:           limit,
+		Cursor:          strings.TrimSpace(c.Query("continue", c.Query("cursor", ""))),
 	}, nil
+}
+
+func parseMemoryTrust(raw string) []store.MemoryTrust {
+	values := splitCSV(raw)
+	result := make([]store.MemoryTrust, 0, len(values))
+	for _, value := range values {
+		result = append(result, store.MemoryTrust(strings.ToLower(value)))
+	}
+	return result
 }
 
 func parseMemoryProposalFilter(c fiber.Ctx, namespace string) (store.MemoryProposalFilter, error) {
@@ -403,36 +444,6 @@ func splitCSV(raw string) []string {
 	return out
 }
 
-func applyMemoryUpdate(memory *store.Memory, req store.Memory) {
-	if req.SessionName != "" {
-		memory.SessionName = req.SessionName
-	}
-	if req.AgentName != "" {
-		memory.AgentName = req.AgentName
-	}
-	if req.TaskName != "" {
-		memory.TaskName = req.TaskName
-	}
-	if req.ParentTask != "" {
-		memory.ParentTask = req.ParentTask
-	}
-	if req.Source != "" {
-		memory.Source = req.Source
-	}
-	if req.Content != "" {
-		memory.Content = req.Content
-	}
-	if req.Tags != nil {
-		memory.Tags = req.Tags
-	}
-	if req.Disabled {
-		memory.Disabled = true
-	}
-	if req.Deleted {
-		memory.Deleted = true
-	}
-}
-
 func bindMemoryProposalReview(c fiber.Ctx, fallbackNamespace, id string) (store.MemoryProposalReview, error) {
 	var req struct {
 		Namespace  string `json:"namespace"`
@@ -476,6 +487,91 @@ func bindMemoryProposalApply(c fiber.Ctx, fallbackNamespace, id string) (store.M
 		ID:        id,
 		AppliedBy: req.AppliedBy,
 	}, nil
+}
+
+func bindStrictMemoryJSON(c fiber.Ctx, target any) error {
+	body := bytes.TrimSpace(c.Body())
+	if len(body) == 0 {
+		return fmt.Errorf("request body is required")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("trailing JSON is not allowed")
+		}
+		return err
+	}
+	return nil
+}
+
+func memoryActor(c fiber.Ctx) (actor, principal string) {
+	if user := GetUserInfo(c); user != nil {
+		actor = strings.TrimSpace(user.Username)
+		principal = actor
+		if user.UID != "" {
+			principal += "#" + user.UID
+		} else if user.Subject != "" {
+			principal += "#" + user.Subject
+		}
+	}
+	if actor == "" {
+		actor = "authenticated-memory-caller"
+	}
+	if principal == "" {
+		principal = actor
+	}
+	return actor, principal
+}
+
+func memoryMutationContext(c fiber.Ctx, route, reason string) memoryruntime.MutationContext {
+	actor, principal := memoryActor(c)
+	return memoryruntime.MutationContext{
+		Principal: principal, Actor: actor, IdempotencyKey: strings.TrimSpace(c.Get("Idempotency-Key")),
+		Route: route, RequestID: requestid.FromContext(c), Reason: reason,
+		LocationBase: "/api/v1/memory-operations/",
+	}
+}
+
+func internalMemoryMutationContext(c fiber.Ctx, namespace, route, reason string) memoryruntime.MutationContext {
+	context := memoryMutationContext(c, route, reason)
+	context.LocationBase = "/internal/v1/memory-operations/" + namespace + "/"
+	return context
+}
+
+func sendMemoryMutationResult(c fiber.Ctx, result *memoryruntime.MutationResult) error {
+	if result == nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "memory service returned no result")
+	}
+	if result.Location != "" {
+		c.Set("Location", result.Location)
+	}
+	if result.RetryAfter > 0 {
+		seconds := max(1, int(result.RetryAfter.Round(time.Second)/time.Second))
+		c.Set("Retry-After", strconv.Itoa(seconds))
+	}
+	if result.StatusCode == fiber.StatusNoContent {
+		return c.SendStatus(fiber.StatusNoContent)
+	}
+	if result.StatusCode == fiber.StatusAccepted {
+		return c.Status(fiber.StatusAccepted).JSON(result.Operation)
+	}
+	return c.Status(result.StatusCode).JSON(result.Memory)
+}
+
+func memoryServiceError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var structured *apierror.Error
+	if errors.As(err, &structured) {
+		return fmt.Errorf("%w: %w", fiber.NewError(structured.Status, structured.Error()), err)
+	}
+	return memoryStoreError("perform memory operation", "memory", err)
 }
 
 func memoryStoreError(action, resource string, err error) error {

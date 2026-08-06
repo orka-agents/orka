@@ -21,6 +21,33 @@
 {{- $gatewayCRDsReady = and (not (empty $gatewayClassCRD)) (not (empty $gatewayCRD)) (not (empty $gatewayBindingCRD)) $taskSchemaReady -}}
 {{- end -}}
 {{- $gatewayRuntimeEnabled := and .Values.controller.gateway.enabled (or .Values.controller.gateway.crdsReadyOverride $gatewayCRDsReady) -}}
+{{- $memoryReleaseStage := include "orka.memoryReleaseStage" . | trim -}}
+{{- if not (has $memoryReleaseStage (list "foundation" "activation")) -}}
+{{- fail (printf "unsupported memory release stage %q" $memoryReleaseStage) -}}
+{{- end -}}
+{{- if and .Values.controller.memoryBackend.activationEnabled (not .Values.controller.memoryBackend.enabled) -}}
+{{- fail "controller.memoryBackend.activationEnabled requires controller.memoryBackend.enabled" -}}
+{{- end -}}
+{{- if and .Values.controller.memoryBackend.activationEnabled (ne $memoryReleaseStage "activation") -}}
+{{- fail (printf "controller.memoryBackend.activationEnabled is unavailable in the %s release artifact" $memoryReleaseStage) -}}
+{{- end -}}
+{{- if and .Values.controller.memoryBackend.enabled (empty .Values.controller.memoryBackend.clusterId) -}}
+{{- fail "controller.memoryBackend.clusterId is required when controller.memoryBackend.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.controller.memoryBackend.enabled (not .Values.store.persistence.enabled) -}}
+{{- fail "controller.memoryBackend.enabled requires store.persistence.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.controller.memoryBackend.enabled (ne (int .Values.controller.replicas) 1) -}}
+{{- fail "controller.memoryBackend.enabled requires controller.replicas=1 while the durable SQLite authority is single-writer" -}}
+{{- end -}}
+{{- $memoryBackendCRDReady := false -}}
+{{- if and .Values.controller.memoryBackend.enabled (not .Values.controller.memoryBackend.crdsReadyOverride) -}}
+{{- $memoryBackendCRD := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "memorybackends.core.orka.ai" -}}
+{{- if $memoryBackendCRD -}}
+{{- $memoryBackendCRDReady = eq (get (default (dict) $memoryBackendCRD.metadata.annotations) "memory.orka.ai/schema-version") "v1alpha1" -}}
+{{- end -}}
+{{- end -}}
+{{- $memoryBackendRuntimeEnabled := and .Values.controller.memoryBackend.enabled (or .Values.controller.memoryBackend.crdsReadyOverride $memoryBackendCRDReady) -}}
 {{- if and $gatewayRuntimeEnabled (not .Values.store.persistence.enabled) (not .Values.controller.gateway.allowEphemeralStore) -}}
 {{- fail "controller.gateway.enabled requires store.persistence.enabled=true; set controller.gateway.allowEphemeralStore=true only for disposable development" -}}
 {{- end -}}
@@ -82,6 +109,20 @@ spec:
             - --gateway-claim-lease={{ .Values.controller.gateway.claimLease }}
             - --gateway-poll-interval={{ .Values.controller.gateway.pollInterval }}
             - --gateway-batch-size={{ .Values.controller.gateway.batchSize }}
+            - --memory-backend-enabled={{ $memoryBackendRuntimeEnabled }}
+            - --memory-remote-activation-enabled={{ and $memoryBackendRuntimeEnabled .Values.controller.memoryBackend.activationEnabled (eq $memoryReleaseStage "activation") }}
+            {{- if .Values.controller.memoryBackend.clusterId }}
+            - {{ printf "--memory-cluster-id=%s" .Values.controller.memoryBackend.clusterId | quote }}
+            {{- end }}
+            - --memory-backend-validation-ttl={{ .Values.controller.memoryBackend.validationTTL }}
+            - --memory-backend-probe-timeout={{ .Values.controller.memoryBackend.probeTimeout }}
+            - --memory-dispatcher-interval={{ .Values.controller.memoryBackend.dispatcherInterval }}
+            - --memory-dispatcher-global-concurrency={{ .Values.controller.memoryBackend.dispatcherGlobalConcurrency }}
+            - --memory-dispatcher-namespace-concurrency={{ .Values.controller.memoryBackend.dispatcherNamespaceConcurrency }}
+            - --memory-dispatcher-global-rps={{ .Values.controller.memoryBackend.dispatcherGlobalRPS }}
+            - --memory-dispatcher-namespace-rps={{ .Values.controller.memoryBackend.dispatcherNamespaceRPS }}
+            - --memory-dispatcher-global-burst={{ .Values.controller.memoryBackend.dispatcherGlobalBurst }}
+            - --memory-dispatcher-namespace-burst={{ .Values.controller.memoryBackend.dispatcherNamespaceBurst }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}
             - {{ printf "--oidc-issuer=%s" .issuer | quote }}
@@ -160,6 +201,12 @@ spec:
             {{- end }}
             {{- if .memoryWrite }}
             - {{ printf "--context-token-memory-write-scopes=%s" .memoryWrite | quote }}
+            {{- end }}
+            {{- if .memoryOperate }}
+            - {{ printf "--context-token-memory-operate-scopes=%s" .memoryOperate | quote }}
+            {{- end }}
+            {{- if .memorySearchRemote }}
+            - {{ printf "--context-token-memory-search-remote-scopes=%s" .memorySearchRemote | quote }}
             {{- end }}
             {{- if .sessionRead }}
             - {{ printf "--context-token-session-read-scopes=%s" .sessionRead | quote }}
@@ -429,7 +476,7 @@ spec:
         - name: store
           {{- if .Values.store.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ include "orka.fullname" . }}-store
+            claimName: {{ include "orka.storePVCName" . }}
           {{- else }}
           emptyDir: {}
           {{- end }}

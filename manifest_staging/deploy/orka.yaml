@@ -4551,6 +4551,517 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
+    memory.orka.ai/schema-version: v1alpha1
+  name: memorybackends.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    categories:
+    - orka
+    kind: MemoryBackend
+    listKind: MemoryBackendList
+    plural: memorybackends
+    shortNames:
+    - mb
+    singular: memorybackend
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.lifecycleState
+      name: Requested
+      type: string
+    - jsonPath: .status.effectiveLifecycleState
+      name: Effective
+      type: string
+    - jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - jsonPath: .spec.store.name
+      name: Store
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: MemoryBackend is the namespaced control-plane binding for external
+          OMS memory.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MemoryBackendSpec defines a namespace's requested external
+              memory backend.
+            properties:
+              clientAuth:
+                description: MemoryBackendClientAuth configures Orka-to-adapter authentication.
+                properties:
+                  bearerTokenSecretRef:
+                    description: |-
+                      BearerTokenSecretRef references a Secret explicitly bound to this backend,
+                      namespace incarnation, endpoint identity, tenant identity, and store.
+                    properties:
+                      key:
+                        description: Key is the Secret data key containing the bearer
+                          token.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                      name:
+                        description: Name is the same-namespace Secret name.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                required:
+                - bearerTokenSecretRef
+                type: object
+              deployment:
+                description: MemoryBackendDeployment configures the external OMS adapter
+                  endpoint.
+                properties:
+                  endpoint:
+                    description: |-
+                      Endpoint is a public HTTPS base URL. Credentials, queries, fragments, local
+                      names, private addresses, and Kubernetes Service names are rejected at runtime.
+                    maxLength: 2048
+                    minLength: 9
+                    pattern: ^https://[^\s@?#]+$
+                    type: string
+                  mode:
+                    description: Mode is the endpoint deployment mode.
+                    enum:
+                    - external-endpoint
+                    type: string
+                required:
+                - endpoint
+                - mode
+                type: object
+              lifecycleState:
+                default: Staged
+                description: |-
+                  LifecycleState is requested intent. Effective authority changes only after
+                  the durable binding coordinator completes the corresponding barrier.
+                enum:
+                - Staged
+                - Active
+                - ReadOnly
+                - Disabled
+                - Decommissioning
+                type: string
+              protocol:
+                description: MemoryBackendProtocol selects the exact OMS wire contract.
+                properties:
+                  omsVersion:
+                    description: OMSVersion is the adapter API version.
+                    enum:
+                    - "0.1"
+                    type: string
+                  profile:
+                    description: Profile is the closed Orka OMS profile implemented
+                      by the adapter.
+                    enum:
+                    - orka.oms.v0alpha1
+                    type: string
+                required:
+                - omsVersion
+                - profile
+                type: object
+              store:
+                description: MemoryBackendStore identifies an operator-precreated
+                  provider store.
+                properties:
+                  name:
+                    description: Name is the immutable provider store name.
+                    maxLength: 128
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - clientAuth
+            - deployment
+            - protocol
+            - store
+            type: object
+            x-kubernetes-validations:
+            - message: spec.protocol is immutable
+              rule: self.protocol == oldSelf.protocol
+            - message: spec.store.name is immutable
+              rule: self.store.name == oldSelf.store.name
+          status:
+            description: MemoryBackendStatus contains bounded, non-secret control-plane
+              observations.
+            properties:
+              accepted:
+                description: Accepted reports whether the current object shape and
+                  fixed-name contract are valid.
+                type: boolean
+              authorityEpoch:
+                format: int64
+                minimum: 0
+                type: integer
+              backendUID:
+                maxLength: 128
+                type: string
+              clusterIdentityDigest:
+                description: ClusterIdentityDigest records only a digest of the configured
+                  cluster identity.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              connected:
+                description: Connected reports whether strict OMS store, capability,
+                  and ownership probes succeeded.
+                type: boolean
+              effectiveLifecycleState:
+                description: EffectiveLifecycleState changes only after the durable
+                  lifecycle barrier completes.
+                enum:
+                - Staged
+                - Validating
+                - Active
+                - ReadOnly
+                - Disabled
+                - Decommissioning
+                - Draining
+                - Recovering
+                - IdentityMismatch
+                - IdentityConflict
+                - Diverged
+                - Removed
+                - Decommissioned
+                type: string
+              endpointDigest:
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              endpointIdentity:
+                description: EndpointIdentity is the canonical, credential-free HTTPS
+                  endpoint identity.
+                maxLength: 2048
+                type: string
+              lastValidated:
+                format: date-time
+                type: string
+              message:
+                description: Message is bounded and contains no bearer values or provider
+                  response content.
+                maxLength: 1024
+                type: string
+              namespaceUID:
+                maxLength: 128
+                type: string
+              observedCapabilities:
+                description: MemoryBackendObservedCapabilities records strict, non-secret
+                  OMS capability metadata.
+                properties:
+                  adapterName:
+                    description: AdapterName is the bounded adapter implementation
+                      identity.
+                    maxLength: 256
+                    type: string
+                  adapterVersion:
+                    description: AdapterVersion is the bounded adapter build/version
+                      identity.
+                    maxLength: 256
+                    type: string
+                  effective:
+                    description: Effective is the capability set Orka can safely use.
+                    items:
+                      description: MemoryBackendCapability is a closed capability
+                        advertised by the Orka OMS profile.
+                      enum:
+                      - durableIdempotency
+                      - idempotencyDigestConflicts
+                      - createIfAbsent
+                      - conditionalMutation
+                      - monotonicGenerations
+                      - deleteHighWatermark
+                      - durableRoutingFence
+                      - operationLookup
+                      - exactGet
+                      - stablePagination
+                      - exclusiveOwnership
+                      - keywordSearch
+                      - auditVersionVisibility
+                      - semanticSearch
+                      - hybridSearch
+                      type: string
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: set
+                  expiresAt:
+                    description: ExpiresAt is the adapter-declared capability expiry.
+                    format: date-time
+                    type: string
+                  limits:
+                    description: MemoryBackendCapabilityLimits contains bounded provider-advertised
+                      limits.
+                    properties:
+                      maxContentBytes:
+                        format: int64
+                        maximum: 262144
+                        minimum: 1
+                        type: integer
+                      maxMetadataEntries:
+                        format: int32
+                        maximum: 32
+                        minimum: 1
+                        type: integer
+                      maxMetadataKeyBytes:
+                        format: int32
+                        maximum: 64
+                        minimum: 1
+                        type: integer
+                      maxMetadataValueBytes:
+                        format: int32
+                        maximum: 1024
+                        minimum: 1
+                        type: integer
+                      maxPageSize:
+                        format: int32
+                        maximum: 8
+                        minimum: 1
+                        type: integer
+                      maxQueryBytes:
+                        format: int32
+                        maximum: 1024
+                        minimum: 1
+                        type: integer
+                      maxRequestBytes:
+                        format: int64
+                        maximum: 2097152
+                        minimum: 1
+                        type: integer
+                      maxResponseBytes:
+                        format: int64
+                        maximum: 4194304
+                        minimum: 1
+                        type: integer
+                      maxSnapshotRecords:
+                        format: int32
+                        maximum: 1024
+                        minimum: 1
+                        type: integer
+                      maxTagBytes:
+                        format: int32
+                        maximum: 128
+                        minimum: 1
+                        type: integer
+                      maxTags:
+                        format: int32
+                        maximum: 64
+                        minimum: 1
+                        type: integer
+                      snapshotTtlSeconds:
+                        format: int32
+                        maximum: 86400
+                        minimum: 1
+                        type: integer
+                    required:
+                    - maxContentBytes
+                    - maxMetadataEntries
+                    - maxMetadataKeyBytes
+                    - maxMetadataValueBytes
+                    - maxPageSize
+                    - maxQueryBytes
+                    - maxRequestBytes
+                    - maxResponseBytes
+                    - maxSnapshotRecords
+                    - maxTagBytes
+                    - maxTags
+                    - snapshotTtlSeconds
+                    type: object
+                  native:
+                    description: Native is the closed capability set advertised by
+                      the adapter.
+                    items:
+                      description: MemoryBackendCapability is a closed capability
+                        advertised by the Orka OMS profile.
+                      enum:
+                      - durableIdempotency
+                      - idempotencyDigestConflicts
+                      - createIfAbsent
+                      - conditionalMutation
+                      - monotonicGenerations
+                      - deleteHighWatermark
+                      - durableRoutingFence
+                      - operationLookup
+                      - exactGet
+                      - stablePagination
+                      - exclusiveOwnership
+                      - keywordSearch
+                      - auditVersionVisibility
+                      - semanticSearch
+                      - hybridSearch
+                      type: string
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: set
+                  revision:
+                    description: Revision is the adapter's stable capability-set revision.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                required:
+                - adapterName
+                - adapterVersion
+                - effective
+                - expiresAt
+                - limits
+                - native
+                - revision
+                type: object
+              observedGeneration:
+                format: int64
+                type: integer
+              ownershipClaimIdentity:
+                maxLength: 256
+                type: string
+              protected:
+                description: Protected reports whether the deletion-protection finalizer
+                  is persisted.
+                type: boolean
+              ready:
+                description: |-
+                  Ready reports whether the requested lifecycle is safely usable. Staged readiness
+                  means validation succeeded while legacy SQLite remains authoritative.
+                type: boolean
+              reason:
+                description: Reason is a stable, sanitized controller reason code.
+                maxLength: 64
+                pattern: ^[A-Za-z][A-Za-z0-9]*$
+                type: string
+              resolvedAddressDigest:
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              resolvedRefs:
+                description: ResolvedRefs reports whether the namespace and bound
+                  Secret were freshly resolved.
+                type: boolean
+              routingEpoch:
+                format: int64
+                minimum: 0
+                type: integer
+              secretResourceVersion:
+                maxLength: 128
+                type: string
+              secretUID:
+                maxLength: 128
+                type: string
+              serverCertificateDigest:
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              storeUUID:
+                maxLength: 128
+                type: string
+              validatedSpecDigest:
+                description: ValidatedSpecDigest is the canonical digest of the validated
+                  spec.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              validationExpiresAt:
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: MemoryBackend metadata.name must be default
+          rule: self.metadata.name == 'default'
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
   name: outboundaccesspolicies.core.orka.ai
 spec:
   group: core.orka.ai
@@ -10366,6 +10877,15 @@ rules:
   - update
   - watch
 - apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingadmissionpolicies
+  - validatingadmissionpolicybindings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - agents.x-k8s.io
   resources:
   - sandboxes
@@ -10380,6 +10900,14 @@ rules:
   - gatewayclasses.gateway.orka.ai
   - gateways.gateway.orka.ai
   - tasks.core.orka.ai
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+- apiGroups:
+  - apiextensions.k8s.io
+  resourceNames:
+  - memorybackends.core.orka.ai
   resources:
   - customresourcedefinitions
   verbs:
@@ -10438,6 +10966,12 @@ rules:
   - update
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - jobs/task-provenance
+  verbs:
+  - admit
+- apiGroups:
   - coordination.k8s.io
   resources:
   - leases
@@ -10454,6 +10988,7 @@ rules:
   resources:
   - agentruntimes
   - agents
+  - memorybackends
   - providers
   - repositorymonitors
   - repositoryscans
@@ -10474,6 +11009,7 @@ rules:
   resources:
   - agentruntimes/finalizers
   - agents/finalizers
+  - memorybackends/finalizers
   - outboundaccesspolicies/finalizers
   - providers/finalizers
   - repositorymonitors/finalizers
@@ -10489,6 +11025,7 @@ rules:
   resources:
   - agentruntimes/status
   - agents/status
+  - memorybackends/status
   - outboundaccesspolicies/status
   - providers/status
   - repositorymonitors/status
@@ -10717,6 +11254,77 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-memorybackend-admin-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends
+  verbs:
+  - '*'
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-memorybackend-editor-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-memorybackend-viewer-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
   name: orka-metrics-auth-role
 rules:
 - apiGroups:
@@ -10789,6 +11397,21 @@ rules:
   - tasks/status
   verbs:
   - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-task-pod-provenance-admitter
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods/task-provenance
+  verbs:
+  - admit
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -11396,6 +12019,25 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-task-pod-provenance-admitter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-task-pod-provenance-admitter
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: system:kube-controller-manager
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: system:serviceaccount:kube-system:job-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
   name: orka-vendor-worker-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -11489,6 +12131,248 @@ spec:
   resources:
     requests:
       storage: 1Gi
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  labels:
+    orka.ai/task-provenance-policy: job
+  name: orka-task-job-provenance
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - batch
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - jobs
+  validations:
+  - expression: |-
+      (variables.newJobTaskLabel == variables.oldJobTaskLabel &&
+
+       variables.newPodTaskLabel == variables.oldPodTaskLabel &&
+       variables.newJobTaskUID == variables.oldJobTaskUID &&
+       variables.newPodTaskUID == variables.oldPodTaskUID &&
+       variables.newJobCanonicalTaskLabel == variables.oldJobCanonicalTaskLabel &&
+       variables.newPodCanonicalTaskLabel == variables.oldPodCanonicalTaskLabel &&
+       variables.newJobTaskName == variables.oldJobTaskName &&
+       variables.newPodTaskName == variables.oldPodTaskName &&
+       variables.newTaskOwners == variables.oldTaskOwners) ||
+      (variables.newJobTaskLabel != '' &&
+
+       variables.newPodTaskLabel == variables.newJobTaskLabel &&
+       size(variables.newTaskOwners) == 1 &&
+       has(variables.newTaskOwners[0].controller) && variables.newTaskOwners[0].controller &&
+       size(variables.newTaskOwners[0].name) > 0 &&
+       size(variables.newTaskOwners[0].uid) > 0 &&
+       ((variables.newJobTaskUID == '' && variables.newPodTaskUID == '' &&
+         variables.newJobCanonicalTaskLabel == '' && variables.newPodCanonicalTaskLabel == '' &&
+         variables.newJobTaskName == '' && variables.newPodTaskName == '') ||
+        (variables.newJobTaskLabel == variables.newJobCanonicalTaskLabel &&
+         variables.newPodTaskLabel == variables.newPodCanonicalTaskLabel &&
+         variables.newJobCanonicalTaskLabel == variables.newPodCanonicalTaskLabel &&
+         variables.newJobTaskUID != '' && variables.newJobTaskUID == variables.newPodTaskUID &&
+         variables.newJobTaskUID == variables.newTaskOwners[0].uid &&
+         variables.newJobTaskName == variables.newTaskOwners[0].name &&
+         variables.newPodTaskName == variables.newTaskOwners[0].name)) &&
+       authorizer.group('batch')
+         .resource('jobs')
+         .subresource('task-provenance')
+         .namespace(request.namespace)
+         .name(object.metadata.name)
+         .check('admit').allowed())
+    message: Orka task Job provenance may only be established or changed by the Orka
+      task controller for the exact owning Task
+    reason: Forbidden
+  variables:
+  - expression: 'has(object.metadata.labels) && ''orka.ai/task'' in object.metadata.labels
+      ? object.metadata.labels[''orka.ai/task''] : '''''
+    name: newJobTaskLabel
+  - expression: 'oldObject != null && has(oldObject.metadata.labels) && ''orka.ai/task''
+      in oldObject.metadata.labels ? oldObject.metadata.labels[''orka.ai/task''] :
+      '''''
+    name: oldJobTaskLabel
+  - expression: 'has(object.spec.template.metadata.labels) && ''orka.ai/task'' in
+      object.spec.template.metadata.labels ? object.spec.template.metadata.labels[''orka.ai/task'']
+      : '''''
+    name: newPodTaskLabel
+  - expression: 'oldObject != null && has(oldObject.spec.template.metadata.labels)
+      && ''orka.ai/task'' in oldObject.spec.template.metadata.labels ? oldObject.spec.template.metadata.labels[''orka.ai/task'']
+      : '''''
+    name: oldPodTaskLabel
+  - expression: 'has(object.metadata.labels) && ''orka.ai/task-uid'' in object.metadata.labels
+      ? object.metadata.labels[''orka.ai/task-uid''] : '''''
+    name: newJobTaskUID
+  - expression: 'oldObject != null && has(oldObject.metadata.labels) && ''orka.ai/task-uid''
+      in oldObject.metadata.labels ? oldObject.metadata.labels[''orka.ai/task-uid'']
+      : '''''
+    name: oldJobTaskUID
+  - expression: 'has(object.spec.template.metadata.labels) && ''orka.ai/task-uid''
+      in object.spec.template.metadata.labels ? object.spec.template.metadata.labels[''orka.ai/task-uid'']
+      : '''''
+    name: newPodTaskUID
+  - expression: 'oldObject != null && has(oldObject.spec.template.metadata.labels)
+      && ''orka.ai/task-uid'' in oldObject.spec.template.metadata.labels ? oldObject.spec.template.metadata.labels[''orka.ai/task-uid'']
+      : '''''
+    name: oldPodTaskUID
+  - expression: 'has(object.metadata.annotations) && ''orka.ai/task-label'' in object.metadata.annotations
+      ? object.metadata.annotations[''orka.ai/task-label''] : '''''
+    name: newJobCanonicalTaskLabel
+  - expression: 'oldObject != null && has(oldObject.metadata.annotations) && ''orka.ai/task-label''
+      in oldObject.metadata.annotations ? oldObject.metadata.annotations[''orka.ai/task-label'']
+      : '''''
+    name: oldJobCanonicalTaskLabel
+  - expression: 'has(object.spec.template.metadata.annotations) && ''orka.ai/task-label''
+      in object.spec.template.metadata.annotations ? object.spec.template.metadata.annotations[''orka.ai/task-label'']
+      : '''''
+    name: newPodCanonicalTaskLabel
+  - expression: 'oldObject != null && has(oldObject.spec.template.metadata.annotations)
+      && ''orka.ai/task-label'' in oldObject.spec.template.metadata.annotations ?
+      oldObject.spec.template.metadata.annotations[''orka.ai/task-label''] : '''''
+    name: oldPodCanonicalTaskLabel
+  - expression: 'has(object.metadata.annotations) && ''orka.ai/task-name'' in object.metadata.annotations
+      ? object.metadata.annotations[''orka.ai/task-name''] : '''''
+    name: newJobTaskName
+  - expression: 'oldObject != null && has(oldObject.metadata.annotations) && ''orka.ai/task-name''
+      in oldObject.metadata.annotations ? oldObject.metadata.annotations[''orka.ai/task-name'']
+      : '''''
+    name: oldJobTaskName
+  - expression: 'has(object.spec.template.metadata.annotations) && ''orka.ai/task-name''
+      in object.spec.template.metadata.annotations ? object.spec.template.metadata.annotations[''orka.ai/task-name'']
+      : '''''
+    name: newPodTaskName
+  - expression: 'oldObject != null && has(oldObject.spec.template.metadata.annotations)
+      && ''orka.ai/task-name'' in oldObject.spec.template.metadata.annotations ? oldObject.spec.template.metadata.annotations[''orka.ai/task-name'']
+      : '''''
+    name: oldPodTaskName
+  - expression: 'has(object.metadata.ownerReferences) ? object.metadata.ownerReferences.filter(o,
+      o.apiVersion == ''core.orka.ai/v1alpha1'' && o.kind == ''Task'') : []'
+    name: newTaskOwners
+  - expression: 'oldObject != null && has(oldObject.metadata.ownerReferences) ? oldObject.metadata.ownerReferences.filter(o,
+      o.apiVersion == ''core.orka.ai/v1alpha1'' && o.kind == ''Task'') : []'
+    name: oldTaskOwners
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  labels:
+    orka.ai/task-provenance-policy: pod
+  name: orka-task-pod-provenance
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - pods
+  validations:
+  - expression: |-
+      (variables.newTaskLabel == '' && variables.oldTaskLabel == '' &&
+
+       variables.newTaskUID == '' && variables.oldTaskUID == '' &&
+       variables.newCanonicalTaskLabel == '' && variables.oldCanonicalTaskLabel == '' &&
+       variables.newTaskName == '' && variables.oldTaskName == '') ||
+      (variables.newTaskLabel == variables.oldTaskLabel &&
+
+       variables.newTaskUID == variables.oldTaskUID &&
+       variables.newCanonicalTaskLabel == variables.oldCanonicalTaskLabel &&
+       variables.newTaskName == variables.oldTaskName &&
+       variables.newJobOwners == variables.oldJobOwners) ||
+      (variables.newTaskLabel != '' &&
+
+       size(variables.newJobOwners) == 1 &&
+       has(variables.newJobOwners[0].controller) && variables.newJobOwners[0].controller &&
+       size(variables.newJobOwners[0].name) > 0 &&
+       size(variables.newJobOwners[0].uid) > 0 &&
+       variables.newJobOwners[0].uid == variables.newJobControllerUID &&
+       variables.newJobOwners[0].name == variables.newJobName &&
+       ((variables.newTaskUID == '' && variables.newCanonicalTaskLabel == '' && variables.newTaskName == '') ||
+        (variables.newTaskLabel == variables.newCanonicalTaskLabel && variables.newTaskUID != '' && variables.newTaskName != '')) &&
+       authorizer.group('')
+         .resource('pods')
+         .subresource('task-provenance')
+         .namespace(request.namespace)
+         .name(object.metadata.name)
+         .check('admit').allowed())
+    message: Orka task Pod provenance may only be established or changed by the Kubernetes
+      Job controller
+    reason: Forbidden
+  variables:
+  - expression: 'has(object.metadata.labels) && ''orka.ai/task'' in object.metadata.labels
+      ? object.metadata.labels[''orka.ai/task''] : '''''
+    name: newTaskLabel
+  - expression: 'oldObject != null && has(oldObject.metadata.labels) && ''orka.ai/task''
+      in oldObject.metadata.labels ? oldObject.metadata.labels[''orka.ai/task''] :
+      '''''
+    name: oldTaskLabel
+  - expression: 'has(object.metadata.labels) && ''orka.ai/task-uid'' in object.metadata.labels
+      ? object.metadata.labels[''orka.ai/task-uid''] : '''''
+    name: newTaskUID
+  - expression: 'oldObject != null && has(oldObject.metadata.labels) && ''orka.ai/task-uid''
+      in oldObject.metadata.labels ? oldObject.metadata.labels[''orka.ai/task-uid'']
+      : '''''
+    name: oldTaskUID
+  - expression: 'has(object.metadata.labels) && ''batch.kubernetes.io/controller-uid''
+      in object.metadata.labels ? object.metadata.labels[''batch.kubernetes.io/controller-uid'']
+      : '''''
+    name: newJobControllerUID
+  - expression: 'has(object.metadata.labels) && ''batch.kubernetes.io/job-name'' in
+      object.metadata.labels ? object.metadata.labels[''batch.kubernetes.io/job-name'']
+      : '''''
+    name: newJobName
+  - expression: 'has(object.metadata.annotations) && ''orka.ai/task-label'' in object.metadata.annotations
+      ? object.metadata.annotations[''orka.ai/task-label''] : '''''
+    name: newCanonicalTaskLabel
+  - expression: 'oldObject != null && has(oldObject.metadata.annotations) && ''orka.ai/task-label''
+      in oldObject.metadata.annotations ? oldObject.metadata.annotations[''orka.ai/task-label'']
+      : '''''
+    name: oldCanonicalTaskLabel
+  - expression: 'has(object.metadata.annotations) && ''orka.ai/task-name'' in object.metadata.annotations
+      ? object.metadata.annotations[''orka.ai/task-name''] : '''''
+    name: newTaskName
+  - expression: 'oldObject != null && has(oldObject.metadata.annotations) && ''orka.ai/task-name''
+      in oldObject.metadata.annotations ? oldObject.metadata.annotations[''orka.ai/task-name'']
+      : '''''
+    name: oldTaskName
+  - expression: 'has(object.metadata.ownerReferences) ? object.metadata.ownerReferences.filter(o,
+      o.apiVersion == ''batch/v1'' && o.kind == ''Job'') : []'
+    name: newJobOwners
+  - expression: 'oldObject != null && has(oldObject.metadata.ownerReferences) ? oldObject.metadata.ownerReferences.filter(o,
+      o.apiVersion == ''batch/v1'' && o.kind == ''Job'') : []'
+    name: oldJobOwners
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  labels:
+    orka.ai/task-provenance-policy: job
+  name: orka-task-job-provenance
+spec:
+  policyName: orka-task-job-provenance
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  labels:
+    orka.ai/task-provenance-policy: pod
+  name: orka-task-pod-provenance
+spec:
+  policyName: orka-task-pod-provenance
+  validationActions:
+  - Deny
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -11634,6 +12518,8 @@ spec:
         - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
         - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
         - --gateway-enabled=true
+        - --memory-backend-enabled=false
+        - --memory-remote-activation-enabled=false
         - --gateway-pending-per-session=100
         - --gateway-max-records-per-gateway=1000
         - --gateway-max-rejected-records-per-gateway=250
@@ -11722,7 +12608,6 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
   name: orka-executionworkspace-core-admission.orka.ai
-  namespace: orka-system
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -11757,64 +12642,6 @@ spec:
         .check('admit').allowed()
     message: only the Orka core controller may establish or advance ExecutionWorkspace
       core admission
-    reason: Forbidden
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicy
-metadata:
-  name: orka-task-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  failurePolicy: Fail
-  matchConstraints:
-    resourceRules:
-    - apiGroups:
-      - core.orka.ai
-      apiVersions:
-      - v1alpha1
-      operations:
-      - CREATE
-      - UPDATE
-      resources:
-      - tasks
-  validations:
-  - expression: |-
-      !has(object.spec.execution) || !has(object.spec.execution.workspace) || !has(object.spec.execution.workspace.classRef) || authorizer.group('workspace.orka.ai')
-
-        .resource('executionworkspaceclasses')
-        .namespace(request.namespace)
-        .name(object.spec.execution.workspace.classRef.name)
-        .check('use').allowed()
-    message: caller is not authorized to use the selected ExecutionWorkspaceClass
-    reason: Forbidden
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicy
-metadata:
-  name: orka-tool-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  failurePolicy: Fail
-  matchConstraints:
-    resourceRules:
-    - apiGroups:
-      - core.orka.ai
-      apiVersions:
-      - v1alpha1
-      operations:
-      - CREATE
-      - UPDATE
-      resources:
-      - tools
-  validations:
-  - expression: |-
-      !has(object.spec.mcp) || !has(object.spec.mcp.workspace) || authorizer.group('workspace.orka.ai')
-
-        .resource('executionworkspaceclasses')
-        .namespace(request.namespace)
-        .name(object.spec.mcp.workspace.classRef.name)
-        .check('use').allowed()
-    message: caller is not authorized to use the selected ExecutionWorkspaceClass
     reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -11871,32 +12698,96 @@ spec:
     name: containerWorkerServiceAccount
 ---
 apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-memorybackend-finalizer-protection
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - UPDATE
+      resources:
+      - memorybackends
+  validations:
+  - expression: |-
+      !has(oldObject.metadata.finalizers) || !oldObject.metadata.finalizers.exists(f, f == 'memory.orka.ai/backend-protection') || (has(object.metadata.finalizers) && object.metadata.finalizers.exists(f, f == 'memory.orka.ai/backend-protection')) || authorizer.group('core.orka.ai')
+
+        .resource('memorybackends')
+        .subresource('finalizers')
+        .namespace(request.namespace)
+        .name(object.metadata.name)
+        .check('update').allowed()
+    message: the MemoryBackend protection finalizer may only be removed by the lifecycle
+      controller
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-task-workspace-class-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - tasks
+  validations:
+  - expression: |-
+      !has(object.spec.execution) || !has(object.spec.execution.workspace) || !has(object.spec.execution.workspace.classRef) || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.spec.execution.workspace.classRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected ExecutionWorkspaceClass
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-tool-workspace-class-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - tools
+  validations:
+  - expression: |-
+      !has(object.spec.mcp) || !has(object.spec.mcp.workspace) || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.spec.mcp.workspace.classRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected ExecutionWorkspaceClass
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
   name: orka-executionworkspace-core-admission.orka.ai
-  namespace: orka-system
 spec:
   policyName: orka-executionworkspace-core-admission.orka.ai
-  validationActions:
-  - Deny
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicyBinding
-metadata:
-  name: orka-task-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  policyName: orka-task-workspace-class-use.orka.ai
-  validationActions:
-  - Deny
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicyBinding
-metadata:
-  name: orka-tool-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  policyName: orka-tool-workspace-class-use.orka.ai
   validationActions:
   - Deny
 ---
@@ -11906,5 +12797,32 @@ metadata:
   name: orka-gateway-task-protection
 spec:
   policyName: orka-gateway-task-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-memorybackend-finalizer-protection
+spec:
+  policyName: orka-memorybackend-finalizer-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-task-workspace-class-use.orka.ai
+spec:
+  policyName: orka-task-workspace-class-use.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-tool-workspace-class-use.orka.ai
+spec:
+  policyName: orka-tool-workspace-class-use.orka.ai
   validationActions:
   - Deny

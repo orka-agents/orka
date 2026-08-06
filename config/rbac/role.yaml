@@ -67,6 +67,15 @@ rules:
   - update
   - watch
 - apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingadmissionpolicies
+  - validatingadmissionpolicybindings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - agents.x-k8s.io
   resources:
   - sandboxes
@@ -81,6 +90,14 @@ rules:
   - gatewayclasses.gateway.orka.ai
   - gateways.gateway.orka.ai
   - tasks.core.orka.ai
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+- apiGroups:
+  - apiextensions.k8s.io
+  resourceNames:
+  - memorybackends.core.orka.ai
   resources:
   - customresourcedefinitions
   verbs:
@@ -139,6 +156,12 @@ rules:
   - update
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - jobs/task-provenance
+  verbs:
+  - admit
+- apiGroups:
   - coordination.k8s.io
   resources:
   - leases
@@ -155,6 +178,7 @@ rules:
   resources:
   - agentruntimes
   - agents
+  - memorybackends
   - providers
   - repositorymonitors
   - repositoryscans
@@ -175,6 +199,7 @@ rules:
   resources:
   - agentruntimes/finalizers
   - agents/finalizers
+  - memorybackends/finalizers
   - outboundaccesspolicies/finalizers
   - providers/finalizers
   - repositorymonitors/finalizers
@@ -190,6 +215,7 @@ rules:
   resources:
   - agentruntimes/status
   - agents/status
+  - memorybackends/status
   - outboundaccesspolicies/status
   - providers/status
   - repositorymonitors/status

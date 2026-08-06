@@ -1,0 +1,22 @@
+# This role is not used by Orka itself. It grants administrators full access
+# to MemoryBackend resources while leaving controller-owned status read-only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: memorybackend-admin-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends
+  verbs:
+  - '*'
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memorybackends/status
+  verbs:
+  - get

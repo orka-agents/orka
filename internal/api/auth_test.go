@@ -25,7 +25,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-const testNamespace = "test-ns"
+const (
+	testNamespace           = "test-ns"
+	testServiceAccountGroup = "system:serviceaccounts"
+	testWorkerPodName       = "worker-pod"
+)
 
 func setupTestApp(c client.Client) *fiber.App {
 	app := fiber.New()
@@ -1190,5 +1194,201 @@ func TestParseServiceAccountNamespace(t *testing.T) {
 				t.Errorf("parseServiceAccountNamespace(%q) = %q, want %q", tt.username, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewAuthMiddlewarePreservesWorkloadIdentityWithSecondaryTxnToken(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+	provider := newTestOIDCProvider(t)
+	contextConfig := testContextTokenConfig(t, provider, "")
+	txnToken := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeMemoryRead + " " + ContextTokenScopeMemorySearchRemote,
+		"tctx":  map[string]any{"namespace": "default", "taskName": "task-a"},
+	})
+	const serviceAccountToken = "dual-auth-service-account-token"
+	hash := getTokenHash(serviceAccountToken)
+	t.Cleanup(func() { tokenCache.Delete(hash) })
+
+	scheme := runtime.NewScheme()
+	if err := authenticationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	createCalls := 0
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
+			review, ok := obj.(*authenticationv1.TokenReview)
+			if !ok {
+				return nil
+			}
+			createCalls++
+			if review.Spec.Token != serviceAccountToken {
+				t.Fatalf("TokenReview token = %q, want service account token", review.Spec.Token)
+			}
+			review.Status.Authenticated = true
+			review.Status.User = authenticationv1.UserInfo{
+				Username: "system:serviceaccount:default:worker",
+				UID:      "worker-uid",
+				Groups:   []string{testServiceAccountGroup},
+				Extra: map[string]authenticationv1.ExtraValue{
+					"authentication.kubernetes.io/pod-name": {testWorkerPodName},
+				},
+			}
+			return nil
+		},
+	}).Build()
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{ContextTokens: contextConfig}))
+	app.Get("/dual", func(c fiber.Ctx) error {
+		user := GetUserInfo(c)
+		if user == nil || user.AuthType != AuthTypeTokenReview || user.Namespace != testDefaultNamespace || user.ContextToken == nil ||
+			!hasAnyScope(user.ContextToken.Scopes, []string{ContextTokenScopeMemorySearchRemote}) {
+			return fiber.NewError(fiber.StatusInternalServerError, "dual identity was not preserved")
+		}
+
+		// Mutating request-local authorization state must not mutate the TokenReview cache.
+		user.Groups[0] = "mutated-group"
+		user.Extra["authentication.kubernetes.io/pod-name"][0] = "mutated-pod"
+		user.ContextToken.Scopes[0] = "mutated-scope"
+		user.ContextToken.TransactionContext["namespace"] = "mutated-namespace"
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+	app.Get("/service-account", func(c fiber.Ctx) error {
+		user := GetUserInfo(c)
+		if user == nil || user.AuthType != AuthTypeTokenReview || user.ContextToken != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, "service-account request inherited transaction authorization")
+		}
+		if len(user.Groups) != 1 || user.Groups[0] != testServiceAccountGroup {
+			return fiber.NewError(fiber.StatusInternalServerError, "service-account groups were mutated through the cache")
+		}
+		podNames := user.Extra["authentication.kubernetes.io/pod-name"]
+		if len(podNames) != 1 || podNames[0] != testWorkerPodName {
+			return fiber.NewError(fiber.StatusInternalServerError, "service-account extras were mutated through the cache")
+		}
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+
+	dualReq := httptest.NewRequest(http.MethodGet, "/dual", nil)
+	dualReq.Header.Set(AuthHeader, BearerPrefix+serviceAccountToken)
+	dualReq.Header.Set(TransactionTokenHeaderName, txnToken)
+	dualResp, err := app.Test(dualReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dualResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("dual-auth status = %d, want %d", dualResp.StatusCode, http.StatusNoContent)
+	}
+
+	serviceAccountReq := httptest.NewRequest(http.MethodGet, "/service-account", nil)
+	serviceAccountReq.Header.Set(AuthHeader, BearerPrefix+serviceAccountToken)
+	serviceAccountResp, err := app.Test(serviceAccountReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if serviceAccountResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("service-account-only status = %d, want %d", serviceAccountResp.StatusCode, http.StatusNoContent)
+	}
+	if createCalls != 1 {
+		t.Fatalf("TokenReview Create calls = %d, want 1", createCalls)
+	}
+}
+
+func TestValidateTokenCacheReturnsIsolatedCopiesConcurrently(t *testing.T) {
+	const token = "concurrent-cache-isolation-token"
+	hash := getTokenHash(token)
+	cached := &UserInfo{
+		Username: "system:serviceaccount:default:worker",
+		Groups:   []string{testServiceAccountGroup},
+		Extra: map[string]authenticationv1.ExtraValue{
+			"authentication.kubernetes.io/pod-name": {testWorkerPodName},
+		},
+		AuthType: AuthTypeTokenReview,
+	}
+	tokenCache.Store(hash, &tokenCacheEntry{userInfo: cached, expiry: time.Now().Add(time.Minute)})
+	t.Cleanup(func() { tokenCache.Delete(hash) })
+
+	type result struct {
+		user *UserInfo
+		err  error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			user, err := validateToken(context.Background(), nil, token)
+			results <- result{user: user, err: err}
+		}()
+	}
+	close(start)
+	first := <-results
+	second := <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("validateToken errors = (%v, %v)", first.err, second.err)
+	}
+	if first.user == second.user || first.user == cached || second.user == cached {
+		t.Fatal("validateToken reused a cached UserInfo pointer")
+	}
+
+	first.user.ContextToken = &ContextToken{Scopes: []string{ContextTokenScopeMemorySearchRemote}}
+	first.user.Groups[0] = "mutated-group"
+	first.user.Extra["authentication.kubernetes.io/pod-name"][0] = "mutated-pod"
+
+	if second.user.ContextToken != nil || cached.ContextToken != nil {
+		t.Fatal("request-specific ContextToken leaked to another cache consumer")
+	}
+	if second.user.Groups[0] != testServiceAccountGroup || cached.Groups[0] != testServiceAccountGroup {
+		t.Fatal("request-local group mutation leaked through the cache")
+	}
+	if second.user.Extra["authentication.kubernetes.io/pod-name"][0] != testWorkerPodName ||
+		cached.Extra["authentication.kubernetes.io/pod-name"][0] != testWorkerPodName {
+		t.Fatal("request-local extra mutation leaked through the cache")
+	}
+}
+
+func TestCloneUserInfoDeepCopiesContextTokenState(t *testing.T) {
+	original := &UserInfo{
+		Groups: []string{"group-a"},
+		Roles:  []string{"role-a"},
+		Extra: map[string]authenticationv1.ExtraValue{
+			"key": {"value"},
+		},
+		ContextToken: &ContextToken{
+			Audience: []string{"audience-a"},
+			Scopes:   []string{"scope-a"},
+			TransactionContext: map[string]any{
+				"nested": map[string]any{"items": []any{"value-a"}},
+			},
+			RequesterContext: map[string]any{"roles": []string{"requester-role"}},
+			Claims:           map[string]any{"claim": map[string]any{"value": "claim-a"}},
+		},
+	}
+
+	cloned := cloneUserInfo(original)
+	if cloned == original || cloned.ContextToken == original.ContextToken {
+		t.Fatal("cloneUserInfo reused top-level pointers")
+	}
+	cloned.Groups[0] = "group-b"
+	cloned.Roles[0] = "role-b"
+	cloned.Extra["key"][0] = "changed"
+	cloned.ContextToken.Audience[0] = "audience-b"
+	cloned.ContextToken.Scopes[0] = "scope-b"
+	cloned.ContextToken.TransactionContext["nested"].(map[string]any)["items"].([]any)[0] = "value-b"
+	cloned.ContextToken.RequesterContext["roles"].([]string)[0] = "changed-role"
+	cloned.ContextToken.Claims["claim"].(map[string]any)["value"] = "claim-b"
+
+	if original.Groups[0] != "group-a" || original.Roles[0] != "role-a" || original.Extra["key"][0] != "value" {
+		t.Fatal("clone mutation changed original UserInfo slices or extras")
+	}
+	if original.ContextToken.Audience[0] != "audience-a" || original.ContextToken.Scopes[0] != "scope-a" {
+		t.Fatal("clone mutation changed original ContextToken slices")
+	}
+	if original.ContextToken.TransactionContext["nested"].(map[string]any)["items"].([]any)[0] != "value-a" ||
+		original.ContextToken.RequesterContext["roles"].([]string)[0] != "requester-role" ||
+		original.ContextToken.Claims["claim"].(map[string]any)["value"] != "claim-a" {
+		t.Fatal("clone mutation changed original nested ContextToken data")
 	}
 }

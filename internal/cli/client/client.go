@@ -207,14 +207,47 @@ func (c *Client) newRequest(ctx context.Context, method, reqURL string, body io.
 	return req, nil
 }
 
-func (c *Client) doRaw(ctx context.Context, method, reqURL string, body []byte) ([]byte, http.Header, error) {
+// APIError is returned for non-successful API responses while preserving the
+// status, safe response headers, and response body for structured callers.
+type APIError struct {
+	StatusCode int
+	Header     http.Header
+	Body       []byte
+}
+
+func (e *APIError) Error() string {
+	if e == nil {
+		return "API error"
+	}
+	return fmt.Sprintf("API error (HTTP %d): %s", e.StatusCode, strings.TrimSpace(string(e.Body)))
+}
+
+// JSONResponse preserves transport metadata needed by asynchronous APIs.
+type JSONResponse struct {
+	StatusCode int
+	Header     http.Header
+	Body       any
+	RawBody    []byte
+}
+
+func (c *Client) doRawWithHeaders(
+	ctx context.Context,
+	method, reqURL string,
+	body []byte,
+	headers http.Header,
+) ([]byte, int, http.Header, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
 	req, err := c.newRequest(ctx, method, reqURL, reader)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, nil, err
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
 	}
 	if body != nil && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -222,19 +255,28 @@ func (c *Client) doRaw(ctx context.Context, method, reqURL string, body []byte) 
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("request failed: %w", err)
+		return nil, 0, nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, resp.StatusCode, resp.Header.Clone(), fmt.Errorf("failed to read response: %w", err)
 	}
-
+	responseHeaders := resp.Header.Clone()
 	if resp.StatusCode >= 400 {
-		return nil, resp.Header, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+		return nil, resp.StatusCode, responseHeaders, &APIError{
+			StatusCode: resp.StatusCode,
+			Header:     responseHeaders,
+			Body:       append([]byte(nil), respBody...),
+		}
 	}
-	return respBody, resp.Header, nil
+	return respBody, resp.StatusCode, responseHeaders, nil
+}
+
+func (c *Client) doRaw(ctx context.Context, method, reqURL string, body []byte) ([]byte, http.Header, error) {
+	responseBody, _, headers, err := c.doRawWithHeaders(ctx, method, reqURL, body, nil)
+	return responseBody, headers, err
 }
 
 func (c *Client) resourceURL(path string, query map[string]string) (string, error) {
@@ -247,7 +289,7 @@ func (c *Client) resourceURL(path string, query map[string]string) (string, erro
 	}
 	q := u.Query()
 	if c.Namespace != "" {
-		if _, ok := query["namespace"]; !ok {
+		if _, ok := query["namespace"]; !ok && q.Get("namespace") == "" {
 			q.Set("namespace", c.Namespace)
 		}
 	}
@@ -260,24 +302,46 @@ func (c *Client) resourceURL(path string, query map[string]string) (string, erro
 	return u.String(), nil
 }
 
-// DoJSON sends an HTTP request with an optional JSON body and decodes the JSON response into a generic value.
-func (c *Client) DoJSON(ctx context.Context, method, path string, query map[string]string, body []byte) (any, error) {
+// DoJSONWithHeaders sends an HTTP request with optional JSON and request
+// headers, and preserves the response status and headers. This is used by APIs
+// whose successful outcome may be immediate or 202 Accepted.
+func (c *Client) DoJSONWithHeaders(
+	ctx context.Context,
+	method, path string,
+	query map[string]string,
+	body []byte,
+	headers http.Header,
+) (*JSONResponse, error) {
 	reqURL, err := c.resourceURL(path, query)
 	if err != nil {
 		return nil, err
 	}
-	respBody, _, err := c.doRaw(ctx, method, reqURL, body)
+	respBody, statusCode, responseHeaders, err := c.doRawWithHeaders(ctx, method, reqURL, body, headers)
 	if err != nil {
 		return nil, err
 	}
-	if len(strings.TrimSpace(string(respBody))) == 0 {
-		return map[string]any{}, nil
+	response := &JSONResponse{
+		StatusCode: statusCode,
+		Header:     responseHeaders,
+		RawBody:    append([]byte(nil), respBody...),
 	}
-	var out any
-	if err := json.Unmarshal(respBody, &out); err != nil {
+	if len(strings.TrimSpace(string(respBody))) == 0 {
+		response.Body = map[string]any{}
+		return response, nil
+	}
+	if err := json.Unmarshal(respBody, &response.Body); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
-	return out, nil
+	return response, nil
+}
+
+// DoJSON sends an HTTP request with an optional JSON body and decodes the JSON response into a generic value.
+func (c *Client) DoJSON(ctx context.Context, method, path string, query map[string]string, body []byte) (any, error) {
+	response, err := c.DoJSONWithHeaders(ctx, method, path, query, body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return response.Body, nil
 }
 
 // Stream opens a streaming GET request for Server-Sent Events. The caller must close the returned body.

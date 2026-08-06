@@ -195,32 +195,33 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	}
 	tracing.StampTaskTraceContext(ctx, task)
 
-	childTokenExchangeEnabled, err := shouldPrepareChildTransactionToken(parentTask)
+	childTokenExchangeEnabled, err := shouldPrepareChildTransactionToken(ctx, parentTask)
 	if err != nil {
 		return "", err
 	}
+	var childTokenPreparation *childTransactionTokenPreparation
 	if childTokenExchangeEnabled {
 		if task.Spec.Schedule != "" {
 			return ChatToolErrorResult("unsupported_schedule", "scheduled child container tasks cannot inherit delegated transaction tokens", "Create an immediate child container task, or create scheduled work from a task that does not need delegated child tokens.")
 		}
 		markChildTransactionTokenPending(task)
-		if err := prepareChildTransactionToken(ctx, t.k8sClient, parentTask, task, "createContainerTask", ""); err != nil {
+		childTokenPreparation, err = prepareChildTransactionToken(ctx, t.k8sClient, parentTask, task)
+		if err != nil {
 			return "", err
+		}
+		if childTokenPreparation == nil {
+			return "", fmt.Errorf("child transaction token exchange became unavailable during preparation")
 		}
 	}
 	if err := t.k8sClient.Create(ctx, task); err != nil {
 		if childTokenExchangeEnabled {
-			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, task)
+			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, task, childTokenPreparation)
 		}
 		return classifyChatK8sErr(err)
 	}
 	if childTokenExchangeEnabled {
-		if err := adoptChildTransactionTokenSecret(ctx, t.k8sClient, task); err != nil {
-			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, task)
-			return classifyChatK8sErr(err)
-		}
-		if err := patchPreparedChildTransactionToken(ctx, t.k8sClient, task); err != nil {
-			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, task)
+		if err := completeChildTransactionToken(ctx, t.k8sClient, task, childTokenPreparation); err != nil {
+			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, task, childTokenPreparation)
 			return classifyChatK8sErr(err)
 		}
 	}

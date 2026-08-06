@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	memoryruntime "github.com/orka-agents/orka/internal/memory"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
@@ -41,27 +42,31 @@ const (
 
 // InternalHandlers contains handlers for internal worker endpoints.
 type InternalHandlers struct {
-	k8sClient           client.Client
-	apiReader           client.Reader
-	resultStore         store.ResultStore
-	sessionStore        store.SessionStore
-	planStore           store.PlanStore
-	messageStore        store.MessageStore
-	artifactStore       store.ArtifactStore
-	executionEventStore store.ExecutionEventStore
-	gatewayEventStore   store.GatewayEventStore
-	memoryStore         store.MemoryStore
-	memoryProposalStore store.MemoryProposalStore
+	k8sClient                 client.Client
+	apiReader                 client.Reader
+	resultStore               store.ResultStore
+	sessionStore              store.SessionStore
+	planStore                 store.PlanStore
+	messageStore              store.MessageStore
+	artifactStore             store.ArtifactStore
+	executionEventStore       store.ExecutionEventStore
+	gatewayEventStore         store.GatewayEventStore
+	memoryStore               store.MemoryStore
+	memoryProposalStore       store.MemoryProposalStore
+	memoryService             *memoryruntime.Service
+	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
 // InternalHandlersConfig holds optional configuration for internal handlers.
 type InternalHandlersConfig struct {
-	Client              client.Client
-	APIReader           client.Reader
-	MemoryStore         store.MemoryStore
-	MemoryProposalStore store.MemoryProposalStore
-	ExecutionEventStore store.ExecutionEventStore
-	GatewayEventStore   store.GatewayEventStore
+	Client                    client.Client
+	APIReader                 client.Reader
+	MemoryStore               store.MemoryStore
+	MemoryProposalStore       store.MemoryProposalStore
+	MemoryService             *memoryruntime.Service
+	ContextTokenAuthorization ContextTokenAuthorizationConfig
+	ExecutionEventStore       store.ExecutionEventStore
+	GatewayEventStore         store.GatewayEventStore
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
@@ -78,8 +83,13 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		h.apiReader = configs[0].APIReader
 		h.memoryStore = configs[0].MemoryStore
 		h.memoryProposalStore = configs[0].MemoryProposalStore
+		h.memoryService = configs[0].MemoryService
+		h.contextTokenAuthorization = configs[0].ContextTokenAuthorization
 		h.executionEventStore = configs[0].ExecutionEventStore
 		h.gatewayEventStore = configs[0].GatewayEventStore
+	}
+	if h.memoryService == nil && (h.memoryStore != nil || h.memoryProposalStore != nil) {
+		h.memoryService = &memoryruntime.Service{Legacy: h.memoryStore, Proposals: h.memoryProposalStore}
 	}
 	return h
 }

@@ -22,6 +22,7 @@ const (
 
 	// Labels
 	LabelTask              = "orka.ai/task"
+	LabelTaskUID           = "orka.ai/task-uid"
 	LabelTaskType          = "orka.ai/task-type"
 	LabelParentTask        = "orka.ai/parent-task"
 	LabelScheduledRun      = "orka.ai/scheduled-run"
@@ -53,6 +54,8 @@ const (
 
 	// Annotations
 	AnnotationCoordinationDepth             = "orka.ai/coordination-depth"
+	AnnotationTaskLabel                     = "orka.ai/task-label"
+	AnnotationTaskName                      = "orka.ai/task-name"
 	AnnotationTransactionID                 = "orka.ai/transaction-id"
 	AnnotationContextTokenProfile           = "orka.ai/context-token-profile"
 	AnnotationTransactionIssuer             = "orka.ai/transaction-issuer"

@@ -21,6 +21,8 @@ import (
 var safeTransactionContextKeys = []string{
 	"purpose",
 	"namespace",
+	"taskName",
+	"taskUID",
 	"taskType",
 	"agent",
 	"allowedAgents",
@@ -64,7 +66,8 @@ var authorizationTransactionContextKeys = map[string]struct{}{
 }
 
 func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {
-	if task == nil || ui == nil || (ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken) {
+	if task == nil || ui == nil ||
+		(ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken && ui.ContextToken == nil) {
 		return
 	}
 
@@ -77,7 +80,7 @@ func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {
 		Roles:    append([]string{}, ui.Roles...),
 	}
 
-	if ui.AuthType == AuthTypeContextToken {
+	if ui.ContextToken != nil {
 		task.Spec.Transaction = taskTransactionFromContextToken(ui.ContextToken)
 		taskmeta.ApplyTransactionMetadata(&task.ObjectMeta, task.Spec.Transaction)
 	}

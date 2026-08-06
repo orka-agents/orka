@@ -23,6 +23,7 @@ const (
 	runtimeSessionTestAgent     = "runtime-agent"
 	runtimeSessionNamespaceA    = "runtime-ns-a"
 	runtimeSessionNamespaceB    = "runtime-ns-b"
+	runtimeSessionNameB         = "session-b"
 )
 
 func TestRuntimeSessionStoreCreateGetRoundTrip(t *testing.T) {
@@ -93,7 +94,7 @@ func TestRuntimeSessionStoreNamespaceOwnership(t *testing.T) {
 	nsA.Owner.SessionName = runtimeSessionTestName
 	nsB := runtimeSessionFixture("runtime-shared")
 	nsB.Owner.Namespace = runtimeSessionNamespaceB
-	nsB.Owner.SessionName = "session-b"
+	nsB.Owner.SessionName = runtimeSessionNameB
 
 	if err := s.CreateRuntimeSession(ctx, &nsA); err != nil {
 		t.Fatalf("CreateRuntimeSession ns-a: %v", err)
@@ -113,7 +114,7 @@ func TestRuntimeSessionStoreNamespaceOwnership(t *testing.T) {
 	if gotA.Owner.Namespace != runtimeSessionNamespaceA || gotA.Owner.SessionName != runtimeSessionTestName {
 		t.Fatalf("ns-a row = %#v", gotA)
 	}
-	if gotB.Owner.Namespace != runtimeSessionNamespaceB || gotB.Owner.SessionName != "session-b" {
+	if gotB.Owner.Namespace != runtimeSessionNamespaceB || gotB.Owner.SessionName != runtimeSessionNameB {
 		t.Fatalf("ns-b row = %#v", gotB)
 	}
 	if _, err := s.GetRuntimeSession(ctx, "ns-c", "runtime-shared"); !errors.Is(err, store.ErrNotFound) {

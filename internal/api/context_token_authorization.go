@@ -67,6 +67,10 @@ const (
 	ContextTokenScopeMemoryRead = "orka:memory:read"
 	// ContextTokenScopeMemoryWrite authorizes context-token callers to mutate memory resources.
 	ContextTokenScopeMemoryWrite = "orka:memory:write"
+	// ContextTokenScopeMemoryOperate authorizes administrative memory lifecycle and operation actions.
+	ContextTokenScopeMemoryOperate = "orka:memory:operate"
+	// ContextTokenScopeMemorySearchRemote authorizes outbound remote-memory search query egress.
+	ContextTokenScopeMemorySearchRemote = "orka:memory:search:remote"
 	// ContextTokenScopeSessionsRead authorizes context-token callers to read sessions.
 	ContextTokenScopeSessionsRead = "orka:sessions:read"
 	// ContextTokenScopeSessionsWrite authorizes context-token callers to delete or mutate sessions.
@@ -105,6 +109,8 @@ type ContextTokenAuthorizationConfig struct {
 	AgentWriteScopes              []string
 	MemoryReadScopes              []string
 	MemoryWriteScopes             []string
+	MemoryOperateScopes           []string
+	MemorySearchRemoteScopes      []string
 	SessionReadScopes             []string
 	SessionWriteScopes            []string
 	SecurityReadScopes            []string
@@ -137,6 +143,8 @@ type ContextTokenAuthorizationConfigOptions struct {
 	AgentWriteScopes           string
 	MemoryReadScopes           string
 	MemoryWriteScopes          string
+	MemoryOperateScopes        string
+	MemorySearchRemoteScopes   string
 	SessionReadScopes          string
 	SessionWriteScopes         string
 	SecurityReadScopes         string
@@ -177,6 +185,8 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	agentWrite := defaultScopes(opts.AgentWriteScopes, ContextTokenScopeAgentsWrite)
 	memoryRead := defaultScopes(opts.MemoryReadScopes, ContextTokenScopeMemoryRead)
 	memoryWrite := defaultScopes(opts.MemoryWriteScopes, ContextTokenScopeMemoryWrite)
+	memoryOperate := defaultScopes(opts.MemoryOperateScopes, ContextTokenScopeMemoryOperate)
+	memorySearchRemote := defaultScopes(opts.MemorySearchRemoteScopes, ContextTokenScopeMemorySearchRemote)
 	sessionRead := defaultScopes(opts.SessionReadScopes, ContextTokenScopeSessionsRead)
 	sessionWrite := defaultScopes(opts.SessionWriteScopes, ContextTokenScopeSessionsWrite)
 	securityRead := defaultScopes(opts.SecurityReadScopes, ContextTokenScopeSecurityRead)
@@ -205,6 +215,8 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 		AgentWriteScopes:              agentWrite,
 		MemoryReadScopes:              memoryRead,
 		MemoryWriteScopes:             memoryWrite,
+		MemoryOperateScopes:           memoryOperate,
+		MemorySearchRemoteScopes:      memorySearchRemote,
 		SessionReadScopes:             sessionRead,
 		SessionWriteScopes:            sessionWrite,
 		SecurityReadScopes:            securityRead,
@@ -283,8 +295,8 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 	if !h.contextTokenAuthorization.Enabled() {
 		return nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return nil
 	}
 
@@ -293,8 +305,8 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
 
-	failures := contextTokenTaskCreateFailures(ui.ContextToken, h.contextTokenAuthorization, authzCtx)
-	credentialFailures, err := contextTokenTaskToolCredentialFailures(c.Context(), h.client, ui.ContextToken, h.contextTokenAuthorization, authzCtx)
+	failures := contextTokenTaskCreateFailures(token, h.contextTokenAuthorization, authzCtx)
+	credentialFailures, err := contextTokenTaskToolCredentialFailures(c.Context(), h.client, token, h.contextTokenAuthorization, authzCtx)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -304,7 +316,7 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 		return nil
 	}
 
-	return h.handleContextTokenAuthorizationFailures(ui.ContextToken, "createTask", failures)
+	return h.handleContextTokenAuthorizationFailures(token, "createTask", failures)
 }
 
 func authorizeContextTokenTaskCreateObject(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
@@ -494,11 +506,11 @@ func (h *Handlers) authorizeContextTokenPolicyConfigMapName(c fiber.Ctx, action,
 	if configMapName == "" || !h.contextTokenAuthorization.Enabled() {
 		return nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return nil
 	}
-	return authorizeContextTokenConfigMapRead(ui.ContextToken, h.contextTokenAuthorization, action, namespace, configMapName)
+	return authorizeContextTokenConfigMapRead(token, h.contextTokenAuthorization, action, namespace, configMapName)
 }
 
 func authorizeContextTokenPolicyConfigMapForUser(ui *UserInfo, cfg ContextTokenAuthorizationConfig, action, namespace, configMapName string) error {
@@ -506,10 +518,11 @@ func authorizeContextTokenPolicyConfigMapForUser(ui *UserInfo, cfg ContextTokenA
 	if configMapName == "" || !cfg.Enabled() {
 		return nil
 	}
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(ui)
+	if token == nil {
 		return nil
 	}
-	return authorizeContextTokenConfigMapRead(ui.ContextToken, cfg, action, namespace, configMapName)
+	return authorizeContextTokenConfigMapRead(token, cfg, action, namespace, configMapName)
 }
 
 func authorizeContextTokenSecretRead(token *ContextToken, cfg ContextTokenAuthorizationConfig, action, namespace, secretName string) error {
@@ -539,11 +552,11 @@ func (h *Handlers) authorizeContextTokenGitCredentialSecretName(c fiber.Ctx, act
 	if secretName == "" || !h.contextTokenAuthorization.Enabled() {
 		return nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return nil
 	}
-	return authorizeContextTokenSecretRead(ui.ContextToken, h.contextTokenAuthorization, action, namespace, secretName)
+	return authorizeContextTokenSecretRead(token, h.contextTokenAuthorization, action, namespace, secretName)
 }
 
 func authorizeContextTokenGitCredentialSecretForUser(ui *UserInfo, cfg ContextTokenAuthorizationConfig, action, namespace, secretName string) error {
@@ -551,10 +564,11 @@ func authorizeContextTokenGitCredentialSecretForUser(ui *UserInfo, cfg ContextTo
 	if secretName == "" || !cfg.Enabled() {
 		return nil
 	}
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(ui)
+	if token == nil {
 		return nil
 	}
-	return authorizeContextTokenSecretRead(ui.ContextToken, cfg, action, namespace, secretName)
+	return authorizeContextTokenSecretRead(token, cfg, action, namespace, secretName)
 }
 
 func contextTokenAgentWriteFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace, agentName string) []string {
@@ -566,8 +580,12 @@ func contextTokenAgentWriteFailures(token *ContextToken, cfg ContextTokenAuthori
 	return failures
 }
 
+// contextTokenFromUserInfo returns the independently verified transaction token
+// attached to a caller, regardless of the caller's primary authentication type.
+// Composite callers retain their primary identity so both workload authorization
+// and transaction-token constraints are enforced.
 func contextTokenFromUserInfo(ui *UserInfo) *ContextToken {
-	if ui == nil || ui.AuthType != AuthTypeContextToken {
+	if ui == nil {
 		return nil
 	}
 	return ui.ContextToken
@@ -581,12 +599,12 @@ func (h *Handlers) authorizeContextTokenLoadedTaskWithIdentity(c fiber.Ctx, acti
 	if !h.contextTokenAuthorization.Enabled() {
 		return nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return nil
 	}
 
-	failures, err := h.contextTokenLoadedTaskContextFailures(c.Context(), ui.ContextToken, task, includeTaskIdentity)
+	failures, err := h.contextTokenLoadedTaskContextFailures(c.Context(), token, task, includeTaskIdentity)
 	if err != nil {
 		return err
 	}
@@ -595,7 +613,7 @@ func (h *Handlers) authorizeContextTokenLoadedTaskWithIdentity(c fiber.Ctx, acti
 		return nil
 	}
 
-	return h.handleContextTokenAuthorizationFailures(ui.ContextToken, action, failures)
+	return h.handleContextTokenAuthorizationFailures(token, action, failures)
 }
 
 func (h *Handlers) contextTokenAllowsLoadedTask(c fiber.Ctx, action string, task *corev1alpha1.Task) (bool, error) {
@@ -606,12 +624,12 @@ func (h *Handlers) contextTokenAllowsLoadedTaskWithIdentity(c fiber.Ctx, action 
 	if !h.contextTokenAuthorization.Enabled() {
 		return true, nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return true, nil
 	}
 
-	failures, err := h.contextTokenLoadedTaskContextFailures(c.Context(), ui.ContextToken, task, includeTaskIdentity)
+	failures, err := h.contextTokenLoadedTaskContextFailures(c.Context(), token, task, includeTaskIdentity)
 	if err != nil {
 		return false, err
 	}
@@ -621,7 +639,7 @@ func (h *Handlers) contextTokenAllowsLoadedTaskWithIdentity(c fiber.Ctx, action 
 	if h.contextTokenAuthorization.enforcing() {
 		return false, nil
 	}
-	return true, h.handleContextTokenAuthorizationFailures(ui.ContextToken, action, failures)
+	return true, h.handleContextTokenAuthorizationFailures(token, action, failures)
 }
 
 func (h *Handlers) contextTokenLoadedTaskContextFailures(ctx context.Context, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
@@ -698,7 +716,7 @@ func authorizeContextTokenActionWithConfig(c fiber.Ctx, cfg ContextTokenAuthoriz
 		return nil
 	}
 	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	if ui == nil || ui.ContextToken == nil {
 		return nil
 	}
 
@@ -726,17 +744,17 @@ func authorizeContextTokenTaskReadWithConfig(c fiber.Ctx, cfg ContextTokenAuthor
 	if !cfg.Enabled() {
 		return nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return nil
 	}
 
-	failures := contextTokenTaskReadFailures(ui.ContextToken, cfg, namespace, taskName)
+	failures := contextTokenTaskReadFailures(token, cfg, namespace, taskName)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
 	}
-	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
 func contextTokenTaskReadFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace, taskName string) []string {
@@ -773,36 +791,36 @@ func authorizeContextTokenProviderUse(c fiber.Ctx, cfg ContextTokenAuthorization
 	if !cfg.Enabled() {
 		return nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return nil
 	}
 
-	failures := contextTokenProviderUseFailures(ui.ContextToken, cfg, namespace, provider, model)
+	failures := contextTokenProviderUseFailures(token, cfg, namespace, provider, model)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
 	}
-	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
 func contextTokenAllowsListedProviderModel(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, namespace string, provider ProviderResolutionInfo, model string) bool {
 	if !cfg.Enabled() {
 		return true
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return true
 	}
 
-	failures := contextTokenProviderUseFailures(ui.ContextToken, cfg, namespace, provider, model)
+	failures := contextTokenProviderUseFailures(token, cfg, namespace, provider, model)
 	if len(failures) == 0 {
 		return true
 	}
 	if cfg.enforcing() {
 		return false
 	}
-	_ = handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+	_ = handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 	return true
 }
 
@@ -810,57 +828,57 @@ func authorizeContextTokenToolUse(c fiber.Ctx, cfg ContextTokenAuthorizationConf
 	if !cfg.Enabled() {
 		return nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return nil
 	}
 
 	failures := []string{}
-	if len(toolNames) > 0 && !hasAnyScope(ui.ContextToken.Scopes, cfg.ToolUseScopes) {
+	if len(toolNames) > 0 && !hasAnyScope(token.Scopes, cfg.ToolUseScopes) {
 		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.ToolUseScopes, ",")))
 	}
-	if allowed, ok := contextStringList(ui.ContextToken.TransactionContext, "allowedTools"); ok && !toolNamesAllowed(toolNames, allowed) {
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedTools"); ok && !toolNamesAllowed(toolNames, allowed) {
 		failures = append(failures, "one or more tools are not allowed by token context")
 	}
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
 	}
-	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
 func authorizeContextTokenToolMetadata(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, toolName string) error {
 	if !cfg.Enabled() {
 		return nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return nil
 	}
-	failures := contextTokenToolMetadataFailures(ui.ContextToken, toolName)
+	failures := contextTokenToolMetadataFailures(token, toolName)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
 	}
-	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
 func contextTokenAllowsToolMetadata(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, toolName string) (bool, error) {
 	if !cfg.Enabled() {
 		return true, nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return true, nil
 	}
-	failures := contextTokenToolMetadataFailures(ui.ContextToken, toolName)
+	failures := contextTokenToolMetadataFailures(token, toolName)
 	if len(failures) == 0 {
 		return true, nil
 	}
 	if cfg.enforcing() {
 		return false, nil
 	}
-	return true, handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+	return true, handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
 func contextTokenToolMetadataFailures(token *ContextToken, toolName string) []string {
@@ -874,34 +892,34 @@ func authorizeContextTokenAgentContext(c fiber.Ctx, cfg ContextTokenAuthorizatio
 	if !cfg.Enabled() {
 		return nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return nil
 	}
-	failures := contextTokenAgentContextFailures(ui.ContextToken, namespace, agentName)
+	failures := contextTokenAgentContextFailures(token, namespace, agentName)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
 	}
-	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
 func contextTokenAllowsAgentContext(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, namespace, agentName string) (bool, error) {
 	if !cfg.Enabled() {
 		return true, nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return true, nil
 	}
-	failures := contextTokenAgentContextFailures(ui.ContextToken, namespace, agentName)
+	failures := contextTokenAgentContextFailures(token, namespace, agentName)
 	if len(failures) == 0 {
 		return true, nil
 	}
 	if cfg.enforcing() {
 		return false, nil
 	}
-	return true, handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+	return true, handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
 func contextTokenAgentContextFailures(token *ContextToken, namespace, agentName string) []string {
@@ -1707,12 +1725,12 @@ func filterCompletionToolsForContextToken(c fiber.Ctx, cfg ContextTokenAuthoriza
 	if !cfg.Enabled() || !cfg.enforcing() {
 		return tools
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return tools
 	}
 
-	allowed, ok := contextStringList(ui.ContextToken.TransactionContext, "allowedTools")
+	allowed, ok := contextStringList(token.TransactionContext, "allowedTools")
 	if !ok {
 		return tools
 	}

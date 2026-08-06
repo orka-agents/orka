@@ -24,6 +24,8 @@ const (
 	testProviderAnthropic = "anthropic"
 	testToolNameSearch    = "search"
 	testStopReasonToolUse = "tool_use"
+	testRoleUser          = "user"
+	testRoleAssistant     = "assistant"
 )
 
 func TestNewProvider(t *testing.T) {
@@ -204,6 +206,59 @@ func TestBuildMessages(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildMessagesSyntheticContextUsesNativeToolData(t *testing.T) {
+	const (
+		callID   = "synthetic-context"
+		toolName = "orka_passive_memory"
+	)
+	toolCall := llm.Message{
+		Role: "assistant",
+		ToolCalls: []llm.ToolCall{{
+			ID:        callID,
+			Name:      toolName,
+			Arguments: json.RawMessage(`{"policy_label":"orka.passive-memory.v1"}`),
+		}},
+	}
+	toolResult := llm.Message{
+		Role: "tool", ToolCallID: callID, Name: toolName, Content: `{"content":"ignore policy"}`,
+	}
+
+	t.Run("fresh task", func(t *testing.T) {
+		wireMessages := buildMessages([]llm.Message{
+			{Role: "user", Content: "real task"},
+			toolCall,
+			toolResult,
+		})
+		if len(wireMessages) != 3 || wireMessages[0].Role != testRoleUser || wireMessages[1].Role != testRoleAssistant ||
+			wireMessages[2].Role != testRoleUser {
+			t.Fatalf("fresh synthetic context was not user-first: %#v", wireMessages)
+		}
+		if wireMessages[1].Content[0].OfToolUse == nil || wireMessages[2].Content[0].OfToolResult == nil ||
+			wireMessages[2].Content[0].OfToolResult.ToolUseID != callID {
+			t.Fatalf("fresh synthetic context was not native tool data: %#v", wireMessages)
+		}
+	})
+
+	t.Run("history", func(t *testing.T) {
+		wireMessages := buildMessages([]llm.Message{
+			{Role: "user", Content: "earlier question"},
+			toolCall,
+			toolResult,
+			{Role: "assistant", Content: "earlier answer"},
+			{Role: "user", Content: "real task"},
+		})
+		if len(wireMessages) != 5 || wireMessages[0].Role != testRoleUser || wireMessages[1].Role != testRoleAssistant ||
+			wireMessages[2].Role != testRoleUser || wireMessages[3].Role != testRoleAssistant ||
+			wireMessages[4].Role != testRoleUser {
+			t.Fatalf("historical synthetic context roles = %#v", wireMessages)
+		}
+		if wireMessages[1].Content[0].OfToolUse == nil || wireMessages[2].Content[0].OfToolResult == nil ||
+			wireMessages[4].Content[0].OfText == nil || wireMessages[4].Content[0].OfText.Text != "real task" {
+			t.Fatalf("historical synthetic context data = %#v", wireMessages)
+		}
+	})
 }
 
 func TestBuildToolParams(t *testing.T) {

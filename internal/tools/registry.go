@@ -17,6 +17,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -32,6 +33,7 @@ import (
 // ToolContext provides dependencies for tools that need K8s client access or other services.
 type ToolContext struct {
 	Client                    client.Client
+	APIReader                 client.Reader
 	KubeClient                kubernetes.Interface
 	Namespace                 string
 	SessionID                 string
@@ -70,6 +72,13 @@ type ToolContext struct {
 	ApprovalTargetSpecDigest       func(context.Context, string) (string, error)
 	ApprovalTargetArguments        func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 	ApprovalTargetRefresh          func(context.Context, string, *corev1alpha1.Tool) error
+
+	// Controller-brokered delegation supplies transaction setup directly because
+	// the controller process does not inherit worker TTS environment variables.
+	TransactionTokenTTS         *contexttoken.TTSConfig
+	TransactionTokenSubject     string
+	TransactionTokenSubjectType string
+	TransactionTokenChildScope  string
 }
 
 type toolContextKey struct{}

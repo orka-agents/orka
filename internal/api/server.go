@@ -8,11 +8,14 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
@@ -23,9 +26,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/orka-agents/orka/internal/apierror"
 	"github.com/orka-agents/orka/internal/controller"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
+	memoryruntime "github.com/orka-agents/orka/internal/memory"
+	"github.com/orka-agents/orka/internal/memorybackend"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/uiembed"
 )
@@ -41,6 +47,7 @@ type ServerConfig struct {
 	OIDC                      OIDCConfig
 	ContextTokens             ContextTokenConfig
 	ContextTokenAuthorization ContextTokenAuthorizationConfig
+	ContextTokenTTS           ContextTokenTTSConfig
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
@@ -49,6 +56,8 @@ type ServerConfig struct {
 	ArtifactStore             store.ArtifactStore
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
+	MemoryService             *memoryruntime.Service
+	MemoryBackendManager      *memorybackend.Manager
 	SecurityStore             store.SecurityStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
 	ExecutionEventStore       store.ExecutionEventStore
@@ -121,6 +130,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		WatchNamespace:            config.WatchNamespace,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
 		ContextTokenAuthorization: config.ContextTokenAuthorization,
+		ContextTokenTTS:           config.ContextTokenTTS,
 		ResultStore:               config.ResultStore,
 		SessionStore:              config.SessionStore,
 		PlanStore:                 config.PlanStore,
@@ -129,6 +139,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ArtifactStore:             config.ArtifactStore,
 		MemoryStore:               config.MemoryStore,
 		MemoryProposalStore:       config.MemoryProposalStore,
+		MemoryService:             config.MemoryService,
+		MemoryBackendManager:      config.MemoryBackendManager,
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
@@ -188,9 +200,10 @@ func (s *Server) setupMiddleware() {
 		origins[i] = strings.TrimSpace(o)
 	}
 	s.app.Use(cors.New(cors.Config{
-		AllowOrigins: origins,
-		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders: allowedCORSHeaders(s.config.ContextTokens),
+		AllowOrigins:  origins,
+		AllowMethods:  []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowHeaders:  allowedCORSHeaders(s.config.ContextTokens),
+		ExposeHeaders: []string{"Location", "Retry-After"},
 	}))
 
 	// Logging middleware
@@ -201,7 +214,7 @@ func (s *Server) setupMiddleware() {
 }
 
 func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
-	headers := []string{"Origin", "Content-Type", "Accept", AuthHeader, XAPIKeyHeader}
+	headers := []string{"Origin", "Content-Type", "Accept", AuthHeader, XAPIKeyHeader, "Idempotency-Key"}
 	addHeader := func(name string) {
 		if name == "" {
 			return
@@ -281,13 +294,31 @@ func (s *Server) setupRoutes() {
 	api.Post("/gateway-deliveries/:id/retry", s.handlers.RetryGatewayDelivery)
 
 	// Memory endpoints
+	api.Get("/memory-backends", s.handlers.ListMemoryBackends)
+	api.Post("/memory-backends", s.handlers.CreateMemoryBackend)
+	api.Get("/memory-backends/default", s.handlers.GetMemoryBackend)
+	api.Put("/memory-backends/default", s.handlers.UpdateMemoryBackend)
+	api.Delete("/memory-backends/default", s.handlers.DeleteMemoryBackend)
+	api.Post("/memory-backends/default/activate", s.handlers.ActivateMemoryBackend)
+	api.Post("/memory-backends/default/decommission", s.handlers.DecommissionMemoryBackend)
+	api.Post("/memory-backends/default/force-orphan", s.handlers.ForceOrphanMemoryBackend)
+	api.Post("/memory-backends/default/restore-legacy", s.handlers.RestoreLegacyMemoryBackend)
+	api.Post("/memory-backends/default/checkpoints", s.handlers.RecordMemoryBackendCheckpoint)
+	api.Post("/memory-backends/default/purge", s.handlers.PurgeMemoryBackendGovernance)
+	api.Get("/memory-backends/default/status", s.handlers.GetMemoryBackendStatus)
 	api.Get("/memories", s.handlers.ListMemories)
 	api.Post("/memories", s.handlers.CreateMemory)
+	api.Post("/memories/search", s.handlers.SearchMemories)
 	api.Get("/memories/:id", s.handlers.GetMemory)
 	api.Put("/memories/:id", s.handlers.UpdateMemory)
 	api.Delete("/memories/:id", s.handlers.DeleteMemory)
 	api.Post("/memories/:id/disable", s.handlers.DisableMemory)
 	api.Post("/memories/:id/enable", s.handlers.EnableMemory)
+	api.Post("/memories/:id/trust", s.handlers.SetMemoryTrust)
+	api.Get("/memory-operations", s.handlers.ListMemoryOperations)
+	api.Get("/memory-operations/:id", s.handlers.GetMemoryOperation)
+	api.Post("/memory-operations/:id/retry", s.handlers.RetryMemoryOperation)
+	api.Post("/memory-operations/:id/abandon", s.handlers.AbandonMemoryOperation)
 	api.Get("/memory-proposals", s.handlers.ListMemoryProposals)
 	api.Post("/memory-proposals", s.handlers.CreateMemoryProposal)
 	api.Get("/memory-proposals/:id", s.handlers.GetMemoryProposal)
@@ -412,16 +443,18 @@ func (s *Server) setupRoutes() {
 			s.MessageStore,
 			s.ArtifactStore,
 			InternalHandlersConfig{
-				Client:              s.client,
-				APIReader:           s.config.APIReader,
-				MemoryStore:         s.MemoryStore,
-				MemoryProposalStore: s.MemoryProposalStore,
-				ExecutionEventStore: s.ExecutionEventStore,
-				GatewayEventStore:   s.GatewayEventStore,
+				Client:                    s.client,
+				APIReader:                 s.config.APIReader,
+				MemoryStore:               s.MemoryStore,
+				MemoryProposalStore:       s.MemoryProposalStore,
+				MemoryService:             s.config.MemoryService,
+				ContextTokenAuthorization: s.config.ContextTokenAuthorization,
+				ExecutionEventStore:       s.ExecutionEventStore,
+				GatewayEventStore:         s.GatewayEventStore,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
-		internal.Use(NewAuthMiddleware(s.client))
+		internal.Use(NewAuthMiddleware(s.client, AuthConfig{ContextTokens: s.config.ContextTokens}))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)
@@ -434,11 +467,14 @@ func (s *Server) setupRoutes() {
 		internal.Post("/artifacts/:namespace/:taskName/:filename", s.internalHandlers.UploadArtifact)
 		internal.Get("/memories/:namespace", s.internalHandlers.ListMemories)
 		internal.Post("/memories/:namespace", s.internalHandlers.CreateMemory)
+		internal.Post("/memories/:namespace/search", s.internalHandlers.SearchMemories)
 		internal.Get("/memories/:namespace/:id", s.internalHandlers.GetMemory)
 		internal.Put("/memories/:namespace/:id", s.internalHandlers.UpdateMemory)
 		internal.Delete("/memories/:namespace/:id", s.internalHandlers.DeleteMemory)
 		internal.Post("/memories/:namespace/:id/disable", s.internalHandlers.DisableMemory)
 		internal.Post("/memories/:namespace/:id/enable", s.internalHandlers.EnableMemory)
+		internal.Get("/memory-operations/:namespace", s.internalHandlers.ListMemoryOperations)
+		internal.Get("/memory-operations/:namespace/:id", s.internalHandlers.GetMemoryOperation)
 		internal.Get("/memory-proposals/:namespace", s.internalHandlers.ListMemoryProposals)
 		internal.Post("/memory-proposals/:namespace", s.internalHandlers.CreateMemoryProposal)
 		internal.Get("/memory-proposals/:namespace/:id", s.internalHandlers.GetMemoryProposal)
@@ -456,6 +492,7 @@ func (s *Server) hasInternalStores() bool {
 		s.ArtifactStore != nil ||
 		s.MemoryStore != nil ||
 		s.MemoryProposalStore != nil ||
+		s.config.MemoryService != nil ||
 		s.ExecutionEventStore != nil
 }
 
@@ -505,7 +542,19 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	code := fiber.StatusInternalServerError
 	message := "Internal Server Error"
 
-	if e, ok := err.(*fiber.Error); ok {
+	reason := ""
+	var structured *apierror.Error
+	if errors.As(err, &structured) {
+		if structured.Status > 0 {
+			code = structured.Status
+		}
+		message = structured.Error()
+		reason = structured.Reason
+		if structured.RetryAfter > 0 {
+			seconds := max(int(structured.RetryAfter.Round(time.Second)/time.Second), 1)
+			c.Set("Retry-After", strconv.Itoa(seconds))
+		}
+	} else if e, ok := err.(*fiber.Error); ok {
 		code = e.Code
 		message = e.Message
 	}
@@ -513,7 +562,7 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	// For 404s on non-API paths, serve the SPA index.html
 	if code == fiber.StatusNotFound {
 		path := c.Path()
-		isAPI := len(path) >= 4 && path[:4] == "/api"
+		isAPI := strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/internal/") || path == "/internal"
 		if !isAPI && path != "/healthz" && path != "/readyz" {
 			distFS, fsErr := uiembed.FS()
 			if fsErr == nil {
@@ -526,10 +575,18 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 		}
 	}
 
-	return c.Status(code).JSON(fiber.Map{
-		"error": fiber.Map{
-			"code":    code,
-			"message": message,
-		},
-	})
+	errorBody := fiber.Map{
+		"code":    code,
+		"message": message,
+	}
+	if reason != "" {
+		errorBody["reason"] = reason
+	}
+	var cursorProvider interface{ SafeCursor() string }
+	if errors.As(err, &cursorProvider) {
+		if cursor := strings.TrimSpace(cursorProvider.SafeCursor()); cursor != "" {
+			errorBody["cursor"] = cursor
+		}
+	}
+	return c.Status(code).JSON(fiber.Map{"error": errorBody})
 }

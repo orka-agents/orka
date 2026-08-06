@@ -135,6 +135,61 @@ type MemoryProposalStore interface {
 	ArchiveMemoryProposal(ctx context.Context, namespace, id string) error
 }
 
+// GovernedMemoryStore owns remote authority binding, catalog, operation, idempotency,
+// audit, and legacy cutover persistence. Mutation admission requires caller-preallocated
+// memory and operation IDs and is open only while the binding is accepting. Exact operations
+// admitted before a draining transition remain dispatchable at their original routing epoch.
+// Raw operation payloads are returned only by claim methods. Orphaning requires a recovering
+// or terminal binding state that blocks all dispatch.
+type GovernedMemoryStore interface {
+	UpsertControllerFeatureHeartbeat(ctx context.Context, heartbeat ControllerFeatureHeartbeat) error
+	ListLiveControllerFeatureHeartbeats(ctx context.Context, now time.Time) ([]ControllerFeatureHeartbeat, error)
+
+	ActivateMemoryBackend(ctx context.Context, activation MemoryBackendActivation) (*MemoryBackendActivationResult, error)
+	GetMemoryBackendBinding(ctx context.Context, namespaceUID string) (*MemoryBackendBinding, error)
+	GetMemoryBackendBindingByNamespace(ctx context.Context, namespace string) (*MemoryBackendBinding, error)
+	ListMemoryBackendBindings(ctx context.Context, filter MemoryBackendBindingFilter) ([]MemoryBackendBinding, error)
+	ForEachMemoryBackendBinding(ctx context.Context, filter MemoryBackendBindingFilter, visit MemoryBackendBindingVisitor) error
+	MaxRequiredMemoryFeatureEpoch(ctx context.Context) (int64, error)
+	TransitionMemoryBackendBinding(ctx context.Context, transition MemoryBackendTransition) (*MemoryBackendBinding, error)
+	RefreshMemoryBackendBinding(ctx context.Context, refresh MemoryBackendBindingRefresh) (*MemoryBackendBinding, error)
+	PreviewLegacyMemoryRestore(ctx context.Context, namespaceUID, backendUID string) (*LegacyMemoryRestorePreview, error)
+	RestoreLegacyMemories(ctx context.Context, restore LegacyMemoryRestore) (*LegacyMemoryRestoreResult, error)
+
+	AdmitRemoteMemoryCreate(ctx context.Context, admission RemoteMemoryCreateAdmission) (*MemoryMutationAdmissionResult, error)
+	AdmitRemoteMemoryReplace(ctx context.Context, admission RemoteMemoryReplaceAdmission) (*MemoryMutationAdmissionResult, error)
+	AdmitRemoteMemoryDelete(ctx context.Context, admission RemoteMemoryDeleteAdmission) (*MemoryMutationAdmissionResult, error)
+	AdmitRemoteMemoryProposalApply(ctx context.Context, admission RemoteMemoryProposalApplyAdmission) (*MemoryMutationAdmissionResult, error)
+
+	GetRemoteMemory(ctx context.Context, namespaceUID, id string) (*RemoteMemoryCatalogEntry, error)
+	ListRemoteMemories(ctx context.Context, filter RemoteMemoryCatalogFilter) ([]RemoteMemoryCatalogEntry, error)
+	MarkRemoteMemoryMaterializationIssue(ctx context.Context, issue RemoteMemoryMaterializationIssue) (*RemoteMemoryCatalogEntry, error)
+	MarkRemoteMemoriesRecalled(ctx context.Context, namespaceUID string, ids []string, now time.Time) error
+	SetRemoteMemoryDisabled(ctx context.Context, change RemoteMemoryDisabledChange) (*RemoteMemoryCatalogEntry, error)
+	SetRemoteMemoryTrust(ctx context.Context, change RemoteMemoryTrustChange) (*RemoteMemoryCatalogEntry, error)
+
+	GetMemoryOperation(ctx context.Context, namespaceUID, id string) (*MemoryOperation, error)
+	ListMemoryOperations(ctx context.Context, filter MemoryOperationFilter) ([]MemoryOperation, error)
+	ClaimNextMemoryOperation(ctx context.Context, claim MemoryOperationClaim) (*MemoryOperationDispatch, error)
+	ClaimMemoryOperation(ctx context.Context, id string, claim MemoryOperationClaim) (*MemoryOperationDispatch, error)
+	MarkMemoryOperationSendStarted(ctx context.Context, send MemoryOperationSend) (*MemoryOperation, error)
+	CompleteMemoryOperation(ctx context.Context, completion MemoryOperationCompletion) (*MemoryOperation, error)
+	RetryMemoryOperation(ctx context.Context, retry MemoryOperationRetry) (*MemoryOperation, error)
+	AbandonMemoryOperation(ctx context.Context, abandonment MemoryOperationAbandonment) (*MemoryOperation, error)
+	OrphanMemoryOperations(ctx context.Context, orphaning MemoryOperationOrphaning) (int, error)
+	ResolveMemoryOperationsForDecommission(ctx context.Context, resolution MemoryDecommissionResolution) (int, error)
+	RecordMemoryActivationRecoveryReceipt(ctx context.Context, receipt MemoryActivationRecoveryReceipt) (*MemoryActivationRecoveryReceipt, error)
+	RecordMemoryVerifiedCheckpoint(ctx context.Context, checkpoint MemoryVerifiedCheckpoint) (*MemoryVerifiedCheckpoint, error)
+	PurgeMemoryGovernance(ctx context.Context, purge MemoryGovernancePurge) (*MemoryGovernancePurgeResult, error)
+
+	GetMemoryIdempotency(ctx context.Context, namespaceUID, principal, route, callerKey string) (*MemoryIdempotencyRecord, error)
+	SaveMemorySearchCursor(ctx context.Context, cursor MemorySearchCursorState) error
+	GetMemorySearchCursor(ctx context.Context, namespaceUID, id string, now time.Time) (*MemorySearchCursorState, error)
+	RetireMemorySearchCursor(ctx context.Context, namespaceUID, id string, now time.Time) error
+	AppendMemoryAudit(ctx context.Context, audit MemoryAuditRecord) error
+	ListMemoryAudit(ctx context.Context, filter MemoryAuditFilter) ([]MemoryAuditRecord, error)
+}
+
 // PlanStore handles autonomous plan state persistence.
 type PlanStore interface {
 	SavePlan(ctx context.Context, namespace, taskName string, plan *PlanState) error

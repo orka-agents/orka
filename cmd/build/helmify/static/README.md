@@ -2,7 +2,7 @@
 
 This chart is generated from `cmd/build/helmify`; edit the generator inputs and
 run `make manifests` rather than editing generated chart copies directly. It
-packages all thirteen canonical Orka CRDs under `crds/`.
+packages all twenty canonical Orka CRDs under `crds/`.
 
 ## Fresh install
 
@@ -26,6 +26,80 @@ cluster-unique release name or `fullnameOverride`, a separate controller
 namespace, and a distinct, non-empty `controller.watchNamespace`. Do not mix a
 cluster-wide watcher with namespace-scoped releases: gateway admission policies
 would overlap. All releases share the same cluster-scoped CRDs.
+
+## Remote memory control plane
+
+`controller.memoryBackend.enabled` is disabled by default. Enabling it requires a
+stable `controller.memoryBackend.clusterId` and durable controller storage. On an
+upgrade, apply the exact target `MemoryBackend` CRD first; Helm does not upgrade
+files under `crds/`. The controller stays disabled until the CRD schema marker is
+observed unless `crdsReadyOverride=true` is used after independent verification.
+
+`controller.memoryBackend.activationEnabled` is the separate second-release
+cutover gate. The foundation chart and controller artifacts reject activation
+even when this value or the matching runtime environment variable is forced.
+The foundation controller advertises feature epoch 1; only a later source-gated
+activation artifact may advertise epoch 2 and accept the activation value.
+While the durable authority remains SQLite, enabling MemoryBackend support also
+requires `controller.replicas: 1`. The controller Deployment uses `Recreate`, so
+the foundation replica stops before the activation artifact starts; activation
+also requires durable evidence that a lower feature epoch was previously
+observed and that every live heartbeat supports the activation epoch.
+Creating `MemoryBackend/default` in `Staged` validates without changing SQLite
+authority. Activation, decommission, force-orphan, and restore-legacy remain
+explicit audited API/CLI actions. Dispatcher concurrency, sustained rate, and
+burst controls are configured under `controller.memoryBackend.dispatcher*`; the
+defaults bound both global and per-namespace work.
+
+The chart always installs fail-closed admission policies that reserve Orka task
+Job/Pod provenance for the owning controllers and require
+`memorybackends/finalizers` update authorization before the backend protection
+finalizer can be removed. Do not disable these policies or grant their protected
+status/finalizer permissions to untrusted namespace writers.
+
+Helm uses release-scoped pre-install/pre-upgrade RBAC and provenance policy hooks
+before rolling the controller Deployment, then installs the retained
+steady-state policies. This closes the Helm kind-ordering gap while allowing the
+old controller and Kubernetes Job controller to create legacy-format work during
+the upgrade. Helm removes the release-scoped preflight RBAC after each successful
+hook run. If a later hook aborts the release, pre-delete hooks replace any
+leftover grants with inert, subject-free/rule-free tombstones during uninstall;
+Helm versions may then remove those tombstones after the cleanup hook completes.
+Intentionally retained steady-state controls remain in place. The raw installer
+likewise places the task provenance policies and bindings after their RBAC
+grants but before either Deployment.
+
+The chart-created controller store PVC is annotated `helm.sh/resource-policy:
+keep`, and `store.persistence.existingClaim` may select an operator-managed PVC.
+The MemoryBackend finalizer policy and binding are also retained on uninstall so
+surviving `MemoryBackend` objects cannot have their lifecycle barrier stripped.
+Delete retained resources manually only after every backend is safely
+decommissioned or force-orphaned and a matched recovery set is verified.
+
+Example foundation values:
+
+```yaml
+controller:
+  memoryBackend:
+    enabled: true
+    activationEnabled: false
+    clusterId: production-cluster-a
+    crdsReadyOverride: true # only after separately applying/verifying target CRDs
+store:
+  persistence:
+    enabled: true
+```
+
+## Out-of-tree OMS adapters
+
+Orka ships the provider-neutral `orka.oms.v0alpha1` protocol and conformance
+harness, but provider adapters are maintained and deployed independently. The
+KD6 adapter, its Helm chart, image lifecycle, and live provider release gate
+live in [`orka-agents/orka-oms-kd6-adapter`](https://github.com/orka-agents/orka-oms-kd6-adapter).
+
+The Orka chart never creates an adapter or a `MemoryBackend`. Install the chosen
+adapter separately, expose it through a public HTTPS endpoint, bind an
+operator-managed client-auth Secret, and stage/activate the backend explicitly.
 
 ## Upgrade
 
@@ -76,7 +150,7 @@ A matching Orka source checkout provides the same guarded flow as
 competing CRD apply workflows for the same cluster.
 
 If another system owns the CRDs, perform the CRD-first step through that system,
-wait for all thirteen CRDs to become `Established`, and then upgrade Orka.
+wait for all twenty CRDs to become `Established`, and then upgrade Orka.
 
 If a previous release was uninstalled, update its retained CRDs first and install
 the replacement release with `--skip-crds`.

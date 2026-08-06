@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1147,5 +1148,84 @@ func TestDoJSONAndTxnToken(t *testing.T) {
 	}
 	if gotNamespace != "team-a" {
 		t.Fatalf("namespace query = %q, want team-a", gotNamespace)
+	}
+}
+
+func TestDoJSONWithHeadersPreservesAcceptedMetadata(t *testing.T) {
+	var gotIdempotencyKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
+		w.Header().Set("Location", "/api/v1/memory-operations/mop-1")
+		w.Header().Set("Retry-After", "3")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "mop-1", "state": "queued"})
+	}))
+	defer srv.Close()
+
+	c := NewWithNamespace(srv.URL, "", "team-a")
+	response, err := c.DoJSONWithHeaders(
+		context.Background(),
+		http.MethodPost,
+		"/api/v1/memories",
+		nil,
+		[]byte(`{"content":"remember this"}`),
+		http.Header{"Idempotency-Key": []string{"idem-1"}},
+	)
+	if err != nil {
+		t.Fatalf("DoJSONWithHeaders() error = %v", err)
+	}
+	if gotIdempotencyKey != "idem-1" {
+		t.Fatalf("Idempotency-Key = %q, want idem-1", gotIdempotencyKey)
+	}
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusAccepted)
+	}
+	if got := response.Header.Get("Location"); got != "/api/v1/memory-operations/mop-1" {
+		t.Fatalf("Location = %q", got)
+	}
+	if got := response.Header.Get("Retry-After"); got != "3" {
+		t.Fatalf("Retry-After = %q", got)
+	}
+	body, ok := response.Body.(map[string]any)
+	if !ok || body["id"] != "mop-1" {
+		t.Fatalf("body = %#v", response.Body)
+	}
+}
+
+func TestDoJSONWithHeadersReturnsTypedAPIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"code":429,"reason":"MEMORY_CAPACITY_EXCEEDED","message":"try later"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	_, err := c.DoJSONWithHeaders(context.Background(), http.MethodPost, "/api/v1/memories", nil, []byte(`{}`), nil)
+	if err == nil {
+		t.Fatal("DoJSONWithHeaders() error = nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error type = %T, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusTooManyRequests || apiErr.Header.Get("Retry-After") != "5" {
+		t.Fatalf("APIError = %#v", apiErr)
+	}
+	if !strings.Contains(string(apiErr.Body), "MEMORY_CAPACITY_EXCEEDED") {
+		t.Fatalf("body = %s", apiErr.Body)
+	}
+}
+
+func TestResourceURLPreservesNamespaceFromLocation(t *testing.T) {
+	client := New("https://orka.example.test", "")
+	client.Namespace = "default"
+
+	got, err := client.resourceURL("/api/v1/memory-operations/mop-1?namespace=team-blue", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://orka.example.test/api/v1/memory-operations/mop-1?namespace=team-blue" {
+		t.Fatalf("resourceURL() = %q", got)
 	}
 }

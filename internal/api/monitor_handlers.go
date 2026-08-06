@@ -494,18 +494,18 @@ func (h *Handlers) contextTokenRepositoryMonitorAllowed(c fiber.Ctx, monitor *co
 	if !h.contextTokenAuthorization.Enabled() {
 		return true
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return true
 	}
-	failures := contextTokenRepositoryMonitorFailures(ui.ContextToken, monitor)
+	failures := contextTokenRepositoryMonitorFailures(token, monitor)
 	if len(failures) == 0 {
 		return true
 	}
 	if h.contextTokenAuthorization.enforcing() {
 		return false
 	}
-	_ = h.handleContextTokenAuthorizationFailures(ui.ContextToken, "listRepositoryMonitors", failures)
+	_ = h.handleContextTokenAuthorizationFailures(token, "listRepositoryMonitors", failures)
 	return true
 }
 
@@ -513,16 +513,16 @@ func (h *Handlers) authorizeContextTokenRepositoryMonitor(c fiber.Ctx, action st
 	if !h.contextTokenAuthorization.Enabled() {
 		return nil
 	}
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+	if token == nil {
 		return nil
 	}
-	failures := contextTokenRepositoryMonitorFailures(ui.ContextToken, monitor)
+	failures := contextTokenRepositoryMonitorFailures(token, monitor)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
 	}
-	return h.handleContextTokenAuthorizationFailures(ui.ContextToken, action, failures)
+	return h.handleContextTokenAuthorizationFailures(token, action, failures)
 }
 
 // CreateRepositoryMonitor creates a new durable repository monitor.

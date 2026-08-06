@@ -10,7 +10,29 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
+
+func TestStampTaskRequesterPreservesAttachedCompositeTransaction(t *testing.T) {
+	token := &ContextToken{
+		Profile: ContextTokenProfileTransactionToken, TransactionID: "txn-composite", Scope: ContextTokenScopeTaskCreate,
+		Scopes: []string{ContextTokenScopeTaskCreate}, Subject: "subject-a", Issuer: "https://issuer.example.test",
+		TransactionContext: map[string]any{"namespace": "default", "taskName": "task-a", "taskUID": "task-uid"},
+	}
+	task := &corev1alpha1.Task{}
+	stampTaskRequesterFromUserInfo(task, &UserInfo{
+		AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:worker", ContextToken: token,
+	})
+
+	if task.Spec.RequestedBy == nil || task.Spec.RequestedBy.Username != "system:serviceaccount:default:worker" {
+		t.Fatalf("RequestedBy = %#v", task.Spec.RequestedBy)
+	}
+	if task.Spec.Transaction == nil || task.Spec.Transaction.ID != token.TransactionID ||
+		task.Spec.Transaction.Context["taskName"] != "task-a" || task.Spec.Transaction.Context["taskUID"] != "task-uid" {
+		t.Fatalf("Transaction = %#v", task.Spec.Transaction)
+	}
+}
 
 func TestDigestMapNormalizesSetValuedContextClaimOrder(t *testing.T) {
 	first := map[string]any{
