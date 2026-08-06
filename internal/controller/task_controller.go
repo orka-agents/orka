@@ -118,6 +118,7 @@ type TaskReconciler struct {
 	ArtifactStore                      store.ArtifactStore
 	ExecutionEventStore                store.ExecutionEventStore
 	DurableControlStore                store.DurableControlStore
+	AgentExecutionSnapshots            store.AgentExecutionSnapshotStore
 	ACPArtifactRetirer                 artifactcap.IdentityRetirer
 	ACPPublicationReclaimer            ACPPublicationReclaimer
 	ControllerEpochManager             *ControllerEpochManager
@@ -716,6 +717,11 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		case agentExecutionPathRejected:
 			return r.rejectPlannedAgentExecution(ctx, task, plan)
 		case agentExecutionPathACP:
+			if r.agentExecutionBindingEnabled() {
+				if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
+					return result, err
+				}
+			}
 			return r.queueACPRuntimeTask(ctx, task, agent)
 		case agentExecutionPathExternal:
 			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(

@@ -7,8 +7,10 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"math"
@@ -179,6 +181,7 @@ func main() {
 	var aiWorkerImage string
 	var storeBackend string
 	var storePath string
+	var agentExecutionSnapshotKeyFile string
 	var controllerURL string
 	var enforceNamespaceIsolation bool
 	var maxTasksPerNamespace int
@@ -354,6 +357,9 @@ func main() {
 		"Maximum gateway events and deliveries processed per iteration.")
 	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
 	flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
+	flag.StringVar(&agentExecutionSnapshotKeyFile, "agent-execution-snapshot-key-file", "",
+		"Path to the 32-byte (raw or base64) AES-256 key encrypting immutable agent execution snapshots. "+
+			"When set, executable agent Tasks freeze a write-once binding and encrypted snapshot before dispatch.")
 	flag.StringVar(&controllerURL, "controller-url", "",
 		"Base URL for the controller API, used by workers. E.g. http://orka-controller.orka-system.svc:8080")
 	flag.BoolVar(&enforceNamespaceIsolation, "enforce-namespace-isolation", false,
@@ -932,6 +938,20 @@ func main() {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
 		os.Exit(1)
 	}
+	agentExecutionBindingEnabled := false
+	if agentExecutionSnapshotKeyFile != "" {
+		snapshotCipher, cipherErr := loadAgentExecutionSnapshotCipher(agentExecutionSnapshotKeyFile)
+		if cipherErr != nil {
+			setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
+				"path", agentExecutionSnapshotKeyFile)
+			os.Exit(1)
+		}
+		sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher)
+		agentExecutionBindingEnabled = true
+		setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
+	} else {
+		setupLog.Info("agent execution binding stage disabled: no --agent-execution-snapshot-key-file configured; the coexistence release requires it")
+	}
 	controlNamespace, err := acpControlNamespace(acpRuntimeEnabled, currentPodNamespace())
 	if err != nil {
 		setupLog.Error(err, "unable to configure Kubernetes ACP control store")
@@ -1139,6 +1159,7 @@ func main() {
 		ArtifactStore:           sqliteStore,
 		ExecutionEventStore:     sqliteStore,
 		DurableControlStore:     taskCleanupControlStore,
+		AgentExecutionSnapshots: taskAgentExecutionSnapshotStore(agentExecutionBindingEnabled, sqliteStore),
 		ACPArtifactRetirer:      artifactRetentionWiring.taskCleanup,
 		ACPPublicationReclaimer: publisherClient,
 		ControllerEpochManager:  controllerEpochManager,
@@ -1774,4 +1795,32 @@ func currentPodNamespace() string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// loadAgentExecutionSnapshotCipher reads the AES-256 snapshot key from a file
+// holding either 32 raw bytes or their base64 encoding.
+func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapshotCipher, error) {
+	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied key path.
+	if err != nil {
+		return nil, err
+	}
+	key := bytes.TrimSpace(raw)
+	if len(key) != sqlite.AgentExecutionSnapshotKeyBytes {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(string(key))
+		if decodeErr != nil || len(decoded) != sqlite.AgentExecutionSnapshotKeyBytes {
+			return nil, fmt.Errorf("snapshot key must be %d raw bytes or their base64 encoding", sqlite.AgentExecutionSnapshotKeyBytes)
+		}
+		key = decoded
+	}
+	return sqlite.NewAgentExecutionSnapshotCipher(key)
+}
+
+// taskAgentExecutionSnapshotStore exposes the snapshot store to the Task
+// controller only when the binding stage is enabled, so a nil store keeps the
+// legacy direct-queue path.
+func taskAgentExecutionSnapshotStore(enabled bool, s *sqlite.Store) store.AgentExecutionSnapshotStore {
+	if !enabled {
+		return nil
+	}
+	return s
 }
