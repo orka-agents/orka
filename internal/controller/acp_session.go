@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -32,6 +33,11 @@ type ACPSessionContinuityConfig struct {
 	BranchClaims    store.BranchClaimStore
 	BootstrapLimits ACPBootstrapLimits
 	NewSessionUID   func() (string, error)
+
+	// Lineages records Session protocol/runtime lineage atomically with lease
+	// acquisition. Optional during the pre-coexistence transition; production
+	// wiring always supplies it, and the coexistence release requires it.
+	Lineages store.SessionLineageStore
 }
 
 // ACPSessionContinuity is the controller-side integration boundary for durable
@@ -44,6 +50,12 @@ type ACPSessionContinuity struct {
 	branchClaims    store.BranchClaimStore
 	bootstrapLimits ACPBootstrapLimits
 	newSessionUID   func() (string, error)
+	lineages        store.SessionLineageStore
+}
+
+// RecordsLineage reports whether Session lineage recording is configured.
+func (c *ACPSessionContinuity) RecordsLineage() bool {
+	return c != nil && c.lineages != nil
 }
 
 // NewACPSessionContinuity creates a continuity component. All stores are
@@ -66,6 +78,7 @@ func NewACPSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionCont
 		transcripts:     config.Transcripts,
 		publications:    config.Publications,
 		branchClaims:    config.BranchClaims,
+		lineages:        config.Lineages,
 		bootstrapLimits: limits,
 		newSessionUID:   newSessionUID,
 	}, nil
@@ -248,6 +261,13 @@ type ACPAcquireSessionLeaseRequest struct {
 	PromptRequestDigest string
 	AcquiredAt          time.Time
 	ExpiresAt           *time.Time
+
+	// NamespaceUID, RuntimeIdentity, and ConfigDigest establish or verify the
+	// Session protocol/runtime lineage atomically with the lease claim when
+	// lineage recording is configured.
+	NamespaceUID    string
+	RuntimeIdentity string
+	ConfigDigest    string
 }
 
 // ACPSessionLease is the exact mutation fence that must be used when opening
@@ -305,7 +325,72 @@ func (c *ACPSessionContinuity) AcquireMutationLease(ctx context.Context, request
 	if err := validateACPSessionLease(control, key); err != nil {
 		return nil, err
 	}
-	return &ACPSessionLease{Session: *control, Key: key}, nil
+	lease := &ACPSessionLease{Session: *control, Key: key}
+	if err := c.claimSessionLineage(ctx, request, lease); err != nil {
+		return nil, err
+	}
+	return lease, nil
+}
+
+// claimSessionLineage establishes or verifies the Session protocol/runtime
+// lineage under the just-acquired mutation lease, so concurrent first-use
+// Tasks serialize on the lease and converge on exactly one lineage. A lineage
+// conflict releases the lease and fails the acquisition: implicit
+// cross-protocol continuation and recreated same-name identities are rejected.
+func (c *ACPSessionContinuity) claimSessionLineage(
+	ctx context.Context,
+	request ACPAcquireSessionLeaseRequest,
+	lease *ACPSessionLease,
+) error {
+	if c.lineages == nil {
+		return nil
+	}
+	if strings.TrimSpace(request.RuntimeIdentity) == "" || strings.TrimSpace(request.NamespaceUID) == "" {
+		return c.releaseLeaseAfterLineageFailure(ctx, request, lease,
+			fmt.Errorf("session lineage recording requires the runtime identity and namespace UID"))
+	}
+	provenance := store.SessionLineageFirstUse
+	record, err := c.transcripts.GetSession(ctx, lease.Session.Namespace, lease.Session.SessionName)
+	switch {
+	case err == nil && record != nil && record.MessageCount > 0:
+		// This controller line is a pure v2 baseline: a pre-existing transcript
+		// without a lineage row is authoritative single-protocol evidence, so
+		// it is adopted as v2 rather than quarantined. The dual-controller
+		// sealed-inventory classification replaces this adoption rule.
+		provenance = store.SessionLineageLegacyAdopted
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return c.releaseLeaseAfterLineageFailure(ctx, request, lease,
+			fmt.Errorf("read session transcript for lineage freshness: %w", err))
+	}
+	if _, err := c.lineages.ClaimSessionLineage(ctx, store.ClaimSessionLineageRequest{
+		Namespace:         lease.Session.Namespace,
+		SessionName:       lease.Session.SessionName,
+		NamespaceUID:      request.NamespaceUID,
+		SessionUID:        lease.Session.SessionUID,
+		ContractVersion:   string(corev1alpha1.AgentRuntimeContractHarnessV2),
+		RuntimeIdentity:   request.RuntimeIdentity,
+		ConfigDigest:      request.ConfigDigest,
+		Provenance:        provenance,
+		EstablishIfAbsent: true,
+	}); err != nil {
+		return c.releaseLeaseAfterLineageFailure(ctx, request, lease,
+			fmt.Errorf("session lineage claim: %w", err))
+	}
+	return nil
+}
+
+func (c *ACPSessionContinuity) releaseLeaseAfterLineageFailure(
+	ctx context.Context,
+	request ACPAcquireSessionLeaseRequest,
+	lease *ACPSessionLease,
+	cause error,
+) error {
+	if _, releaseErr := c.ReleaseMutationLease(ctx, ACPReleaseSessionLeaseRequest{
+		Lease: *lease, Fence: request.Fence, ReleasedAt: time.Now().UTC(),
+	}); releaseErr != nil {
+		return errors.Join(cause, fmt.Errorf("release session lease after lineage failure: %w", releaseErr))
+	}
+	return cause
 }
 
 func (c *ACPSessionContinuity) ReleaseMutationLease(ctx context.Context, request ACPReleaseSessionLeaseRequest) (*store.SessionControl, error) {

@@ -986,6 +986,7 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-pre-prompt")),
 		testControlDigestForDispatcher("mcp-pre-prompt"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
+		acpSessionLineageIdentity{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1012,6 +1013,7 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-pre-prompt")),
 		testControlDigestForDispatcher("mcp-pre-prompt"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
+		acpSessionLineageIdentity{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2437,6 +2439,7 @@ func TestACPDispatcherQuiescesInterruptedSessionPreparation(t *testing.T) {
 					ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-"+name)),
 					testControlDigestForDispatcher("mcp-"+name),
 					harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
+					acpSessionLineageIdentity{},
 				)
 				if err != nil {
 					t.Fatal(err)
@@ -2453,7 +2456,7 @@ func TestACPDispatcherQuiescesInterruptedSessionPreparation(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := dispatcher.acquireTaskSessionLease(ctx, task, fence, control); err != nil {
+				if _, err := dispatcher.acquireTaskSessionLease(ctx, task, fence, control, acpSessionLineageIdentity{}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -2545,6 +2548,7 @@ func TestACPDispatcherAbortsLeaseWhenSessionTurnOpenFails(t *testing.T) {
 	if _, err := dispatcher.prepareTaskSession(
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-open-failure")),
 		testControlDigestForDispatcher("mcp-open-failure"), "runtime", "boot",
+		acpSessionLineageIdentity{},
 	); err == nil {
 		t.Fatal("prepareTaskSession unexpectedly succeeded")
 	}
@@ -2651,6 +2655,7 @@ func TestACPDispatcherGatewaySessionUsesTranscriptBackedPrompt(t *testing.T) {
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-gateway-transcript")),
 		testControlDigestForDispatcher("mcp-gateway-transcript"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
+		acpSessionLineageIdentity{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2840,6 +2845,7 @@ func TestACPDispatcherPromptIncludedSessionAppendsAssistantOnly(t *testing.T) {
 	session, err := dispatcher.prepareTaskSession(
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-prompt-included-append")),
 		testControlDigestForDispatcher("mcp-prompt-included-append"), "runtime", "boot",
+		acpSessionLineageIdentity{},
 	)
 	if err != nil {
 		t.Fatal(err)

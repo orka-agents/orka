@@ -998,6 +998,7 @@ func main() {
 	if acpRuntimeEnabled {
 		acpSessionContinuity, err = controller.NewACPSessionContinuity(controller.ACPSessionContinuityConfig{
 			SessionControls: durableControlStore, Transcripts: sqliteStore, Publications: durableControlStore, BranchClaims: durableControlStore,
+			Lineages: sqliteStore,
 		})
 		if err != nil {
 			setupLog.Error(err, "unable to create ACP Session continuity manager")

@@ -726,9 +726,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err != nil {
 		return d.requeueReservedTask(ctx, task, err)
 	}
+	lineage := acpSessionLineageIdentity{RuntimeIdentity: string(agent.Spec.Runtime.Type)}
+	if task.Spec.SessionRef != nil && d.Sessions.RecordsLineage() {
+		taskNamespace := &corev1.Namespace{}
+		if err := d.APIReader.Get(runtimeCtx, client.ObjectKey{Name: task.Namespace}, taskNamespace); err != nil {
+			return d.requeueReservedTask(ctx, task, fmt.Errorf("resolve namespace identity for session lineage: %w", err))
+		}
+		lineage.NamespaceUID = string(taskNamespace.UID)
+	}
 	sessionExecution, err := d.prepareTaskSession(
 		runtimeCtx, task, fence, runtimeFence.RuntimeProfileDigest, mcpBindingDigest,
-		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID,
+		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage,
 	)
 	if err != nil {
 		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
