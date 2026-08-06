@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,6 +16,118 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 )
+
+type harnessV1CandidateErrorReader struct {
+	client.Reader
+	get func(client.ObjectKey, client.Object) error
+}
+
+func (r *harnessV1CandidateErrorReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	if r.get != nil {
+		if err := r.get(key, object); err != nil {
+			return err
+		}
+	}
+	return r.Reader.Get(ctx, key, object, options...)
+}
+
+func TestEnsureHarnessV1ExecutionBindingRequeuesTransientCandidateErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		intercept func(client.Object) bool
+	}{
+		{
+			name: "compatibility policy API read",
+			intercept: func(object client.Object) bool {
+				_, ok := object.(*corev1alpha1.AgentExecutionPolicy)
+				return ok
+			},
+		},
+		{
+			name: "wrapper auth Secret API read",
+			intercept: func(object client.Object) bool {
+				_, ok := object.(*corev1.Secret)
+				return ok
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			fixture := newHarnessV1CandidateFixture(t, ctx)
+			transientErr := errors.New("temporary Kubernetes API outage")
+			fixture.reconciler.APIReader = &harnessV1CandidateErrorReader{
+				Reader: fixture.reconciler.Client,
+				get: func(_ client.ObjectKey, object client.Object) error {
+					if test.intercept(object) {
+						return transientErr
+					}
+					return nil
+				},
+			}
+
+			result, err, handled := fixture.reconciler.ensureHarnessV1ExecutionBinding(
+				ctx, fixture.task.DeepCopy(), fixture.agent,
+			)
+			if err != nil || !handled || result.RequeueAfter != 5*time.Second {
+				t.Fatalf("ensure binding = result=%#v handled=%v err=%v, want five-second requeue", result, handled, err)
+			}
+			current := &corev1alpha1.Task{}
+			if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.task), current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Phase == corev1alpha1.TaskPhaseFailed || current.Status.AgentExecutionBinding != nil {
+				t.Fatalf("transient resolution error terminalized or bound Task: %#v", current.Status)
+			}
+		})
+	}
+}
+
+func TestEnsureHarnessV1ExecutionBindingFailsPermanentPolicyViolation(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	policy := &corev1alpha1.AgentExecutionPolicy{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.policy), policy); err != nil {
+		t.Fatal(err)
+	}
+	policy.Spec.AllowNewV1Bindings = false
+	if err := fixture.reconciler.Update(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err, handled := fixture.reconciler.ensureHarnessV1ExecutionBinding(
+		ctx, fixture.task.DeepCopy(), fixture.agent,
+	)
+	if err != nil || !handled {
+		t.Fatalf("ensure binding = handled=%v err=%v, want permanent failure", handled, err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseFailed ||
+		!strings.Contains(current.Status.Message, "does not authorize new bindings") {
+		t.Fatalf("permanent policy violation status = %#v", current.Status)
+	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateMarksSpecViolationPermanent(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	task := fixture.task.DeepCopy()
+	task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{}
+
+	_, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent)
+	if err == nil || !isPermanentHarnessV1CandidateError(err) {
+		t.Fatalf("workspace violation error = %v, permanent=%v", err, isPermanentHarnessV1CandidateError(err))
+	}
+}
 
 func TestLoadVerifiedHarnessV1ExecutionForRecoveryControlRevision(t *testing.T) {
 	tests := []struct {
@@ -91,10 +205,17 @@ func TestLoadVerifiedHarnessV1ExecutionForRecoveryControlRevision(t *testing.T) 
 	}
 }
 
-func newHarnessV1RecoveryBindingFixture(
+type harnessV1CandidateFixture struct {
+	reconciler *TaskReconciler
+	task       *corev1alpha1.Task
+	agent      *corev1alpha1.Agent
+	policy     *corev1alpha1.AgentExecutionPolicy
+}
+
+func newHarnessV1CandidateFixture(
 	t *testing.T,
 	ctx context.Context,
-) (*TaskReconciler, *corev1alpha1.Task) {
+) *harnessV1CandidateFixture {
 	t.Helper()
 	const authSecretKey = "harness-auth"
 	control := bindingTestControl()
@@ -164,15 +285,30 @@ func newHarnessV1RecoveryBindingFixture(
 	reconciler.HarnessV1AuthSecretNamespace = authSecret.Namespace
 	reconciler.HarnessV1AuthSecretName = authSecret.Name
 	reconciler.HarnessV1AuthSecretKey = authSecretKey
+	return &harnessV1CandidateFixture{
+		reconciler: reconciler,
+		task:       task,
+		agent:      agent,
+		policy:     policy,
+	}
+}
 
-	if result, err, handled := reconciler.ensureHarnessV1ExecutionBinding(ctx, task.DeepCopy(), agent); err != nil || handled {
+func newHarnessV1RecoveryBindingFixture(
+	t *testing.T,
+	ctx context.Context,
+) (*TaskReconciler, *corev1alpha1.Task) {
+	t.Helper()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	if result, err, handled := fixture.reconciler.ensureHarnessV1ExecutionBinding(
+		ctx, fixture.task.DeepCopy(), fixture.agent,
+	); err != nil || handled {
 		t.Fatalf("establish harness v1 recovery fixture binding: result=%#v handled=%v err=%v", result, handled, err)
 	}
 	bound := &corev1alpha1.Task{}
-	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.task), bound); err != nil {
 		t.Fatal(err)
 	}
-	return reconciler, bound
+	return fixture.reconciler, bound
 }
 
 func updateHarnessV1RecoveryControl(

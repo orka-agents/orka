@@ -451,8 +451,7 @@ verify-coexistence-crds: ## Refuse workload deployment until the reviewed v1/v2 
 		"$(KUBECTL)" wait --for=condition=Established --timeout=60s "crd/$$crd.core.orka.ai" >/dev/null || { echo "coexistence CRD is not Established: $$crd.core.orka.ai" >&2; exit 1; }; \
 	done
 	@"$(KUBECTL)" get crd agentruntimes.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] as $$enums | \
-		($$enums | length) > 0 and ($$enums | all(sort == ["orka.harness.v1","orka.harness.v2"]))' >/dev/null || \
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] as $$enums | ($$enums | length) > 0 and ($$enums | all(sort == ["orka.harness.v1","orka.harness.v2"]))' >/dev/null || \
 		{ echo "AgentRuntime CRD is not the dual orka.harness.v1/orka.harness.v2 bridge schema; apply the reviewed coexistence CRD upgrade wave before workloads" >&2; exit 1; }
 	@COEXISTENCE=1 KUBECTL="$(KUBECTL)" scripts/check-legacy-wrapper-resources.sh
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness/ledger"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -124,6 +125,131 @@ func TestServerReceiptPersistenceFailureRetainsTurnAndClosesReadiness(t *testing
 	if readiness.Ready || readiness.Status != harness.HealthStatusUnhealthy ||
 		readiness.Metadata["terminalLedger"] != terminalLedgerPersistFailed {
 		t.Fatalf("readiness after receipt persistence failure = %#v", readiness)
+	}
+}
+
+func TestServerAcceptanceFailureReconcilesAdmissionWithIndependentContext(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	request := validWrapperStartTurnRequest()
+	durable, err := validateDurableTurnAdmission(request)
+	if err != nil {
+		t.Fatalf("validate durable admission: %v", err)
+	}
+	if _, _, err := server.ledger.AdmitTurn(
+		context.Background(), string(request.TurnID), durable.taskUID, durable.attempt, durable.requestDigest,
+		string(request.RuntimeSessionID), request.CorrelationID,
+	); err != nil {
+		t.Fatalf("admit durable turn: %v", err)
+	}
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := server.markDurableTurnAccepted(canceledCtx, turn); err == nil {
+		t.Fatal("markDurableTurnAccepted() error = nil, want canceled acceptance failure")
+	}
+
+	record, err := server.ledger.GetTurn(context.Background(), string(request.TurnID))
+	if err != nil {
+		t.Fatalf("GetTurn: %v", err)
+	}
+	if record.State != ledger.TurnRejected || record.RejectReason != durableAcceptanceRejectionReason {
+		t.Fatalf("durable record = %#v, want reconciled rejection", record)
+	}
+	if server.turnRegistry.active(request.TurnID) {
+		t.Fatal("reconciled acceptance failure retained the local turn")
+	}
+	if !server.admissionLedgerHealthy() {
+		t.Fatal("successful admission reconciliation closed readiness")
+	}
+}
+
+func TestServerAcceptanceReconcileFailureRetainsTurnAndClosesReadiness(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	request := validWrapperStartTurnRequest()
+	durable, err := validateDurableTurnAdmission(request)
+	if err != nil {
+		t.Fatalf("validate durable admission: %v", err)
+	}
+	if _, _, err := server.ledger.AdmitTurn(
+		context.Background(), string(request.TurnID), durable.taskUID, durable.attempt, durable.requestDigest,
+		string(request.RuntimeSessionID), request.CorrelationID,
+	); err != nil {
+		t.Fatalf("admit durable turn: %v", err)
+	}
+	if err := server.ledger.MarkTurnAccepted(context.Background(), string(request.TurnID)); err != nil {
+		t.Fatalf("seed accepted turn: %v", err)
+	}
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+	defer server.turnRegistry.reject(turn)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := server.markDurableTurnAccepted(canceledCtx, turn); err == nil {
+		t.Fatal("markDurableTurnAccepted() error = nil, want ambiguous acceptance failure")
+	}
+
+	if !server.turnRegistry.active(request.TurnID) {
+		t.Fatal("unreconciled acceptance failure released the local turn")
+	}
+	readinessRecorder := httptest.NewRecorder()
+	readinessRequest := httptest.NewRequest(http.MethodGet, harness.ReadinessPath, nil)
+	server.Handler().ServeHTTP(readinessRecorder, readinessRequest)
+	if readinessRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status code = %d, want 503", readinessRecorder.Code)
+	}
+	var readiness harness.HealthResponse
+	if err := json.Unmarshal(readinessRecorder.Body.Bytes(), &readiness); err != nil {
+		t.Fatalf("decode readiness response: %v", err)
+	}
+	if readiness.Ready || readiness.Status != harness.HealthStatusUnhealthy ||
+		readiness.Metadata["admissionLedger"] != admissionLedgerReconcileFailed {
+		t.Fatalf("readiness after admission reconciliation failure = %#v", readiness)
+	}
+
+	next := validWrapperStartTurnRequest()
+	next.TurnID = "turn-after-admission-reconcile-failure"
+	next.CorrelationID = "corr-after-admission-reconcile-failure"
+	next = sealDurableWrapperRequest(next)
+	body, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("marshal next request: %v", err)
+	}
+	startRecorder := httptest.NewRecorder()
+	startRequest := httptest.NewRequest(http.MethodPost, harness.TurnsPath, bytes.NewReader(body))
+	server.Handler().ServeHTTP(startRecorder, startRequest)
+	if startRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("StartTurn while admission ledger is unhealthy = %d, want 503", startRecorder.Code)
 	}
 }
 

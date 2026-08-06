@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -172,5 +173,102 @@ func TestAgentExecutionClassificationReconcilerWritesDispositionsLineageAndSeal(
 	}
 	if !sealedAgentExecutionClassification(gotControl) {
 		t.Fatalf("classification status = %#v, want exact Sealed marker", gotControl.Status.Classification)
+	}
+}
+
+func TestAgentExecutionClassificationBlocksActiveLegacySessionLease(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 6, 2, 0, 0, 0, time.UTC)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "bound", UID: "bound-uid", Generation: 1},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAgent,
+			SessionRef: &corev1alpha1.SessionReference{Name: "chat"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhasePending,
+			AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
+				SchemaVersion: 1, Mode: corev1alpha1.AgentExecutionBindingModeExecute,
+				ContractVersion:      corev1alpha1.AgentRuntimeContractHarnessV2,
+				Backend:              corev1alpha1.AgentExecutionBackendRuntimePool,
+				Provenance:           corev1alpha1.AgentExecutionProvenanceLegacyAdopted,
+				BindingDigest:        "sha256:" + strings.Repeat("1", 64),
+				RuntimeType:          corev1alpha1.AgentRuntimeCodex,
+				RuntimeProfileDigest: "sha256:" + strings.Repeat("2", 64),
+				Snapshot: corev1alpha1.AgentExecutionSnapshotRef{
+					ID:     "bound-uid/sha256:" + strings.Repeat("3", 64),
+					Digest: "sha256:" + strings.Repeat("3", 64), SchemaVersion: 1,
+				},
+			},
+		},
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}}
+
+	for _, tc := range []struct {
+		name                string
+		leaseVisibleInSweep bool
+	}{
+		{name: "visible in inventory", leaseVisibleInSweep: true},
+		{name: "appears after inventory read", leaseVisibleInSweep: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			current := &corev1alpha1.RuntimeSessionControl{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: "session-control", UID: "session-control-uid",
+				},
+				Spec: corev1alpha1.RuntimeSessionControlSpec{SessionName: "chat", SessionUID: "session-uid"},
+				Status: corev1alpha1.RuntimeSessionControlStatus{
+					MutationLeaseGeneration: 1,
+					MutationLease: &corev1alpha1.RuntimeSessionMutationLeaseStatus{
+						LeaseName: "runtime-session-lock", LeaseResourceVersion: "7", Generation: 1,
+						TaskUID: "bound-uid", Attempt: 1, PromptID: "prompt-1",
+						RequestDigest: "sha256:" + strings.Repeat("4", 64), AcquiredAt: metav1.NewTime(now),
+					},
+				},
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&corev1alpha1.RuntimeSessionControl{}).
+				WithObjects(current, namespace).Build()
+			var inventoryReader client.Reader = kubeClient
+			if !tc.leaseVisibleInSweep {
+				stale := current.DeepCopy()
+				stale.Status = corev1alpha1.RuntimeSessionControlStatus{}
+				inventoryReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(stale, namespace).Build()
+			}
+			reconciler := &AgentExecutionClassificationReconciler{
+				Client: kubeClient, APIReader: kubeClient, Now: func() time.Time { return now },
+			}
+			complete, mutated, _, err := reconciler.classifySessions(
+				context.Background(), inventoryReader, []corev1alpha1.Task{*task}, "inventory-1", nil,
+			)
+			if err != nil {
+				t.Fatalf("classifySessions() error = %v", err)
+			}
+			if complete || !mutated {
+				t.Fatalf("classifySessions() = complete %t, mutated %t; want false, true", complete, mutated)
+			}
+			got := &corev1alpha1.RuntimeSessionControl{}
+			if err := kubeClient.Get(context.Background(), types.NamespacedName{
+				Namespace: current.Namespace, Name: current.Name,
+			}, got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Status.Lineage != nil {
+				t.Fatalf("active legacy Lease gained status-only lineage: %#v", got.Status.Lineage)
+			}
+			if got.Status.Availability != corev1alpha1.RuntimeSessionControlAvailability("ReconciliationBlocked") ||
+				!strings.Contains(got.Status.BlockedReason, "inventory-1") {
+				t.Fatalf("Session block = %q, %q", got.Status.Availability, got.Status.BlockedReason)
+			}
+			if got.Status.MutationLease == nil || got.Status.MutationLease.RequestDigest != current.Status.MutationLease.RequestDigest {
+				t.Fatalf("Session mutation Lease changed = %#v", got.Status.MutationLease)
+			}
+		})
 	}
 }

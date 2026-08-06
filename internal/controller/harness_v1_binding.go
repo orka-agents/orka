@@ -51,6 +51,27 @@ type verifiedHarnessV1Execution struct {
 	frozenTask *corev1alpha1.Task
 }
 
+// permanentHarnessV1CandidateError marks deterministic Task, Agent, or
+// compatibility-policy violations. Candidate resolution errors without this
+// marker remain retryable because they may depend on mutable control-plane
+// state.
+type permanentHarnessV1CandidateError struct{ err error }
+
+func (e *permanentHarnessV1CandidateError) Error() string { return e.err.Error() }
+func (e *permanentHarnessV1CandidateError) Unwrap() error { return e.err }
+
+func permanentHarnessV1Candidate(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentHarnessV1CandidateError{err: err}
+}
+
+func isPermanentHarnessV1CandidateError(err error) bool {
+	var permanent *permanentHarnessV1CandidateError
+	return errors.As(err, &permanent)
+}
+
 //nolint:gocyclo // Candidate resolution keeps the fail-closed admission checks auditable in one path.
 func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	ctx context.Context,
@@ -60,11 +81,14 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	if r.AgentExecutionSnapshots == nil {
 		return nil, errors.New("encrypted agent execution snapshot store is required; v1 admission fails closed")
 	}
-	if task == nil || task.UID == "" || task.Generation < 1 || agent == nil || agent.UID == "" || agent.Generation < 1 || agent.Spec.Runtime == nil {
+	if task == nil || task.UID == "" || task.Generation < 1 || agent == nil || agent.UID == "" || agent.Generation < 1 {
 		return nil, errors.New("task and Agent immutable identities are required for a harness v1 binding")
 	}
+	if agent.Spec.Runtime == nil {
+		return nil, permanentHarnessV1Candidate(errors.New("Agent runtime configuration is required for a harness v1 binding"))
+	}
 	if err := validateNewHarnessV1Workload(task, agent); err != nil {
-		return nil, err
+		return nil, permanentHarnessV1Candidate(err)
 	}
 	reader := r.APIReader
 	if reader == nil {
@@ -88,6 +112,9 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	}
 	systemPrompt, err := resolveACPSystemPrompt(ctx, reader, agent)
 	if err != nil {
+		if isPermanentACPAgentConfigurationError(err) {
+			return nil, permanentHarnessV1Candidate(err)
+		}
 		return nil, err
 	}
 
@@ -114,7 +141,7 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	duplicateSafe := policy.Spec.RetryEligibility == corev1alpha1.AgentExecutionRetryDuplicateSafeOnly &&
 		target.backend == corev1alpha1.AgentExecutionBackendHarnessWrapper && len(credentialRefs) == 0
 	if task.Spec.RetryPolicy != nil && task.Spec.RetryPolicy.MaxRetries > 0 && !duplicateSafe {
-		return nil, errors.New("harness v1 retry requires a duplicate-safe built-in workload without provider credentials")
+		return nil, permanentHarnessV1Candidate(errors.New("harness v1 retry requires a duplicate-safe built-in workload without provider credentials"))
 	}
 	body := agentExecutionSnapshotBody{
 		SchemaVersion:   store.AgentExecutionSnapshotSchemaVersion,
@@ -258,15 +285,18 @@ func (r *TaskReconciler) resolveHarnessV1Policy(
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, policy); err != nil {
 		return nil, "", fmt.Errorf("read harness v1 compatibility policy %s/%s: %w", task.Namespace, name, err)
 	}
-	if policy.UID == "" || policy.Generation < 1 || !policy.Spec.AllowNewV1Bindings {
-		return nil, "", errors.New("harness v1 compatibility policy does not authorize new bindings")
+	if policy.UID == "" || policy.Generation < 1 {
+		return nil, "", errors.New("harness v1 compatibility policy identity is not ready")
+	}
+	if !policy.Spec.AllowNewV1Bindings {
+		return nil, "", permanentHarnessV1Candidate(errors.New("harness v1 compatibility policy does not authorize new bindings"))
 	}
 	if agent.Spec.Runtime.RuntimeRef == nil {
 		if !slices.Contains(policy.Spec.AllowedBuiltInRuntimeTypes, agent.Spec.Runtime.Type) {
-			return nil, "", fmt.Errorf("harness v1 policy does not allow built-in runtime %q", agent.Spec.Runtime.Type)
+			return nil, "", permanentHarnessV1Candidate(fmt.Errorf("harness v1 policy does not allow built-in runtime %q", agent.Spec.Runtime.Type))
 		}
 	} else if !policy.Spec.AllowTrustedObservedModeRuntimes {
-		return nil, "", errors.New("harness v1 policy does not allow trusted observed-mode external runtimes")
+		return nil, "", permanentHarnessV1Candidate(errors.New("harness v1 policy does not allow trusted observed-mode external runtimes"))
 	}
 	mandatory := []corev1alpha1.AgentExecutionProhibitedField{
 		corev1alpha1.AgentExecutionProhibitWorkspaceCredentials,
@@ -276,7 +306,7 @@ func (r *TaskReconciler) resolveHarnessV1Policy(
 	}
 	for _, field := range mandatory {
 		if !slices.Contains(policy.Spec.ProhibitedFields, field) {
-			return nil, "", fmt.Errorf("harness v1 policy is missing mandatory prohibition %q", field)
+			return nil, "", permanentHarnessV1Candidate(fmt.Errorf("harness v1 policy is missing mandatory prohibition %q", field))
 		}
 	}
 	digest, err := acpDomainDigest("agent-execution-policy", policy.Spec)
@@ -379,7 +409,7 @@ func resolveHarnessV1CredentialRefs(
 			continue
 		}
 		if strings.Contains(upper, "TXN_TOKEN") || strings.Contains(upper, "TX_TOKEN") || strings.Contains(upper, "TRANSACTION_TOKEN") || strings.Contains(upper, "KONTXT") {
-			return nil, fmt.Errorf("provider credential Secret key %q is prohibited for harness v1", key)
+			return nil, permanentHarnessV1Candidate(fmt.Errorf("provider credential Secret key %q is prohibited for harness v1", key))
 		}
 		keys = append(keys, key)
 	}
@@ -640,8 +670,12 @@ func (r *TaskReconciler) ensureHarnessV1ExecutionBinding(
 
 	candidate, err := r.resolveHarnessV1ExecutionCandidate(ctx, task, agent)
 	if err != nil {
-		result, failErr := r.failTask(ctx, task, err.Error())
-		return result, failErr, true
+		if isPermanentHarnessV1CandidateError(err) {
+			result, failErr := r.failTask(ctx, task, err.Error())
+			return result, failErr, true
+		}
+		log.Error(err, "harness v1 execution candidate resolution failed")
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
 	}
 	if err := r.persistAgentExecutionSnapshot(ctx, task, candidate); err != nil {
 		log.Error(err, "harness v1 immutable snapshot persistence failed")

@@ -31,9 +31,12 @@ import (
 )
 
 const (
-	maxTerminalResultBytes      = 512 * 1024
-	localOutputRef              = "cliwrapper-result-v1"
-	terminalLedgerPersistFailed = "persist-failed"
+	maxTerminalResultBytes           = 512 * 1024
+	localOutputRef                   = "cliwrapper-result-v1"
+	terminalLedgerPersistFailed      = "persist-failed"
+	admissionLedgerReconcileFailed   = "reconcile-failed"
+	durableAdmissionReconcileTimeout = 5 * time.Second
+	durableAcceptanceRejectionReason = "wrapper-durable-acceptance-failed"
 )
 
 type Server struct {
@@ -45,8 +48,9 @@ type Server struct {
 	turnRegistry *turnRegistry
 	ledger       *ledger.Ledger
 
-	healthMu          sync.RWMutex
-	terminalLedgerErr error
+	healthMu           sync.RWMutex
+	terminalLedgerErr  error
+	admissionLedgerErr error
 }
 
 type RuntimeSupportProvider interface {
@@ -230,6 +234,34 @@ func (s *Server) finishTurn(turn *turnState) {
 	s.scheduleTurnEviction(turn)
 }
 
+func (s *Server) markDurableTurnAccepted(ctx context.Context, turn *turnState) error {
+	acceptErr := s.ledger.MarkTurnAccepted(ctx, string(turn.id()))
+	if acceptErr == nil {
+		return nil
+	}
+
+	// AdmitTurn has already committed. Reconcile that durable admission before
+	// releasing the wrapper-local reservation, even if the request was canceled.
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		durableAdmissionReconcileTimeout,
+	)
+	rejectErr := s.ledger.MarkTurnRejected(
+		cleanupCtx,
+		string(turn.id()),
+		durableAcceptanceRejectionReason,
+	)
+	cancel()
+	if rejectErr != nil {
+		combinedErr := errors.Join(acceptErr, fmt.Errorf("reconcile durable turn admission: %w", rejectErr))
+		s.setAdmissionLedgerError(combinedErr)
+		return combinedErr
+	}
+
+	s.turnRegistry.reject(turn)
+	return acceptErr
+}
+
 func (s *Server) setTerminalLedgerError(err error) {
 	s.healthMu.Lock()
 	s.terminalLedgerErr = err
@@ -240,6 +272,18 @@ func (s *Server) terminalLedgerHealthy() bool {
 	s.healthMu.RLock()
 	defer s.healthMu.RUnlock()
 	return s.terminalLedgerErr == nil
+}
+
+func (s *Server) setAdmissionLedgerError(err error) {
+	s.healthMu.Lock()
+	s.admissionLedgerErr = err
+	s.healthMu.Unlock()
+}
+
+func (s *Server) admissionLedgerHealthy() bool {
+	s.healthMu.RLock()
+	defer s.healthMu.RUnlock()
+	return s.admissionLedgerErr == nil
 }
 
 func (s *Server) scheduleTurnEviction(turn *turnState) {
@@ -295,6 +339,11 @@ func (s *Server) healthResponse() harness.HealthResponse {
 		status = harness.HealthStatusUnhealthy
 		ready = false
 		metadata["terminalLedger"] = terminalLedgerPersistFailed
+	}
+	if !s.admissionLedgerHealthy() {
+		status = harness.HealthStatusUnhealthy
+		ready = false
+		metadata["admissionLedger"] = admissionLedgerReconcileFailed
 	}
 	return harness.HealthResponse{
 		Version:   harness.ProtocolVersion,
@@ -564,6 +613,10 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if !s.admissionLedgerHealthy() {
+		writeSafeError(w, http.StatusServiceUnavailable, "durable turn admission is unavailable")
+		return
+	}
 	var request harness.StartTurnRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeSafeError(w, http.StatusBadRequest, "invalid JSON request")
@@ -638,8 +691,7 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.ledger != nil {
-		if err := s.ledger.MarkTurnAccepted(r.Context(), string(request.TurnID)); err != nil {
-			s.turnRegistry.reject(state)
+		if err := s.markDurableTurnAccepted(r.Context(), state); err != nil {
 			writeSafeError(w, http.StatusServiceUnavailable, "durable turn acceptance failed")
 			return
 		}

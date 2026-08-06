@@ -743,6 +743,14 @@ type sessionClassificationClaim struct {
 	Ambiguous       bool
 }
 
+type sessionLineagePatchOutcome uint8
+
+const (
+	sessionLineagePatchUnchanged sessionLineagePatchOutcome = iota
+	sessionLineagePatchAdopted
+	sessionLineagePatchBlocked
+)
+
 func (r *AgentExecutionClassificationReconciler) classifySessions(
 	ctx context.Context,
 	reader client.Reader,
@@ -835,12 +843,12 @@ func (r *AgentExecutionClassificationReconciler) classifySessions(
 			ConfigDigest: claim.ConfigDigest, Provenance: corev1alpha1.RuntimeSessionLineageLegacyAdopted,
 			EstablishedAt: metav1.NewTime(r.now()),
 		}
-		mutated, err := r.patchSessionLineage(ctx, control, lineage)
+		outcome, err := r.patchSessionLineage(ctx, control, lineage, inventoryID)
 		if err != nil {
 			return false, false, nil, err
 		}
-		if mutated {
-			if r.SessionLineages != nil {
+		if outcome != sessionLineagePatchUnchanged {
+			if outcome == sessionLineagePatchAdopted && r.SessionLineages != nil {
 				_, err = r.SessionLineages.ProjectSessionLineage(ctx, store.SessionLineage{
 					Namespace: control.Namespace, SessionName: control.Spec.SessionName,
 					NamespaceUID: string(namespace.UID), SessionUID: control.Spec.SessionUID,
@@ -863,24 +871,35 @@ func (r *AgentExecutionClassificationReconciler) patchSessionLineage(
 	ctx context.Context,
 	control *corev1alpha1.RuntimeSessionControl,
 	lineage *corev1alpha1.RuntimeSessionLineageStatus,
-) (bool, error) {
+	inventoryID string,
+) (sessionLineagePatchOutcome, error) {
 	current := &corev1alpha1.RuntimeSessionControl{}
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: control.Namespace, Name: control.Name}, current); err != nil {
-		return false, err
+		return sessionLineagePatchUnchanged, err
 	}
 	if current.UID != control.UID || current.Status.Lineage != nil {
-		return false, nil
+		return sessionLineagePatchUnchanged, nil
 	}
 	base := current.DeepCopy()
-	current.Status.Lineage = lineage.DeepCopy()
-	if err := r.Status().Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-		return false, err
+	outcome := sessionLineagePatchAdopted
+	if current.Status.MutationLease != nil {
+		// Legacy mutation Leases do not carry the lineage digest required by the
+		// v2 Lease protocol. Appending lineage to status alone would permanently
+		// split the status and authoritative Lease, so require adjudication.
+		current.Status.Availability = corev1alpha1.RuntimeSessionControlAvailability("ReconciliationBlocked")
+		current.Status.BlockedReason = "sealed inventory " + inventoryID + " found ambiguous runtime lineage"
+		outcome = sessionLineagePatchBlocked
+	} else {
+		current.Status.Lineage = lineage.DeepCopy()
 	}
-	return true, nil
+	if err := r.Status().Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return sessionLineagePatchUnchanged, err
+	}
+	return outcome, nil
 }
 
 func (r *AgentExecutionClassificationReconciler) blockSessionClassification(
