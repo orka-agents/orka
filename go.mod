@@ -11,7 +11,7 @@ require (
 	github.com/gofiber/fiber/v3 v3.4.0
 	github.com/google/jsonschema-go v0.4.2
 	github.com/google/uuid v1.6.0
-	github.com/lestrrat-go/jwx/v3 v3.1.1
+	github.com/lestrrat-go/jwx/v3 v3.2.0
 	github.com/onsi/ginkgo/v2 v2.32.0
 	github.com/onsi/gomega v1.42.1
 	github.com/openai/openai-go/v3 v3.47.0
@@ -108,10 +108,10 @@ require (
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/lestrrat-go/blackmagic v1.0.4 // indirect
-	github.com/lestrrat-go/dsig v1.2.1 // indirect
+	github.com/lestrrat-go/dsig v1.3.0 // indirect
 	github.com/lestrrat-go/dsig-secp256k1 v1.0.0 // indirect
 	github.com/lestrrat-go/httpcc v1.0.1 // indirect
-	github.com/lestrrat-go/httprc/v3 v3.0.5 // indirect
+	github.com/lestrrat-go/httprc/v3 v3.0.6 // indirect
 	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
