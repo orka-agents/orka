@@ -249,6 +249,7 @@ metadata:
   namespace: ${test_namespace}
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: codex
     defaultMaxTurns: 1
     defaultAllowBash: false

@@ -219,11 +219,28 @@ describe('workspaceConfigSchema', () => {
 })
 
 describe('agentRuntimeSpecSchema', () => {
-  it('parses governed tool overrides without a duplicate workspace', () => {
+  it('parses governed tool overrides', () => {
     const data = { allowedTools: ['read'], disallowedTools: ['write'], allowBash: false }
     expect(agentRuntimeSpecSchema.parse(data)).toEqual(data)
     expect(agentRuntimeSpecSchema.parse({ maxTurns: 50 })).toEqual({ maxTurns: 50 })
-    expect(() => agentRuntimeSpecSchema.parse({ workspace: { gitRepo: 'legacy' } })).toThrow()
+    expect(() => agentRuntimeSpecSchema.parse({ unknownField: true })).toThrow()
+  })
+
+  it('parses the preserved legacy harness v1 workspace surface', () => {
+    // Stored v1 Tasks keep spec.agentRuntime.workspace as a read-only
+    // coexistence compatibility surface; the CRD forbids introducing it on
+    // new Tasks, but the UI must render stored objects without pruning.
+    const legacy = {
+      workspace: {
+        gitRepo: 'https://github.com/org/repo.git',
+        branch: 'main',
+        gitSecretRef: { name: 'git-credentials' },
+        forkRepo: 'https://github.com/bot/repo.git',
+        pushBranch: 'agent/fix-1',
+      },
+      maxTurns: 25,
+    }
+    expect(agentRuntimeSpecSchema.parse(legacy)).toEqual(legacy)
   })
 })
 

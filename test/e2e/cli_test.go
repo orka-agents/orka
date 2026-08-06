@@ -285,6 +285,7 @@ metadata:
   name: %s
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: claude
     defaultMaxTurns: 5
     defaultAllowBash: false
@@ -296,6 +297,7 @@ metadata:
   name: %s
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: claude
     defaultMaxTurns: 7
     defaultAllowBash: false

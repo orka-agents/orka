@@ -9,6 +9,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
@@ -122,7 +123,8 @@ func TestPlanACPRuntimeHashesNormalizedDenyOnlyProviderNativePolicy(t *testing.T
 				Spec: corev1alpha1.AgentSpec{
 					Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
 					Runtime: &corev1alpha1.AgentCLIRuntime{
-						Type: test.provider,
+						Type:            test.provider,
+						ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
 					},
 				},
 			}
@@ -171,7 +173,10 @@ func TestPlanACPRuntimeTreatsExplicitEmptyDisallowedAsUnrestricted(t *testing.T)
 			}}
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{UID: types.UID("agent-uid"), Generation: 1},
-				Spec:       corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{Type: tt.runtime}},
+				Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{
+					Type:            tt.runtime,
+					ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				}},
 			}
 			if _, err := PlanACPRuntime(task, agent, tt.images); err != nil {
 				t.Fatalf("PlanACPRuntime() rejected explicit deny-none policy: %v", err)
@@ -190,8 +195,11 @@ func TestPlanACPRuntimeRejectsCodexExplicitEmptyProviderNativePolicy(t *testing.
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeCodex,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	_, err := PlanACPRuntime(
@@ -213,8 +221,11 @@ func TestPlanACPRuntimeRejectsCodexDenyOnlyProviderNativePolicy(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeCodex,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	_, err := PlanACPRuntime(
@@ -237,8 +248,11 @@ func TestPlanACPRuntimeRejectsCopilotDenyOnlyPolicyThatRetainsWebSearch(t *testi
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeCopilot,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	_, err := PlanACPRuntime(
@@ -258,6 +272,7 @@ func TestPlanACPRuntimeDeterministicAndIntentScoped(t *testing.T) {
 			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type: corev1alpha1.AgentRuntimeCodex, DefaultMaxTurns: &maxTurns, DefaultReasoningEffort: "high",
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -302,7 +317,10 @@ func TestPlanACPRuntimeDeterministicAndIntentScoped(t *testing.T) {
 }
 
 func TestPlanACPRuntimeRequiresModelAndPinnedImage(t *testing.T) {
-	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}}}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type:            corev1alpha1.AgentRuntimeCodex,
+		ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+	}}}
 	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent}}
 	if _, err := PlanACPRuntime(task, agent, ACPRuntimeImages{}); err == nil {
 		t.Fatal("missing model unexpectedly accepted")
@@ -318,8 +336,11 @@ func TestPlanACPRuntimeSelectsCopilotProfileAndPinnedImage(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{UID: types.UID("copilot-agent"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: "gpt-5"},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+			Model: &corev1alpha1.ModelConfig{Name: "gpt-5"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeCopilot,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent}}
@@ -349,8 +370,11 @@ func TestPlanACPRuntimePreservesExplicitEmptyAllowedTools(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: "claude-test"},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+			Model: &corev1alpha1.ModelConfig{Name: "claude-test"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeClaude,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent}}
@@ -381,8 +405,11 @@ func TestPlanACPRuntimeOpenCodeUsesNativeACPImage(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{UID: types.UID("opencode-agent-uid"), Generation: 2},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   testOpenCodeModelConfig(),
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent}}
@@ -508,8 +535,11 @@ func TestPlanACPRuntimePoolIdentityRotatesWithImageDigest(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeClaude,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	first, err := PlanACPRuntime(task, agent, ACPRuntimeImages{

@@ -15,7 +15,7 @@ import (
 
 // AgentSpec defines the desired state of Agent
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)",message="execution.workspace.classRef is only supported on Task specs"
-// +kubebuilder:validation:XValidation:rule="!(has(self.runtime) && has(self.runtime.type) && self.runtime.type == 'opencode' && has(self.systemPrompt) && ((has(self.systemPrompt.inline) && self.systemPrompt.inline.size() > 0) || has(self.systemPrompt.configMapRef)))",message="opencode runtime does not support spec.systemPrompt"
+// +kubebuilder:validation:XValidation:rule="!(has(self.runtime) && has(self.runtime.type) && self.runtime.type == 'opencode' && has(self.runtime.contractVersion) && self.runtime.contractVersion == 'orka.harness.v2' && has(self.systemPrompt) && ((has(self.systemPrompt.inline) && self.systemPrompt.inline.size() > 0) || has(self.systemPrompt.configMapRef)))",message="opencode orka.harness.v2 runtime does not support spec.systemPrompt"
 type AgentSpec struct {
 	// ProviderRef references a Provider CRD for LLM configuration
 	// If set, model.provider is optional (inherited from Provider)
@@ -77,10 +77,20 @@ type AgentSpec struct {
 
 // AgentCLIRuntime defines agent CLI runtime configuration for an Agent.
 // +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="runtime.contractVersion is immutable once set"
+// +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || has(self.type)",message="runtime.contractVersion applies only to built-in runtime types; runtimeRef derives the protocol from the referenced AgentRuntime"
 type AgentCLIRuntime struct {
 	// Type specifies which built-in CLI runtime to use. Use runtimeRef for admin-registered custom runtimes.
 	// +optional
 	Type AgentRuntimeType `json:"type,omitempty"`
+
+	// ContractVersion is the immutable harness protocol selector for built-in
+	// runtime types. There is no default: a missing selector is never
+	// interpreted as either protocol, and fail-closed admission requires an
+	// explicit value on new built-in Agents. runtime.type alone (including
+	// opencode, which exists in both protocols) is never protocol evidence.
+	// +optional
+	ContractVersion *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
 
 	// RuntimeRef selects an admin-governed AgentRuntime for custom/BYO harness runtimes.
 	// +optional
@@ -114,12 +124,13 @@ type AgentCLIRuntime struct {
 // slices would otherwise serialize both states as omission.
 func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 	type agentCLIRuntimeJSON struct {
-		Type                   AgentRuntimeType       `json:"type,omitempty"`
-		RuntimeRef             *AgentRuntimeReference `json:"runtimeRef,omitempty"`
-		DefaultMaxTurns        *int32                 `json:"defaultMaxTurns,omitempty"`
-		DefaultAllowedTools    *[]string              `json:"defaultAllowedTools,omitempty"`
-		DefaultAllowBash       *bool                  `json:"defaultAllowBash,omitempty"`
-		DefaultReasoningEffort string                 `json:"defaultReasoningEffort,omitempty"`
+		Type                   AgentRuntimeType             `json:"type,omitempty"`
+		ContractVersion        *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
+		RuntimeRef             *AgentRuntimeReference       `json:"runtimeRef,omitempty"`
+		DefaultMaxTurns        *int32                       `json:"defaultMaxTurns,omitempty"`
+		DefaultAllowedTools    *[]string                    `json:"defaultAllowedTools,omitempty"`
+		DefaultAllowBash       *bool                        `json:"defaultAllowBash,omitempty"`
+		DefaultReasoningEffort string                       `json:"defaultReasoningEffort,omitempty"`
 	}
 	var defaultAllowedTools *[]string
 	if in.DefaultAllowedTools != nil {
@@ -128,12 +139,24 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(agentCLIRuntimeJSON{
 		Type:                   in.Type,
+		ContractVersion:        in.ContractVersion,
 		RuntimeRef:             in.RuntimeRef,
 		DefaultMaxTurns:        in.DefaultMaxTurns,
 		DefaultAllowedTools:    defaultAllowedTools,
 		DefaultAllowBash:       in.DefaultAllowBash,
 		DefaultReasoningEffort: in.DefaultReasoningEffort,
 	})
+}
+
+// BuiltInContractVersion returns the Agent's explicit built-in harness
+// protocol selector, or empty when unclassified. Callers must treat empty as
+// neither protocol and fail closed; runtime.type alone is never protocol
+// evidence.
+func (in *Agent) BuiltInContractVersion() AgentRuntimeContractVersion {
+	if in == nil || in.Spec.Runtime == nil || in.Spec.Runtime.ContractVersion == nil {
+		return ""
+	}
+	return *in.Spec.Runtime.ContractVersion
 }
 
 // ModelFallback defines a fallback provider configuration

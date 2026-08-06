@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -53,8 +54,11 @@ func TestQueueACPRuntimeTaskRebindsOnlyQuiescentReservedAttemptAfterRuntimeImage
 					UID: types.UID("33220495-a4a7-4f3e-9e07-8f3901048de5"), Generation: 3,
 				},
 				Spec: corev1alpha1.AgentSpec{
-					Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+					Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+					Runtime: &corev1alpha1.AgentCLIRuntime{
+						Type:            corev1alpha1.AgentRuntimeCodex,
+						ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+					},
 				},
 			}
 			oldImage := "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)

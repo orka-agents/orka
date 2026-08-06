@@ -87,9 +87,17 @@ func (r *TaskReconciler) planAgentExecution(
 
 	switch agent.Spec.Runtime.Type {
 	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode:
-		return agentACPPlan()
 	default:
 		return rejectAgentExecutionPlan(fmt.Sprintf("agent runtime %q is not supported by the ACP core runtime", agent.Spec.Runtime.Type))
+	}
+
+	switch agent.BuiltInContractVersion() {
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		return agentACPPlan()
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		return rejectAgentExecutionPlan("agent is classified orka.harness.v1; the harness v1 execution plane is not enabled on this release and v2 execution never substitutes for it")
+	default:
+		return rejectAgentExecutionPlan("agent runtime.contractVersion is unclassified; a missing selector is never interpreted as either protocol and execution admission fails closed")
 	}
 }
 
@@ -98,13 +106,14 @@ func externalAgentRuntimeDispatchUnsupportedReason(name string) string {
 }
 
 func externalAgentRuntimeReadinessReason(task *corev1alpha1.Task, runtime *corev1alpha1.AgentRuntime) string {
-	if runtime == nil || runtime.Spec.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2 {
+	if runtime == nil || runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
 		return "external AgentRuntime must use orka.harness.v2"
 	}
 	if !runtime.Status.Ready || runtime.Status.ObservedGeneration != runtime.Generation || runtime.Status.ObservedCapabilities == nil {
 		return fmt.Sprintf("external AgentRuntime %q has not passed current-generation v2 conformance", runtime.Name)
 	}
-	if runtime.Spec.Capabilities == nil || runtime.Status.ObservedCapabilities.RuntimeInstanceID == "" ||
+	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.Profile == nil ||
+		runtime.Status.ObservedCapabilities.RuntimeInstanceID == "" ||
 		runtime.Status.ObservedCapabilities.RuntimeProfileDigest != runtime.Spec.Capabilities.Profile.Digest {
 		return fmt.Sprintf("external AgentRuntime %q does not have an exact observed runtime identity/profile", runtime.Name)
 	}

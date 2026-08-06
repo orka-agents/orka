@@ -2920,7 +2920,7 @@ func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *core
 		int64(status.Fence.RuntimePoolGeneration) != observed.RuntimePoolGeneration || string(status.Fence.RuntimeProfileDigest) != runtime.Spec.Capabilities.Profile.Digest {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external AgentRuntime status fence drifted after conformance")
 	}
-	profile, err := agentRuntimeProfile(runtime.Spec.Capabilities.Profile)
+	profile, err := agentRuntimeProfile(*runtime.Spec.Capabilities.Profile)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}

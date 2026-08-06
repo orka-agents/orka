@@ -1391,6 +1391,17 @@ spec:
                   Runtime configures this Agent for external CLI runtimes (type: agent tasks).
                   When set, this Agent is for type: agent tasks only (mutually exclusive with providerRef).
                 properties:
+                  contractVersion:
+                    description: |-
+                      ContractVersion is the immutable harness protocol selector for built-in
+                      runtime types. There is no default: a missing selector is never
+                      interpreted as either protocol, and fail-closed admission requires an
+                      explicit value on new built-in Agents. runtime.type alone (including
+                      opencode, which exists in both protocols) is never protocol evidence.
+                    enum:
+                    - orka.harness.v1
+                    - orka.harness.v2
+                    type: string
                   defaultAllowBash:
                     description: |-
                       DefaultAllowBash controls whether bash is allowed by default for tasks using this Agent.
@@ -1446,6 +1457,12 @@ spec:
                 x-kubernetes-validations:
                 - message: exactly one of type or runtimeRef is required
                   rule: has(self.type) != has(self.runtimeRef)
+                - message: runtime.contractVersion is immutable once set
+                  rule: '!has(oldSelf.contractVersion) || (has(self.contractVersion)
+                    && self.contractVersion == oldSelf.contractVersion)'
+                - message: runtime.contractVersion applies only to built-in runtime
+                    types; runtimeRef derives the protocol from the referenced AgentRuntime
+                  rule: '!has(self.contractVersion) || has(self.type)'
               secretRef:
                 description: SecretRef references a Secret containing LLM API keys
                 properties:
@@ -1559,9 +1576,10 @@ spec:
             x-kubernetes-validations:
             - message: execution.workspace.classRef is only supported on Task specs
               rule: '!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)'
-            - message: opencode runtime does not support spec.systemPrompt
+            - message: opencode orka.harness.v2 runtime does not support spec.systemPrompt
               rule: '!(has(self.runtime) && has(self.runtime.type) && self.runtime.type
-                == ''opencode'' && has(self.systemPrompt) && ((has(self.systemPrompt.inline)
+                == ''opencode'' && has(self.runtime.contractVersion) && self.runtime.contractVersion
+                == ''orka.harness.v2'' && has(self.systemPrompt) && ((has(self.systemPrompt.inline)
                 && self.systemPrompt.inline.size() > 0) || has(self.systemPrompt.configMapRef)))'
           status:
             description: AgentStatus defines the observed state of Agent

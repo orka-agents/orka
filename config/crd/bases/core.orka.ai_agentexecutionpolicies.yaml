@@ -1,0 +1,176 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: agentexecutionpolicies.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    kind: AgentExecutionPolicy
+    listKind: AgentExecutionPolicyList
+    plural: agentexecutionpolicies
+    shortNames:
+    - aexpol
+    singular: agentexecutionpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.allowNewV1Bindings
+      name: V1Admission
+      type: boolean
+    - jsonPath: .spec.networkIsolationProfile
+      name: Isolation
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentExecutionPolicy is the cluster-admin-owned harness v1 compatibility
+          policy for one trust domain. It is namespaced to the trust domain but
+          writable only by administrators.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              AgentExecutionPolicySpec is the admin-owned compatibility policy that new
+              v1 bindings must be evaluated against. The evaluated policy UID, generation,
+              and digest are frozen into each Task binding; later policy changes never
+              broaden an existing binding.
+            properties:
+              allowNewV1Bindings:
+                description: |-
+                  AllowNewV1Bindings gates creation of new v1 execution bindings in this
+                  trust domain. Adopted legacy and cleanup-only work is unaffected.
+                type: boolean
+              allowPublicReadOnlyWorkspaces:
+                description: |-
+                  AllowPublicReadOnlyWorkspaces admits v1 workloads whose workspace is a
+                  public repository technically mounted read-only with write tools disabled
+                  and publication-blocking network policy.
+                type: boolean
+              allowTrustedObservedModeRuntimes:
+                description: |-
+                  AllowTrustedObservedModeRuntimes admits external v1 runtimes that execute
+                  tools in observed mode. Such runtimes are trusted/non-governed and never
+                  satisfy strict-governance claims.
+                type: boolean
+              allowedBrokeredToolClasses:
+                description: |-
+                  AllowedBrokeredToolClasses lists tool classes Orka may broker for v1
+                  runtimes. Empty or omitted allows none.
+                items:
+                  description: |-
+                    AgentRuntimeBrokeredToolClass classifies Tool CRDs. It is shared by the Tool
+                    API and by harness v1 AgentRuntime capability declarations.
+                  enum:
+                  - read
+                  - write
+                  - coordination
+                  type: string
+                maxItems: 8
+                type: array
+                x-kubernetes-list-type: set
+              allowedBuiltInRuntimeTypes:
+                description: |-
+                  AllowedBuiltInRuntimeTypes lists built-in runtime types admitted for new
+                  v1 bindings. Empty or omitted allows none.
+                items:
+                  description: AgentRuntimeType defines the agent runtime to use
+                  enum:
+                  - claude
+                  - codex
+                  - copilot
+                  - opencode
+                  type: string
+                maxItems: 8
+                type: array
+                x-kubernetes-list-type: set
+              networkIsolationProfile:
+                description: |-
+                  NetworkIsolationProfile is the wrapper isolation posture required for
+                  workloads admitted under this policy.
+                enum:
+                - default-deny
+                - per-trust-domain
+                type: string
+              prohibitedFields:
+                description: |-
+                  ProhibitedFields records the field families rejected for new v1 bindings.
+                  The mandatory floors are enforced structurally and cannot be removed.
+                items:
+                  description: |-
+                    AgentExecutionProhibitedField names one field family that stays rejected for
+                    new v1 bindings. The mandatory floors cannot be removed from a policy.
+                  enum:
+                  - workspace-credentials
+                  - forge-credentials
+                  - direct-publication
+                  - transaction-tokens
+                  - observed-write-tools
+                  type: string
+                maxItems: 8
+                minItems: 4
+                type: array
+                x-kubernetes-list-type: set
+              retryEligibility:
+                description: RetryEligibility bounds v1 retry behavior for workloads
+                  under this policy.
+                enum:
+                - none
+                - duplicate-safe-only
+                type: string
+            required:
+            - allowNewV1Bindings
+            - networkIsolationProfile
+            - prohibitedFields
+            - retryEligibility
+            type: object
+            x-kubernetes-validations:
+            - message: prohibitedFields must retain the mandatory fail-closed floors
+              rule: '[''workspace-credentials'',''forge-credentials'',''direct-publication'',''transaction-tokens''].all(f,
+                f in self.prohibitedFields)'
+            - message: new v1 OpenCode bindings are prohibited; legacy v1 OpenCode
+                is sealed-inventory adoption only
+              rule: '!has(self.allowedBuiltInRuntimeTypes) || !(''opencode'' in self.allowedBuiltInRuntimeTypes)'
+          status:
+            description: |-
+              AgentExecutionPolicyStatus publishes the controller-computed policy digest
+              recorded into bindings evaluated against this generation.
+            properties:
+              observedGeneration:
+                format: int64
+                type: integer
+              specDigest:
+                description: SpecDigest is the canonical digest of the observed policy
+                  spec.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

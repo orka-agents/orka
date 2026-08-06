@@ -87,15 +87,15 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if err != nil {
 		return nil, false, "", "", err.Error()
 	}
-	profile, err := agentRuntimeProfile(runtime.Spec.Capabilities.Profile)
+	profile, err := agentRuntimeProfile(*runtime.Spec.Capabilities.Profile)
 	if err != nil {
 		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
 	}
-	limits, err := agentRuntimeProtocolLimits(runtime.Spec.Capabilities.Limits)
+	limits, err := agentRuntimeProtocolLimits(*runtime.Spec.Capabilities.Limits)
 	if err != nil {
 		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
 	}
-	governance, err := agentRuntimeWorkspaceGovernance(runtime.Spec.Capabilities.WorkspaceGovernance)
+	governance, err := agentRuntimeWorkspaceGovernance(*runtime.Spec.Capabilities.WorkspaceGovernance)
 	if err != nil {
 		return nil, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
 	}
@@ -159,8 +159,13 @@ func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 	if runtime == nil {
 		return fmt.Errorf("AgentRuntime is required")
 	}
-	if runtime.Spec.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2 {
-		return fmt.Errorf("unsupported AgentRuntime contractVersion %q; want %q", runtime.Spec.ContractVersion, corev1alpha1.AgentRuntimeContractHarnessV2)
+	switch runtime.RegisteredContractVersion() {
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		return fmt.Errorf("orka.harness.v1 AgentRuntime registration is preserved but not probeable until the coexistence v1 dispatcher is enabled")
+	default:
+		return fmt.Errorf("AgentRuntime contractVersion is unclassified; explicit %q or %q classification is required and omission is never protocol evidence",
+			corev1alpha1.AgentRuntimeContractHarnessV1, corev1alpha1.AgentRuntimeContractHarnessV2)
 	}
 	if runtime.Spec.Deployment.Mode != corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint {
 		return fmt.Errorf("unsupported AgentRuntime deployment mode %q", runtime.Spec.Deployment.Mode)
@@ -182,13 +187,16 @@ func validateAgentRuntimeEndpointSpec(endpoint string) error {
 }
 
 func validateAgentRuntimeClientAuthSpec(auth corev1alpha1.AgentRuntimeClientAuth) error {
-	if auth.ControllerBearerTokenSecretRef.Name == "" || auth.ControllerBearerTokenSecretRef.Key == "" {
+	if auth.BearerAuthRef != nil {
+		return fmt.Errorf("orka.harness.v2 AgentRuntime must not carry the legacy v1 bearerTokenSecretRef auth shape")
+	}
+	if auth.ControllerBearerTokenSecretRef == nil || auth.ControllerBearerTokenSecretRef.Name == "" || auth.ControllerBearerTokenSecretRef.Key == "" {
 		return fmt.Errorf("AgentRuntime controllerBearerTokenSecretRef name and key are required")
 	}
-	if auth.OperationCapabilitySecretRef.Name == "" || auth.OperationCapabilitySecretRef.Key == "" {
+	if auth.OperationCapabilitySecretRef == nil || auth.OperationCapabilitySecretRef.Name == "" || auth.OperationCapabilitySecretRef.Key == "" {
 		return fmt.Errorf("AgentRuntime operationCapabilitySecretRef name and key are required")
 	}
-	if auth.ControllerBearerTokenSecretRef == auth.OperationCapabilitySecretRef {
+	if *auth.ControllerBearerTokenSecretRef == *auth.OperationCapabilitySecretRef {
 		return fmt.Errorf("controller bearer token and operation capability must use distinct Secret keys")
 	}
 	return nil
@@ -198,10 +206,18 @@ func validateAgentRuntimeCapabilitiesSpec(capabilities *corev1alpha1.AgentRuntim
 	if capabilities == nil {
 		return fmt.Errorf("AgentRuntime capabilities are required")
 	}
+	if capabilities.Profile == nil || capabilities.Limits == nil || capabilities.WorkspaceGovernance == nil {
+		return fmt.Errorf("orka.harness.v2 AgentRuntime capabilities require profile, limits, and workspaceGovernance")
+	}
+	if len(capabilities.ToolExecutionModes) > 0 || len(capabilities.BrokeredToolClasses) > 0 ||
+		capabilities.SupportsCancel != nil || capabilities.SupportsRuntimeSessions != nil ||
+		capabilities.SupportsContinuation != nil || capabilities.SupportsArtifacts != nil {
+		return fmt.Errorf("orka.harness.v2 AgentRuntime capabilities must not carry harness v1 capability fields")
+	}
 	if _, err := harnessv2.PathSegment("runtime instance ID", capabilities.RuntimeInstanceID); err != nil {
 		return fmt.Errorf("AgentRuntime capabilities.runtimeInstanceID: %w", err)
 	}
-	profile, err := agentRuntimeProfile(capabilities.Profile)
+	profile, err := agentRuntimeProfile(*capabilities.Profile)
 	if err != nil {
 		return err
 	}
@@ -212,10 +228,10 @@ func validateAgentRuntimeCapabilitiesSpec(capabilities *corev1alpha1.AgentRuntim
 	if string(digest) != capabilities.Profile.Digest {
 		return fmt.Errorf("AgentRuntime profile digest %q does not match canonical digest %q", capabilities.Profile.Digest, digest)
 	}
-	if _, err := agentRuntimeProtocolLimits(capabilities.Limits); err != nil {
+	if _, err := agentRuntimeProtocolLimits(*capabilities.Limits); err != nil {
 		return err
 	}
-	governance, err := agentRuntimeWorkspaceGovernance(capabilities.WorkspaceGovernance)
+	governance, err := agentRuntimeWorkspaceGovernance(*capabilities.WorkspaceGovernance)
 	if err != nil {
 		return err
 	}
@@ -379,8 +395,11 @@ func validateAgentRuntimeAuthSecretUse(runtimeName string, endpoint string, secr
 }
 
 func (r *AgentRuntimeReconciler) agentRuntimeAuthMaterial(ctx context.Context, runtime *corev1alpha1.AgentRuntime) (agentRuntimeAuthMaterial, error) {
-	controllerRef := runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef
-	capabilityRef := runtime.Spec.ClientAuth.OperationCapabilitySecretRef
+	if runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef == nil || runtime.Spec.ClientAuth.OperationCapabilitySecretRef == nil {
+		return agentRuntimeAuthMaterial{}, fmt.Errorf("AgentRuntime v2 client auth references are required")
+	}
+	controllerRef := *runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef
+	capabilityRef := *runtime.Spec.ClientAuth.OperationCapabilitySecretRef
 	controllerSecret, err := r.getAgentRuntimeAuthSecret(ctx, runtime, controllerRef)
 	if err != nil {
 		return agentRuntimeAuthMaterial{}, fmt.Errorf("controller bearer token: %w", err)

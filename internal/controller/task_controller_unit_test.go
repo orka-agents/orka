@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -481,8 +482,11 @@ func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRuntime(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   testOpenCodeModelConfig(),
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
@@ -494,8 +498,11 @@ func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRejectsSecretRef(t *tes
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
 	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "a1"}, Spec: corev1alpha1.AgentSpec{
-		Model:     testOpenCodeModelConfig(),
-		Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+		Model: testOpenCodeModelConfig(),
+		Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type:            corev1alpha1.AgentRuntimeOpencode,
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+		},
 		SecretRef: &corev1.LocalObjectReference{Name: "legacy-opencode-secret"},
 	}}
 	err := r.validateTaskAgentCompatibility(task, agent)
@@ -511,6 +518,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRejectsReasoningEffort(
 		Model: testOpenCodeModelConfig(),
 		Runtime: &corev1alpha1.AgentCLIRuntime{
 			Type:                   corev1alpha1.AgentRuntimeOpencode,
+			ContractVersion:        ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
 			DefaultReasoningEffort: agentReasoningEffortHigh,
 		},
 	}}
@@ -524,8 +532,11 @@ func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRejectsSubstitutionMode
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
 	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "a1"}, Spec: corev1alpha1.AgentSpec{
-		Model:   &corev1alpha1.ModelConfig{Name: "{file:/proc/self/environ}"},
-		Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+		Model: &corev1alpha1.ModelConfig{Name: "{file:/proc/self/environ}"},
+		Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type:            corev1alpha1.AgentRuntimeOpencode,
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+		},
 	}}
 	err := r.validateTaskAgentCompatibility(task, agent)
 	if err == nil || !strings.Contains(err.Error(), "substitution braces") {
@@ -536,7 +547,10 @@ func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRejectsSubstitutionMode
 func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRuntimeRequiresModel(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
-	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "a1"}, Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode}}}
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "a1"}, Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type:            corev1alpha1.AgentRuntimeOpencode,
+		ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+	}}}
 	err := r.validateTaskAgentCompatibility(task, agent)
 	if err == nil || !strings.Contains(err.Error(), "opencode runtime requires spec.model.name") {
 		t.Fatalf("validateTaskAgentCompatibility() error = %v, want missing model rejection", err)

@@ -1421,6 +1421,7 @@ apply_agent() {
       spec:{
         runtime:({
           type:$provider,
+          contractVersion:"orka.harness.v2",
           defaultMaxTurns:$maxTurns
         } + (if $provider == "codex" then {} else {
           defaultAllowBash:$allowBash,

@@ -84,12 +84,28 @@ export const workspaceConfigSchema = z.object({
   }
 })
 
+// Legacy harness v1 workspace preserved at spec.agentRuntime.workspace; a
+// read-only compatibility surface for stored v1 Tasks.
+export const legacyAgentWorkspaceConfigSchema = z.object({
+  gitRepo: z.string().optional(),
+  branch: z.string().optional(),
+  ref: z.string().optional(),
+  gitSecretRef: z.object({ name: z.string().optional() }).optional(),
+  subPath: z.string().optional(),
+  forkRepo: z.string().optional(),
+  prBaseBranch: z.string().optional(),
+  pushBranch: z.string().optional(),
+})
+
 export const agentRuntimeSpecSchema = z.object({
+  workspace: legacyAgentWorkspaceConfigSchema.optional(),
   maxTurns: z.number().optional(),
   allowedTools: z.array(z.string()).optional(),
   disallowedTools: z.array(z.string()).optional(),
   allowBash: z.boolean().optional(),
 }).strict()
+
+export const harnessContractVersionSchema = z.enum(['orka.harness.v1', 'orka.harness.v2'])
 
 export const taskExecutionStateSchema = z.enum([
   'Queued',
@@ -254,6 +270,93 @@ export const taskSpecSchema = z.object({
   workspace: workspaceConfigSchema.optional(),
 })
 
+// Harness v1 compatibility status surface (non-secret routing metadata only).
+export const harnessRuntimeStatusSchema = z.object({
+  runtimeRefName: z.string().optional(),
+  runtimeName: z.string().optional(),
+  contractVersion: z.string().optional(),
+  endpoint: z.string().optional(),
+  runtimeGeneration: z.number().optional(),
+  authRefName: z.string().optional(),
+  authRefField: z.string().optional(),
+  authRefResourceVersion: z.string().optional(),
+})
+
+// The authoritative execution route. Snapshot metadata and abbreviated
+// digests only — snapshot bodies are never exposed through ordinary surfaces.
+export const agentExecutionBindingSchema = z.object({
+  schemaVersion: z.number(),
+  mode: z.enum(['execute', 'cleanup-only']),
+  contractVersion: harnessContractVersionSchema,
+  backend: z.enum(['harness-wrapper', 'runtime-pool', 'external-endpoint']),
+  provenance: z.enum(['newly-bound', 'legacy-adopted', 'legacy-cleanup-only']),
+  bindingDigest: z.string(),
+  task: z.object({
+    namespaceUID: z.string(),
+    uid: z.string(),
+    boundSpecGeneration: z.number(),
+  }),
+  backendControl: z.object({
+    name: z.string(),
+    uid: z.string(),
+    generation: z.number(),
+    modeRevision: z.number(),
+    admittedMode: z.string(),
+  }).optional(),
+  policy: z.object({
+    name: z.string(),
+    uid: z.string(),
+    generation: z.number(),
+    digest: z.string(),
+  }).optional(),
+  agent: z.object({
+    namespace: z.string(),
+    name: z.string(),
+    uid: z.string(),
+    generation: z.number(),
+  }).optional(),
+  snapshot: z.object({
+    id: z.string(),
+    digest: z.string(),
+    schemaVersion: z.number(),
+  }),
+  runtimeType: z.string().optional(),
+  runtimeRef: z.object({
+    name: z.string(),
+    uid: z.string().optional(),
+    generation: z.number().optional(),
+  }).optional(),
+  runtimeProfileDigest: z.string().optional(),
+  runtimeProfileDigestSchemaVersion: z.number().optional(),
+  boundAt: z.string(),
+})
+
+export const agentExecutionNoExecutionSchema = z.object({
+  schemaVersion: z.number(),
+  state: z.literal('UnboundNoExecution'),
+  migrationInventoryID: z.string(),
+  evidenceDigest: z.string(),
+  recordedAt: z.string(),
+})
+
+export const agentExecutionQuarantineSchema = z.object({
+  schemaVersion: z.number(),
+  reason: z.string(),
+  migrationInventoryID: z.string(),
+  v1EvidenceDigest: z.string().optional(),
+  v2EvidenceDigest: z.string().optional(),
+  recordedAt: z.string(),
+})
+
+export const agentExecutionResolutionRefSchema = z.object({
+  adjudicationName: z.string(),
+  adjudicationUID: z.string(),
+  action: z.string(),
+  operationDigest: z.string(),
+  resolutionDigest: z.string(),
+  appliedAt: z.string(),
+})
+
 export const taskStatusSchema = z.object({
   phase: taskPhaseSchema.optional(),
   startTime: z.string().optional(),
@@ -264,6 +367,11 @@ export const taskStatusSchema = z.object({
   resultRef: resultRefSchema.optional(),
   execution: taskExecutionStatusSchema.optional(),
   delivery: taskDeliveryStatusSchema.optional(),
+  harnessRuntime: harnessRuntimeStatusSchema.optional(),
+  agentExecutionBinding: agentExecutionBindingSchema.optional(),
+  agentExecutionNoExecution: agentExecutionNoExecutionSchema.optional(),
+  agentExecutionQuarantine: agentExecutionQuarantineSchema.optional(),
+  agentExecutionResolutionRef: agentExecutionResolutionRefSchema.optional(),
   webhookDelivered: z.boolean().optional(),
   message: z.string().optional(),
   childTasks: z.array(childTaskStatusSchema).optional(),
@@ -298,6 +406,12 @@ export type WorkspaceConfig = z.infer<typeof workspaceConfigSchema>
 export type TaskExecutionStatus = z.infer<typeof taskExecutionStatusSchema>
 export type TaskDeliveryStatus = z.infer<typeof taskDeliveryStatusSchema>
 export type ExecutionWorkspaceStatus = z.infer<typeof executionWorkspaceStatusSchema>
+export type HarnessContractVersion = z.infer<typeof harnessContractVersionSchema>
+export type HarnessRuntimeStatus = z.infer<typeof harnessRuntimeStatusSchema>
+export type AgentExecutionBinding = z.infer<typeof agentExecutionBindingSchema>
+export type AgentExecutionNoExecution = z.infer<typeof agentExecutionNoExecutionSchema>
+export type AgentExecutionQuarantine = z.infer<typeof agentExecutionQuarantineSchema>
+export type AgentExecutionResolutionRef = z.infer<typeof agentExecutionResolutionRefSchema>
 
 export const planStateSchema = z.object({
   summary: z.string().optional(),

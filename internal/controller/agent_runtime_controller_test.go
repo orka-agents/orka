@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"k8s.io/utils/ptr"
+
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -239,11 +241,11 @@ func TestAgentRuntimeReconcilerRechecksHostileCycleAfterAuthRotation(t *testing.
 	}
 }
 
-func TestAgentRuntimeReconcilerRejectsV1Contract(t *testing.T) {
+func TestAgentRuntimeReconcilerPreservesV1ContractNotReady(t *testing.T) {
 	runtimeObject := &corev1alpha1.AgentRuntime{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "legacy", Generation: 1},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"),
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
 			Deployment:      corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: "https://runtime.example.com"},
 		},
 	}
@@ -252,8 +254,25 @@ func TestAgentRuntimeReconcilerRejectsV1Contract(t *testing.T) {
 		t.Fatal(err)
 	}
 	updated := getAgentRuntime(t, reconciler, runtimeObject)
-	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "orka.harness.v2") {
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "preserved but not probeable") {
 		t.Fatalf("legacy runtime status = %#v", updated.Status)
+	}
+}
+
+func TestAgentRuntimeReconcilerUnclassifiedContractNotReady(t *testing.T) {
+	runtimeObject := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "unclassified", Generation: 1},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: "https://runtime.example.com"},
+		},
+	}
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "unclassified") {
+		t.Fatalf("unclassified runtime status = %#v", updated.Status)
 	}
 }
 
@@ -424,15 +443,15 @@ func testAgentRuntimeAndSecret(t *testing.T, endpoint string, config conformance
 	runtimeObject := &corev1alpha1.AgentRuntime{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime", Generation: 1},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
 			Deployment:      corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: endpoint},
 			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{
-				ControllerBearerTokenSecretRef: corev1alpha1.AgentRuntimeSecretKeyReference{Name: "runtime-auth", Key: "controller-token"},
-				OperationCapabilitySecretRef:   corev1alpha1.AgentRuntimeSecretKeyReference{Name: "runtime-auth", Key: "capability-secret"},
+				ControllerBearerTokenSecretRef: &corev1alpha1.AgentRuntimeSecretKeyReference{Name: "runtime-auth", Key: "controller-token"},
+				OperationCapabilitySecretRef:   &corev1alpha1.AgentRuntimeSecretKeyReference{Name: "runtime-auth", Key: "capability-secret"},
 			},
 			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
 				RuntimeInstanceID: string(config.RuntimeInstanceID),
-				Profile: corev1alpha1.AgentRuntimeProfileSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
 					Digest: string(profileDigest), DigestSchemaVersion: int32(harnessv2.ProfileDigestSchemaVersion),
 					ACPProfile: config.Profile.ACPProfile, AdapterName: adapterName, AdapterDigest: adapterDigest,
 					ProviderKind: config.Profile.ProviderKind, Model: config.Profile.Model, ModelLimits: apiModelLimits,
@@ -443,7 +462,7 @@ func testAgentRuntimeAndSecret(t *testing.T, endpoint string, config conformance
 					ProxyCredentialRole:    config.Profile.ProxyCredentialRole, ProxyCredentialScope: config.Profile.ProxyCredentialScope,
 					ResourceClass: config.Profile.ResourceClass,
 				},
-				Limits: corev1alpha1.AgentRuntimeProtocolLimits{
+				Limits: &corev1alpha1.AgentRuntimeProtocolLimits{
 					MaxResidentSessions: int32(config.Limits.MaxResidentSessions), MaxConcurrentPrompts: int32(config.Limits.MaxConcurrentPrompts),
 					MaxRequestBytes: int32(config.Limits.MaxRequestBytes), MaxEventLineBytes: int32(config.Limits.MaxEventLineBytes),
 					MaxTerminalResultBytes: int32(config.Limits.MaxTerminalResultBytes), MaxBufferedEvents: int32(config.Limits.MaxBufferedEvents),
@@ -452,7 +471,7 @@ func testAgentRuntimeAndSecret(t *testing.T, endpoint string, config conformance
 					MaxWorkspaceDeltaBytes: config.Limits.MaxWorkspaceDeltaBytes,
 				},
 				SupportsDrain: config.SupportsDrain,
-				WorkspaceGovernance: corev1alpha1.AgentRuntimeWorkspaceGovernanceCapabilities{
+				WorkspaceGovernance: &corev1alpha1.AgentRuntimeWorkspaceGovernanceCapabilities{
 					Mode: corev1alpha1.AgentRuntimeWorkspaceGovernanceMode(config.WorkspaceGovernance.Mode), Trusted: config.WorkspaceGovernance.Trusted,
 					OrkaOwnedWorkspaceDeltas:        config.WorkspaceGovernance.OrkaOwnedWorkspaceDeltas,
 					PromptScopedBrokerAuthorization: config.WorkspaceGovernance.PromptScopedBrokerAuthorization,
