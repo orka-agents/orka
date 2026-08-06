@@ -206,7 +206,7 @@ func (a internalCallerAuthorizer) verifyTaskWorker(ctx context.Context, userInfo
 			continue
 		}
 		for _, jobOwner := range job.OwnerReferences {
-			if jobOwner.Kind == "Task" && jobOwner.UID == task.UID {
+			if jobOwner.Kind == "Task" && jobOwner.Name == task.Name && jobOwner.UID == task.UID {
 				return nil
 			}
 		}

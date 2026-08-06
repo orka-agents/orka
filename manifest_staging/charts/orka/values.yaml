@@ -44,6 +44,19 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
+  # Additive repository-security integrity rollout gates. Enforce output binding,
+  # pinned targets, and hardened analysis currently fail startup until their
+  # unpredictable lease and pinned capability-snapshot prerequisites are available.
+  securityIntegrity:
+    workerOutputBindingMode: audit
+    pinnedScanTargetsEnabled: false
+    qualityStateWritesEnabled: false
+    findingObservationWritesEnabled: false
+    bundleSealingMode: off
+    hardenedAnalysisEnabled: false
+    strictCompletionEnabled: false
+    deepScanEnabled: false
+
   # Provider-neutral workspace.orka.ai control plane (disabled by default during rollout).
   # Before enabling it during a Helm upgrade, apply the current chart CRDs explicitly;
   # Helm does not upgrade CRDs from the crds/ directory and the chart fails closed otherwise.

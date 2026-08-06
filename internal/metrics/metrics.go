@@ -7,9 +7,18 @@ MIT License - see LICENSE file for details.
 package metrics
 
 import (
+	"strings"
+
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
+)
+
+const (
+	metricLabelUnknown               = "unknown"
+	securityInventoryLabelEligible   = "eligible"
+	securityInventoryLabelTruncated  = "truncated"
+	securityInventoryLabelUnreadable = "unreadable"
 )
 
 var (
@@ -223,6 +232,71 @@ var (
 		},
 		[]string{"category", "event_type"},
 	)
+
+	SecurityOutputWritesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_output_writes_total",
+			Help: "Repository security result and artifact writes by binding mode, outcome, and stable reason",
+		},
+		[]string{"kind", "mode", "outcome", "reason"},
+	)
+
+	SecurityValidationRejectionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_validation_rejections_total",
+			Help: "Repository security validation artifact rejections by stable class",
+		},
+		[]string{"reason"},
+	)
+
+	SecurityIsolationOutcomesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_isolation_outcomes_total",
+			Help: "Repository security analysis-isolation capability observations by requested policy and effective outcome",
+		},
+		[]string{"policy", "outcome"},
+	)
+
+	SecurityInventoryEntriesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_inventory_entries_total",
+			Help: "Repository security mapper inventory records by bounded disposition",
+		},
+		[]string{"disposition"},
+	)
+
+	SecurityInventoryReasonClassesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_inventory_reason_classes_total",
+			Help: "Repository security mapper inventory records by bounded disposition and reason class",
+		},
+		[]string{"disposition", "reason_class"},
+	)
+
+	SecurityTargetVerificationTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_target_verification_total",
+			Help: "Repository security target verification observations by outcome",
+		},
+		[]string{"outcome"},
+	)
+
+	SecurityBundleSealingTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_bundle_sealing_total",
+			Help: "Repository security bundle sealing attempts by mode and outcome",
+		},
+		[]string{"mode", "outcome"},
+	)
+
+	SecurityBundleSealingDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_security_bundle_sealing_duration_seconds",
+			Help:    "Repository security bundle sealing latency by mode and outcome",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"mode", "outcome"},
+	)
 )
 
 func init() {
@@ -252,7 +326,63 @@ func init() {
 		ExecutionEventTruncationsTotal,
 		ExecutionEventDerivedLatency,
 		ExecutionEventDerivedFailuresTotal,
+		SecurityOutputWritesTotal,
+		SecurityValidationRejectionsTotal,
+		SecurityIsolationOutcomesTotal,
+		SecurityInventoryEntriesTotal,
+		SecurityInventoryReasonClassesTotal,
+		SecurityTargetVerificationTotal,
+		SecurityBundleSealingTotal,
+		SecurityBundleSealingDuration,
 	)
+}
+
+// RecordSecurityOutputWrite records a low-cardinality worker-output binding decision.
+func RecordSecurityOutputWrite(kind, mode, outcome, reason string) {
+	SecurityOutputWritesTotal.WithLabelValues(
+		normalizeMetricLabel(kind),
+		normalizeMetricLabel(mode),
+		normalizeMetricLabel(outcome),
+		normalizeMetricLabel(reason),
+	).Inc()
+}
+
+// RecordSecurityValidationRejection records a stable validation ingestion failure class.
+func RecordSecurityValidationRejection(reason string) {
+	SecurityValidationRejectionsTotal.WithLabelValues(normalizeMetricLabel(reason)).Inc()
+}
+
+// RecordSecurityIsolationOutcome records a bounded analysis-isolation capability outcome.
+func RecordSecurityIsolationOutcome(policy, outcome string) {
+	SecurityIsolationOutcomesTotal.WithLabelValues(
+		normalizeSecurityIsolationPolicy(policy),
+		normalizeSecurityIsolationOutcome(outcome),
+	).Inc()
+}
+
+// RecordSecurityInventoryEntries records mapper inventory records using only
+// bounded disposition and reason-class labels.
+func RecordSecurityInventoryEntries(disposition, reason string, count int) {
+	if count <= 0 {
+		return
+	}
+	disposition = normalizeSecurityInventoryDisposition(disposition)
+	reason = normalizeSecurityInventoryReasonClass(reason)
+	SecurityInventoryEntriesTotal.WithLabelValues(disposition).Add(float64(count))
+	SecurityInventoryReasonClassesTotal.WithLabelValues(disposition, reason).Add(float64(count))
+}
+
+// RecordSecurityTargetVerification records one target receipt verification outcome.
+func RecordSecurityTargetVerification(outcome string) {
+	SecurityTargetVerificationTotal.WithLabelValues(normalizeMetricLabel(outcome)).Inc()
+}
+
+// RecordSecurityBundleSealing records a bundle sealing attempt and latency.
+func RecordSecurityBundleSealing(mode, outcome string, durationSeconds float64) {
+	mode = normalizeMetricLabel(mode)
+	outcome = normalizeMetricLabel(outcome)
+	SecurityBundleSealingTotal.WithLabelValues(mode, outcome).Inc()
+	SecurityBundleSealingDuration.WithLabelValues(mode, outcome).Observe(durationSeconds)
 }
 
 // RecordAPIRequest records an API request
@@ -391,9 +521,75 @@ func RecordRepositoryMonitorBlock(reason string) {
 	RepositoryMonitorBlocksTotal.WithLabelValues(normalizeMetricLabel(reason)).Inc()
 }
 
+func normalizeSecurityIsolationPolicy(value string) string {
+	switch value = strings.ToLower(strings.TrimSpace(value)); value {
+	case "legacy", "prefer-hardened", "require-hardened":
+		return value
+	default:
+		return metricLabelUnknown
+	}
+}
+
+func normalizeSecurityIsolationOutcome(value string) string {
+	switch value = strings.ToLower(strings.TrimSpace(value)); value {
+	case "legacy", "hardened", "fallback", "unverified", "failed":
+		return value
+	default:
+		return metricLabelUnknown
+	}
+}
+
+func normalizeSecurityInventoryDisposition(value string) string {
+	switch value = strings.ToLower(strings.TrimSpace(value)); value {
+	case "reviewable", securityInventoryLabelEligible:
+		return securityInventoryLabelEligible
+	case "excluded", "assigned", "omitted", securityInventoryLabelTruncated, securityInventoryLabelUnreadable:
+		return value
+	default:
+		return metricLabelUnknown
+	}
+}
+
+func normalizeSecurityInventoryReasonClass(value string) string {
+	switch value = strings.ToLower(strings.TrimSpace(value)); value {
+	case "supported-reviewable-file":
+		return "eligible"
+	case "assigned-to-review-slice":
+		return "assigned"
+	case "no-deterministic-review-slice":
+		return "unassigned"
+	case "symlink":
+		return "symlink"
+	case "secret-like-path":
+		return "secret_like"
+	case "lockfile":
+		return "lockfile"
+	case "unsupported-type":
+		return "unsupported_type"
+	case "vcs-directory":
+		return "vcs"
+	case "dependency-directory":
+		return "dependency"
+	case "generated-directory":
+		return "generated"
+	case "cache-directory":
+		return "cache"
+	case "virtualenv-directory":
+		return "virtualenv"
+	case "entrypoint-reference-cap", "context-reference-cap", "test-reference-cap", "mapper_inventory_entry_limit", "maxfiles", "maxbytes", securityInventoryLabelTruncated:
+		return securityInventoryLabelTruncated
+	case securityInventoryLabelUnreadable:
+		return securityInventoryLabelUnreadable
+	case "":
+		return metricLabelUnknown
+	default:
+		return "other"
+	}
+}
+
 func normalizeMetricLabel(value string) string {
 	if value == "" {
-		return "unknown"
+		return metricLabelUnknown
 	}
 	return value
 }

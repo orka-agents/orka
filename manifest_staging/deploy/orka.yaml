@@ -6139,9 +6139,28 @@ spec:
                 required:
                 - name
                 type: object
+              analysisIsolationPolicy:
+                description: |-
+                  AnalysisIsolationPolicy controls whether repository-dependent analysis uses
+                  Orka's verified read-only/runtime-auth-only execution profile. Empty is
+                  legacy for backward compatibility.
+                enum:
+                - legacy
+                - prefer-hardened
+                - require-hardened
+                type: string
               branch:
                 description: Branch is the base branch to scan. Defaults to the literal
                   main branch when omitted.
+                type: string
+              completionPolicy:
+                description: |-
+                  CompletionPolicy controls whether a successful discovery pipeline is
+                  sufficient or whether full, verified assurance is required. Empty is
+                  discovery for backward compatibility.
+                enum:
+                - discovery
+                - validated
                 type: string
               customScanInstructionsRef:
                 description: CustomScanInstructionsRef references additive scanner
@@ -6157,6 +6176,47 @@ spec:
                     type: string
                 required:
                 - name
+                type: object
+              deepScan:
+                description: |-
+                  DeepScan configures opt-in bounded repeated discovery. The controller-wide
+                  deepScanEnabled gate must also be enabled before this can dispatch work.
+                properties:
+                  deadline:
+                    description: Deadline is the hard wall-clock budget for repeated
+                      discovery.
+                    type: string
+                  enabled:
+                    description: Enabled opts this RepositoryScan into repeated discovery.
+                    type: boolean
+                  maxCandidates:
+                    description: MaxCandidates is the hard accepted plus rejected
+                      candidate cap.
+                    format: int32
+                    maximum: 10000
+                    minimum: 1
+                    type: integer
+                  maxPasses:
+                    description: MaxPasses is the hard discovery pass cap.
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  maxWorkers:
+                    description: MaxWorkers is the hard concurrent discovery worker
+                      cap.
+                    format: int32
+                    maximum: 32
+                    minimum: 1
+                    type: integer
+                  noNewCandidatesThreshold:
+                    description: |-
+                      NoNewCandidatesThreshold stops after this many consecutive passes without
+                      a new controller-derived canonical candidate.
+                    format: int32
+                    maximum: 5
+                    minimum: 1
+                    type: integer
                 type: object
               falsePositivePolicyRef:
                 description: FalsePositivePolicyRef references additive false-positive
@@ -6196,6 +6256,15 @@ spec:
                   inspect repository history.
                 format: int32
                 type: integer
+              incrementalBaselinePolicy:
+                description: |-
+                  IncrementalBaselinePolicy selects which durable watermark may seed an
+                  incremental scan. Empty remains legacy-discovery for existing resources.
+                enum:
+                - legacy-discovery
+                - complete-coverage
+                - assurance-qualified
+                type: string
               maxFindingsPerRun:
                 description: MaxFindingsPerRun bounds scan output volume.
                 format: int32
@@ -6367,13 +6436,26 @@ spec:
                     format: int32
                     type: integer
                 type: object
+              lastAssuranceQualifiedCommit:
+                description: LastAssuranceQualifiedCommit is the latest commit satisfying
+                  validated completion.
+                type: string
+              lastBundleSealedCommit:
+                description: LastBundleSealedCommit is the latest commit represented
+                  by an immutable sealed integrity bundle.
+                type: string
+              lastCompleteCoverageCommit:
+                description: LastCompleteCoverageCommit is the latest commit with
+                  complete compatible inventory and candidate coverage.
+                type: string
               lastObservedHeadSHA:
                 description: LastObservedHeadSHA is the latest repository head SHA
                   seen by a completed scan.
                 type: string
               lastProcessedCommit:
-                description: LastProcessedCommit is the latest commit fully processed
-                  by a completed scan.
+                description: |-
+                  LastProcessedCommit is the latest commit reached by the backward-compatible discovery pipeline.
+                  It does not by itself claim complete coverage or validated assurance.
                 type: string
               lastScanAt:
                 description: LastScanAt is the completion time of the most recent
@@ -6396,6 +6478,122 @@ spec:
                 description: Phase describes the high-level repository scan lifecycle
                   state.
                 type: string
+              quality:
+                description: Quality is the latest bounded run-quality projection.
+                properties:
+                  analysisAttestationLevel:
+                    enum:
+                    - delivered
+                    - tool-observed
+                    - brokered
+                    - unverified
+                    type: string
+                  attackPathExecution:
+                    enum:
+                    - not_started
+                    - pending
+                    - complete
+                    - partial
+                    - failed
+                    - deferred
+                    - unknown
+                    type: string
+                  authorizationStatus:
+                    enum:
+                    - verified
+                    - admitted
+                    - delegated
+                    - legacy-unverified
+                    - revoked
+                    - expired
+                    type: string
+                  bundleStatus:
+                    enum:
+                    - not_started
+                    - draft
+                    - sealing
+                    - sealed
+                    - retryable_failed
+                    - failed
+                    type: string
+                  candidateCoverageStatus:
+                    enum:
+                    - not_started
+                    - pending
+                    - complete
+                    - partial
+                    - failed
+                    - unknown
+                    type: string
+                  coverageStatus:
+                    enum:
+                    - not_started
+                    - pending
+                    - complete
+                    - partial
+                    - failed
+                    - unknown
+                    type: string
+                  inventoryCoverageStatus:
+                    enum:
+                    - not_started
+                    - pending
+                    - complete
+                    - partial
+                    - failed
+                    - unknown
+                    type: string
+                  isolationStatus:
+                    enum:
+                    - legacy
+                    - hardened
+                    - fallback
+                    - unverified
+                    - failed
+                    type: string
+                  observedGeneration:
+                    format: int64
+                    type: integer
+                  observedRepositoryScanUID:
+                    description: ObservedRepositoryScanUID and Generation bind the
+                      projection to the object incarnation.
+                    type: string
+                  reasonCodes:
+                    description: ReasonCodes are stable low-cardinality degradation
+                      reasons.
+                    items:
+                      type: string
+                    maxItems: 16
+                    type: array
+                  schemaVersion:
+                    description: SchemaVersion identifies the quality reducer contract.
+                    format: int32
+                    type: integer
+                  targetVerification:
+                    enum:
+                    - pending
+                    - verified
+                    - unverified
+                    - mismatch
+                    type: string
+                  validationExecution:
+                    enum:
+                    - not_started
+                    - pending
+                    - complete
+                    - partial
+                    - failed
+                    - deferred
+                    - unknown
+                    type: string
+                  validationScope:
+                    enum:
+                    - "off"
+                    - sampled
+                    - all
+                    - unknown
+                    type: string
+                type: object
               threatModelVersion:
                 description: ThreatModelVersion is the latest persisted threat model
                   version.
@@ -11664,6 +11862,22 @@ spec:
           value: /var/run/orka/harness-wrapper/token
         - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
           value: orka-agent-harness-wrapper
+        - name: ORKA_SECURITY_WORKER_OUTPUT_BINDING_MODE
+          value: audit
+        - name: ORKA_SECURITY_PINNED_SCAN_TARGETS_ENABLED
+          value: "false"
+        - name: ORKA_SECURITY_QUALITY_STATE_WRITES_ENABLED
+          value: "false"
+        - name: ORKA_SECURITY_FINDING_OBSERVATION_WRITES_ENABLED
+          value: "false"
+        - name: ORKA_SECURITY_BUNDLE_SEALING_MODE
+          value: "off"
+        - name: ORKA_SECURITY_HARDENED_ANALYSIS_ENABLED
+          value: "false"
+        - name: ORKA_SECURITY_STRICT_COMPLETION_ENABLED
+          value: "false"
+        - name: ORKA_SECURITY_DEEP_SCAN_ENABLED
+          value: "false"
         image: ghcr.io/orka-agents/orka:0.1.1
         imagePullPolicy: IfNotPresent
         livenessProbe:

@@ -13,8 +13,12 @@ import (
 
 func TestParseContractsAcceptValidExamples(t *testing.T) {
 	slicesData := []byte(`{"schemaVersion":1,"slices":[{"id":"slice_demo","repositoryScan":"repo","source":"deterministic-go-package","title":"Go package internal/security","summary":"Security parsing.","kind":"package","ownedFiles":[{"path":"internal/security/security.go","reason":"source"}],"confidence":"high","status":"pending"}]}`)
-	if _, err := ParseReviewSlicesArtifact(slicesData); err != nil {
+	slicesArtifact, err := ParseReviewSlicesArtifact(slicesData)
+	if err != nil {
 		t.Fatalf("ParseReviewSlicesArtifact() error = %v", err)
+	}
+	if slicesArtifact.CoverageStatus != MapperCoverageUnknown {
+		t.Fatalf("v1 coverageStatus = %q, want %q", slicesArtifact.CoverageStatus, MapperCoverageUnknown)
 	}
 
 	contextData := []byte(`{"schemaVersion":1,"sliceId":"slice_demo","includedFiles":[{"path":"internal/security/security.go","role":"owned","bytes":10,"includedBytes":10,"includedLineRanges":[{"startLine":1,"endLine":2}],"truncated":false,"readable":true,"skippedReason":null}],"promptBytes":100,"approximateTokens":25}`)
@@ -28,6 +32,308 @@ func TestParseContractsAcceptValidExamples(t *testing.T) {
 	}
 }
 
+func TestParseReviewSlicesArtifactV2CoverageAccountable(t *testing.T) {
+	headOID := strings.Repeat("a", 40)
+	artifact := ReviewSlicesArtifact{
+		SchemaVersion:  SchemaVersionReviewSlicesV2,
+		CoverageStatus: MapperCoverageAccountable,
+		HeadCommit:     headOID,
+		DiscoveredFiles: []MapperFileInventoryEntry{
+			{Path: "app.go", Disposition: MapperDispositionReviewable, Reason: "supported-reviewable-file"},
+			{Path: "vendor", Disposition: MapperDispositionExcluded, Reason: "dependency-directory"},
+		},
+		ReviewableFiles: []MapperFileInventoryEntry{
+			{Path: "app.go", Disposition: MapperDispositionAssigned, Reason: "assigned-to-review-slice"},
+		},
+		OmittedFiles: []MapperFileInventoryEntry{
+			{Path: "vendor", Disposition: MapperDispositionExcluded, Reason: "dependency-directory"},
+		},
+		TargetReceipt: validMapperTargetReceipt(headOID, "app.go"),
+		Slices: []store.ReviewSlice{{
+			SchemaVersion:  1,
+			ID:             "slice_app",
+			RepositoryScan: "repo",
+			Source:         "deterministic-go-package",
+			Title:          "Go package root",
+			Summary:        "Application source.",
+			Kind:           "package",
+			OwnedFiles:     []store.ReviewSliceFile{{Path: "app.go", Reason: "source"}},
+			Confidence:     "high",
+			Status:         "pending",
+		}},
+	}
+	data, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	got, err := ParseReviewSlicesArtifact(data)
+	if err != nil {
+		t.Fatalf("ParseReviewSlicesArtifact() error = %v", err)
+	}
+	if got.CoverageStatus != MapperCoverageAccountable {
+		t.Fatalf("v2 coverageStatus = %q, want %q", got.CoverageStatus, MapperCoverageAccountable)
+	}
+}
+
+func TestParseReviewSlicesArtifactV2AcceptsBoundedPartialInventory(t *testing.T) {
+	headOID := strings.Repeat("a", 40)
+	artifact := ReviewSlicesArtifact{
+		SchemaVersion:       SchemaVersionReviewSlicesV2,
+		CoverageStatus:      MapperCoveragePartial,
+		CoverageReasonCodes: []string{MapperCoverageReasonInventoryEntryLimit},
+		InventorySummary: &MapperInventorySummary{
+			EntryLimit:       2,
+			TotalEntries:     3,
+			RetainedEntries:  2,
+			TruncatedEntries: 1,
+			Truncated:        true,
+			Reason:           MapperCoverageReasonInventoryEntryLimit,
+		},
+		HeadCommit: headOID,
+		DiscoveredFiles: []MapperFileInventoryEntry{
+			{Path: "app.go", Disposition: MapperDispositionReviewable, Reason: "supported-reviewable-file"},
+			{Path: "vendor", Disposition: MapperDispositionExcluded, Reason: "dependency-directory"},
+		},
+		ReviewableFiles: []MapperFileInventoryEntry{
+			{Path: "app.go", Disposition: MapperDispositionAssigned, Reason: "assigned-to-review-slice"},
+		},
+		OmittedFiles: []MapperFileInventoryEntry{
+			{Path: "vendor", Disposition: MapperDispositionExcluded, Reason: "dependency-directory"},
+		},
+		TargetReceipt: validMapperTargetReceipt(headOID, "app.go"),
+		Slices: []store.ReviewSlice{{
+			SchemaVersion:  1,
+			ID:             "slice_app",
+			RepositoryScan: "repo",
+			Source:         "deterministic-go-package",
+			Title:          "Go package root",
+			OwnedFiles:     []store.ReviewSliceFile{{Path: "app.go"}},
+		}},
+	}
+	data, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	got, err := ParseReviewSlicesArtifact(data)
+	if err != nil {
+		t.Fatalf("ParseReviewSlicesArtifact() error = %v", err)
+	}
+	if got.CoverageStatus != MapperCoveragePartial || got.InventorySummary == nil ||
+		got.InventorySummary.TruncatedEntries != 1 {
+		t.Fatalf("parsed partial inventory = %#v", got)
+	}
+}
+
+func TestParseReviewSlicesArtifactRejectsOversizedInventory(t *testing.T) {
+	var data strings.Builder
+	data.WriteString(`{"schemaVersion":2,"coverageStatus":"accountable","discoveredFiles":[`)
+	for i := 0; i <= MaxMapperInventoryEntries; i++ {
+		if i > 0 {
+			data.WriteByte(',')
+		}
+		data.WriteString(`null`)
+	}
+	// Intentionally omit the closing array/object. A bounded streaming preflight
+	// must reject the (limit+1)th entry before attempting to decode the tail.
+	if _, err := ParseReviewSlicesArtifact([]byte(data.String())); err == nil || !strings.Contains(err.Error(), "discoveredFiles exceeds") {
+		t.Fatalf("ParseReviewSlicesArtifact() error = %v, want inventory bound rejection", err)
+	}
+}
+
+func TestParseReviewSlicesArtifactRejectsOversizedTargetReceiptTreeIndexBeforeUnmarshal(t *testing.T) {
+	var data strings.Builder
+	data.WriteString(`{"schemaVersion":2,"targetReceipt":{"treeIndex":[`)
+	for i := 0; i <= MaxMapperTreeIndexEntries; i++ {
+		if i > 0 {
+			data.WriteByte(',')
+		}
+		// Strings cannot unmarshal into MapperTreeIndexEntry. The streaming
+		// preflight must still reach the entry limit first, before json.Unmarshal
+		// allocates or decodes the nested slice.
+		data.WriteString(`"not-a-tree-entry"`)
+	}
+	// Intentionally omit the closing array/object. The bound must be enforced as
+	// soon as the (limit+1)th nested entry is observed.
+	if _, err := ParseReviewSlicesArtifact([]byte(data.String())); err == nil ||
+		!strings.Contains(err.Error(), "targetReceipt.treeIndex exceeds") {
+		t.Fatalf("ParseReviewSlicesArtifact() error = %v, want nested treeIndex bound rejection", err)
+	}
+}
+
+func TestParseReviewSlicesArtifactV2RejectsInconsistentTruncationMetadata(t *testing.T) {
+	headOID := strings.Repeat("a", 40)
+	base := ReviewSlicesArtifact{
+		SchemaVersion:       SchemaVersionReviewSlicesV2,
+		CoverageStatus:      MapperCoveragePartial,
+		CoverageReasonCodes: []string{MapperCoverageReasonInventoryEntryLimit},
+		InventorySummary: &MapperInventorySummary{
+			EntryLimit:       1,
+			TotalEntries:     2,
+			RetainedEntries:  1,
+			TruncatedEntries: 1,
+			Truncated:        true,
+			Reason:           MapperCoverageReasonInventoryEntryLimit,
+		},
+		HeadCommit: headOID,
+		DiscoveredFiles: []MapperFileInventoryEntry{{
+			Path: "app.go", Disposition: MapperDispositionReviewable, Reason: "supported-reviewable-file",
+		}},
+		ReviewableFiles: []MapperFileInventoryEntry{{
+			Path: "app.go", Disposition: MapperDispositionAssigned, Reason: "assigned-to-review-slice",
+		}},
+		OmittedFiles:  []MapperFileInventoryEntry{},
+		TargetReceipt: validMapperTargetReceipt(headOID, "app.go"),
+		Slices: []store.ReviewSlice{{
+			SchemaVersion: 1, ID: "slice_app", RepositoryScan: "repo", Source: "mapper", Title: "app",
+			OwnedFiles: []store.ReviewSliceFile{{Path: "app.go"}},
+		}},
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*ReviewSlicesArtifact)
+	}{
+		{name: "missing summary", mutate: func(artifact *ReviewSlicesArtifact) { artifact.InventorySummary = nil }},
+		{name: "missing reason code", mutate: func(artifact *ReviewSlicesArtifact) { artifact.CoverageReasonCodes = nil }},
+		{name: "accountable status", mutate: func(artifact *ReviewSlicesArtifact) { artifact.CoverageStatus = MapperCoverageAccountable }},
+		{name: "retained count mismatch", mutate: func(artifact *ReviewSlicesArtifact) { artifact.InventorySummary.RetainedEntries = 0 }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			artifact := base
+			summary := *base.InventorySummary
+			artifact.InventorySummary = &summary
+			artifact.CoverageReasonCodes = append([]string(nil), base.CoverageReasonCodes...)
+			tt.mutate(&artifact)
+			data, err := json.Marshal(artifact)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			if _, err := ParseReviewSlicesArtifact(data); err == nil {
+				t.Fatal("ParseReviewSlicesArtifact() error = nil, want truncation metadata rejected")
+			}
+		})
+	}
+}
+
+func TestParseReviewSlicesArtifactV2RejectsUnaccountedInventories(t *testing.T) {
+	headOID := strings.Repeat("a", 40)
+	base := ReviewSlicesArtifact{
+		SchemaVersion:  SchemaVersionReviewSlicesV2,
+		CoverageStatus: MapperCoverageAccountable,
+		HeadCommit:     headOID,
+		DiscoveredFiles: []MapperFileInventoryEntry{
+			{Path: "app.go", Disposition: MapperDispositionReviewable, Reason: "supported-reviewable-file"},
+		},
+		ReviewableFiles: []MapperFileInventoryEntry{
+			{Path: "app.go", Disposition: MapperDispositionAssigned, Reason: "assigned-to-review-slice"},
+		},
+		OmittedFiles:  []MapperFileInventoryEntry{},
+		TargetReceipt: validMapperTargetReceipt(headOID, "app.go"),
+		Slices: []store.ReviewSlice{{
+			SchemaVersion:  1,
+			ID:             "slice_app",
+			RepositoryScan: "repo",
+			Source:         "mapper",
+			Title:          "app",
+			OwnedFiles:     []store.ReviewSliceFile{{Path: "app.go"}},
+		}},
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*ReviewSlicesArtifact)
+	}{
+		{
+			name: "missing inventories",
+			mutate: func(artifact *ReviewSlicesArtifact) {
+				artifact.OmittedFiles = nil
+			},
+		},
+		{
+			name: "assigned path absent from slices",
+			mutate: func(artifact *ReviewSlicesArtifact) {
+				artifact.Slices[0].OwnedFiles = nil
+			},
+		},
+		{
+			name: "reviewable path absent from discovered",
+			mutate: func(artifact *ReviewSlicesArtifact) {
+				artifact.DiscoveredFiles = []MapperFileInventoryEntry{}
+			},
+		},
+		{
+			name: "nondeterministic order",
+			mutate: func(artifact *ReviewSlicesArtifact) {
+				artifact.DiscoveredFiles = []MapperFileInventoryEntry{
+					{Path: "z.go", Disposition: MapperDispositionReviewable, Reason: "supported-reviewable-file"},
+					{Path: "app.go", Disposition: MapperDispositionReviewable, Reason: "supported-reviewable-file"},
+				}
+			},
+		},
+		{
+			name: "abbreviated head",
+			mutate: func(artifact *ReviewSlicesArtifact) {
+				artifact.HeadCommit = "abcdef1"
+				artifact.TargetReceipt.HeadOID = "abcdef1"
+			},
+		},
+		{
+			name: "excluded omission contradicts reviewable discovery",
+			mutate: func(artifact *ReviewSlicesArtifact) {
+				artifact.OmittedFiles = append(artifact.OmittedFiles, MapperFileInventoryEntry{
+					Path: "app.go", Disposition: MapperDispositionExcluded, Reason: "unsupported-type",
+				})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			artifact := base
+			artifact.DiscoveredFiles = append([]MapperFileInventoryEntry(nil), base.DiscoveredFiles...)
+			artifact.ReviewableFiles = append([]MapperFileInventoryEntry(nil), base.ReviewableFiles...)
+			artifact.OmittedFiles = append([]MapperFileInventoryEntry(nil), base.OmittedFiles...)
+			artifact.Slices = append([]store.ReviewSlice(nil), base.Slices...)
+			receipt := *base.TargetReceipt
+			receipt.TreeIndex = append([]MapperTreeIndexEntry(nil), base.TargetReceipt.TreeIndex...)
+			artifact.TargetReceipt = &receipt
+			tt.mutate(&artifact)
+			data, err := json.Marshal(artifact)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			if _, err := ParseReviewSlicesArtifact(data); err == nil {
+				t.Fatal("ParseReviewSlicesArtifact() error = nil, want invalid inventory rejected")
+			}
+		})
+	}
+}
+
+func validMapperTargetReceipt(headOID string, paths ...string) *MapperTargetReceipt {
+	entries := make([]MapperTreeIndexEntry, 0, len(paths))
+	hexDigits := "bcdef0123456789a"
+	for i, path := range paths {
+		entries = append(entries, MapperTreeIndexEntry{
+			Path:        path,
+			Mode:        "100644",
+			Type:        "blob",
+			ObjectID:    strings.Repeat(string(hexDigits[i%len(hexDigits)]), 40),
+			Disposition: MapperTreeDispositionRegular,
+		})
+	}
+	return &MapperTargetReceipt{
+		HeadOID:              headOID,
+		RequestedBranch:      "main",
+		CleanTrackedWorktree: true,
+		ObjectFormat:         "sha1",
+		TreeOID:              strings.Repeat("c", 40),
+		TreeDigest:           "sha256:" + strings.Repeat("d", 64),
+		SnapshotDigest:       "sha256:" + strings.Repeat("e", 64),
+		TreeEntryCount:       len(entries),
+		TreeIndex:            entries,
+	}
+}
+
 func TestParseContractsRejectMalformedExamples(t *testing.T) {
 	if _, err := ParseReviewSlicesArtifact([]byte(`{"schemaVersion":1,"slices":[{"id":"slice_bad","repositoryScan":"repo","source":"mapper","title":"bad","ownedFiles":[{"path":"../secret"}]}]}`)); err == nil {
 		t.Fatal("ParseReviewSlicesArtifact() error = nil, want unsafe path rejected")
@@ -37,6 +343,54 @@ func TestParseContractsRejectMalformedExamples(t *testing.T) {
 	}
 	if _, err := ParseFindingsV2Artifact([]byte(`{"schemaVersion":2}`)); err == nil {
 		t.Fatal("ParseFindingsV2Artifact() error = nil, want missing findings array rejected")
+	}
+}
+
+func TestParseFindingsV2ArtifactAcceptsOptionalIdentityProposal(t *testing.T) {
+	data := []byte(`{"schemaVersion":2,"findings":[{"ruleId":"go.command-injection","identity":{"anchor":"exec.command","instance":"primary-1","algorithmVersion":"v1"}}]}`)
+	artifact, err := ParseFindingsV2Artifact(data)
+	if err != nil {
+		t.Fatalf("ParseFindingsV2Artifact() error = %v", err)
+	}
+	got := artifact.Findings[0]
+	if got.RuleID != "go.command-injection" || got.Identity == nil || got.Identity.Anchor != "exec.command" ||
+		got.Identity.Instance != "primary-1" || got.Identity.AlgorithmVersion != "v1" {
+		t.Fatalf("identity proposal = %#v/%#v, want parsed optional fields", got.RuleID, got.Identity)
+	}
+}
+
+func TestParseFindingsV2ArtifactRejectsInvalidIdentityProposalSlugs(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "uppercase rule", field: "ruleId", value: "Go.Command"},
+		{name: "leading separator", field: "anchor", value: ".exec"},
+		{name: "consecutive separators", field: "instance", value: "primary..one"},
+		{name: "oversized algorithm", field: "algorithmVersion", value: strings.Repeat("a", MaxFindingsIdentitySlugBytes+1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			finding := FindingsV2Finding{Identity: &FindingsV2Identity{}}
+			switch tt.field {
+			case "ruleId":
+				finding.RuleID = tt.value
+			case "anchor":
+				finding.Identity.Anchor = tt.value
+			case "instance":
+				finding.Identity.Instance = tt.value
+			case "algorithmVersion":
+				finding.Identity.AlgorithmVersion = tt.value
+			}
+			data, err := json.Marshal(FindingsV2Artifact{SchemaVersion: SchemaVersionFindingsV2, Findings: []FindingsV2Finding{finding}})
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			if _, err := ParseFindingsV2Artifact(data); err == nil {
+				t.Fatal("ParseFindingsV2Artifact() error = nil, want invalid identity slug rejected")
+			}
+		})
 	}
 }
 
@@ -690,5 +1044,128 @@ func TestBuildReviewContextPreservesCapturedRangeWhenLaterRangeExceedsSeekLimit(
 	}
 	if len(manifest.ChangedLineRanges) != 1 || manifest.ChangedLineRanges[0].StartLine != 1 {
 		t.Fatalf("changed ranges = %#v, want reachable first range preserved", manifest.ChangedLineRanges)
+	}
+}
+
+func TestParseReviewSlicesArtifactRejectsCaseInsensitiveOversizedCollectionAliases(t *testing.T) {
+	tests := []struct {
+		key   string
+		limit int
+		want  string
+	}{
+		{key: "DISCOVEREDFILES", limit: MaxMapperInventoryEntries, want: "discoveredFiles exceeds"},
+		{key: "ReviewableFiles", limit: MaxMapperInventoryEntries, want: "reviewableFiles exceeds"},
+		{key: "OMITTEDFILES", limit: MaxMapperOmittedInventoryEntries, want: "omittedFiles exceeds"},
+		{key: "SLICES", limit: MaxMapperReviewSlices, want: "slices exceeds"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			var data strings.Builder
+			data.WriteString(`{"schemaVersion":2,"`)
+			data.WriteString(tt.key)
+			data.WriteString(`":[`)
+			for i := 0; i <= tt.limit; i++ {
+				if i > 0 {
+					data.WriteByte(',')
+				}
+				data.WriteString(`null`)
+			}
+			if _, err := ParseReviewSlicesArtifact([]byte(data.String())); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ParseReviewSlicesArtifact() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseReviewSlicesArtifactRejectsUnicodeFoldedOversizedCollectionAliases(t *testing.T) {
+	tests := []struct {
+		key   string
+		limit int
+		want  string
+	}{
+		{key: "diſcoveredFileſ", limit: MaxMapperInventoryEntries, want: "discoveredFiles exceeds"},
+		{key: "reviewableFileſ", limit: MaxMapperInventoryEntries, want: "reviewableFiles exceeds"},
+		{key: "omittedFileſ", limit: MaxMapperOmittedInventoryEntries, want: "omittedFiles exceeds"},
+		{key: "ſlices", limit: MaxMapperReviewSlices, want: "slices exceeds"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			var data strings.Builder
+			data.WriteString(`{"schemaVersion":2,"`)
+			data.WriteString(tt.key)
+			data.WriteString(`":[`)
+			for i := 0; i <= tt.limit; i++ {
+				if i > 0 {
+					data.WriteByte(',')
+				}
+				data.WriteString(`null`)
+			}
+			if _, err := ParseReviewSlicesArtifact([]byte(data.String())); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ParseReviewSlicesArtifact() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseReviewSlicesArtifactRejectsCaseInsensitiveTargetReceiptTreeIndexAlias(t *testing.T) {
+	var data strings.Builder
+	data.WriteString(`{"schemaVersion":2,"TARGETRECEIPT":{"TREEINDEX":[`)
+	for i := 0; i <= MaxMapperTreeIndexEntries; i++ {
+		if i > 0 {
+			data.WriteByte(',')
+		}
+		data.WriteString(`null`)
+	}
+	if _, err := ParseReviewSlicesArtifact([]byte(data.String())); err == nil ||
+		!strings.Contains(err.Error(), "targetReceipt.treeIndex exceeds") {
+		t.Fatalf("ParseReviewSlicesArtifact() error = %v, want nested alias bound rejection", err)
+	}
+}
+
+func TestParseReviewSlicesArtifactSeparatesPathAndOmissionRecordTruncation(t *testing.T) {
+	headOID := strings.Repeat("a", 40)
+	artifact := ReviewSlicesArtifact{
+		SchemaVersion:       SchemaVersionReviewSlicesV2,
+		CoverageStatus:      MapperCoveragePartial,
+		CoverageReasonCodes: []string{MapperCoverageReasonInventoryEntryLimit},
+		InventorySummary: &MapperInventorySummary{
+			EntryLimit:       10,
+			TotalEntries:     1,
+			RetainedEntries:  1,
+			TruncatedEntries: 0,
+			OmissionRecords: &MapperOmissionRecordSummary{
+				EntryLimit:       1,
+				TotalRecords:     2,
+				RetainedRecords:  1,
+				TruncatedRecords: 1,
+				Truncated:        true,
+			},
+			Truncated: true,
+			Reason:    MapperCoverageReasonInventoryEntryLimit,
+		},
+		HeadCommit: headOID,
+		DiscoveredFiles: []MapperFileInventoryEntry{{
+			Path: "app.go", Disposition: MapperDispositionReviewable, Reason: "supported-reviewable-file",
+		}},
+		ReviewableFiles: []MapperFileInventoryEntry{{
+			Path: "app.go", Disposition: MapperDispositionOmitted, Reason: "no-deterministic-review-slice",
+		}},
+		OmittedFiles: []MapperFileInventoryEntry{{
+			Path: "app.go", Disposition: MapperDispositionOmitted, Reason: "no-deterministic-review-slice",
+		}},
+		TargetReceipt: validMapperTargetReceipt(headOID, "app.go"),
+		Slices:        []store.ReviewSlice{},
+	}
+	data, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseReviewSlicesArtifact(data)
+	if err != nil {
+		t.Fatalf("ParseReviewSlicesArtifact() error = %v", err)
+	}
+	if got.InventorySummary.TotalEntries != 1 || got.InventorySummary.TruncatedEntries != 0 ||
+		got.InventorySummary.OmissionRecords == nil || got.InventorySummary.OmissionRecords.TruncatedRecords != 1 {
+		t.Fatalf("inventory summary = %#v", got.InventorySummary)
 	}
 }

@@ -11,7 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -55,66 +57,298 @@ func unmarshalSecurityJSON(payload string, value any) error {
 
 // CreateScanRun inserts a new scan run.
 func (s *Store) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
-	now := time.Now()
+	if err := normalizeScanRunIntegrityFields(run); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
 	if run.StartedAt.IsZero() {
 		run.StartedAt = now
+	} else {
+		run.StartedAt = run.StartedAt.UTC()
 	}
-	_, err := s.db.ExecContext(ctx,
+	run.CompletedAt = normalizeSecurityTimePtr(run.CompletedAt)
+	reasonCodesJSON, err := marshalSecurityJSON(run.Quality.ReasonCodes)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO security_scan_runs
-		 (id, namespace, repository_scan, task_name, mode, phase, base_commit, head_commit, commit_count,
-		  slice_count, reviewed_slice_count, skipped_slice_count, accepted_findings, dropped_findings,
-		  scanner_policy_version, policy_digest, idempotency_key, summary, error_message, started_at, completed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		run.ID, run.Namespace, run.RepositoryScan, run.TaskName, run.Mode, run.Phase,
-		run.BaseCommit, run.HeadCommit, run.CommitCount, run.SliceCount, run.ReviewedSliceCount,
-		run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings,
-		run.ScannerPolicyVersion, run.PolicyDigest, run.IdempotencyKey, run.Summary, run.ErrorMessage,
-		run.StartedAt, run.CompletedAt,
+		 (id, run_uid, namespace, repository_scan, repository_scan_uid, repository_scan_generation,
+		  task_name, mode, phase, base_commit, head_commit, commit_count, slice_count, reviewed_slice_count,
+		  skipped_slice_count, accepted_findings, dropped_findings, scanner_policy_version, policy_digest,
+		  idempotency_key, request_idempotency_key, resolved_target_key, target_receipt_id,
+		  quality_schema_version, inventory_coverage_status, candidate_coverage_status, coverage_status,
+		  validation_scope, validation_execution, attack_path_execution, analysis_attestation_level,
+		  target_verification, bundle_status, authorization_status, isolation_status, quality_reason_codes_json,
+		  summary, error_message, started_at, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.RunUID, run.Namespace, run.RepositoryScan, run.RepositoryScanUID, run.RepositoryScanGeneration,
+		run.TaskName, run.Mode, run.Phase, run.BaseCommit, run.HeadCommit, run.CommitCount, run.SliceCount,
+		run.ReviewedSliceCount, run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings,
+		run.ScannerPolicyVersion, run.PolicyDigest, run.IdempotencyKey, run.RequestIdempotencyKey,
+		run.ResolvedTargetKey, run.TargetReceiptID, run.Quality.SchemaVersion, run.Quality.InventoryCoverageStatus,
+		run.Quality.CandidateCoverageStatus, run.Quality.CoverageStatus, run.Quality.ValidationScope,
+		run.Quality.ValidationExecution, run.Quality.AttackPathExecution, run.Quality.AnalysisAttestationLevel,
+		run.Quality.TargetVerification, run.Quality.BundleStatus, run.Quality.AuthorizationStatus,
+		run.Quality.IsolationStatus, reasonCodesJSON, run.Summary, run.ErrorMessage, run.StartedAt, run.CompletedAt,
 	)
+	if isSQLiteConstraintError(err) {
+		return fmt.Errorf("%w: active scan request already exists", store.ErrConflict)
+	}
 	return err
 }
 
-// UpdateScanRun updates a scan run.
+func mergeImmutableScanRunString(current, requested, field string) (string, error) {
+	current = strings.TrimSpace(current)
+	requested = strings.TrimSpace(requested)
+	if current == "" {
+		return requested, nil
+	}
+	if requested == "" || requested == current {
+		return current, nil
+	}
+	return "", fmt.Errorf("%w: scan run %s is immutable", store.ErrConflict, field)
+}
+
+func mergeImmutableScanRunGeneration(current, requested int64) (int64, error) {
+	if current == 0 {
+		return requested, nil
+	}
+	if requested == 0 || requested == current {
+		return current, nil
+	}
+	return 0, fmt.Errorf("%w: scan run repositoryScanGeneration is immutable", store.ErrConflict)
+}
+
+func validateScanRunBundleStatusTransition(current, requested store.BundleStatus) error {
+	if current == store.BundleStatusSealed {
+		return fmt.Errorf("%w: sealed scan run is immutable", store.ErrConflict)
+	}
+
+	allowed := false
+	switch current {
+	case store.BundleStatusNotStarted:
+		allowed = requested == store.BundleStatusNotStarted ||
+			requested == store.BundleStatusDraft ||
+			requested == store.BundleStatusSealing ||
+			requested == store.BundleStatusFailed
+	case store.BundleStatusDraft:
+		allowed = requested == store.BundleStatusDraft ||
+			requested == store.BundleStatusSealing ||
+			requested == store.BundleStatusRetryableFailed ||
+			requested == store.BundleStatusFailed
+	case store.BundleStatusSealing:
+		allowed = requested == store.BundleStatusSealing ||
+			requested == store.BundleStatusSealed ||
+			requested == store.BundleStatusRetryableFailed ||
+			requested == store.BundleStatusFailed
+	case store.BundleStatusRetryableFailed:
+		allowed = requested == store.BundleStatusRetryableFailed ||
+			requested == store.BundleStatusSealing ||
+			requested == store.BundleStatusFailed
+	case store.BundleStatusFailed:
+		allowed = requested == store.BundleStatusFailed
+	}
+	if !allowed {
+		return fmt.Errorf("%w: scan run bundle status cannot transition from %q to %q", store.ErrConflict, current, requested)
+	}
+	return nil
+}
+
+const (
+	storedScanRunPhasePending   = "pending"
+	storedScanRunPhaseRunning   = "running"
+	storedScanRunPhaseSucceeded = "succeeded"
+	storedScanRunPhaseFailed    = "failed"
+)
+
+func terminalSecurityScanRunPhase(phase string) bool {
+	switch strings.TrimSpace(phase) {
+	case storedScanRunPhaseSucceeded, storedScanRunPhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func activeSecurityScanRunPhase(phase string) bool {
+	switch strings.TrimSpace(phase) {
+	case storedScanRunPhasePending, storedScanRunPhaseRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+// UpdateScanRun updates mutable progress while allowing one-time population of immutable identity fields.
 func (s *Store) UpdateScanRun(ctx context.Context, run *store.ScanRun) error {
-	_, err := s.db.ExecContext(ctx,
+	if err := normalizeScanRunIntegrityFields(run); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var currentRunUID, currentRepositoryScan, currentRepositoryScanUID, currentRequestKey, currentTargetKey, currentTargetReceiptID, currentPhase string
+	var currentBundleStatus store.BundleStatus
+	var currentRepositoryScanGeneration, currentRowID int64
+	err = tx.QueryRowContext(ctx, `SELECT rowid, run_uid, repository_scan, repository_scan_uid, repository_scan_generation,
+		request_idempotency_key, resolved_target_key, target_receipt_id, bundle_status, phase
+		FROM security_scan_runs WHERE namespace = ? AND id = ?`, run.Namespace, run.ID).
+		Scan(&currentRowID, &currentRunUID, &currentRepositoryScan, &currentRepositoryScanUID, &currentRepositoryScanGeneration,
+			&currentRequestKey, &currentTargetKey, &currentTargetReceiptID, &currentBundleStatus, &currentPhase)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if terminalSecurityScanRunPhase(currentPhase) && activeSecurityScanRunPhase(run.Phase) {
+		var newerRunID string
+		newerErr := tx.QueryRowContext(ctx, `SELECT id
+			FROM security_scan_runs
+			WHERE namespace = ? AND repository_scan = ? AND rowid > ?
+			ORDER BY rowid DESC
+			LIMIT 1`, run.Namespace, currentRepositoryScan, currentRowID).Scan(&newerRunID)
+		switch {
+		case newerErr == nil:
+			// A delayed reconciliation may replay an old Task snapshot after a
+			// newer repository run has been reserved or completed. SQLite rowid is
+			// the immutable insertion sequence, so never let that historical
+			// projection reopen and become
+			// the active repository run again.
+			return nil
+		case errors.Is(newerErr, sql.ErrNoRows):
+			// The latest run may legitimately return to running if newly discovered
+			// work still belongs to that same run.
+		default:
+			return newerErr
+		}
+	}
+	if err := validateScanRunBundleStatusTransition(currentBundleStatus, run.Quality.BundleStatus); err != nil {
+		return err
+	}
+	if run.RunUID, err = mergeImmutableScanRunString(currentRunUID, run.RunUID, "runUID"); err != nil {
+		return err
+	}
+	if run.RepositoryScanUID, err = mergeImmutableScanRunString(currentRepositoryScanUID, run.RepositoryScanUID, "repositoryScanUID"); err != nil {
+		return err
+	}
+	if run.RepositoryScanGeneration, err = mergeImmutableScanRunGeneration(currentRepositoryScanGeneration, run.RepositoryScanGeneration); err != nil {
+		return err
+	}
+	if run.RequestIdempotencyKey, err = mergeImmutableScanRunString(currentRequestKey, run.RequestIdempotencyKey, "requestIdempotencyKey"); err != nil {
+		return err
+	}
+	if run.ResolvedTargetKey, err = mergeImmutableScanRunString(currentTargetKey, run.ResolvedTargetKey, "resolvedTargetKey"); err != nil {
+		return err
+	}
+	if run.TargetReceiptID, err = mergeImmutableScanRunString(currentTargetReceiptID, run.TargetReceiptID, "targetReceiptID"); err != nil {
+		return err
+	}
+	if run.IdempotencyKey == "" {
+		run.IdempotencyKey = run.RequestIdempotencyKey
+	}
+	reasonCodesJSON, err := marshalSecurityJSON(run.Quality.ReasonCodes)
+	if err != nil {
+		return err
+	}
+	run.StartedAt = normalizeSecurityTime(run.StartedAt)
+	run.CompletedAt = normalizeSecurityTimePtr(run.CompletedAt)
+	res, err := tx.ExecContext(ctx,
 		`UPDATE security_scan_runs
-		 SET task_name = ?, mode = ?, phase = ?, base_commit = ?, head_commit = ?, commit_count = ?,
+		 SET run_uid = ?, repository_scan_uid = ?, repository_scan_generation = ?,
+		     task_name = ?, mode = ?, phase = ?, base_commit = ?, head_commit = ?, commit_count = ?,
 		     slice_count = ?, reviewed_slice_count = ?, skipped_slice_count = ?, accepted_findings = ?, dropped_findings = ?,
-		     scanner_policy_version = ?, policy_digest = ?, idempotency_key = ?,
+		     scanner_policy_version = ?, policy_digest = ?, idempotency_key = ?, request_idempotency_key = ?,
+		     resolved_target_key = ?, target_receipt_id = ?, quality_schema_version = ?,
+		     inventory_coverage_status = ?, candidate_coverage_status = ?, coverage_status = ?, validation_scope = ?,
+		     validation_execution = ?, attack_path_execution = ?, analysis_attestation_level = ?, target_verification = ?,
+		     bundle_status = ?, authorization_status = ?, isolation_status = ?, quality_reason_codes_json = ?,
 		     summary = ?, error_message = ?, started_at = ?, completed_at = ?
 		 WHERE namespace = ? AND id = ?`,
-		run.TaskName, run.Mode, run.Phase, run.BaseCommit, run.HeadCommit, run.CommitCount,
-		run.SliceCount, run.ReviewedSliceCount, run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings,
-		run.ScannerPolicyVersion, run.PolicyDigest, run.IdempotencyKey,
-		run.Summary, run.ErrorMessage, run.StartedAt, run.CompletedAt, run.Namespace, run.ID,
+		run.RunUID, run.RepositoryScanUID, run.RepositoryScanGeneration, run.TaskName, run.Mode, run.Phase,
+		run.BaseCommit, run.HeadCommit, run.CommitCount, run.SliceCount, run.ReviewedSliceCount,
+		run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings, run.ScannerPolicyVersion,
+		run.PolicyDigest, run.IdempotencyKey, run.RequestIdempotencyKey, run.ResolvedTargetKey,
+		run.TargetReceiptID, run.Quality.SchemaVersion, run.Quality.InventoryCoverageStatus,
+		run.Quality.CandidateCoverageStatus, run.Quality.CoverageStatus, run.Quality.ValidationScope,
+		run.Quality.ValidationExecution, run.Quality.AttackPathExecution, run.Quality.AnalysisAttestationLevel,
+		run.Quality.TargetVerification, run.Quality.BundleStatus, run.Quality.AuthorizationStatus,
+		run.Quality.IsolationStatus, reasonCodesJSON, run.Summary, run.ErrorMessage, run.StartedAt,
+		run.CompletedAt, run.Namespace, run.ID,
 	)
-	return err
+	if isSQLiteConstraintError(err) {
+		return fmt.Errorf("%w: active repository scan already exists", store.ErrConflict)
+	}
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return tx.Commit()
+}
+
+const scanRunSelectColumns = `id, run_uid, namespace, repository_scan, repository_scan_uid,
+	repository_scan_generation, task_name, mode, phase, started_at, completed_at, base_commit, head_commit,
+	commit_count, slice_count, reviewed_slice_count, skipped_slice_count, accepted_findings, dropped_findings,
+	scanner_policy_version, policy_digest, idempotency_key, request_idempotency_key, resolved_target_key,
+	target_receipt_id, quality_schema_version, inventory_coverage_status, candidate_coverage_status,
+	coverage_status, validation_scope, validation_execution, attack_path_execution, analysis_attestation_level,
+	target_verification, bundle_status, authorization_status, isolation_status, quality_reason_codes_json,
+	summary, error_message`
+
+func qualifiedScanRunSelectColumns(alias string) string {
+	columns := strings.Split(scanRunSelectColumns, ",")
+	for i := range columns {
+		columns[i] = alias + "." + strings.TrimSpace(columns[i])
+	}
+	return strings.Join(columns, ", ")
+}
+
+func scanScanRun(scanner interface{ Scan(dest ...any) error }) (*store.ScanRun, error) {
+	var run store.ScanRun
+	var reasonCodesJSON string
+	err := scanner.Scan(
+		&run.ID, &run.RunUID, &run.Namespace, &run.RepositoryScan, &run.RepositoryScanUID,
+		&run.RepositoryScanGeneration, &run.TaskName, &run.Mode, &run.Phase, &run.StartedAt,
+		&run.CompletedAt, &run.BaseCommit, &run.HeadCommit, &run.CommitCount, &run.SliceCount,
+		&run.ReviewedSliceCount, &run.SkippedSliceCount, &run.AcceptedFindings, &run.DroppedFindings,
+		&run.ScannerPolicyVersion, &run.PolicyDigest, &run.IdempotencyKey, &run.RequestIdempotencyKey,
+		&run.ResolvedTargetKey, &run.TargetReceiptID, &run.Quality.SchemaVersion,
+		&run.Quality.InventoryCoverageStatus, &run.Quality.CandidateCoverageStatus, &run.Quality.CoverageStatus,
+		&run.Quality.ValidationScope, &run.Quality.ValidationExecution, &run.Quality.AttackPathExecution,
+		&run.Quality.AnalysisAttestationLevel, &run.Quality.TargetVerification, &run.Quality.BundleStatus,
+		&run.Quality.AuthorizationStatus, &run.Quality.IsolationStatus, &reasonCodesJSON, &run.Summary,
+		&run.ErrorMessage,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := unmarshalSecurityJSON(reasonCodesJSON, &run.Quality.ReasonCodes); err != nil {
+		return nil, err
+	}
+	if run.RequestIdempotencyKey == "" {
+		run.RequestIdempotencyKey = run.IdempotencyKey
+	}
+	return &run, nil
 }
 
 // GetScanRun fetches a scan run by ID.
 func (s *Store) GetScanRun(ctx context.Context, namespace, id string) (*store.ScanRun, error) {
-	var run store.ScanRun
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, namespace, repository_scan, task_name, mode, phase, started_at, completed_at,
-		        base_commit, head_commit, commit_count, slice_count, reviewed_slice_count, skipped_slice_count,
-		        accepted_findings, dropped_findings, scanner_policy_version, policy_digest, idempotency_key,
-		        summary, error_message
-		 FROM security_scan_runs WHERE namespace = ? AND id = ?`,
-		namespace, id,
-	).Scan(
-		&run.ID, &run.Namespace, &run.RepositoryScan, &run.TaskName, &run.Mode, &run.Phase,
-		&run.StartedAt, &run.CompletedAt, &run.BaseCommit, &run.HeadCommit, &run.CommitCount,
-		&run.SliceCount, &run.ReviewedSliceCount, &run.SkippedSliceCount, &run.AcceptedFindings,
-		&run.DroppedFindings, &run.ScannerPolicyVersion, &run.PolicyDigest, &run.IdempotencyKey,
-		&run.Summary, &run.ErrorMessage,
-	)
+	run, err := scanScanRun(s.db.QueryRowContext(ctx,
+		`SELECT `+scanRunSelectColumns+` FROM security_scan_runs WHERE namespace = ? AND id = ?`, namespace, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &run, nil
+	return run, err
 }
 
 // ListScanRuns lists scan runs for a repository scan ordered newest first.
@@ -126,42 +360,111 @@ func (s *Store) ListScanRuns(ctx context.Context, namespace, repositoryScan stri
 	if limit <= 0 {
 		limit = 20
 	}
-
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, namespace, repository_scan, task_name, mode, phase, started_at, completed_at,
-		        base_commit, head_commit, commit_count, slice_count, reviewed_slice_count, skipped_slice_count,
-		        accepted_findings, dropped_findings, scanner_policy_version, policy_digest, idempotency_key,
-		        summary, error_message
-		 FROM security_scan_runs
+		`SELECT `+scanRunSelectColumns+` FROM security_scan_runs
 		 WHERE namespace = ? AND repository_scan = ?
-		 ORDER BY started_at DESC, id DESC
-		 LIMIT ? OFFSET ?`,
+		 ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`,
 		namespace, repositoryScan, limit, offset,
 	)
 	if err != nil {
 		return nil, "", err
 	}
 	defer rows.Close() //nolint:errcheck
-
-	var runs []store.ScanRun
+	runs := make([]store.ScanRun, 0)
 	for rows.Next() {
-		var run store.ScanRun
-		if err := rows.Scan(
-			&run.ID, &run.Namespace, &run.RepositoryScan, &run.TaskName, &run.Mode, &run.Phase,
-			&run.StartedAt, &run.CompletedAt, &run.BaseCommit, &run.HeadCommit, &run.CommitCount,
-			&run.SliceCount, &run.ReviewedSliceCount, &run.SkippedSliceCount, &run.AcceptedFindings,
-			&run.DroppedFindings, &run.ScannerPolicyVersion, &run.PolicyDigest, &run.IdempotencyKey,
-			&run.Summary, &run.ErrorMessage,
-		); err != nil {
+		run, err := scanScanRun(rows)
+		if err != nil {
 			return nil, "", err
 		}
-		runs = append(runs, run)
+		runs = append(runs, *run)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, "", err
 	}
-
 	return runs, nextOffsetCursor(offset, len(runs), limit), nil
+}
+
+// ListLatestScanRuns returns the newest run for each requested RepositoryScan incarnation.
+func (s *Store) ListLatestScanRuns(
+	ctx context.Context,
+	namespace string,
+	repositories []store.RepositoryScanIdentity,
+) ([]store.ScanRun, error) {
+	if len(repositories) == 0 {
+		return []store.ScanRun{}, nil
+	}
+
+	identities := make([]store.RepositoryScanIdentity, 0, len(repositories))
+	seen := make(map[store.RepositoryScanIdentity]struct{}, len(repositories))
+	for _, identity := range repositories {
+		if identity.Name != strings.TrimSpace(identity.Name) {
+			return nil, store.ValidationErrorf("repository scan name must not contain surrounding whitespace")
+		}
+		if identity.UID != strings.TrimSpace(identity.UID) {
+			return nil, store.ValidationErrorf("repository scan UID must not contain surrounding whitespace")
+		}
+		if identity.Name == "" {
+			return nil, store.ValidationErrorf("repository scan name is required")
+		}
+		if identity.UID == "" {
+			return nil, store.ValidationErrorf("repository scan UID is required")
+		}
+		if identity.Generation <= 0 {
+			return nil, store.ValidationErrorf("repository scan generation must be positive")
+		}
+		if _, ok := seen[identity]; ok {
+			continue
+		}
+		seen[identity] = struct{}{}
+		identities = append(identities, identity)
+	}
+
+	placeholders := make([]string, 0, len(identities))
+	args := make([]any, 0, len(identities)*3+1)
+	for _, identity := range identities {
+		placeholders = append(placeholders, "(?, ?, ?)")
+		args = append(args, identity.Name, identity.UID, identity.Generation)
+	}
+	args = append(args, namespace)
+
+	query := `WITH requested(repository_scan, repository_scan_uid, repository_scan_generation) AS (
+		VALUES ` + strings.Join(placeholders, ", ") + `
+	), ranked AS (
+		SELECT ` + qualifiedScanRunSelectColumns("runs") + `,
+			ROW_NUMBER() OVER (
+				PARTITION BY runs.repository_scan, runs.repository_scan_uid, runs.repository_scan_generation
+				ORDER BY runs.started_at DESC, runs.id DESC
+			) AS latest_rank
+		FROM security_scan_runs AS runs
+		INNER JOIN requested
+			ON requested.repository_scan = runs.repository_scan
+			AND requested.repository_scan_uid = runs.repository_scan_uid
+			AND requested.repository_scan_generation = runs.repository_scan_generation
+		WHERE runs.namespace = ?
+	)
+	SELECT ` + scanRunSelectColumns + `
+	FROM ranked
+	WHERE latest_rank = 1
+	ORDER BY repository_scan, repository_scan_uid, repository_scan_generation`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	runs := make([]store.ScanRun, 0, len(identities))
+	for rows.Next() {
+		run, err := scanScanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, *run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
 }
 
 // UpsertReviewSlice inserts or updates a deterministic review slice.
@@ -176,7 +479,7 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 		slice.Confidence = "medium"
 	}
 	if slice.Status == "" {
-		slice.Status = "pending"
+		slice.Status = "pending" //nolint:goconst // review-slice status is a separate domain from scan-run phase
 	}
 
 	entrypointsJSON, err := marshalSecurityJSON(slice.Entrypoints)
@@ -395,14 +698,16 @@ func (s *Store) UpdateReviewSliceStatus(ctx context.Context, namespace, reposito
 func (s *Store) GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*store.ThreatModel, error) {
 	var model store.ThreatModel
 	err := s.db.QueryRowContext(ctx,
-		`SELECT namespace, repository_scan, version, content, source, generated_by_scan, created_at, updated_at
+		`SELECT namespace, repository_scan, repository_scan_uid, repository_scan_generation,
+		        version, content, source, generated_by_scan, created_at, updated_at
 		 FROM security_threat_models
 		 WHERE namespace = ? AND repository_scan = ?
 		 ORDER BY version DESC
 		 LIMIT 1`,
 		namespace, repositoryScan,
 	).Scan(
-		&model.Namespace, &model.RepositoryScan, &model.Version, &model.Content, &model.Source,
+		&model.Namespace, &model.RepositoryScan, &model.RepositoryScanUID, &model.RepositoryScanGeneration,
+		&model.Version, &model.Content, &model.Source,
 		&model.GeneratedByScan, &model.CreatedAt, &model.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -417,6 +722,7 @@ func (s *Store) GetLatestThreatModel(ctx context.Context, namespace, repositoryS
 // SaveThreatModel stores the current threat model, replacing any older copies for the repository.
 // When Version is zero, the revision number is incremented from the latest stored model.
 func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
+	model.Content = redact.SensitiveText(model.Content)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -454,10 +760,11 @@ func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) e
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO security_threat_models
-		 (namespace, repository_scan, version, content, source, generated_by_scan, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		model.Namespace, model.RepositoryScan, model.Version, model.Content, model.Source,
-		model.GeneratedByScan, model.CreatedAt, model.UpdatedAt,
+		 (namespace, repository_scan, repository_scan_uid, repository_scan_generation,
+		  version, content, source, generated_by_scan, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		model.Namespace, model.RepositoryScan, model.RepositoryScanUID, model.RepositoryScanGeneration,
+		model.Version, model.Content, model.Source, model.GeneratedByScan, model.CreatedAt, model.UpdatedAt,
 	); err != nil {
 		return err
 	}
@@ -487,10 +794,125 @@ func unmarshalEvidence(payload string) ([]store.FindingEvidenceRef, error) {
 	return evidence, nil
 }
 
+func redactFindingProjectionText(value *string, field string) error {
+	if !utf8.ValidString(*value) {
+		return store.ValidationErrorf("%s must be valid UTF-8", field)
+	}
+	*value = redact.SensitiveText(*value)
+	return nil
+}
+
+func rejectCredentialBearingFindingProjectionString(value, field string) error {
+	if !utf8.ValidString(value) {
+		return store.ValidationErrorf("%s must be valid UTF-8", field)
+	}
+	if redact.SensitiveText(value) != value {
+		return store.ValidationErrorf("%s contains credential-like content", field)
+	}
+	return nil
+}
+
+// sanitizeFindingProjection ensures every string persisted in security_findings
+// or its evidence JSON is either redacted as free text or rejected as a stable
+// identifier, coordinate, enum, digest, or URL.
+func sanitizeFindingProjection(finding *store.Finding) error {
+	if finding == nil {
+		return store.ValidationErrorf("finding is required")
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"finding.id", finding.ID},
+		{"finding.namespace", finding.Namespace},
+		{"finding.repositoryScan", finding.RepositoryScan},
+		{"finding.scanRunID", finding.ScanRunID},
+		{"finding.scanTaskName", finding.ScanTaskName},
+		{"finding.sliceID", finding.SliceID},
+		{"finding.fingerprint", finding.Fingerprint},
+		{"finding.identityQuality", finding.IdentityQuality},
+		{"finding.identityAlgorithmVersion", finding.IdentityAlgorithmVersion},
+		{"finding.semanticFingerprint", finding.SemanticFingerprint},
+		{"finding.legacyFingerprint", finding.LegacyFingerprint},
+		{"finding.historyStatus", finding.HistoryStatus},
+		{"finding.currentOccurrenceID", finding.CurrentOccurrenceID},
+		{"finding.severity", finding.Severity},
+		{"finding.confidence", finding.Confidence},
+		{"finding.validationStatus", finding.ValidationStatus},
+		{"finding.state", finding.State},
+		{"finding.filePath", finding.FilePath},
+		{"finding.commitSHA", finding.CommitSHA},
+		{"finding.patchProposalID", finding.PatchProposalID},
+		{"finding.prURL", finding.PRURL},
+	} {
+		if err := rejectCredentialBearingFindingProjectionString(field.value, field.name); err != nil {
+			return err
+		}
+	}
+	for _, field := range []struct {
+		name  string
+		value *string
+	}{
+		{"finding.title", &finding.Title},
+		{"finding.category", &finding.Category},
+		{"finding.summary", &finding.Summary},
+		{"finding.triage", &finding.Triage},
+		{"finding.rootCause", &finding.RootCause},
+		{"finding.reproduction", &finding.Reproduction},
+		{"finding.remediation", &finding.Remediation},
+		{"finding.suggestedAction", &finding.SuggestedAction},
+		{"finding.whyTestsDoNotAlreadyCoverThis", &finding.WhyTestsDoNotAlreadyCoverThis},
+		{"finding.suggestedRegressionTest", &finding.SuggestedRegressionTest},
+		{"finding.minimumFixScope", &finding.MinimumFixScope},
+	} {
+		if err := redactFindingProjectionText(field.value, field.name); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(finding.ValidationJSON) != "" {
+		normalized, _, err := normalizeSecurityPayload(json.RawMessage(finding.ValidationJSON), "", true, "finding.validationJSON")
+		if err != nil {
+			return err
+		}
+		finding.ValidationJSON = string(normalized)
+	}
+	for i := range finding.Evidence {
+		evidence := &finding.Evidence[i]
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{fmt.Sprintf("finding.evidence[%d].kind", i), evidence.Kind},
+			{fmt.Sprintf("finding.evidence[%d].taskName", i), evidence.TaskName},
+			{fmt.Sprintf("finding.evidence[%d].name", i), evidence.Name},
+			{fmt.Sprintf("finding.evidence[%d].path", i), evidence.Path},
+			{fmt.Sprintf("finding.evidence[%d].symbol", i), evidence.Symbol},
+			{fmt.Sprintf("finding.evidence[%d].contentSHA256", i), evidence.ContentSHA256},
+		} {
+			if err := rejectCredentialBearingFindingProjectionString(field.value, field.name); err != nil {
+				return err
+			}
+		}
+		if err := redactFindingProjectionText(&evidence.Label, fmt.Sprintf("finding.evidence[%d].label", i)); err != nil {
+			return err
+		}
+		if err := redactFindingProjectionText(&evidence.Quote, fmt.Sprintf("finding.evidence[%d].quote", i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // UpsertFinding inserts or updates a finding keyed by repository fingerprint.
 func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error {
 	if finding.ID == "" {
 		finding.ID = finding.Fingerprint
+	}
+	if err := sanitizeFindingProjection(finding); err != nil {
+		return err
+	}
+	if err := normalizeFindingIntegrityFields(finding); err != nil {
+		return err
 	}
 
 	evidenceJSON, err := marshalEvidence(finding.Evidence)
@@ -504,23 +926,134 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 	}
 	finding.UpdatedAt = now
 
+	// Lower-quality inputs must not hybridize the immutable occurrence-derived
+	// projection. Their lifecycle fields may advance only when they are bound to
+	// the retained occurrence and source run, or when both bindings are legacy-empty.
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO security_findings
-		 (id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, title, category, summary, severity, confidence, triage,
+		 (id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, identity_quality, identity_algorithm_version,
+		  semantic_fingerprint, legacy_fingerprint, history_status, current_occurrence_id, decision_version,
+		  title, category, summary, severity, confidence, triage,
 		  validation_status, state, file_path, line, commit_sha, root_cause, reproduction, remediation, suggested_action,
 		  why_tests_do_not_cover, suggested_regression_test, minimum_fix_scope, evidence_json, validation_json, patch_proposal_id,
 		  pr_number, pr_url, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(namespace, repository_scan, fingerprint) DO UPDATE SET
-		   scan_run_id = excluded.scan_run_id,
-		   slice_id = excluded.slice_id,
-		   title = excluded.title,
-		   category = excluded.category,
-		   summary = excluded.summary,
-		   severity = excluded.severity,
-		   confidence = excluded.confidence,
-		   triage = excluded.triage,
+		   scan_run_id = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.scan_run_id
+		     WHEN excluded.current_occurrence_id <> ''
+		       OR excluded.scan_run_id <> security_findings.scan_run_id
+		       THEN excluded.scan_run_id
+		     ELSE security_findings.scan_run_id
+		   END,
+		   slice_id = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.slice_id
+		     ELSE excluded.slice_id
+		   END,
+		   identity_quality = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.identity_quality
+		     ELSE excluded.identity_quality
+		   END,
+		   identity_algorithm_version = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.identity_algorithm_version
+		     ELSE excluded.identity_algorithm_version
+		   END,
+		   semantic_fingerprint = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.semantic_fingerprint
+		     WHEN excluded.semantic_fingerprint <> '' THEN excluded.semantic_fingerprint
+		     ELSE security_findings.semantic_fingerprint
+		   END,
+		   legacy_fingerprint = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.legacy_fingerprint
+		     WHEN security_findings.legacy_fingerprint <> '' THEN security_findings.legacy_fingerprint
+		     ELSE excluded.legacy_fingerprint
+		   END,
+		   history_status = CASE
+		     WHEN security_findings.history_status = 'canonical' THEN security_findings.history_status
+		     ELSE excluded.history_status
+		   END,
+		   current_occurrence_id = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.current_occurrence_id
+		     WHEN excluded.current_occurrence_id <> ''
+		       OR excluded.scan_run_id <> security_findings.scan_run_id
+		       THEN excluded.current_occurrence_id
+		     ELSE security_findings.current_occurrence_id
+		   END,
+		   decision_version = security_findings.decision_version,
+		   title = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.title
+		     ELSE excluded.title
+		   END,
+		   category = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.category
+		     ELSE excluded.category
+		   END,
+		   summary = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.summary
+		     ELSE excluded.summary
+		   END,
+		   severity = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.severity
+		     ELSE excluded.severity
+		   END,
+		   confidence = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.confidence
+		     ELSE excluded.confidence
+		   END,
+		   triage = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.triage
+		     ELSE excluded.triage
+		   END,
 		   validation_status = CASE
+		     WHEN (security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy'))
+		       AND NOT (
+		         security_findings.current_occurrence_id = excluded.current_occurrence_id
+		         AND security_findings.scan_run_id = excluded.scan_run_id
+		         AND ((security_findings.current_occurrence_id <> '' AND security_findings.scan_run_id <> '')
+		           OR (security_findings.current_occurrence_id = '' AND security_findings.scan_run_id = ''))
+		       )
+		       THEN security_findings.validation_status
 		     WHEN security_findings.validation_status = 'validated'
 		       AND excluded.validation_status != 'validated'
 		       THEN security_findings.validation_status
@@ -544,6 +1077,16 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		     ELSE excluded.validation_status
 		   END,
 		   state = CASE
+		     WHEN (security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy'))
+		       AND NOT (
+		         security_findings.current_occurrence_id = excluded.current_occurrence_id
+		         AND security_findings.scan_run_id = excluded.scan_run_id
+		         AND ((security_findings.current_occurrence_id <> '' AND security_findings.scan_run_id <> '')
+		           OR (security_findings.current_occurrence_id = '' AND security_findings.scan_run_id = ''))
+		       )
+		       THEN security_findings.state
 		     WHEN security_findings.state IN ('fixed', 'resolved', 'dismissed', 'suppressed', 'false_positive')
 		       THEN security_findings.state
 		     WHEN security_findings.state = 'patch_pending'
@@ -564,18 +1107,94 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		     END THEN security_findings.state
 		     ELSE excluded.state
 		   END,
-		   file_path = excluded.file_path,
-		   line = excluded.line,
-		   commit_sha = excluded.commit_sha,
-		   root_cause = excluded.root_cause,
-		   reproduction = excluded.reproduction,
-		   remediation = excluded.remediation,
-		   suggested_action = excluded.suggested_action,
-		   why_tests_do_not_cover = excluded.why_tests_do_not_cover,
-		   suggested_regression_test = excluded.suggested_regression_test,
-		   minimum_fix_scope = excluded.minimum_fix_scope,
-		   evidence_json = excluded.evidence_json,
+		   file_path = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.file_path
+		     ELSE excluded.file_path
+		   END,
+		   line = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.line
+		     ELSE excluded.line
+		   END,
+		   commit_sha = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.commit_sha
+		     ELSE excluded.commit_sha
+		   END,
+		   root_cause = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.root_cause
+		     ELSE excluded.root_cause
+		   END,
+		   reproduction = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.reproduction
+		     ELSE excluded.reproduction
+		   END,
+		   remediation = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.remediation
+		     ELSE excluded.remediation
+		   END,
+		   suggested_action = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.suggested_action
+		     ELSE excluded.suggested_action
+		   END,
+		   why_tests_do_not_cover = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.why_tests_do_not_cover
+		     ELSE excluded.why_tests_do_not_cover
+		   END,
+		   suggested_regression_test = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.suggested_regression_test
+		     ELSE excluded.suggested_regression_test
+		   END,
+		   minimum_fix_scope = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.minimum_fix_scope
+		     ELSE excluded.minimum_fix_scope
+		   END,
+		   evidence_json = CASE
+		     WHEN security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy')
+		       THEN security_findings.evidence_json
+		     ELSE excluded.evidence_json
+		   END,
 		   validation_json = CASE
+		     WHEN (security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy'))
+		       AND NOT (
+		         security_findings.current_occurrence_id = excluded.current_occurrence_id
+		         AND security_findings.scan_run_id = excluded.scan_run_id
+		         AND ((security_findings.current_occurrence_id <> '' AND security_findings.scan_run_id <> '')
+		           OR (security_findings.current_occurrence_id = '' AND security_findings.scan_run_id = ''))
+		       )
+		       THEN security_findings.validation_json
 		     WHEN security_findings.validation_status = 'validated'
 		       AND excluded.validation_status != 'validated'
 		       THEN security_findings.validation_json
@@ -599,16 +1218,50 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		     ELSE excluded.validation_json
 		   END,
 		   patch_proposal_id = CASE
+		     WHEN (security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy'))
+		       AND NOT (
+		         security_findings.current_occurrence_id = excluded.current_occurrence_id
+		         AND security_findings.scan_run_id = excluded.scan_run_id
+		         AND ((security_findings.current_occurrence_id <> '' AND security_findings.scan_run_id <> '')
+		           OR (security_findings.current_occurrence_id = '' AND security_findings.scan_run_id = ''))
+		       )
+		       THEN security_findings.patch_proposal_id
 		     WHEN excluded.patch_proposal_id IS NOT NULL AND excluded.patch_proposal_id != '' THEN excluded.patch_proposal_id
 		     ELSE security_findings.patch_proposal_id
 		   END,
-		   pr_number = COALESCE(excluded.pr_number, security_findings.pr_number),
+		   pr_number = CASE
+		     WHEN (security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy'))
+		       AND NOT (
+		         security_findings.current_occurrence_id = excluded.current_occurrence_id
+		         AND security_findings.scan_run_id = excluded.scan_run_id
+		         AND ((security_findings.current_occurrence_id <> '' AND security_findings.scan_run_id <> '')
+		           OR (security_findings.current_occurrence_id = '' AND security_findings.scan_run_id = ''))
+		       )
+		       THEN security_findings.pr_number
+		     ELSE COALESCE(excluded.pr_number, security_findings.pr_number)
+		   END,
 		   pr_url = CASE
+		     WHEN (security_findings.history_status = 'canonical'
+		       OR (security_findings.identity_quality = 'canonical' AND excluded.identity_quality != 'canonical')
+		       OR (security_findings.identity_quality = 'producer-proposed' AND excluded.identity_quality = 'legacy'))
+		       AND NOT (
+		         security_findings.current_occurrence_id = excluded.current_occurrence_id
+		         AND security_findings.scan_run_id = excluded.scan_run_id
+		         AND ((security_findings.current_occurrence_id <> '' AND security_findings.scan_run_id <> '')
+		           OR (security_findings.current_occurrence_id = '' AND security_findings.scan_run_id = ''))
+		       )
+		       THEN security_findings.pr_url
 		     WHEN excluded.pr_url IS NOT NULL AND excluded.pr_url != '' THEN excluded.pr_url
 		     ELSE security_findings.pr_url
 		   END,
 		   updated_at = excluded.updated_at`,
 		finding.ID, finding.Namespace, finding.RepositoryScan, finding.ScanRunID, finding.SliceID, finding.Fingerprint,
+		finding.IdentityQuality, finding.IdentityAlgorithmVersion, finding.SemanticFingerprint, finding.LegacyFingerprint,
+		finding.HistoryStatus, finding.CurrentOccurrenceID, int64(0),
 		finding.Title, finding.Category, finding.Summary, finding.Severity, finding.Confidence, finding.Triage,
 		finding.ValidationStatus, finding.State, finding.FilePath, finding.Line, finding.CommitSHA, finding.RootCause,
 		finding.Reproduction, finding.Remediation, finding.SuggestedAction, finding.WhyTestsDoNotAlreadyCoverThis,
@@ -627,6 +1280,8 @@ func scanFinding(scanner interface {
 	)
 	err := scanner.Scan(
 		&finding.ID, &finding.Namespace, &finding.RepositoryScan, &finding.ScanRunID, &finding.SliceID, &finding.Fingerprint,
+		&finding.IdentityQuality, &finding.IdentityAlgorithmVersion, &finding.SemanticFingerprint, &finding.LegacyFingerprint,
+		&finding.HistoryStatus, &finding.CurrentOccurrenceID, &finding.DecisionVersion,
 		&finding.Title, &finding.Category, &finding.Summary, &finding.Severity, &finding.Confidence, &finding.Triage,
 		&finding.ValidationStatus, &finding.State, &finding.FilePath, &finding.Line, &finding.CommitSHA, &finding.RootCause,
 		&finding.Reproduction, &finding.Remediation, &finding.SuggestedAction, &finding.WhyTestsDoNotAlreadyCoverThis,
@@ -646,7 +1301,9 @@ func scanFinding(scanner interface {
 // GetFinding returns a finding by ID.
 func (s *Store) GetFinding(ctx context.Context, namespace, id string) (*store.Finding, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, title, category, summary, severity,
+		`SELECT id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, identity_quality,
+		        identity_algorithm_version, semantic_fingerprint, legacy_fingerprint, history_status,
+		        current_occurrence_id, decision_version, title, category, summary, severity,
 		        confidence, triage, validation_status, state, file_path, line, commit_sha, root_cause, reproduction,
 		        remediation, suggested_action, why_tests_do_not_cover, suggested_regression_test, minimum_fix_scope,
 		        evidence_json, validation_json, patch_proposal_id, pr_number, pr_url, created_at, updated_at
@@ -675,7 +1332,9 @@ func (s *Store) ListFindings(ctx context.Context, filter store.FindingFilter) ([
 	}
 
 	query := strings.Builder{}
-	query.WriteString(`SELECT id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, title, category, summary, severity,
+	query.WriteString(`SELECT id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, identity_quality,
+		identity_algorithm_version, semantic_fingerprint, legacy_fingerprint, history_status, current_occurrence_id,
+		decision_version, title, category, summary, severity,
 		confidence, triage, validation_status, state, file_path, line, commit_sha, root_cause, reproduction,
 		remediation, suggested_action, why_tests_do_not_cover, suggested_regression_test, minimum_fix_scope,
 		evidence_json, validation_json, patch_proposal_id, pr_number, pr_url, created_at, updated_at
@@ -797,6 +1456,28 @@ func (s *Store) UpdateFindingState(ctx context.Context, namespace, id, state str
 	return nil
 }
 
+// ClearFindingPatchProjection clears one stale patch/PR projection, reopening patch-backed states without changing unrelated lifecycle state.
+func (s *Store) ClearFindingPatchProjection(ctx context.Context, namespace, id, proposalID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE security_findings
+		SET patch_proposal_id = '',
+		    pr_number = NULL,
+		    pr_url = '',
+		    state = CASE WHEN state IN ('patch_pending', 'patch_ready', 'pr_open') THEN 'open' ELSE state END,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE namespace = ? AND id = ? AND patch_proposal_id = ?`, namespace, id, proposalID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 // CreatePatchProposal inserts a new patch proposal.
 func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchProposal) error {
 	now := time.Now()
@@ -807,9 +1488,10 @@ func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchPr
 
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO security_patch_proposals
-		 (id, namespace, repository_scan, finding_id, task_name, branch, diff_artifact, summary_artifact, status, pr_number, pr_url, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		proposal.ID, proposal.Namespace, proposal.RepositoryScan, proposal.FindingID, proposal.TaskName, proposal.Branch,
+		 (id, namespace, repository_scan, finding_id, occurrence_id, source_scan_run_id, source_head_sha, task_name, branch, diff_artifact, summary_artifact, status, pr_number, pr_url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		proposal.ID, proposal.Namespace, proposal.RepositoryScan, proposal.FindingID, proposal.OccurrenceID,
+		proposal.SourceScanRunID, proposal.SourceHeadSHA, proposal.TaskName, proposal.Branch,
 		proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.PRNumber, proposal.PRURL, proposal.CreatedAt, proposal.UpdatedAt,
 	)
 	return err
@@ -818,20 +1500,40 @@ func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchPr
 // UpdatePatchProposal updates an existing patch proposal.
 func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchProposal) error {
 	proposal.UpdatedAt = time.Now()
-	_, err := s.db.ExecContext(ctx,
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE security_patch_proposals
 		 SET task_name = ?, branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, pr_number = ?, pr_url = ?, updated_at = ?
-		 WHERE namespace = ? AND id = ?`,
-		proposal.TaskName, proposal.Branch, proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.PRNumber,
+		 WHERE namespace = ? AND id = ? AND occurrence_id = ? AND source_scan_run_id = ? AND source_head_sha = ?`,
+		proposal.TaskName, proposal.Branch,
+		proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.PRNumber,
 		proposal.PRURL, proposal.UpdatedAt, proposal.Namespace, proposal.ID,
+		proposal.OccurrenceID, proposal.SourceScanRunID, proposal.SourceHeadSHA,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_patch_proposals WHERE namespace = ? AND id = ?`,
+			proposal.Namespace, proposal.ID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return store.ErrNotFound
+		}
+		return fmt.Errorf("%w: patch proposal source binding is immutable", store.ErrConflict)
+	}
+	return nil
 }
 
 // ListPatchProposals lists patch proposals for a finding, newest first.
 func (s *Store) ListPatchProposals(ctx context.Context, namespace, findingID string) ([]store.PatchProposal, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, namespace, repository_scan, finding_id, task_name, branch, diff_artifact, summary_artifact,
+		`SELECT id, namespace, repository_scan, finding_id, occurrence_id, source_scan_run_id, source_head_sha, task_name, branch, diff_artifact, summary_artifact,
 		        status, pr_number, pr_url, created_at, updated_at
 		 FROM security_patch_proposals
 		 WHERE namespace = ? AND finding_id = ?
@@ -847,8 +1549,8 @@ func (s *Store) ListPatchProposals(ctx context.Context, namespace, findingID str
 	for rows.Next() {
 		var proposal store.PatchProposal
 		if err := rows.Scan(
-			&proposal.ID, &proposal.Namespace, &proposal.RepositoryScan, &proposal.FindingID, &proposal.TaskName, &proposal.Branch,
-			&proposal.DiffArtifact, &proposal.SummaryArtifact, &proposal.Status, &proposal.PRNumber, &proposal.PRURL,
+			&proposal.ID, &proposal.Namespace, &proposal.RepositoryScan, &proposal.FindingID, &proposal.OccurrenceID,
+			&proposal.SourceScanRunID, &proposal.SourceHeadSHA, &proposal.TaskName, &proposal.Branch, &proposal.DiffArtifact, &proposal.SummaryArtifact, &proposal.Status, &proposal.PRNumber, &proposal.PRURL,
 			&proposal.CreatedAt, &proposal.UpdatedAt,
 		); err != nil {
 			return nil, err

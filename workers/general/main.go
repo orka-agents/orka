@@ -10,6 +10,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,9 +22,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/security"
 	securityslices "github.com/orka-agents/orka/internal/security/slices"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -33,7 +38,16 @@ import (
 var (
 	workspaceDir                  = "/workspace"
 	setupGitCredentialsForGeneral = common.SetupGitCredentials
+	mapperTreeIndexLimit          = security.MaxMapperTreeIndexEntries
 )
+
+func gitCommandNoReplace(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1")
+	return cmd
+}
+
+const maxMapperTreePathBytes = 4096
 
 func main() {
 	if err := run(); err != nil {
@@ -258,30 +272,12 @@ func runSecurityMapper(ctx context.Context) error {
 		return fmt.Errorf("security mapper requires a git workspace")
 	}
 	repositoryScan := strings.TrimSpace(os.Getenv(security.EnvRepositoryScanName))
-	slices, err := securityslices.MapRepository(workDir, securityslices.MapperOptions{
-		RepositoryScan: repositoryScan,
-		SubPath:        os.Getenv(workerenv.WorkspaceSubpath),
-	})
-	if err != nil {
-		return err
-	}
 	baseCommit := strings.TrimSpace(os.Getenv(security.EnvScanBaseCommit))
 	headCommit := strings.TrimSpace(os.Getenv(security.EnvScanHeadCommit))
-	changedFilesComputed, changedFiles, changedLineRanges, diffSummary, changedFilesError, resolvedHeadCommit :=
-		changedFilesForSecurityScan(ctx, workDir, baseCommit, headCommit)
-	if headCommit == "" {
-		headCommit = resolvedHeadCommit
-	}
-	artifact := security.ReviewSlicesArtifact{
-		SchemaVersion:        security.SchemaVersionReviewSlices,
-		BaseCommit:           baseCommit,
-		HeadCommit:           headCommit,
-		ChangedFilesComputed: changedFilesComputed,
-		ChangedFiles:         changedFiles,
-		ChangedLineRanges:    changedLineRanges,
-		DiffSummary:          diffSummary,
-		ChangedFilesError:    changedFilesError,
-		Slices:               slices,
+	pinnedTargets, _ := strconv.ParseBool(strings.TrimSpace(os.Getenv(security.EnvPinnedScanTargetsEnabled)))
+	artifact, err := buildSecurityMapperArtifact(ctx, workDir, repositoryScan, baseCommit, headCommit, pinnedTargets)
+	if err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(artifact, "", "  ")
 	if err != nil {
@@ -290,9 +286,401 @@ func runSecurityMapper(ctx context.Context) error {
 	if err := common.WriteArtifactFile(security.ArtifactSlices, data); err != nil {
 		return err
 	}
-	output := fmt.Sprintf("security mapper wrote %d review slices\n", len(slices))
+	output := fmt.Sprintf("security mapper wrote %d review slices\n", len(artifact.Slices))
 	fmt.Print(output)
 	return submitResult(workDir, output)
+}
+
+func buildSecurityMapperArtifact(
+	ctx context.Context,
+	workDir string,
+	repositoryScan string,
+	baseCommit string,
+	headCommit string,
+	pinnedTargets bool,
+) (*security.ReviewSlicesArtifact, error) {
+	mapped, err := securityslices.MapRepository(workDir, securityslices.MapperOptions{
+		RepositoryScan: repositoryScan,
+		SubPath:        os.Getenv(workerenv.WorkspaceSubpath),
+	})
+	if err != nil {
+		return nil, err
+	}
+	inventorySummary := mapped.InventorySummary
+	coverageStatus, coverageReasonCodes := mapperCoverageForInventory(inventorySummary)
+	if !pinnedTargets {
+		resolvedHead := strings.TrimSpace(headCommit)
+		if resolvedHead == "" {
+			resolvedHead, _ = gitTextOutput(ctx, workDir, "rev-parse", "HEAD")
+		}
+		changedFilesComputed, changedFiles, changedLineRanges, diffSummary, changedFilesError, _ :=
+			changedFilesForSecurityScan(ctx, workDir, baseCommit, resolvedHead)
+		return &security.ReviewSlicesArtifact{
+			SchemaVersion: security.SchemaVersionReviewSlices, CoverageStatus: security.MapperCoverageUnknown,
+			BaseCommit: baseCommit, HeadCommit: resolvedHead, ChangedFilesComputed: changedFilesComputed,
+			ChangedFiles: changedFiles, ChangedLineRanges: changedLineRanges, DiffSummary: diffSummary,
+			ChangedFilesError: changedFilesError, CoverageReasonCodes: coverageReasonCodes,
+			InventorySummary: &inventorySummary, DiscoveredFiles: mapped.DiscoveredFiles,
+			ReviewableFiles: mapped.ReviewableFiles, OmittedFiles: mapped.OmittedFiles, Slices: mapped.Slices,
+		}, nil
+	}
+	targetReceipt, err := buildMapperTargetReceipt(ctx, workDir, baseCommit, headCommit)
+	if err != nil {
+		return nil, err
+	}
+	changedFilesComputed, changedFiles, changedLineRanges, diffSummary, changedFilesError, _ :=
+		changedFilesForSecurityScan(ctx, workDir, baseCommit, targetReceipt.HeadOID)
+	return &security.ReviewSlicesArtifact{
+		SchemaVersion:        security.SchemaVersionReviewSlicesV2,
+		CoverageStatus:       coverageStatus,
+		BaseCommit:           baseCommit,
+		HeadCommit:           targetReceipt.HeadOID,
+		ChangedFilesComputed: changedFilesComputed,
+		ChangedFiles:         changedFiles,
+		ChangedLineRanges:    changedLineRanges,
+		DiffSummary:          diffSummary,
+		ChangedFilesError:    changedFilesError,
+		CoverageReasonCodes:  coverageReasonCodes,
+		InventorySummary:     &inventorySummary,
+		DiscoveredFiles:      mapped.DiscoveredFiles,
+		ReviewableFiles:      mapped.ReviewableFiles,
+		OmittedFiles:         mapped.OmittedFiles,
+		TargetReceipt:        targetReceipt,
+		Slices:               mapped.Slices,
+	}, nil
+}
+
+func mapperCoverageForInventory(summary security.MapperInventorySummary) (string, []string) {
+	if summary.Truncated {
+		return security.MapperCoveragePartial, []string{security.MapperCoverageReasonInventoryEntryLimit}
+	}
+	return security.MapperCoverageAccountable, nil
+}
+
+func buildMapperTargetReceipt(
+	ctx context.Context,
+	workDir string,
+	baseRef string,
+	expectedHeadOID string,
+) (*security.MapperTargetReceipt, error) {
+	repoRoot, err := gitTextOutput(ctx, workDir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return nil, fmt.Errorf("resolve mapper repository root: %w", err)
+	}
+	objectFormat, err := gitTextOutput(ctx, repoRoot, "rev-parse", "--show-object-format")
+	if err != nil {
+		return nil, fmt.Errorf("resolve mapper git object format: %w", err)
+	}
+	objectFormat = strings.ToLower(objectFormat)
+	if objectFormat != "sha1" && objectFormat != "sha256" {
+		return nil, fmt.Errorf("unsupported git object format %q", objectFormat)
+	}
+	headOID, err := gitTextOutput(ctx, repoRoot, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return nil, fmt.Errorf("resolve mapper HEAD: %w", err)
+	}
+	headOID = strings.ToLower(headOID)
+	if !fullGitObjectID(headOID, objectFormat) {
+		return nil, fmt.Errorf("resolved mapper HEAD is not a full %s object ID", objectFormat)
+	}
+	if expected := strings.ToLower(strings.TrimSpace(expectedHeadOID)); expected != "" {
+		if !fullGitObjectID(expected, objectFormat) {
+			return nil, fmt.Errorf("expected mapper head %q must be a full %s object ID", expectedHeadOID, objectFormat)
+		}
+		if expected != headOID {
+			return nil, fmt.Errorf("expected mapper head %s does not match checked out HEAD %s", expected, headOID)
+		}
+	}
+
+	clean, err := cleanTrackedWorktree(ctx, repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	if !clean {
+		return nil, fmt.Errorf("mapper tracked worktree is not clean at HEAD %s", headOID)
+	}
+	treeOID, err := gitTextOutput(ctx, repoRoot, "rev-parse", "--verify", "HEAD^{tree}")
+	if err != nil {
+		return nil, fmt.Errorf("resolve mapper HEAD tree: %w", err)
+	}
+	treeOID = strings.ToLower(treeOID)
+	if !fullGitObjectID(treeOID, objectFormat) {
+		return nil, fmt.Errorf("resolved mapper tree is not a full %s object ID", objectFormat)
+	}
+
+	treeIndex, treeEntryCount, treeDigest, err := mapperTreeIndex(ctx, repoRoot, objectFormat)
+	if err != nil {
+		return nil, err
+	}
+	receipt := &security.MapperTargetReceipt{
+		HeadOID:              headOID,
+		RequestedBranch:      strings.TrimSpace(os.Getenv(workerenv.GitBranch)),
+		RequestedRef:         strings.TrimSpace(os.Getenv(workerenv.GitRef)),
+		BaseRef:              strings.TrimSpace(baseRef),
+		CleanTrackedWorktree: true,
+		ObjectFormat:         objectFormat,
+		TreeOID:              treeOID,
+		TreeDigest:           treeDigest,
+		TreeEntryCount:       treeEntryCount,
+		TreeIndexTruncated:   treeEntryCount > len(treeIndex),
+		TreeIndex:            treeIndex,
+	}
+	receipt.SnapshotDigest = mapperSnapshotDigest(receipt)
+	return receipt, nil
+}
+
+func gitTextOutput(ctx context.Context, workDir string, args ...string) (string, error) {
+	cmdArgs := append([]string{"-C", workDir}, args...)
+	out, err := gitCommandNoReplace(ctx, cmdArgs...).CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(out))
+		if message == "" {
+			message = err.Error()
+		}
+		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), message)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func fullGitObjectID(value, objectFormat string) bool {
+	expectedLength := 0
+	switch objectFormat {
+	case "sha1":
+		expectedLength = 40
+	case "sha256":
+		expectedLength = 64
+	default:
+		return false
+	}
+	if len(value) != expectedLength {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func cleanTrackedWorktree(ctx context.Context, repoRoot string) (bool, error) {
+	out, err := gitCommandNoReplace(ctx, "-C", repoRoot,
+		"status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching",
+		"--ignore-submodules=none").CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("check mapper tracked worktree: %s", strings.TrimSpace(string(out)))
+	}
+	for record := range bytes.SplitSeq(out, []byte{0}) {
+		if len(record) == 0 {
+			continue
+		}
+		if bytes.Equal(record, []byte("?? .orka-artifacts")) || bytes.HasPrefix(record, []byte("?? .orka-artifacts/")) ||
+			bytes.Equal(record, []byte("!! .orka-artifacts")) || bytes.HasPrefix(record, []byte("!! .orka-artifacts/")) {
+			continue
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+func mapperTreeIndex(
+	ctx context.Context,
+	repoRoot string,
+	objectFormat string,
+) ([]security.MapperTreeIndexEntry, int, string, error) {
+	cmd := gitCommandNoReplace(ctx, "-C", repoRoot, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("read mapper tree: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, 0, "", fmt.Errorf("start mapper tree read: %w", err)
+	}
+	hasher := sha256.New()
+	reader := bufio.NewReader(io.TeeReader(stdout, hasher))
+	limit := mapperTreeIndexLimit
+	if limit <= 0 || limit > security.MaxMapperTreeIndexEntries {
+		limit = security.MaxMapperTreeIndexEntries
+	}
+	entries := make([]security.MapperTreeIndexEntry, 0, min(limit, 256))
+	total := 0
+	for {
+		record, readErr := reader.ReadBytes(0)
+		if len(record) > 0 {
+			entry, parseErr := parseMapperTreeEntry(record, objectFormat)
+			if parseErr != nil {
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				_ = cmd.Wait()
+				return nil, 0, "", parseErr
+			}
+			total++
+			if len(entries) < limit {
+				entries = append(entries, entry)
+			}
+		}
+		if readErr == nil {
+			continue
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+		return nil, 0, "", fmt.Errorf("read mapper tree: %w", readErr)
+	}
+	if err := cmd.Wait(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return nil, 0, "", fmt.Errorf("git ls-tree: %s", message)
+	}
+	if err := markMapperLFSEntries(ctx, repoRoot, entries); err != nil {
+		return nil, 0, "", err
+	}
+	if err := populateMapperTreeEntryMetadata(repoRoot, entries); err != nil {
+		return nil, 0, "", err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	return entries, total, "sha256:" + hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func parseMapperTreeEntry(record []byte, objectFormat string) (security.MapperTreeIndexEntry, error) {
+	if len(record) == 0 || record[len(record)-1] != 0 {
+		return security.MapperTreeIndexEntry{}, fmt.Errorf("mapper tree record is not NUL terminated")
+	}
+	record = record[:len(record)-1]
+	tab := bytes.IndexByte(record, '\t')
+	if tab <= 0 || tab == len(record)-1 {
+		return security.MapperTreeIndexEntry{}, fmt.Errorf("mapper tree record has invalid format")
+	}
+	header := strings.Fields(string(record[:tab]))
+	if len(header) != 3 {
+		return security.MapperTreeIndexEntry{}, fmt.Errorf("mapper tree record has invalid header")
+	}
+	pathBytes := record[tab+1:]
+	if len(pathBytes) > maxMapperTreePathBytes || !utf8.Valid(pathBytes) {
+		return security.MapperTreeIndexEntry{}, fmt.Errorf("mapper tree path is oversized or invalid UTF-8")
+	}
+	entry := security.MapperTreeIndexEntry{
+		Mode:     header[0],
+		Type:     header[1],
+		ObjectID: strings.ToLower(header[2]),
+		Path:     string(pathBytes),
+	}
+	if !security.SafeRepoPath(entry.Path) || !fullGitObjectID(entry.ObjectID, objectFormat) {
+		return security.MapperTreeIndexEntry{}, fmt.Errorf(
+			"mapper tree entry %q has unsafe path or invalid object ID", entry.Path,
+		)
+	}
+	switch {
+	case entry.Mode == "120000" && entry.Type == "blob":
+		entry.Disposition = security.MapperTreeDispositionSymlink
+	case entry.Mode == "160000" && entry.Type == "commit":
+		entry.Disposition = security.MapperTreeDispositionSubmodule
+	case (entry.Mode == "100644" || entry.Mode == "100755") && entry.Type == "blob":
+		entry.Disposition = security.MapperTreeDispositionRegular
+	default:
+		return security.MapperTreeIndexEntry{}, fmt.Errorf(
+			"mapper tree entry %q has unsupported mode/type %s/%s", entry.Path, entry.Mode, entry.Type,
+		)
+	}
+	return entry, nil
+}
+
+func markMapperLFSEntries(ctx context.Context, repoRoot string, entries []security.MapperTreeIndexEntry) error {
+	var input bytes.Buffer
+	for _, entry := range entries {
+		if entry.Disposition != security.MapperTreeDispositionRegular {
+			continue
+		}
+		input.WriteString(entry.Path)
+		input.WriteByte(0)
+	}
+	if input.Len() == 0 {
+		return nil
+	}
+	cmd := gitCommandNoReplace(ctx, "-C", repoRoot, "check-attr", "-z", "--stdin", "filter")
+	cmd.Stdin = &input
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("classify mapper LFS entries: %s", strings.TrimSpace(string(out)))
+	}
+	parts := bytes.Split(out, []byte{0})
+	if len(parts) == 0 || len(parts)%3 != 1 || len(parts[len(parts)-1]) != 0 {
+		return fmt.Errorf("classify mapper LFS entries: invalid git check-attr output")
+	}
+	lfsPaths := map[string]struct{}{}
+	for i := 0; i+2 < len(parts)-1; i += 3 {
+		if string(parts[i+1]) == "filter" && string(parts[i+2]) == "lfs" {
+			lfsPaths[string(parts[i])] = struct{}{}
+		}
+	}
+	for i := range entries {
+		if _, ok := lfsPaths[entries[i].Path]; ok && entries[i].Disposition == security.MapperTreeDispositionRegular {
+			entries[i].Disposition = security.MapperTreeDispositionLFS
+		}
+	}
+	return nil
+}
+
+func populateMapperTreeEntryMetadata(repoRoot string, entries []security.MapperTreeIndexEntry) error {
+	const maxLineCountBytes = 10 << 20
+	for i := range entries {
+		entry := &entries[i]
+		if entry.Disposition != security.MapperTreeDispositionRegular {
+			continue
+		}
+		fullPath := filepath.Join(repoRoot, filepath.FromSlash(entry.Path))
+		info, err := os.Lstat(fullPath)
+		if err != nil {
+			return fmt.Errorf("stat mapper tree entry %q: %w", entry.Path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("mapper tree entry %q is not a regular checked-out file", entry.Path)
+		}
+		entry.ContentSize = info.Size()
+		if info.Size() > maxLineCountBytes {
+			continue
+		}
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			return fmt.Errorf("read mapper tree entry %q: %w", entry.Path, err)
+		}
+		entry.LineCount = bytes.Count(data, []byte{'\n'})
+		if len(data) > 0 && data[len(data)-1] != '\n' {
+			entry.LineCount++
+		}
+	}
+	return nil
+}
+
+func mapperSnapshotDigest(receipt *security.MapperTargetReceipt) string {
+	payload := struct {
+		Version              int    `json:"version"`
+		ObjectFormat         string `json:"objectFormat"`
+		HeadOID              string `json:"headOID"`
+		TreeOID              string `json:"treeOID"`
+		TreeDigest           string `json:"treeDigest"`
+		CleanTrackedWorktree bool   `json:"cleanTrackedWorktree"`
+	}{
+		Version:              1,
+		ObjectFormat:         receipt.ObjectFormat,
+		HeadOID:              receipt.HeadOID,
+		TreeOID:              receipt.TreeOID,
+		TreeDigest:           receipt.TreeDigest,
+		CleanTrackedWorktree: receipt.CleanTrackedWorktree,
+	}
+	data, _ := json.Marshal(payload)
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func changedFilesForSecurityScan(
@@ -300,7 +688,7 @@ func changedFilesForSecurityScan(
 	workDir, baseCommit, headCommit string,
 ) (bool, []string, []security.ChangedLineRange, string, string, string) {
 	if headCommit == "" {
-		out, err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "HEAD").CombinedOutput()
+		out, err := gitCommandNoReplace(ctx, "-C", workDir, "rev-parse", "HEAD").CombinedOutput()
 		if err == nil {
 			headCommit = strings.TrimSpace(string(out))
 		}
@@ -316,9 +704,16 @@ func changedFilesForSecurityScan(
 			return false, nil, nil, "", err.Error(), headCommit
 		}
 	}
+	ancestor, err := gitCommitIsAncestor(ctx, workDir, baseCommit, headCommit)
+	if err != nil {
+		return false, nil, nil, "", err.Error(), headCommit
+	}
+	if !ancestor {
+		return false, nil, nil, "", changedFilesDivergedError, headCommit
+	}
 
-	deletedOut, err := exec.CommandContext(ctx,
-		"git", "-C", workDir,
+	deletedOut, err := gitCommandNoReplace(ctx,
+		"-C", workDir,
 		"diff", "--name-only", "--diff-filter=D", "--relative",
 		baseCommit, headCommit, "--", ".",
 	).CombinedOutput()
@@ -338,8 +733,8 @@ func changedFilesForSecurityScan(
 		return false, nil, nil, "", message, headCommit
 	}
 
-	out, err := exec.CommandContext(ctx,
-		"git", "-C", workDir,
+	out, err := gitCommandNoReplace(ctx,
+		"-C", workDir,
 		"diff", "--name-only", "--diff-filter=ACMRT", "--relative",
 		baseCommit, headCommit, "--", ".",
 	).CombinedOutput()
@@ -371,10 +766,48 @@ func changedFilesForSecurityScan(
 	return true, files, lineRanges, diffSummary, "", headCommit
 }
 
+func gitCommitIsAncestor(ctx context.Context, workDir, baseCommit, headCommit string) (bool, error) {
+	ancestor, err := runGitCommitIsAncestor(ctx, workDir, baseCommit, headCommit)
+	if ancestor || !isShallowGitRepository(ctx, workDir) {
+		return ancestor, err
+	}
+	out, fetchErr := gitCommandNoReplace(ctx, "-C", workDir,
+		"fetch", "--no-tags", "--unshallow", "origin").CombinedOutput()
+	if fetchErr != nil {
+		message := strings.TrimSpace(string(out))
+		if message == "" {
+			message = fetchErr.Error()
+		}
+		message = redact.SensitiveText(message)
+		if len(message) > 1024 {
+			message = message[:1024]
+			for len(message) > 0 && !utf8.ValidString(message) {
+				message = message[:len(message)-1]
+			}
+		}
+		return false, fmt.Errorf("verify incremental base ancestry: fetch complete history: %s", message)
+	}
+	return runGitCommitIsAncestor(ctx, workDir, baseCommit, headCommit)
+}
+
+func runGitCommitIsAncestor(ctx context.Context, workDir, baseCommit, headCommit string) (bool, error) {
+	err := gitCommandNoReplace(ctx, "-C", workDir,
+		"merge-base", "--is-ancestor", baseCommit, headCommit).Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("verify incremental base ancestry: %w", err)
+}
+
 const (
 	maxChangedLineRangesForArtifact  = 2000
 	maxChangedDiffBytesForLineRanges = 2 * 1024 * 1024
 	maxChangedDiffLinesForLineRanges = 20000
+	changedFilesDivergedError        = "incremental base is not an ancestor of head; full scan required"
 )
 
 var (
@@ -386,8 +819,8 @@ func defaultChangedLineRangesForSecurityScan(
 	ctx context.Context,
 	workDir, baseCommit, headCommit string,
 ) ([]security.ChangedLineRange, error) {
-	cmd := exec.CommandContext(ctx,
-		"git", "-C", workDir,
+	cmd := gitCommandNoReplace(ctx,
+		"-C", workDir,
 		"diff", "--unified=0", "--diff-filter=ACMRT", "--relative",
 		baseCommit, headCommit, "--", ".",
 	)
@@ -584,9 +1017,8 @@ func ensureCommitAvailableForDiff(ctx context.Context, workDir, commit string) e
 		return nil
 	}
 
-	out, err := exec.CommandContext(
+	out, err := gitCommandNoReplace(
 		ctx,
-		"git",
 		"-C",
 		workDir,
 		"fetch",
@@ -607,7 +1039,7 @@ func ensureCommitAvailableForDiff(ctx context.Context, workDir, commit string) e
 	if isShallowGitRepository(ctx, workDir) {
 		args = []string{"fetch", "--no-tags", "--unshallow", "origin"}
 	}
-	out, err = exec.CommandContext(ctx, "git", append([]string{"-C", workDir}, args...)...).CombinedOutput()
+	out, err = gitCommandNoReplace(ctx, append([]string{"-C", workDir}, args...)...).CombinedOutput()
 	if err == nil && gitCommitAvailable(ctx, workDir, commit) {
 		return nil
 	}
@@ -630,7 +1062,7 @@ func gitCommitAvailable(ctx context.Context, workDir, commit string) bool {
 	if strings.TrimSpace(commit) == "" {
 		return false
 	}
-	err := exec.CommandContext(ctx, "git", "-C", workDir, "cat-file", "-e", commit+"^{commit}").Run()
+	err := gitCommandNoReplace(ctx, "-C", workDir, "cat-file", "-e", commit+"^{commit}").Run()
 	return err == nil
 }
 
@@ -649,6 +1081,6 @@ func safeGitCommitID(commit string) bool {
 }
 
 func isShallowGitRepository(ctx context.Context, workDir string) bool {
-	out, err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "--is-shallow-repository").CombinedOutput()
+	out, err := gitCommandNoReplace(ctx, "-C", workDir, "rev-parse", "--is-shallow-repository").CombinedOutput()
 	return err == nil && strings.TrimSpace(string(out)) == "true"
 }

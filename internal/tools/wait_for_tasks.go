@@ -222,7 +222,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			// provide ResultStore through ToolContext; worker calls fall back to the
 			// internal HTTP result endpoint.
 			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, ns, taskName)
+				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, &task)
 				if fetchErr == nil {
 					// Parse structured result and strip diff to avoid context bloat.
 					sr := common.ParseStructuredResult(resultStr)
@@ -289,15 +289,15 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	return string(data), nil
 }
 
-func fetchTaskResultForNamespace(ctx context.Context, namespace, taskName string) (string, error) {
+func fetchTaskResultForNamespace(ctx context.Context, task *corev1alpha1.Task) (string, error) {
 	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.ResultStore != nil {
-		result, err := toolCtx.ResultStore.GetResult(ctx, namespace, taskName)
+		result, err := toolTaskResult(ctx, toolCtx, task)
 		if err != nil {
 			return "", err
 		}
 		return string(result), nil
 	}
-	return fetchTaskResult(ctx, taskName)
+	return fetchTaskResult(ctx, task.Name)
 }
 
 func boundWaitTaskData(data map[string]any) map[string]any {

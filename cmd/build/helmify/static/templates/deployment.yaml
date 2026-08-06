@@ -321,6 +321,24 @@ spec:
               value: /var/run/orka/harness-wrapper/token
             - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
               value: {{ include "orka.harnessWrapperName" . | quote }}
+            {{- $controllerValues := .Values.controller | default dict }}
+            {{- $securityIntegrity := index $controllerValues "securityIntegrity" | default dict }}
+            - name: ORKA_SECURITY_WORKER_OUTPUT_BINDING_MODE
+              value: {{ $securityIntegrity.workerOutputBindingMode | default "audit" | quote }}
+            - name: ORKA_SECURITY_PINNED_SCAN_TARGETS_ENABLED
+              value: {{ $securityIntegrity.pinnedScanTargetsEnabled | default false | quote }}
+            - name: ORKA_SECURITY_QUALITY_STATE_WRITES_ENABLED
+              value: {{ $securityIntegrity.qualityStateWritesEnabled | default false | quote }}
+            - name: ORKA_SECURITY_FINDING_OBSERVATION_WRITES_ENABLED
+              value: {{ $securityIntegrity.findingObservationWritesEnabled | default false | quote }}
+            - name: ORKA_SECURITY_BUNDLE_SEALING_MODE
+              value: {{ $securityIntegrity.bundleSealingMode | default "off" | quote }}
+            - name: ORKA_SECURITY_HARDENED_ANALYSIS_ENABLED
+              value: {{ $securityIntegrity.hardenedAnalysisEnabled | default false | quote }}
+            - name: ORKA_SECURITY_STRICT_COMPLETION_ENABLED
+              value: {{ $securityIntegrity.strictCompletionEnabled | default false | quote }}
+            - name: ORKA_SECURITY_DEEP_SCAN_ENABLED
+              value: {{ $securityIntegrity.deepScanEnabled | default false | quote }}
             {{- if .Values.github.webhook.secretName }}
             - name: ORKA_GITHUB_WEBHOOK_SECRET
               valueFrom:

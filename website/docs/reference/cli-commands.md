@@ -2178,6 +2178,9 @@ Usage:
   orka security scan [command]
 
 Available Commands:
+  bundle      Get a sealed security scan bundle
+  check       Fail when a sealed scan bundle does not satisfy requested quality
+  coverage    Get a sealed security scan coverage
   list        List security scan runs
   run         Run a manual security scan
 
@@ -2229,6 +2232,69 @@ Flags:
   -h, --help              help for list
       --limit int         Maximum number of results (default 20)
   -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka security scan bundle`
+
+```text
+Get a sealed security scan bundle
+
+Usage:
+  orka security scan bundle <repo> <run-id> [flags]
+
+Flags:
+  -h, --help            help for bundle
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka security scan coverage`
+
+```text
+Get a sealed security scan coverage
+
+Usage:
+  orka security scan coverage <repo> <run-id> [flags]
+
+Flags:
+  -h, --help            help for coverage
+  -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka security scan check`
+
+```text
+Fail when a sealed scan bundle does not satisfy requested quality
+
+Usage:
+  orka security scan check <repo> <run-id> [flags]
+
+Flags:
+  -h, --help        help for check
+      --validated   Require full verified validated assurance
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -2318,9 +2384,12 @@ Usage:
   orka security finding [command]
 
 Available Commands:
+  assessments List immutable security finding assessments
+  decisions   List immutable security finding decisions
   dismiss     dismiss a security finding
   get         Get a security finding
   list        List security findings
+  occurrences List immutable security finding occurrences
   patch       patch a security finding
   patches     List security patch proposals
   pr          Create a pull request for the latest patch proposal
@@ -2505,6 +2574,79 @@ Usage:
 Flags:
   -h, --help            help for pr
   -o, --output string   Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka security finding occurrences`
+
+```text
+List immutable security finding occurrences
+
+Usage:
+  orka security finding occurrences <id> [flags]
+
+Flags:
+      --continue string   Continue token
+      --cursor string     Cursor token
+  -h, --help              help for occurrences
+      --limit int         Maximum number of results (default 50)
+  -o, --output string     Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka security finding decisions`
+
+```text
+List immutable security finding decisions
+
+Usage:
+  orka security finding decisions <id> [flags]
+
+Flags:
+      --continue string   Continue token
+      --cursor string     Cursor token
+  -h, --help              help for decisions
+      --limit int         Maximum number of results (default 50)
+  -o, --output string     Output format: table, json, yaml (default "json")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka security finding assessments`
+
+```text
+List immutable security finding assessments
+
+Usage:
+  orka security finding assessments <id> [flags]
+
+Flags:
+      --continue string   Continue token
+      --cursor string     Cursor token
+  -h, --help              help for assessments
+      --kind string       Filter by assessment kind
+      --limit int         Maximum number of results (default 50)
+  -o, --output string     Output format: table, json, yaml (default "json")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

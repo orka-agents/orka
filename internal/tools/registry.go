@@ -18,6 +18,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/genai"
@@ -44,6 +45,8 @@ type ToolContext struct {
 	ProviderType              string
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
+	// WorkerOutputBindingMode controls bound-result reads for repository-security tasks.
+	WorkerOutputBindingMode security.WorkerOutputBindingMode
 	// ResultStore for fetching task outputs (store.ResultStore)
 	ResultStore interface {
 		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)

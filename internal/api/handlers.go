@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -87,6 +89,7 @@ type Handlers struct {
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	contextTokenAuthorization ContextTokenAuthorizationConfig
+	integrityConfig           security.IntegrityConfig
 	resultStore               store.ResultStore
 	sessionStore              store.SessionStore
 	planStore                 store.PlanStore
@@ -95,6 +98,9 @@ type Handlers struct {
 	memoryStore               store.MemoryStore
 	memoryProposalStore       store.MemoryProposalStore
 	securityStore             store.SecurityStore
+	securityRunTaskInputStore store.SecurityRunTaskInputStore
+	securityIntegrityStore    store.SecurityIntegrityStore
+	securityBundleStore       store.SecurityBundleStore
 	repositoryMonitorStore    store.RepositoryMonitorStore
 	executionEventStore       store.ExecutionEventStore
 	gatewayEventStore         store.GatewayEventStore
@@ -112,6 +118,7 @@ type HandlersConfig struct {
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	ContextTokenAuthorization ContextTokenAuthorizationConfig
+	IntegrityConfig           security.IntegrityConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
 	PlanStore                 store.PlanStore
@@ -121,6 +128,9 @@ type HandlersConfig struct {
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
+	SecurityRunTaskInputStore store.SecurityRunTaskInputStore
+	SecurityIntegrityStore    store.SecurityIntegrityStore
+	SecurityBundleStore       store.SecurityBundleStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
 	ExecutionEventStore       store.ExecutionEventStore
 	GatewayEventStore         store.GatewayEventStore
@@ -130,6 +140,10 @@ type HandlersConfig struct {
 
 // NewHandlers creates a new Handlers instance
 func NewHandlers(cfg HandlersConfig) *Handlers {
+	runTaskInputStore := cfg.SecurityRunTaskInputStore
+	if runTaskInputStore == nil {
+		runTaskInputStore, _ = cfg.SecurityStore.(store.SecurityRunTaskInputStore)
+	}
 	return &Handlers{
 		client:                    cfg.Client,
 		apiReader:                 cfg.APIReader,
@@ -137,6 +151,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		watchNamespace:            cfg.WatchNamespace,
 		enforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
 		contextTokenAuthorization: cfg.ContextTokenAuthorization,
+		integrityConfig:           cfg.IntegrityConfig,
 		resultStore:               cfg.ResultStore,
 		sessionStore:              cfg.SessionStore,
 		planStore:                 cfg.PlanStore,
@@ -145,6 +160,9 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		memoryStore:               cfg.MemoryStore,
 		memoryProposalStore:       cfg.MemoryProposalStore,
 		securityStore:             cfg.SecurityStore,
+		securityRunTaskInputStore: runTaskInputStore,
+		securityIntegrityStore:    cfg.SecurityIntegrityStore,
+		securityBundleStore:       cfg.SecurityBundleStore,
 		repositoryMonitorStore:    cfg.RepositoryMonitorStore,
 		executionEventStore:       cfg.ExecutionEventStore,
 		gatewayEventStore:         cfg.GatewayEventStore,
@@ -680,6 +698,29 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
+func (h *Handlers) resultForTask(ctx context.Context, task *corev1alpha1.Task) ([]byte, error) {
+	if task == nil || h.resultStore == nil {
+		return nil, store.ErrNotFound
+	}
+	mode := h.integrityConfig.WorkerOutputBindingMode
+	securityTask := strings.TrimSpace(task.Labels[labels.LabelCreatedBy]) == securityOutputCreatedBy
+	strictRead := mode == security.WorkerOutputBindingEnforce || h.integrityConfig.PinnedScanTargetsEnabled
+	if securityTask && (mode != "" && mode != security.WorkerOutputBindingOff || strictRead) {
+		if bound, ok := h.resultStore.(store.BoundOutputStore); ok {
+			result, err := bound.GetBoundResult(ctx, task.Namespace, task.Name, string(task.UID), taskBoundOutputAttempt(task))
+			if err == nil {
+				return result.Data, nil
+			}
+			if strictRead {
+				return nil, err
+			}
+		} else if strictRead {
+			return nil, fmt.Errorf("bound result storage is unavailable")
+		}
+	}
+	return h.resultStore.GetResult(ctx, task.Namespace, task.Name)
+}
+
 // GetTaskLogs gets logs for a task
 func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	id := c.Params("id")
@@ -695,7 +736,7 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 
 	// For completed tasks with results available, serve from ResultStore
 	if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-		data, err := h.resultStore.GetResult(ctx, namespace, id)
+		data, err := h.resultForTask(ctx, task)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return fiber.NewError(fiber.StatusNotFound, "logs not found in result store")
@@ -799,7 +840,7 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "task has no result")
 	}
 
-	data, err := h.resultStore.GetResult(ctx, namespace, id)
+	data, err := h.resultForTask(ctx, task)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "result not found")
@@ -1620,6 +1661,71 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	})
 }
 
+func (h *Handlers) listArtifactsForTask(ctx context.Context, task *corev1alpha1.Task) ([]store.ArtifactMetadata, error) {
+	if task == nil {
+		return nil, store.ErrNotFound
+	}
+	mode := h.integrityConfig.WorkerOutputBindingMode
+	securityTask := strings.TrimSpace(task.Labels[labels.LabelCreatedBy]) == securityOutputCreatedBy
+	strictRead := mode == security.WorkerOutputBindingEnforce || h.integrityConfig.PinnedScanTargetsEnabled
+	if securityTask && (mode != "" && mode != security.WorkerOutputBindingOff || strictRead) {
+		if bound, ok := h.artifactStore.(store.BoundOutputStore); ok {
+			items, err := bound.ListBoundArtifacts(ctx, task.Namespace, task.Name, string(task.UID), taskBoundOutputAttempt(task))
+			if strictRead {
+				if err != nil {
+					return nil, err
+				}
+				return items, nil
+			}
+			if err == nil && len(items) > 0 {
+				legacy, legacyErr := h.artifactStore.ListArtifacts(ctx, task.Namespace, task.Name)
+				if legacyErr != nil {
+					return nil, legacyErr
+				}
+				byName := make(map[string]store.ArtifactMetadata, len(legacy)+len(items))
+				for _, item := range legacy {
+					byName[item.Filename] = item
+				}
+				for _, item := range items {
+					byName[item.Filename] = item
+				}
+				merged := make([]store.ArtifactMetadata, 0, len(byName))
+				for _, item := range byName {
+					merged = append(merged, item)
+				}
+				sort.Slice(merged, func(i, j int) bool { return merged[i].Filename < merged[j].Filename })
+				return merged, nil
+			}
+		} else if strictRead {
+			return nil, fmt.Errorf("bound artifact storage is unavailable")
+		}
+	}
+	return h.artifactStore.ListArtifacts(ctx, task.Namespace, task.Name)
+}
+
+func (h *Handlers) artifactForTask(ctx context.Context, task *corev1alpha1.Task, filename string) ([]byte, string, error) {
+	if task == nil {
+		return nil, "", store.ErrNotFound
+	}
+	mode := h.integrityConfig.WorkerOutputBindingMode
+	securityTask := strings.TrimSpace(task.Labels[labels.LabelCreatedBy]) == securityOutputCreatedBy
+	strictRead := mode == security.WorkerOutputBindingEnforce || h.integrityConfig.PinnedScanTargetsEnabled
+	if securityTask && (mode != "" && mode != security.WorkerOutputBindingOff || strictRead) {
+		if bound, ok := h.artifactStore.(store.BoundOutputStore); ok {
+			artifact, err := bound.GetBoundArtifact(ctx, task.Namespace, task.Name, filename, string(task.UID), taskBoundOutputAttempt(task))
+			if err == nil {
+				return artifact.Data, artifact.ContentType, nil
+			}
+			if strictRead {
+				return nil, "", err
+			}
+		} else if strictRead {
+			return nil, "", fmt.Errorf("bound artifact storage is unavailable")
+		}
+	}
+	return h.artifactStore.GetArtifact(ctx, task.Namespace, task.Name, filename)
+}
+
 // ListTaskArtifacts lists artifacts for a task
 func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 	id := c.Params("id")
@@ -1628,7 +1734,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 		return err
 	}
 	ctx := c.Context()
-	_, err = h.taskAccess().loadReadable(c, "listTaskArtifacts", namespace, id)
+	task, err := h.taskAccess().loadReadable(c, "listTaskArtifacts", namespace, id)
 	if err != nil {
 		return err
 	}
@@ -1637,7 +1743,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"artifacts": []any{}})
 	}
 
-	artifacts, err := h.artifactStore.ListArtifacts(ctx, namespace, id)
+	artifacts, err := h.listArtifactsForTask(ctx, task)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list artifacts: %v", err))
 	}
@@ -1658,7 +1764,7 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return err
 	}
 	ctx := c.Context()
-	_, err = h.taskAccess().loadReadable(c, "downloadTaskArtifact", namespace, id)
+	task, err := h.taskAccess().loadReadable(c, "downloadTaskArtifact", namespace, id)
 	if err != nil {
 		return err
 	}
@@ -1667,7 +1773,7 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "artifact store not configured")
 	}
 
-	data, contentType, err := h.artifactStore.GetArtifact(ctx, namespace, id, filename)
+	data, contentType, err := h.artifactForTask(ctx, task, filename)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "artifact not found")

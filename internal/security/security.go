@@ -18,6 +18,10 @@ const (
 	ArtifactThreatModel    = "security-threat-model.md"
 	ArtifactValidation     = "security-validation.json"
 	ArtifactValidationText = "security-validation.txt"
+	// AnnotationValidationBindingVersion marks validation Tasks whose artifacts
+	// must bind to the trusted scan run as well as the public finding ID.
+	AnnotationValidationBindingVersion = "orka.ai/security-validation-binding-version"
+	ValidationBindingVersion           = "1"
 	// ArtifactWorkspaceDir is the repo-root symlink the worker exposes for
 	// writing security artifacts from inside the agent workspace.
 	ArtifactWorkspaceDir = ".orka-artifacts"
@@ -36,6 +40,8 @@ const (
 type ValidationArtifact struct {
 	Version            int                            `json:"version"`
 	FindingID          string                         `json:"finding_id"`
+	ScanRunID          string                         `json:"scan_run_id,omitempty"`
+	OccurrenceID       string                         `json:"occurrence_id,omitempty"`
 	Status             string                         `json:"status"`
 	Summary            string                         `json:"summary"`
 	ValidationSteps    []string                       `json:"validation_steps,omitempty"`
@@ -544,9 +550,12 @@ func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, head
 
 	prompt.WriteString("\nsecurity-findings.v2.json must be valid JSON with this top-level shape:\n")
 	prompt.WriteString(`{"schemaVersion":2,"repository":{"repoURL":"...","branch":"...","subPath":"...","baseSHA":"...","headSHA":"..."},"scan":{"mode":"initial|incremental|manual","sliceId":"...","summary":"..."},"findings":[]}` + "\n")
-	prompt.WriteString("Each finding object must use these keys: title, category, severity, confidence, triage, evidence, summary, rootCause, reproduction, remediation, suggestedAction, whyTestsDoNotAlreadyCoverThis, suggestedRegressionTest, minimumFixScope.\n")
+	prompt.WriteString("Each finding object must use these keys: ruleId, identity, title, category, severity, confidence, triage, evidence, summary, rootCause, reproduction, remediation, suggestedAction, whyTestsDoNotAlreadyCoverThis, suggestedRegressionTest, minimumFixScope.\n")
 	prompt.WriteString("Use severity exactly one of: critical, high, medium, low. Use confidence exactly one of: high, medium, low.\n")
 	prompt.WriteString("Set scan.sliceId exactly to the slice ID above. Even when this slice has zero findings, write valid JSON with an empty findings array.\n")
+	fmt.Fprintf(&prompt, "Set repository.repoURL=%q, repository.baseSHA=%q, and repository.headSHA=%q exactly; target mismatches are rejected.\n",
+		scan.Spec.RepoURL, baseCommit, headCommit)
+	prompt.WriteString("For each finding, propose lowercase semantic slugs in ruleId and identity.anchor; use identity.instance only for independently reachable sibling instances. Identity proposals are controller-validated and non-authoritative.\n")
 
 	prompt.WriteString("\nReview slice metadata:\n")
 	prompt.Write(sliceJSON)
@@ -566,6 +575,10 @@ func BuildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Fin
 
 	fmt.Fprintf(&prompt, "You are validating and, when safe, attempting to reproduce a single security finding for %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
 	fmt.Fprintf(&prompt, "Finding ID: %s\n", finding.ID)
+	fmt.Fprintf(&prompt, "Scan run ID: %s\n", finding.ScanRunID)
+	if finding.CurrentOccurrenceID != "" {
+		fmt.Fprintf(&prompt, "Occurrence ID: %s\n", finding.CurrentOccurrenceID)
+	}
 	fmt.Fprintf(&prompt, "Title: %s\n", finding.Title)
 	fmt.Fprintf(&prompt, "Severity: %s\n", finding.Severity)
 	fmt.Fprintf(&prompt, "Confidence: %s\n", finding.Confidence)
@@ -599,7 +612,8 @@ func BuildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Fin
 	appendRequiredArtifactsDirective(&prompt, ArtifactValidation)
 	prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
 	prompt.WriteString("security-validation.json must be valid JSON with this shape:\n")
-	prompt.WriteString(`{"version":1,"finding_id":"fnd_...","status":"validated|failed|skipped","summary":"...","validation_steps":["..."],"reproduction":"...","attack_path_analysis":"...","likelihood":"...","impact":"...","assumptions":["..."],"controls":["..."],"blindspots":["..."],"evidence":[]}` + "\n")
+	prompt.WriteString(`{"version":1,"finding_id":"fnd_...","scan_run_id":"scan_...","occurrence_id":"occ_...","status":"validated|failed|skipped","summary":"...","validation_steps":["..."],"reproduction":"...","attack_path_analysis":"...","likelihood":"...","impact":"...","assumptions":["..."],"controls":["..."],"blindspots":["..."],"evidence":[]}` + "\n")
+	prompt.WriteString("Set finding_id, scan_run_id, and occurrence_id (when shown) exactly to the trusted values above. Missing or mismatched bindings fail validation ingestion.\n")
 	prompt.WriteString("Use status=validated when the code path and validation strongly support the issue.\n")
 	prompt.WriteString("Use status=failed when the original claim does not hold after review or reproduction attempts.\n")
 	prompt.WriteString("Use status=skipped when the environment or safety constraints prevent meaningful validation.\n")

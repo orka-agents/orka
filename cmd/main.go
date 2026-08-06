@@ -50,6 +50,7 @@ import (
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	_ "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tools"
@@ -575,6 +576,22 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	securityIntegrityConfig, err := security.IntegrityConfigFromEnv(os.Getenv)
+	if err != nil {
+		setupLog.Error(err, "invalid repository security integrity configuration")
+		os.Exit(1)
+	}
+	setupLog.Info("repository security integrity gates",
+		"workerOutputBindingMode", securityIntegrityConfig.WorkerOutputBindingMode,
+		"pinnedScanTargetsEnabled", securityIntegrityConfig.PinnedScanTargetsEnabled,
+		"qualityStateWritesEnabled", securityIntegrityConfig.QualityStateWritesEnabled,
+		"findingObservationWritesEnabled", securityIntegrityConfig.FindingObservationWrites,
+		"bundleSealingMode", securityIntegrityConfig.BundleSealingMode,
+		"hardenedAnalysisEnabled", securityIntegrityConfig.HardenedAnalysisEnabled,
+		"strictCompletionEnabled", securityIntegrityConfig.StrictCompletionEnabled,
+		"deepScanEnabled", securityIntegrityConfig.DeepScanEnabled,
+	)
+
 	executionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProvider(executionWorkspaceDefaultProviderFlag)
 	if !controller.WorkspaceProviderSupported(executionWorkspaceDefaultProvider) {
 		setupLog.Error(fmt.Errorf("unsupported execution workspace default provider %q", executionWorkspaceDefaultProvider),
@@ -945,6 +962,7 @@ func main() {
 		MessageStore:                       sqliteStore,
 		ArtifactStore:                      sqliteStore,
 		ExecutionEventStore:                sqliteStore,
+		SecurityIntegrityConfig:            securityIntegrityConfig,
 		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
 		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
 		ExecutionWorkspaceDefaultProvider:  executionWorkspaceDefaultProvider,
@@ -1133,11 +1151,17 @@ func main() {
 	}
 
 	if err := (&controller.RepositoryScanReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		SecurityStore: sqliteStore,
-		ArtifactStore: sqliteStore,
-		ResultStore:   sqliteStore,
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		SecurityStore:       sqliteStore,
+		IntegrityStore:      sqliteStore,
+		TargetReceiptStore:  sqliteStore,
+		RunTaskInputStore:   sqliteStore,
+		RunThreatModelStore: sqliteStore,
+		BundleStore:         sqliteStore,
+		ArtifactStore:       sqliteStore,
+		ResultStore:         sqliteStore,
+		IntegrityConfig:     securityIntegrityConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryScan")
 		os.Exit(1)
@@ -1186,6 +1210,7 @@ func main() {
 		},
 		ContextTokens:             contextTokenConfig,
 		ContextTokenAuthorization: contextTokenAuthzConfig,
+		SecurityIntegrity:         securityIntegrityConfig,
 		ResultStore:               sqliteStore,
 		SessionStore:              sqliteStore,
 		PlanStore:                 sqliteStore,
@@ -1194,6 +1219,8 @@ func main() {
 		MemoryStore:               sqliteStore,
 		MemoryProposalStore:       sqliteStore,
 		SecurityStore:             sqliteStore,
+		SecurityIntegrityStore:    sqliteStore,
+		SecurityBundleStore:       sqliteStore,
 		RepositoryMonitorStore:    sqliteStore,
 		ExecutionEventStore:       sqliteStore,
 		GatewayEventStore:         sqliteStore,

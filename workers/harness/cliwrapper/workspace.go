@@ -1,6 +1,7 @@
 package cliwrapper
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -23,6 +25,8 @@ const (
 	envAllowedGitHosts       = "ORKA_HARNESS_WRAPPER_ALLOWED_GIT_HOSTS"
 	controllerGitAskpassPath = "/bin/echo-token"
 	workspaceRefFetchDepth   = "1000"
+	gitShallowTrue           = "true"
+	gitShallowFalse          = "false"
 )
 
 func workspaceGitCommand(ctx context.Context, args ...string) *exec.Cmd {
@@ -34,6 +38,7 @@ func workspaceGitCommand(ctx context.Context, args ...string) *exec.Cmd {
 	env := []string{
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_NO_REPLACE_OBJECTS=1",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ASKPASS=/bin/false",
 		"PATH=" + wrapperSafeCommandPath,
@@ -274,6 +279,9 @@ func fetchAndCheckoutWorkspaceRef(ctx context.Context, cloneDir, ref, repo strin
 	if err := validateWorkspaceRefForFetch(ref); err != nil {
 		return err
 	}
+	if oid, ok := security.NormalizeFullGitObjectID(ref); ok {
+		return fetchAndCheckoutWorkspaceCommitOID(ctx, cloneDir, oid, repo)
+	}
 	fetch := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", "--end-of-options", ref)
 	if _, err := fetch.CombinedOutput(); err == nil {
 		return checkoutWorkspaceCommit(ctx, cloneDir, "FETCH_HEAD", repo)
@@ -296,6 +304,26 @@ func fetchAndCheckoutWorkspaceRef(ctx context.Context, cloneDir, ref, repo strin
 		return err
 	}
 	return checkoutWorkspaceCommit(ctx, cloneDir, commit, repo)
+}
+
+func fetchAndCheckoutWorkspaceCommitOID(ctx context.Context, cloneDir, oid, repo string) error {
+	fetch := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", "--end-of-options", oid)
+	if _, err := fetch.CombinedOutput(); err == nil {
+		fetched, resolveErr := resolveWorkspaceCommit(ctx, cloneDir, "FETCH_HEAD", repo)
+		if resolveErr == nil && strings.EqualFold(fetched, oid) {
+			return checkoutWorkspaceExactCommit(ctx, cloneDir, oid, repo)
+		}
+	}
+	if err := fetchWorkspaceRemoteCommitReachability(ctx, cloneDir, repo); err != nil {
+		return err
+	}
+	resolved, resolveErr := resolveWorkspaceCommit(ctx, cloneDir, oid, repo)
+	if resolveErr != nil || !strings.EqualFold(resolved, oid) {
+		if err := fetchWorkspaceRemoteCommitFullReachability(ctx, cloneDir, repo); err != nil {
+			return err
+		}
+	}
+	return checkoutWorkspaceExactCommit(ctx, cloneDir, oid, repo)
 }
 
 func validateWorkspaceRefForFetch(ref string) error {
@@ -353,6 +381,58 @@ func fetchWorkspaceRemoteHeads(ctx context.Context, cloneDir string) error {
 	return nil
 }
 
+func fetchWorkspaceRemoteCommitReachability(ctx context.Context, cloneDir, repo string) error {
+	cmd := workspaceGitCommand(
+		ctx,
+		"-C", cloneDir,
+		"fetch", "--depth="+workspaceRefFetchDepth,
+		"origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return gitCommandError("fetch turn workspace remote refs", err, out, repo)
+	}
+	return nil
+}
+
+func fetchWorkspaceRemoteCommitFullReachability(ctx context.Context, cloneDir, repo string) error {
+	shallow, err := workspaceRepositoryIsShallow(ctx, cloneDir, repo)
+	if err != nil {
+		return err
+	}
+	args := []string{"-C", cloneDir, "fetch"}
+	if shallow {
+		args = append(args, "--unshallow")
+	}
+	args = append(
+		args,
+		"origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*",
+	)
+	cmd := workspaceGitCommand(ctx, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return gitCommandError("fetch full turn workspace remote refs", err, out, repo)
+	}
+	return nil
+}
+
+func workspaceRepositoryIsShallow(ctx context.Context, cloneDir, repo string) (bool, error) {
+	cmd := workspaceGitCommand(ctx, "-C", cloneDir, "rev-parse", "--is-shallow-repository")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, gitCommandError("inspect turn workspace repository depth", err, out, repo)
+	}
+	switch strings.TrimSpace(string(out)) {
+	case gitShallowTrue:
+		return true, nil
+	case gitShallowFalse:
+		return false, nil
+	default:
+		return false, fmt.Errorf(
+			"inspect turn workspace repository depth: unexpected result %q",
+			strings.TrimSpace(string(out)),
+		)
+	}
+}
+
 func resolveWorkspaceRemoteBranch(ctx context.Context, cloneDir, branch, repo string) (string, error) {
 	remoteRef := "refs/remotes/origin/" + branch
 	verify := workspaceGitCommand(ctx, "-C", cloneDir, "rev-parse", "--verify", "--end-of-options", remoteRef+"^{commit}")
@@ -367,16 +447,50 @@ func resolveWorkspaceRemoteBranch(ctx context.Context, cloneDir, branch, repo st
 	return commit, nil
 }
 
-func checkoutWorkspaceCommit(ctx context.Context, cloneDir, ref, repo string) error {
+func resolveWorkspaceCommit(ctx context.Context, cloneDir, ref, repo string) (string, error) {
 	verify := workspaceGitCommand(ctx, "-C", cloneDir, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
-	out, err := verify.CombinedOutput()
+	var stderr bytes.Buffer
+	verify.Stderr = &stderr
+	out, err := verify.Output()
 	if err != nil {
-		return gitCommandError("resolve turn workspace ref", err, out, repo)
+		return "", gitCommandError("resolve turn workspace ref", err, stderr.Bytes(), repo)
 	}
 	commit := strings.TrimSpace(string(out))
+	if commit == "" {
+		return "", fmt.Errorf("resolve turn workspace ref: empty commit for %q", ref)
+	}
+	return commit, nil
+}
+
+func checkoutWorkspaceCommit(ctx context.Context, cloneDir, ref, repo string) error {
+	commit, err := resolveWorkspaceCommit(ctx, cloneDir, ref, repo)
+	if err != nil {
+		return err
+	}
 	checkout := workspaceGitCommand(ctx, "-C", cloneDir, "checkout", "--detach", commit)
 	if out, err := checkout.CombinedOutput(); err != nil {
 		return gitCommandError("checkout turn workspace ref", err, out, repo)
+	}
+	return nil
+}
+
+func checkoutWorkspaceExactCommit(ctx context.Context, cloneDir, oid, repo string) error {
+	commit, err := resolveWorkspaceCommit(ctx, cloneDir, oid, repo)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(commit, oid) {
+		return fmt.Errorf("resolve turn workspace ref: commit %q does not match requested object ID %q", commit, oid)
+	}
+	if err := checkoutWorkspaceCommit(ctx, cloneDir, oid, repo); err != nil {
+		return err
+	}
+	observed, err := resolveWorkspaceCommit(ctx, cloneDir, "HEAD", repo)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(observed, oid) {
+		return fmt.Errorf("checkout turn workspace ref: commit %q does not match requested object ID %q", observed, oid)
 	}
 	return nil
 }

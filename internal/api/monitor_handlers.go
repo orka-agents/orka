@@ -764,7 +764,7 @@ func (h *Handlers) CreateRepositoryMonitorRun(c fiber.Ctx) error {
 
 func (h *Handlers) markRepositoryMonitorRunSignalFailed(c fiber.Ctx, run *store.MonitorRun, signalErr error) error {
 	completedAt := time.Now()
-	run.Phase = "failed"
+	run.Phase = repositoryMonitorRunPhaseFailed
 	run.CompletedAt = &completedAt
 	run.Error = signalErr.Error()
 	return h.repositoryMonitorStore.UpdateMonitorRun(c.Context(), run)

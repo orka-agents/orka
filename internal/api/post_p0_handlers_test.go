@@ -36,6 +36,8 @@ type postP0FakeSessionStore struct {
 	deleteOnGetAfter int
 }
 
+const postP0SourceTaskName = "source-task"
+
 func (f *postP0FakeSessionStore) key(namespace, name string) string { return namespace + "/" + name }
 func (f *postP0FakeSessionStore) CreateSession(ctx context.Context, session *store.SessionRecord) error {
 	f.records[f.key(session.Namespace, session.Name)] = session
@@ -641,9 +643,9 @@ func TestTaskApprovalDecisionAPIPagesApprovalEvents(t *testing.T) {
 
 func TestForkTaskAPI(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
-	appendTestTaskEvent(t, eventStore, "source-task", events.ExecutionEventTypeTaskStarted)
-	appendTestTaskEvent(t, eventStore, "source-task", events.ExecutionEventTypeWorkerStarted)
-	source := testTask("default", "source-task")
+	appendTestTaskEvent(t, eventStore, postP0SourceTaskName, events.ExecutionEventTypeTaskStarted)
+	appendTestTaskEvent(t, eventStore, postP0SourceTaskName, events.ExecutionEventTypeWorkerStarted)
+	source := testTask("default", postP0SourceTaskName)
 	source.Spec.Type = corev1alpha1.TaskTypeAgent
 	source.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-1"}
 	h, app := setupTaskEventHandlers(t, eventStore, source)
@@ -668,7 +670,7 @@ func TestForkTaskAPI(t *testing.T) {
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "forked-task"}, created); err != nil {
 		t.Fatalf("get created: %v", err)
 	}
-	if created.Annotations[labels.AnnotationForkSourceTask] != "source-task" ||
+	if created.Annotations[labels.AnnotationForkSourceTask] != postP0SourceTaskName ||
 		created.Annotations[labels.AnnotationForkSourceSeq] != "1" ||
 		created.Annotations[labels.AnnotationDisableCoordinationToolInject] != queryTrue {
 		t.Fatalf("created task annotations = %#v", created.Annotations)
@@ -798,8 +800,8 @@ func TestResolveForkSessionNamesDetachesGatewayOwnershipWhenSessionMissing(t *te
 
 func TestForkTaskAPIDoesNotAppendRequestEventWhenCreateFails(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
-	appendTestTaskEvent(t, eventStore, "source-task", events.ExecutionEventTypeTaskStarted)
-	source := testTask("default", "source-task")
+	appendTestTaskEvent(t, eventStore, postP0SourceTaskName, events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", postP0SourceTaskName)
 	existingFork := testTask("default", "existing-fork")
 	h, app := setupTaskEventHandlers(t, eventStore, source, existingFork)
 	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
@@ -812,7 +814,7 @@ func TestForkTaskAPIDoesNotAppendRequestEventWhenCreateFails(t *testing.T) {
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status=%d, want 409", resp.StatusCode)
 	}
-	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "source-task", Limit: 10})
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: postP0SourceTaskName, Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -829,12 +831,12 @@ func TestForkTaskAPIDoesNotAppendRequestEventWhenCreateFails(t *testing.T) {
 // Task is the source of truth and is self-describing via its parent annotations.
 func TestForkTaskAPISucceedsWhenRequestEventAppendFails(t *testing.T) {
 	baseStore := store.NewFakeExecutionEventStore()
-	appendTestTaskEvent(t, baseStore, "source-task", events.ExecutionEventTypeTaskStarted)
+	appendTestTaskEvent(t, baseStore, postP0SourceTaskName, events.ExecutionEventTypeTaskStarted)
 	eventStore := &postP0FailingAppendEventStore{
 		ExecutionEventStore: baseStore,
 		failType:            events.ExecutionEventTypeTaskForkRequested,
 	}
-	source := testTask("default", "source-task")
+	source := testTask("default", postP0SourceTaskName)
 	h, app := setupTaskEventHandlers(t, eventStore, source)
 	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/source-task/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"besteffort-fork","prompt":"continue"}`))
@@ -854,7 +856,7 @@ func TestForkTaskAPISucceedsWhenRequestEventAppendFails(t *testing.T) {
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "besteffort-fork"}, created); err != nil {
 		t.Fatalf("forked task should exist despite event append failure: %v", err)
 	}
-	if created.Annotations[labels.AnnotationForkSourceTask] != "source-task" {
+	if created.Annotations[labels.AnnotationForkSourceTask] != postP0SourceTaskName {
 		t.Fatalf("forked task missing fork lineage annotation: %#v", created.Annotations)
 	}
 }

@@ -150,15 +150,16 @@ func (r *TaskReconciler) executeHarnessBrokeredCoordinationTool(
 	restore := setHarnessBrokeredCoordinationEnv(task, agent)
 	defer restore()
 	toolCtx := &toolspkg.ToolContext{
-		Client:       r.Client,
-		Namespace:    task.Namespace,
-		Tenant:       task.Namespace,
-		TaskID:       task.Name,
-		TaskUID:      string(task.UID),
-		ParentTaskID: harnessBrokeredParentTaskName(task),
-		ToolCallID:   frame.ToolCallID,
-		ResultStore:  r.ResultStore,
-		MessageStore: r.MessageStore,
+		Client:                  r.Client,
+		Namespace:               task.Namespace,
+		Tenant:                  task.Namespace,
+		TaskID:                  task.Name,
+		TaskUID:                 string(task.UID),
+		ParentTaskID:            harnessBrokeredParentTaskName(task),
+		ToolCallID:              frame.ToolCallID,
+		WorkerOutputBindingMode: r.SecurityIntegrityConfig.WorkerOutputBindingMode,
+		ResultStore:             r.ResultStore,
+		MessageStore:            r.MessageStore,
 	}
 	return tool.Execute(toolspkg.WithToolContext(ctx, toolCtx), argsOrEmptyObject(frame.Content))
 }

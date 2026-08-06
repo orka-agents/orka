@@ -47,6 +47,7 @@ import (
 	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -114,6 +115,7 @@ type TaskReconciler struct {
 	MessageStore                       store.MessageStore
 	ArtifactStore                      store.ArtifactStore
 	ExecutionEventStore                store.ExecutionEventStore
+	SecurityIntegrityConfig            security.IntegrityConfig
 	EnforceNamespaceIsolation          bool
 	MaxTasksPerNamespace               int32
 	ExecutionWorkspaceDefaultProvider  corev1alpha1.WorkspaceProvider
@@ -477,7 +479,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if r.ResultStore != nil {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete result from store", "task", task.Name)
-				// Continue with finalizer removal anyway
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -485,6 +487,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if r.ArtifactStore != nil {
 			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete artifacts", "task", task.Name)
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -2553,8 +2556,25 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		return nil
 	}
 
-	// Check if result already exists in store (written by worker via HTTP)
-	_, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	// Check if result already exists in store (written by worker via HTTP).
+	// Repository-security Tasks consume only output bound to the current Task UID and attempt when enabled.
+	var err error
+	securityTask := strings.TrimSpace(task.Labels[labels.LabelCreatedBy]) == "repository-security"
+	mode := r.SecurityIntegrityConfig.WorkerOutputBindingMode
+	if securityTask && mode != "" && mode != security.WorkerOutputBindingOff {
+		if bound, ok := r.ResultStore.(store.BoundOutputStore); ok {
+			_, err = bound.GetBoundResult(ctx, task.Namespace, task.Name, string(task.UID), int64(task.Status.Attempts))
+			if err != nil && mode == security.WorkerOutputBindingAudit {
+				_, err = r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+			}
+		} else if mode == security.WorkerOutputBindingEnforce {
+			err = fmt.Errorf("bound result storage is unavailable")
+		} else {
+			_, err = r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+		}
+	} else {
+		_, err = r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	}
 	if err == nil {
 		// Result already exists (written by worker)
 		task.Status.ResultRef = &corev1alpha1.ResultReference{

@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
@@ -54,6 +55,7 @@ type compatProxyToolContextConfig struct {
 	Provider                  ProviderResolutionInfo
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
+	WorkerOutputBindingMode   security.WorkerOutputBindingMode
 	ResultStore               store.ResultStore
 	GenerateTaskName          func() string
 	Profile                   compatProxyToolContextProfile
@@ -73,6 +75,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 		ProviderType:              cfg.Provider.Type,
 		WatchNamespace:            cfg.WatchNamespace,
 		EnforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
+		WorkerOutputBindingMode:   cfg.WorkerOutputBindingMode,
 		ResultStore:               cfg.ResultStore,
 		GenerateTaskName:          cfg.GenerateTaskName,
 		TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": cfg.Profile.SourceLabel} },

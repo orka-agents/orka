@@ -31,6 +31,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
@@ -53,6 +54,9 @@ func clearDeprecatedHarnessRuntimeAnnotations(annotations map[string]string) {
 
 const (
 	harnessWrapperEndpointEnv                 = "ORKA_HARNESS_WRAPPER_ENDPOINT"
+	harnessOutputRuntimeSessionEnv            = "ORKA_OUTPUT_RUNTIME_SESSION_ID"
+	harnessOutputTurnIDEnv                    = "ORKA_OUTPUT_TURN_ID"
+	harnessOutputCorrelationIDEnv             = "ORKA_OUTPUT_CORRELATION_ID"
 	harnessWrapperAuthValueEnv                = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
 	harnessWrapperAuthValueFileEnv            = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
 	harnessWrapperTurnIDAnnotation            = "orka.ai/harness-wrapper-turn-id"
@@ -61,6 +65,7 @@ const (
 	harnessWrapperLastFrameSeqAnno            = "orka.ai/harness-wrapper-last-frame-seq"
 	harnessWrapperStartedAnno                 = "orka.ai/harness-wrapper-started"
 	harnessWrapperPlannedAtAnno               = "orka.ai/harness-wrapper-planned-at"
+	harnessWrapperAttemptAnno                 = "orka.ai/harness-wrapper-attempt"
 	harnessWrapperMetadataAnno                = "orka.ai/harness-wrapper-metadata"
 	harnessWrapperRuntimeRefAnno              = "orka.ai/harness-wrapper-runtime-ref"
 	harnessWrapperContractAnno                = "orka.ai/harness-wrapper-contract-version"
@@ -762,7 +767,7 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 			}
 			resultBytes = fetched
 		}
-		if saveErr := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, resultBytes); saveErr != nil {
+		if saveErr := r.saveHarnessWrapperResult(ctx, task, resultBytes); saveErr != nil {
 			log.Error(saveErr, "failed to save harness wrapper result")
 			return r.completeAfterSuccessfulExecutionError(
 				ctx, task, fmt.Sprintf("failed to save harness wrapper result: %v", saveErr),
@@ -781,7 +786,7 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 			}
 		}
 		if len(resultBytes) > 0 {
-			if saveErr := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, resultBytes); saveErr != nil {
+			if saveErr := r.saveHarnessWrapperResult(ctx, task, resultBytes); saveErr != nil {
 				log.Error(saveErr, "failed to save failed harness wrapper result")
 			} else {
 				task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
@@ -873,6 +878,41 @@ func (r *TaskReconciler) clearHarnessBrokeredApprovalWaiting(ctx context.Context
 			Message:            fmt.Sprintf("brokered tool %s continued", toolName),
 		})
 	})
+}
+
+func (r *TaskReconciler) saveHarnessWrapperResult(ctx context.Context, task *corev1alpha1.Task, data []byte) error {
+	if r.ResultStore == nil || task == nil {
+		return nil
+	}
+	securityTask := strings.TrimSpace(task.Labels[labels.LabelCreatedBy]) == repositorySecurityCreatedBy
+	mode := r.SecurityIntegrityConfig.WorkerOutputBindingMode
+	useBound := securityTask && mode != "" && mode != security.WorkerOutputBindingOff
+	if bound, ok := r.ResultStore.(store.BoundOutputStore); useBound && ok && task.UID != "" && task.Annotations != nil {
+		runtimeSessionID := strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation])
+		turnID := strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation])
+		correlationID := strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
+		if runtimeSessionID != "" && turnID != "" && correlationID != "" {
+			binding := sha256.Sum256([]byte(strings.Join([]string{
+				"controller-harness-output-v1", string(task.UID), strconv.FormatInt(harnessWrapperOutputAttempt(task), 10),
+				runtimeSessionID, turnID, correlationID,
+			}, "\x00")))
+			return bound.SaveBoundResult(ctx, &store.BoundResult{
+				Namespace: task.Namespace,
+				TaskName:  task.Name,
+				Data:      data,
+				Provenance: store.OutputProvenance{
+					TaskUID: string(task.UID), TaskAttempt: harnessWrapperOutputAttempt(task),
+					ProducerKind:     store.OutputProducerControllerHarness,
+					RuntimeSessionID: runtimeSessionID, TurnID: turnID, CorrelationID: correlationID,
+					SubmissionNonceDigest: "sha256:" + hex.EncodeToString(binding[:]),
+				},
+			})
+		}
+	}
+	if securityTask && mode == security.WorkerOutputBindingEnforce {
+		return fmt.Errorf("bound result storage is unavailable for repository-security task")
+	}
+	return r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, data)
 }
 
 func harnessWrapperCompletedResultBytes(completed *harness.TurnCompleted) []byte {
@@ -1038,6 +1078,7 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
 	task.Annotations[harnessWrapperStartedAnno] = "false"
 	task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
+	task.Annotations[harnessWrapperAttemptAnno] = strings.TrimSpace(request.Metadata["taskAttempt"])
 	delete(task.Annotations, harnessWrapperBrokeredContinuationAnno)
 	if runtimeRefName := strings.TrimSpace(request.Metadata["runtimeRef"]); runtimeRefName != "" {
 		task.Annotations[harnessWrapperRuntimeRefAnno] = runtimeRefName
@@ -1081,6 +1122,7 @@ func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *c
 		harnessWrapperCorrelationIDAnno,
 		harnessWrapperLastFrameSeqAnno,
 		harnessWrapperPlannedAtAnno,
+		harnessWrapperAttemptAnno,
 		harnessWrapperMetadataAnno,
 	} {
 		if strings.TrimSpace(latest.Annotations[key]) == "" && task != nil && task.Annotations != nil {
@@ -1117,6 +1159,23 @@ func harnessWrapperPlannedMetadata(task *corev1alpha1.Task, runtimeName string) 
 func harnessWrapperPlannedToolExecutionMode(task *corev1alpha1.Task) harness.ToolExecutionMode {
 	metadata := harnessWrapperPlannedMetadata(task, "")
 	return harness.ToolExecutionMode(strings.TrimSpace(metadata["toolExecutionMode"]))
+}
+
+func harnessWrapperOutputAttempt(task *corev1alpha1.Task) int64 {
+	if task == nil {
+		return 0
+	}
+	attempt := int64(task.Status.Attempts)
+	if task.Status.Phase == corev1alpha1.TaskPhasePending || task.Status.Phase == corev1alpha1.TaskPhaseScheduled {
+		attempt++
+	}
+	if task != nil && task.Annotations != nil {
+		if value, err := strconv.ParseInt(strings.TrimSpace(task.Annotations[harnessWrapperAttemptAnno]), 10, 64); err == nil &&
+			value > 0 && value >= attempt {
+			return value
+		}
+	}
+	return attempt
 }
 
 func harnessWrapperCurrentAttempt(task *corev1alpha1.Task) int32 {
@@ -1486,6 +1545,7 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 	patch := ctrlclient.MergeFrom(task.DeepCopy())
 	if task.Annotations != nil {
 		delete(task.Annotations, harnessWrapperTurnIDAnnotation)
+		delete(task.Annotations, harnessWrapperAttemptAnno)
 		delete(task.Annotations, harnessWrapperRuntimeAnnotation)
 		delete(task.Annotations, harnessWrapperCorrelationIDAnno)
 		delete(task.Annotations, harnessWrapperLastFrameSeqAnno)
@@ -1706,6 +1766,7 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	if err != nil {
 		return harness.StartTurnRequest{}, err
 	}
+	metadata["taskAttempt"] = strconv.FormatInt(int64(attempts), 10)
 	brokeredClasses, err := r.harnessWrapperRequiredBrokeredToolClasses(ctx, task, agent)
 	if err != nil {
 		return harness.StartTurnRequest{}, err
@@ -2076,6 +2137,15 @@ func (r *TaskReconciler) harnessWrapperBaseTurnEnv(ctx context.Context, task *co
 		env = append(env, harness.TurnEnvVar{Name: workerenv.PriorTaskNamespace, Value: priorNS})
 	}
 	if task.Annotations != nil {
+		for envName, annotation := range map[string]string{
+			harnessOutputRuntimeSessionEnv: harnessWrapperRuntimeAnnotation,
+			harnessOutputTurnIDEnv:         harnessWrapperTurnIDAnnotation,
+			harnessOutputCorrelationIDEnv:  harnessWrapperCorrelationIDAnno,
+		} {
+			if value := strings.TrimSpace(task.Annotations[annotation]); value != "" {
+				env = setHarnessTurnEnv(env, envName, value)
+			}
+		}
 		if traceparent := strings.TrimSpace(task.Annotations[labels.AnnotationTraceParent]); traceparent != "" {
 			env = setHarnessTurnEnv(env, workerenv.TraceParent, traceparent)
 		}

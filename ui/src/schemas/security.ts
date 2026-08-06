@@ -9,12 +9,31 @@ export const findingCountsSchema = z.object({
   low: z.number().optional(),
 })
 
+export const repositoryScanQualitySchema = z.object({
+  schemaVersion: z.number().optional(),
+  observedRepositoryScanUID: z.string().optional(),
+  observedGeneration: z.number().optional(),
+  inventoryCoverageStatus: z.string().optional(),
+  candidateCoverageStatus: z.string().optional(),
+  coverageStatus: z.string().optional(),
+  validationScope: z.string().optional(),
+  validationExecution: z.string().optional(),
+  attackPathExecution: z.string().optional(),
+  analysisAttestationLevel: z.string().optional(),
+  targetVerification: z.string().optional(),
+  bundleStatus: z.string().optional(),
+  authorizationStatus: z.string().optional(),
+  isolationStatus: z.string().optional(),
+  reasonCodes: z.array(z.string()).optional(),
+})
+
 export const repositoryScanSpecSchema = z.object({
   provider: z.string().optional(),
   repoURL: z.string(),
   owner: z.string().optional(),
   repository: z.string().optional(),
   branch: z.string().optional(),
+  ref: z.string().optional(),
   subPath: z.string().optional(),
   gitSecretRef: z.object({ name: z.string() }).optional(),
   forkRepo: z.string().optional(),
@@ -26,11 +45,28 @@ export const repositoryScanSpecSchema = z.object({
   validationMaxFindingsPerRun: z.number().optional(),
   validationMinSeverity: z.string().optional(),
   validationMinConfidence: z.string().optional(),
-  customScanInstructionsRef: z.object({ name: z.string(), key: z.string().optional() }).optional(),
-  falsePositivePolicyRef: z.object({ name: z.string(), key: z.string().optional() }).optional(),
+  customScanInstructionsRef: z
+    .object({ name: z.string(), key: z.string().optional() })
+    .optional(),
+  falsePositivePolicyRef: z
+    .object({ name: z.string(), key: z.string().optional() })
+    .optional(),
   analysisAgentRef: agentRefSchema,
   patchAgentRef: agentRefSchema.optional(),
   maxFindingsPerRun: z.number().optional(),
+  analysisIsolationPolicy: z.string().optional(),
+  completionPolicy: z.string().optional(),
+  incrementalBaselinePolicy: z.string().optional(),
+  deepScan: z
+    .object({
+      enabled: z.boolean().optional(),
+      maxPasses: z.number().optional(),
+      maxWorkers: z.number().optional(),
+      maxCandidates: z.number().optional(),
+      noNewCandidatesThreshold: z.number().optional(),
+      deadline: z.string().optional(),
+    })
+    .optional(),
   suspend: z.boolean().optional(),
 })
 
@@ -42,6 +78,10 @@ export const repositoryScanStatusSchema = z.object({
   lastSuccessfulScanAt: z.string().optional(),
   lastObservedHeadSHA: z.string().optional(),
   lastProcessedCommit: z.string().optional(),
+  lastCompleteCoverageCommit: z.string().optional(),
+  lastBundleSealedCommit: z.string().optional(),
+  lastAssuranceQualifiedCommit: z.string().optional(),
+  quality: repositoryScanQualitySchema.optional(),
   threatModelVersion: z.number().optional(),
   findingCounts: findingCountsSchema.optional(),
 })
@@ -54,10 +94,29 @@ export const repositoryScanSchema = z.object({
   status: repositoryScanStatusSchema.optional(),
 })
 
+export const scanRunQualitySchema = z.object({
+  qualitySchemaVersion: z.number(),
+  inventoryCoverageStatus: z.string(),
+  candidateCoverageStatus: z.string(),
+  coverageStatus: z.string(),
+  validationScope: z.string(),
+  validationExecution: z.string(),
+  attackPathExecution: z.string(),
+  analysisAttestationLevel: z.string(),
+  targetVerification: z.string(),
+  bundleStatus: z.string(),
+  authorizationStatus: z.string(),
+  isolationStatus: z.string(),
+  reasonCodes: z.array(z.string()).optional(),
+})
+
 export const scanRunSchema = z.object({
   id: z.string(),
+  runUID: z.string().optional(),
   namespace: z.string(),
   repositoryScan: z.string(),
+  repositoryScanUID: z.string().optional(),
+  repositoryScanGeneration: z.number().optional(),
   taskName: z.string(),
   mode: z.string(),
   phase: z.string(),
@@ -74,6 +133,10 @@ export const scanRunSchema = z.object({
   scannerPolicyVersion: z.string().optional(),
   policyDigest: z.string().optional(),
   idempotencyKey: z.string().optional(),
+  requestIdempotencyKey: z.string().optional(),
+  resolvedTargetKey: z.string().optional(),
+  targetReceiptID: z.string().optional(),
+  quality: scanRunQualitySchema.optional(),
   summary: z.string().optional(),
   errorMessage: z.string().optional(),
 })
@@ -81,6 +144,8 @@ export const scanRunSchema = z.object({
 export const threatModelSchema = z.object({
   namespace: z.string(),
   repositoryScan: z.string(),
+  repositoryScanUID: z.string().optional(),
+  repositoryScanGeneration: z.number().optional(),
   version: z.number(),
   content: z.string(),
   source: z.string(),
@@ -99,6 +164,8 @@ export const findingEvidenceRefSchema = z.object({
   endLine: z.number().optional(),
   symbol: z.string().optional(),
   quote: z.string().optional(),
+  contentSHA256: z.string().optional(),
+  contentSize: z.number().optional(),
 })
 
 export const securityFindingSchema = z.object({
@@ -109,6 +176,13 @@ export const securityFindingSchema = z.object({
   scanTaskName: z.string().optional(),
   sliceID: z.string().optional(),
   fingerprint: z.string(),
+  identityQuality: z.string().optional(),
+  identityAlgorithmVersion: z.string().optional(),
+  semanticFingerprint: z.string().optional(),
+  legacyFingerprint: z.string().optional(),
+  historyStatus: z.string().optional(),
+  currentOccurrenceID: z.string().optional(),
+  decisionVersion: z.number().optional(),
   title: z.string(),
   category: z.string().optional(),
   summary: z.string(),
@@ -190,6 +264,9 @@ export const patchProposalSchema = z.object({
   namespace: z.string(),
   repositoryScan: z.string(),
   findingID: z.string(),
+  occurrenceID: z.string().optional(),
+  sourceScanRunID: z.string().optional(),
+  sourceHeadSHA: z.string().optional(),
   taskName: z.string(),
   branch: z.string(),
   diffArtifact: z.string().optional(),
@@ -201,6 +278,94 @@ export const patchProposalSchema = z.object({
   updatedAt: z.string(),
 })
 
+export const findingOccurrenceObservationSchema = z.object({
+  observationID: z.string(),
+  relationship: z.string(),
+  ordinal: z.number(),
+})
+
+export const findingOccurrenceSchema = z.object({
+  id: z.string(),
+  namespace: z.string(),
+  repositoryScan: z.string(),
+  scanRunID: z.string(),
+  runUID: z.string(),
+  publicFindingID: z.string(),
+  semanticFindingID: z.string(),
+  semanticFingerprint: z.string(),
+  identityQuality: z.string(),
+  identityAlgorithmVersion: z.string(),
+  legacyFingerprint: z.string().optional(),
+  ruleID: z.string().optional(),
+  identityAnchor: z.string().optional(),
+  identityInstance: z.string().optional(),
+  targetReceiptID: z.string().optional(),
+  targetSHA: z.string().optional(),
+  discoveryPayload: z.unknown().optional(),
+  payloadDigest: z.string().optional(),
+  observationLinks: z.array(findingOccurrenceObservationSchema).optional(),
+  recordDigest: z.string(),
+  createdAt: z.string(),
+})
+
+export const findingDecisionApplicabilitySchema = z.object({
+  targetLineage: z.string(),
+  scope: z.string(),
+  policyVersion: z.string(),
+  predicateDigest: z.string(),
+  expiresAt: z.string().optional(),
+})
+
+export const findingDecisionSchema = z.object({
+  decisionID: z.string(),
+  namespace: z.string(),
+  repositoryScan: z.string(),
+  publicFindingID: z.string(),
+  scope: z.string(),
+  occurrenceID: z.string().optional(),
+  action: z.string(),
+  reasonCode: z.string().optional(),
+  reason: z.string().optional(),
+  evidenceReceiptIDs: z.array(z.string()).optional(),
+  supersedesDecisionID: z.string().optional(),
+  expectedDecisionVersion: z.number(),
+  decisionVersion: z.number(),
+  applicability: findingDecisionApplicabilitySchema.optional(),
+  actorSubject: z.string(),
+  actorIssuer: z.string().optional(),
+  authenticationSource: z.string(),
+  source: z.string().optional(),
+  feedbackEligible: z.boolean(),
+  recordDigest: z.string(),
+  createdAt: z.string(),
+})
+
+export const findingAssessmentSchema = z.object({
+  id: z.string(),
+  namespace: z.string(),
+  repositoryScan: z.string(),
+  scanRunID: z.string(),
+  runUID: z.string(),
+  occurrenceID: z.string(),
+  publicFindingID: z.string(),
+  kind: z.string(),
+  stageReceiptID: z.string(),
+  targetReceiptID: z.string().optional(),
+  targetSHA: z.string().optional(),
+  method: z.string().optional(),
+  outcome: z.string(),
+  failureClass: z.string().optional(),
+  summary: z.string().optional(),
+  proofGap: z.string().optional(),
+  evidenceReceiptIDs: z.array(z.string()).optional(),
+  normalizedPayload: z.unknown().optional(),
+  payloadDigest: z.string().optional(),
+  projectionValidationStatus: z.string().optional(),
+  projectionEvidence: z.array(findingEvidenceRefSchema).optional(),
+  recordDigest: z.string(),
+  createdAt: z.string(),
+})
+
 export type RepositoryScan = z.infer<typeof repositoryScanSchema>
 export type ScanRun = z.infer<typeof scanRunSchema>
 export type ThreatModel = z.infer<typeof threatModelSchema>
@@ -208,3 +373,7 @@ export type SecurityFinding = z.infer<typeof securityFindingSchema>
 export type PatchProposal = z.infer<typeof patchProposalSchema>
 export type ReviewSlice = z.infer<typeof reviewSliceSchema>
 export type DroppedFinding = z.infer<typeof droppedFindingSchema>
+
+export type FindingOccurrence = z.infer<typeof findingOccurrenceSchema>
+export type FindingDecision = z.infer<typeof findingDecisionSchema>
+export type FindingAssessment = z.infer<typeof findingAssessmentSchema>

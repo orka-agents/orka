@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -36,6 +37,9 @@ func TestNewServer(t *testing.T) {
 		Port:           8080,
 		MetricsPort:    9090,
 		WatchNamespace: "default",
+		SecurityIntegrity: security.IntegrityConfig{
+			WorkerOutputBindingMode: security.WorkerOutputBindingAudit,
+		},
 	}
 
 	server := NewServer(fakeClient, nil, config)
@@ -51,6 +55,15 @@ func TestNewServer(t *testing.T) {
 	}
 	if server.config.Port != 8080 {
 		t.Errorf("Port = %d, want 8080", server.config.Port)
+	}
+	for name, mode := range map[string]security.WorkerOutputBindingMode{
+		"chat":      server.chatHandler.workerOutputBindingMode,
+		"openai":    server.openaiHandler.workerOutputBindingMode,
+		"anthropic": server.anthropicHandler.workerOutputBindingMode,
+	} {
+		if mode != security.WorkerOutputBindingAudit {
+			t.Errorf("%s worker output binding mode = %q, want audit", name, mode)
+		}
 	}
 }
 

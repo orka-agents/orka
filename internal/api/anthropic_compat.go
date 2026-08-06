@@ -21,6 +21,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
@@ -37,6 +38,7 @@ type AnthropicCompatHandler struct {
 	config                    ChatConfig
 	resolver                  *ProviderResolver
 	resultStore               store.ResultStore
+	workerOutputBindingMode   security.WorkerOutputBindingMode
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
@@ -314,6 +316,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			Provider:                  providerInfo,
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
+			WorkerOutputBindingMode:   h.workerOutputBindingMode,
 			ResultStore:               h.resultStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", uuid.New().String()[:8]) },
 			Profile:                   anthropicCompatProxyToolContextProfile,

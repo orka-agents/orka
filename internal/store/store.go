@@ -156,6 +156,7 @@ type SecurityStore interface {
 	UpdateScanRun(ctx context.Context, run *ScanRun) error
 	GetScanRun(ctx context.Context, namespace, id string) (*ScanRun, error)
 	ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]ScanRun, string, error)
+	ListLatestScanRuns(ctx context.Context, namespace string, repositories []RepositoryScanIdentity) ([]ScanRun, error)
 
 	UpsertReviewSlice(ctx context.Context, slice *ReviewSlice) error
 	ListReviewSlices(ctx context.Context, filter ReviewSliceFilter) ([]ReviewSlice, string, error)
@@ -170,6 +171,7 @@ type SecurityStore interface {
 	ListFindings(ctx context.Context, filter FindingFilter) ([]Finding, string, error)
 	GetFindingCounts(ctx context.Context, namespace, repositoryScan string) (FindingCounts, error)
 	UpdateFindingState(ctx context.Context, namespace, id, state string) error
+	ClearFindingPatchProjection(ctx context.Context, namespace, id, proposalID string) error
 
 	CreatePatchProposal(ctx context.Context, proposal *PatchProposal) error
 	UpdatePatchProposal(ctx context.Context, proposal *PatchProposal) error
@@ -177,6 +179,32 @@ type SecurityStore interface {
 
 	CreateDroppedFinding(ctx context.Context, dropped *DroppedFinding) error
 	ListDroppedFindings(ctx context.Context, filter DroppedFindingFilter) ([]DroppedFinding, string, error)
+}
+
+// SecurityIntegrityStore handles append-only scan receipts and finding history.
+// It is separate from SecurityStore so existing consumers can adopt shadow writes
+// without widening their mutable compatibility-store dependency.
+type SecurityIntegrityStore interface {
+	AppendStageReceipt(ctx context.Context, receipt *StageReceipt) (bool, error)
+	GetStageReceipt(ctx context.Context, namespace, id string) (*StageReceipt, error)
+	ListStageReceipts(ctx context.Context, filter StageReceiptFilter) ([]StageReceipt, string, error)
+
+	AcceptFindingObservation(ctx context.Context, observation *FindingObservation) (bool, error)
+	GetFindingObservation(ctx context.Context, namespace, id string) (*FindingObservation, error)
+	ListFindingObservations(ctx context.Context, filter FindingObservationFilter) ([]FindingObservation, string, error)
+
+	FinalizeFindingOccurrence(ctx context.Context, finalization *FindingOccurrenceFinalization) (bool, error)
+	GetFindingOccurrence(ctx context.Context, namespace, id string) (*FindingOccurrence, error)
+	ListFindingOccurrences(ctx context.Context, filter FindingOccurrenceFilter) ([]FindingOccurrence, string, error)
+	GetFindingAlias(ctx context.Context, namespace, repositoryScan, semanticFingerprint string) (*FindingAlias, error)
+
+	RecordFindingAssessment(ctx context.Context, assessment *FindingAssessment) (bool, error)
+	GetFindingAssessment(ctx context.Context, namespace, id string) (*FindingAssessment, error)
+	ListFindingAssessments(ctx context.Context, filter FindingAssessmentFilter) ([]FindingAssessment, string, error)
+
+	AppendFindingDecision(ctx context.Context, decision *FindingDecision) (*FindingDecision, error)
+	GetFindingDecision(ctx context.Context, namespace, id string) (*FindingDecision, error)
+	ListFindingDecisions(ctx context.Context, filter FindingDecisionFilter) ([]FindingDecision, string, error)
 }
 
 // RepositoryMonitorStore handles durable repository monitor state.
