@@ -16,7 +16,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/redact"
@@ -653,8 +653,14 @@ func createTaskRequestFromTask(task *corev1alpha1.Task) CreateTaskRequest {
 	}
 
 	req := CreateTaskRequest{
-		Name:              task.Name,
-		Namespace:         task.Namespace,
+		Name:      task.Name,
+		Namespace: task.Namespace,
+		Metadata: MetadataRequest{
+			Name:        task.Name,
+			Namespace:   task.Namespace,
+			Labels:      task.Labels,
+			Annotations: task.Annotations,
+		},
 		Annotations:       task.Annotations,
 		Type:              task.Spec.Type,
 		Image:             task.Spec.Image,
@@ -1236,59 +1242,28 @@ func contextTokenTaskCreateEffectiveProviderModel(req CreateTaskRequest, agent *
 }
 
 func contextTokenTaskCreateEffectiveAITools(req CreateTaskRequest, agent *corev1alpha1.Agent) []string {
-	tools := []string{}
-	if agent != nil {
-		for _, tool := range agent.Spec.Tools {
-			if tool.Enabled != nil && !*tool.Enabled {
-				continue
-			}
-			if strings.TrimSpace(tool.Name) != "" {
-				tools = append(tools, tool.Name)
-			}
-		}
-		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && req.Annotations[labels.AnnotationDisableCoordinationToolInject] != queryTrue {
-			for _, tool := range coordinationToolNames() {
-				if !slices.Contains(tools, tool) {
-					tools = append(tools, tool)
-				}
-			}
-		}
-	}
-	if req.AI != nil {
-		for _, tool := range req.AI.Tools {
-			if strings.TrimSpace(tool) != "" {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	if req.Type == corev1alpha1.TaskTypeAI {
-		for _, tool := range memoryToolNames() {
-			if !slices.Contains(tools, tool) {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	return tools
+	return aitools.Resolve(contextTokenTaskCreateAIToolTask(req), agent)
 }
 
-func memoryToolNames() []string {
-	return []string{
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
+func contextTokenTaskCreateAIToolTask(req CreateTaskRequest) *corev1alpha1.Task {
+	taskType := req.Type
+	taskAI := req.AI
+	if req.Spec != nil {
+		if taskType == "" {
+			taskType = req.Spec.Type
+		}
+		if taskAI == nil {
+			taskAI = req.Spec.AI
+		}
 	}
-}
-
-func coordinationToolNames() []string {
-	return []string{
-		"delegate_task", "wait_for_tasks", "create_container_task", "cancel_task",
-		"send_message", "check_messages", "recall_memory", "remember",
-		"propose_memory", "search_transcript", "create_pull_request",
-		"list_pull_requests", "check_pr_review_marker", "check_pull_request_ci",
-		"merge_pull_request", "auto_merge_pull_request", "review_pull_request",
-		"post_review_comment", "create_agent", "delete_agent", "update_plan",
+	annotations := req.Annotations
+	if annotations == nil {
+		annotations = req.Metadata.Annotations
 	}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: taskType, AI: taskAI}}
+	task.Labels = req.Metadata.Labels
+	task.Annotations = annotations
+	return task
 }
 
 func contextTokenTaskCreateEffectiveRuntimeAllowedTools(req CreateTaskRequest, agent *corev1alpha1.Agent) []string {
@@ -1613,12 +1588,15 @@ func contextTokenTaskToolFailures(token *ContextToken, authzCtx contextTokenTask
 }
 
 func contextTokenPlatformAIToolName(authzCtx contextTokenTaskCreateAuthorizationContext, name string) bool {
-	if slices.Contains(memoryToolNames(), name) {
+	task := contextTokenTaskCreateAIToolTask(authzCtx.Request)
+	if slices.Contains(aitools.MemoryToolNames(), name) {
+		return true
+	}
+	if aitools.IsImplicitTool(task, authzCtx.Agent, name) {
 		return true
 	}
 	if slices.Contains(toolspkg.CoordinationToolNames(), name) {
-		coordinationEnabled := authzCtx.Agent != nil && authzCtx.Agent.Spec.Coordination != nil && authzCtx.Agent.Spec.Coordination.Enabled
-		return coordinationEnabled || slices.Contains(toolspkg.ChatToolNames(), name)
+		return aitools.RegistersCoordinationTools(task, authzCtx.Agent) || slices.Contains(toolspkg.ChatToolNames(), name)
 	}
 	_, builtin := toolspkg.DefaultRegistry.Get(name)
 	return builtin
