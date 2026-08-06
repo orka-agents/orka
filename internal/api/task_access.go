@@ -111,6 +111,30 @@ type gatewayTaskAuthorizationKey struct {
 	GatewayUID       string
 }
 
+func (a taskAccess) hasBroadGatewayRead(c fiber.Ctx, action, namespace string) (bool, error) {
+	if err := a.h.authorizeContextTokenAction(c, action+"GatewayRead", a.h.contextTokenAuthorization.GatewayReadScopes); err != nil {
+		if isGatewayTaskFilterDenial(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if a.h.clientset == nil {
+		return true, nil
+	}
+	if err := a.h.authorizeGatewayKubernetes(c, gatewayVerbList, "gateways", namespace, ""); err != nil {
+		if isGatewayTaskFilterDenial(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func isGatewayTaskFilterDenial(err error) bool {
+	var fiberErr *fiber.Error
+	return errors.As(err, &fiberErr) && (fiberErr.Code == fiber.StatusForbidden || fiberErr.Code == fiber.StatusNotFound)
+}
+
 func (a taskAccess) gatewayTaskReadableCached(
 	c fiber.Ctx, action string, task *corev1alpha1.Task, cache map[gatewayTaskAuthorizationKey]bool,
 ) (bool, error) {
@@ -137,8 +161,7 @@ func (a taskAccess) gatewayTaskReadableCached(
 		}
 		return true, nil
 	}
-	var fiberErr *fiber.Error
-	if errors.As(err, &fiberErr) && (fiberErr.Code == fiber.StatusForbidden || fiberErr.Code == fiber.StatusNotFound) {
+	if isGatewayTaskFilterDenial(err) {
 		if cache != nil {
 			cache[key] = false
 		}
