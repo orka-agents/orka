@@ -105,18 +105,7 @@ func run() (err error) {
 	taskNamespace := workerEnv.TaskNamespace
 	eventRecorder := common.NewHTTPEventRecorderFromEnv()
 	defer func() {
-		if err != nil {
-			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerFailed, 0,
-				common.WithEventSeverity(events.ExecutionEventSeverityError),
-				common.WithEventTaskName(taskName),
-				common.WithEventSummary(err.Error()),
-			)
-			return
-		}
-		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerCompleted, 0,
-			common.WithEventTaskName(taskName),
-			common.WithEventSummary("AI worker completed"),
-		)
+		err = finishAIWorkerRun(ctx, eventRecorder, taskName, err)
 	}()
 	if err := workerEnv.ValidateRequired(); err != nil {
 		return err
@@ -341,8 +330,8 @@ func run() (err error) {
 		return fmt.Errorf("agent execution failed: %w", err)
 	}
 
-	// Write result to controller via HTTP
-	if err := writeResult(result); err != nil {
+	// Write result to controller via HTTP.
+	if err := writeResult(ctx, result); err != nil {
 		return fmt.Errorf("failed to write result: %w", err)
 	}
 	common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeResultSubmitted,
@@ -351,22 +340,9 @@ func run() (err error) {
 		common.WithEventContent(eventContent(map[string]any{"resultLength": len(result)})),
 	)
 
-	// Upload any artifacts the agent wrote
-	if err := common.UploadArtifacts(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
-		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeArtifactUploadFailed, 0,
-			common.WithEventSeverity(events.ExecutionEventSeverityWarning),
-			common.WithEventTaskName(taskName),
-			common.WithEventSummary("AI worker artifact upload failed"),
-			common.WithEventContent(eventContent(map[string]any{"artifact": "all", "error": err.Error()})),
-		)
-		// Don't fail the task if artifact upload fails
-	} else {
-		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeArtifactUploadCompleted, 0,
-			common.WithEventTaskName(taskName),
-			common.WithEventSummary("AI worker artifact upload completed"),
-			common.WithEventContent(eventContent(map[string]any{"artifact": "all"})),
-		)
+	// Upload any artifacts the agent wrote.
+	if err := uploadAIArtifacts(ctx, eventRecorder, taskName); err != nil {
+		return err
 	}
 
 	fmt.Printf("Task %s/%s completed successfully%s\n", taskNamespace, taskName, transactionLogFields)
@@ -1541,6 +1517,50 @@ func advertisedToolNames(llmTools []llm.Tool) map[string]struct{} {
 	return names
 }
 
+func finishAIWorkerRun(
+	ctx context.Context, eventRecorder common.EventRecorder, taskName string, runErr error,
+) error {
+	if runErr == nil {
+		runErr = ctx.Err()
+	}
+	if runErr != nil {
+		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerFailed, 0,
+			common.WithEventSeverity(events.ExecutionEventSeverityError),
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary(runErr.Error()),
+		)
+		return runErr
+	}
+	common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkerCompleted,
+		common.WithEventTaskName(taskName),
+		common.WithEventSummary("AI worker completed"),
+	)
+	return ctx.Err()
+}
+
+func uploadAIArtifacts(ctx context.Context, eventRecorder common.EventRecorder, taskName string) error {
+	err := common.UploadArtifactsContext(ctx)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("artifact upload canceled: %w", ctxErr)
+		}
+		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
+		common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeArtifactUploadFailed,
+			common.WithEventSeverity(events.ExecutionEventSeverityWarning),
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("AI worker artifact upload failed"),
+			common.WithEventContent(eventContent(map[string]any{"artifact": "all", "error": err.Error()})),
+		)
+		return ctx.Err()
+	}
+	common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeArtifactUploadCompleted,
+		common.WithEventTaskName(taskName),
+		common.WithEventSummary("AI worker artifact upload completed"),
+		common.WithEventContent(eventContent(map[string]any{"artifact": "all"})),
+	)
+	return ctx.Err()
+}
+
 func eventContent(values map[string]any) json.RawMessage {
 	data, err := json.Marshal(values)
 	if err != nil {
@@ -1612,8 +1632,8 @@ func completionOutcomeError(outcome llm.CompletionOutcome, stopReason string) er
 }
 
 // writeResult submits the result to the controller via HTTP POST.
-func writeResult(result string) error {
-	return common.SubmitResult([]byte(result))
+func writeResult(ctx context.Context, result string) error {
+	return common.SubmitResultContext(ctx, []byte(result))
 }
 
 func workerSecretReadAuthorizer(

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -195,6 +196,163 @@ func TestServerCancelEmitsCancellation(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for cancel frame")
+	}
+}
+
+func TestServerCancelDuringArtifactUploadDoesNotAppendCompletion(t *testing.T) {
+	uploadStarted := make(chan struct{}, 1)
+	releaseUpload := make(chan struct{})
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case uploadStarted <- struct{}{}:
+		default:
+		}
+		<-releaseUpload
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer func() {
+		close(releaseUpload)
+		controller.Close()
+	}()
+	t.Setenv(workerenv.ControllerURL, controller.URL)
+
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic.Command = wrapperTestShellPath
+	cfg.Generic.Args = []string{
+		"-c",
+		`printf 'artifact' > "$ORKA_ARTIFACTS_DIR/evidence.txt"; printf 'done'`,
+	}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+
+	select {
+	case <-uploadStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for artifact upload")
+	}
+	if _, err := client.CancelTurn(context.Background(), harness.CancelTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        request.Namespace,
+		TaskName:         request.TaskName,
+		SessionName:      request.SessionName,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		CorrelationID:    request.CorrelationID,
+		Reason:           "test artifact cancellation",
+	}); err != nil {
+		t.Fatalf("CancelTurn: %v", err)
+	}
+	streamCtx, cancelStream := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelStream()
+	frames := []harness.HarnessEventFrame{}
+	if err := client.StreamFrames(streamCtx, request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
+		frames = append(frames, frame)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamFrames after cancellation: %v", err)
+	}
+	if len(frames) == 0 {
+		t.Fatal("no frames after cancellation")
+	}
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCancelled {
+		t.Fatalf("last frame = %#v, want cancelled", last)
+	}
+	for _, frame := range frames {
+		if frame.Type == harness.FrameTurnCompleted {
+			t.Fatalf("frames contain late completion after cancellation: %#v", frames)
+		}
+	}
+}
+
+func TestTryAppendTerminalFrameRejectsContextDoneWhileWaitingForTurnLock(t *testing.T) {
+	turn := newTurnState(validWrapperStartTurnRequest(), time.Now)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	turn.mu.Lock()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- turn.tryAppendTerminalFrame(ctx, harness.HarnessEventFrame{
+			Type: harness.FrameTurnCompleted,
+			Completed: &harness.TurnCompleted{
+				Result: "late result",
+			},
+		})
+	}()
+	<-ctx.Done()
+	turn.mu.Unlock()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("tryAppendTerminalFrame() error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("tryAppendTerminalFrame() did not return after deadline")
+	}
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	if len(turn.frames) != 0 || turn.terminal {
+		t.Fatalf("turn state after expired completion = frames %#v, terminal %v", turn.frames, turn.terminal)
+	}
+}
+
+func TestTryAppendTerminalFrameRejectsAcceptedCancelBeforeFailure(t *testing.T) {
+	turn := newTurnState(validWrapperStartTurnRequest(), time.Now)
+	turn.requestCancel()
+
+	err := turn.tryAppendTerminalFrame(context.Background(), harness.HarnessEventFrame{
+		Type: harness.FrameTurnFailed,
+		Failed: &harness.TurnFailed{
+			Reason:  "result_store_failed",
+			Message: "store failed",
+		},
+	})
+	if !errors.Is(err, errTurnCanceledBeforeCompletion) {
+		t.Fatalf("tryAppendTerminalFrame() error = %v, want canceled-before-completion", err)
+	}
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	if len(turn.frames) != 0 || turn.terminal {
+		t.Fatalf("turn state after rejected failure = frames %#v, terminal %v", turn.frames, turn.terminal)
+	}
+}
+
+func TestAppendFramePublishesCancellationAfterAcceptedCancel(t *testing.T) {
+	turn := newTurnState(validWrapperStartTurnRequest(), time.Now)
+	turn.requestCancel()
+	turn.appendFrame(harness.HarnessEventFrame{
+		Type:        harness.FrameTurnFailed,
+		Severity:    "error",
+		Summary:     "result store failed",
+		ContentText: "late failure detail",
+		Failed: &harness.TurnFailed{
+			Reason:  "result_store_failed",
+			Message: "store failed",
+		},
+	})
+
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	if len(turn.frames) != 1 {
+		t.Fatalf("frames = %#v, want one cancellation", turn.frames)
+	}
+	frame := turn.frames[0]
+	if frame.Type != harness.FrameTurnCancelled || !turn.terminal {
+		t.Fatalf("frame after accepted cancel = %#v, terminal %v", frame, turn.terminal)
+	}
+	if frame.Failed != nil || frame.Completed != nil || frame.ContentText != "" {
+		t.Fatalf("cancellation retained late terminal payload: %#v", frame)
 	}
 }
 

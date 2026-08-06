@@ -44,8 +44,7 @@ func FinalizeTurnResult(workDir, output string) ([]byte, error) {
 	return common.FinalizeResult(workDir, output)
 }
 
-// UploadTurnArtifacts reuses the existing worker artifact uploader. It is a
-// no-op when the selected turn artifact directory is absent.
+// ClearTurnArtifacts removes artifacts left by a completed turn.
 func ClearTurnArtifacts(artifactDirs ...string) {
 	artifactDir := firstNonEmpty(artifactDirs...)
 	if artifactDir == "" {
@@ -62,7 +61,10 @@ func wrapperArtifactsDir() string {
 	return "/tmp/artifacts"
 }
 
-func UploadTurnArtifacts(turn TurnContext, artifactDir string) error {
+// UploadTurnArtifacts reuses the existing worker artifact uploader. It is a
+// no-op when the selected turn artifact directory is absent and stops promptly
+// when the turn context is canceled.
+func UploadTurnArtifacts(ctx context.Context, turn TurnContext, artifactDir string) error {
 	resolvedArtifactDir := firstNonEmpty(artifactDir, wrapperArtifactsDir())
 	if err := prepareArtifactsForWrapper(resolvedArtifactDir); err != nil {
 		return fmt.Errorf("prepare artifacts for wrapper upload: %w", err)
@@ -75,7 +77,7 @@ func UploadTurnArtifacts(turn TurnContext, artifactDir string) error {
 	defer restoreTaskName()
 	restoreTaskNamespace := setTemporaryEnv(workerenv.TaskNamespace, turn.Namespace)
 	defer restoreTaskNamespace()
-	err := common.UploadArtifacts()
+	err := common.UploadArtifactsContext(ctx)
 	return err
 }
 
