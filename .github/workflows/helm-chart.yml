@@ -212,9 +212,13 @@ jobs:
             echo "AI workers must not receive an unrestricted TokenRequest ClusterRole." >&2
             exit 1
           fi
-          for template in deployment service serviceaccount secret pvc networkpolicy; do
+          for template in deployment service serviceaccount pvc networkpolicy; do
             test -f "manifest_staging/charts/orka/templates/harness-wrapper-${template}.yaml"
           done
+          if test -f "manifest_staging/charts/orka/templates/harness-wrapper-secret.yaml"; then
+            echo "Harness v1 credentials must come from an operator-created Secret, not a chart template." >&2
+            exit 1
+          fi
 
           mkdir -p cr-release-packages
           helm package manifest_staging/charts/orka --destination cr-release-packages
