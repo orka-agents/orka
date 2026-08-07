@@ -28,6 +28,16 @@ func TestAgentExecutionClassificationReadinessReady(t *testing.T) {
 	}
 }
 
+func TestAgentExecutionClassificationReadinessAcceptsAbsentFirstUseSessionControl(t *testing.T) {
+	checker := classificationReadinessForTest(t,
+		classifiedReadinessAgent(),
+		classifiedReadinessTask(true),
+	)
+	if err := checker.Check(context.Background()); err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+}
+
 func TestAgentExecutionClassificationReadinessAcceptsImmutableDispositions(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, 8, 6, 1, 0, 0, 0, time.UTC))
 	quarantined := classifiedReadinessTask(false)

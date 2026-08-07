@@ -196,9 +196,11 @@ func (c *AgentExecutionClassificationReadiness) Check(ctx context.Context) error
 		for key := range referencedSessions {
 			control := bySession[key]
 			if control == nil {
-				issues = appendReadinessIssue(issues, fmt.Sprintf(
-					"referenced Session %s/%s has no authoritative control record", key.Namespace, key.Name,
-				))
+				// A missing control is the sealed absent-control classification for
+				// a Session that has not reached first use. The dispatcher creates
+				// the authoritative control and establishes lineage atomically with
+				// the first mutation Lease. Once a control exists, readiness remains
+				// fail-closed until it has lineage or an immutable block below.
 				continue
 			}
 			lineageClassified := control.Status.Lineage != nil

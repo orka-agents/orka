@@ -12,7 +12,6 @@ package e2e
 import (
 	"fmt"
 	"os/exec"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -23,7 +22,7 @@ import (
 
 const externalV2RuntimeName = "external-v2-runtime"
 
-var _ = Describe("AgentRuntime v2 hard cutover", func() {
+var _ = Describe("AgentRuntime external dispatch", func() {
 	const (
 		agentName = "e2e-external-v2-agent"
 		taskName  = "e2e-external-v2-task"
@@ -41,7 +40,7 @@ var _ = Describe("AgentRuntime v2 hard cutover", func() {
 		}
 	})
 
-	It("rejects orka.harness.v1 registrations at API validation", func() {
+	It("accepts orka.harness.v1 registrations in the coexistence bridge schema", func() {
 		manifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "AgentRuntime",
@@ -56,11 +55,8 @@ var _ = Describe("AgentRuntime v2 hard cutover", func() {
 		}`, namespace)
 		cmd := exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
 		cmd.Stdin = stringReader(manifest)
-		output, err := utils.Run(cmd)
-		Expect(err).To(HaveOccurred())
-		lower := strings.ToLower(output)
-		Expect(lower).To(ContainSubstring("unsupported value"))
-		Expect(lower).To(ContainSubstring("orka.harness.v2"))
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	It("fails closed at the external Task dispatch support boundary", func() {
