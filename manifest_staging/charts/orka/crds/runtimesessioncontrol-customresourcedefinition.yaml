@@ -427,7 +427,8 @@ spec:
         x-kubernetes-validations:
         - message: runtime Session lineage UID must match the immutable control Session
             UID
-          rule: '!has(self.status.lineage) || self.status.lineage.sessionUid == self.spec.sessionUid'
+          rule: '!has(self.status) || !has(self.status.lineage) || self.status.lineage.sessionUid
+            == self.spec.sessionUid'
     served: true
     storage: true
     subresources:

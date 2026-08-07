@@ -624,6 +624,15 @@ remain outside rendered Helm manifests.
 {{- if lt (int .Values.harnessV1.dispatch.workers) 1 -}}
 {{- fail "harnessV1.dispatch.workers must be positive when harnessV1.enabled=true" -}}
 {{- end -}}
+{{- if or (lt (int .Values.harnessV1.retirement.port) 1) (gt (int .Values.harnessV1.retirement.port) 65535) -}}
+{{- fail "harnessV1.retirement.port must be between 1 and 65535 when harnessV1.enabled=true" -}}
+{{- end -}}
+{{- if eq (int .Values.harnessV1.retirement.port) (int .Values.controller.apiPort) -}}
+{{- fail "harnessV1.retirement.port must differ from controller.apiPort when harnessV1.enabled=true" -}}
+{{- end -}}
+{{- if not (trim (default "" .Values.harnessV1.retirement.tokenAudience)) -}}
+{{- fail "harnessV1.retirement.tokenAudience is required when harnessV1.enabled=true" -}}
+{{- end -}}
 {{- if not (regexMatch "^([1-9][0-9]*(ns|us|µs|ms|s|m|h))+$" (trim (default "" .Values.harnessV1.upgradeDrain.timeout))) -}}
 {{- fail "harnessV1.upgradeDrain.timeout must be a positive Go duration when harnessV1.enabled=true" -}}
 {{- end -}}

@@ -1136,11 +1136,21 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
-	defer preparedWorkspace.cleanup()
+	cleanupWorkspace := true
+	defer func() {
+		if cleanupWorkspace {
+			preparedWorkspace.cleanup()
+		}
+	}()
 	turnCtx.WorkDir = preparedWorkspace.workDir
 	turnCtx.RootDir = preparedWorkspace.rootDir
 	turnArtifactsDir := turnArtifactDir(preparedWorkspace)
-	defer ClearTurnArtifacts(turnArtifactsDir)
+	cleanupArtifacts := true
+	defer func() {
+		if cleanupArtifacts {
+			ClearTurnArtifacts(turnArtifactsDir)
+		}
+	}()
 	if err := prepareTurnArtifactsDirForWrapper(turnArtifactsDir); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
@@ -1373,11 +1383,26 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			return
 		}
 		if artifactErr := UploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
-			turn.appendFrame(s.runtimeLogTextFrame(
-				turn,
-				"artifact-upload",
-				artifactErr.Error(),
-			))
+			retainedArtifactsDir, retainErr := retainFailedTurnArtifacts(turnArtifactsDir)
+			if retainErr != nil {
+				// If the isolated move fails, retain the original workspace rather
+				// than deleting the only copy of the failed-upload evidence.
+				cleanupArtifacts = false
+				cleanupWorkspace = false
+				retainedArtifactsDir = turnArtifactsDir
+			}
+			message := fmt.Sprintf(
+				"artifact upload failed: %v; artifacts retained at %s",
+				artifactErr,
+				retainedArtifactsDir,
+			)
+			if retainErr != nil {
+				message = fmt.Sprintf("%s (isolated retention failed: %v)", message, retainErr)
+			}
+			failed := s.failedFrame(turn, "artifact_upload_failed", message, true)
+			failed.Metadata["retainedArtifactsPath"] = retainedArtifactsDir
+			turn.appendFrame(failed)
+			return
 		}
 		if finalizedWorkDir != "" {
 			if cleanErr := CleanFinalizedWorkDir(gitCtx, finalizedWorkDir); cleanErr != nil {
@@ -1488,6 +1513,31 @@ func turnArtifactDir(workspace preparedWorkspace) string {
 		return filepath.Join(workspace.rootDir, ".orka-runtime-artifacts")
 	}
 	return filepath.Join(os.TempDir(), "orka-runtime-artifacts")
+}
+
+func retainFailedTurnArtifacts(artifactDir string) (string, error) {
+	artifactDir = strings.TrimSpace(artifactDir)
+	if artifactDir == "" {
+		return "", errors.New("artifact directory is empty")
+	}
+	artifactDir = filepath.Clean(artifactDir)
+	info, err := os.Lstat(artifactDir)
+	if err != nil {
+		return "", fmt.Errorf("inspect artifact directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("artifact path is not a regular directory")
+	}
+	retentionRoot, err := os.MkdirTemp(os.TempDir(), "orka-harness-artifact-upload-failed-*")
+	if err != nil {
+		return "", fmt.Errorf("create artifact retention directory: %w", err)
+	}
+	retainedArtifactsDir := filepath.Join(retentionRoot, "artifacts")
+	if err := os.Rename(artifactDir, retainedArtifactsDir); err != nil {
+		_ = os.Remove(retentionRoot)
+		return "", fmt.Errorf("move artifacts to retention directory: %w", err)
+	}
+	return retainedArtifactsDir, nil
 }
 
 // prepareTurnArtifactsDirForWrapper creates the per-turn artifact directory for

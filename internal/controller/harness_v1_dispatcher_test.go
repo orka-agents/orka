@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/harness"
@@ -127,6 +129,147 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 	if _, err := buildHarnessV1StartTurnRequest(task, &mutated, attempt, env); err == nil ||
 		!strings.Contains(err.Error(), "does not match the durable attempt") {
 		t.Fatalf("mutated request error = %v, want durable digest mismatch", err)
+	}
+}
+
+func TestContinueHarnessV1BrokeredToolCallReplaysDurableResult(t *testing.T) {
+	fixture := newHarnessV1DispatcherStateFixture(t)
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: fixture.task.Namespace, Name: "lookup", UID: types.UID("lookup-tool-uid"), Generation: 1,
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "look up a value", BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP: &corev1alpha1.HTTPExecution{URL: "https://tools.example.test/lookup", Method: http.MethodPost},
+		},
+	}
+	if err := fixture.dispatcher.Client.Create(fixture.ctx, tool); err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.Tool{}
+	if err := fixture.dispatcher.APIReader.Get(fixture.ctx, client.ObjectKeyFromObject(tool), current); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := harnessV1BrokeredToolDefinitionDigest(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.verified.body.HarnessV1.ToolExecutionMode = string(harness.ToolExecutionModeBrokered)
+	fixture.verified.body.HarnessV1.BrokeredToolClasses = []corev1alpha1.AgentRuntimeBrokeredToolClass{
+		corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+	}
+	fixture.verified.body.HarnessV1.BrokeredTools = []agentExecutionSnapshotHarnessV1BrokeredTool{{
+		Name: current.Name, Description: current.Spec.Description, BrokeredClass: current.Spec.BrokeredToolClass,
+		Parameters: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","minLength":2}},"required":["query"],"additionalProperties":false}`),
+		UID:        string(current.UID), Generation: current.Generation,
+		DefinitionDigest: digest,
+	}}
+	call := harness.ToolCallRequest{
+		Version: harness.ProtocolVersion, RuntimeSessionID: fixture.request.RuntimeSessionID,
+		TurnID: fixture.request.TurnID, ToolCallID: "call-1", ToolName: current.Name,
+		Input: json.RawMessage(`{"query":"value"}`),
+	}
+	call.IdempotencyKey = harness.ToolRequestIdempotencyKey(call.RuntimeSessionID, call.TurnID, call.ToolCallID)
+	content, err := json.Marshal(call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := harness.HarnessEventFrame{
+		Version: harness.ProtocolVersion, Type: harness.FrameToolCallRequested,
+		RuntimeSessionID: fixture.request.RuntimeSessionID, TurnID: fixture.request.TurnID,
+		CorrelationID: fixture.request.CorrelationID, Seq: 2,
+		ToolName: current.Name, ToolCallID: call.ToolCallID, Content: content,
+	}
+	executeCalls := 0
+	fixture.dispatcher.ExternalEffects = fixture.durable
+	fixture.dispatcher.BrokeredToolExecutor = HarnessV1BrokeredToolExecutorFunc(func(
+		_ context.Context,
+		namespace string,
+		gotTool *corev1alpha1.Tool,
+		request harness.ToolCallRequest,
+	) (json.RawMessage, error) {
+		executeCalls++
+		if namespace != fixture.task.Namespace || gotTool.UID != current.UID || request.IdempotencyKey != call.IdempotencyKey {
+			t.Fatalf("unexpected brokered execution: namespace=%q tool=%s request=%+v", namespace, gotTool.UID, request)
+		}
+		return json.RawMessage(`{"answer":42}`), nil
+	})
+	var continuedResults []harness.ToolCallResult
+	protocolClient := &recordingHarnessV1RecoveryClient{continueTurn: func(
+		_ context.Context,
+		request harness.ContinueTurnRequest,
+	) (*harness.ContinueTurnResponse, error) {
+		if err := request.Validate(); err != nil {
+			t.Fatalf("invalid ContinueTurn request: %v", err)
+		}
+		continuedResults = append(continuedResults, request.ToolResults[0])
+		return &harness.ContinueTurnResponse{
+			Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID,
+			TurnID: request.TurnID, CorrelationID: request.CorrelationID,
+		}, nil
+	}}
+
+	for i := range 2 {
+		if err := fixture.dispatcher.continueHarnessV1BrokeredToolCall(
+			fixture.ctx, fixture.task, fixture.verified, protocolClient, fixture.request,
+			fixture.attempt, fixture.fence, frame,
+		); err != nil {
+			t.Fatalf("continue brokered call %d: %v", i+1, err)
+		}
+	}
+	if executeCalls != 1 {
+		t.Fatalf("brokered executor calls = %d, want one durable execution", executeCalls)
+	}
+	if protocolClient.continueCalls != 2 || len(continuedResults) != 2 {
+		t.Fatalf("ContinueTurn calls/results = %d/%d, want 2/2", protocolClient.continueCalls, len(continuedResults))
+	}
+	first, err := json.Marshal(continuedResults[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := json.Marshal(continuedResults[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) || string(continuedResults[0].Output) != `{"answer":42}` {
+		t.Fatalf("replayed tool result differs: first=%s second=%s", first, second)
+	}
+
+	invalidCall := call
+	invalidCall.ToolCallID = "call-invalid"
+	invalidCall.Input = json.RawMessage(`{"query":1}`)
+	invalidCall.IdempotencyKey = harness.ToolRequestIdempotencyKey(
+		invalidCall.RuntimeSessionID, invalidCall.TurnID, invalidCall.ToolCallID,
+	)
+	invalidContent, err := json.Marshal(invalidCall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidFrame := frame
+	invalidFrame.Seq = 3
+	invalidFrame.ToolCallID = invalidCall.ToolCallID
+	invalidFrame.Content = invalidContent
+	if err := fixture.dispatcher.continueHarnessV1BrokeredToolCall(
+		fixture.ctx, fixture.task, fixture.verified, protocolClient, fixture.request,
+		fixture.attempt, fixture.fence, invalidFrame,
+	); err == nil || !strings.Contains(err.Error(), "input does not match the frozen parameters schema") {
+		t.Fatalf("invalid brokered input error = %v, want frozen schema rejection", err)
+	}
+	if executeCalls != 1 || protocolClient.continueCalls != 2 {
+		t.Fatalf("invalid input reached executor/continuation: execute=%d continue=%d", executeCalls, protocolClient.continueCalls)
+	}
+	invalidIdentity := store.ExternalEffectIdentity{
+		Kind: "harness-v1-tool", Namespace: fixture.task.Namespace, AggregateID: string(fixture.task.UID),
+		OperationID: store.CanonicalControlID(
+			"harness-v1-tool-call", string(invalidCall.RuntimeSessionID), string(invalidCall.TurnID), invalidCall.ToolCallID,
+		),
+	}
+	invalidEffectID, err := invalidIdentity.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.durable.GetExternalEffect(fixture.ctx, invalidEffectID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("invalid input external effect error = %v, want no durable reservation", err)
 	}
 }
 
@@ -1686,21 +1829,23 @@ func assertHarnessV1AttemptState(
 }
 
 type recordingHarnessV1RecoveryClient struct {
-	status      *harness.DurableTurnStatus
-	statusErr   error
-	start       func(context.Context, harness.StartTurnRequest) (*harness.StartTurnResponse, error)
-	stream      func(context.Context, harness.HarnessTurnID, int64, func(harness.HarnessEventFrame) error) error
-	fetch       func(context.Context, harness.HarnessTurnID, string) ([]byte, error)
-	acknowledge func(context.Context, harness.TurnOutputAcknowledgementRequest) error
-	settle      func(context.Context, harness.TurnSettlementAcknowledgementRequest) error
-	cancel      func(context.Context, harness.CancelTurnRequest) (*harness.CancelTurnResponse, error)
-	statusCalls int
-	startCalls  int
-	streamCalls int
-	fetchCalls  int
-	ackCalls    int
-	settleCalls int
-	cancelCalls int
+	status        *harness.DurableTurnStatus
+	statusErr     error
+	start         func(context.Context, harness.StartTurnRequest) (*harness.StartTurnResponse, error)
+	stream        func(context.Context, harness.HarnessTurnID, int64, func(harness.HarnessEventFrame) error) error
+	continueTurn  func(context.Context, harness.ContinueTurnRequest) (*harness.ContinueTurnResponse, error)
+	fetch         func(context.Context, harness.HarnessTurnID, string) ([]byte, error)
+	acknowledge   func(context.Context, harness.TurnOutputAcknowledgementRequest) error
+	settle        func(context.Context, harness.TurnSettlementAcknowledgementRequest) error
+	cancel        func(context.Context, harness.CancelTurnRequest) (*harness.CancelTurnResponse, error)
+	statusCalls   int
+	startCalls    int
+	streamCalls   int
+	continueCalls int
+	fetchCalls    int
+	ackCalls      int
+	settleCalls   int
+	cancelCalls   int
 }
 
 type failingHarnessV1ResultStore struct{ err error }
@@ -1780,6 +1925,17 @@ func (c *recordingHarnessV1RecoveryClient) StreamFrames(
 		return c.stream(ctx, turnID, afterSeq, onFrame)
 	}
 	return errors.New("unexpected frame stream")
+}
+
+func (c *recordingHarnessV1RecoveryClient) ContinueTurn(
+	ctx context.Context,
+	request harness.ContinueTurnRequest,
+) (*harness.ContinueTurnResponse, error) {
+	c.continueCalls++
+	if c.continueTurn != nil {
+		return c.continueTurn(ctx, request)
+	}
+	return nil, errors.New("unexpected continuation")
 }
 
 func (c *recordingHarnessV1RecoveryClient) FetchTurnOutput(

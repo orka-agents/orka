@@ -8,6 +8,8 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -77,11 +79,16 @@ type ServerConfig struct {
 	AgentExecutionClassificationGate AgentExecutionClassificationGate
 	HarnessV1Retirement              HarnessV1RetirementService
 	HarnessV1RetirementUsername      string
+	HarnessV1RetirementPort          int
+	HarnessV1RetirementTLSCertFile   string
+	HarnessV1RetirementTLSKeyFile    string
+	HarnessV1RetirementTokenAudience string
 }
 
 // Server is the REST API server
 type Server struct {
 	app                    *fiber.App
+	retirementApp          *fiber.App
 	client                 client.Client
 	config                 ServerConfig
 	sessionManager         *controller.SessionManager
@@ -167,6 +174,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
+	server.setupHarnessV1RetirementServer()
 
 	return server
 }
@@ -467,12 +475,8 @@ func (s *Server) setupRoutes() {
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
-	// Internal API for worker communication
-	if s.config.HarnessV1Retirement != nil {
-		retirement := s.app.Group("/internal/v1")
-		retirement.Use(NewAuthMiddleware(s.client))
-		retirement.Post("/harness-v1/retirement", s.handleHarnessV1Retirement)
-	}
+	// Internal API for worker communication. Harness v1 retirement is served
+	// only by the dedicated audience-bound TLS listener configured below.
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
 			s.ResultStore,
@@ -517,6 +521,25 @@ func (s *Server) setupRoutes() {
 	}
 }
 
+func (s *Server) setupHarnessV1RetirementServer() {
+	if s.config.HarnessV1Retirement == nil {
+		return
+	}
+	app := fiber.New(fiber.Config{
+		AppName:      "Orka Harness V1 Retirement API",
+		BodyLimit:    1024,
+		ErrorHandler: customErrorHandler,
+	})
+	app.Use(recover.New())
+	app.Use(requestid.New())
+	app.Use(NewTracingMiddleware())
+	app.Use(NewAuthMiddleware(s.client, AuthConfig{
+		TokenReviewAudiences: []string{s.config.HarnessV1RetirementTokenAudience},
+	}))
+	app.Post(harnessV1RetirementPath, s.handleHarnessV1Retirement)
+	s.retirementApp = app
+}
+
 func (s *Server) hasInternalStores() bool {
 	return s.ResultStore != nil ||
 		s.SessionStore != nil ||
@@ -534,18 +557,35 @@ func (s *Server) Start(ctx context.Context) error {
 	log.Info("starting API server", "address", addr)
 
 	// Start server in a goroutine
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		if err := s.app.Listen(addr); err != nil {
 			errCh <- err
 		}
 	}()
+	if s.retirementApp != nil {
+		retirementAddr := fmt.Sprintf(":%d", s.config.HarnessV1RetirementPort)
+		log.Info("starting harness v1 retirement API", "address", retirementAddr)
+		go func() {
+			if err := s.retirementApp.Listen(retirementAddr, fiber.ListenConfig{
+				CertFile:      s.config.HarnessV1RetirementTLSCertFile,
+				CertKeyFile:   s.config.HarnessV1RetirementTLSKeyFile,
+				TLSMinVersion: tls.VersionTLS13,
+			}); err != nil {
+				errCh <- err
+			}
+		}()
+	}
 
 	// Wait for shutdown signal or error
 	select {
 	case <-ctx.Done():
 		log.Info("shutting down API server")
-		return s.app.Shutdown()
+		var retirementErr error
+		if s.retirementApp != nil {
+			retirementErr = s.retirementApp.Shutdown()
+		}
+		return errors.Join(s.app.Shutdown(), retirementErr)
 	case err := <-errCh:
 		return err
 	}

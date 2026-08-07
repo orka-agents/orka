@@ -63,6 +63,7 @@ type harnessV1ProtocolClient interface {
 	StartTurn(context.Context, harness.StartTurnRequest) (*harness.StartTurnResponse, error)
 	DurableTurnStatus(context.Context, harness.HarnessTurnID) (*harness.DurableTurnStatus, error)
 	StreamFrames(context.Context, harness.HarnessTurnID, int64, func(harness.HarnessEventFrame) error) error
+	ContinueTurn(context.Context, harness.ContinueTurnRequest) (*harness.ContinueTurnResponse, error)
 	FetchTurnOutput(context.Context, harness.HarnessTurnID, string) ([]byte, error)
 	AcknowledgeTurnOutput(context.Context, harness.TurnOutputAcknowledgementRequest) error
 	AcknowledgeTurnSettlement(context.Context, harness.TurnSettlementAcknowledgementRequest) error
@@ -82,19 +83,21 @@ type harnessV1DispatchCandidate struct {
 // frame evidence are consulted before any state change and the request is never
 // replayed merely because evidence is unavailable.
 type HarnessV1Dispatcher struct {
-	Client              client.Client
-	APIReader           client.Reader
-	Attempts            store.HarnessV1AttemptStore
-	Snapshots           store.AgentExecutionSnapshotStore
-	BindingReservations store.AgentExecutionBindingReservationStore
-	ResultStore         store.ResultStore
-	EventStore          store.ExecutionEventStore
-	Sessions            *ACPSessionContinuity
-	Epochs              *ControllerEpochManager
-	Interval            time.Duration
-	MaxConcurrent       int
-	HTTPClient          *http.Client
-	clientFactory       harnessV1ClientFactory
+	Client               client.Client
+	APIReader            client.Reader
+	Attempts             store.HarnessV1AttemptStore
+	Snapshots            store.AgentExecutionSnapshotStore
+	BindingReservations  store.AgentExecutionBindingReservationStore
+	ResultStore          store.ResultStore
+	EventStore           store.ExecutionEventStore
+	ExternalEffects      store.ExternalEffectStore
+	BrokeredToolExecutor HarnessV1BrokeredToolExecutor
+	Sessions             *ACPSessionContinuity
+	Epochs               *ControllerEpochManager
+	Interval             time.Duration
+	MaxConcurrent        int
+	HTTPClient           *http.Client
+	clientFactory        harnessV1ClientFactory
 
 	mu     sync.Mutex
 	active map[types.UID]struct{}
@@ -527,7 +530,7 @@ func buildHarnessV1StartTurnRequest(
 		Deadline:          deadlineBase.Add(timeout),
 		AuthIdentity:      harness.AuthIdentity{Subject: "orka-task:" + attempt.TaskUID},
 		Input:             harness.TurnInput{Prompt: inputPrompt, Env: env},
-		ToolExecutionMode: harness.ToolExecutionModeObserved,
+		ToolExecutionMode: frozenHarnessV1ToolExecutionMode(verified.body),
 		Metadata: map[string]string{
 			harness.MetadataTaskUID:             attempt.TaskUID,
 			harness.MetadataAttempt:             strconv.FormatInt(int64(attempt.Attempt), 10),
@@ -545,17 +548,30 @@ func buildHarnessV1StartTurnRequest(
 	if verified.body.Configuration.MaxTurns < 1 {
 		return harness.StartTurnRequest{}, errors.New("frozen harness v1 max turns must be positive")
 	}
-	allowedTools, allowedToolsSet, disallowedTools, allowBash := frozenHarnessV1ToolPolicy(verified.body)
-	if !allowedToolsSet || allowBash == nil {
-		return harness.StartTurnRequest{}, errors.New("frozen harness v1 tool policy must explicitly set allowedTools and allowBash")
-	}
-	request.Metadata[harness.MetadataAllowedToolsSet] = booleanTrueValue
-	request.Metadata["allowedTools"] = strings.Join(allowedTools, ",")
-	request.Metadata["disallowedTools"] = strings.Join(disallowedTools, ",")
-	request.Metadata["allowBash"] = strconv.FormatBool(*allowBash)
-	if strings.EqualFold(strings.TrimSpace(verified.body.HarnessV1.RuntimeName), string(corev1alpha1.AgentRuntimeCodex)) &&
-		len(allowedTools) == 0 && !*allowBash {
-		request.Metadata["readOnly"] = booleanTrueValue
+	if request.ToolExecutionMode == harness.ToolExecutionModeBrokered {
+		definitions, err := frozenHarnessV1BrokeredToolDefinitions(verified.body)
+		if err != nil {
+			return harness.StartTurnRequest{}, err
+		}
+		request.Input.Tools = definitions
+		classes := make([]string, 0, len(verified.body.HarnessV1.BrokeredToolClasses))
+		for _, class := range verified.body.HarnessV1.BrokeredToolClasses {
+			classes = append(classes, string(class))
+		}
+		request.Metadata["brokeredToolClasses"] = strings.Join(classes, ",")
+	} else {
+		allowedTools, allowedToolsSet, disallowedTools, allowBash := frozenHarnessV1ToolPolicy(verified.body)
+		if !allowedToolsSet || allowBash == nil {
+			return harness.StartTurnRequest{}, errors.New("frozen harness v1 tool policy must explicitly set allowedTools and allowBash")
+		}
+		request.Metadata[harness.MetadataAllowedToolsSet] = booleanTrueValue
+		request.Metadata["allowedTools"] = strings.Join(allowedTools, ",")
+		request.Metadata["disallowedTools"] = strings.Join(disallowedTools, ",")
+		request.Metadata["allowBash"] = strconv.FormatBool(*allowBash)
+		if strings.EqualFold(strings.TrimSpace(verified.body.HarnessV1.RuntimeName), string(corev1alpha1.AgentRuntimeCodex)) &&
+			len(allowedTools) == 0 && !*allowBash {
+			request.Metadata["readOnly"] = booleanTrueValue
+		}
 	}
 	if err := applyHarnessV1WorkspaceMetadata(&request, verified.body); err != nil {
 		return harness.StartTurnRequest{}, err
@@ -787,11 +803,12 @@ func (d *HarnessV1Dispatcher) retryAdmissionClosedStartTurn(
 }
 
 type persistedHarnessV1Evidence struct {
-	found     bool
-	lastSeq   int64
-	terminal  harness.FrameType
-	completed *harness.TurnCompleted
-	failed    *harness.TurnFailed
+	found             bool
+	lastSeq           int64
+	terminal          harness.FrameType
+	completed         *harness.TurnCompleted
+	failed            *harness.TurnFailed
+	brokeredToolCalls []harness.HarnessEventFrame
 }
 
 //nolint:gocyclo // Submission recovery keeps every durable evidence branch in one auditable state machine.
@@ -1073,7 +1090,7 @@ func (d *HarnessV1Dispatcher) ensureAttemptAccepted(
 func (d *HarnessV1Dispatcher) streamAcceptedAttempt(
 	ctx context.Context,
 	task *corev1alpha1.Task,
-	_ *verifiedHarnessV1Execution,
+	verified *verifiedHarnessV1Execution,
 	protocolClient harnessV1ProtocolClient,
 	request harness.StartTurnRequest,
 	attempt *store.HarnessV1Attempt,
@@ -1085,6 +1102,21 @@ func (d *HarnessV1Dispatcher) streamAcceptedAttempt(
 	}
 	if evidence.terminal != "" {
 		return d.settlePersistedTerminal(ctx, task, protocolClient, request, attempt, fence, evidence)
+	}
+	for _, frame := range evidence.brokeredToolCalls {
+		if frame.Seq <= attempt.LastEventSeq {
+			continue
+		}
+		if err := d.continueHarnessV1BrokeredToolCall(
+			ctx, task, verified, protocolClient, request, attempt, fence, frame,
+		); err != nil {
+			return err
+		}
+		last := frame.Seq
+		attempt, err = d.transitionAttemptProgress(ctx, attempt, fence, last)
+		if err != nil {
+			return err
+		}
 	}
 	if evidence.lastSeq > attempt.LastEventSeq {
 		last := evidence.lastSeq
@@ -1112,11 +1144,22 @@ func (d *HarnessV1Dispatcher) streamAcceptedAttempt(
 			frame.CorrelationID != request.CorrelationID || frame.Seq <= current.LastEventSeq {
 			return fmt.Errorf("harness frame identity or sequence does not match the durable attempt")
 		}
-		if frame.Type == harness.FrameToolCallRequested || frame.Type == harness.FrameApprovalRequested {
-			return fmt.Errorf("harness v1 pure-prompt binding received an unauthorized continuation request")
+		if frame.Type == harness.FrameApprovalRequested {
+			return fmt.Errorf("harness v1 binding received an unauthorized approval request")
+		}
+		if frame.Type == harness.FrameToolCallRequested &&
+			frozenHarnessV1ToolExecutionMode(verified.body) != harness.ToolExecutionModeBrokered {
+			return fmt.Errorf("observed harness v1 binding received an unauthorized continuation request")
 		}
 		if _, _, err := journalState.AppendFrameIfNew(ctx, frame); err != nil {
 			return err
+		}
+		if frame.Type == harness.FrameToolCallRequested {
+			if err := d.continueHarnessV1BrokeredToolCall(
+				ctx, task, verified, protocolClient, request, current, fence, frame,
+			); err != nil {
+				return err
+			}
 		}
 		targetState := current.State
 		if targetState == store.HarnessV1AttemptAccepted {
@@ -1196,6 +1239,19 @@ func (d *HarnessV1Dispatcher) persistedEvidence(
 			if identity.Seq > evidence.lastSeq {
 				evidence.lastSeq = identity.Seq
 			}
+			if identity.FrameType == harness.FrameToolCallRequested {
+				var content struct {
+					FrameContent json.RawMessage `json:"frameContent"`
+				}
+				if err := json.Unmarshal(event.Content, &content); err != nil || len(content.FrameContent) == 0 {
+					return evidence, errors.New("persisted brokered harness v1 tool call is incomplete")
+				}
+				evidence.brokeredToolCalls = append(evidence.brokeredToolCalls, harness.HarnessEventFrame{
+					Version: identity.Version, Type: identity.FrameType, RuntimeSessionID: identity.RuntimeSessionID,
+					TurnID: identity.TurnID, CorrelationID: identity.CorrelationID, Seq: identity.Seq,
+					ToolName: event.ToolName, ToolCallID: event.ToolCallID, Content: content.FrameContent,
+				})
+			}
 			if identity.FrameType == harness.FrameTurnCompleted || identity.FrameType == harness.FrameTurnFailed || identity.FrameType == harness.FrameTurnCancelled {
 				evidence.terminal = identity.FrameType
 				var content struct {
@@ -1209,6 +1265,9 @@ func (d *HarnessV1Dispatcher) persistedEvidence(
 			}
 		}
 		if len(events) < store.MaxExecutionEventLimit {
+			sort.Slice(evidence.brokeredToolCalls, func(i, j int) bool {
+				return evidence.brokeredToolCalls[i].Seq < evidence.brokeredToolCalls[j].Seq
+			})
 			return evidence, nil
 		}
 	}

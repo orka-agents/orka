@@ -367,6 +367,90 @@ func TestServerSecurityArtifactFollowUpChildCleanupFailureFailsClosed(t *testing
 	}
 }
 
+func TestServerArtifactUploadFailureFailsTurnAndRetainsEvidence(t *testing.T) {
+	t.Setenv(EnvChildUID, "")
+	t.Setenv(EnvChildGID, "")
+	t.Setenv(workerenv.ControllerURL, "")
+
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic = GenericAdapterConfig{
+		Command:    wrapperTestShellPath,
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeStdout,
+	}
+	server, err := NewServer(cfg, NewGenericAdapter(cfg.Generic))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	const (
+		artifactName = "security-findings.v2.json"
+		artifactBody = `{"findings":[{"severity":"high"}]}`
+	)
+	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+		if spec == nil {
+			t.Fatal("command spec is nil")
+		}
+		artifactDir := ""
+		for _, entry := range spec.Env {
+			key, value, ok := strings.Cut(entry, "=")
+			if ok && key == "ORKA_ARTIFACTS_DIR" {
+				artifactDir = value
+				break
+			}
+		}
+		if artifactDir == "" {
+			t.Fatal("command env is missing ORKA_ARTIFACTS_DIR")
+		}
+		if err := os.WriteFile(filepath.Join(artifactDir, artifactName), []byte(artifactBody), 0o640); err != nil {
+			t.Fatalf("write test artifact: %v", err)
+		}
+		return CommandResult{Stdout: "runtime succeeded", FullStdout: "runtime succeeded"}, nil
+	})
+
+	request := validWrapperStartTurnRequest()
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+	server.runTurn(turn)
+
+	frames, closed := turn.framesFrom(1)
+	if !closed {
+		t.Fatal("artifact upload failure did not close the turn")
+	}
+	var terminal harness.HarnessEventFrame
+	for _, frame := range frames {
+		if frame.Type == harness.FrameTurnCompleted {
+			t.Fatalf("artifact upload failure emitted TurnCompleted: %#v", frame)
+		}
+		if frame.Type == harness.FrameTurnFailed {
+			terminal = frame
+		}
+	}
+	if terminal.Failed == nil || terminal.Failed.Reason != "artifact_upload_failed" {
+		t.Fatalf("terminal frame = %#v, want artifact_upload_failed", terminal)
+	}
+	retainedArtifactsDir := terminal.Metadata["retainedArtifactsPath"]
+	if retainedArtifactsDir == "" {
+		t.Fatalf("terminal metadata = %#v, want retained artifact path", terminal.Metadata)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(retainedArtifactsDir)) })
+	retained, err := os.ReadFile(filepath.Join(retainedArtifactsDir, artifactName))
+	if err != nil {
+		t.Fatalf("read retained artifact: %v", err)
+	}
+	if string(retained) != artifactBody {
+		t.Fatalf("retained artifact = %q, want %q", retained, artifactBody)
+	}
+}
+
 func TestServerRetriesTransientAdmissionLedgerReclaimError(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
@@ -1000,6 +1084,15 @@ func startWrapperServer(t *testing.T, adapter RuntimeAdapter) (string, func()) {
 	return startWrapperServerWithConfig(t, cfg, adapter)
 }
 
+func configureSuccessfulArtifactUpload(t *testing.T) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+}
+
 func startWrapperServerWithConfig(t *testing.T, cfg Config, adapter RuntimeAdapter) (string, func()) {
 	t.Helper()
 	if !cfg.AllowUnauthenticated && strings.TrimSpace(cfg.AdmissionLedgerPath) == "" {
@@ -1355,6 +1448,7 @@ func TestServerClassifiesCancelBeforeResultFileParsing(t *testing.T) {
 }
 
 func TestServerPassesSecurityStageEnvToCodexAdapter(t *testing.T) {
+	configureSuccessfulArtifactUpload(t)
 	artifactDir := "/tmp/artifacts"
 	_ = os.RemoveAll(artifactDir)
 	t.Cleanup(func() { _ = os.RemoveAll(artifactDir) })
@@ -1403,6 +1497,7 @@ printf 'done'
 }
 
 func TestServerCreatesWorkspaceArtifactLinkAndEnforcesRequiredArtifacts(t *testing.T) {
+	configureSuccessfulArtifactUpload(t)
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	cfg.Generic = GenericAdapterConfig{

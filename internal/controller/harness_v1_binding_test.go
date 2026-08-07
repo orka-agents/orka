@@ -11,12 +11,14 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -528,7 +530,7 @@ func TestResolveHarnessV1ExecutionCandidateRejectsCopilotPermanently(t *testing.
 	}
 }
 
-func TestResolveHarnessV1TargetRequiresObservedMode(t *testing.T) {
+func TestResolveHarnessV1TargetRequiresSupportedToolMode(t *testing.T) {
 	const (
 		endpoint   = "https://runtime.example.invalid"
 		runtimeKey = "token"
@@ -536,17 +538,22 @@ func TestResolveHarnessV1TargetRequiresObservedMode(t *testing.T) {
 	tests := []struct {
 		name         string
 		capabilities *corev1alpha1.AgentRuntimeObservedCapabilities
-		wantError    bool
+		wantError    string
 	}{
-		{name: "missing capabilities", wantError: true},
+		{name: "missing capabilities", wantError: "supported tool execution mode"},
 		{
-			name: "brokered only",
+			name:         "missing modes",
+			capabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{},
+			wantError:    "supported tool execution mode",
+		},
+		{
+			name: "incomplete brokered mode",
 			capabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
 				ToolExecutionModes: []corev1alpha1.AgentRuntimeToolExecutionMode{
 					corev1alpha1.AgentRuntimeToolExecutionModeBrokered,
 				},
 			},
-			wantError: true,
+			wantError: "requires continuation and brokered tool classes",
 		},
 		{
 			name: "observed only",
@@ -557,11 +564,27 @@ func TestResolveHarnessV1TargetRequiresObservedMode(t *testing.T) {
 			},
 		},
 		{
+			name: "brokered only",
+			capabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
+				ToolExecutionModes: []corev1alpha1.AgentRuntimeToolExecutionMode{
+					corev1alpha1.AgentRuntimeToolExecutionModeBrokered,
+				},
+				SupportsContinuation: true,
+				BrokeredToolClasses: []corev1alpha1.AgentRuntimeBrokeredToolClass{
+					corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+				},
+			},
+		},
+		{
 			name: "observed and brokered",
 			capabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
 				ToolExecutionModes: []corev1alpha1.AgentRuntimeToolExecutionMode{
 					corev1alpha1.AgentRuntimeToolExecutionModeObserved,
 					corev1alpha1.AgentRuntimeToolExecutionModeBrokered,
+				},
+				SupportsContinuation: true,
+				BrokeredToolClasses: []corev1alpha1.AgentRuntimeBrokeredToolClass{
+					corev1alpha1.AgentRuntimeBrokeredToolClassRead,
 				},
 			},
 		},
@@ -604,9 +627,9 @@ func TestResolveHarnessV1TargetRequiresObservedMode(t *testing.T) {
 			}}}
 
 			target, err := reconciler.resolveHarnessV1Target(t.Context(), reconciler.Client, task, agent)
-			if test.wantError {
-				if err == nil || !strings.Contains(err.Error(), "required observed tool execution mode") {
-					t.Fatalf("resolve target = %#v, error = %v, want observed-mode rejection", target, err)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("resolve target = %#v, error = %v, want rejection containing %q", target, err, test.wantError)
 				}
 				return
 			}
@@ -617,8 +640,233 @@ func TestResolveHarnessV1TargetRequiresObservedMode(t *testing.T) {
 				target.backend != corev1alpha1.AgentExecutionBackendExternalEndpoint {
 				t.Fatalf("resolved target = %#v, want external AgentRuntime %q", target, runtime.Name)
 			}
+			if !slices.Equal(target.toolExecutionModes, test.capabilities.ToolExecutionModes) ||
+				target.supportsContinuation != test.capabilities.SupportsContinuation ||
+				!slices.Equal(target.brokeredToolClasses, test.capabilities.BrokeredToolClasses) {
+				t.Fatalf("resolved target capabilities = modes=%v continuation=%v classes=%v, want %#v",
+					target.toolExecutionModes, target.supportsContinuation, target.brokeredToolClasses, test.capabilities)
+			}
 		})
 	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateFreezesBrokeredToolAuthority(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	const (
+		runtimeName     = "external-brokered-v1"
+		runtimeEndpoint = "https://runtime.example.invalid"
+		runtimeAuthKey  = "token"
+		toolName        = "lookup"
+		toolEndpoint    = "https://tools.example.invalid/lookup"
+	)
+
+	policy := &corev1alpha1.AgentExecutionPolicy{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.policy), policy); err != nil {
+		t.Fatal(err)
+	}
+	policy.Spec.AllowedBrokeredToolClasses = []corev1alpha1.AgentRuntimeBrokeredToolClass{
+		corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+	}
+	if err := fixture.reconciler.Update(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeAuth := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: fixture.task.Namespace, Name: runtimeName + "-auth",
+			UID: types.UID(runtimeName + "-auth-uid"),
+			Labels: map[string]string{
+				agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: runtimeName,
+			},
+			Annotations: map[string]string{agentRuntimeAuthEndpointAnnotation: runtimeEndpoint},
+		},
+		Data: map[string][]byte{runtimeAuthKey: []byte("external-runtime-auth-value")},
+	}
+	runtime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: fixture.task.Namespace, Name: runtimeName,
+			UID: types.UID(runtimeName + "-uid"), Generation: 1,
+		},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
+			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
+				Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: runtimeEndpoint,
+			},
+			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{BearerAuthRef: &corev1alpha1.AgentRuntimeBearerAuthReference{
+				Name: runtimeAuth.Name, Key: runtimeAuthKey,
+			}},
+		},
+		Status: corev1alpha1.AgentRuntimeStatus{
+			Ready: true, ObservedGeneration: 1,
+			ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
+				RuntimeName: runtimeName,
+				ToolExecutionModes: []corev1alpha1.AgentRuntimeToolExecutionMode{
+					corev1alpha1.AgentRuntimeToolExecutionModeBrokered,
+				},
+				SupportsContinuation: true,
+				BrokeredToolClasses: []corev1alpha1.AgentRuntimeBrokeredToolClass{
+					corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+				},
+			},
+		},
+	}
+	parameters := []byte(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`)
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: fixture.task.Namespace, Name: toolName,
+			UID: types.UID(toolName + "-uid"), Generation: 1,
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "look up a value", BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			Parameters: &apiextensionsv1.JSON{Raw: parameters},
+			HTTP:       &corev1alpha1.HTTPExecution{URL: toolEndpoint, Method: "POST"},
+		},
+	}
+	if err := fixture.reconciler.Create(ctx, runtimeAuth); err != nil {
+		t.Fatal(err)
+	}
+	currentRuntimeAuth := &corev1.Secret{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(runtimeAuth), currentRuntimeAuth); err != nil {
+		t.Fatal(err)
+	}
+	runtime.Status.ObservedAuthRefResourceVersion = currentRuntimeAuth.ResourceVersion
+	for _, object := range []client.Object{runtime, tool} {
+		if err := fixture.reconciler.Create(ctx, object); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	task := &corev1alpha1.Task{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.task), task); err != nil {
+		t.Fatal(err)
+	}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{toolName}}
+	if err := fixture.reconciler.Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	agent := fixture.agent.DeepCopy()
+	agent.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: runtime.Name}
+	agent.Spec.Runtime.DefaultAllowedTools = nil
+	agent.Spec.Runtime.DefaultAllowBash = nil
+
+	candidate, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body agentExecutionSnapshotBody
+	if err := json.Unmarshal(candidate.snapshotBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	currentTool := &corev1alpha1.Tool{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(tool), currentTool); err != nil {
+		t.Fatal(err)
+	}
+	wantDefinitionDigest, err := harnessV1BrokeredToolDefinitionDigest(currentTool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHarnessV1BrokeredCandidateRoute(t, candidate, runtime)
+	frozenTool := assertHarnessV1BrokeredSnapshot(
+		t, candidate.snapshotBody, body, currentTool, parameters, wantDefinitionDigest, toolEndpoint,
+	)
+
+	if result, err, handled := fixture.reconciler.ensureHarnessV1ExecutionBinding(ctx, task.DeepCopy(), agent); err != nil || handled {
+		t.Fatalf("ensure brokered binding = result=%#v handled=%v err=%v", result, handled, err)
+	}
+	bound := &corev1alpha1.Task{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+		t.Fatal(err)
+	}
+	if bound.Status.AgentExecutionBinding == nil || bound.Status.AgentExecutionBinding.BindingDigest == "" {
+		t.Fatalf("persisted brokered binding = %#v", bound.Status.AgentExecutionBinding)
+	}
+	verified, err := fixture.reconciler.loadVerifiedHarnessV1Execution(
+		ctx, bound, bound.Status.AgentExecutionBinding,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := &store.HarnessV1Attempt{
+		Namespace: bound.Namespace, TaskName: bound.Name, TaskUID: string(bound.UID), Attempt: 1,
+		BindingDigest:  bound.Status.AgentExecutionBinding.BindingDigest,
+		SnapshotDigest: bound.Status.AgentExecutionBinding.Snapshot.Digest,
+		TurnID:         "brokered-turn", RuntimeSessionID: "brokered-runtime-session",
+		CorrelationID: string(bound.UID),
+	}
+	request, err := buildHarnessV1StartTurnRequest(bound, verified, attempt, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHarnessV1BrokeredStartTurn(t, request, frozenTool)
+}
+
+func assertHarnessV1BrokeredCandidateRoute(
+	t *testing.T,
+	candidate *agentExecutionCandidate,
+	runtime *corev1alpha1.AgentRuntime,
+) {
+	t.Helper()
+	if candidate.binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
+		candidate.binding.RuntimeRef == nil || candidate.binding.RuntimeRef.Name != runtime.Name ||
+		candidate.binding.RuntimeRef.UID != runtime.UID || candidate.binding.RuntimeRef.Generation != runtime.Generation {
+		t.Fatalf("brokered candidate binding route = %#v", candidate.binding)
+	}
+}
+
+func assertHarnessV1BrokeredSnapshot(
+	t *testing.T,
+	snapshotBody []byte,
+	body agentExecutionSnapshotBody,
+	currentTool *corev1alpha1.Tool,
+	parameters []byte,
+	wantDefinitionDigest string,
+	toolEndpoint string,
+) agentExecutionSnapshotHarnessV1BrokeredTool {
+	t.Helper()
+	if body.HarnessV1 == nil || body.HarnessV1.ToolExecutionMode != string(harness.ToolExecutionModeBrokered) ||
+		!slices.Equal(body.HarnessV1.BrokeredToolClasses, []corev1alpha1.AgentRuntimeBrokeredToolClass{
+			corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+		}) || len(body.HarnessV1.BrokeredTools) != 1 {
+		t.Fatalf("frozen brokered governance = %#v", body.HarnessV1)
+	}
+	frozenTool := body.HarnessV1.BrokeredTools[0]
+	if frozenTool.Name != currentTool.Name || frozenTool.Description != currentTool.Spec.Description ||
+		frozenTool.BrokeredClass != currentTool.Spec.BrokeredToolClass ||
+		!jsonEqual(frozenTool.Parameters, parameters) || frozenTool.UID != string(currentTool.UID) ||
+		frozenTool.Generation != currentTool.Generation || frozenTool.DefinitionDigest != wantDefinitionDigest {
+		t.Fatalf("frozen Tool authority = %#v, want Tool %s/%s at %s", frozenTool, currentTool.Namespace, currentTool.Name, wantDefinitionDigest)
+	}
+	if strings.Contains(string(snapshotBody), toolEndpoint) ||
+		strings.Contains(string(snapshotBody), "external-runtime-auth-value") {
+		t.Fatal("brokered snapshot exposed Tool execution or runtime credential material")
+	}
+	return frozenTool
+}
+
+func assertHarnessV1BrokeredStartTurn(
+	t *testing.T,
+	request harness.StartTurnRequest,
+	frozenTool agentExecutionSnapshotHarnessV1BrokeredTool,
+) {
+	t.Helper()
+	if request.ToolExecutionMode != harness.ToolExecutionModeBrokered || len(request.Input.Tools) != 1 ||
+		request.Metadata["brokeredToolClasses"] != string(corev1alpha1.AgentRuntimeBrokeredToolClassRead) {
+		t.Fatalf("brokered StartTurn = %#v", request)
+	}
+	definition := request.Input.Tools[0]
+	if definition.Name != frozenTool.Name || definition.Description != frozenTool.Description ||
+		definition.BrokeredClass != harness.BrokeredToolClass(frozenTool.BrokeredClass) ||
+		!jsonEqual(definition.Parameters, frozenTool.Parameters) {
+		t.Fatalf("brokered StartTurn Tool definition = %#v, want frozen %#v", definition, frozenTool)
+	}
+}
+
+func jsonEqual(left, right []byte) bool {
+	var leftValue any
+	var rightValue any
+	return json.Unmarshal(left, &leftValue) == nil && json.Unmarshal(right, &rightValue) == nil &&
+		fmt.Sprint(leftValue) == fmt.Sprint(rightValue)
 }
 
 func TestResolveHarnessV1TargetRevalidatesTLSForReadyRuntime(t *testing.T) {

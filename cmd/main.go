@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -60,6 +61,7 @@ import (
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/harness"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
@@ -207,6 +209,10 @@ func main() {
 	var harnessV1DispatchInterval time.Duration
 	var harnessV1DispatchWorkers int
 	var harnessV1RetirementUsername string
+	var harnessV1RetirementPort int
+	var harnessV1RetirementTLSCertFile string
+	var harnessV1RetirementTLSKeyFile string
+	var harnessV1RetirementTokenAudience string
 	var acpRuntimeEnabled bool
 	var acpIdlePoolTTL time.Duration
 	var acpCodexRuntimeImage string
@@ -425,6 +431,17 @@ func main() {
 	flag.StringVar(&harnessV1RetirementUsername, "harness-v1-retirement-username",
 		os.Getenv("ORKA_HARNESS_V1_RETIREMENT_USERNAME"),
 		"Exact Kubernetes ServiceAccount username authorized to invoke the one-way harness v1 retirement barrier.")
+	flag.IntVar(&harnessV1RetirementPort, "harness-v1-retirement-port", 8443,
+		"Dedicated TLS port for the harness v1 retirement barrier.")
+	flag.StringVar(&harnessV1RetirementTLSCertFile, "harness-v1-retirement-tls-cert-file",
+		os.Getenv("ORKA_HARNESS_V1_RETIREMENT_TLS_CERT_FILE"),
+		"Serving certificate for the dedicated harness v1 retirement listener.")
+	flag.StringVar(&harnessV1RetirementTLSKeyFile, "harness-v1-retirement-tls-key-file",
+		os.Getenv("ORKA_HARNESS_V1_RETIREMENT_TLS_KEY_FILE"),
+		"Serving private key for the dedicated harness v1 retirement listener.")
+	flag.StringVar(&harnessV1RetirementTokenAudience, "harness-v1-retirement-token-audience",
+		envStringDefault("ORKA_HARNESS_V1_RETIREMENT_TOKEN_AUDIENCE", "orka-harness-v1-retirement"),
+		"Exact projected ServiceAccount token audience accepted by the harness v1 retirement listener.")
 	flag.BoolVar(&acpRuntimeEnabled, "acp-runtime-enabled", envBool("ORKA_ACP_RUNTIME_ENABLED", true),
 		"Route built-in codex/claude/copilot/opencode agent Tasks through managed orka.harness.v2 RuntimePools.")
 	flag.DurationVar(&acpIdlePoolTTL, "acp-idle-pool-ttl", envDurationDefault("ORKA_ACP_IDLE_POOL_TTL", controller.DefaultACPIdlePoolTTL),
@@ -687,14 +704,18 @@ func main() {
 		os.Exit(1)
 	}
 	if harnessV1Enabled {
-		missing := make([]string, 0, 6)
+		missing := make([]string, 0, 10)
 		for name, value := range map[string]string{
-			"--harness-v1-endpoint":              harnessV1Endpoint,
-			"--harness-v1-ca-file":               harnessV1CAFile,
-			"--harness-v1-auth-secret-namespace": harnessV1AuthSecretNamespace,
-			"--harness-v1-auth-secret-name":      harnessV1AuthSecretName,
-			"--harness-v1-auth-secret-key":       harnessV1AuthSecretKey,
-			"--harness-v1-policy-name":           harnessV1PolicyName,
+			"--harness-v1-endpoint":                  harnessV1Endpoint,
+			"--harness-v1-ca-file":                   harnessV1CAFile,
+			"--harness-v1-auth-secret-namespace":     harnessV1AuthSecretNamespace,
+			"--harness-v1-auth-secret-name":          harnessV1AuthSecretName,
+			"--harness-v1-auth-secret-key":           harnessV1AuthSecretKey,
+			"--harness-v1-policy-name":               harnessV1PolicyName,
+			"--harness-v1-retirement-username":       harnessV1RetirementUsername,
+			"--harness-v1-retirement-tls-cert-file":  harnessV1RetirementTLSCertFile,
+			"--harness-v1-retirement-tls-key-file":   harnessV1RetirementTLSKeyFile,
+			"--harness-v1-retirement-token-audience": harnessV1RetirementTokenAudience,
 		} {
 			if strings.TrimSpace(value) == "" {
 				missing = append(missing, name)
@@ -715,6 +736,10 @@ func main() {
 		}
 		if harnessV1DispatchInterval <= 0 || harnessV1DispatchWorkers <= 0 {
 			fmt.Fprintln(os.Stderr, "harness v1 dispatch interval and worker count must be positive")
+			os.Exit(1)
+		}
+		if harnessV1RetirementPort < 1 || harnessV1RetirementPort > 65535 || harnessV1RetirementPort == apiPort {
+			fmt.Fprintln(os.Stderr, "harness v1 retirement port must be between 1 and 65535 and differ from the API port")
 			os.Exit(1)
 		}
 	}
@@ -1467,11 +1492,25 @@ func main() {
 			BindingReservations: sqliteStore,
 			ResultStore:         sqliteStore,
 			EventStore:          sqliteStore,
-			Sessions:            acpSessionContinuity,
-			Epochs:              controllerEpochManager,
-			Interval:            harnessV1DispatchInterval,
-			MaxConcurrent:       harnessV1DispatchWorkers,
-			HTTPClient:          harnessV1HTTPClient,
+			ExternalEffects:     kubeControlStore,
+			BrokeredToolExecutor: controller.HarnessV1BrokeredToolExecutorFunc(func(
+				ctx context.Context,
+				namespace string,
+				tool *corev1alpha1.Tool,
+				request harness.ToolCallRequest,
+			) (json.RawMessage, error) {
+				executor := worker.NewToolExecutorForNamespace(namespace, kubeClient, nil, outboundAccessResolver)
+				executor.SetTransactionExchangeConfig(brokeredTransactionExchange)
+				execCtx := worker.WithToolCallID(ctx, request.ToolCallID)
+				execCtx = worker.WithToolIdempotencyKey(execCtx, request.IdempotencyKey)
+				result, executeErr := executor.Execute(execCtx, tool, request.Input)
+				return json.RawMessage(result), executeErr
+			}),
+			Sessions:      acpSessionContinuity,
+			Epochs:        controllerEpochManager,
+			Interval:      harnessV1DispatchInterval,
+			MaxConcurrent: harnessV1DispatchWorkers,
+			HTTPClient:    harnessV1HTTPClient,
 		}
 		if err := mgr.Add(&controller.AgentExecutionClassificationGatedRunnable{
 			Gate: classificationGate, Runnable: harnessV1Dispatcher,
@@ -1793,6 +1832,10 @@ func main() {
 		AgentExecutionClassificationGate: classificationGate,
 		HarnessV1Retirement:              harnessV1Retirement,
 		HarnessV1RetirementUsername:      harnessV1RetirementUsername,
+		HarnessV1RetirementPort:          harnessV1RetirementPort,
+		HarnessV1RetirementTLSCertFile:   harnessV1RetirementTLSCertFile,
+		HarnessV1RetirementTLSKeyFile:    harnessV1RetirementTLSKeyFile,
+		HarnessV1RetirementTokenAudience: harnessV1RetirementTokenAudience,
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,

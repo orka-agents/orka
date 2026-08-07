@@ -101,6 +101,10 @@ spec:
             - --harness-v1-dispatch-interval={{ .Values.harnessV1.dispatch.interval }}
             - --harness-v1-dispatch-workers={{ .Values.harnessV1.dispatch.workers }}
             - --harness-v1-retirement-username=system:serviceaccount:{{ .Release.Namespace }}:{{ include "orka.harnessV1Name" . }}
+            - --harness-v1-retirement-port={{ .Values.harnessV1.retirement.port }}
+            - --harness-v1-retirement-tls-cert-file=/var/run/orka/harness-v1-tls/tls.crt
+            - --harness-v1-retirement-tls-key-file=/var/run/orka/harness-v1-tls/tls.key
+            - --harness-v1-retirement-token-audience={{ .Values.harnessV1.retirement.tokenAudience }}
             {{- end }}
             {{- if or .Values.controller.acpRuntime.enabled .Values.harnessV1.enabled }}
             - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
@@ -410,6 +414,11 @@ spec:
             - name: api
               containerPort: {{ .Values.controller.apiPort }}
               protocol: TCP
+            {{- if .Values.harnessV1.enabled }}
+            - name: v1-retirement
+              containerPort: {{ .Values.harnessV1.retirement.port }}
+              protocol: TCP
+            {{- end }}
             - name: metrics
               containerPort: {{ .Values.controller.metricsPort }}
               protocol: TCP
@@ -527,6 +536,10 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

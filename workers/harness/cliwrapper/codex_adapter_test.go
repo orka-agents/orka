@@ -322,6 +322,7 @@ printf 'large prompt received' > "$out"
 }
 
 func TestCodexAdapterSecurityArtifactFollowUpUsesStdinWithoutPromptEnv(t *testing.T) {
+	configureSuccessfulArtifactUpload(t)
 	dir := t.TempDir()
 	invocationMarker := filepath.Join(dir, "codex-invoked")
 	followUpStdinCapture := filepath.Join(dir, "codex-follow-up-stdin.txt")

@@ -48,12 +48,28 @@ func prepareBoundACPDispatcherTaskForTest(
 	agent *corev1alpha1.Agent,
 	images ACPRuntimeImages,
 ) *corev1alpha1.Task {
+	return prepareBoundACPDispatcherTaskWithStoresForTest(
+		t, ctx, kubeClient, scheme, controlStore, controlStore, task, agent, images,
+	)
+}
+
+func prepareBoundACPDispatcherTaskWithStoresForTest(
+	t *testing.T,
+	ctx context.Context,
+	kubeClient client.Client,
+	scheme *runtime.Scheme,
+	controlStore store.DurableControlStore,
+	persistence *sqlite.Store,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	images ACPRuntimeImages,
+) *corev1alpha1.Task {
 	t.Helper()
 	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x61}, sqlite.AgentExecutionSnapshotKeyBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controlStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
+	if err := persistence.SetAgentExecutionSnapshotCipher(cipher); err != nil {
 		t.Fatal(err)
 	}
 	binder := &TaskReconciler{
@@ -61,8 +77,8 @@ func prepareBoundACPDispatcherTaskForTest(
 		APIReader:                         kubeClient,
 		Scheme:                            scheme,
 		DurableControlStore:               controlStore,
-		AgentExecutionSnapshots:           controlStore,
-		AgentExecutionBindingReservations: controlStore,
+		AgentExecutionSnapshots:           persistence,
+		AgentExecutionBindingReservations: persistence,
 		ACPRuntimeEnabled:                 true,
 		ACPRuntimeImages:                  images,
 	}
@@ -478,6 +494,9 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	taskUID := types.UID("11111111-1111-1111-1111-111111111111")
 	promptID := "prompt-" + string(taskUID) + "-1"
 	task := &corev1alpha1.Task{
@@ -535,14 +554,25 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		}},
 		Data: map[string][]byte{runtimePoolControllerTokenKey: []byte(strings.Repeat("t", 32)), runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32))},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task, pool, secret, agent).Build()
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: task.Namespace, UID: types.UID("default-namespace-uid"),
+	}}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(
+		&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}, &corev1alpha1.ControllerEpoch{},
+		&corev1alpha1.PromptAttempt{}, &corev1alpha1.RuntimeSessionControl{},
+		&corev1alpha1.BranchClaim{}, &corev1alpha1.Publication{}, &corev1alpha1.ExternalEffect{},
+	).WithObjects(task, pool, secret, agent, namespace).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
-	epochs := NewControllerEpochManager(controlStore, "controller-test")
+	persistence := sqlite.NewStore(db, "test")
+	controlStore, err := kubestore.NewComposite(kubeClient, "orka-system", persistence, kubestore.WithAPIReader(kubeClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	epochs := NewControllerEpochManager(controlStore, "controller-test").WithMirror(persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()
@@ -552,7 +582,9 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
+	task = prepareBoundACPDispatcherTaskWithStoresForTest(
+		t, ctx, kubeClient, scheme, controlStore, persistence, task, agent, images,
+	)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
 	if err != nil {
@@ -566,14 +598,15 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
-		SessionControls: controlStore, Transcripts: controlStore, Publications: controlStore, BranchClaims: controlStore,
+		SessionControls: controlStore, Transcripts: persistence, Publications: controlStore, BranchClaims: controlStore,
+		Lineages: persistence,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	dispatcher := &ACPDispatcher{
-		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore,
-		Snapshots: controlStore, BindingReservations: controlStore, Epochs: epochs, Sessions: continuity,
+		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
+		Snapshots: persistence, BindingReservations: persistence, Epochs: epochs, Sessions: continuity,
 	}
 	if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
 		t.Fatal(err)
@@ -587,14 +620,14 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		completed.Status.ResultRef == nil || !completed.Status.ResultRef.Available {
 		t.Fatalf("unexpected completed status: %#v", completed.Status)
 	}
-	result, err := controlStore.GetResult(ctx, task.Namespace, task.Name)
+	result, err := persistence.GetResult(ctx, task.Namespace, task.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(result) != "hello from runtime" {
 		t.Fatalf("result = %q", result)
 	}
-	transcript, err := controlStore.LoadTranscript(ctx, "default", "session", 10)
+	transcript, err := persistence.LoadTranscript(ctx, "default", "session", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2292,7 +2325,7 @@ func TestACPDispatcherCapacityBackpressureRunsIdlePoolMaintenance(t *testing.T) 
 
 func TestACPDispatcherRuntimePoolReservationCASAndIdempotentRelease(t *testing.T) {
 	ctx := context.Background()
-	dispatcher, kubeClient, pool, first, second := newRuntimePoolReservationTestFixture(t, 1, 1)
+	dispatcher, kubeClient, pool, first, second := newRuntimePoolReservationTestFixture(t)
 	fence := store.ControllerEpochFence{Name: store.DefaultControllerEpochName, Epoch: 1}
 
 	claimed, firstIdentity, err := dispatcher.claimRuntimePoolReservation(ctx, first, pool.Name, fence, 1)
@@ -2334,7 +2367,7 @@ func TestACPDispatcherRuntimePoolReservationCASAndIdempotentRelease(t *testing.T
 
 func TestACPDispatcherRuntimePoolConcurrentClaimsAreAtomic(t *testing.T) {
 	ctx := context.Background()
-	dispatcher, kubeClient, pool, first, second := newRuntimePoolReservationTestFixture(t, 1, 1)
+	dispatcher, kubeClient, pool, first, second := newRuntimePoolReservationTestFixture(t)
 	fence := store.ControllerEpochFence{Name: store.DefaultControllerEpochName, Epoch: 1}
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -2532,7 +2565,7 @@ func runACPDispatcherPreAdmissionSettlementTest(
 
 func TestACPDispatcherRuntimePoolReservationReclaimsExpiredAndReplacedInstance(t *testing.T) {
 	ctx := context.Background()
-	dispatcher, kubeClient, pool, first, _ := newRuntimePoolReservationTestFixture(t, 1, 1)
+	dispatcher, kubeClient, pool, first, _ := newRuntimePoolReservationTestFixture(t)
 	now := time.Now().UTC()
 	pool.Status.Capacity.Reservations = []corev1alpha1.RuntimePoolCapacityReservationStatus{
 		{
@@ -2670,6 +2703,7 @@ func TestACPDispatcherReservedRetryReportsOnlyBoundedStage(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // The recovery proof keeps the cross-store state transitions visible in one test.
 func TestACPDispatcherReserveTaskRecoversIncompletePreSubmissionRollback(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -2779,6 +2813,19 @@ func TestACPDispatcherReserveTaskRecoversIncompletePreSubmissionRollback(t *test
 		cancelEpoch()
 		t.Fatalf("reserveTask() = task %#v, target %#v; want recovered reservation", reserved, target)
 	}
+	reservedPool := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), reservedPool); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if len(reservedPool.Status.Capacity.Reservations) != 1 ||
+		reservedPool.Status.Capacity.Reservations[0].ResidentSlots != 0 ||
+		reservedPool.Status.Capacity.Reservations[0].PromptSlots != 1 ||
+		reservedPool.Status.Capacity.ReservedSessions != 0 ||
+		reservedPool.Status.Capacity.ReservedPrompts != 1 {
+		cancelEpoch()
+		t.Fatalf("Session-backed reservation = %#v, want prompt-only capacity", reservedPool.Status.Capacity)
+	}
 	recovered, err := controlStore.GetPromptAttempt(ctx, attempt.ID)
 	if err != nil {
 		cancelEpoch()
@@ -2803,8 +2850,9 @@ func TestACPDispatcherReserveTaskRecoversIncompletePreSubmissionRollback(t *test
 	}
 }
 
-func newRuntimePoolReservationTestFixture(t *testing.T, maxResident, maxPrompts int32) (*ACPDispatcher, client.Client, *corev1alpha1.RuntimePool, *corev1alpha1.Task, *corev1alpha1.Task) {
+func newRuntimePoolReservationTestFixture(t *testing.T) (*ACPDispatcher, client.Client, *corev1alpha1.RuntimePool, *corev1alpha1.Task, *corev1alpha1.Task) {
 	t.Helper()
+	const maxResident, maxPrompts int32 = 1, 1
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -2822,6 +2870,56 @@ func newRuntimePoolReservationTestFixture(t *testing.T, maxResident, maxPrompts 
 	second := runtimePoolReservationTestTask("second", "second-uid", string(pool.UID))
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RuntimePool{}).WithObjects(pool).Build()
 	return &ACPDispatcher{Client: kubeClient, ReservationTTL: time.Minute}, kubeClient, pool.DeepCopy(), first, second
+}
+
+func TestACPDispatcherRuntimePoolReservationResidentUpgradeChecksCapacity(t *testing.T) {
+	dispatcher, kubeClient, pool, task, _ := newRuntimePoolReservationTestFixture(t)
+	ctx := context.Background()
+	current := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Capacity.ResidentSessions = 1
+	if err := kubeClient.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+
+	_, identity, err := dispatcher.claimRuntimePoolReservation(
+		ctx, task, pool.Name, store.ControllerEpochFence{Epoch: 1}, 0,
+	)
+	if err != nil {
+		t.Fatalf("claim prompt-only reservation: %v", err)
+	}
+	lease := newACPRuntimePoolReservationLease(dispatcher, identity)
+	if err := lease.setSlots(ctx, 1); !errors.Is(err, errACPRuntimePoolAtCapacity) {
+		t.Fatalf("resident upgrade error = %v, want RuntimePool capacity", err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Status.Capacity.Reservations) != 1 ||
+		current.Status.Capacity.Reservations[0].ResidentSlots != 0 ||
+		current.Status.Capacity.Reservations[0].PromptSlots != 1 ||
+		current.Status.Capacity.ReservedSessions != 0 || current.Status.Capacity.ReservedPrompts != 1 {
+		t.Fatalf("capacity-denied upgrade mutated reservation: %#v", current.Status.Capacity)
+	}
+
+	current.Status.Capacity.ResidentSessions = 0
+	if err := kubeClient.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.setSlots(ctx, 1); err != nil {
+		t.Fatalf("upgrade reservation after capacity release: %v", err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Status.Capacity.Reservations) != 1 ||
+		current.Status.Capacity.Reservations[0].ResidentSlots != 1 ||
+		current.Status.Capacity.Reservations[0].PromptSlots != 1 ||
+		current.Status.Capacity.ReservedSessions != 1 || current.Status.Capacity.ReservedPrompts != 1 {
+		t.Fatalf("resident upgrade was not committed atomically: %#v", current.Status.Capacity)
+	}
 }
 
 func runtimePoolReservationTestTask(name, uid, poolUID string) *corev1alpha1.Task {

@@ -43,12 +43,15 @@ const (
 )
 
 type resolvedHarnessV1Target struct {
-	endpoint      string
-	backend       corev1alpha1.AgentExecutionBackend
-	runtimeName   string
-	authSecret    *corev1.Secret
-	authSecretKey string
-	runtimeRef    *corev1alpha1.AgentRuntime
+	endpoint             string
+	backend              corev1alpha1.AgentExecutionBackend
+	runtimeName          string
+	authSecret           *corev1.Secret
+	authSecretKey        string
+	runtimeRef           *corev1alpha1.AgentRuntime
+	toolExecutionModes   []corev1alpha1.AgentRuntimeToolExecutionMode
+	brokeredToolClasses  []corev1alpha1.AgentRuntimeBrokeredToolClass
+	supportsContinuation bool
 }
 
 type verifiedHarnessV1Execution struct {
@@ -114,6 +117,10 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 		return nil, err
 	}
 	target, err := r.resolveHarnessV1Target(ctx, reader, task, agent)
+	if err != nil {
+		return nil, err
+	}
+	toolGovernance, err := resolveHarnessV1ToolGovernance(ctx, reader, task, agent, policy, target)
 	if err != nil {
 		return nil, err
 	}
@@ -186,6 +193,9 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 		RuntimeOverride: task.Spec.AgentRuntime.DeepCopy(),
 		HarnessV1: &agentExecutionSnapshotHarnessV1{
 			Endpoint: target.endpoint, Backend: string(target.backend), RuntimeName: target.runtimeName,
+			ToolExecutionMode:   string(toolGovernance.mode),
+			BrokeredToolClasses: toolGovernance.classes,
+			BrokeredTools:       toolGovernance.tools,
 			RuntimeAuthOnly:     runtimeAuthOnly,
 			AuthSecretNamespace: target.authSecret.Namespace, AuthSecretName: target.authSecret.Name,
 			AuthSecretKey: target.authSecretKey, AuthSecretUID: string(target.authSecret.UID),
@@ -305,19 +315,6 @@ func validateNewHarnessV1Workload(task *corev1alpha1.Task, agent *corev1alpha1.A
 	case corev1alpha1.AgentRuntimeOpencode:
 		return errors.New("new harness v1 OpenCode bindings are prohibited")
 	}
-	allowed := agent.Spec.Runtime.DefaultAllowedTools
-	allowBash := agent.Spec.Runtime.DefaultAllowBash
-	if task.Spec.AgentRuntime != nil {
-		if task.Spec.AgentRuntime.AllowedTools != nil {
-			allowed = task.Spec.AgentRuntime.AllowedTools
-		}
-		if task.Spec.AgentRuntime.AllowBash != nil {
-			allowBash = task.Spec.AgentRuntime.AllowBash
-		}
-	}
-	if allowed == nil || len(allowed) != 0 || allowBash == nil || *allowBash {
-		return errors.New("new harness v1 pure-prompt bindings require an explicit empty allowedTools list and allowBash=false")
-	}
 	return nil
 }
 
@@ -345,8 +342,6 @@ func (r *TaskReconciler) resolveHarnessV1Policy(
 		if !slices.Contains(policy.Spec.AllowedBuiltInRuntimeTypes, agent.Spec.Runtime.Type) {
 			return nil, "", permanentHarnessV1Candidate(fmt.Errorf("harness v1 policy does not allow built-in runtime %q", agent.Spec.Runtime.Type))
 		}
-	} else if !policy.Spec.AllowTrustedObservedModeRuntimes {
-		return nil, "", permanentHarnessV1Candidate(errors.New("harness v1 policy does not allow trusted observed-mode external runtimes"))
 	}
 	mandatory := []corev1alpha1.AgentExecutionProhibitedField{
 		corev1alpha1.AgentExecutionProhibitWorkspaceCredentials,
@@ -415,6 +410,7 @@ func (r *TaskReconciler) validateLiveHarnessV1PolicyBinding(
 	return nil
 }
 
+//nolint:gocyclo // Built-in and external v1 targets have distinct fail-closed admission proofs.
 func (r *TaskReconciler) resolveHarnessV1Target(
 	ctx context.Context,
 	reader client.Reader,
@@ -443,6 +439,9 @@ func (r *TaskReconciler) resolveHarnessV1Target(
 		return resolvedHarnessV1Target{
 			endpoint: endpoint, backend: corev1alpha1.AgentExecutionBackendHarnessWrapper,
 			runtimeName: string(agent.Spec.Runtime.Type), authSecret: secret, authSecretKey: key,
+			toolExecutionModes: []corev1alpha1.AgentRuntimeToolExecutionMode{
+				corev1alpha1.AgentRuntimeToolExecutionModeObserved,
+			},
 		}, nil
 	}
 
@@ -455,8 +454,14 @@ func (r *TaskReconciler) resolveHarnessV1Target(
 		!runtime.Status.Ready || runtime.Status.ObservedGeneration != runtime.Generation {
 		return resolvedHarnessV1Target{}, errors.New("harness v1 AgentRuntime is not current-generation Ready with the exact v1 contract")
 	}
-	if !supportsHarnessV1ObservedToolExecution(runtime) {
-		return resolvedHarnessV1Target{}, errors.New("harness v1 AgentRuntime does not advertise the required observed tool execution mode")
+	capabilities := runtime.Status.ObservedCapabilities
+	if capabilities == nil || !slices.Contains(capabilities.ToolExecutionModes, corev1alpha1.AgentRuntimeToolExecutionModeObserved) &&
+		!slices.Contains(capabilities.ToolExecutionModes, corev1alpha1.AgentRuntimeToolExecutionModeBrokered) {
+		return resolvedHarnessV1Target{}, errors.New("harness v1 AgentRuntime does not advertise a supported tool execution mode")
+	}
+	if slices.Contains(capabilities.ToolExecutionModes, corev1alpha1.AgentRuntimeToolExecutionModeBrokered) &&
+		(!capabilities.SupportsContinuation || len(capabilities.BrokeredToolClasses) == 0) {
+		return resolvedHarnessV1Target{}, errors.New("harness v1 AgentRuntime brokered mode requires continuation and brokered tool classes")
 	}
 	if err := validateHarnessV1AgentRuntimeEndpointSpec(runtime.Spec.Deployment.Endpoint); err != nil {
 		return resolvedHarnessV1Target{}, fmt.Errorf("validate harness v1 AgentRuntime endpoint: %w", err)
@@ -484,15 +489,10 @@ func (r *TaskReconciler) resolveHarnessV1Target(
 		endpoint: strings.TrimSpace(runtime.Spec.Deployment.Endpoint),
 		backend:  corev1alpha1.AgentExecutionBackendExternalEndpoint, runtimeName: runtimeName,
 		authSecret: secret, authSecretKey: strings.TrimSpace(ref.Key), runtimeRef: runtime,
+		toolExecutionModes:   append([]corev1alpha1.AgentRuntimeToolExecutionMode(nil), capabilities.ToolExecutionModes...),
+		brokeredToolClasses:  append([]corev1alpha1.AgentRuntimeBrokeredToolClass(nil), capabilities.BrokeredToolClasses...),
+		supportsContinuation: capabilities.SupportsContinuation,
 	}, nil
-}
-
-func supportsHarnessV1ObservedToolExecution(runtime *corev1alpha1.AgentRuntime) bool {
-	capabilities := runtime.Status.ObservedCapabilities
-	return capabilities != nil && slices.Contains(
-		capabilities.ToolExecutionModes,
-		corev1alpha1.AgentRuntimeToolExecutionModeObserved,
-	)
 }
 
 func resolveHarnessV1CredentialRefs(
@@ -782,6 +782,9 @@ func validateHarnessV1Snapshot(
 		body.HarnessV1.AuthSecretKey == "" || body.HarnessV1.AuthSecretUID == "" ||
 		body.HarnessV1.AuthSecretResourceVersion == "" || body.HarnessV1.SessionName == "" {
 		return errors.New("harness v1 snapshot has incomplete frozen endpoint/auth/session identity")
+	}
+	if err := validateFrozenHarnessV1ToolGovernance(body); err != nil {
+		return err
 	}
 	if err := validateFrozenHarnessV1SessionInput(body); err != nil {
 		return err

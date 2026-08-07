@@ -822,9 +822,19 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 		return deadlineErr
 	}
-	if reservationLease != nil && sessionExecution != nil && sessionExecution.Reused {
-		if err := reservationLease.setSlots(ctx, 0, 1); err != nil {
-			return d.requeueReservedTask(ctx, task, acpReservedRetryReservationResize, err)
+	if reservationLease != nil && sessionExecution != nil {
+		residentSlots := int32(0)
+		if !sessionExecution.Reused {
+			residentSlots = 1
+		}
+		if err := reservationLease.setSlots(ctx, residentSlots); err != nil {
+			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+				ctx, task, attemptID, fence, err, &sessionExecution.Binding,
+			); requeueErr != nil {
+				return errors.Join(err, requeueErr)
+			}
+			sessionExecution.requeued = true
+			return nil
 		}
 	}
 	leaseGeneration := int64(1)
@@ -1145,7 +1155,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 		}
 		if reservationLease != nil {
-			if err := reservationLease.setSlots(ctx, 0, 1); err != nil {
+			if err := reservationLease.setSlots(ctx, 0); err != nil {
 				_ = cleanupRuntimeSession("capacity_reservation_lost")
 				return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
 			}
@@ -2055,7 +2065,7 @@ func (l *acpRuntimePoolReservationLease) renew(ctx context.Context) error {
 	return nil
 }
 
-func (l *acpRuntimePoolReservationLease) setSlots(ctx context.Context, residentSlots, promptSlots int32) error {
+func (l *acpRuntimePoolReservationLease) setSlots(ctx context.Context, residentSlots int32) error {
 	if l == nil {
 		return nil
 	}
@@ -2064,7 +2074,7 @@ func (l *acpRuntimePoolReservationLease) setSlots(ctx context.Context, residentS
 	if !l.held {
 		return errACPRuntimePoolReservationLost
 	}
-	if err := l.dispatcher.updateRuntimePoolReservationSlots(ctx, l.identity, residentSlots, promptSlots); err != nil {
+	if err := l.dispatcher.updateRuntimePoolReservationSlots(ctx, l.identity, residentSlots, 1); err != nil {
 		if errors.Is(err, errACPRuntimePoolReservationLost) {
 			l.held = false
 		}
@@ -2282,6 +2292,26 @@ func (d *ACPDispatcher) updateRuntimePoolReservationSlots(ctx context.Context, i
 			}
 			found = true
 			if reservations[i].ResidentSlots != residentSlots || reservations[i].PromptSlots != promptSlots {
+				if residentSlots > reservations[i].ResidentSlots || promptSlots > reservations[i].PromptSlots {
+					others := make([]corev1alpha1.RuntimePoolCapacityReservationStatus, 0, len(reservations)-1)
+					others = append(others, reservations[:i]...)
+					others = append(others, reservations[i+1:]...)
+					runtimeInstanceID, admissionErr := runtimePoolReservationAdmission(
+						latest, others, identity.ControllerEpoch, residentSlots, promptSlots,
+					)
+					if admissionErr != nil {
+						if err := updateRuntimePoolReservationStatusIfChanged(ctx, d.Client, latest, changed); err != nil {
+							return err
+						}
+						return admissionErr
+					}
+					if runtimeInstanceID != reservations[i].RuntimeInstanceID {
+						if err := updateRuntimePoolReservationStatusIfChanged(ctx, d.Client, latest, changed); err != nil {
+							return err
+						}
+						return errACPRuntimePoolReservationLost
+					}
+				}
 				latest.Status.Capacity.Reservations[i].ResidentSlots = residentSlots
 				latest.Status.Capacity.Reservations[i].PromptSlots = promptSlots
 				changed = true
@@ -2596,8 +2626,15 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		return nil, acpDispatchTarget{}, err
 	}
 	var target acpDispatchTarget
+	residentSlots := int32(1)
+	if task.Spec.SessionRef != nil {
+		// Session planning is the authority for whether an existing resident
+		// RuntimeSession can be reused. Claim only prompt capacity until that
+		// plan proves a new resident slot is actually required.
+		residentSlots = 0
+	}
 	pool, reservation, claimErr := d.claimRuntimePoolReservation(
-		ctx, task, task.Status.Execution.RuntimePoolName, fence, 1,
+		ctx, task, task.Status.Execution.RuntimePoolName, fence, residentSlots,
 	)
 	if claimErr != nil {
 		if errors.Is(claimErr, errACPRuntimePoolAtCapacity) || errors.Is(claimErr, errACPRuntimePoolNotAdmitting) {

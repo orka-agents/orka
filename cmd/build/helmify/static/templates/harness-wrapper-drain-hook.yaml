@@ -116,7 +116,7 @@ spec:
               app.kubernetes.io/component: controller
       ports:
         - protocol: TCP
-          port: {{ .Values.controller.apiPort }}
+          port: {{ .Values.harnessV1.retirement.port }}
 {{ end }}
 ---
 apiVersion: batch/v1
@@ -160,8 +160,9 @@ spec:
             - --bearer-token-file=/var/run/orka/harness-wrapper/token
             - --ca-file=/var/run/orka/harness-wrapper/ca.crt
             {{- if not .Values.harnessV1.enabled }}
-            - {{ printf "--controller-endpoint=http://%s.%s.svc:%v/internal/v1/harness-v1/retirement" (include "orka.fullname" .) .Release.Namespace .Values.service.port | quote }}
+            - {{ printf "--controller-endpoint=https://%s.%s.svc:%v/internal/v1/harness-v1/retirement" (include "orka.fullname" .) .Release.Namespace .Values.harnessV1.retirement.port | quote }}
             - --controller-token-file=/var/run/orka/harness-v1-retirement/token
+            - --controller-ca-file=/var/run/orka/harness-v1-retirement/ca.crt
             {{- end }}
             - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
             - {{ printf "--poll-interval=%s" .Values.harnessV1.upgradeDrain.pollInterval | quote }}
@@ -207,6 +208,12 @@ spec:
               - serviceAccountToken:
                   path: token
                   expirationSeconds: 600
+                  audience: {{ .Values.harnessV1.retirement.tokenAudience | quote }}
+              - secret:
+                  name: {{ $existingAuthSecret | quote }}
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
         {{- end }}
         - name: tmp
           emptyDir: {}
@@ -422,7 +429,7 @@ spec:
               app.kubernetes.io/component: controller
       ports:
         - protocol: TCP
-          port: {{ .Values.controller.apiPort }}
+          port: {{ .Values.harnessV1.retirement.port }}
 ---
 apiVersion: batch/v1
 kind: Job
@@ -464,8 +471,9 @@ spec:
             - {{ printf "--endpoint=https://%s.%s.svc:8080" $wrapperName .Release.Namespace | quote }}
             - --bearer-token-file=/var/run/orka/harness-wrapper/token
             - --ca-file=/var/run/orka/harness-wrapper/ca.crt
-            - {{ printf "--controller-endpoint=http://%s.%s.svc:%v/internal/v1/harness-v1/retirement" (include "orka.fullname" .) .Release.Namespace .Values.service.port | quote }}
+            - {{ printf "--controller-endpoint=https://%s.%s.svc:%v/internal/v1/harness-v1/retirement" (include "orka.fullname" .) .Release.Namespace .Values.harnessV1.retirement.port | quote }}
             - --controller-token-file=/var/run/orka/harness-v1-retirement/token
+            - --controller-ca-file=/var/run/orka/harness-v1-retirement/ca.crt
             - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
             - {{ printf "--poll-interval=%s" .Values.harnessV1.upgradeDrain.pollInterval | quote }}
           volumeMounts:
@@ -506,6 +514,12 @@ spec:
               - serviceAccountToken:
                   path: token
                   expirationSeconds: 600
+                  audience: {{ .Values.harnessV1.retirement.tokenAudience | quote }}
+              - secret:
+                  name: {{ .Values.harnessV1.auth.existingSecret | quote }}
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
         - name: tmp
           emptyDir: {}
 {{- end }}

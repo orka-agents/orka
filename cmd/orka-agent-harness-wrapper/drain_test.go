@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -77,7 +78,7 @@ func TestRunDrainRetiresControllerBeforeClosingWrapper(t *testing.T) {
 		controllerToken = "projected-service-account-token"
 	)
 	var retirementCalls atomic.Int32
-	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	controller := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer "+controllerToken {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -121,6 +122,7 @@ func TestRunDrainRetiresControllerBeforeClosingWrapper(t *testing.T) {
 		"--ca-file=" + writeTLSServerCA(t, wrapper),
 		"--controller-endpoint=" + controller.URL + "/internal/v1/harness-v1/retirement",
 		"--controller-token-file=" + controllerTokenFile,
+		"--controller-ca-file=" + writeTLSServerCA(t, controller),
 		"--timeout=2s",
 		"--poll-interval=1ms",
 	}); err != nil {
@@ -128,6 +130,15 @@ func TestRunDrainRetiresControllerBeforeClosingWrapper(t *testing.T) {
 	}
 	if retirementCalls.Load() != 1 {
 		t.Fatalf("controller retirement calls = %d, want 1", retirementCalls.Load())
+	}
+}
+
+func TestRunDrainRejectsPlaintextControllerRetirement(t *testing.T) {
+	err := requestControllerRetirement(
+		context.Background(), "http://controller.example/internal/v1/harness-v1/retirement", "token", "ca",
+	)
+	if err == nil || !strings.Contains(err.Error(), "HTTPS URL") {
+		t.Fatalf("requestControllerRetirement() error = %v, want HTTPS rejection", err)
 	}
 }
 

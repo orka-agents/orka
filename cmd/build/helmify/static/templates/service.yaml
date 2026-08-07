@@ -11,6 +11,12 @@ spec:
       targetPort: api
       protocol: TCP
       name: api
+    {{- if .Values.harnessV1.enabled }}
+    - port: {{ .Values.harnessV1.retirement.port }}
+      targetPort: v1-retirement
+      protocol: TCP
+      name: v1-retirement
+    {{- end }}
     - port: {{ .Values.controller.metricsPort }}
       targetPort: metrics
       protocol: TCP

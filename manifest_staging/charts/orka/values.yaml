@@ -416,6 +416,11 @@ harnessV1:
   dispatch:
     interval: 1s
     workers: 1
+  retirement:
+    # The controller serves the one-way retirement barrier on a dedicated TLS
+    # listener and accepts only projected tokens with this audience.
+    port: 8443
+    tokenAudience: orka-harness-v1-retirement
   upgradeDrain:
     # Before an upgrade, rollback, or deletion mutates an existing wrapper, a
     # Helm hook durably closes admission and proves that no unsettled turns
@@ -441,8 +446,10 @@ harnessV1:
     # Use a dedicated operator-created Secret. Bearer credentials are never
     # accepted through Helm values or emitted into rendered release manifests.
     # The Secret must also contain tls.crt, tls.key, and ca.crt. Its serving
-    # certificate must authenticate the release-scoped wrapper Service DNS
-    # name: <release>-orka-agent-harness-wrapper.<namespace>.svc.
+    # certificate must authenticate both release-scoped Service DNS names:
+    # <release>-orka-agent-harness-wrapper.<namespace>.svc and
+    # <release>-orka.<namespace>.svc. The controller uses the second identity
+    # only on the dedicated retirement listener.
     # The Secret source and key are immutable while an enabled wrapper
     # Deployment exists because controller attempts pin its resourceVersion.
     existingSecret: ""

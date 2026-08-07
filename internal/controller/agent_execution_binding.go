@@ -105,6 +105,9 @@ type agentExecutionSnapshotHarnessV1 struct {
 	Endpoint                  string                                           `json:"endpoint"`
 	Backend                   string                                           `json:"backend"`
 	RuntimeName               string                                           `json:"runtimeName"`
+	ToolExecutionMode         string                                           `json:"toolExecutionMode,omitempty"`
+	BrokeredToolClasses       []corev1alpha1.AgentRuntimeBrokeredToolClass     `json:"brokeredToolClasses,omitempty"`
+	BrokeredTools             []agentExecutionSnapshotHarnessV1BrokeredTool    `json:"brokeredTools,omitempty"`
 	RuntimeAuthOnly           bool                                             `json:"runtimeAuthOnly,omitempty"`
 	AuthSecretNamespace       string                                           `json:"authSecretNamespace"`
 	AuthSecretName            string                                           `json:"authSecretName"`

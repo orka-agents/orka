@@ -205,7 +205,7 @@ type RuntimeSessionControlStatus struct {
 // +kubebuilder:printcolumn:name="Generation",type=integer,JSONPath=`.status.generation`
 // +kubebuilder:printcolumn:name="Lease",type=integer,JSONPath=`.status.mutationLeaseGeneration`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="!has(self.status.lineage) || self.status.lineage.sessionUid == self.spec.sessionUid",message="runtime Session lineage UID must match the immutable control Session UID"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.lineage) || self.status.lineage.sessionUid == self.spec.sessionUid",message="runtime Session lineage UID must match the immutable control Session UID"
 
 // RuntimeSessionControl is the Kubernetes-authoritative RuntimeSession control
 // record. SessionTurn/transcript/deferred-outbox data remains in one durable

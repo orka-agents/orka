@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -111,6 +112,12 @@ type AuthConfig struct {
 	OIDC          OIDCConfig
 	ContextTokens ContextTokenConfig
 
+	// TokenReviewAudiences scopes Kubernetes ServiceAccount authentication to
+	// the exact audiences requested by this listener. The cache key includes
+	// the normalized audience set so a token authenticated on an unscoped
+	// listener cannot be replayed against an audience-bound listener.
+	TokenReviewAudiences []string
+
 	// TokenSources optionally overrides the ordered request headers used to
 	// extract authentication tokens. When empty, Authorization: Bearer is used
 	// first and x-api-key remains the fallback.
@@ -190,7 +197,7 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 
 func authenticateToken(ctx context.Context, c client.Client, token string, cfg AuthConfig) (*UserInfo, error) {
 	if !cfg.OIDC.Enabled() {
-		return validateToken(ctx, c, token)
+		return validateToken(ctx, c, token, cfg.TokenReviewAudiences...)
 	}
 
 	parsedOIDC, oidcErr := parseOIDCTokenCandidate(token, cfg.OIDC)
@@ -207,7 +214,7 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 		return nil, oidcErr
 	}
 
-	userInfo, tokenReviewErr := validateToken(ctx, c, token)
+	userInfo, tokenReviewErr := validateToken(ctx, c, token, cfg.TokenReviewAudiences...)
 	if tokenReviewErr == nil {
 		return userInfo, nil
 	}
@@ -225,9 +232,10 @@ func authenticateContextToken(ctx context.Context, token string, profile Context
 	return contextTokenToUserInfo(contextToken), nil
 }
 
-// validateToken validates a ServiceAccount token using TokenReview with caching
-func validateToken(ctx context.Context, c client.Client, token string) (*UserInfo, error) {
-	hash := getTokenHash(token)
+// validateToken validates a ServiceAccount token using TokenReview with caching.
+func validateToken(ctx context.Context, c client.Client, token string, audiences ...string) (*UserInfo, error) {
+	audiences = normalizedTokenReviewAudiences(audiences)
+	hash := tokenReviewCacheKey(token, audiences)
 
 	// Check cache
 	if entry, ok := tokenCache.Load(hash); ok {
@@ -243,7 +251,8 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 			Name: "orka-token-review",
 		},
 		Spec: authenticationv1.TokenReviewSpec{
-			Token: token,
+			Token:     token,
+			Audiences: slices.Clone(audiences),
 		},
 	}
 
@@ -256,6 +265,12 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 	if !review.Status.Authenticated {
 		tokenCache.Delete(hash)
 		return nil, fiber.NewError(fiber.StatusUnauthorized, "token not authenticated")
+	}
+	for _, audience := range audiences {
+		if !slices.Contains(review.Status.Audiences, audience) {
+			tokenCache.Delete(hash)
+			return nil, fiber.NewError(fiber.StatusUnauthorized, "token audience not authenticated")
+		}
 	}
 
 	userInfo := &UserInfo{
@@ -277,6 +292,24 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 	}
 
 	return userInfo, nil
+}
+
+func normalizedTokenReviewAudiences(audiences []string) []string {
+	normalized := make([]string, 0, len(audiences))
+	for _, audience := range audiences {
+		if audience = strings.TrimSpace(audience); audience != "" && !slices.Contains(normalized, audience) {
+			normalized = append(normalized, audience)
+		}
+	}
+	slices.Sort(normalized)
+	return normalized
+}
+
+func tokenReviewCacheKey(token string, audiences []string) string {
+	if len(audiences) == 0 {
+		return getTokenHash(token)
+	}
+	return getTokenHash(token + "\x00" + strings.Join(audiences, "\x00"))
 }
 
 // GetUserInfo retrieves user info from the context
