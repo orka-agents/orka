@@ -503,12 +503,16 @@ func buildHarnessV1StartTurnRequest(
 		return harness.StartTurnRequest{}, errors.New("harness v1 binding time is required")
 	}
 	timeout := defaultHarnessV1TurnTimeout
+	deadlineBase := verified.binding.BoundAt.UTC()
 	if verified.body.Timeout != "" {
 		parsed, err := time.ParseDuration(verified.body.Timeout)
 		if err != nil || parsed <= 0 {
 			return harness.StartTurnRequest{}, errors.New("frozen harness v1 timeout must be a positive duration")
 		}
 		timeout = parsed
+		if !task.CreationTimestamp.IsZero() {
+			deadlineBase = task.CreationTimestamp.UTC()
+		}
 	}
 	inputPrompt, err := frozenHarnessV1InputPrompt(verified.body)
 	if err != nil {
@@ -520,7 +524,7 @@ func buildHarnessV1StartTurnRequest(
 		RuntimeSessionID:  harness.RuntimeSessionID(attempt.RuntimeSessionID),
 		TurnID:            harness.HarnessTurnID(attempt.TurnID),
 		CorrelationID:     attempt.CorrelationID,
-		Deadline:          verified.binding.BoundAt.Time.UTC().Add(timeout),
+		Deadline:          deadlineBase.Add(timeout),
 		AuthIdentity:      harness.AuthIdentity{Subject: "orka-task:" + attempt.TaskUID},
 		Input:             harness.TurnInput{Prompt: inputPrompt, Env: env},
 		ToolExecutionMode: harness.ToolExecutionModeObserved,

@@ -516,10 +516,19 @@ func TestStaticChartAdmissionRuntimeAndWebhooksAreIndependent(t *testing.T) {
 		"apiGroups: [authorization.k8s.io]",
 		"resources: [subjectaccessreviews]",
 		"verbs: [create]",
+		"- agentexecutionpolicies",
 	} {
 		if !strings.Contains(rbac, required) {
 			t.Fatalf("admission RBAC is missing workspace authorization marker %q:\n%s", required, rbac)
 		}
+	}
+	standaloneRBACPath := filepath.Join("..", "..", "..", "config", "orka-admission", "rbac.yaml")
+	standaloneRBAC, err := os.ReadFile(standaloneRBACPath)
+	if err != nil {
+		t.Fatalf("read standalone admission RBAC: %v", err)
+	}
+	if !strings.Contains(string(standaloneRBAC), "- agentexecutionpolicies\n    verbs: [get]") {
+		t.Fatalf("standalone admission RBAC cannot read compatibility policies:\n%s", standaloneRBAC)
 	}
 
 	webhookArgs := append(append([]string{}, base...),
@@ -1240,6 +1249,13 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 	}
 	if strings.Contains(policy, "- copilot") {
 		t.Fatalf("harness v1 policy unexpectedly advertises unsupported Copilot:\n%s", policy)
+	}
+	controllerDeployment := requireHelmRender(t, append(args, "--show-only", "templates/deployment.yaml")...)
+	if !strings.Contains(controllerDeployment, "--harness-v1-dispatch-workers=1") {
+		t.Fatalf(
+			"controller Deployment does not align dispatch capacity with the single-turn wrapper:\n%s",
+			controllerDeployment,
+		)
 	}
 
 	deployment := requireHelmRender(t, append(args, "--show-only", "templates/harness-wrapper-deployment.yaml")...)

@@ -44,8 +44,9 @@ func resolveHarnessV1PublicReadOnlyWorkspace(
 		)
 	}
 	switch policy.Spec.NetworkIsolationProfile {
-	case corev1alpha1.AgentExecutionNetworkIsolationDefaultDeny,
-		corev1alpha1.AgentExecutionNetworkIsolationPerTrustDomain:
+	case corev1alpha1.AgentExecutionNetworkIsolationDefaultDeny:
+	case corev1alpha1.AgentExecutionNetworkIsolationPerTrustDomain:
+		return nil, errors.New("harness v1 public read-only workspace requires a trust-domain-specific wrapper target")
 	default:
 		return nil, errors.New("harness v1 public read-only workspace requires a fail-closed network isolation profile")
 	}

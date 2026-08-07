@@ -415,7 +415,7 @@ harnessV1:
     networkIsolationProfile: default-deny
   dispatch:
     interval: 1s
-    workers: 4
+    workers: 1
   upgradeDrain:
     # Before an upgrade, rollback, or deletion mutates an existing wrapper, a
     # Helm hook durably closes admission and proves that no unsettled turns

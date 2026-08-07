@@ -146,6 +146,7 @@ rules:
   - agentexecutioncontrols
   - tasks
   - agentexecutionadjudications
+  - agentexecutionpolicies
   verbs:
   - get
 - apiGroups:

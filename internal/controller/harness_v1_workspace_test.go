@@ -171,6 +171,12 @@ func TestResolveHarnessV1PublicReadOnlyWorkspaceRequiresPolicyAndSupportedRuntim
 		!strings.Contains(err.Error(), "does not support runtime") {
 		t.Fatalf("unsupported runtime error = %v", err)
 	}
+	perTrustDomain := policy.DeepCopy()
+	perTrustDomain.Spec.NetworkIsolationProfile = corev1alpha1.AgentExecutionNetworkIsolationPerTrustDomain
+	if _, err := resolveHarnessV1PublicReadOnlyWorkspace(task, agent, perTrustDomain, target); err == nil ||
+		!strings.Contains(err.Error(), "trust-domain-specific wrapper target") {
+		t.Fatalf("per-trust-domain isolation error = %v", err)
+	}
 	external := target
 	external.backend = corev1alpha1.AgentExecutionBackendExternalEndpoint
 	external.runtimeRef = &corev1alpha1.AgentRuntime{}

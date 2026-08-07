@@ -30,6 +30,7 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 	snapshotDigest := "sha256:" + strings.Repeat("b", 64)
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "default", Name: "turn-task", UID: types.UID("task-uid"),
+		CreationTimestamp: metav1.NewTime(boundAt.Add(-30 * time.Second)),
 	}}
 	verified := &verifiedHarnessV1Execution{
 		binding: &corev1alpha1.AgentExecutionBinding{
@@ -64,7 +65,7 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDeadline := boundAt.Add(2 * time.Minute)
+	wantDeadline := task.CreationTimestamp.Add(2 * time.Minute)
 	if !request.Deadline.Equal(wantDeadline) {
 		t.Fatalf("deadline = %s, want %s", request.Deadline, wantDeadline)
 	}
