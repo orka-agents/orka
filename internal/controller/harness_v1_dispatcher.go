@@ -56,6 +56,7 @@ const (
 
 var (
 	errHarnessV1TerminalFrame              = errors.New("harness v1 terminal frame received")
+	errHarnessV1FrameSequenceViolation     = errors.New("harness v1 frame sequence is not strictly increasing")
 	errHarnessV1StreamEndedWithoutTerminal = errors.New("harness v1 frame stream ended without terminal evidence")
 )
 
@@ -1076,10 +1077,14 @@ func (d *HarnessV1Dispatcher) streamAcceptedAttempt(
 		pollTimeout = DefaultHarnessV1DispatchInterval
 	}
 	streamCtx, cancelStream := context.WithTimeout(ctx, pollTimeout)
+	lastSeenSeq := current.LastEventSeq
 	streamErr := protocolClient.StreamFrames(streamCtx, request.TurnID, current.LastEventSeq, func(frame harness.HarnessEventFrame) error {
 		if frame.RuntimeSessionID != request.RuntimeSessionID || frame.TurnID != request.TurnID ||
-			frame.CorrelationID != request.CorrelationID || frame.Seq <= current.LastEventSeq {
-			return fmt.Errorf("harness frame identity or sequence does not match the durable attempt")
+			frame.CorrelationID != request.CorrelationID {
+			return fmt.Errorf("harness frame identity does not match the durable attempt")
+		}
+		if frame.Seq <= lastSeenSeq {
+			return fmt.Errorf("%w: got %d after %d", errHarnessV1FrameSequenceViolation, frame.Seq, lastSeenSeq)
 		}
 		if frame.Type == harness.FrameApprovalRequested {
 			return fmt.Errorf("harness v1 binding received an unauthorized approval request")
@@ -1111,6 +1116,7 @@ func (d *HarnessV1Dispatcher) streamAcceptedAttempt(
 		if err != nil {
 			return err
 		}
+		lastSeenSeq = seq
 		if frame.Type == harness.FrameTurnCompleted || frame.Type == harness.FrameTurnFailed || frame.Type == harness.FrameTurnCancelled {
 			copy := frame
 			terminal = &copy
@@ -1137,6 +1143,9 @@ func (d *HarnessV1Dispatcher) streamAcceptedAttempt(
 		return nil
 	}
 	if streamErr != nil {
+		if errors.Is(streamErr, errHarnessV1FrameSequenceViolation) {
+			return d.markOutcomeUnknown(ctx, task, current, fence, harnessV1ReasonProtocolViolation)
+		}
 		var clientErr harness.ClientError
 		if errors.As(streamErr, &clientErr) && clientErr.IsProtocolViolation() {
 			return d.markOutcomeUnknown(ctx, task, current, fence, harnessV1ReasonProtocolViolation)

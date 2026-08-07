@@ -1061,6 +1061,55 @@ func TestHarnessV1DispatcherPreparedSnapshotDispatchSucceeds(t *testing.T) {
 	}
 }
 
+func TestHarnessV1DispatcherRejectsNonIncreasingFrameSequences(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		seqs []int64
+	}{
+		{name: "decrease", seqs: []int64{1, 3, 2}},
+		{name: "duplicate", seqs: []int64{1, 1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newHarnessV1DispatcherStateFixture(t)
+			protocolClient := &recordingHarnessV1RecoveryClient{
+				stream: func(
+					_ context.Context,
+					_ harness.HarnessTurnID,
+					_ int64,
+					onFrame func(harness.HarnessEventFrame) error,
+				) error {
+					for _, seq := range test.seqs {
+						if err := onFrame(harness.HarnessEventFrame{
+							Version: harness.ProtocolVersion, Type: harness.FrameRuntimeOutput,
+							RuntimeSessionID: fixture.request.RuntimeSessionID, TurnID: fixture.request.TurnID,
+							CorrelationID: fixture.request.CorrelationID, Seq: seq, ContentText: "progress",
+						}); err != nil {
+							return err
+						}
+					}
+					return nil
+				},
+			}
+
+			if err := fixture.dispatcher.streamAcceptedAttempt(
+				fixture.ctx,
+				fixture.task,
+				fixture.verified,
+				protocolClient,
+				fixture.request,
+				fixture.attempt,
+				fixture.fence,
+			); err != nil {
+				t.Fatalf("streamAcceptedAttempt: %v", err)
+			}
+			persisted := assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptOutcomeUnknown)
+			if persisted.TerminalReason != harnessV1ReasonProtocolViolation {
+				t.Fatalf("terminal reason = %q, want %q", persisted.TerminalReason, harnessV1ReasonProtocolViolation)
+			}
+		})
+	}
+}
+
 func TestHarnessV1DispatcherTerminalFrameWinsOverTrailingStreamError(t *testing.T) {
 	fixture := newHarnessV1DispatcherStateFixture(t)
 	trailingErr := errors.New("stream disconnected after terminal frame")

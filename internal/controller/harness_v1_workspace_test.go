@@ -69,6 +69,7 @@ func TestEnsureHarnessV1ExecutionBindingFreezesPublicReadOnlyWorkspace(t *testin
 }
 
 func TestValidateHarnessV1PublicReadOnlyWorkspace(t *testing.T) {
+	t.Setenv(harness.WrapperAllowedGitHostsEnv, "")
 	valid := &corev1alpha1.WorkspaceConfig{
 		Intent:  corev1alpha1.WorkspaceIntentRead,
 		GitRepo: "https://github.com/orka-agents/orka.git",
@@ -106,6 +107,13 @@ func TestValidateHarnessV1PublicReadOnlyWorkspace(t *testing.T) {
 			want: "publication",
 		},
 		{
+			name: "unsupported repository host",
+			mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+				workspace.GitRepo = "https://codeberg.org/orka-agents/orka.git"
+			},
+			want: "host",
+		},
+		{
 			name: "unsafe ref",
 			mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
 				workspace.Ref = "refs/heads/main..other"
@@ -129,6 +137,13 @@ func TestValidateHarnessV1PublicReadOnlyWorkspace(t *testing.T) {
 				t.Fatalf("validate workspace error = %v, want %q", err, test.want)
 			}
 		})
+	}
+
+	t.Setenv(harness.WrapperAllowedGitHostsEnv, "codeberg.org")
+	configuredHost := valid.DeepCopy()
+	configuredHost.GitRepo = "https://codeberg.org/orka-agents/orka.git"
+	if err := validateHarnessV1PublicReadOnlyWorkspace(configuredHost); err != nil {
+		t.Fatalf("configured wrapper repository host rejected: %v", err)
 	}
 }
 

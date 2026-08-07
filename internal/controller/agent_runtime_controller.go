@@ -264,14 +264,21 @@ func validateHarnessV1AgentRuntimeExecutableCapabilities(capabilities *harness.C
 		return fmt.Errorf("runtime must advertise toolExecutionMode %q or %q",
 			corev1alpha1.AgentRuntimeToolExecutionModeObserved, corev1alpha1.AgentRuntimeToolExecutionModeBrokered)
 	}
-	if observed && !capabilities.SupportsCancel {
-		return fmt.Errorf("runtime advertises observed mode but not supportsCancel")
+	if !capabilities.SupportsCancel {
+		return fmt.Errorf("runtime does not advertise required supportsCancel capability")
 	}
 	if brokered && !capabilities.SupportsContinuation {
 		return fmt.Errorf("runtime advertises brokered mode but not supportsContinuation")
 	}
 	if brokered && len(capabilities.BrokeredToolClasses) == 0 {
 		return fmt.Errorf("runtime advertises brokered mode but no brokeredToolClasses")
+	}
+	if capabilities.MaxOutputBytes > harness.MaxFetchTurnOutputBytes {
+		return fmt.Errorf(
+			"runtime maxOutputBytes %d exceeds controller fetch limit %d",
+			capabilities.MaxOutputBytes,
+			harness.MaxFetchTurnOutputBytes,
+		)
 	}
 	return nil
 }

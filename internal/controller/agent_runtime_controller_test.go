@@ -282,6 +282,36 @@ func TestAgentRuntimeReconcilerMarksHarnessV1RuntimeReady(t *testing.T) {
 	}
 }
 
+func TestValidateHarnessV1AgentRuntimeExecutableCapabilitiesRequiresControllerCompatibleRuntime(t *testing.T) {
+	base := harness.CapabilitiesResponse{
+		RuntimeName:             "external-v1",
+		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+		SupportsCancel:          true,
+		SupportsRuntimeSessions: true,
+		MaxOutputBytes:          harness.MaxFetchTurnOutputBytes,
+	}
+	if err := validateHarnessV1AgentRuntimeExecutableCapabilities(&base); err != nil {
+		t.Fatalf("controller-compatible capabilities rejected: %v", err)
+	}
+
+	brokeredWithoutCancel := base
+	brokeredWithoutCancel.ToolExecutionModes = []harness.ToolExecutionMode{harness.ToolExecutionModeBrokered}
+	brokeredWithoutCancel.BrokeredToolClasses = []harness.BrokeredToolClass{harness.BrokeredToolClassRead}
+	brokeredWithoutCancel.SupportsContinuation = true
+	brokeredWithoutCancel.SupportsCancel = false
+	if err := validateHarnessV1AgentRuntimeExecutableCapabilities(&brokeredWithoutCancel); err == nil ||
+		!strings.Contains(err.Error(), "supportsCancel") {
+		t.Fatalf("brokered runtime without cancellation error = %v, want supportsCancel", err)
+	}
+
+	oversizedOutput := base
+	oversizedOutput.MaxOutputBytes = harness.MaxFetchTurnOutputBytes + 1
+	if err := validateHarnessV1AgentRuntimeExecutableCapabilities(&oversizedOutput); err == nil ||
+		!strings.Contains(err.Error(), "fetch limit") {
+		t.Fatalf("oversized output capability error = %v, want fetch limit", err)
+	}
+}
+
 func TestAgentRuntimeReconcilerHarnessV1RequiresDeclaredCapabilitySubset(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeV1TestBearer})
 	defer server.Close()

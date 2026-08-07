@@ -19,10 +19,12 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 )
 
-const (
-	maxFetchTurnOutputBytes        = 50 << 20
-	maxHarnessControlResponseBytes = 1 << 20
-)
+// MaxFetchTurnOutputBytes is the controller client's hard cap for referenced
+// harness output payloads. Runtime readiness must reject a larger advertised
+// maximum so accepted turns cannot become permanently stuck while settling.
+const MaxFetchTurnOutputBytes = 50 << 20
+
+const maxHarnessControlResponseBytes = 1 << 20
 
 type Client struct {
 	baseURL         *url.URL
@@ -515,11 +517,11 @@ func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outp
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, c.statusError("fetch_turn_output", resp)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchTurnOutputBytes+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxFetchTurnOutputBytes+1))
 	if err != nil {
 		return nil, safeClientError("fetch_turn_output", resp.StatusCode, err.Error(), err)
 	}
-	if len(data) > maxFetchTurnOutputBytes {
+	if len(data) > MaxFetchTurnOutputBytes {
 		return nil, safeClientError("fetch_turn_output", resp.StatusCode, "output exceeds harness fetch limit")
 	}
 	if c.authBearerValue != "" && bytes.Contains(data, []byte(c.authBearerValue)) {

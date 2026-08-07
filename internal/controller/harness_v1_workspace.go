@@ -9,6 +9,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"strings"
 
@@ -55,8 +56,16 @@ func validateHarnessV1PublicReadOnlyWorkspace(workspace *corev1alpha1.WorkspaceC
 	if workspace.GitRepo == "" || workspace.GitRepo != strings.TrimSpace(workspace.GitRepo) {
 		return errors.New("harness v1 public workspace requires a canonical credential-free gitRepo")
 	}
-	if _, err := workspaceRepository(workspace); err != nil {
+	repository, err := workspaceRepository(workspace)
+	if err != nil {
 		return fmt.Errorf("validate harness v1 public workspace repository: %w", err)
+	}
+	parsed, _, err := canonicalWorkspaceRepositoryURL(repository.URL)
+	if err != nil {
+		return fmt.Errorf("validate harness v1 public workspace repository: %w", err)
+	}
+	if !harness.WrapperGitHostAllowed(parsed.Hostname(), os.Getenv(harness.WrapperAllowedGitHostsEnv)) {
+		return fmt.Errorf("harness v1 public workspace repository host %q is not allowed", parsed.Hostname())
 	}
 	if err := validateHarnessV1PublicWorkspaceAuthority(workspace); err != nil {
 		return err
