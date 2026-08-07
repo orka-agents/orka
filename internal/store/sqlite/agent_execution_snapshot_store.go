@@ -227,7 +227,9 @@ func (s *Store) ListAgentExecutionSnapshotMetadataBefore(
 
 // CountAgentExecutionSnapshotReferences implements
 // store.AgentExecutionSnapshotLifecycleStore. All counts are read by one SQL
-// statement so the result is one consistent SQLite snapshot.
+// statement so the result is one consistent SQLite snapshot. Only Open
+// binding reservations retain snapshots; terminal Bound and Rejected rows are
+// durable audit records rather than active execution references.
 func (s *Store) CountAgentExecutionSnapshotReferences(
 	ctx context.Context,
 	key store.AgentExecutionSnapshotKey,
@@ -238,14 +240,14 @@ func (s *Store) CountAgentExecutionSnapshotReferences(
 	var counts store.AgentExecutionSnapshotReferenceCounts
 	err := s.db.QueryRowContext(ctx, `SELECT
 		(SELECT COUNT(*) FROM agent_execution_binding_reservations
-			WHERE task_uid = ? AND snapshot_digest = ?),
+			WHERE task_uid = ? AND snapshot_digest = ? AND state = ?),
 		(SELECT COUNT(*) FROM harness_v1_attempts
 			WHERE task_uid = ? AND snapshot_digest = ?),
 		(SELECT COUNT(*) FROM prompt_attempts
 			WHERE task_uid = ? AND snapshot_digest = ?),
 		(SELECT COUNT(*) FROM session_lineages
 			WHERE config_digest = ?)`,
-		key.TaskUID, key.Digest,
+		key.TaskUID, key.Digest, store.AgentExecutionBindingReservationOpen,
 		key.TaskUID, key.Digest,
 		key.TaskUID, key.Digest,
 		key.Digest,

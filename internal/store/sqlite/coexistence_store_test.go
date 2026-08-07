@@ -226,6 +226,7 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 	key := persistLifecycleSnapshot(t, ctx, s, "task-uid", []byte(`{"snapshot":"target"}`), now)
 	otherDigestKey := persistLifecycleSnapshot(t, ctx, s, key.TaskUID, []byte(`{"snapshot":"other"}`), now)
 	otherTaskKey := persistLifecycleSnapshot(t, ctx, s, "other-task-uid", []byte(`{"snapshot":"target"}`), now)
+	rejectedKey := persistLifecycleSnapshot(t, ctx, s, "rejected-task-uid", []byte(`{"snapshot":"rejected"}`), now)
 	bindingDigest := store.CanonicalAgentExecutionSnapshotDigest([]byte("binding"))
 	requestDigest := store.CanonicalAgentExecutionSnapshotDigest([]byte("request"))
 
@@ -235,14 +236,30 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 			t.Fatalf("seed snapshot reference: %v", err)
 		}
 	}
-	seedReservation := func(id, taskUID, snapshotDigest string) {
+	seedReservation := func(
+		id, taskUID, snapshotDigest string,
+		state store.AgentExecutionBindingReservationState,
+	) {
+		t.Helper()
+		terminalReason := ""
+		var settledAt any
+		switch state {
+		case store.AgentExecutionBindingReservationOpen:
+		case store.AgentExecutionBindingReservationBound:
+			settledAt = now
+		case store.AgentExecutionBindingReservationRejected:
+			terminalReason = "test-rejection"
+			settledAt = now
+		default:
+			t.Fatalf("unsupported reservation state %q", state)
+		}
 		mustExec(`INSERT INTO agent_execution_binding_reservations
 			(id, task_namespace, task_name, task_uid, control_uid, control_generation,
 			 backend, mode_revision, binding_digest, snapshot_digest, state,
 			 terminal_reason, version, reserved_at, settled_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Bound', '', 1, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
 			id, "ns", "task-"+id, taskUID, "control-uid", 1, "v2", 1,
-			bindingDigest, snapshotDigest, now, now, now)
+			bindingDigest, snapshotDigest, state, terminalReason, now, settledAt, now)
 	}
 	seedHarnessAttempt := func(id, taskUID string, attempt int, snapshotDigest string) {
 		mustExec(`INSERT INTO harness_v1_attempts
@@ -272,8 +289,10 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 			configDigest, now, now)
 	}
 
-	seedReservation("reservation-match", key.TaskUID, key.Digest)
-	seedReservation("reservation-other-task", otherTaskKey.TaskUID, key.Digest)
+	seedReservation("reservation-open", key.TaskUID, key.Digest, store.AgentExecutionBindingReservationOpen)
+	seedReservation("reservation-bound", otherTaskKey.TaskUID, key.Digest, store.AgentExecutionBindingReservationBound)
+	seedReservation("reservation-rejected", rejectedKey.TaskUID, rejectedKey.Digest,
+		store.AgentExecutionBindingReservationRejected)
 	seedHarnessAttempt("harness-match-1", key.TaskUID, 1, key.Digest)
 	seedHarnessAttempt("harness-match-2", key.TaskUID, 2, key.Digest)
 	seedHarnessAttempt("harness-other-digest", key.TaskUID, 3, otherDigestKey.Digest)
@@ -305,13 +324,19 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 		t.Fatalf("count other Task references: %v", err)
 	}
 	wantOtherTask := store.AgentExecutionSnapshotReferenceCounts{
-		BindingReservations: 1,
-		HarnessV1Attempts:   1,
-		PromptAttempts:      1,
-		SessionLineages:     2,
+		HarnessV1Attempts: 1,
+		PromptAttempts:    1,
+		SessionLineages:   2,
 	}
 	if otherTaskCounts != wantOtherTask {
 		t.Fatalf("other Task reference counts = %#v, want %#v", otherTaskCounts, wantOtherTask)
+	}
+	rejectedCounts, err := s.CountAgentExecutionSnapshotReferences(ctx, rejectedKey)
+	if err != nil {
+		t.Fatalf("count rejected Task references: %v", err)
+	}
+	if rejectedCounts != (store.AgentExecutionSnapshotReferenceCounts{}) {
+		t.Fatalf("rejected Task reference counts = %#v, want no retaining references", rejectedCounts)
 	}
 	if _, err := s.CountAgentExecutionSnapshotReferences(ctx, store.AgentExecutionSnapshotKey{}); err == nil {
 		t.Fatal("incomplete snapshot key must fail reference-count validation")

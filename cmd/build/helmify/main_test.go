@@ -612,12 +612,29 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
 
-	// Client-only Helm rendering has no live Deployment for lookup, so even an
-	// upgrade render must not emit the hook on a fresh installation.
+	// Client-only Helm rendering has no live Deployment for lookup, so an
+	// upgrade render must not emit a drain hook on a fresh installation. The
+	// enabled revision must still persist its post-rollback abort hook because
+	// Helm executes hooks recorded in the historical rollback target.
 	fresh := requireHelmRender(t, append(append([]string{}, args...), "--is-upgrade")...)
 	if strings.Contains(fresh, "app.kubernetes.io/component: agent-harness-wrapper-drain") ||
 		strings.Contains(fresh, "helm.sh/hook: pre-upgrade") {
 		t.Fatalf("fresh harness v1 render unexpectedly contains an upgrade drain hook:\n%s", fresh)
+	}
+	for _, marker := range []string{
+		"app.kubernetes.io/component: agent-harness-wrapper-rollover-abort",
+		"helm.sh/hook: post-rollback",
+		"- abort-rollover",
+		`image: "ghcr.io/orka-agents/orka/agent-harness-wrapper@sha256:` + strings.Repeat("1", 64) + `"`,
+		`secretName: "harness-wrapper-auth"`,
+		`key: "token"`,
+	} {
+		if !strings.Contains(fresh, marker) {
+			t.Fatalf("fresh enabled revision rollback hook is missing %q:\n%s", marker, fresh)
+		}
+	}
+	if got := strings.Count(fresh, "helm.sh/hook: post-rollback"); got != 3 {
+		t.Fatalf("fresh enabled rollback hook annotation count = %d, want 3:\n%s", got, fresh)
 	}
 
 	// Render the unchanged hook body from a copied chart with only lookup's

@@ -3,7 +3,6 @@
 {{- $desiredGeneration := include "orka.harnessV1PodTemplateGeneration" . }}
 {{- $existingWrapper := lookup "apps/v1" "Deployment" .Release.Namespace $wrapperName }}
 {{- $needsRollover := false }}
-{{- $needsAbort := false }}
 {{- $existingImage := "" }}
 {{- $existingPullPolicy := "" }}
 {{- $existingAuthSecret := "" }}
@@ -11,7 +10,6 @@
 {{- if $existingWrapper }}
 {{- $existingGeneration := include "orka.harnessV1ExistingGeneration" $existingWrapper | trim }}
 {{- $needsRollover = or (not .Values.harnessV1.enabled) (ne $existingGeneration $desiredGeneration) }}
-{{- $needsAbort = .Values.harnessV1.enabled }}
 {{- $existingImage = include "orka.harnessV1ExistingImage" $existingWrapper }}
 {{- $existingPullPolicy = include "orka.harnessV1ExistingImagePullPolicy" $existingWrapper }}
 {{- $existingAuthSecret = include "orka.harnessV1ExistingAuthSecretName" $existingWrapper }}
@@ -153,7 +151,7 @@ spec:
         - name: tmp
           emptyDir: {}
 {{- end }}
-{{- if $needsAbort }}
+{{- if .Values.harnessV1.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

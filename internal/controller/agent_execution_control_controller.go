@@ -520,6 +520,12 @@ func (r *AgentExecutionControlReconciler) closingInventory(
 			} else if taskErr == nil && binding != nil {
 				return agentExecutionClosingInventory{}, false, nil,
 					fmt.Errorf("open reservation %q conflicts with the Task's immutable binding", reservation.ID)
+			} else if taskErr == nil && task != nil && string(task.UID) == reservation.TaskUID {
+				// The Task may have persisted its reservation immediately before
+				// admission closed but not yet projected the write-once binding.
+				// Keep that exact reservation Open so the idempotent binding path
+				// can finish after gate closure. Only absent or replacement Tasks
+				// are safe to classify as abandoned reservations below.
 			} else if taskErr != nil && !apierrors.IsNotFound(taskErr) {
 				return agentExecutionClosingInventory{}, false, nil, taskErr
 			} else {

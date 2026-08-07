@@ -141,9 +141,11 @@ type AgentExecutionSnapshotLifecycleStore interface {
 	ListAgentExecutionSnapshotMetadataBefore(ctx context.Context, cutoff time.Time) ([]AgentExecutionSnapshotMetadata, error)
 
 	// CountAgentExecutionSnapshotReferences returns a consistent count across
-	// binding reservations, v1 attempts, v2 prompt attempts, and Session
-	// lineages. The first three sources match Task UID and digest; Session
-	// lineages conservatively match every occurrence of the digest.
+	// open binding reservations, v1 attempts, v2 prompt attempts, and Session
+	// lineages. Terminal Bound and Rejected reservations are audit records and
+	// do not retain snapshots. The first three sources match Task UID and
+	// digest; Session lineages conservatively match every occurrence of the
+	// digest.
 	CountAgentExecutionSnapshotReferences(ctx context.Context, key AgentExecutionSnapshotKey) (AgentExecutionSnapshotReferenceCounts, error)
 
 	// DeleteAgentExecutionSnapshot idempotently deletes one exact Task
