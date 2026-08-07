@@ -8,11 +8,12 @@ import (
 )
 
 const (
-	TurnResourceEvents                = "events"
-	TurnResourceContinue              = "continue"
-	TurnResourceCancel                = "cancel"
-	TurnResourceOutput                = "output"
-	TurnResourceOutputAcknowledgement = "output-acknowledgement"
+	TurnResourceEvents                    = "events"
+	TurnResourceContinue                  = "continue"
+	TurnResourceCancel                    = "cancel"
+	TurnResourceOutput                    = "output"
+	TurnResourceOutputAcknowledgement     = "output-acknowledgement"
+	TurnResourceSettlementAcknowledgement = "settlement-acknowledgement"
 )
 
 // ErrTurnPathNotFound reports that a request path is not a two-segment harness
@@ -69,6 +70,12 @@ func OutputTurnPath(turnID HarnessTurnID) (string, error) {
 // path for a turn.
 func OutputAcknowledgementTurnPath(turnID HarnessTurnID) (string, error) {
 	return TurnResourcePath(turnID, TurnResourceOutputAcknowledgement)
+}
+
+// SettlementAcknowledgementTurnPath builds the controller settlement
+// acknowledgement path for a durable turn.
+func SettlementAcknowledgementTurnPath(turnID HarnessTurnID) (string, error) {
+	return TurnResourcePath(turnID, TurnResourceSettlementAcknowledgement)
 }
 
 // ParseTurnResourcePath extracts the turn ID and resource from a request path

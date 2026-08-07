@@ -544,8 +544,14 @@ func TestStaticChartAdmissionRuntimeAndWebhooksAreIndependent(t *testing.T) {
 		"/validate-core-orka-ai-v1alpha1-agentexecution-control-policy",
 		"resources: [agentexecutioncontrols, agentexecutionpolicies]",
 		"route-unless-controller-cleanup-safe",
+		"oldObject.metadata.?finalizers.orValue([]).filter",
+		"object.spec == oldObject.spec",
+		"object.?status.orValue({}) == oldObject.?status.orValue({})",
 		"/validate-core-orka-ai-v1alpha1-session-resolution",
 		"resources: [runtimesessioncontrols/status]",
+		"resolution-reference-introduced",
+		"object.?status.?agentExecutionResolutionRef.hasValue()",
+		"!oldObject.?status.?agentExecutionResolutionRef.hasValue()",
 	} {
 		if !strings.Contains(webhooks, marker) {
 			t.Fatalf("admission webhooks are missing %q:\n%s", marker, webhooks)
@@ -813,6 +819,12 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 	}
 	if !strings.Contains(unchanged, "helm.sh/hook: pre-delete") {
 		t.Fatalf("enabled release lost its uninstall drain hook:\n%s", unchanged)
+	}
+
+	disabledArgs := append(append([]string{}, args...), "--set", "harnessV1.enabled=false")
+	disabled := requireHarnessV1UpgradeDrainHookRender(t, true, disabledArgs...)
+	if !regexp.MustCompile(`--next-generation=retired:[a-f0-9]{64}`).MatchString(disabled) {
+		t.Fatalf("same-template retirement did not use a distinct tombstone generation:\n%s", disabled)
 	}
 }
 
@@ -1103,6 +1115,46 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			wantError: "harnessV1.ledger.size is required when harnessV1.enabled=true",
 		},
 		{
+			name: "missing ledger retention",
+			args: []string{
+				"--set", "harnessV1.enabled=true",
+				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.ledger.retention=",
+			},
+			wantError: "harnessV1.ledger.retention is required when harnessV1.enabled=true",
+		},
+		{
+			name: "zero ledger retention",
+			args: []string{
+				"--set", "harnessV1.enabled=true",
+				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.ledger.retention=0s",
+			},
+			wantError: "harnessV1.ledger.retention must be a positive Go duration",
+		},
+		{
+			name: "malformed ledger retention",
+			args: []string{
+				"--set", "harnessV1.enabled=true",
+				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.ledger.retention=immediate",
+			},
+			wantError: "harnessV1.ledger.retention must be a positive Go duration",
+		},
+		{
+			name: "negative ledger retention",
+			args: []string{
+				"--set", "harnessV1.enabled=true",
+				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.ledger.retention=-1h",
+			},
+			wantError: "harnessV1.ledger.retention must be a positive Go duration",
+		},
+		{
 			name: "unsupported Codex sandbox",
 			args: []string{
 				"--set", "harnessV1.enabled=true",
@@ -1164,6 +1216,7 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"--set", "harnessV1.policy.allowNewV1Bindings=true",
 		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.ledger.retention=168h",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
@@ -1199,6 +1252,8 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"name: ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH",
 		"value: /var/lib/orka/harness-v1/admission-ledger.db",
 		"name: ORKA_HARNESS_WRAPPER_LEDGER_GENERATION",
+		"name: ORKA_HARNESS_WRAPPER_LEDGER_RETENTION",
+		`value: "168h"`,
 		"mountPath: /var/lib/orka/harness-v1",
 		"claimName: test-orka-harness-v1-ledger",
 		`secretName: "harness-wrapper-auth"`,

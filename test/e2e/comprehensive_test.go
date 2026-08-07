@@ -140,6 +140,7 @@ var _ = Describe("Comprehensive Functionality", Ordered, func() {
 			"metadata": {"name": %q, "namespace": %q},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 10,
 					"defaultAllowBash": false

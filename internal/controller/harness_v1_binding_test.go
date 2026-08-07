@@ -31,6 +31,32 @@ type harnessV1PolicySequenceReader struct {
 	policyReads int
 }
 
+type harnessV1SessionControlSequenceStore struct {
+	store.DurableControlStore
+	controls []*store.SessionControl
+	reads    int
+}
+
+func (s *harnessV1SessionControlSequenceStore) GetSessionControl(
+	ctx context.Context,
+	namespace, sessionName string,
+) (*store.SessionControl, error) {
+	if s.reads >= len(s.controls) {
+		return s.DurableControlStore.GetSessionControl(ctx, namespace, sessionName)
+	}
+	control := s.controls[s.reads]
+	s.reads++
+	if control == nil {
+		return nil, store.ErrNotFound
+	}
+	copyControl := *control
+	if control.Lease != nil {
+		copyLease := *control.Lease
+		copyControl.Lease = &copyLease
+	}
+	return &copyControl, nil
+}
+
 func (r *harnessV1PolicySequenceReader) Get(
 	ctx context.Context,
 	key client.ObjectKey,
@@ -289,6 +315,192 @@ func TestResolveHarnessV1ExecutionCandidateMarksSpecViolationPermanent(t *testin
 	_, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent)
 	if err == nil || !isPermanentHarnessV1CandidateError(err) {
 		t.Fatalf("workspace violation error = %v, permanent=%v", err, isPermanentHarnessV1CandidateError(err))
+	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateFreezesBoundedSessionTranscript(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	const sessionName = "continued-session"
+	seedHarnessV1BindingTranscript(t, ctx, fixture, sessionName, defaultACPSessionType, []store.SessionMessage{
+		{ID: "message-1", Role: "user", Content: "old request"},
+		{ID: "message-2", Role: "assistant", Content: "old response"},
+		{ID: "message-3", Role: "user", Content: "recent request"},
+	})
+	task := fixture.task.DeepCopy()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{
+		Name: sessionName, Append: true, MaxMessages: 2,
+	}
+	control, err := fixture.controls.GetSessionControl(ctx, task.Namespace, sessionName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence := &harnessV1SessionControlSequenceStore{
+		DurableControlStore: fixture.controls,
+		controls:            []*store.SessionControl{control, control},
+	}
+	fixture.reconciler.DurableControlStore = sequence
+
+	candidate, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body agentExecutionSnapshotBody
+	if err := json.Unmarshal(candidate.snapshotBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := body.HarnessV1.SessionBootstrap
+	if bootstrap == nil || bootstrap.SchemaVersion != harnessV1SessionBootstrapSchemaVersion ||
+		bootstrap.SessionUID != control.SessionUID || bootstrap.ControlVersion != control.Version ||
+		bootstrap.LeaseGeneration != control.LeaseGeneration || bootstrap.MessageCount != 2 ||
+		bootstrap.TotalMessages != 2 || sequence.reads != 2 {
+		t.Fatalf("frozen Session bootstrap = %#v, want bounded two-message suffix", bootstrap)
+	}
+	if body.Prompt != task.Spec.Prompt || strings.Contains(bootstrap.Artifact, "old request") ||
+		!strings.Contains(bootstrap.Artifact, "old response") || !strings.Contains(bootstrap.Artifact, "recent request") {
+		t.Fatalf("frozen Session input = prompt %q bootstrap %q", body.Prompt, bootstrap.Artifact)
+	}
+	if err := validateFrozenHarnessV1SessionInput(body); err != nil {
+		t.Fatalf("validate frozen Session input: %v", err)
+	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateRejectsSessionControlRace(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	const sessionName = "racing-session"
+	seedHarnessV1BindingTranscript(t, ctx, fixture, sessionName, defaultACPSessionType, []store.SessionMessage{
+		{ID: "message-1", Role: "user", Content: "stable request"},
+	})
+	task := fixture.task.DeepCopy()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: sessionName, Append: true}
+	control, err := fixture.controls.GetSessionControl(ctx, task.Namespace, sessionName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanced := *control
+	advanced.Version++
+	fixture.reconciler.DurableControlStore = &harnessV1SessionControlSequenceStore{
+		DurableControlStore: fixture.controls,
+		controls:            []*store.SessionControl{control, &advanced},
+	}
+
+	if _, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent); err == nil ||
+		!errors.Is(err, store.ErrConflict) {
+		t.Fatalf("Session control race error = %v, want ErrConflict", err)
+	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateFreezesNewSessionUID(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	task := fixture.task.DeepCopy()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{
+		Name: "new-session", Create: true, Append: true,
+	}
+
+	candidate, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body agentExecutionSnapshotBody
+	if err := json.Unmarshal(candidate.snapshotBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := body.HarnessV1.SessionBootstrap
+	if bootstrap == nil || bootstrap.SchemaVersion != harnessV1SessionBootstrapSchemaVersion ||
+		strings.TrimSpace(bootstrap.SessionUID) == "" || bootstrap.ControlVersion != 0 ||
+		bootstrap.LeaseGeneration != 0 || bootstrap.MessageCount != 0 || bootstrap.TotalMessages != 0 ||
+		bootstrap.Artifact != "" {
+		t.Fatalf("new Session bootstrap = %#v, want frozen UID at V0/G0 with empty transcript", bootstrap)
+	}
+	if err := validateFrozenHarnessV1SessionInput(body); err != nil {
+		t.Fatalf("validate new Session bootstrap: %v", err)
+	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateRejectsControlLessTranscriptAdoption(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	const sessionName = "legacy-transcript"
+	transcripts := fixture.reconciler.SessionManager.store
+	now := time.Now().UTC()
+	if err := transcripts.CreateSession(ctx, &store.SessionRecord{
+		Namespace: fixture.task.Namespace, Name: sessionName, SessionType: defaultACPSessionType,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.AppendMessages(ctx, fixture.task.Namespace, sessionName, []store.SessionMessage{
+		{ID: "legacy-message", Role: "user", Content: "unclassified history", Timestamp: now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.task.DeepCopy()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: sessionName, Create: true, Append: true}
+
+	if _, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent); err == nil ||
+		!errors.Is(err, store.ErrConflict) {
+		t.Fatalf("control-less transcript adoption error = %v, want ErrConflict", err)
+	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateFreezesPromptIncludedCutoff(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	const (
+		sessionName   = "gateway-session"
+		currentPrompt = "answer the canonical gateway message"
+	)
+	throughMessageID := store.GatewayUserMessageID("event-current")
+	seedHarnessV1BindingTranscript(t, ctx, fixture, sessionName, store.SessionTypeGateway, []store.SessionMessage{
+		{ID: "gateway:prior:user", Role: "user", Content: "earlier request"},
+		{ID: "gateway:prior:assistant", Role: "assistant", Content: "earlier response"},
+		{ID: throughMessageID, Role: "user", Content: currentPrompt},
+		{ID: store.GatewayUserMessageID("event-later"), Role: "user", Content: "later queued request"},
+	})
+	task := fixture.task.DeepCopy()
+	task.Spec.Prompt = ""
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{
+		Name: sessionName, Append: false, MaxMessages: int32(store.GatewayTranscriptMessageLimit),
+		ThroughMessageID: throughMessageID, PromptIncluded: true,
+	}
+
+	candidate, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body agentExecutionSnapshotBody
+	if err := json.Unmarshal(candidate.snapshotBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := body.HarnessV1.SessionBootstrap
+	if body.Prompt != currentPrompt || bootstrap == nil || bootstrap.MessageCount != 2 || bootstrap.TotalMessages != 3 {
+		t.Fatalf("frozen prompt-included Session input = prompt %q bootstrap %#v", body.Prompt, bootstrap)
+	}
+	if strings.Contains(bootstrap.Artifact, currentPrompt) || strings.Contains(bootstrap.Artifact, "later queued request") ||
+		!strings.Contains(bootstrap.Artifact, "earlier response") {
+		t.Fatalf("prompt-included bootstrap crossed its cutoff or duplicated the current prompt: %q", bootstrap.Artifact)
+	}
+	if err := validateFrozenHarnessV1SessionInput(body); err != nil {
+		t.Fatalf("validate frozen prompt-included Session input: %v", err)
+	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateRejectsMissingPromptCutoff(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	seedHarnessV1BindingTranscript(t, ctx, fixture, "gateway-session", store.SessionTypeGateway, nil)
+	task := fixture.task.DeepCopy()
+	task.Spec.Prompt = ""
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{
+		Name: "gateway-session", Append: false, MaxMessages: int32(store.GatewayTranscriptMessageLimit),
+		ThroughMessageID: store.GatewayUserMessageID("missing"), PromptIncluded: true,
+	}
+
+	if _, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent); err == nil ||
+		!errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing canonical prompt cutoff error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -689,9 +901,52 @@ func TestLoadVerifiedHarnessV1ExecutionForRecoveryControlRevision(t *testing.T) 
 
 type harnessV1CandidateFixture struct {
 	reconciler *TaskReconciler
+	controls   store.DurableControlStore
+	fence      store.ControllerEpochFence
 	task       *corev1alpha1.Task
 	agent      *corev1alpha1.Agent
 	policy     *corev1alpha1.AgentExecutionPolicy
+}
+
+func seedHarnessV1BindingTranscript(
+	t *testing.T,
+	ctx context.Context,
+	fixture *harnessV1CandidateFixture,
+	sessionName string,
+	sessionType string,
+	messages []store.SessionMessage,
+) {
+	t.Helper()
+	if fixture == nil || fixture.reconciler == nil || fixture.reconciler.SessionManager == nil {
+		t.Fatal("harness v1 binding fixture is missing its Session transcript store")
+	}
+	transcripts := fixture.reconciler.SessionManager.store
+	if err := transcripts.CreateSession(ctx, &store.SessionRecord{
+		Namespace: fixture.task.Namespace, Name: sessionName, SessionType: sessionType,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := fixture.controls.CreateSessionControl(ctx, &store.SessionControl{
+		Namespace: fixture.task.Namespace, SessionName: sessionName,
+		SessionUID:    "frozen-" + sessionName + "-uid",
+		RequestDigest: store.CanonicalAgentExecutionSnapshotDigest([]byte("session-control:" + sessionName)),
+		Availability:  store.SessionAvailable, CreatedAt: now, UpdatedAt: now,
+	}, fixture.fence); err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) == 0 {
+		return
+	}
+	for index := range messages {
+		if messages[index].Timestamp.IsZero() {
+			messages[index].Timestamp = now.Add(time.Duration(index) * time.Millisecond)
+		}
+	}
+	if err := transcripts.AppendMessages(ctx, fixture.task.Namespace, sessionName, messages); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newHarnessV1CandidateFixture(
@@ -711,6 +966,7 @@ func newHarnessV1CandidateFixture(
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default", Name: "harness-v1-recovery", UID: types.UID("harness-v1-recovery-task-uid"), Generation: 1,
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent, Prompt: "continue admitted work",
@@ -760,6 +1016,7 @@ func newHarnessV1CandidateFixture(
 	}
 
 	reconciler, durable := newBindingTestReconciler(t, control, task, namespace, policy, authSecret)
+	fence := seedHarnessV1AttemptEpoch(t, durable)
 	configureAgentExecutionBindingTestGate(
 		t, ctx, durable, control, store.AgentExecutionBackendV1,
 	)
@@ -767,8 +1024,12 @@ func newHarnessV1CandidateFixture(
 	reconciler.HarnessV1AuthSecretNamespace = authSecret.Namespace
 	reconciler.HarnessV1AuthSecretName = authSecret.Name
 	reconciler.HarnessV1AuthSecretKey = authSecretKey
+	reconciler.SessionManager = NewSessionManager(durable)
+	reconciler.DurableControlStore = durable
 	return &harnessV1CandidateFixture{
 		reconciler: reconciler,
+		controls:   durable,
+		fence:      fence,
 		task:       task,
 		agent:      agent,
 		policy:     policy,

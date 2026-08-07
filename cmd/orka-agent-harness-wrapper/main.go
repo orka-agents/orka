@@ -80,6 +80,12 @@ func run(args []string) error {
 		cfg.LedgerGeneration,
 		"durable wrapper admission ledger generation",
 	)
+	fs.DurationVar(
+		&cfg.LedgerRetention,
+		"ledger-retention",
+		cfg.LedgerRetention,
+		"minimum retention for controller-settled wrapper ledger records",
+	)
 	fs.StringVar(&cfg.Copilot.Path, "copilot-cli-path", cfg.Copilot.Path, "Copilot CLI path for the copilot adapter")
 	fs.StringVar(
 		&cfg.Copilot.HelperPath,

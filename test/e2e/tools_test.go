@@ -312,6 +312,7 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false
@@ -376,6 +377,7 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false

@@ -31,7 +31,8 @@ Before `make deploy`, provision `orka-system/orka-admission-tls` with
 `tls.crt`, `tls.key`, and `ca.crt`; the serving certificate must cover
 `orka-admission.orka-system.svc`. Deployment fails closed when that material is
 missing. The apply script rolls out two admission replicas, waits for two ready
-Service endpoints and current control status, sends an AdmissionReview smoke
-request to every protected handler through the Kubernetes Service proxy, pins
-the webhook CA bundle from `ca.crt`, and only then applies
-`../orka-admission-webhooks`.
+Service endpoints, sends an AdmissionReview smoke request to every protected
+handler through the Kubernetes Service proxy, and pins the webhook CA bundle
+from `ca.crt`. It activates the fail-closed
+`../orka-admission-webhooks` wave before rolling the coexistence controller,
+then waits for the controller to report the current control generation.

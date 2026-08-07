@@ -3,6 +3,7 @@ package cliwrapper
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -567,9 +568,13 @@ func TestDurableAdmissionAdminEndpointsFailWithoutLedger(t *testing.T) {
 }
 
 func TestDurableAdmissionRejectsUnopenableLedgerPath(t *testing.T) {
+	blockedParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("blocked"), 0o600); err != nil {
+		t.Fatalf("create blocking ledger parent: %v", err)
+	}
 	cfg := DefaultConfig()
 	cfg.AuthValue = durableAdmissionControllerToken
-	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "missing-parent", "admission-ledger.db")
+	cfg.AdmissionLedgerPath = filepath.Join(blockedParent, "admission-ledger.db")
 	cfg.Generic.Command = testEchoCommand
 	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
 	if err == nil {
@@ -616,6 +621,26 @@ func TestDurableAdmissionPreservesIdentityAcrossAcceptedAndTerminalStatus(t *tes
 		terminal.TerminalReceipt.TurnID != request.TurnID ||
 		terminal.TerminalReceipt.Kind != harness.DurableTurnTerminalCancelled {
 		t.Fatalf("terminal status = %#v, want canonical cancellation receipt", terminal)
+	}
+	wrong := harness.TurnSettlementAcknowledgementRequest{
+		Version: harness.ProtocolVersion, TurnID: request.TurnID,
+		RequestDigest:         "sha256:" + strings.Repeat("f", 64),
+		TerminalReceiptDigest: terminal.TerminalReceiptDigest,
+	}
+	if err := client.AcknowledgeTurnSettlement(context.Background(), wrong); err == nil ||
+		!strings.Contains(err.Error(), "409") {
+		t.Fatalf("AcknowledgeTurnSettlement(wrong fence) error = %v, want 409", err)
+	}
+	acknowledgement := harness.TurnSettlementAcknowledgementRequest{
+		Version: harness.ProtocolVersion, TurnID: request.TurnID,
+		RequestDigest:         request.Metadata[harness.MetadataRequestDigest],
+		TerminalReceiptDigest: terminal.TerminalReceiptDigest,
+	}
+	if err := client.AcknowledgeTurnSettlement(context.Background(), acknowledgement); err != nil {
+		t.Fatalf("AcknowledgeTurnSettlement: %v", err)
+	}
+	if err := client.AcknowledgeTurnSettlement(context.Background(), acknowledgement); err != nil {
+		t.Fatalf("AcknowledgeTurnSettlement(idempotent): %v", err)
 	}
 }
 

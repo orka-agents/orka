@@ -1,6 +1,10 @@
 {{- include "orka.validateHarnessV1" . }}
 {{- $wrapperName := include "orka.harnessV1Name" . }}
 {{- $desiredGeneration := include "orka.harnessV1PodTemplateGeneration" . }}
+{{- $rolloverGeneration := $desiredGeneration }}
+{{- if not .Values.harnessV1.enabled }}
+{{- $rolloverGeneration = printf "retired:%s" $desiredGeneration }}
+{{- end }}
 {{- $existingWrapper := lookup "apps/v1" "Deployment" .Release.Namespace $wrapperName }}
 {{- $controllerName := include "orka.controllerName" . }}
 {{- $existingController := lookup "apps/v1" "Deployment" .Release.Namespace $controllerName }}
@@ -146,7 +150,7 @@ spec:
             - --bearer-token-file=/var/run/orka/harness-wrapper/token
             - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
             - {{ printf "--poll-interval=%s" .Values.harnessV1.upgradeDrain.pollInterval | quote }}
-            - {{ printf "--next-generation=%s" $desiredGeneration | quote }}
+            - {{ printf "--next-generation=%s" $rolloverGeneration | quote }}
           volumeMounts:
             - name: auth
               mountPath: /var/run/orka/harness-wrapper

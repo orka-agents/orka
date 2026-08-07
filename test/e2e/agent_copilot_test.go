@@ -44,6 +44,7 @@ var _ = Describe("Agent Copilot ACP Runtime", Ordered, func() {
 			"metadata": {"name": %q, "namespace": %q},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "copilot",
 					"defaultMaxTurns": 10,
 					"defaultAllowBash": true

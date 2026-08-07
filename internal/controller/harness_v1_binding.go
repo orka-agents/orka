@@ -34,6 +34,11 @@ import (
 const (
 	defaultHarnessV1PolicyName  = "compatibility"
 	defaultHarnessV1SessionName = "task"
+
+	harnessV1SessionBootstrapSchemaVersion   = 1
+	harnessV1SessionBootstrapMaxMessages     = 64
+	harnessV1SessionBootstrapMaxBytes        = 128 * 1024
+	harnessV1SessionBootstrapMaxMessageBytes = 32 * 1024
 )
 
 type resolvedHarnessV1Target struct {
@@ -126,6 +131,10 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 		}
 		return nil, err
 	}
+	sessionPrompt, sessionBootstrap, err := r.resolveHarnessV1SessionInput(ctx, task)
+	if err != nil {
+		return nil, fmt.Errorf("resolve frozen harness v1 Session input: %w", err)
+	}
 
 	credentialRefs, err := resolveHarnessV1CredentialRefs(ctx, reader, agent, target)
 	if err != nil {
@@ -169,7 +178,7 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 			ReasoningEffort: strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort),
 			SystemPrompt:    systemPrompt,
 		},
-		Prompt:          task.Spec.Prompt,
+		Prompt:          sessionPrompt,
 		RetryPolicy:     task.Spec.RetryPolicy.DeepCopy(),
 		SessionRef:      task.Spec.SessionRef.DeepCopy(),
 		Workspace:       workspace,
@@ -181,7 +190,8 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 			AuthSecretKey: target.authSecretKey, AuthSecretUID: string(target.authSecret.UID),
 			AuthSecretResourceVersion: target.authSecret.ResourceVersion,
 			DuplicateSafe:             duplicateSafe,
-			SessionName:               harnessV1SessionName(task), CredentialRefs: credentialRefs,
+			SessionName:               harnessV1SessionName(task), SessionBootstrap: sessionBootstrap,
+			CredentialRefs: credentialRefs,
 		},
 	}
 	if task.Spec.Timeout != nil {
@@ -542,6 +552,180 @@ func harnessV1SessionName(task *corev1alpha1.Task) string {
 	return defaultHarnessV1SessionName
 }
 
+// resolveHarnessV1SessionInput freezes the canonical transcript suffix and the
+// exact current user prompt before the binding is persisted. Harness v1 CLI
+// adapters start a fresh process for every turn, so dispatch must not depend on
+// either mutable transcript reads or provider-native session continuation.
+//
+//nolint:gocyclo // Freezing spans the control and transcript stores and keeps every cross-store fence in one boundary.
+func (r *TaskReconciler) resolveHarnessV1SessionInput(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (string, *agentExecutionSnapshotHarnessV1SessionBootstrap, error) {
+	if task == nil {
+		return "", nil, store.ValidationErrorf("Task is required")
+	}
+	prompt := task.Spec.Prompt
+	ref := task.Spec.SessionRef
+	if ref == nil {
+		return prompt, nil, nil
+	}
+	name := strings.TrimSpace(ref.Name)
+	if name == "" {
+		return "", nil, store.ValidationErrorf("harness v1 SessionRef name is required")
+	}
+	if r.DurableControlStore == nil {
+		return "", nil, errors.New("session control store is required")
+	}
+	requiresTranscript := ref.Append || ref.PromptIncluded
+	if r.SessionManager == nil || r.SessionManager.store == nil {
+		return "", nil, errors.New("session transcript store is required")
+	}
+	throughMessageID := strings.TrimSpace(ref.ThroughMessageID)
+	if ref.PromptIncluded && throughMessageID == "" {
+		return "", nil, store.ValidationErrorf("prompt-included harness v1 Session requires a through-message ID")
+	}
+
+	control, err := r.DurableControlStore.GetSessionControl(ctx, task.Namespace, name)
+	newSession := false
+	if errors.Is(err, store.ErrNotFound) {
+		if !ref.Create {
+			return "", nil, fmt.Errorf("session %s/%s does not exist and create=false: %w", task.Namespace, name, store.ErrNotFound)
+		}
+		newSession = true
+		uid, uidErr := newACPSessionUID()
+		if uidErr != nil {
+			return "", nil, fmt.Errorf("generate frozen harness v1 Session UID: %w", uidErr)
+		}
+		control = &store.SessionControl{
+			Namespace: task.Namespace, SessionName: name, SessionUID: uid,
+			Availability: store.SessionAvailable,
+		}
+	} else if err != nil {
+		return "", nil, fmt.Errorf("load harness v1 Session control: %w", err)
+	} else if err := validateAvailableUnleasedHarnessV1SessionControl(control, task.Namespace, name); err != nil {
+		return "", nil, err
+	}
+
+	maxMessages := acpSessionReferenceMaxMessages(ref)
+	var messages []store.SessionMessage
+	if requiresTranscript {
+		if throughMessageID != "" {
+			messages, err = r.SessionManager.store.LoadTranscriptThrough(
+				ctx, task.Namespace, name, throughMessageID, maxMessages,
+			)
+		} else {
+			messages, err = r.SessionManager.store.LoadTranscript(ctx, task.Namespace, name, maxMessages)
+		}
+		if err != nil && (!newSession || !ref.Create || ref.PromptIncluded || !errors.Is(err, store.ErrNotFound)) {
+			return "", nil, fmt.Errorf("load canonical Session transcript: %w", err)
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			messages = nil
+		}
+	} else if newSession {
+		record, getErr := r.SessionManager.store.GetSession(ctx, task.Namespace, name)
+		if getErr == nil && record.MessageCount > 0 {
+			return "", nil, fmt.Errorf(
+				"%w: control-less Session %s/%s has a non-empty transcript",
+				store.ErrConflict, task.Namespace, name,
+			)
+		}
+		if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
+			return "", nil, fmt.Errorf("inspect new harness v1 Session transcript: %w", getErr)
+		}
+	}
+	if newSession && len(messages) > 0 {
+		return "", nil, fmt.Errorf(
+			"%w: control-less Session %s/%s has a non-empty transcript",
+			store.ErrConflict, task.Namespace, name,
+		)
+	}
+	if throughMessageID != "" && (len(messages) == 0 || messages[len(messages)-1].ID != throughMessageID) {
+		return "", nil, fmt.Errorf(
+			"%w: bounded harness v1 transcript does not end at message %q",
+			store.ErrConflict, throughMessageID,
+		)
+	}
+	totalMessages := len(messages)
+	bootstrapMessages := messages
+	if ref.PromptIncluded {
+		throughMessage := messages[len(messages)-1]
+		if throughMessage.Role != acpBootstrapRoleUser || strings.TrimSpace(throughMessage.Content) == "" {
+			return "", nil, store.ValidationErrorf(
+				"prompt-included harness v1 Session cutoff must end at a non-empty user message",
+			)
+		}
+		prompt = throughMessage.Content
+		bootstrapMessages = messages[:len(messages)-1]
+	}
+	limits, err := harnessV1SessionBootstrapLimits(harnessV1SessionBootstrapSchemaVersion)
+	if err != nil {
+		return "", nil, err
+	}
+	bootstrap, err := buildACPBootstrapTranscript(bootstrapMessages, limits)
+	if err != nil {
+		return "", nil, fmt.Errorf("build bounded harness v1 Session bootstrap: %w", err)
+	}
+	if newSession {
+		if winner, getErr := r.DurableControlStore.GetSessionControl(ctx, task.Namespace, name); getErr == nil {
+			return "", nil, fmt.Errorf(
+				"%w: session %s/%s was created as UID %q while freezing UID %q",
+				store.ErrConflict, task.Namespace, name, winner.SessionUID, control.SessionUID,
+			)
+		} else if !errors.Is(getErr, store.ErrNotFound) {
+			return "", nil, fmt.Errorf("recheck new harness v1 Session control: %w", getErr)
+		}
+	} else {
+		current, getErr := r.DurableControlStore.GetSessionControl(ctx, task.Namespace, name)
+		if getErr != nil {
+			return "", nil, fmt.Errorf("recheck harness v1 Session control: %w", getErr)
+		}
+		if err := validateAvailableUnleasedHarnessV1SessionControl(current, task.Namespace, name); err != nil {
+			return "", nil, err
+		}
+		if current.SessionUID != control.SessionUID || current.Version != control.Version ||
+			current.LeaseGeneration != control.LeaseGeneration {
+			return "", nil, fmt.Errorf("%w: harness v1 Session control changed while freezing its transcript", store.ErrConflict)
+		}
+	}
+	return prompt, &agentExecutionSnapshotHarnessV1SessionBootstrap{
+		SchemaVersion: harnessV1SessionBootstrapSchemaVersion,
+		SessionUID:    control.SessionUID, ControlVersion: control.Version,
+		LeaseGeneration: control.LeaseGeneration,
+		Artifact:        string(bootstrap.Artifact), Digest: bootstrap.Digest,
+		MessageCount: bootstrap.MessageCount, TotalMessages: totalMessages,
+		Truncated: bootstrap.Truncated,
+	}, nil
+}
+
+func harnessV1SessionBootstrapLimits(schemaVersion int) (ACPBootstrapLimits, error) {
+	if schemaVersion != harnessV1SessionBootstrapSchemaVersion {
+		return ACPBootstrapLimits{}, store.ValidationErrorf(
+			"unsupported harness v1 Session bootstrap schema version %d", schemaVersion,
+		)
+	}
+	return ACPBootstrapLimits{
+		MaxMessages:     harnessV1SessionBootstrapMaxMessages,
+		MaxBytes:        harnessV1SessionBootstrapMaxBytes,
+		MaxMessageBytes: harnessV1SessionBootstrapMaxMessageBytes,
+	}, nil
+}
+
+func validateAvailableUnleasedHarnessV1SessionControl(
+	control *store.SessionControl,
+	namespace, name string,
+) error {
+	if control == nil || control.Namespace != namespace || control.SessionName != name ||
+		strings.TrimSpace(control.SessionUID) == "" || control.Version < 1 || control.LeaseGeneration < 0 {
+		return fmt.Errorf("%w: harness v1 Session control identity is incomplete", store.ErrConflict)
+	}
+	if control.Availability != store.SessionAvailable || control.Lease != nil {
+		return fmt.Errorf("%w: harness v1 Session %s/%s is not available and unleased", store.ErrConflict, namespace, name)
+	}
+	return nil
+}
+
 //nolint:gocyclo // Snapshot validation intentionally checks every frozen v1 field in one boundary.
 func validateHarnessV1Snapshot(
 	binding *corev1alpha1.AgentExecutionBinding,
@@ -579,6 +763,9 @@ func validateHarnessV1Snapshot(
 		body.HarnessV1.AuthSecretResourceVersion == "" || body.HarnessV1.SessionName == "" {
 		return errors.New("harness v1 snapshot has incomplete frozen endpoint/auth/session identity")
 	}
+	if err := validateFrozenHarnessV1SessionInput(body); err != nil {
+		return err
+	}
 	if body.HarnessV1.RuntimeAuthOnly {
 		if body.HarnessV1.Backend != string(corev1alpha1.AgentExecutionBackendHarnessWrapper) ||
 			len(body.HarnessV1.CredentialRefs) == 0 {
@@ -604,6 +791,92 @@ func validateHarnessV1Snapshot(
 		if body.RetryPolicy.MaxRetries > 0 && !body.HarnessV1.DuplicateSafe {
 			return errors.New("harness v1 snapshot retry policy is not duplicate-safe")
 		}
+	}
+	return nil
+}
+
+//nolint:gocyclo // Snapshot validation intentionally checks every frozen Session field in one boundary.
+func validateFrozenHarnessV1SessionInput(body agentExecutionSnapshotBody) error {
+	if body.HarnessV1 == nil {
+		return errors.New("harness v1 target metadata is required")
+	}
+	ref := body.SessionRef
+	bootstrap := body.HarnessV1.SessionBootstrap
+	if ref == nil {
+		if bootstrap != nil {
+			return errors.New("harness v1 snapshot has a Session bootstrap without a SessionRef")
+		}
+		return nil
+	}
+	if bootstrap == nil {
+		return errors.New("harness v1 snapshot is missing its frozen Session identity/bootstrap")
+	}
+	if body.HarnessV1.SessionName != strings.TrimSpace(ref.Name) {
+		return errors.New("harness v1 snapshot Session name does not match its frozen SessionRef")
+	}
+	limits, err := harnessV1SessionBootstrapLimits(bootstrap.SchemaVersion)
+	if err != nil {
+		return err
+	}
+	if err := store.ValidateControlIdentifier("frozen harness v1 Session UID", bootstrap.SessionUID); err != nil {
+		return err
+	}
+	if bootstrap.ControlVersion < 0 || bootstrap.LeaseGeneration < 0 ||
+		(bootstrap.ControlVersion == 0 && bootstrap.LeaseGeneration != 0) {
+		return errors.New("harness v1 snapshot has an invalid frozen Session control revision")
+	}
+	if bootstrap.ControlVersion == 0 && (!ref.Create || bootstrap.MessageCount != 0 ||
+		bootstrap.TotalMessages != 0 || bootstrap.Truncated || bootstrap.Artifact != "") {
+		return errors.New("new harness v1 Session bootstrap must freeze an empty create-only transcript")
+	}
+	if strings.TrimSpace(body.Prompt) == "" {
+		return errors.New("harness v1 snapshot has an empty frozen Session prompt")
+	}
+	if ref.PromptIncluded && strings.TrimSpace(ref.ThroughMessageID) == "" {
+		return errors.New("prompt-included harness v1 snapshot is missing its through-message ID")
+	}
+	requiresTranscript := ref.Append || ref.PromptIncluded
+	minimumTotal := int(bootstrap.MessageCount)
+	if ref.PromptIncluded {
+		minimumTotal++
+	}
+	if (!requiresTranscript && (bootstrap.MessageCount != 0 || bootstrap.TotalMessages != 0 || bootstrap.Truncated)) ||
+		bootstrap.TotalMessages < minimumTotal || bootstrap.TotalMessages > acpSessionReferenceMaxMessages(ref) {
+		return errors.New("harness v1 snapshot has inconsistent Session bootstrap message counts")
+	}
+	artifact := []byte(bootstrap.Artifact)
+	if bootstrap.MessageCount == 0 {
+		if len(artifact) != 0 {
+			return errors.New("empty harness v1 Session bootstrap has a non-empty artifact")
+		}
+	} else if len(artifact) == 0 || artifact[len(artifact)-1] != '\n' {
+		return errors.New("harness v1 Session bootstrap artifact is incomplete")
+	}
+	lines := bytes.Split(artifact, []byte{'\n'})
+	if len(lines) > 0 && len(lines[len(lines)-1]) == 0 {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) != int(bootstrap.MessageCount) {
+		return errors.New("harness v1 Session bootstrap artifact count does not match its metadata")
+	}
+	messages := make([]store.SessionMessage, 0, len(lines))
+	for _, line := range lines {
+		canonicalLine := append(append([]byte(nil), line...), '\n')
+		message, err := decodeACPBootstrapLine(canonicalLine)
+		if err != nil {
+			return fmt.Errorf("validate frozen harness v1 Session bootstrap: %w", err)
+		}
+		messages = append(messages, store.SessionMessage{
+			Role: message.Role, Content: message.Content, Name: message.Name, ToolCallID: message.ToolCallID,
+		})
+	}
+	rebuilt, err := buildACPBootstrapTranscript(messages, limits)
+	if err != nil {
+		return fmt.Errorf("validate frozen harness v1 Session bootstrap bounds: %w", err)
+	}
+	if !bytes.Equal(rebuilt.Artifact, artifact) || rebuilt.Digest != bootstrap.Digest ||
+		rebuilt.MessageCount != bootstrap.MessageCount {
+		return errors.New("harness v1 Session bootstrap artifact is not canonical or digest-consistent")
 	}
 	return nil
 }

@@ -24,6 +24,10 @@ The wrapper has a dedicated ServiceAccount with token automount disabled, a
 PVC-backed admission ledger, controller-only ingress, and egress limited to DNS
 and public HTTPS provider/read-only SCM endpoints. Do not mount Git, forge,
 publisher, provider-proxy, or other publication credentials into this Pod.
+Terminal and rejected ledger rows become reclaimable only after the controller
+acknowledges their exact durable settlement. The shipped 720-hour retention
+window preserves duplicate-suppression and audit/backup evidence before bounded
+garbage collection; configure a longer window when policy requires it.
 
 Before changing any wrapper Pod-template field, run the authenticated drain
 client from the currently deployed wrapper image and wait for it to succeed:

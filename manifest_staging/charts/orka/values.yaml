@@ -448,6 +448,9 @@ harnessV1:
     # The admission ledger is always PVC-backed when harness v1 is enabled.
     size: 1Gi
     storageClass: ""
+    # Controller-acknowledged terminal records remain replay-safe for this
+    # audit/backup window before bounded wrapper GC may reclaim them.
+    retention: 720h
   # Codex defaults to workspace-write. Broader modes require explicit policy.
   codexSandboxMode: workspace-write
   resources:

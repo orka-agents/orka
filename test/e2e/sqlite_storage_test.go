@@ -200,6 +200,7 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false

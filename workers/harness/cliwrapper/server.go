@@ -37,6 +37,7 @@ const (
 	terminalLedgerPersistFailed      = "persist-failed"
 	admissionLedgerReconcileFailed   = "reconcile-failed"
 	durableAdmissionReconcileTimeout = 5 * time.Second
+	durableLedgerReclaimBatch        = 128
 	durableAcceptanceRejectionReason = "wrapper-durable-acceptance-failed"
 	durableLocalRejectionReason      = "wrapper-local-admission-rejected"
 )
@@ -112,6 +113,11 @@ func NewServer(cfg Config, adapter RuntimeAdapter, opts ...ServerOption) (*Serve
 			s.ledger = nil
 			return nil, fmt.Errorf("activate wrapper ledger generation: %w", err)
 		}
+		if err := s.reclaimSettledTurns(context.Background()); err != nil {
+			_ = admissionLedger.Close()
+			s.ledger = nil
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -154,6 +160,17 @@ func (s *Server) reconcileOrphanedDurableTurns(ctx context.Context) error {
 				return fmt.Errorf("settle orphaned accepted turn: %w", err)
 			}
 		}
+	}
+	return nil
+}
+
+func (s *Server) reclaimSettledTurns(ctx context.Context) error {
+	if s == nil || s.ledger == nil {
+		return nil
+	}
+	cutoff := s.now().UTC().Add(-s.config.LedgerRetention)
+	if _, err := s.ledger.ReclaimSettledTurnsBefore(ctx, cutoff, durableLedgerReclaimBatch); err != nil {
+		return fmt.Errorf("reclaim settled wrapper ledger turns: %w", err)
 	}
 	return nil
 }
@@ -663,6 +680,11 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		writeSafeError(w, http.StatusServiceUnavailable, "durable turn admission is unavailable")
 		return
 	}
+	if err := s.reclaimSettledTurns(r.Context()); err != nil {
+		s.setAdmissionLedgerError(err)
+		writeSafeError(w, http.StatusServiceUnavailable, "durable turn admission is unavailable")
+		return
+	}
 	var request harness.StartTurnRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeSafeError(w, http.StatusBadRequest, "invalid JSON request")
@@ -784,6 +806,18 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleOutputAcknowledgement(w, r, turnID)
+		return
+	}
+	if resource == harness.TurnResourceSettlementAcknowledgement {
+		if r.Method != http.MethodPost {
+			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if s.ledger == nil {
+			writeSafeError(w, http.StatusServiceUnavailable, "durable turn settlement acknowledgement is unavailable")
+			return
+		}
+		s.handleSettlementAcknowledgement(w, r, turnID)
 		return
 	}
 	turn := s.turnRegistry.lookup(turnID)
@@ -910,6 +944,43 @@ func (s *Server) handleOutputAcknowledgement(w http.ResponseWriter, r *http.Requ
 		Version:               harness.ProtocolVersion,
 		TurnID:                request.TurnID,
 		OutputRef:             request.OutputRef,
+		TerminalReceiptDigest: request.TerminalReceiptDigest,
+		Acknowledged:          true,
+	})
+}
+
+func (s *Server) handleSettlementAcknowledgement(w http.ResponseWriter, r *http.Request, turnID harness.HarnessTurnID) {
+	var request harness.TurnSettlementAcknowledgementRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeSafeError(w, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	if err := request.ValidateFor(turnID); err != nil {
+		writeSafeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.ledger.AcknowledgeTurnSettlement(
+		r.Context(), string(turnID), request.RequestDigest, request.TerminalReceiptDigest,
+	); err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrNotFound):
+			writeSafeError(w, http.StatusNotFound, "turn not found")
+		case errors.Is(err, ledger.ErrSettlementAcknowledgementMismatch):
+			writeSafeError(w, http.StatusConflict, "settlement acknowledgement does not match durable evidence")
+		default:
+			writeSafeError(w, http.StatusServiceUnavailable, "failed to acknowledge durable turn settlement")
+		}
+		return
+	}
+	if err := s.reclaimSettledTurns(r.Context()); err != nil {
+		s.setAdmissionLedgerError(err)
+		writeSafeError(w, http.StatusServiceUnavailable, "failed to reclaim settled wrapper turns")
+		return
+	}
+	harness.WriteJSON(w, http.StatusOK, harness.TurnSettlementAcknowledgementResponse{
+		Version:               harness.ProtocolVersion,
+		TurnID:                request.TurnID,
+		RequestDigest:         request.RequestDigest,
 		TerminalReceiptDigest: request.TerminalReceiptDigest,
 		Acknowledged:          true,
 	})

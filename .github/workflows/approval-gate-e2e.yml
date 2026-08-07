@@ -56,7 +56,8 @@ jobs:
     env:
       KIND_CLUSTER: orka-approval-gate-e2e
       KIND_VERSION: v0.31.0
-      E2E_GO_TEST_TIMEOUT: 20m
+      E2E_EPHEMERAL_CLUSTER: "true"
+      E2E_GO_TEST_TIMEOUT: 30m
       E2E_GINKGO_FOCUS: Human Approval Gate
     steps:
       - name: Clone the code

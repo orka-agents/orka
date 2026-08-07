@@ -22,10 +22,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -100,18 +102,35 @@ type agentExecutionSnapshotToolPolicy struct {
 // snapshot; the exact Secret UID/resourceVersion is verified again before the
 // first executor side effect.
 type agentExecutionSnapshotHarnessV1 struct {
-	Endpoint                  string                            `json:"endpoint"`
-	Backend                   string                            `json:"backend"`
-	RuntimeName               string                            `json:"runtimeName"`
-	RuntimeAuthOnly           bool                              `json:"runtimeAuthOnly,omitempty"`
-	AuthSecretNamespace       string                            `json:"authSecretNamespace"`
-	AuthSecretName            string                            `json:"authSecretName"`
-	AuthSecretKey             string                            `json:"authSecretKey"`
-	AuthSecretUID             string                            `json:"authSecretUID"`
-	AuthSecretResourceVersion string                            `json:"authSecretResourceVersion"`
-	DuplicateSafe             bool                              `json:"duplicateSafe"`
-	SessionName               string                            `json:"sessionName"`
-	CredentialRefs            []agentExecutionSnapshotSecretRef `json:"credentialRefs,omitempty"`
+	Endpoint                  string                                           `json:"endpoint"`
+	Backend                   string                                           `json:"backend"`
+	RuntimeName               string                                           `json:"runtimeName"`
+	RuntimeAuthOnly           bool                                             `json:"runtimeAuthOnly,omitempty"`
+	AuthSecretNamespace       string                                           `json:"authSecretNamespace"`
+	AuthSecretName            string                                           `json:"authSecretName"`
+	AuthSecretKey             string                                           `json:"authSecretKey"`
+	AuthSecretUID             string                                           `json:"authSecretUID"`
+	AuthSecretResourceVersion string                                           `json:"authSecretResourceVersion"`
+	DuplicateSafe             bool                                             `json:"duplicateSafe"`
+	SessionName               string                                           `json:"sessionName"`
+	SessionBootstrap          *agentExecutionSnapshotHarnessV1SessionBootstrap `json:"sessionBootstrap,omitempty"`
+	CredentialRefs            []agentExecutionSnapshotSecretRef                `json:"credentialRefs,omitempty"`
+}
+
+// agentExecutionSnapshotHarnessV1SessionBootstrap freezes the canonical
+// transcript suffix used to give a fresh v1 CLI process conversation context.
+// The rendered JSONL is kept inside the encrypted, content-addressed snapshot
+// so dispatch and recovery never re-read mutable transcript state.
+type agentExecutionSnapshotHarnessV1SessionBootstrap struct {
+	SchemaVersion   int    `json:"schemaVersion"`
+	SessionUID      string `json:"sessionUID"`
+	ControlVersion  int64  `json:"controlVersion"`
+	LeaseGeneration int64  `json:"leaseGeneration"`
+	Artifact        string `json:"artifact"`
+	Digest          string `json:"digest"`
+	MessageCount    uint32 `json:"messageCount"`
+	TotalMessages   int    `json:"totalMessages"`
+	Truncated       bool   `json:"truncated,omitempty"`
 }
 
 type agentExecutionSnapshotSecretRef struct {
@@ -625,6 +644,9 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 	}
 	if !current.DeletionTimestamp.IsZero() {
 		return nil, fmt.Errorf("task is deleting; a deleting task may be classified only for cleanup and never dispatches")
+	}
+	if !controllerutil.ContainsFinalizer(current, labels.TaskFinalizer) {
+		return nil, errors.New("task cleanup finalizer is missing; refusing to persist an executable binding")
 	}
 	if candidate.binding.ContractVersion == corev1alpha1.AgentRuntimeContractHarnessV1 {
 		if err := r.validateLiveHarnessV1PolicyBinding(ctx, reader, current, &candidate.binding); err != nil {

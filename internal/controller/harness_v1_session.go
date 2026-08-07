@@ -49,6 +49,11 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 	if name == "" {
 		return store.ValidationErrorf("harness v1 SessionRef name is required")
 	}
+	if verified.body.HarnessV1 == nil || verified.body.HarnessV1.SessionName != name ||
+		verified.body.HarnessV1.SessionBootstrap == nil {
+		return fmt.Errorf("%w: frozen harness v1 Session identity is incomplete", store.ErrConflict)
+	}
+	bootstrap := verified.body.HarnessV1.SessionBootstrap
 	transcriptBackedPrompt := ref.PromptIncluded && strings.TrimSpace(ref.ThroughMessageID) != ""
 	if !ref.Create && !transcriptBackedPrompt {
 		if _, err := d.Sessions.controls.GetSessionControl(ctx, task.Namespace, name); err != nil {
@@ -66,11 +71,15 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 		Namespace:                 task.Namespace,
 		SessionName:               name,
 		SessionType:               sessionType,
+		ExpectedSessionUID:        bootstrap.SessionUID,
 		RequireExistingTranscript: transcriptBackedPrompt && !ref.Create,
 		Fence:                     fence,
 		CreatedAt:                 time.Now().UTC(),
 	})
 	if err != nil {
+		return err
+	}
+	if err := validateFrozenHarnessV1SessionControl(bootstrap, control, task, attempt); err != nil {
 		return err
 	}
 	expiresAt := time.Now().UTC().Add(defaultHarnessV1TurnTimeout + time.Minute)
@@ -79,6 +88,13 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 	}
 	lineageConfigDigest, err := agentExecutionLineageConfigDigest(verified.binding)
 	if err != nil {
+		return err
+	}
+	control, err = d.Sessions.controls.GetSessionControl(ctx, task.Namespace, name)
+	if err != nil {
+		return fmt.Errorf("recheck frozen harness v1 Session control before lease acquisition: %w", err)
+	}
+	if err := validateFrozenHarnessV1SessionControl(bootstrap, control, task, attempt); err != nil {
 		return err
 	}
 	lease, err := d.Sessions.AcquireMutationLease(ctx, ACPAcquireSessionLeaseRequest{
@@ -112,6 +128,65 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 		OpenedAt:             time.Now().UTC(),
 	})
 	return err
+}
+
+func validateFrozenHarnessV1SessionControl(
+	bootstrap *agentExecutionSnapshotHarnessV1SessionBootstrap,
+	control *store.SessionControl,
+	task *corev1alpha1.Task,
+	attempt *store.HarnessV1Attempt,
+) error {
+	if bootstrap == nil || control == nil || task == nil || attempt == nil ||
+		control.SessionUID != bootstrap.SessionUID || control.Availability != store.SessionAvailable {
+		return fmt.Errorf("%w: current harness v1 Session control does not match the frozen available identity", store.ErrConflict)
+	}
+	if attempt.Attempt < 1 {
+		return fmt.Errorf("%w: harness v1 Session attempt number must be positive", store.ErrConflict)
+	}
+	initialVersion := bootstrap.ControlVersion
+	if bootstrap.ControlVersion == 0 {
+		initialVersion = 1
+	}
+	priorAttempts := int64(attempt.Attempt - 1)
+	expectedVersion := initialVersion + 2*priorAttempts
+	expectedGeneration := bootstrap.LeaseGeneration + priorAttempts
+	if priorAttempts > 0 {
+		priorTurnID, err := store.SessionTurnKey{
+			SessionUID:      bootstrap.SessionUID,
+			LeaseGeneration: expectedGeneration,
+			TaskUID:         string(task.UID),
+			Attempt:         priorAttempts,
+			PromptID:        string(harnessV1TurnID(task, attempt.Attempt-1)),
+		}.CanonicalID()
+		if err != nil {
+			return err
+		}
+		if control.LastOperationID != "finalize:"+priorTurnID {
+			return fmt.Errorf("%w: harness v1 Session retry does not follow its own finalized turn", store.ErrConflict)
+		}
+	}
+	if control.Lease == nil {
+		if control.Version == expectedVersion && control.LeaseGeneration == expectedGeneration {
+			return nil
+		}
+		return fmt.Errorf("%w: harness v1 Session control advanced after transcript freeze", store.ErrConflict)
+	}
+	expectedGeneration++
+	expectedDigest, err := acpSessionMutationLeaseDigest(
+		bootstrap.SessionUID, expectedGeneration, string(task.UID), int64(attempt.Attempt),
+		attempt.TurnID, attempt.RequestDigest,
+	)
+	if err != nil {
+		return err
+	}
+	lease := control.Lease
+	if control.Version != expectedVersion+1 || control.LeaseGeneration != expectedGeneration ||
+		lease.Generation != expectedGeneration || lease.TaskUID != string(task.UID) ||
+		lease.Attempt != int64(attempt.Attempt) || lease.PromptID != attempt.TurnID ||
+		lease.RequestDigest != expectedDigest {
+		return fmt.Errorf("%w: harness v1 Session is leased by stale or foreign work", store.ErrConflict)
+	}
+	return nil
 }
 
 func (d *HarnessV1Dispatcher) recoverHarnessV1TaskSession(

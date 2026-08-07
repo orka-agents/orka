@@ -10,9 +10,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -314,6 +316,156 @@ func TestLedgerTerminalOutputAcknowledgementReclaimsPayloadAndIsIdempotent(t *te
 	}
 }
 
+func TestLedgerSettlementAcknowledgementFencesAndReclaimsAfterRetention(t *testing.T) {
+	ctx := context.Background()
+	l, _ := openTestLedger(t)
+	requestDigest := "sha256:" + strings.Repeat("a", 64)
+	if _, _, err := l.AdmitTurn(
+		ctx, "turn-settled", "task-uid", 1, requestDigest, testRuntimeSessionID, testCorrelationID,
+	); err != nil {
+		t.Fatalf("admit terminal turn: %v", err)
+	}
+	if err := l.MarkTurnAccepted(ctx, "turn-settled"); err != nil {
+		t.Fatalf("accept terminal turn: %v", err)
+	}
+	receipt := []byte(`{"outcome":"succeeded","outputRef":"cliwrapper-result-v1"}`)
+	receiptDigest := ReceiptDigest(receipt)
+	output := &TurnOutput{Ref: "cliwrapper-result-v1", Data: []byte("durable result")}
+	if err := l.RecordTurnTerminalWithOutput(ctx, "turn-settled", receipt, false, output); err != nil {
+		t.Fatalf("record terminal turn: %v", err)
+	}
+	if err := l.AcknowledgeTurnSettlement(
+		ctx, "turn-settled", requestDigest, receiptDigest,
+	); !errors.Is(err, ErrSettlementAcknowledgementMismatch) {
+		t.Fatalf("settlement before output acknowledgement error = %v, want mismatch", err)
+	}
+	if err := l.AcknowledgeTurnOutput(ctx, "turn-settled", output.Ref, receiptDigest); err != nil {
+		t.Fatalf("acknowledge terminal output: %v", err)
+	}
+	if err := l.AcknowledgeTurnSettlement(
+		ctx, "turn-settled", "sha256:"+strings.Repeat("b", 64), receiptDigest,
+	); !errors.Is(err, ErrSettlementAcknowledgementMismatch) {
+		t.Fatalf("wrong request digest error = %v, want mismatch", err)
+	}
+	if err := l.AcknowledgeTurnSettlement(
+		ctx, "turn-settled", requestDigest, "sha256:"+strings.Repeat("c", 64),
+	); !errors.Is(err, ErrSettlementAcknowledgementMismatch) {
+		t.Fatalf("wrong receipt digest error = %v, want mismatch", err)
+	}
+	if err := l.AcknowledgeTurnSettlement(ctx, "turn-settled", requestDigest, receiptDigest); err != nil {
+		t.Fatalf("acknowledge settlement: %v", err)
+	}
+	if err := l.AcknowledgeTurnSettlement(ctx, "turn-settled", requestDigest, receiptDigest); err != nil {
+		t.Fatalf("idempotent settlement acknowledgement: %v", err)
+	}
+
+	if _, _, err := l.AdmitTurn(
+		ctx, "turn-unsettled", "task-uid", 2, requestDigest, "runtime-session-2", "correlation-2",
+	); err != nil {
+		t.Fatalf("admit unsettled turn: %v", err)
+	}
+	if reclaimed, err := l.ReclaimSettledTurnsBefore(ctx, time.Now().UTC().Add(-time.Hour), 10); err != nil || reclaimed != 0 {
+		t.Fatalf("reclaim before retention = %d, %v, want 0", reclaimed, err)
+	}
+	if _, err := l.db.ExecContext(ctx, `UPDATE turn_admissions SET settled_at = ? WHERE turn_id = ?`,
+		time.Now().UTC().Add(-2*time.Hour), "turn-settled"); err != nil {
+		t.Fatalf("age settled turn fixture: %v", err)
+	}
+	if reclaimed, err := l.ReclaimSettledTurnsBefore(ctx, time.Now().UTC().Add(-time.Hour), 10); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim after retention = %d, %v, want 1", reclaimed, err)
+	}
+	if _, err := l.GetTurn(ctx, "turn-settled"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetTurn(reclaimed) error = %v, want ErrNotFound", err)
+	}
+	if _, err := l.GetTurn(ctx, "turn-unsettled"); err != nil {
+		t.Fatalf("unsettled turn was reclaimed: %v", err)
+	}
+	var acknowledgementRows int
+	if err := l.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM turn_output_acknowledgements WHERE turn_id = ?`,
+		"turn-settled").Scan(&acknowledgementRows); err != nil {
+		t.Fatalf("count reclaimed acknowledgement rows: %v", err)
+	}
+	if acknowledgementRows != 0 {
+		t.Fatalf("acknowledgement rows after parent reclamation = %d, want 0", acknowledgementRows)
+	}
+}
+
+func TestLedgerRejectedSettlementRequiresEmptyReceiptDigest(t *testing.T) {
+	ctx := context.Background()
+	l, _ := openTestLedger(t)
+	requestDigest := "sha256:" + strings.Repeat("d", 64)
+	if _, _, err := l.AdmitTurn(
+		ctx, "turn-rejected", "task-uid", 1, requestDigest, testRuntimeSessionID, testCorrelationID,
+	); err != nil {
+		t.Fatalf("admit rejected turn: %v", err)
+	}
+	if err := l.MarkTurnRejected(ctx, "turn-rejected", "not accepted"); err != nil {
+		t.Fatalf("reject turn: %v", err)
+	}
+	if err := l.AcknowledgeTurnSettlement(
+		ctx, "turn-rejected", requestDigest, "sha256:"+strings.Repeat("e", 64),
+	); !errors.Is(err, ErrSettlementAcknowledgementMismatch) {
+		t.Fatalf("rejected settlement with receipt error = %v, want mismatch", err)
+	}
+	if err := l.AcknowledgeTurnSettlement(ctx, "turn-rejected", requestDigest, ""); err != nil {
+		t.Fatalf("acknowledge rejected settlement: %v", err)
+	}
+}
+
+func TestLedgerOpenRestrictsDirectoryDatabaseAndSidecarPermissions(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "ledger-private")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatalf("create permissive ledger directory: %v", err)
+	}
+	path := filepath.Join(parent, "ledger.db")
+	if err := os.WriteFile(path, nil, 0o666); err != nil {
+		t.Fatalf("create permissive ledger file: %v", err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatalf("make ledger file permissive: %v", err)
+	}
+	l, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+	if _, _, err := l.AdmitTurn(
+		context.Background(), "turn-permissions", "task-uid", 1,
+		"sha256:"+strings.Repeat("f", 64), testRuntimeSessionID, testCorrelationID,
+	); err != nil {
+		t.Fatalf("write ledger to create sidecars: %v", err)
+	}
+	for candidate, wantMode := range map[string]os.FileMode{
+		parent:        0o700,
+		path:          0o600,
+		path + "-wal": 0o600,
+		path + "-shm": 0o600,
+	} {
+		info, err := os.Lstat(candidate)
+		if err != nil {
+			t.Fatalf("stat secured ledger path %s: %v", candidate, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != wantMode {
+			t.Fatalf("ledger path %s mode = %v, want %04o and no symlink", candidate, info.Mode(), wantMode)
+		}
+	}
+}
+
+func TestLedgerOpenRejectsSymlinkDatabase(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target.db")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatalf("create ledger symlink target: %v", err)
+	}
+	path := filepath.Join(root, "ledger.db")
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("Open(symlink) error = %v, want regular-file rejection", err)
+	}
+}
+
 //nolint:gocyclo // One test keeps the full close, drain, prepare, restart, and activation protocol in order.
 func TestLedgerRolloverRequiresCompletedDrainAndExactGeneration(t *testing.T) {
 	ctx := context.Background()
@@ -421,6 +573,37 @@ func TestLedgerAbortRolloverReopensOnlyExactCurrentGeneration(t *testing.T) {
 	}
 	if closed, _, err := l.AdmissionClosed(ctx); err != nil || !closed {
 		t.Fatalf("bare-close abort changed admission: closed=%v err=%v", closed, err)
+	}
+}
+
+func TestLedgerRetirementMarkerAllowsLaterReactivation(t *testing.T) {
+	ctx := context.Background()
+	l, _ := openTestLedger(t)
+	retired := retiredGenerationPrefix + strings.Repeat("a", 64)
+	if err := l.CloseAdmission(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.PrepareRollover(ctx, retired); err != nil {
+		t.Fatalf("prepare retirement: %v", err)
+	}
+	if err := l.ActivateGeneration(ctx, "1"); err != nil {
+		t.Fatalf("reactivate same enabled generation after retirement: %v", err)
+	}
+	if closed, _, err := l.AdmissionClosed(ctx); err != nil || closed {
+		t.Fatalf("same-generation reactivation closed=%v err=%v, want open", closed, err)
+	}
+
+	if err := l.CloseAdmission(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.PrepareRollover(ctx, retired); err != nil {
+		t.Fatalf("prepare second retirement: %v", err)
+	}
+	if err := l.ActivateGeneration(ctx, "2"); err != nil {
+		t.Fatalf("activate changed generation after retirement: %v", err)
+	}
+	if generation, err := l.Generation(ctx); err != nil || generation != "2" {
+		t.Fatalf("generation after retirement reactivation = %q, %v, want 2", generation, err)
 	}
 }
 

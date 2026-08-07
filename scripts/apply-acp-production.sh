@@ -51,6 +51,7 @@ namespace_resource="${work_dir}/namespace.json"
 runtime_config="${work_dir}/runtime-images-configmap.json"
 execution_control="${work_dir}/agent-execution-control.json"
 existing_control="${work_dir}/existing-agent-execution-control.json"
+admission_runtime_manifest="${work_dir}/admission-runtime-manifest.json"
 workload_manifest="${work_dir}/workload-manifest.json"
 snapshot_secret="${work_dir}/agent-execution-snapshot-key.json"
 snapshot_key="${work_dir}/snapshot-key"
@@ -100,7 +101,18 @@ jq -sc '
   | {
       apiVersion: "v1",
       kind: "List",
-      items: map(select(.apiVersion != "core.orka.ai/v1alpha1" or .kind != "AgentExecutionControl"))
+      items: map(select(.metadata.labels["app.kubernetes.io/component"] == "admission"))
+    }
+' "${rendered_json}" >"${admission_runtime_manifest}"
+jq -sc '
+  [.[] | if .kind == "List" then .items[] else . end]
+  | {
+      apiVersion: "v1",
+      kind: "List",
+      items: map(select(
+        (.apiVersion != "core.orka.ai/v1alpha1" or .kind != "AgentExecutionControl") and
+        .metadata.labels["app.kubernetes.io/component"] != "admission"
+      ))
     }
 ' "${rendered_json}" >"${workload_manifest}"
 jq -esc '
@@ -410,18 +422,20 @@ EOF_ADMISSION_HANDLERS
   stop_admission_proxy
 }
 
-# Establish every workload prerequisite before applying the Deployment that
-# references it. Every retry repeats these idempotent phases, so interruption
-# after any apply still converges on the desired generation without rotating an
-# existing snapshot key or recreating the durable execution-control singleton.
+# Establish every workload prerequisite, then activate the independent
+# admission plane before rolling the coexistence controller. Every retry repeats
+# these idempotent phases, so interruption after any apply still converges on the
+# desired generation without rotating an existing snapshot key or recreating the
+# durable execution-control singleton.
 "${kubectl}" apply -f "${namespace_resource}"
 validate_admission_tls_secret
 ensure_snapshot_secret
 "${kubectl}" apply -f "${runtime_config}"
 ensure_execution_control
-"${kubectl}" apply -f "${workload_manifest}"
+"${kubectl}" apply -f "${admission_runtime_manifest}"
 wait_for_admission_endpoints
-wait_for_execution_control
 smoke_admission_handlers
 render_admission_webhooks
 "${kubectl}" apply -f "${admission_webhooks_manifest}"
+"${kubectl}" apply -f "${workload_manifest}"
+wait_for_execution_control

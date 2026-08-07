@@ -530,6 +530,20 @@ if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConf
       (.failurePolicy == "Fail" and (.clientConfig.caBundle | length > 0))] | all) and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") |
       .metadata.annotations["cert-manager.io/inject-ca-from-secret"]] | all(. == null))
+    and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "taskexecutionauthority.core.orka.ai") | .matchConditions[] |
+      select(.name == "route-unless-controller-cleanup-safe") | .expression |
+      select(contains("orka.ai/cleanup") and
+        contains("oldObject.metadata.?finalizers.orValue([]).filter") and
+        contains("object.spec == oldObject.spec") and
+        contains("object.?status.orValue({}) == oldObject.?status.orValue({})"))] | length) == 1
+    and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "sessionresolution.core.orka.ai") | .matchConditions[] |
+      select(.name == "resolution-reference-introduced") | .expression |
+      select(contains("object.?status.?agentExecutionResolutionRef.hasValue()") and
+        contains("!oldObject.?status.?agentExecutionResolutionRef.hasValue()"))] | length) == 1
   ' "$3" >/dev/null || { echo 'admission policy wave was not fail-closed and CA-pinned' >&2; exit 40; }
   if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "policies" && ! -e "${FAKE_KUBE_STATE}/failed-policies" ]]; then
     : >"${FAKE_KUBE_STATE}/failed-policies"
@@ -568,6 +582,29 @@ if [[ -n "${namespace_name}" && -z "${config_name}" && -z "${deployment_ref}" ]]
   exit 0
 fi
 
+if [[ "${admission_deployments}" != "0" || "${admission_services}" != "0" ]]; then
+  [[ "${admission_deployments}" == "1" && "${admission_services}" == "1" ]] || {
+    echo 'admission runtime wave was incomplete' >&2
+    exit 42
+  }
+  [[ -z "${deployment_ref}" ]] || {
+    echo 'admission runtime wave included the coexistence controller' >&2
+    exit 43
+  }
+  [[ -e "${FAKE_KUBE_STATE}/namespace" ]] || {
+    echo 'admission runtime applied before namespace' >&2
+    exit 44
+  }
+  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "admission" && ! -e "${FAKE_KUBE_STATE}/failed-admission" ]]; then
+    : >"${FAKE_KUBE_STATE}/failed-admission"
+    printf 'fail-admission:orka-admission\n' >>"${FAKE_KUBE_LOG}"
+    exit 45
+  fi
+  : >"${FAKE_KUBE_STATE}/admission-runtime"
+  printf 'admission-runtime:orka-admission\n' >>"${FAKE_KUBE_LOG}"
+  exit 0
+fi
+
 if [[ -z "${deployment_ref}" ]]; then
   [[ -n "${config_name}" ]] || { echo 'runtime ConfigMap apply was not identifiable' >&2; exit 1; }
   [[ -e "${FAKE_KUBE_STATE}/namespace" ]] || { echo 'runtime ConfigMap applied before namespace' >&2; exit 17; }
@@ -602,16 +639,19 @@ fi
   echo 'Deployment applied before AgentExecutionControl' >&2
   exit 31
 }
-[[ "${admission_deployments}" == "1" && "${admission_services}" == "1" ]] || {
-  echo 'workload wave omitted the dedicated admission runtime or Service' >&2
-  exit 42
+[[ -e "${FAKE_KUBE_STATE}/admission-runtime" ]] || {
+  echo 'coexistence controller applied before the admission runtime' >&2
+  exit 46
+}
+[[ -e "${FAKE_KUBE_STATE}/admission-policies" ]] || {
+  echo 'coexistence controller applied before fail-closed admission protections' >&2
+  exit 47
 }
 if jq -e 'if .kind == "List" then any(.items[]?; .kind == "AgentExecutionControl") else .kind == "AgentExecutionControl" end' "$3" >/dev/null; then
   echo 'workload wave reapplied AgentExecutionControl bootstrap modes' >&2
   exit 33
 fi
 printf '%s\n' "${deployment_ref}" >"${FAKE_KUBE_STATE}/deployment-ref"
-: >"${FAKE_KUBE_STATE}/admission-runtime"
 printf 'full:%s\n' "${deployment_ref}" >>"${FAKE_KUBE_LOG}"
 EOF_FAKE_KUBECTL
 chmod +x "${fake_bin}/kubectl"
@@ -677,7 +717,7 @@ export PATH="${fake_bin}:${PATH}"
 
 assert_converged() {
   local state_dir="$1"
-  local reference
+  local admission_line rollout_line smoke_line policies_line controller_line reference
   reference="$(cat "${state_dir}/deployment-ref")"
   [[ -e "${state_dir}/namespace" ]]
   [[ -e "${state_dir}/configmaps/${reference}" ]]
@@ -692,6 +732,15 @@ assert_converged() {
   [[ "$(grep -c '^control-create:cluster$' "${state_dir}/apply.log")" == "1" ]]
   [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "9" ]]
   [[ "$(grep -c '^policies:orka-admission$' "${state_dir}/apply.log")" == "1" ]]
+  admission_line="$(grep -n '^admission-runtime:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
+  rollout_line="$(grep -n '^rollout:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
+  smoke_line="$(grep -n '^smoke:' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
+  policies_line="$(grep -n '^policies:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
+  controller_line="$(grep -n '^full:' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
+  (( admission_line < rollout_line ))
+  (( rollout_line < smoke_line ))
+  (( smoke_line < policies_line ))
+  (( policies_line < controller_line ))
 }
 
 run_apply_scenario() {
@@ -717,6 +766,7 @@ run_apply_scenario ""
 run_apply_scenario namespace
 run_apply_scenario config
 run_apply_scenario control
+run_apply_scenario admission
 run_apply_scenario full
 run_apply_scenario rollout
 run_apply_scenario endpoints
@@ -822,4 +872,4 @@ done
 
 grep -F 'scripts/apply-acp-production.sh' "${root}/Makefile" >/dev/null
 
-printf '%s\n' 'ok - ACP deployment preserves modes and keys, rolls two admission replicas, smokes every handler, pins the CA, and installs fail-closed policies only after readiness'
+printf '%s\n' 'ok - ACP deployment preserves modes and keys, activates fail-closed admission after readiness, and only then rolls the coexistence controller'

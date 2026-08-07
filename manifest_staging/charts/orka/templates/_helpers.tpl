@@ -154,6 +154,8 @@ spec:
           value: /var/lib/orka/harness-v1/admission-ledger.db
         - name: ORKA_HARNESS_WRAPPER_LEDGER_GENERATION
           value: {{ $generation | quote }}
+        - name: ORKA_HARNESS_WRAPPER_LEDGER_RETENTION
+          value: {{ $root.Values.harnessV1.ledger.retention | quote }}
         - name: ORKA_ALLOW_BASH
           value: "true"
         - name: ORKA_HARNESS_WRAPPER_CHILD_UID
@@ -570,6 +572,12 @@ remain outside rendered Helm manifests.
 {{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.ledger.size)) -}}
 {{- fail "harnessV1.ledger.size is required when harnessV1.enabled=true" -}}
+{{- end -}}
+{{- if not (trim (default "" .Values.harnessV1.ledger.retention)) -}}
+{{- fail "harnessV1.ledger.retention is required when harnessV1.enabled=true" -}}
+{{- end -}}
+{{- if not (regexMatch "^([1-9][0-9]*(ns|us|µs|ms|s|m|h))+$" (trim (default "" .Values.harnessV1.ledger.retention))) -}}
+{{- fail "harnessV1.ledger.retention must be a positive Go duration when harnessV1.enabled=true" -}}
 {{- end -}}
 {{- if not .Values.store.persistence.enabled -}}
 {{- fail "store.persistence.enabled must be true when harnessV1.enabled=true" -}}

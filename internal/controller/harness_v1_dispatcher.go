@@ -65,6 +65,7 @@ type harnessV1ProtocolClient interface {
 	StreamFrames(context.Context, harness.HarnessTurnID, int64, func(harness.HarnessEventFrame) error) error
 	FetchTurnOutput(context.Context, harness.HarnessTurnID, string) ([]byte, error)
 	AcknowledgeTurnOutput(context.Context, harness.TurnOutputAcknowledgementRequest) error
+	AcknowledgeTurnSettlement(context.Context, harness.TurnSettlementAcknowledgementRequest) error
 	CancelTurn(context.Context, harness.CancelTurnRequest) (*harness.CancelTurnResponse, error)
 }
 
@@ -509,6 +510,10 @@ func buildHarnessV1StartTurnRequest(
 		}
 		timeout = parsed
 	}
+	inputPrompt, err := frozenHarnessV1InputPrompt(verified.body)
+	if err != nil {
+		return harness.StartTurnRequest{}, err
+	}
 	request := harness.StartTurnRequest{
 		Version: harness.ProtocolVersion, Namespace: task.Namespace, TaskName: task.Name,
 		SessionName:       verified.body.HarnessV1.SessionName,
@@ -517,7 +522,7 @@ func buildHarnessV1StartTurnRequest(
 		CorrelationID:     attempt.CorrelationID,
 		Deadline:          verified.binding.BoundAt.Time.UTC().Add(timeout),
 		AuthIdentity:      harness.AuthIdentity{Subject: "orka-task:" + attempt.TaskUID},
-		Input:             harness.TurnInput{Prompt: verified.body.Prompt, Env: env},
+		Input:             harness.TurnInput{Prompt: inputPrompt, Env: env},
 		ToolExecutionMode: harness.ToolExecutionModeObserved,
 		Metadata: map[string]string{
 			harness.MetadataTaskUID:             attempt.TaskUID,
@@ -568,6 +573,27 @@ func buildHarnessV1StartTurnRequest(
 		return harness.StartTurnRequest{}, errors.New("reconstructed harness v1 request digest does not match the durable attempt")
 	}
 	return request, nil
+}
+
+func frozenHarnessV1InputPrompt(body agentExecutionSnapshotBody) (string, error) {
+	if body.HarnessV1 == nil {
+		return "", errors.New("frozen harness v1 target metadata is required")
+	}
+	bootstrap := body.HarnessV1.SessionBootstrap
+	if bootstrap == nil || bootstrap.MessageCount == 0 {
+		return body.Prompt, nil
+	}
+	if bootstrap.Artifact == "" {
+		return "", errors.New("frozen harness v1 Session bootstrap artifact is required")
+	}
+	bootstrapText := bootstrapPromptText(&ACPBootstrapTranscript{
+		Artifact:     []byte(bootstrap.Artifact),
+		MessageCount: bootstrap.MessageCount,
+	})
+	if bootstrapText == "" {
+		return "", errors.New("frozen harness v1 Session bootstrap is invalid")
+	}
+	return bootstrapText + "Orka current user prompt:\n" + body.Prompt, nil
 }
 
 func frozenHarnessV1ToolPolicy(
@@ -1255,7 +1281,10 @@ func (d *HarnessV1Dispatcher) settleTerminalFrameWithReceiptDigest(
 				store.HarnessV1AttemptSucceeded, "Succeeded", receiptDigest, frame.Completed.OutputRef,
 			)
 		}
-		return d.finishAttempt(ctx, task, attempt, fence, store.HarnessV1AttemptSucceeded, "Succeeded", receiptDigest)
+		return d.finishAttemptWithProtocol(
+			ctx, task, protocolClient, request, attempt, fence,
+			store.HarnessV1AttemptSucceeded, "Succeeded", receiptDigest,
+		)
 	case harness.FrameTurnFailed:
 		reason := harnessV1ReasonFailed
 		if frame.Failed != nil && frame.Failed.Retryable {
@@ -1274,9 +1303,15 @@ func (d *HarnessV1Dispatcher) settleTerminalFrameWithReceiptDigest(
 				store.HarnessV1AttemptFailed, reason, receiptDigest, frame.Failed.OutputRef,
 			)
 		}
-		return d.finishAttempt(ctx, task, attempt, fence, store.HarnessV1AttemptFailed, reason, receiptDigest)
+		return d.finishAttemptWithProtocol(
+			ctx, task, protocolClient, request, attempt, fence,
+			store.HarnessV1AttemptFailed, reason, receiptDigest,
+		)
 	case harness.FrameTurnCancelled:
-		return d.finishAttempt(ctx, task, attempt, fence, store.HarnessV1AttemptCancelled, harnessV1ReasonCancelled, receiptDigest)
+		return d.finishAttemptWithProtocol(
+			ctx, task, protocolClient, request, attempt, fence,
+			store.HarnessV1AttemptCancelled, harnessV1ReasonCancelled, receiptDigest,
+		)
 	default:
 		return d.markOutcomeUnknown(ctx, task, attempt, fence, harnessV1ReasonProtocolViolation)
 	}
@@ -1392,6 +1427,23 @@ func (d *HarnessV1Dispatcher) finishAttempt(
 	return d.reconcileTerminalAttempt(ctx, task, updated, fence)
 }
 
+func (d *HarnessV1Dispatcher) finishAttemptWithProtocol(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	protocolClient harnessV1ProtocolClient,
+	request harness.StartTurnRequest,
+	attempt *store.HarnessV1Attempt,
+	fence store.ControllerEpochFence,
+	target store.HarnessV1AttemptState,
+	reason, receiptDigest string,
+) error {
+	updated, err := d.finishAttemptDurably(ctx, attempt, fence, target, reason, receiptDigest)
+	if err != nil {
+		return err
+	}
+	return d.reconcileTerminalAttemptWithProtocol(ctx, task, updated, fence, protocolClient, &request)
+}
+
 func (d *HarnessV1Dispatcher) finishAttemptWithOutputAcknowledgement(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1409,7 +1461,7 @@ func (d *HarnessV1Dispatcher) finishAttemptWithOutputAcknowledgement(
 	if err := d.acknowledgeTerminalOutput(ctx, task, protocolClient, request, updated, outputRef); err != nil {
 		return err
 	}
-	return d.reconcileTerminalAttempt(ctx, task, updated, fence)
+	return d.reconcileTerminalAttemptWithProtocol(ctx, task, updated, fence, protocolClient, &request)
 }
 
 func (d *HarnessV1Dispatcher) finishAttemptDurably(
@@ -1572,6 +1624,17 @@ func (d *HarnessV1Dispatcher) reconcileTerminalAttempt(
 	attempt *store.HarnessV1Attempt,
 	fence store.ControllerEpochFence,
 ) error {
+	return d.reconcileTerminalAttemptWithProtocol(ctx, task, attempt, fence, nil, nil)
+}
+
+func (d *HarnessV1Dispatcher) reconcileTerminalAttemptWithProtocol(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.HarnessV1Attempt,
+	fence store.ControllerEpochFence,
+	protocolClient harnessV1ProtocolClient,
+	request *harness.StartTurnRequest,
+) error {
 	retryPolicy, err := d.frozenRetryPolicy(ctx, attempt)
 	if err != nil {
 		return err
@@ -1587,11 +1650,18 @@ func (d *HarnessV1Dispatcher) reconcileTerminalAttempt(
 	if err != nil {
 		return err
 	}
+	if !retrying {
+		if err := d.settleHarnessV1RuntimeSessionRecord(ctx, task, attempt); err != nil {
+			return err
+		}
+	}
+	if err := d.acknowledgeDurableHarnessV1Settlement(
+		ctx, task, verified, attempt, protocolClient, request,
+	); err != nil {
+		return err
+	}
 	if retrying {
 		return d.createRetryAttempt(ctx, task, attempt, fence, retryPolicy)
-	}
-	if err := d.settleHarnessV1RuntimeSessionRecord(ctx, task, attempt); err != nil {
-		return err
 	}
 	if sessionSettled {
 		// The deferred outbox projection is the only terminal Task visibility
@@ -1599,6 +1669,56 @@ func (d *HarnessV1Dispatcher) reconcileTerminalAttempt(
 		return nil
 	}
 	return d.projectAttemptState(ctx, task, attempt, d.terminalMessage(attempt))
+}
+
+func (d *HarnessV1Dispatcher) acknowledgeDurableHarnessV1Settlement(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	verified *verifiedHarnessV1Execution,
+	attempt *store.HarnessV1Attempt,
+	protocolClient harnessV1ProtocolClient,
+	request *harness.StartTurnRequest,
+) error {
+	if task == nil || verified == nil || verified.body.HarnessV1 == nil || attempt == nil {
+		return errors.New("harness v1 settlement acknowledgement requires Task, execution, and attempt")
+	}
+	if attempt.Backend != string(corev1alpha1.AgentExecutionBackendHarnessWrapper) {
+		return nil
+	}
+	ledgerBackedRejection := attempt.State == store.HarnessV1AttemptRejected &&
+		attempt.TerminalReason == harnessV1ReasonRejected && attempt.TerminalReceiptDigest == ""
+	ledgerBackedTerminal := attempt.TerminalReceiptDigest != "" &&
+		(attempt.State == store.HarnessV1AttemptSucceeded || attempt.State == store.HarnessV1AttemptFailed ||
+			attempt.State == store.HarnessV1AttemptCancelled || attempt.State == store.HarnessV1AttemptOutcomeUnknown)
+	if !ledgerBackedRejection && !ledgerBackedTerminal {
+		return nil
+	}
+	var requestValue harness.StartTurnRequest
+	if protocolClient == nil || request == nil {
+		var err error
+		protocolClient, requestValue, err = d.protocolClientAndRequest(ctx, task, verified, attempt)
+		if err != nil {
+			return fmt.Errorf("build harness v1 settlement acknowledgement request: %w", err)
+		}
+	} else {
+		requestValue = *request
+	}
+	if requestValue.TurnID != harness.HarnessTurnID(attempt.TurnID) ||
+		requestValue.Metadata[harness.MetadataRequestDigest] != attempt.RequestDigest {
+		return errors.New("harness v1 settlement acknowledgement request does not match the durable attempt")
+	}
+	if err := protocolClient.AcknowledgeTurnSettlement(ctx, harness.TurnSettlementAcknowledgementRequest{
+		Version: harness.ProtocolVersion, TurnID: requestValue.TurnID,
+		RequestDigest: attempt.RequestDigest, TerminalReceiptDigest: attempt.TerminalReceiptDigest,
+	}); err != nil {
+		if ledgerBackedRejection && isHarnessV1DurableTurnNotFoundError(err) {
+			// The wrapper can reject a malformed request before durable admission.
+			// There is no ledger row to retain or acknowledge in that case.
+			return nil
+		}
+		return fmt.Errorf("acknowledge durable harness v1 turn settlement: %w", err)
+	}
+	return nil
 }
 
 func (d *HarnessV1Dispatcher) frozenRetryPolicy(

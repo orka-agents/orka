@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,11 +38,56 @@ func resolveSafeExecutable(name string) string {
 	return name
 }
 
-// FinalizeTurnResult reuses the existing worker structured-result and workspace
-// diff finalization behavior. A non-git or empty workDir falls back to the raw
-// agent output, matching workers/common.FinalizeResult semantics.
+// FinalizeTurnResult builds the bounded structured workspace result inside the
+// dedicated child identity boundary. Harness v1 workspaces never carry
+// publication authority, so finalization records a diff without committing or
+// pushing it. A non-git or empty workDir falls back to the raw agent output.
 func FinalizeTurnResult(workDir, output string) ([]byte, error) {
-	return common.FinalizeResult(workDir, output)
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return []byte(output), nil
+	}
+	if strings.TrimSpace(os.Getenv(workerenv.PushBranch)) != "" {
+		return nil, errors.New("harness v1 wrapper finalization does not permit branch publication")
+	}
+	baseSHA, err := wrapperGitOutput(workDir, "rev-parse", "HEAD")
+	if err != nil {
+		return []byte(output), nil
+	}
+	baseSHA = strings.TrimSpace(baseSHA)
+	if err := neutralizeWrapperRepoExecutableConfig(workDir); err != nil {
+		return nil, fmt.Errorf("neutralize child-owned repository executable Git configuration: %w", err)
+	}
+	if staged, err := wrapperGitOutput(workDir, "add", "-A"); err != nil {
+		return nil, fmt.Errorf("stage harness v1 workspace result: %w: %s", err, strings.TrimSpace(staged))
+	}
+	_, _ = wrapperGitOutput(workDir, "reset", "-q", "--", ".orka-artifacts", ":(glob)**/.orka-artifacts")
+	diff, err := wrapperGitOutput(
+		workDir, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("render harness v1 workspace diff: %w", err)
+	}
+	files := make([]string, 0)
+	for _, args := range [][]string{
+		{"diff", "--cached", "--name-status", "-z", "--no-ext-diff", "--no-textconv"},
+		{"diff", "--name-status", "-z", "--no-ext-diff", "--no-textconv"},
+	} {
+		if names, namesErr := wrapperGitOutput(workDir, args...); namesErr == nil {
+			files = append(files, parseWrapperDiffNameStatusPaths(names)...)
+		}
+	}
+	files = uniqueWrapperPaths(files)
+	result := &common.StructuredResult{
+		Summary: common.TruncateStructuredSummary(output),
+		BaseSHA: baseSHA,
+		HeadSHA: baseSHA,
+	}
+	if diff != "" {
+		result.Diff = diff
+		result.Files = files
+	}
+	return common.FormatStructuredResult(result)
 }
 
 // UploadTurnArtifacts reuses the existing worker artifact uploader. It is a
@@ -337,14 +383,114 @@ func setTemporaryEnv(key, value string) func() {
 	}
 }
 
+func wrapperGitOutput(dir string, args ...string) (string, error) {
+	out, err := wrapperGitCommand(dir, args...).CombinedOutput()
+	return string(out), err
+}
+
+func neutralizeWrapperRepoExecutableConfig(dir string) error {
+	raw, err := wrapperGitOutput(dir, "config", "--local", "--no-includes", "--name-only", "-z", "--list")
+	if err != nil {
+		return fmt.Errorf("list local Git configuration: %w", err)
+	}
+	for key := range strings.SplitSeq(raw, "\x00") {
+		key = strings.TrimSpace(key)
+		if key == "" || !wrapperExecutableGitConfigKey(key) {
+			continue
+		}
+		if out, err := wrapperGitOutput(
+			dir, "config", "--local", "--no-includes", "--unset-all", key,
+		); err != nil {
+			return fmt.Errorf("remove executable Git configuration %q: %w: %s", key, err, strings.TrimSpace(out))
+		}
+	}
+	return nil
+}
+
+func wrapperExecutableGitConfigKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, prefix := range []string{"alias.", "credential.", "filter.", "include.", "includeif."} {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	switch key {
+	case "core.editor", "core.fsmonitor", "core.fsmonitorhookversion", "core.hookspath",
+		"core.pager", "core.sshcommand", "diff.external", "gpg.program", "sequence.editor":
+		return true
+	}
+	return strings.HasPrefix(key, "diff.") &&
+		(strings.HasSuffix(key, ".command") || strings.HasSuffix(key, ".textconv")) ||
+		strings.HasPrefix(key, "merge.") && strings.HasSuffix(key, ".driver")
+}
+
+func parseWrapperDiffNameStatusPaths(raw string) []string {
+	parts := strings.Split(raw, "\x00")
+	paths := make([]string, 0, len(parts))
+	for index := 0; index < len(parts); {
+		status := strings.TrimSpace(parts[index])
+		index++
+		if status == "" {
+			continue
+		}
+		pathCount := 1
+		if status[0] == 'R' || status[0] == 'C' {
+			pathCount = 2
+		}
+		for range pathCount {
+			if index >= len(parts) {
+				return uniqueWrapperPaths(paths)
+			}
+			if parts[index] != "" {
+				paths = append(paths, parts[index])
+			}
+			index++
+		}
+	}
+	return uniqueWrapperPaths(paths)
+}
+
+func uniqueWrapperPaths(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	unique := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if _, exists := seen[path]; exists {
+			continue
+		}
+		seen[path] = struct{}{}
+		unique = append(unique, path)
+	}
+	return unique
+}
+
 func wrapperGitCommand(dir string, args ...string) *exec.Cmd {
 	safeDir := strings.TrimSpace(dir)
 	if abs, err := filepath.Abs(safeDir); err == nil {
 		safeDir = abs
 	}
-	gitArgs := append([]string{"-c", "safe.directory=" + safeDir, "-C", dir}, args...)
+	gitArgs := append([]string{
+		"-c", "safe.directory=" + safeDir,
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.fsmonitor=false",
+		"-c", "credential.helper=",
+		"-c", "core.askPass=",
+		"-c", "diff.external=",
+		"-c", "core.pager=cat",
+		"-C", dir,
+	}, args...)
 	cmd := exec.Command(wrapperGitBinary, gitArgs...)
-	cmd.Env = setEnv(os.Environ(), "PATH", wrapperSafeCommandPath)
+	cmd.Env = []string{
+		"GIT_ASKPASS=/bin/false",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_TERMINAL_PROMPT=0",
+		"HOME=/tmp/orka-empty-git-home",
+		"LC_ALL=C",
+		"PATH=" + wrapperSafeCommandPath,
+		"SSH_ASKPASS=/bin/false",
+		"XDG_CONFIG_HOME=/tmp/orka-empty-git-config",
+	}
 	cmd.SysProcAttr = commandSysProcAttr()
 	return cmd
 }

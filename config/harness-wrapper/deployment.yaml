@@ -51,6 +51,8 @@ spec:
               value: /var/lib/orka/harness-v1/admission-ledger.db
             - name: ORKA_HARNESS_WRAPPER_LEDGER_GENERATION
               value: "1"
+            - name: ORKA_HARNESS_WRAPPER_LEDGER_RETENTION
+              value: 720h
             - name: ORKA_ALLOW_BASH
               value: "true"
             - name: ORKA_HARNESS_WRAPPER_CHILD_UID

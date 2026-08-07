@@ -42,6 +42,7 @@ var _ = Describe("ACP Workspace Profiles", func() {
 			"metadata": {"name": %q, "namespace": %q},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 5,
 					"defaultAllowBash": false

@@ -406,6 +406,54 @@ func (r TurnOutputAcknowledgementResponse) ValidateFor(request TurnOutputAcknowl
 	return nil
 }
 
+// TurnSettlementAcknowledgementRequest proves that the controller durably
+// settled the exact wrapper request and terminal evidence. A rejected turn has
+// no terminal receipt digest; terminal and outcome-unknown turns require one.
+type TurnSettlementAcknowledgementRequest struct {
+	Version               string        `json:"version"`
+	TurnID                HarnessTurnID `json:"turnID"`
+	RequestDigest         string        `json:"requestDigest"`
+	TerminalReceiptDigest string        `json:"terminalReceiptDigest,omitempty"`
+}
+
+func (r TurnSettlementAcknowledgementRequest) ValidateFor(turnID HarnessTurnID) error {
+	if err := validateVersion(r.Version); err != nil {
+		return err
+	}
+	if err := ValidateTurnPathSegment(r.TurnID); err != nil {
+		return err
+	}
+	if r.TurnID != turnID {
+		return fmt.Errorf("turn id does not match request path")
+	}
+	if !isCanonicalSHA256Digest(r.RequestDigest) {
+		return fmt.Errorf("request digest must be a canonical sha256 digest")
+	}
+	if r.TerminalReceiptDigest != "" && !isCanonicalSHA256Digest(r.TerminalReceiptDigest) {
+		return fmt.Errorf("terminal receipt digest must be empty or a canonical sha256 digest")
+	}
+	return nil
+}
+
+type TurnSettlementAcknowledgementResponse struct {
+	Version               string        `json:"version"`
+	TurnID                HarnessTurnID `json:"turnID"`
+	RequestDigest         string        `json:"requestDigest"`
+	TerminalReceiptDigest string        `json:"terminalReceiptDigest,omitempty"`
+	Acknowledged          bool          `json:"acknowledged"`
+}
+
+func (r TurnSettlementAcknowledgementResponse) ValidateFor(request TurnSettlementAcknowledgementRequest) error {
+	if err := validateVersion(r.Version); err != nil {
+		return err
+	}
+	if !r.Acknowledged || r.TurnID != request.TurnID || r.RequestDigest != request.RequestDigest ||
+		r.TerminalReceiptDigest != request.TerminalReceiptDigest {
+		return fmt.Errorf("settlement acknowledgement does not match request")
+	}
+	return nil
+}
+
 type DurableDrainStatus struct {
 	AdmissionClosed   bool                `json:"admissionClosed"`
 	AdmissionClosedAt time.Time           `json:"admissionClosedAt,omitempty"`

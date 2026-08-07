@@ -553,6 +553,31 @@ func (c *Client) AcknowledgeTurnOutput(
 	return nil
 }
 
+// AcknowledgeTurnSettlement confirms that the controller has durably settled
+// the exact request and terminal evidence. The wrapper may reclaim the row only
+// after its configured retention period.
+func (c *Client) AcknowledgeTurnSettlement(
+	ctx context.Context,
+	request TurnSettlementAcknowledgementRequest,
+) (err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
+	if err := request.ValidateFor(request.TurnID); err != nil {
+		return safeClientError("acknowledge_turn_settlement", 0, err.Error(), err)
+	}
+	rel, err := SettlementAcknowledgementTurnPath(request.TurnID)
+	if err != nil {
+		return safeClientError("acknowledge_turn_settlement", 0, err.Error(), err)
+	}
+	var response TurnSettlementAcknowledgementResponse
+	if err := c.postJSON(ctx, rel, request, &response); err != nil {
+		return err
+	}
+	if err := response.ValidateFor(request); err != nil {
+		return safeClientError("acknowledge_turn_settlement", 0, err.Error(), err)
+	}
+	return nil
+}
+
 func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSeq int64, emit func(HarnessEventFrame) error) error {
 	if emit == nil {
 		return c.sanitizeClientError(safeClientError("stream_frames", 0, "emit callback is required"))

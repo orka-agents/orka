@@ -30,6 +30,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -72,6 +74,12 @@ var ErrNotFound = errors.New("turn record not found")
 // fenced to the output and terminal receipt durably recorded for the turn.
 var ErrOutputAcknowledgementMismatch = errors.New("turn output acknowledgement does not match durable receipt")
 
+// ErrSettlementAcknowledgementMismatch reports a controller acknowledgement
+// that is not fenced to the exact durable request and terminal evidence.
+var ErrSettlementAcknowledgementMismatch = errors.New("turn settlement acknowledgement does not match durable evidence")
+
+const retiredGenerationPrefix = "retired:"
+
 // TurnRecord is one durable admission record.
 type TurnRecord struct {
 	TurnID                string
@@ -86,6 +94,7 @@ type TurnRecord struct {
 	TerminalReceiptDigest string
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
+	SettledAt             *time.Time
 }
 
 // TurnOutput is the bounded output payload referenced by a terminal receipt.
@@ -131,10 +140,16 @@ func Open(path string) (*Ledger, error) {
 // table with the caller's deployment generation. An existing ledger keeps its
 // durable generation and still requires the explicit close/drain rollover CAS.
 func OpenWithGeneration(path, initialGeneration string) (*Ledger, error) {
-	if strings.TrimSpace(path) == "" {
+	path = strings.TrimSpace(path)
+	if path == "" {
 		return nil, fmt.Errorf("ledger path is required")
 	}
 	if err := validateGeneration(initialGeneration); err != nil {
+		return nil, err
+	}
+	var err error
+	path, err = prepareLedgerPath(path)
+	if err != nil {
 		return nil, err
 	}
 	db, err := sql.Open("sqlite", path)
@@ -145,6 +160,7 @@ func OpenWithGeneration(path, initialGeneration string) (*Ledger, error) {
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
 	for _, pragma := range []string{
+		"PRAGMA foreign_keys=ON",
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA synchronous=FULL",
@@ -158,7 +174,79 @@ func OpenWithGeneration(path, initialGeneration string) (*Ledger, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := secureLedgerFiles(path); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return &Ledger{db: db}, nil
+}
+
+func prepareLedgerPath(path string) (string, error) {
+	path = filepath.Clean(path)
+	parent := filepath.Dir(path)
+	volumeRoot := filepath.Clean(filepath.VolumeName(parent) + string(filepath.Separator))
+	if parent == "." || parent == volumeRoot {
+		return "", fmt.Errorf("wrapper admission ledger path must use a dedicated directory")
+	}
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return "", fmt.Errorf("create wrapper admission ledger directory: %w", err)
+	}
+	if err := secureLedgerPath(parent, true, 0o700); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		file, createErr := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if createErr != nil {
+			return "", fmt.Errorf("create wrapper admission ledger: %w", createErr)
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			return "", fmt.Errorf("close new wrapper admission ledger: %w", closeErr)
+		}
+	case err != nil:
+		return "", fmt.Errorf("inspect wrapper admission ledger: %w", err)
+	case info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular():
+		return "", fmt.Errorf("wrapper admission ledger must be a regular file")
+	}
+	if err := secureLedgerPath(path, false, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func secureLedgerFiles(path string) error {
+	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
+		if err := secureLedgerPath(candidate, false, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func secureLedgerPath(path string, directory bool, mode os.FileMode) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) {
+		kind := "file"
+		if directory {
+			kind = "directory"
+		}
+		return fmt.Errorf("wrapper admission ledger %s must be a non-symlink %s", path, kind)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		return fmt.Errorf("restrict wrapper admission ledger %s permissions: %w", path, err)
+	}
+	info, err = os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("verify wrapper admission ledger %s permissions: %w", path, err)
+	}
+	if info.Mode().Perm() != mode.Perm() {
+		return fmt.Errorf("wrapper admission ledger %s permissions are %04o, want %04o", path, info.Mode().Perm(), mode.Perm())
+	}
+	return nil
 }
 
 // Close closes the ledger database.
@@ -184,7 +272,8 @@ func migrate(db *sql.DB, initialGeneration string) error {
 			terminal_receipt        BLOB,
 			terminal_receipt_digest TEXT NOT NULL DEFAULT '',
 			created_at              TIMESTAMP NOT NULL,
-			updated_at              TIMESTAMP NOT NULL
+			updated_at              TIMESTAMP NOT NULL,
+			settled_at              TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_turn_admissions_unsettled
 			ON turn_admissions(state, updated_at ASC)
@@ -225,10 +314,16 @@ func migrate(db *sql.DB, initialGeneration string) error {
 	}{
 		{name: "runtime_session_id", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "correlation_id", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "settled_at", definition: "TIMESTAMP"},
 	} {
 		if err := ensureTurnAdmissionColumn(db, column.name, column.definition); err != nil {
 			return err
 		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_turn_admissions_reclaimable
+		ON turn_admissions(settled_at, updated_at ASC)
+		WHERE settled_at IS NOT NULL`); err != nil {
+		return fmt.Errorf("index reclaimable wrapper admission ledger turns: %w", err)
 	}
 	return nil
 }
@@ -582,6 +677,101 @@ func (l *Ledger) AcknowledgeTurnOutput(
 	return tx.Commit()
 }
 
+// AcknowledgeTurnSettlement records that the controller durably settled the
+// exact request and terminal evidence. Only acknowledged rows are eligible for
+// later retention-based reclamation.
+func (l *Ledger) AcknowledgeTurnSettlement(
+	ctx context.Context,
+	turnID, requestDigest, terminalReceiptDigest string,
+) error {
+	turnID = strings.TrimSpace(turnID)
+	requestDigest = strings.TrimSpace(requestDigest)
+	terminalReceiptDigest = strings.TrimSpace(terminalReceiptDigest)
+	if turnID == "" || !isCanonicalReceiptDigest(requestDigest) {
+		return fmt.Errorf("turn ID and canonical request digest are required")
+	}
+	if terminalReceiptDigest != "" && !isCanonicalReceiptDigest(terminalReceiptDigest) {
+		return fmt.Errorf("terminal receipt digest must be empty or a canonical sha256 digest")
+	}
+
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin turn settlement acknowledgement: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var state, persistedRequestDigest, persistedReceiptDigest string
+	var settledAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT state, request_digest, terminal_receipt_digest, settled_at
+		FROM turn_admissions WHERE turn_id = ?`, turnID).Scan(
+		&state, &persistedRequestDigest, &persistedReceiptDigest, &settledAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: turn %s", ErrNotFound, turnID)
+	}
+	if err != nil {
+		return fmt.Errorf("read turn settlement evidence: %w", err)
+	}
+	if persistedRequestDigest != requestDigest {
+		return fmt.Errorf("%w: turn %s", ErrSettlementAcknowledgementMismatch, turnID)
+	}
+	switch TurnState(state) {
+	case TurnRejected:
+		if terminalReceiptDigest != "" || persistedReceiptDigest != "" {
+			return fmt.Errorf("%w: turn %s", ErrSettlementAcknowledgementMismatch, turnID)
+		}
+	case TurnTerminal, TurnOutcomeUnknown:
+		if terminalReceiptDigest == "" || terminalReceiptDigest != persistedReceiptDigest {
+			return fmt.Errorf("%w: turn %s", ErrSettlementAcknowledgementMismatch, turnID)
+		}
+		var outputCount int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM turn_outputs WHERE turn_id = ?`, turnID).Scan(&outputCount); err != nil {
+			return fmt.Errorf("read unsettled terminal turn output count: %w", err)
+		}
+		if outputCount != 0 {
+			return fmt.Errorf("%w: turn %s still has unacknowledged output", ErrSettlementAcknowledgementMismatch, turnID)
+		}
+	default:
+		return fmt.Errorf("%w: turn %s is not terminal", ErrSettlementAcknowledgementMismatch, turnID)
+	}
+	if settledAt.Valid {
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE turn_admissions SET settled_at = ?
+		WHERE turn_id = ? AND settled_at IS NULL`, time.Now().UTC(), turnID); err != nil {
+		return fmt.Errorf("acknowledge turn settlement: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit turn settlement acknowledgement: %w", err)
+	}
+	return nil
+}
+
+// ReclaimSettledTurnsBefore removes a bounded batch of controller-acknowledged
+// rows only after the configured retention cutoff. Child output and
+// acknowledgement rows are deleted by the foreign-key cascade.
+func (l *Ledger) ReclaimSettledTurnsBefore(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	if cutoff.IsZero() {
+		return 0, fmt.Errorf("settled turn reclamation cutoff is required")
+	}
+	if limit < 1 || limit > 1000 {
+		return 0, fmt.Errorf("settled turn reclamation limit must be between 1 and 1000")
+	}
+	result, err := l.db.ExecContext(ctx, `DELETE FROM turn_admissions WHERE turn_id IN (
+		SELECT turn_id FROM turn_admissions
+		WHERE settled_at IS NOT NULL AND settled_at <= ?
+		ORDER BY settled_at ASC, turn_id ASC LIMIT ?
+	)`, cutoff.UTC(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("reclaim settled wrapper turns: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count reclaimed wrapper turns: %w", err)
+	}
+	return count, nil
+}
+
 func isCanonicalReceiptDigest(value string) bool {
 	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") {
 		return false
@@ -783,8 +973,9 @@ func (l *Ledger) AbortRollover(ctx context.Context, expectedGeneration string) e
 }
 
 // ActivateGeneration atomically reopens a fully drained ledger only for the
-// exact generation prepared by the prior wrapper. Starting the same generation
-// is always permitted but never removes a durable close marker.
+// exact generation prepared by the prior wrapper. A deliberate retirement
+// marker may be replaced by the first later enabled generation. Starting the
+// same generation is otherwise permitted but never removes a durable close.
 func (l *Ledger) ActivateGeneration(ctx context.Context, desiredGeneration string) error {
 	if err := validateGeneration(desiredGeneration); err != nil {
 		return err
@@ -802,14 +993,15 @@ func (l *Ledger) ActivateGeneration(ctx context.Context, desiredGeneration strin
 		}
 		return fmt.Errorf("read wrapper ledger generation: %w", err)
 	}
-	if current == desiredGeneration {
-		return tx.Commit()
-	}
 	pending, pendingFound, err := controlValue(ctx, tx, "pending-generation")
 	if err != nil {
 		return fmt.Errorf("read pending wrapper ledger generation: %w", err)
 	}
-	if !pendingFound || pending != desiredGeneration {
+	retirementPrepared := pendingFound && isRetiredGeneration(pending)
+	if current == desiredGeneration && !retirementPrepared {
+		return tx.Commit()
+	}
+	if !pendingFound || pending != desiredGeneration && !retirementPrepared {
 		return fmt.Errorf("wrapper ledger generation %q was not prepared", desiredGeneration)
 	}
 	closed, _, err := admissionClosed(ctx, tx)
@@ -836,6 +1028,15 @@ func (l *Ledger) ActivateGeneration(ctx context.Context, desiredGeneration strin
 		return fmt.Errorf("commit wrapper ledger generation activation: %w", err)
 	}
 	return nil
+}
+
+func isRetiredGeneration(value string) bool {
+	digest := strings.TrimPrefix(strings.TrimSpace(value), retiredGenerationPrefix)
+	if digest == value || len(digest) != sha256.Size*2 || digest != strings.ToLower(digest) {
+		return false
+	}
+	_, err := hex.DecodeString(digest)
+	return err == nil
 }
 
 // Generation returns the ledger generation watermark for inventory reports.
@@ -905,7 +1106,7 @@ func admissionClosed(ctx context.Context, q queryRower) (bool, time.Time, error)
 
 const turnSelectSQL = `SELECT turn_id, task_uid, attempt, request_digest,
 	runtime_session_id, correlation_id, state,
-	reject_reason, terminal_receipt, terminal_receipt_digest, created_at, updated_at
+	reject_reason, terminal_receipt, terminal_receipt_digest, created_at, updated_at, settled_at
 	FROM turn_admissions`
 
 type rowScanner interface {
@@ -914,18 +1115,23 @@ type rowScanner interface {
 
 func scanTurn(row rowScanner) (*TurnRecord, error) {
 	var (
-		record TurnRecord
-		state  string
+		record    TurnRecord
+		state     string
+		settledAt sql.NullTime
 	)
 	if err := row.Scan(&record.TurnID, &record.TaskUID, &record.Attempt, &record.RequestDigest,
 		&record.RuntimeSessionID, &record.CorrelationID, &state,
 		&record.RejectReason, &record.TerminalReceipt, &record.TerminalReceiptDigest,
-		&record.CreatedAt, &record.UpdatedAt); err != nil {
+		&record.CreatedAt, &record.UpdatedAt, &settledAt); err != nil {
 		return nil, err
 	}
 	record.State = TurnState(state)
 	record.CreatedAt = record.CreatedAt.UTC()
 	record.UpdatedAt = record.UpdatedAt.UTC()
+	if settledAt.Valid {
+		value := settledAt.Time.UTC()
+		record.SettledAt = &value
+	}
 	if err := validateTurnRecordIntegrity(record); err != nil {
 		return nil, err
 	}

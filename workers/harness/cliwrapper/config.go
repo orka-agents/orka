@@ -30,6 +30,7 @@ const (
 	EnvTurnRetention        = "ORKA_HARNESS_WRAPPER_TURN_RETENTION"
 	EnvAdmissionLedgerPath  = "ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH"
 	EnvLedgerGeneration     = "ORKA_HARNESS_WRAPPER_LEDGER_GENERATION"
+	EnvLedgerRetention      = "ORKA_HARNESS_WRAPPER_LEDGER_RETENTION"
 	EnvCopilotCLIPath       = "ORKA_HARNESS_WRAPPER_COPILOT_CLI_PATH"
 	EnvCopilotHelperPath    = "ORKA_HARNESS_WRAPPER_COPILOT_HELPER_PATH"
 )
@@ -48,6 +49,7 @@ const (
 	DefaultOutputLimitBytes = maxTerminalResultBytes
 	DefaultCancelGrace      = 2 * time.Second
 	DefaultTurnRetention    = 5 * time.Minute
+	DefaultLedgerRetention  = 30 * 24 * time.Hour
 	DefaultPromptEnv        = "ORKA_TURN_PROMPT"
 	DefaultWrapperWorkDir   = "/workspace"
 	DefaultLedgerGeneration = "1"
@@ -67,6 +69,7 @@ type Config struct {
 	TurnRetention        time.Duration
 	AdmissionLedgerPath  string
 	LedgerGeneration     string
+	LedgerRetention      time.Duration
 	Generic              GenericAdapterConfig
 	Codex                CodexAdapterConfig
 	Claude               ClaudeAdapterConfig
@@ -117,6 +120,7 @@ func DefaultConfig() Config {
 		CancelGrace:      DefaultCancelGrace,
 		TurnRetention:    DefaultTurnRetention,
 		LedgerGeneration: DefaultLedgerGeneration,
+		LedgerRetention:  DefaultLedgerRetention,
 		Generic: GenericAdapterConfig{
 			PromptMode: PromptModeStdin,
 			PromptEnv:  DefaultPromptEnv,
@@ -230,6 +234,13 @@ func LoadConfigFromEnvUnvalidated() (Config, error) {
 	if v := strings.TrimSpace(os.Getenv(EnvLedgerGeneration)); v != "" {
 		cfg.LedgerGeneration = v
 	}
+	if v := strings.TrimSpace(os.Getenv(EnvLedgerRetention)); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil || parsed <= 0 {
+			return Config{}, fmt.Errorf("invalid %s: %q", EnvLedgerRetention, v)
+		}
+		cfg.LedgerRetention = parsed
+	}
 	if v := strings.TrimSpace(os.Getenv(EnvCopilotCLIPath)); v != "" {
 		cfg.Copilot.Path = v
 	}
@@ -263,6 +274,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.AdmissionLedgerPath) != "" && strings.TrimSpace(c.LedgerGeneration) == "" {
 		return fmt.Errorf("durable admission ledger generation is required")
+	}
+	if strings.TrimSpace(c.AdmissionLedgerPath) != "" && c.LedgerRetention <= 0 {
+		return fmt.Errorf("durable admission ledger retention must be positive")
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Runtime)) {
 	case "", RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeOpencode, RuntimeMulti:

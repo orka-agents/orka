@@ -143,16 +143,30 @@ webhooks:
         expression: >-
           !(request.userInfo.username == {{ include "orka.admissionControllerUsername" . | quote }} &&
           request.operation == 'UPDATE' &&
-          (!has(object.status) ||
-          (!has(object.status.agentExecutionBinding) &&
-          !has(object.status.agentExecutionNoExecution) &&
-          !has(object.status.agentExecutionQuarantine) &&
-          !has(object.status.agentExecutionResolutionRef))) &&
-          (!has(oldObject.status) ||
-          (!has(oldObject.status.agentExecutionBinding) &&
-          !has(oldObject.status.agentExecutionNoExecution) &&
-          !has(oldObject.status.agentExecutionQuarantine) &&
-          !has(oldObject.status.agentExecutionResolutionRef))))
+          has(oldObject.metadata.deletionTimestamp) &&
+          has(object.metadata.deletionTimestamp) &&
+          object.metadata.deletionTimestamp == oldObject.metadata.deletionTimestamp &&
+          oldObject.metadata.?finalizers.orValue([]).exists(f, f == 'orka.ai/cleanup') &&
+          !object.metadata.?finalizers.orValue([]).exists(f, f == 'orka.ai/cleanup') &&
+          object.metadata.?finalizers.orValue([]) ==
+          oldObject.metadata.?finalizers.orValue([]).filter(f, f != 'orka.ai/cleanup') &&
+          object.apiVersion == oldObject.apiVersion &&
+          object.kind == oldObject.kind &&
+          object.spec == oldObject.spec &&
+          object.?status.orValue({}) == oldObject.?status.orValue({}) &&
+          object.metadata.name == oldObject.metadata.name &&
+          object.metadata.?generateName.orValue('') == oldObject.metadata.?generateName.orValue('') &&
+          object.metadata.namespace == oldObject.metadata.namespace &&
+          object.metadata.uid == oldObject.metadata.uid &&
+          object.metadata.resourceVersion == oldObject.metadata.resourceVersion &&
+          object.metadata.generation == oldObject.metadata.generation &&
+          object.metadata.creationTimestamp == oldObject.metadata.creationTimestamp &&
+          object.metadata.?deletionGracePeriodSeconds.orValue(0) ==
+          oldObject.metadata.?deletionGracePeriodSeconds.orValue(0) &&
+          object.metadata.?labels.orValue({}) == oldObject.metadata.?labels.orValue({}) &&
+          object.metadata.?annotations.orValue({}) == oldObject.metadata.?annotations.orValue({}) &&
+          object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([]) &&
+          object.metadata.?managedFields.orValue([]) == oldObject.metadata.?managedFields.orValue([]))
   - name: agentexecutionadjudication.core.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -241,4 +255,9 @@ webhooks:
         apiVersions: [v1alpha1]
         resources: [runtimesessioncontrols/status]
         scope: Namespaced
+    matchConditions:
+      - name: resolution-reference-introduced
+        expression: >-
+          object.?status.?agentExecutionResolutionRef.hasValue() &&
+          !oldObject.?status.?agentExecutionResolutionRef.hasValue()
 {{- end }}

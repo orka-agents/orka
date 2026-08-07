@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -48,6 +49,7 @@ func bindingTestTask() *corev1alpha1.Task {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default", Name: "task",
 			UID: types.UID("11111111-1111-1111-1111-111111111111"), Generation: 2,
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent, Prompt: "implement the fix",
@@ -56,6 +58,35 @@ func bindingTestTask() *corev1alpha1.Task {
 				Intent: corev1alpha1.WorkspaceIntentRead, GitRepo: "https://github.com/orka-agents/orka.git",
 			},
 		},
+	}
+}
+
+func TestPersistAgentExecutionBindingRequiresCleanupFinalizerAtCAS(t *testing.T) {
+	ctx := context.Background()
+	task := bindingTestTask()
+	agent := bindingTestAgent()
+	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
+	candidate, err := reconciler.resolveAgentExecutionCandidate(ctx, task, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Finalizers = nil
+	if err := reconciler.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.persistAgentExecutionBinding(ctx, task, candidate); err == nil ||
+		!strings.Contains(err.Error(), "cleanup finalizer is missing") {
+		t.Fatalf("missing-finalizer binding error = %v, want refusal", err)
+	}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.AgentExecutionBinding != nil {
+		t.Fatalf("binding persisted after finalizer removal: %+v", current.Status.AgentExecutionBinding)
 	}
 }
 
