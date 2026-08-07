@@ -142,6 +142,9 @@ func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
 	if err := d.Client.List(ctx, &tasks); err != nil {
 		return err
 	}
+	if err := d.reconcileLegacyCleanupACPTasks(ctx, tasks.Items); err != nil {
+		return err
+	}
 	if err := d.scheduleACPDeliveryRecoveries(ctx, tasks.Items); err != nil {
 		return err
 	}
@@ -151,7 +154,7 @@ func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
 	queued := make([]*corev1alpha1.Task, 0)
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		if task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Status.Execution == nil ||
+		if !taskDispatchableByACP(task) || task.Status.Execution == nil ||
 			(task.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued && task.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved) ||
 			strings.TrimSpace(task.Status.Execution.AgentRuntimeName) != "" || strings.TrimSpace(task.Status.Execution.RuntimePoolName) == "" {
 			continue
@@ -220,7 +223,7 @@ func (d *ACPDispatcher) rejectPersistedExternalRuntimeDispatches(ctx context.Con
 }
 
 func persistedExternalRuntimeDispatch(task *corev1alpha1.Task) bool {
-	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Status.Execution == nil ||
+	if !taskDispatchableByACP(task) || task.Status.Execution == nil ||
 		strings.TrimSpace(task.Status.Execution.AgentRuntimeName) == "" {
 		return false
 	}
@@ -298,7 +301,7 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 	haveFence := false
 	for i := range tasks {
 		task := &tasks[i]
-		if task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Status.Execution == nil ||
+		if !taskDispatchableByACP(task) || task.Status.Execution == nil ||
 			task.Status.Execution.Attempt < 1 || strings.TrimSpace(task.Status.Execution.PromptID) == "" {
 			continue
 		}

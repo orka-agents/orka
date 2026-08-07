@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -194,6 +195,108 @@ func TestTaskExecutionAuthorityValidatorRequiresLiveEnabledRevision(t *testing.T
 	))
 	require.False(t, response.Allowed)
 	require.Contains(t, response.Result.Message, "Task spec is immutable")
+}
+
+func TestTaskExecutionAuthorityValidatorRequiresExactLiveV1Policy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := coexistenceTestScheme(t)
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: admissionTestNamespace,
+		UID:  types.UID("namespace-uid"),
+	}}
+	control := &corev1alpha1.AgentExecutionControl{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       corev1alpha1.AgentExecutionControlName,
+			Namespace:  corev1alpha1.AgentExecutionControlNamespace,
+			UID:        types.UID("control-uid"),
+			Generation: 3,
+		},
+		Status: corev1alpha1.AgentExecutionControlStatus{
+			ObservedGeneration: 3,
+			Backends: &corev1alpha1.AgentExecutionBackendsStatus{
+				V1: corev1alpha1.AgentExecutionBackendStatus{
+					EffectiveMode: corev1alpha1.AgentExecutionEffectiveModeEnabled,
+					ModeRevision:  5,
+				},
+			},
+		},
+	}
+	policy := &corev1alpha1.AgentExecutionPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  admissionTestNamespace,
+			Name:       "compatibility",
+			UID:        types.UID("policy-uid"),
+			Generation: 4,
+		},
+		Spec: corev1alpha1.AgentExecutionPolicySpec{
+			AllowNewV1Bindings:         true,
+			AllowedBuiltInRuntimeTypes: []corev1alpha1.AgentRuntimeType{corev1alpha1.AgentRuntimeCodex},
+			NetworkIsolationProfile:    corev1alpha1.AgentExecutionNetworkIsolationDefaultDeny,
+		},
+	}
+	policyDigest, err := store.CanonicalAgentExecutionPolicyDigest(policy.Spec)
+	require.NoError(t, err)
+	oldTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name:       admissionTestTaskName,
+		Namespace:  admissionTestNamespace,
+		UID:        types.UID("task-uid"),
+		Generation: 2,
+	}}
+	newTask := oldTask.DeepCopy()
+	binding := coexistenceTestBinding(namespace.UID, control)
+	binding.ContractVersion = corev1alpha1.AgentRuntimeContractHarnessV1
+	binding.Backend = corev1alpha1.AgentExecutionBackendHarnessWrapper
+	binding.RuntimeType = corev1alpha1.AgentRuntimeCodex
+	binding.BackendControl.ModeRevision = control.Status.Backends.V1.ModeRevision
+	binding.Policy = &corev1alpha1.AgentExecutionPolicyRef{
+		Name:       policy.Name,
+		UID:        policy.UID,
+		Generation: policy.Generation,
+		Digest:     policyDigest,
+	}
+	newTask.Status.AgentExecutionBinding = binding
+
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace, control, policy).Build()
+	validator := &TaskExecutionAuthorityValidator{
+		decoder: ctrladmission.NewDecoder(scheme),
+		reader:  reader,
+		config: CoexistenceConfig{
+			ControllerUsername: coexistenceControllerUsername,
+		}.normalized(),
+	}
+	request := func(task *corev1alpha1.Task) ctrladmission.Response {
+		return validator.Handle(ctx, coexistenceRequest(
+			t, admissionv1.Update, coexistenceControllerUsername, task, oldTask, "status",
+		))
+	}
+	require.True(t, request(newTask).Allowed)
+
+	missingRef := newTask.DeepCopy()
+	missingRef.Status.AgentExecutionBinding.Policy = nil
+	response := request(missingRef)
+	require.False(t, response.Allowed)
+	require.Contains(t, response.Result.Message, "live compatibility policy")
+
+	staleIdentity := newTask.DeepCopy()
+	staleIdentity.Status.AgentExecutionBinding.Policy.Generation--
+	response = request(staleIdentity)
+	require.False(t, response.Allowed)
+	require.Contains(t, response.Result.Message, "live enabled compatibility policy")
+
+	staleDigest := newTask.DeepCopy()
+	staleDigest.Status.AgentExecutionBinding.Policy.Digest = "sha256:" + strings.Repeat("b", 64)
+	response = request(staleDigest)
+	require.False(t, response.Allowed)
+	require.Contains(t, response.Result.Message, "live enabled compatibility policy")
+
+	currentPolicy := &corev1alpha1.AgentExecutionPolicy{}
+	require.NoError(t, reader.Get(ctx, client.ObjectKeyFromObject(policy), currentPolicy))
+	currentPolicy.Spec.AllowNewV1Bindings = false
+	require.NoError(t, reader.Update(ctx, currentPolicy))
+	response = request(newTask)
+	require.False(t, response.Allowed)
+	require.Contains(t, response.Result.Message, "live enabled compatibility policy")
 }
 
 func TestTaskExecutionAuthorityValidatorProtectsCleanupFinalizer(t *testing.T) {

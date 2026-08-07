@@ -159,7 +159,13 @@ func (d *HarnessV1Dispatcher) dispatchOnce(ctx context.Context) error {
 	candidates := make([]harnessV1DispatchCandidate, 0, len(tasks.Items))
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		if !taskManagedByHarnessV1(task) {
+		if legacyCleanupBinding(task, corev1alpha1.AgentRuntimeContractHarnessV1) != nil {
+			if err := d.reconcileLegacyCleanupHarnessV1Task(ctx, task.DeepCopy()); err != nil {
+				return fmt.Errorf("reconcile legacy cleanup-only harness v1 Task %s/%s: %w", task.Namespace, task.Name, err)
+			}
+			continue
+		}
+		if !taskDispatchableByHarnessV1(task) {
 			continue
 		}
 		attempts, err := d.Attempts.ListHarnessV1AttemptsByTask(ctx, task.Namespace, string(task.UID))
@@ -541,6 +547,9 @@ func buildHarnessV1StartTurnRequest(
 	if strings.EqualFold(strings.TrimSpace(verified.body.HarnessV1.RuntimeName), string(corev1alpha1.AgentRuntimeCodex)) &&
 		len(allowedTools) == 0 && !*allowBash {
 		request.Metadata["readOnly"] = booleanTrueValue
+	}
+	if err := applyHarnessV1WorkspaceMetadata(&request, verified.body); err != nil {
+		return harness.StartTurnRequest{}, err
 	}
 	if attempt.RequestDigest != "" {
 		request.Metadata[harness.MetadataRequestDigest] = attempt.RequestDigest

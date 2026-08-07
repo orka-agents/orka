@@ -2114,6 +2114,19 @@ func boundPromptAttemptForTest(attempt *store.PromptAttempt) *store.PromptAttemp
 	return attempt
 }
 
+func testACPExecuteBindingForDispatcher() *corev1alpha1.AgentExecutionBinding {
+	return &corev1alpha1.AgentExecutionBinding{
+		SchemaVersion:   1,
+		Mode:            corev1alpha1.AgentExecutionBindingModeExecute,
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+		Backend:         corev1alpha1.AgentExecutionBackendRuntimePool,
+		BindingDigest:   testControlDigestForDispatcher("test-v2-binding"),
+		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{
+			Digest: testControlDigestForDispatcher("test-v2-snapshot"),
+		},
+	}
+}
+
 func TestACPDispatcherRejectsPersistedExternalRuntimeAttemptsWithoutExecution(t *testing.T) {
 	for _, state := range []corev1alpha1.TaskExecutionState{
 		corev1alpha1.TaskExecutionStateQueued,
@@ -2155,6 +2168,7 @@ func TestACPDispatcherRejectsPersistedExternalRuntimeAttemptsWithoutExecution(t 
 				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do not dispatch"},
 				Status: corev1alpha1.TaskStatus{
 					Phase: corev1alpha1.TaskPhasePending, Attempts: 1,
+					AgentExecutionBinding: testACPExecuteBindingForDispatcher(),
 					Execution: &corev1alpha1.TaskExecutionStatus{
 						State: state, Attempt: 1, PromptID: promptID, RequestDigest: requestDigest,
 						AgentRuntimeName: runtimeRegistration.Name, AgentRuntimeUID: string(runtimeRegistration.UID), ControllerEpoch: fence.Epoch,
@@ -2403,6 +2417,7 @@ func runACPDispatcherPreAdmissionSettlementTest(
 		t.Fatal(err)
 	}
 	task := runtimePoolReservationTestTask("pre-admission", "pre-admission-uid", "pool-uid")
+	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
 	mutateTask(task)
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: "pool", UID: types.UID("pool-uid"), Generation: 1},

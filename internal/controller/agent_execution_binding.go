@@ -607,13 +607,9 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 	if current.UID != task.UID {
 		return nil, fmt.Errorf("task UID changed from %s to %s; never dispatching", task.UID, current.UID)
 	}
-	if current.Generation != candidate.binding.Task.BoundSpecGeneration {
-		return nil, fmt.Errorf("task spec generation changed from bound candidate %d to %d; refusing stale binding",
-			candidate.binding.Task.BoundSpecGeneration, current.Generation)
-	}
-	if !current.DeletionTimestamp.IsZero() {
-		return nil, fmt.Errorf("task is deleting; a deleting task may be classified only for cleanup and never dispatches")
-	}
+	// A matching persisted binding is authoritative even if this reconcile is
+	// recovering an ambiguous status-patch response after mutable admission
+	// inputs (such as the v1 compatibility policy) changed.
 	if existing := current.Status.AgentExecutionBinding; existing != nil {
 		if existing.BindingDigest == candidate.binding.BindingDigest {
 			return existing, nil
@@ -623,10 +619,44 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 			candidateDigest: candidate.binding.BindingDigest,
 		}
 	}
+	if current.Generation != candidate.binding.Task.BoundSpecGeneration {
+		return nil, fmt.Errorf("task spec generation changed from bound candidate %d to %d; refusing stale binding",
+			candidate.binding.Task.BoundSpecGeneration, current.Generation)
+	}
+	if !current.DeletionTimestamp.IsZero() {
+		return nil, fmt.Errorf("task is deleting; a deleting task may be classified only for cleanup and never dispatches")
+	}
+	if candidate.binding.ContractVersion == corev1alpha1.AgentRuntimeContractHarnessV1 {
+		if err := r.validateLiveHarnessV1PolicyBinding(ctx, reader, current, &candidate.binding); err != nil {
+			return nil, err
+		}
+	}
 
 	base := current.DeepCopy()
 	current.Status.AgentExecutionBinding = candidate.binding.DeepCopy()
 	if err := r.Status().Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		// A transport error can arrive after the API server committed the status
+		// patch. Re-read before classifying the failure so an exact binding can
+		// settle its reservation Bound instead of being rejected after a policy
+		// revocation that happened immediately after the commit.
+		latest := &corev1alpha1.Task{}
+		if readErr := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, latest); readErr == nil &&
+			latest.UID == task.UID {
+			if existing := latest.Status.AgentExecutionBinding; existing != nil {
+				if existing.BindingDigest == candidate.binding.BindingDigest {
+					return existing, nil
+				}
+				return nil, &errAgentExecutionBindingConflict{
+					existingDigest:  existing.BindingDigest,
+					candidateDigest: candidate.binding.BindingDigest,
+				}
+			}
+			if candidate.binding.ContractVersion == corev1alpha1.AgentRuntimeContractHarnessV1 {
+				if policyErr := r.validateLiveHarnessV1PolicyBinding(ctx, reader, latest, &candidate.binding); policyErr != nil {
+					return nil, policyErr
+				}
+			}
+		}
 		return nil, fmt.Errorf("write-once binding patch: %w", err)
 	}
 	return current.Status.AgentExecutionBinding, nil

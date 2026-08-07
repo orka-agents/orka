@@ -253,6 +253,126 @@ func TestServerAcceptanceReconcileFailureRetainsTurnAndClosesReadiness(t *testin
 	}
 }
 
+func TestServerLocalAdmissionRejectionReconcilesWithIndependentContext(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	request := validWrapperStartTurnRequest()
+	durable, err := validateDurableTurnAdmission(request)
+	if err != nil {
+		t.Fatalf("validate durable admission: %v", err)
+	}
+	if _, _, err := server.ledger.AdmitTurn(
+		context.Background(), string(request.TurnID), durable.taskUID, durable.attempt, durable.requestDigest,
+		string(request.RuntimeSessionID), request.CorrelationID,
+	); err != nil {
+		t.Fatalf("admit durable turn: %v", err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := server.markDurableLocalAdmissionRejected(canceledCtx, request.TurnID); err != nil {
+		t.Fatalf("markDurableLocalAdmissionRejected(): %v", err)
+	}
+
+	record, err := server.ledger.GetTurn(context.Background(), string(request.TurnID))
+	if err != nil {
+		t.Fatalf("GetTurn: %v", err)
+	}
+	if record.State != ledger.TurnRejected || record.RejectReason != durableLocalRejectionReason {
+		t.Fatalf("durable record = %#v, want local admission rejection", record)
+	}
+	if !server.admissionLedgerHealthy() {
+		t.Fatal("successful local admission reconciliation closed readiness")
+	}
+}
+
+func TestServerLocalAdmissionReconcileFailureReturnsUnavailable(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	request := validWrapperStartTurnRequest()
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal StartTurn request: %v", err)
+	}
+
+	// Hold local admission after the durable AdmitTurn commit, then make the
+	// rejection write fail. This deterministically exercises the handler's
+	// post-commit reconciliation failure instead of only calling the helper.
+	server.turnRegistry.mu.Lock()
+	registryLocked := true
+	defer func() {
+		if registryLocked {
+			server.turnRegistry.mu.Unlock()
+		}
+	}()
+	server.turnRegistry.activeTurns = 1
+
+	startRecorder := httptest.NewRecorder()
+	startRequest := httptest.NewRequest(http.MethodPost, harness.TurnsPath, bytes.NewReader(body))
+	startDone := make(chan struct{})
+	go func() {
+		defer close(startDone)
+		server.Handler().ServeHTTP(startRecorder, startRequest)
+	}()
+
+	eventually(t, 2*time.Second, func() bool {
+		record, getErr := server.ledger.GetTurn(context.Background(), string(request.TurnID))
+		return getErr == nil && record.State == ledger.TurnAdmitted
+	})
+	if err := server.ledger.Close(); err != nil {
+		t.Fatalf("close admission ledger: %v", err)
+	}
+	server.turnRegistry.mu.Unlock()
+	registryLocked = false
+
+	select {
+	case <-startDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartTurn did not finish after local admission was released")
+	}
+	server.ledger = nil
+
+	if startRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("StartTurn after durable rejection failure = %d, want 503", startRecorder.Code)
+	}
+	readinessRecorder := httptest.NewRecorder()
+	readinessRequest := httptest.NewRequest(http.MethodGet, harness.ReadinessPath, nil)
+	server.Handler().ServeHTTP(readinessRecorder, readinessRequest)
+	if readinessRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status code = %d, want 503", readinessRecorder.Code)
+	}
+	var readiness harness.HealthResponse
+	if err := json.Unmarshal(readinessRecorder.Body.Bytes(), &readiness); err != nil {
+		t.Fatalf("decode readiness response: %v", err)
+	}
+	if readiness.Ready || readiness.Status != harness.HealthStatusUnhealthy ||
+		readiness.Metadata["admissionLedger"] != admissionLedgerReconcileFailed {
+		t.Fatalf("readiness after local admission reconciliation failure = %#v", readiness)
+	}
+}
+
 func TestServerRequiresBearerTokenForTurnEndpoints(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AuthValue = "auth-value-123"

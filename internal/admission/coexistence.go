@@ -310,6 +310,9 @@ func (v *TaskExecutionAuthorityValidator) validateBinding(
 	if err := validateLiveBindingControl(ctx, v.reader, newValue); err != nil {
 		return ctrladmission.Denied(err.Error())
 	}
+	if err := validateLiveBindingPolicy(ctx, v.reader, object.Namespace, newValue); err != nil {
+		return ctrladmission.Denied(err.Error())
+	}
 	return ctrladmission.Allowed("Task binding matches the live enabled admission revision")
 }
 
@@ -558,6 +561,38 @@ func validateLiveBindingControl(
 		status.AdmissionClosedAt != nil || ref.ModeRevision != status.ModeRevision ||
 		ref.AdmittedMode != corev1alpha1.AgentExecutionEffectiveModeEnabled {
 		return fmt.Errorf("execution binding does not match the live enabled backend admission revision")
+	}
+	return nil
+}
+
+func validateLiveBindingPolicy(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	binding *corev1alpha1.AgentExecutionBinding,
+) error {
+	if binding == nil || binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 ||
+		binding.Mode != corev1alpha1.AgentExecutionBindingModeExecute {
+		return nil
+	}
+	if reader == nil || binding.Policy == nil {
+		return fmt.Errorf("new harness v1 execution binding requires a live compatibility policy")
+	}
+	ref := binding.Policy
+	if strings.TrimSpace(ref.Name) == "" || ref.UID == "" || ref.Generation < 1 {
+		return fmt.Errorf("harness v1 execution binding carries an incomplete compatibility policy identity")
+	}
+	policy := &corev1alpha1.AgentExecutionPolicy{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, policy); err != nil {
+		return fmt.Errorf("read harness v1 compatibility policy: %w", err)
+	}
+	digest, err := store.CanonicalAgentExecutionPolicyDigest(policy.Spec)
+	if err != nil {
+		return fmt.Errorf("digest harness v1 compatibility policy: %w", err)
+	}
+	if policy.UID != ref.UID || policy.Generation != ref.Generation || digest != ref.Digest ||
+		!policy.Spec.AllowNewV1Bindings {
+		return fmt.Errorf("harness v1 execution binding does not match the live enabled compatibility policy")
 	}
 	return nil
 }

@@ -837,6 +837,11 @@ func (r *TaskReconciler) handleBoundAgentTaskPending(
 	if binding == nil {
 		return ctrl.Result{}, errors.New("bound agent Task is missing its execution binding")
 	}
+	if legacyCleanupBinding(task, binding.ContractVersion) != nil {
+		// Dispatchers own migration cleanup because it may need to terminalize
+		// durable executor state. It is never routed through either queue path.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	switch binding.ContractVersion {
 	case corev1alpha1.AgentRuntimeContractHarnessV1:
 		if result, err, handled := r.ensureHarnessV1ExecutionBinding(ctx, task, nil); handled {

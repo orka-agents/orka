@@ -39,13 +39,17 @@ func (d *ACPDispatcher) recoverStaleAttempts(ctx context.Context) error {
 	if err := d.Client.List(ctx, &tasks); err != nil {
 		return err
 	}
+	if err := d.reconcileLegacyCleanupACPTasks(ctx, tasks.Items); err != nil {
+		return err
+	}
 	for i := range tasks.Items {
 		candidate := tasks.Items[i].DeepCopy()
 		task, recoverable, readErr := d.readRecoverableTask(ctx, candidate)
 		if readErr != nil {
 			return fmt.Errorf("refresh stale ACP task %s/%s: %w", candidate.Namespace, candidate.Name, readErr)
 		}
-		if !recoverable || !taskManagedByACP(task) || task.Status.Execution == nil || task.Status.Execution.ControllerEpoch >= fence.Epoch {
+		if !recoverable || !taskManagedByACP(task) || !taskDispatchableByACP(task) ||
+			task.Status.Execution == nil || task.Status.Execution.ControllerEpoch >= fence.Epoch {
 			continue
 		}
 		if err := d.recoverStaleTask(ctx, task, fence); err != nil {

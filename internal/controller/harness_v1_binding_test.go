@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -23,6 +24,74 @@ import (
 type harnessV1CandidateErrorReader struct {
 	client.Reader
 	get func(client.ObjectKey, client.Object) error
+}
+
+type harnessV1PolicySequenceReader struct {
+	client.Reader
+	policyReads int
+}
+
+func (r *harnessV1PolicySequenceReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	if err := r.Reader.Get(ctx, key, object, options...); err != nil {
+		return err
+	}
+	if policy, ok := object.(*corev1alpha1.AgentExecutionPolicy); ok {
+		r.policyReads++
+		if r.policyReads > 1 {
+			policy.Generation++
+			policy.Spec.AllowNewV1Bindings = false
+		}
+	}
+	return nil
+}
+
+type harnessV1BindingResponseLostClient struct {
+	client.Client
+	policyKey client.ObjectKey
+	lost      bool
+}
+
+func (c *harnessV1BindingResponseLostClient) Status() client.SubResourceWriter {
+	return &harnessV1BindingResponseLostWriter{
+		SubResourceWriter: c.Client.Status(),
+		parent:            c,
+	}
+}
+
+type harnessV1BindingResponseLostWriter struct {
+	client.SubResourceWriter
+	parent *harnessV1BindingResponseLostClient
+}
+
+func (w *harnessV1BindingResponseLostWriter) Patch(
+	ctx context.Context,
+	object client.Object,
+	patch client.Patch,
+	options ...client.SubResourcePatchOption,
+) error {
+	if err := w.SubResourceWriter.Patch(ctx, object, patch, options...); err != nil {
+		return err
+	}
+	task, ok := object.(*corev1alpha1.Task)
+	if !ok || task.Status.AgentExecutionBinding == nil || w.parent.lost {
+		return nil
+	}
+	policy := &corev1alpha1.AgentExecutionPolicy{}
+	if err := w.parent.Get(ctx, w.parent.policyKey, policy); err != nil {
+		return fmt.Errorf("read policy before simulated response loss: %w", err)
+	}
+	policy.Spec.AllowNewV1Bindings = false
+	policy.Generation++
+	if err := w.parent.Update(ctx, policy); err != nil {
+		return fmt.Errorf("revoke policy before simulated response loss: %w", err)
+	}
+	w.parent.lost = true
+	return errors.New("simulated binding status response loss")
 }
 
 func (r *harnessV1CandidateErrorReader) Get(
@@ -117,6 +186,97 @@ func TestEnsureHarnessV1ExecutionBindingFailsPermanentPolicyViolation(t *testing
 	if current.Status.Phase != corev1alpha1.TaskPhaseFailed ||
 		!strings.Contains(current.Status.Message, "does not authorize new bindings") {
 		t.Fatalf("permanent policy violation status = %#v", current.Status)
+	}
+}
+
+func TestEnsureHarnessV1ExecutionBindingRejectsPolicyChangedBeforeCAS(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture.reconciler.APIReader = &harnessV1PolicySequenceReader{Reader: fixture.reconciler.Client}
+
+	_, err, handled := fixture.reconciler.ensureHarnessV1ExecutionBinding(
+		ctx, fixture.task.DeepCopy(), fixture.agent,
+	)
+	if err != nil || !handled {
+		t.Fatalf("ensure binding = handled=%v err=%v, want terminal policy rejection", handled, err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.AgentExecutionBinding != nil || current.Status.Phase != corev1alpha1.TaskPhaseFailed ||
+		!strings.Contains(current.Status.Message, "changed or revoked") {
+		t.Fatalf("Task after policy race = %#v", current.Status)
+	}
+	control := &corev1alpha1.AgentExecutionControl{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKey{
+		Namespace: corev1alpha1.AgentExecutionControlNamespace,
+		Name:      corev1alpha1.AgentExecutionControlName,
+	}, control); err != nil {
+		t.Fatal(err)
+	}
+	inventory, err := fixture.reconciler.AgentExecutionBindingReservations.ListAgentExecutionBindingReservations(
+		ctx,
+		store.AgentExecutionControlRevision{
+			ControlUID:        string(control.UID),
+			ControlGeneration: control.Generation,
+			Backend:           store.AgentExecutionBackendV1,
+			ModeRevision:      control.Status.Backends.V1.ModeRevision,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Reservations) != 1 || inventory.OpenCount != 0 ||
+		inventory.Reservations[0].State != store.AgentExecutionBindingReservationRejected ||
+		inventory.Reservations[0].TerminalReason != "policy-invalidated" {
+		t.Fatalf("policy-race reservation inventory = %#v", inventory)
+	}
+}
+
+func TestEnsureHarnessV1ExecutionBindingRecoversCommittedPatchAfterPolicyRevocation(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	baseClient := fixture.reconciler.Client
+	lostClient := &harnessV1BindingResponseLostClient{
+		Client:    baseClient,
+		policyKey: client.ObjectKeyFromObject(fixture.policy),
+	}
+	fixture.reconciler.Client = lostClient
+
+	_, err, handled := fixture.reconciler.ensureHarnessV1ExecutionBinding(
+		ctx, fixture.task.DeepCopy(), fixture.agent,
+	)
+	if err != nil || handled {
+		t.Fatalf("ensure binding ambiguity recovery = handled=%v err=%v", handled, err)
+	}
+	if !lostClient.lost {
+		t.Fatal("test client did not simulate a committed status patch with a lost response")
+	}
+	bound := &corev1alpha1.Task{}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(fixture.task), bound); err != nil {
+		t.Fatal(err)
+	}
+	if bound.Status.AgentExecutionBinding == nil {
+		t.Fatal("committed binding was not recovered after the response was lost")
+	}
+	policy := &corev1alpha1.AgentExecutionPolicy{}
+	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(fixture.policy), policy); err != nil {
+		t.Fatal(err)
+	}
+	if policy.Spec.AllowNewV1Bindings {
+		t.Fatal("test policy was not revoked after the binding commit")
+	}
+	want, err := agentExecutionBindingReservationFor(bound, bound.Status.AgentExecutionBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := fixture.reconciler.AgentExecutionBindingReservations.GetAgentExecutionBindingReservation(ctx, want.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reservation.State != store.AgentExecutionBindingReservationBound {
+		t.Fatalf("recovered reservation state = %s, want Bound", reservation.State)
 	}
 }
 

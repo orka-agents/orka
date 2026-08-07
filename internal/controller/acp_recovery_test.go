@@ -171,6 +171,7 @@ func TestACPDispatcherRecoveryReusesExistingTaskScopedTerminalProjection(t *test
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "test"},
 		Status: corev1alpha1.TaskStatus{
 			Phase: corev1alpha1.TaskPhaseSucceeded, Attempts: 1, Message: "ACP task completed",
+			AgentExecutionBinding: testACPExecuteBindingForDispatcher(),
 			Execution: &corev1alpha1.TaskExecutionStatus{
 				State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
 				Attempt: 1, PromptID: promptID, RuntimePoolName: "pool", RuntimePoolUID: "pool-uid", ControllerEpoch: oldFence.Epoch,
@@ -357,6 +358,7 @@ func TestRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t *te
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "recovered-cleanup", UID: types.UID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled, Attempts: 1,
+			AgentExecutionBinding: testACPExecuteBindingForDispatcher(),
 			Execution: &corev1alpha1.TaskExecutionStatus{
 				State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeCancelled,
 				Attempt: 1, PromptID: "prompt-recovered-cleanup", RuntimePoolName: "pool", RuntimePoolUID: "pool-uid",
@@ -729,7 +731,10 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 			Type: corev1alpha1.TaskTypeAgent, Prompt: "persist this failed turn",
 			SessionRef: &corev1alpha1.SessionReference{Name: "session-crash", Create: true, Append: true},
 		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1,
+			AgentExecutionBinding: testACPExecuteBindingForDispatcher(),
+		},
 	}
 	rawClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -1325,10 +1330,11 @@ func newACPRecoveryFixture(t *testing.T, target store.PromptExecutionState) *rec
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: uid, Labels: map[string]string{acpRuntimeTaskPoolLabel: "pool"}},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "test"},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1, Execution: &corev1alpha1.TaskExecutionStatus{
-			State: corev1alpha1.TaskExecutionState(target), Attempt: 1, PromptID: promptID, RuntimePoolName: "pool",
-			ControllerEpoch: oldFence.Epoch, RequestDigest: attempt.RequestDigest,
-		}},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1,
+			AgentExecutionBinding: testACPExecuteBindingForDispatcher(), Execution: &corev1alpha1.TaskExecutionStatus{
+				State: corev1alpha1.TaskExecutionState(target), Attempt: 1, PromptID: promptID, RuntimePoolName: "pool",
+				ControllerEpoch: oldFence.Epoch, RequestDigest: attempt.RequestDigest,
+			}},
 	}
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {

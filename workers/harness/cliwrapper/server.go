@@ -38,6 +38,7 @@ const (
 	admissionLedgerReconcileFailed   = "reconcile-failed"
 	durableAdmissionReconcileTimeout = 5 * time.Second
 	durableAcceptanceRejectionReason = "wrapper-durable-acceptance-failed"
+	durableLocalRejectionReason      = "wrapper-local-admission-rejected"
 )
 
 type Server struct {
@@ -263,6 +264,20 @@ func (s *Server) markDurableTurnAccepted(ctx context.Context, turn *turnState) e
 
 	s.turnRegistry.reject(turn)
 	return acceptErr
+}
+
+func (s *Server) markDurableLocalAdmissionRejected(ctx context.Context, turnID harness.HarnessTurnID) error {
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		durableAdmissionReconcileTimeout,
+	)
+	defer cancel()
+	if err := s.ledger.MarkTurnRejected(cleanupCtx, string(turnID), durableLocalRejectionReason); err != nil {
+		reconcileErr := fmt.Errorf("reconcile durable local turn rejection: %w", err)
+		s.setAdmissionLedgerError(reconcileErr)
+		return reconcileErr
+	}
+	return nil
 }
 
 func (s *Server) setTerminalLedgerError(err error) {
@@ -704,7 +719,10 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 	state, err := s.turnRegistry.admit(request, s.now)
 	if err != nil {
 		if s.ledger != nil && durable != nil {
-			_ = s.ledger.MarkTurnRejected(r.Context(), string(request.TurnID), "wrapper-local-admission-rejected")
+			if rejectErr := s.markDurableLocalAdmissionRejected(r.Context(), request.TurnID); rejectErr != nil {
+				writeSafeError(w, http.StatusServiceUnavailable, "durable turn rejection failed")
+				return
+			}
 		}
 		switch {
 		case errors.Is(err, errTurnAlreadyExists):

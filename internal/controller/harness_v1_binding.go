@@ -19,6 +19,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -110,6 +111,10 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	if err != nil {
 		return nil, err
 	}
+	workspace, err := resolveHarnessV1PublicReadOnlyWorkspace(task, agent, policy, target)
+	if err != nil {
+		return nil, permanentHarnessV1Candidate(err)
+	}
 	runtimeAuthOnly, err := validateHarnessV1RuntimeAuthOnly(task, agent, target)
 	if err != nil {
 		return nil, err
@@ -167,6 +172,7 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 		Prompt:          task.Spec.Prompt,
 		RetryPolicy:     task.Spec.RetryPolicy.DeepCopy(),
 		SessionRef:      task.Spec.SessionRef.DeepCopy(),
+		Workspace:       workspace,
 		RuntimeOverride: task.Spec.AgentRuntime.DeepCopy(),
 		HarnessV1: &agentExecutionSnapshotHarnessV1{
 			Endpoint: target.endpoint, Backend: string(target.backend), RuntimeName: target.runtimeName,
@@ -256,8 +262,8 @@ func validateNewHarnessV1Workload(task *corev1alpha1.Task, agent *corev1alpha1.A
 	if task.Spec.Transaction != nil {
 		return errors.New("harness v1 agent Tasks do not accept transaction tokens")
 	}
-	if task.Spec.Workspace != nil || (task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil) {
-		return errors.New("new harness v1 bindings do not accept workspace or publication authority")
+	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
+		return errors.New("new harness v1 bindings do not accept the legacy agentRuntime.workspace surface")
 	}
 	if task.Spec.SecretRef != nil || len(task.Spec.Env) != 0 {
 		return errors.New("new harness v1 bindings reject arbitrary Task Secret and env delivery")
@@ -342,11 +348,60 @@ func (r *TaskReconciler) resolveHarnessV1Policy(
 			return nil, "", permanentHarnessV1Candidate(fmt.Errorf("harness v1 policy is missing mandatory prohibition %q", field))
 		}
 	}
-	digest, err := acpDomainDigest("agent-execution-policy", policy.Spec)
+	digest, err := store.CanonicalAgentExecutionPolicyDigest(policy.Spec)
 	if err != nil {
 		return nil, "", err
 	}
 	return policy, digest, nil
+}
+
+// validateLiveHarnessV1PolicyBinding revalidates the exact compatibility
+// policy frozen into a prospective binding. The initial candidate read is not
+// an admission fence: an administrator may revoke or replace the policy while
+// snapshot and reservation persistence is in flight.
+func (r *TaskReconciler) validateLiveHarnessV1PolicyBinding(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	binding *corev1alpha1.AgentExecutionBinding,
+) error {
+	if task == nil || binding == nil || binding.Policy == nil ||
+		binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 ||
+		binding.Mode != corev1alpha1.AgentExecutionBindingModeExecute {
+		return permanentHarnessV1Candidate(errors.New(
+			"new harness v1 execution binding requires an exact compatibility policy reference",
+		))
+	}
+	if reader == nil {
+		return errors.New("API reader is required to revalidate the harness v1 compatibility policy")
+	}
+	ref := binding.Policy
+	if strings.TrimSpace(ref.Name) == "" || ref.UID == "" || ref.Generation < 1 ||
+		store.ValidateCanonicalDigest("harness v1 compatibility policy digest", ref.Digest) != nil {
+		return permanentHarnessV1Candidate(errors.New(
+			"harness v1 execution binding carries an incomplete compatibility policy identity",
+		))
+	}
+	policy := &corev1alpha1.AgentExecutionPolicy{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: ref.Name}, policy); err != nil {
+		if apierrors.IsNotFound(err) {
+			return permanentHarnessV1Candidate(errors.New(
+				"harness v1 compatibility policy was removed before binding admission",
+			))
+		}
+		return fmt.Errorf("revalidate harness v1 compatibility policy: %w", err)
+	}
+	digest, err := store.CanonicalAgentExecutionPolicyDigest(policy.Spec)
+	if err != nil {
+		return fmt.Errorf("digest live harness v1 compatibility policy: %w", err)
+	}
+	if policy.UID != ref.UID || policy.Generation != ref.Generation || digest != ref.Digest ||
+		!policy.Spec.AllowNewV1Bindings {
+		return permanentHarnessV1Candidate(errors.New(
+			"harness v1 compatibility policy changed or revoked before binding admission",
+		))
+	}
+	return nil
 }
 
 func (r *TaskReconciler) resolveHarnessV1Target(
@@ -534,6 +589,12 @@ func validateHarnessV1Snapshot(
 		default:
 			return errors.New("harness v1 runtime-auth-only snapshot uses an unsupported runtime")
 		}
+	}
+	if body.Workspace != nil && binding.Policy == nil {
+		return errors.New("harness v1 public workspace snapshot is missing its compatibility policy binding")
+	}
+	if err := validateFrozenHarnessV1PublicReadOnlyWorkspace(body); err != nil {
+		return err
 	}
 	if body.RetryPolicy != nil {
 		if body.RetryPolicy.MaxRetries < 0 ||
@@ -758,6 +819,16 @@ func (r *TaskReconciler) ensureHarnessV1ExecutionBinding(
 			if settleErr := r.settleAgentExecutionBindingReservation(
 				ctx, reservation, store.AgentExecutionBindingReservationRejected, "binding-conflict",
 			); settleErr != nil {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
+			}
+			result, failErr := r.failTask(ctx, task, err.Error())
+			return result, failErr, true
+		}
+		if isPermanentHarnessV1CandidateError(err) {
+			if settleErr := r.settleAgentExecutionBindingReservation(
+				ctx, reservation, store.AgentExecutionBindingReservationRejected, "policy-invalidated",
+			); settleErr != nil {
+				log.Error(settleErr, "reject harness v1 binding reservation after policy invalidation")
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
 			}
 			result, failErr := r.failTask(ctx, task, err.Error())
