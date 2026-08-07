@@ -107,6 +107,16 @@ func requireHelmRender(t *testing.T, args ...string) string {
 	return output
 }
 
+func staticChartAdmissionArgs(digest string) []string {
+	return []string{
+		"--set", "admission.enabled=true",
+		"--set", "admission.webhooks.enabled=true",
+		"--set-string", "controller.image.digest=" + digest,
+		"--set-string", "admission.tls.existingSecret=orka-admission-tls",
+		"--set-string", "admission.webhooks.caBundle=Y2E=",
+	}
+}
+
 func requireHarnessV1UpgradeDrainHookRender(t *testing.T, matchesDesiredGeneration bool, args ...string) string {
 	t.Helper()
 	output, err := helmTemplateHarnessV1UpgradeDrainHook(t, harnessV1UpgradeState{
@@ -281,17 +291,19 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 
 func TestStaticChartProviderProxyConfigurationIsFixedToSupportedBoundary(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("0", 64)
-	rendered := requireHelmRender(t,
+	args := []string{
 		"--set", "providerProxy.enabled=true",
 		"--set", "controller.acpRuntime.enabled=true",
 		"--set", "store.persistence.enabled=true",
-		"--set-string", "controller.image.digest="+digest,
-		"--set-string", "publisher.image.digest="+digest,
+		"--set-string", "controller.image.digest=" + digest,
+		"--set-string", "publisher.image.digest=" + digest,
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--set-string", "controller.acpRuntime.providerProxyNamespace=orka-test",
 		"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:1337/",
-	)
+	}
+	args = append(args, staticChartAdmissionArgs(digest)...)
+	rendered := requireHelmRender(t, args...)
 
 	for _, marker := range []string{
 		"--acp-provider-proxy-base-url=http://test-orka-provider-auth-proxy.orka-test.svc:8080",
@@ -420,16 +432,18 @@ func TestStaticChartRequiresAgentExecutionSnapshotSecretForACPAdmission(t *testi
 
 func TestStaticChartMountsAgentExecutionSnapshotKeyForACPAdmission(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("0", 64)
-	rendered := requireHelmRender(t,
+	args := []string{
 		"--set", "controller.acpRuntime.enabled=true",
 		"--set", "providerProxy.enabled=true",
 		"--set", "store.persistence.enabled=true",
-		"--set-string", "controller.image.digest="+digest,
-		"--set-string", "publisher.image.digest="+digest,
+		"--set-string", "controller.image.digest=" + digest,
+		"--set-string", "publisher.image.digest=" + digest,
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--show-only", "templates/deployment.yaml",
-	)
+	}
+	args = append(args, staticChartAdmissionArgs(digest)...)
+	rendered := requireHelmRender(t, args...)
 
 	for _, marker := range []string{
 		"--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key",
@@ -481,6 +495,55 @@ func TestStaticChartAdmissionRequiresReplicasTLSAndCA(t *testing.T) {
 			output, err := helmTemplateStaticChart(t, tt.args...)
 			if err == nil || !strings.Contains(output, tt.want) {
 				t.Fatalf("helm render error = %v, want %q:\n%s", err, tt.want, output)
+			}
+		})
+	}
+}
+
+func TestStaticChartAgentExecutionRequiresAdmissionAndWebhooks(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("5", 64)
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "ACP v2",
+			args: []string{
+				"--set", "controller.acpRuntime.enabled=true",
+				"--set", "providerProxy.enabled=true",
+				"--set", "store.persistence.enabled=true",
+				"--set-string", "controller.image.digest=" + digest,
+				"--set-string", "publisher.image.digest=" + digest,
+				"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
+				"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
+			},
+		},
+		{
+			name: "harness v1",
+			args: []string{
+				"--set", "harnessV1.enabled=true",
+				"--set", "store.persistence.enabled=true",
+				"--set-string", "controller.image.digest=" + digest,
+				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
+				"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+" requires admission", func(t *testing.T) {
+			output, err := helmTemplateStaticChart(t, tt.args...)
+			if err == nil || !strings.Contains(output, "admission.enabled must be true when agent execution is enabled") {
+				t.Fatalf("helm render error = %v, want admission runtime requirement:\n%s", err, output)
+			}
+		})
+		t.Run(tt.name+" requires webhooks", func(t *testing.T) {
+			args := append(append([]string{}, tt.args...), "--set", "admission.enabled=true")
+			output, err := helmTemplateStaticChart(t, args...)
+			if err == nil ||
+				!strings.Contains(output, "admission.webhooks.enabled must be true when agent execution is enabled") {
+				t.Fatalf("helm render error = %v, want admission webhook requirement:\n%s", err, output)
 			}
 		})
 	}
@@ -671,17 +734,19 @@ func TestStaticChartManagesFixedAgentExecutionOwnershipNamespace(t *testing.T) {
 
 func TestStaticChartManagedHarnessV1PolicyCanBeCleanupOnly(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("1", 64)
-	policy := requireHelmRender(t,
+	args := []string{
 		"--set", "harnessV1.enabled=true",
 		"--set", "controller.agentExecutionControl.v1Mode=drain-only",
 		"--set", "controller.agentExecutionControl.v2Mode=disabled",
 		"--set", "store.persistence.enabled=true",
-		"--set-string", "harnessV1.image.digest="+digest,
+		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--show-only", "templates/agent-execution-policy.yaml",
-	)
+	}
+	args = append(args, staticChartAdmissionArgs(digest)...)
+	policy := requireHelmRender(t, args...)
 	if !strings.Contains(policy, "allowNewV1Bindings: false") {
 		t.Fatalf("managed harness v1 policy is not cleanup-only by default:\n%s", policy)
 	}
@@ -721,6 +786,7 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
+	args = append(args, staticChartAdmissionArgs(digest)...)
 
 	// A fresh installation has no live Deployment and must not emit a drain
 	// hook. The enabled revision must still persist its post-rollback abort hook because
@@ -947,6 +1013,7 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
+	baseArgs = append(baseArgs, staticChartAdmissionArgs(digest)...)
 	tests := []struct {
 		name      string
 		state     harnessV1UpgradeState
@@ -1042,6 +1109,7 @@ func TestStaticChartHarnessV1GenerationTracksOnlyPodTemplate(t *testing.T) {
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--show-only", "templates/harness-wrapper-deployment.yaml",
 	}
+	args = append(args, staticChartAdmissionArgs(digest)...)
 	first := requireHelmRender(t, append(append([]string{}, args...), "--set", "controller.apiPort=8080")...)
 	second := requireHelmRender(t, append(append([]string{}, args...), "--set", "controller.apiPort=9090")...)
 	firstGeneration := harnessV1RenderedGeneration(t, first)
@@ -1065,6 +1133,7 @@ func TestStaticChartHarnessV1UsesOnlyExistingSecretReferences(t *testing.T) {
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
+	args = append(args, staticChartAdmissionArgs(digest)...)
 	rendered := requireHelmRender(t, args...)
 	if !strings.Contains(rendered, "secretName: \"harness-wrapper-auth\"") {
 		t.Fatalf("wrapper did not mount the configured existing Secret:\n%s", rendered)
@@ -1085,6 +1154,7 @@ func TestStaticChartRendersExplicitAgentExecutionBackendModes(t *testing.T) {
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
+	v1Args = append(v1Args, staticChartAdmissionArgs(digest)...)
 	v2Args := []string{
 		"--set", "controller.acpRuntime.enabled=true",
 		"--set", "providerProxy.enabled=true",
@@ -1094,6 +1164,7 @@ func TestStaticChartRendersExplicitAgentExecutionBackendModes(t *testing.T) {
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
+	v2Args = append(v2Args, staticChartAdmissionArgs(digest)...)
 
 	tests := []struct {
 		name             string
@@ -1307,7 +1378,8 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			output, err := helmTemplateStaticChart(t, tt.args...)
+			args := append(append([]string{}, tt.args...), staticChartAdmissionArgs(digest)...)
+			output, err := helmTemplateStaticChart(t, args...)
 			if err == nil {
 				t.Fatalf("helm template unexpectedly accepted unsafe harness v1 values")
 			}
@@ -1329,6 +1401,7 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
+	args = append(args, staticChartAdmissionArgs(digest)...)
 
 	policy := requireHelmRender(t, append(args, "--show-only", "templates/agent-execution-policy.yaml")...)
 	for _, marker := range []string{

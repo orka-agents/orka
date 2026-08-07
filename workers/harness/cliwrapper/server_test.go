@@ -1129,6 +1129,7 @@ func TestTurnStateExactRedactsProviderValuesAtFrameAndOutputSinks(t *testing.T) 
 	request.Input.Env = []harness.TurnEnvVar{
 		{Name: "OPENAI_API_KEY", Value: exactValue},
 		{Name: "OPENAI_API_KEY_DUPLICATE", Value: exactValue},
+		{Name: "CLAUDE_CODE_USE_FOUNDRY", Value: "1"},
 		{Name: "EMPTY_VALUE", Value: ""},
 	}
 	turn := newTurnState(request, time.Now)
@@ -1137,8 +1138,8 @@ func TestTurnStateExactRedactsProviderValuesAtFrameAndOutputSinks(t *testing.T) 
 	frame := harness.HarnessEventFrame{
 		Type:        harness.FrameRuntimeLog,
 		Summary:     "summary " + exactValue,
-		ContentText: "stdout " + exactValue,
-		Content:     json.RawMessage(`{"nested":{"value":"` + exactValue + `"},"items":["` + exactValue + `"]}`),
+		ContentText: "stdout 1 " + exactValue,
+		Content:     json.RawMessage(`{"ordinary":1,"nested":{"value":"` + exactValue + `"},"items":["` + exactValue + `"]}`),
 		ToolName:    "tool-" + exactValue,
 		ToolCallID:  "call-" + exactValue,
 		ApprovalID:  "approval-" + exactValue,
@@ -1185,8 +1186,11 @@ func TestTurnStateExactRedactsProviderValuesAtFrameAndOutputSinks(t *testing.T) 
 	if strings.Contains(string(encoded), exactValue) || !strings.Contains(string(encoded), "[REDACTED]") {
 		t.Fatalf("exact-redacted frames = %s", encoded)
 	}
+	if !strings.Contains(string(encoded), `stdout 1 [REDACTED]`) || !strings.Contains(string(encoded), `"ordinary":1`) {
+		t.Fatalf("exact redaction corrupted non-credential configuration value: %s", encoded)
+	}
 
-	if _, err := turn.storeOutput("durable output " + exactValue); err != nil {
+	if _, err := turn.storeOutput("durable output 1 " + exactValue); err != nil {
 		t.Fatal(err)
 	}
 	output, ok, err := turn.output()
@@ -1196,10 +1200,42 @@ func TestTurnStateExactRedactsProviderValuesAtFrameAndOutputSinks(t *testing.T) 
 	if strings.Contains(string(output), exactValue) || !strings.Contains(string(output), "[REDACTED]") {
 		t.Fatalf("exact-redacted durable output = %q", output)
 	}
+	if string(output) != "durable output 1 [REDACTED]" {
+		t.Fatalf("exact redaction corrupted non-credential configuration value: %q", output)
+	}
 
 	turn.clearExactRedactionValues()
 	if values := turn.exactRedactionValuesSnapshot(); len(values) != 0 {
 		t.Fatalf("exact redaction values retained after clear: %v", values)
+	}
+}
+
+func TestExactTurnInputValuesExcludesOnlyKnownProviderConfiguration(t *testing.T) {
+	values := exactTurnInputValues([]harness.TurnEnvVar{
+		{Name: workerenv.OpenAIAPIKey, Value: "openai-secret"},
+		{Name: "ANTHROPIC_FOUNDRY_API_KEY", Value: "foundry-secret"},
+		{Name: "FAKE_SECRET", Value: "opaque-secret"},
+		{Name: workerenv.OpenAIBaseURL, Value: "https://openai.example.test"},
+		{Name: workerenv.AnthropicBaseURL, Value: "https://anthropic.example.test"},
+		{Name: "CLAUDE_CODE_USE_FOUNDRY", Value: "1"},
+		{Name: workerenv.AnthropicFoundryBaseURL, Value: "https://foundry.example.test"},
+		{Name: "ANTHROPIC_FOUNDRY_RESOURCE", Value: "resource"},
+		{Name: "ANTHROPIC_DEFAULT_SONNET_MODEL", Value: "sonnet"},
+		{Name: "ANTHROPIC_DEFAULT_HAIKU_MODEL", Value: "haiku"},
+		{Name: "ANTHROPIC_DEFAULT_OPUS_MODEL", Value: "opus"},
+	})
+	want := map[string]bool{
+		"openai-secret":  true,
+		"foundry-secret": true,
+		"opaque-secret":  true,
+	}
+	if len(values) != len(want) {
+		t.Fatalf("exact turn input values = %v, want credential values only", values)
+	}
+	for _, value := range values {
+		if !want[value] {
+			t.Fatalf("exact turn input values unexpectedly include %q: %v", value, values)
+		}
 	}
 }
 

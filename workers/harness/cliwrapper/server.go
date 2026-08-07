@@ -1864,7 +1864,7 @@ func exactTurnInputValues(env []harness.TurnEnvVar) []string {
 	seen := make(map[string]struct{}, len(env))
 	values := make([]string, 0, len(env))
 	for _, item := range env {
-		if item.Value == "" {
+		if item.Value == "" || isKnownNonCredentialTurnEnv(item.Name) {
 			continue
 		}
 		if _, ok := seen[item.Value]; ok {
@@ -1875,6 +1875,22 @@ func exactTurnInputValues(env []harness.TurnEnvVar) []string {
 	}
 	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
 	return values
+}
+
+func isKnownNonCredentialTurnEnv(name string) bool {
+	switch strings.TrimSpace(name) {
+	case workerenv.OpenAIBaseURL,
+		workerenv.AnthropicBaseURL,
+		"CLAUDE_CODE_USE_FOUNDRY",
+		workerenv.AnthropicFoundryBaseURL,
+		"ANTHROPIC_FOUNDRY_RESOURCE",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":
+		return true
+	default:
+		return false
+	}
 }
 
 func identityFromStartTurnRequest(request harness.StartTurnRequest) turnIdentity {

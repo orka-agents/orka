@@ -522,6 +522,14 @@ Its certificate and CA trust are always operator-managed, and fail-closed
 webhooks are a separate activation step after the replicas are ready.
 */}}
 {{- define "orka.validateAdmission" -}}
+{{- if or .Values.controller.acpRuntime.enabled .Values.harnessV1.enabled -}}
+{{- if not .Values.admission.enabled -}}
+{{- fail "admission.enabled must be true when agent execution is enabled" -}}
+{{- end -}}
+{{- if not .Values.admission.webhooks.enabled -}}
+{{- fail "admission.webhooks.enabled must be true when agent execution is enabled" -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.admission.enabled -}}
 {{- if lt (int .Values.admission.replicas) 2 -}}
 {{- fail "admission.replicas must be at least 2 when admission.enabled=true" -}}
