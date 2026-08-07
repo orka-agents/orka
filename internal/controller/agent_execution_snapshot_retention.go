@@ -31,6 +31,7 @@ const (
 type AgentExecutionSnapshotRetentionManager struct {
 	APIReader client.Reader
 	Store     store.AgentExecutionSnapshotLifecycleStore
+	Namespace string
 
 	Retention time.Duration
 	Interval  time.Duration
@@ -70,6 +71,9 @@ func (m *AgentExecutionSnapshotRetentionManager) Start(ctx context.Context) erro
 func (m *AgentExecutionSnapshotRetentionManager) validate() error {
 	if m == nil || m.APIReader == nil || m.Store == nil {
 		return errors.New("snapshot retention requires an uncached Kubernetes reader and lifecycle store")
+	}
+	if strings.TrimSpace(m.Namespace) == "" {
+		return errors.New("snapshot retention namespace is required")
 	}
 	if m.retention() <= 0 {
 		return errors.New("snapshot retention duration must be positive")
@@ -184,8 +188,9 @@ func (m *AgentExecutionSnapshotRetentionManager) loadKubernetesReferences(
 		taskUIDs:             make(map[string]struct{}),
 		sessionLeaseTaskUIDs: make(map[string]struct{}),
 	}
+	namespace := client.InNamespace(strings.TrimSpace(m.Namespace))
 	tasks := &corev1alpha1.TaskList{}
-	if err := m.APIReader.List(ctx, tasks); err != nil {
+	if err := m.APIReader.List(ctx, tasks, namespace); err != nil {
 		return result, fmt.Errorf("list Tasks for snapshot retention: %w", err)
 	}
 	for i := range tasks.Items {
@@ -194,7 +199,7 @@ func (m *AgentExecutionSnapshotRetentionManager) loadKubernetesReferences(
 		}
 	}
 	sessions := &corev1alpha1.RuntimeSessionControlList{}
-	if err := m.APIReader.List(ctx, sessions); err != nil {
+	if err := m.APIReader.List(ctx, sessions, namespace); err != nil {
 		return result, fmt.Errorf("list RuntimeSessionControls for snapshot retention: %w", err)
 	}
 	for i := range sessions.Items {

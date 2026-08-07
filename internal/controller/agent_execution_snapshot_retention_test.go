@@ -23,7 +23,7 @@ func TestAgentExecutionSnapshotRetentionRequiresTwoReferenceFreeWindows(t *testi
 	lifecycle := newSnapshotRetentionLifecycleStore(item)
 	manager := &AgentExecutionSnapshotRetentionManager{
 		APIReader: emptySnapshotRetentionClient(t),
-		Store:     lifecycle, Retention: time.Hour, Now: func() time.Time { return now },
+		Store:     lifecycle, Namespace: "default", Retention: time.Hour, Now: func() time.Time { return now },
 	}
 
 	require.NoError(t, manager.collectOnce(ctx))
@@ -56,7 +56,7 @@ func TestAgentExecutionSnapshotRetentionHonorsKubernetesReferences(t *testing.T)
 	}
 	manager := &AgentExecutionSnapshotRetentionManager{
 		APIReader: snapshotRetentionClient(t, task, session),
-		Store:     lifecycle, Retention: time.Hour, Now: func() time.Time { return now },
+		Store:     lifecycle, Namespace: "default", Retention: time.Hour, Now: func() time.Time { return now },
 	}
 
 	require.NoError(t, manager.collectOnce(ctx))
@@ -64,6 +64,49 @@ func TestAgentExecutionSnapshotRetentionHonorsKubernetesReferences(t *testing.T)
 	require.NoError(t, manager.collectOnce(ctx))
 	require.Empty(t, lifecycle.deleted)
 	require.Empty(t, manager.unreferencedSince)
+}
+
+func TestAgentExecutionSnapshotRetentionScopesKubernetesReferencesToNamespace(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	ownedItem := snapshotRetentionMetadata("owned-task", "owned", now.Add(-3*time.Hour))
+	foreignTaskItem := snapshotRetentionMetadata("foreign-task", "foreign-task", now.Add(-3*time.Hour))
+	foreignLeaseItem := snapshotRetentionMetadata("foreign-lease", "foreign-lease", now.Add(-3*time.Hour))
+	lifecycle := newSnapshotRetentionLifecycleStore(ownedItem, foreignTaskItem, foreignLeaseItem)
+
+	ownedTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "tenant-a", Name: "owned", UID: types.UID(ownedItem.Key.TaskUID),
+	}}
+	foreignTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "tenant-b", Name: "foreign", UID: types.UID(foreignTaskItem.Key.TaskUID),
+	}}
+	foreignSession := &corev1alpha1.RuntimeSessionControl{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-b", Name: "foreign-session"},
+		Status: corev1alpha1.RuntimeSessionControlStatus{
+			MutationLease: &corev1alpha1.RuntimeSessionMutationLeaseStatus{TaskUID: foreignLeaseItem.Key.TaskUID},
+		},
+	}
+	manager := &AgentExecutionSnapshotRetentionManager{
+		APIReader: snapshotRetentionClient(t, ownedTask, foreignTask, foreignSession),
+		Store:     lifecycle, Namespace: "tenant-a", Retention: time.Hour, Now: func() time.Time { return now },
+	}
+
+	require.NoError(t, manager.collectOnce(ctx))
+	now = now.Add(time.Hour)
+	require.NoError(t, manager.collectOnce(ctx))
+	require.ElementsMatch(t, []store.AgentExecutionSnapshotKey{foreignTaskItem.Key, foreignLeaseItem.Key}, lifecycle.deleted)
+	_, ownedRetained := lifecycle.metadata[ownedItem.Key.ID()]
+	require.True(t, ownedRetained)
+}
+
+func TestAgentExecutionSnapshotRetentionRequiresNamespace(t *testing.T) {
+	manager := &AgentExecutionSnapshotRetentionManager{
+		APIReader: emptySnapshotRetentionClient(t),
+		Store:     newSnapshotRetentionLifecycleStore(),
+		Retention: time.Hour,
+	}
+
+	require.EqualError(t, manager.collectOnce(context.Background()), "snapshot retention namespace is required")
 }
 
 func TestAgentExecutionSnapshotRetentionDoesNotTreatLineageConfigAsSnapshot(t *testing.T) {
@@ -79,7 +122,7 @@ func TestAgentExecutionSnapshotRetentionDoesNotTreatLineageConfigAsSnapshot(t *t
 	}
 	manager := &AgentExecutionSnapshotRetentionManager{
 		APIReader: snapshotRetentionClient(t, session),
-		Store:     lifecycle, Retention: time.Hour, Now: func() time.Time { return now },
+		Store:     lifecycle, Namespace: "default", Retention: time.Hour, Now: func() time.Time { return now },
 	}
 
 	require.NoError(t, manager.collectOnce(ctx))
@@ -95,7 +138,7 @@ func TestAgentExecutionSnapshotRetentionDurableReferenceResetsClock(t *testing.T
 	lifecycle := newSnapshotRetentionLifecycleStore(item)
 	manager := &AgentExecutionSnapshotRetentionManager{
 		APIReader: emptySnapshotRetentionClient(t),
-		Store:     lifecycle, Retention: time.Hour, Now: func() time.Time { return now },
+		Store:     lifecycle, Namespace: "default", Retention: time.Hour, Now: func() time.Time { return now },
 	}
 
 	require.NoError(t, manager.collectOnce(ctx))

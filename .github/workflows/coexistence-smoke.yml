@@ -6,6 +6,7 @@ on:
       - ".github/workflows/coexistence-smoke.yml"
       - "Makefile"
       - "api/**"
+      - "cmd/main.go"
       - "cmd/build/helmify/**"
       - "cmd/orka-admission/**"
       - "cmd/orka-agent-harness-wrapper/**"
@@ -18,6 +19,7 @@ on:
       - "go.sum"
       - "internal/admission/**"
       - "internal/controller/agent_execution*"
+      - "internal/controller/acp_upgrade_drain*"
       - "internal/controller/harness_v1*"
       - "internal/executionmode/**"
       - "internal/harness/**"
@@ -25,8 +27,14 @@ on:
       - "pkg/harness/**"
       - "scripts/check-legacy-wrapper-resources.sh"
       - "scripts/apply-acp-production.sh"
+      - "scripts/live-github-oidc-e2e.sh"
+      - "scripts/security-scan-e2e.sh"
+      - "scripts/agent-substrate-e2e.sh"
+      - "scripts/live-github-label-trigger-e2e.sh"
       - "scripts/static-mode-crd-validate.sh"
       - "scripts/tests/acp-runtime-image-rollout-test.sh"
+      - "scripts/tests/live-github-oidc-e2e-test.sh"
+      - "scripts/tests/static-mode-e2e-namespace-test.sh"
       - "scripts/tests/static-mode-deploy-gate-test.sh"
       - "workers/harness/**"
   pull_request:
@@ -34,6 +42,7 @@ on:
       - ".github/workflows/coexistence-smoke.yml"
       - "Makefile"
       - "api/**"
+      - "cmd/main.go"
       - "cmd/build/helmify/**"
       - "cmd/orka-admission/**"
       - "cmd/orka-agent-harness-wrapper/**"
@@ -46,6 +55,7 @@ on:
       - "go.sum"
       - "internal/admission/**"
       - "internal/controller/agent_execution*"
+      - "internal/controller/acp_upgrade_drain*"
       - "internal/controller/harness_v1*"
       - "internal/executionmode/**"
       - "internal/harness/**"
@@ -53,8 +63,14 @@ on:
       - "pkg/harness/**"
       - "scripts/check-legacy-wrapper-resources.sh"
       - "scripts/apply-acp-production.sh"
+      - "scripts/live-github-oidc-e2e.sh"
+      - "scripts/security-scan-e2e.sh"
+      - "scripts/agent-substrate-e2e.sh"
+      - "scripts/live-github-label-trigger-e2e.sh"
       - "scripts/static-mode-crd-validate.sh"
       - "scripts/tests/acp-runtime-image-rollout-test.sh"
+      - "scripts/tests/live-github-oidc-e2e-test.sh"
+      - "scripts/tests/static-mode-e2e-namespace-test.sh"
       - "scripts/tests/static-mode-deploy-gate-test.sh"
       - "workers/harness/**"
   workflow_dispatch:
@@ -97,7 +113,7 @@ jobs:
             ./workers/harness/... \
             ./cmd/orka-admission \
             ./cmd/orka-agent-harness-wrapper \
-            -run '(ExecutionMode|ControllerMode|AgentContract|AgentRuntimeContract|TaskExecutionAuthority|HarnessV1|RecoverAmbiguousSubmission|RecoverActiveAttempt|DurableAdmission|DurableTurn|Ledger|SessionLineage|ReceiptPersistence|AdmissionClose)' \
+            -run '(ExecutionMode|ControllerMode|AgentContract|AgentRuntimeContract|TaskExecutionAuthority|HarnessV1|ACPUpgradeDrain|AgentExecutionSnapshotRetention|RecoverAmbiguousSubmission|RecoverActiveAttempt|DurableAdmission|DurableTurn|Ledger|SessionLineage|ReceiptPersistence|AdmissionClose)' \
             -count=1
 
   shell-syntax:
@@ -115,7 +131,13 @@ jobs:
           bash -n scripts/static-mode-crd-validate.sh
           bash -n scripts/check-legacy-wrapper-resources.sh
           bash -n scripts/apply-acp-production.sh
+          bash -n scripts/live-github-oidc-e2e.sh
+          bash -n scripts/security-scan-e2e.sh
+          bash -n scripts/agent-substrate-e2e.sh
+          bash -n scripts/live-github-label-trigger-e2e.sh
           bash -n scripts/tests/acp-runtime-image-rollout-test.sh
+          bash -n scripts/tests/live-github-oidc-e2e-test.sh
+          bash -n scripts/tests/static-mode-e2e-namespace-test.sh
           bash -n scripts/tests/static-mode-deploy-gate-test.sh
 
       - name: Install kustomize
@@ -125,3 +147,5 @@ jobs:
         run: |
           bash scripts/tests/static-mode-deploy-gate-test.sh
           KUSTOMIZE="$PWD/bin/kustomize" bash scripts/tests/acp-runtime-image-rollout-test.sh
+          bash scripts/tests/live-github-oidc-e2e-test.sh
+          bash scripts/tests/static-mode-e2e-namespace-test.sh

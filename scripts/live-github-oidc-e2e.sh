@@ -26,7 +26,7 @@ audience="${ORKA_GITHUB_OIDC_AUDIENCE:-orka-live-github-oidc-e2e}"
 issuer="${ORKA_GITHUB_OIDC_ISSUER:-https://token.actions.githubusercontent.com}"
 repository="${GITHUB_REPOSITORY:-orka-agents/orka}"
 allowed_subjects="${ORKA_GITHUB_OIDC_ALLOWED_SUBJECTS:-repo:${repository}:*}"
-oidc_namespace="${ORKA_GITHUB_OIDC_NAMESPACE:-default}"
+oidc_namespace="${ORKA_GITHUB_OIDC_NAMESPACE:-${namespace}}"
 token="${ORKA_GITHUB_OIDC_TOKEN:-}"
 port="${ORKA_API_LOCAL_PORT:-18080}"
 workdir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/orka-oidc-e2e.XXXXXX")"
@@ -103,6 +103,9 @@ wait_for_api() {
   die "Orka API did not become ready"
 }
 
+[[ "${namespace}" == "orka-system" ]] || die "ORKA_NAMESPACE must be orka-system for the canonical make deploy path"
+[[ "${oidc_namespace}" == "${namespace}" ]] || die "ORKA_GITHUB_OIDC_NAMESPACE must match ORKA_NAMESPACE for an isolated controller"
+
 for cmd in make go docker kind kubectl curl jq openssl; do require_cmd "${cmd}"; done
 cd "${repo_root}"
 cp "${kustomization}" "${backup}"
@@ -153,7 +156,8 @@ fetch_token
 payload="${workdir}/task.json"
 response="${workdir}/response.json"
 task="github-oidc-$(date +%s)-${RANDOM}"
-jq -n --arg name "${task}" '{name:$name,namespace:"default",type:"container",image:"busybox:1.36",command:["/bin/sh","-c"],args:["echo github-oidc"]}' >"${payload}"
+jq -n --arg name "${task}" --arg namespace "${oidc_namespace}" \
+  '{name:$name,namespace:$namespace,type:"container",image:"busybox:1.36",command:["/bin/sh","-c"],args:["echo github-oidc"]}' >"${payload}"
 status="$(request POST "http://127.0.0.1:${port}/api/v1/tasks" "${response}" -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' --data @"${payload}")"
 [[ "${status}" == 201 ]] || { cat "${response}" | redact >&2; die "OIDC task creation returned HTTP ${status}"; }
 jq -e --arg issuer "${issuer}" '.spec.requestedBy.issuer == $issuer and ((.spec.requestedBy.subject // "") != "")' "${response}" >/dev/null

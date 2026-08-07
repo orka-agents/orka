@@ -113,16 +113,10 @@ dump_diagnostics() {
     kubectl config current-context 2>/dev/null || true
     echo
     echo "=== Orka Namespace Resources ==="
-    kubectl get pods,svc,deploy,tasks -n "${orka_namespace}" -o wide 2>/dev/null || true
-    echo
-    echo "=== Default Namespace Resources ==="
-    kubectl get pods,svc,deploy,agents,tasks -n default -o wide 2>/dev/null || true
+    kubectl get pods,svc,deploy,agents,tasks -n "${orka_namespace}" -o wide 2>/dev/null || true
     echo
     echo "=== Orka Namespace Events ==="
     kubectl get events -n "${orka_namespace}" --sort-by=.lastTimestamp 2>/dev/null || true
-    echo
-    echo "=== Default Namespace Events ==="
-    kubectl get events -n default --sort-by=.lastTimestamp 2>/dev/null || true
     echo
     echo "=== Controller Logs ==="
     local controller_pod
@@ -151,9 +145,9 @@ on_exit() {
   cleanup_port_forward
 
   if [[ -n "${task_name}" ]]; then
-    kubectl delete task "${task_name}" -n default --ignore-not-found=true >/dev/null 2>&1 || true
+    kubectl delete task "${task_name}" -n "${orka_namespace}" --ignore-not-found=true >/dev/null 2>&1 || true
   fi
-  kubectl delete agent "${agent_name}" -n default --ignore-not-found=true >/dev/null 2>&1 || true
+  kubectl delete agent "${agent_name}" -n "${orka_namespace}" --ignore-not-found=true >/dev/null 2>&1 || true
 
   restore_manager_kustomization
   orka_kind_registry_stop
@@ -300,7 +294,7 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: ${agent_name}
-  namespace: default
+  namespace: ${orka_namespace}
 spec:
   runtime:
     contractVersion: orka.harness.v2
@@ -373,6 +367,7 @@ main() {
   require_cmd jq
   require_cmd python3
   require_cmd openssl
+  [[ "${orka_namespace}" == "orka-system" ]] || die "ORKA_NAMESPACE must be orka-system for the canonical make deploy path"
   check_docker_ready
 
   if [[ ! "${target_number}" =~ ^[0-9]+$ || "${target_number}" -le 0 ]]; then
@@ -432,7 +427,7 @@ main() {
   run kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
   run kubectl wait --for=condition=Established crd/agents.core.orka.ai --timeout=60s
 
-  log "Creating runtime Agent ${agent_name} in default namespace"
+  log "Creating runtime Agent ${agent_name} in ${orka_namespace} namespace"
   write_agent_manifest
 
   log "Configuring local image pull policy and GitHub label trigger env"
@@ -442,7 +437,7 @@ main() {
   kubectl -n "${orka_namespace}" set env deployment/"${orka_controller_deployment}" \
     ORKA_GITHUB_WEBHOOK_SECRET="${webhook_secret}" \
     ORKA_GITHUB_LABEL_TRIGGER_AGENT="${agent_name}" \
-    ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE=default \
+    ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE="${orka_namespace}" \
     ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT=5m \
     ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS=5 >/dev/null
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
@@ -485,7 +480,7 @@ main() {
   log "Verifying created Task ${task_name} targets ${repo_full}"
   local task_file
   task_file="${work_dir}/created-task.json"
-  run kubectl get task "${task_name}" -n default -o json >"${task_file}"
+  run kubectl get task "${task_name}" -n "${orka_namespace}" -o json >"${task_file}"
   jq -e \
     --arg agent "${agent_name}" \
     --arg delivery "${delivery}" \

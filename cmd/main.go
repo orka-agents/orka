@@ -698,6 +698,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "--watch-namespace is required; controller modes cannot use a cluster-wide watch")
 		os.Exit(1)
 	}
+	acpUpgradeDrainOptions.WatchNamespace = watchNamespace
 	if !enforceNamespaceIsolation {
 		fmt.Fprintln(os.Stderr, "--enforce-namespace-isolation=true is required for a static controller installation")
 		os.Exit(1)
@@ -1144,6 +1145,7 @@ func main() {
 		snapshotRetentionManager := &controller.AgentExecutionSnapshotRetentionManager{
 			APIReader: mgr.GetAPIReader(),
 			Store:     sqliteStore,
+			Namespace: watchNamespace,
 			Retention: agentExecutionSnapshotRetention,
 			Interval:  agentExecutionSnapshotRetentionInterval,
 		}

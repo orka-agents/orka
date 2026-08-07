@@ -32,7 +32,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 
 kind_cluster="${KIND_CLUSTER:-orka-security-scan-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
-test_namespace="${ORKA_SECURITY_SCAN_E2E_NAMESPACE:-default}"
+test_namespace="${ORKA_SECURITY_SCAN_E2E_NAMESPACE:-${orka_namespace}}"
 orka_controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
 wait_timeout="${ORKA_SECURITY_SCAN_WAIT_TIMEOUT:-25m}"
 target_repo="${ORKA_SECURITY_SCAN_TARGET_REPO:-https://github.com/sozercan/nodejs-goof}"
@@ -310,6 +310,9 @@ main() {
   require_cmd kubectl
   require_cmd jq
   require_cmd openssl
+
+  [[ "${orka_namespace}" == "orka-system" ]] || die "ORKA_NAMESPACE must be orka-system for the canonical make deploy path"
+  [[ "${test_namespace}" == "${orka_namespace}" ]] || die "ORKA_SECURITY_SCAN_E2E_NAMESPACE must match ORKA_NAMESPACE for an isolated controller"
 
   cd "${repo_root}"
   [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
