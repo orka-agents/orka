@@ -347,20 +347,22 @@ manifest_json() {
   fi
 }
 
-if [[ "$1" == "create" && "$2" == "--raw" ]]; then
-  proxy_path="$3"
-  [[ "$4" == "-f" && -f "$5" ]] || { echo "invalid AdmissionReview smoke invocation: $*" >&2; exit 2; }
+if [[ "$1" == "proxy" ]]; then
   [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'handler smoke ran before ready endpoints' >&2; exit 34; }
-  handler="${proxy_path##*/proxy}"
-  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "smoke" && ! -e "${FAKE_KUBE_STATE}/failed-smoke" ]]; then
-    : >"${FAKE_KUBE_STATE}/failed-smoke"
-    printf 'fail-smoke:%s\n' "${handler}" >>"${FAKE_KUBE_LOG}"
-    exit 35
-  fi
-  uid="$(jq -r '.request.uid' "$5")"
-  jq -n --arg uid "${uid}" '{apiVersion:"admission.k8s.io/v1",kind:"AdmissionReview",response:{uid:$uid,allowed:false,status:{message:"smoke reached handler"}}}'
-  printf 'smoke:%s\n' "${handler}" >>"${FAKE_KUBE_LOG}"
-  exit 0
+  [[ " $* " == *" --address=127.0.0.1 "* && " $* " == *" --port=0 "* ]] || {
+    echo "invalid admission proxy invocation: $*" >&2
+    exit 2
+  }
+  printf 'proxy-start\n' >>"${FAKE_KUBE_LOG}"
+  stop_proxy() {
+    printf 'proxy-stop\n' >>"${FAKE_KUBE_LOG}"
+    exit 0
+  }
+  trap stop_proxy INT TERM
+  printf 'Starting to serve on 127.0.0.1:43210\n'
+  while true; do
+    sleep 1
+  done
 fi
 
 if [[ "$1" == "create" && "$2" == "-f" && $# -eq 3 ]] \
@@ -613,6 +615,65 @@ printf '%s\n' "${deployment_ref}" >"${FAKE_KUBE_STATE}/deployment-ref"
 printf 'full:%s\n' "${deployment_ref}" >>"${FAKE_KUBE_LOG}"
 EOF_FAKE_KUBECTL
 chmod +x "${fake_bin}/kubectl"
+cat >"${fake_bin}/curl" <<'EOF_FAKE_CURL'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+content_type=""
+request_file=""
+url=""
+while (( $# > 0 )); do
+  case "$1" in
+    --fail|--silent|--show-error)
+      shift
+      ;;
+    --noproxy|--max-time)
+      [[ $# -ge 2 ]] || { echo "missing curl argument for $1" >&2; exit 2; }
+      shift 2
+      ;;
+    --header)
+      [[ $# -ge 2 ]] || { echo 'missing curl header' >&2; exit 2; }
+      content_type="$2"
+      shift 2
+      ;;
+    --data-binary)
+      [[ $# -ge 2 && "$2" == @* ]] || { echo 'invalid curl data argument' >&2; exit 2; }
+      request_file="${2#@}"
+      shift 2
+      ;;
+    http://*)
+      url="$1"
+      shift
+      ;;
+    *)
+      echo "unexpected fake curl argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ "${content_type}" == "Content-Type: application/json" ]] || {
+  echo 'admission smoke did not send application/json' >&2
+  exit 43
+}
+[[ -f "${request_file}" ]] || { echo 'admission smoke request file missing' >&2; exit 2; }
+if [[ ! "${url}" =~ ^http://127\.0\.0\.1:[0-9]+/api/v1/namespaces/orka-system/services/https:orka-admission:443/proxy(/.*)$ ]]; then
+  echo "invalid admission smoke URL: ${url}" >&2
+  exit 2
+fi
+handler="${BASH_REMATCH[1]}"
+[[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'handler smoke ran before ready endpoints' >&2; exit 34; }
+if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "smoke" && ! -e "${FAKE_KUBE_STATE}/failed-smoke" ]]; then
+  : >"${FAKE_KUBE_STATE}/failed-smoke"
+  printf 'fail-smoke:%s\n' "${handler}" >>"${FAKE_KUBE_LOG}"
+  exit 35
+fi
+uid="$(jq -r '.request.uid' "${request_file}")"
+jq -n --arg uid "${uid}" '{apiVersion:"admission.k8s.io/v1",kind:"AdmissionReview",response:{uid:$uid,allowed:false,status:{message:"smoke reached handler"}}}'
+printf 'smoke:%s\n' "${handler}" >>"${FAKE_KUBE_LOG}"
+EOF_FAKE_CURL
+chmod +x "${fake_bin}/curl"
+export PATH="${fake_bin}:${PATH}"
 
 assert_converged() {
   local state_dir="$1"
@@ -625,6 +686,8 @@ assert_converged() {
   [[ -e "${state_dir}/admission-runtime" ]]
   [[ -e "${state_dir}/admission-endpoints" ]]
   [[ -e "${state_dir}/admission-policies" ]]
+  [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" -ge 1 ]]
+  [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" == "$(grep -c '^proxy-stop$' "${state_dir}/apply.log")" ]]
   [[ "$(grep -c '^secret:agent-execution-snapshot-key$' "${state_dir}/apply.log")" == "1" ]]
   [[ "$(grep -c '^control-create:cluster$' "${state_dir}/apply.log")" == "1" ]]
   [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "9" ]]

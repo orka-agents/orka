@@ -14,7 +14,7 @@ overlay_dir="$1"
 kustomize="$2"
 kubectl="$3"
 
-for command in "${kustomize}" "${kubectl}" base64 cmp dd jq openssl sleep tr wc; do
+for command in "${kustomize}" "${kubectl}" base64 cmp curl dd jq openssl sleep tr wc; do
   command -v "${command}" >/dev/null 2>&1 || {
     echo "required command not found: ${command}" >&2
     exit 1
@@ -31,7 +31,16 @@ admission_webhooks_dir="${overlay_dir}/../orka-admission-webhooks"
 }
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/apply-acp-production.XXXXXX")"
+admission_proxy_pid=""
+stop_admission_proxy() {
+  if [[ -n "${admission_proxy_pid}" ]]; then
+    kill "${admission_proxy_pid}" 2>/dev/null || true
+    wait "${admission_proxy_pid}" 2>/dev/null || true
+    admission_proxy_pid=""
+  fi
+}
 cleanup() {
+  stop_admission_proxy
   rm -rf "${work_dir}"
 }
 trap cleanup EXIT
@@ -61,6 +70,8 @@ admission_webhooks_rendered="${work_dir}/orka-admission-webhooks-rendered.json"
 admission_webhooks_manifest="${work_dir}/orka-admission-webhooks.json"
 admission_smoke_request="${work_dir}/orka-admission-smoke-request.json"
 admission_smoke_response="${work_dir}/orka-admission-smoke-response.json"
+admission_proxy_log="${work_dir}/kubectl-proxy.log"
+admission_proxy_port=""
 "${kustomize}" build "${overlay_dir}" >"${manifest}"
 "${kubectl}" create --dry-run=client --validate=false -f "${manifest}" -o json >"${rendered_json}"
 "${kustomize}" build "${admission_webhooks_dir}" >"${admission_webhooks_source}"
@@ -298,9 +309,42 @@ wait_for_admission_endpoints() {
   fi
 }
 
+start_admission_proxy() {
+  local attempt line
+  admission_proxy_port=""
+  : >"${admission_proxy_log}"
+  "${kubectl}" proxy \
+    --address=127.0.0.1 \
+    --accept-hosts='^127\.0\.0\.1$' \
+    --port=0 \
+    >"${admission_proxy_log}" 2>&1 &
+  admission_proxy_pid=$!
+
+  for attempt in {1..50}; do
+    while IFS= read -r line; do
+      if [[ "${line}" =~ ^Starting[[:space:]]+to[[:space:]]+serve[[:space:]]+on[[:space:]]+127\.0\.0\.1:([0-9]+)$ ]]; then
+        admission_proxy_port="${BASH_REMATCH[1]}"
+        return 0
+      fi
+    done <"${admission_proxy_log}"
+    if ! kill -0 "${admission_proxy_pid}" 2>/dev/null; then
+      echo "kubectl proxy exited before the admission smoke endpoint was ready" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+
+  echo "kubectl proxy did not publish an admission smoke endpoint" >&2
+  return 1
+}
+
 smoke_admission_handlers() {
   local handler kind resource uid
-  local service_proxy="/api/v1/namespaces/orka-system/services/https:orka-admission:443/proxy"
+  local service_proxy
+  if ! start_admission_proxy; then
+    return 1
+  fi
+  service_proxy="http://127.0.0.1:${admission_proxy_port}/api/v1/namespaces/orka-system/services/https:orka-admission:443/proxy"
   while IFS='|' read -r handler kind resource; do
     [[ -n "${handler}" ]] || continue
     uid="orka-admission-smoke-${resource}"
@@ -332,7 +376,15 @@ smoke_admission_handlers() {
         }
       }
     ' >"${admission_smoke_request}"
-    if ! "${kubectl}" create --raw "${service_proxy}${handler}" -f "${admission_smoke_request}" \
+    if ! curl \
+      --fail \
+      --silent \
+      --show-error \
+      --noproxy '*' \
+      --max-time 15 \
+      --header 'Content-Type: application/json' \
+      --data-binary "@${admission_smoke_request}" \
+      "${service_proxy}${handler}" \
       >"${admission_smoke_response}" \
       || ! jq -e --arg uid "${uid}" '
         .apiVersion == "admission.k8s.io/v1" and
@@ -341,6 +393,7 @@ smoke_admission_handlers() {
         (.response.allowed | type == "boolean")
       ' "${admission_smoke_response}" >/dev/null; then
       echo "orka-admission handler smoke failed: ${handler}" >&2
+      stop_admission_proxy
       return 1
     fi
   done <<'EOF_ADMISSION_HANDLERS'
@@ -354,6 +407,7 @@ smoke_admission_handlers() {
 /validate-core-orka-ai-v1alpha1-agentexecution-control-policy|AgentExecutionControl|agentexecutioncontrols
 /validate-core-orka-ai-v1alpha1-session-resolution|RuntimeSessionControl|runtimesessioncontrols
 EOF_ADMISSION_HANDLERS
+  stop_admission_proxy
 }
 
 # Establish every workload prerequisite before applying the Deployment that
