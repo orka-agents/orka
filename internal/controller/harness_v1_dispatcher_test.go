@@ -1452,6 +1452,162 @@ func TestHarnessV1DispatcherRetriesCancellationUntilAcknowledged(t *testing.T) {
 	}
 }
 
+func TestHarnessV1DispatcherCancellationSkipsPersistedAndLiveBrokeredToolCalls(t *testing.T) {
+	fixture := newHarnessV1DispatcherStateFixture(t)
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: fixture.task.Namespace, Name: "lookup", UID: types.UID("lookup-tool-uid"), Generation: 1,
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "look up a value", BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP: &corev1alpha1.HTTPExecution{URL: "https://tools.example.test/lookup", Method: http.MethodPost},
+		},
+	}
+	if err := fixture.dispatcher.Client.Create(fixture.ctx, tool); err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.Tool{}
+	if err := fixture.dispatcher.APIReader.Get(fixture.ctx, client.ObjectKeyFromObject(tool), current); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := harnessV1BrokeredToolDefinitionDigest(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.verified.body.HarnessV1.ToolExecutionMode = string(harness.ToolExecutionModeBrokered)
+	fixture.verified.body.HarnessV1.BrokeredToolClasses = []corev1alpha1.AgentRuntimeBrokeredToolClass{
+		corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+	}
+	fixture.verified.body.HarnessV1.BrokeredTools = []agentExecutionSnapshotHarnessV1BrokeredTool{{
+		Name: current.Name, Description: current.Spec.Description, BrokeredClass: current.Spec.BrokeredToolClass,
+		Parameters:       json.RawMessage(`{"type":"object","additionalProperties":true}`),
+		UID:              string(current.UID),
+		Generation:       current.Generation,
+		DefinitionDigest: digest,
+	}}
+	brokeredFrame := func(seq int64, callID string) harness.HarnessEventFrame {
+		t.Helper()
+		call := harness.ToolCallRequest{
+			Version: harness.ProtocolVersion, RuntimeSessionID: fixture.request.RuntimeSessionID,
+			TurnID: fixture.request.TurnID, ToolCallID: callID, ToolName: current.Name,
+			Input: json.RawMessage(`{"query":"value"}`),
+		}
+		call.IdempotencyKey = harness.ToolRequestIdempotencyKey(call.RuntimeSessionID, call.TurnID, call.ToolCallID)
+		content, marshalErr := json.Marshal(call)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return harness.HarnessEventFrame{
+			Version: harness.ProtocolVersion, Type: harness.FrameToolCallRequested,
+			RuntimeSessionID: fixture.request.RuntimeSessionID, TurnID: fixture.request.TurnID,
+			CorrelationID: fixture.request.CorrelationID, Seq: seq,
+			ToolName: current.Name, ToolCallID: callID, Content: content,
+		}
+	}
+	persistedFrame := brokeredFrame(1, "persisted-call")
+	liveFrame := brokeredFrame(2, "live-call")
+	appendPersistedHarnessV1Frame(t, fixture, persistedFrame)
+	evidence, err := fixture.dispatcher.persistedEvidence(fixture.ctx, fixture.task, fixture.attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.brokeredToolCalls) != 1 || evidence.brokeredToolCalls[0].Seq != persistedFrame.Seq {
+		t.Fatalf("persisted brokered evidence = %#v, want sequence %d", evidence, persistedFrame.Seq)
+	}
+
+	now := time.Now().UTC()
+	seededIdentity := harnessV1BrokeredToolEffectIdentity(
+		fixture.task, fixture.request, persistedFrame.ToolCallID,
+	)
+	seededEffect, err := fixture.durable.ReserveExternalEffect(fixture.ctx, store.ReserveExternalEffectRequest{
+		Identity: seededIdentity, RequestDigest: "sha256:" + strings.Repeat("c", 64),
+		Fence: fixture.fence, CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseExpiry := now.Add(time.Minute)
+	seededEffect, err = fixture.durable.TransitionExternalEffect(fixture.ctx, store.ExternalEffectTransition{
+		ID: seededEffect.ID, Fence: fixture.fence, ExpectedVersion: seededEffect.Version,
+		ExpectedState: seededEffect.State, NewState: store.ExternalEffectInFlight,
+		RequestDigest: seededEffect.RequestDigest, LeaseOwner: "seeded-harness-v1-tool-call",
+		LeaseExpiresAt: &leaseExpiry, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.attempt, err = fixture.dispatcher.transitionAttempt(
+		fixture.ctx, fixture.attempt, fixture.fence,
+		store.HarnessV1AttemptCancelRequested, "test-cancel-requested",
+		store.HarnessV1AttemptUpdates{CancelRequestedAt: &now},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.dispatcher.Client.Delete(fixture.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	executeCalls := 0
+	fixture.dispatcher.ExternalEffects = fixture.durable
+	fixture.dispatcher.BrokeredToolExecutor = HarnessV1BrokeredToolExecutorFunc(func(
+		context.Context, string, *corev1alpha1.Tool, harness.ToolCallRequest,
+	) (json.RawMessage, error) {
+		executeCalls++
+		return json.RawMessage(`{"unexpected":true}`), nil
+	})
+	protocolClient := &recordingHarnessV1RecoveryClient{stream: func(
+		_ context.Context,
+		_ harness.HarnessTurnID,
+		afterSeq int64,
+		onFrame func(harness.HarnessEventFrame) error,
+	) error {
+		if afterSeq != 0 {
+			t.Fatalf("stream after sequence = %d, want 0 while CancelRequested progress remains journal-backed", afterSeq)
+		}
+		if err := onFrame(persistedFrame); err != nil {
+			return err
+		}
+		if err := onFrame(liveFrame); err != nil {
+			return err
+		}
+		return onFrame(harness.HarnessEventFrame{
+			Version: harness.ProtocolVersion, Type: harness.FrameTurnCancelled,
+			RuntimeSessionID: fixture.request.RuntimeSessionID, TurnID: fixture.request.TurnID,
+			CorrelationID: fixture.request.CorrelationID, Seq: 3,
+		})
+	}}
+
+	if err := fixture.dispatcher.streamAcceptedAttempt(
+		fixture.ctx, fixture.task, fixture.verified, protocolClient,
+		fixture.request, fixture.attempt, fixture.fence,
+	); err != nil {
+		t.Fatalf("stream cancelled brokered attempt: %v", err)
+	}
+	assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptCancelled)
+	if executeCalls != 0 || protocolClient.continueCalls != 0 {
+		t.Fatalf(
+			"cancelled brokered attempt calls = execute=%d continue=%d, want 0/0",
+			executeCalls, protocolClient.continueCalls,
+		)
+	}
+	settledEffect, err := fixture.durable.GetExternalEffect(fixture.ctx, seededEffect.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settledEffect.State != store.ExternalEffectOutcomeUnknown || settledEffect.LeaseOwner != "" ||
+		settledEffect.LeaseExpiresAt != nil {
+		t.Fatalf("settled cancelled brokered effect = %#v, want terminal OutcomeUnknown without a lease", settledEffect)
+	}
+	liveIdentity := harnessV1BrokeredToolEffectIdentity(fixture.task, fixture.request, liveFrame.ToolCallID)
+	liveEffectID, err := liveIdentity.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.durable.GetExternalEffect(fixture.ctx, liveEffectID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("live cancelled brokered call external effect error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestHarnessV1DispatcherRetriesOutputAcknowledgementBeforeProjection(t *testing.T) {
 	fixture := newHarnessV1DispatcherStateFixture(t)
 	frame := harnessV1CompletedFrame(fixture.request, "")

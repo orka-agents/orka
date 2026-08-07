@@ -113,6 +113,24 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	if err != nil {
 		return nil, err
 	}
+	binding := corev1alpha1.AgentExecutionBinding{
+		SchemaVersion:   1,
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+		Backend:         target.backend,
+		Task: corev1alpha1.AgentExecutionBindingTaskRef{
+			NamespaceUID: namespace.UID, UID: task.UID, BoundSpecGeneration: task.Generation,
+		},
+		Agent: &corev1alpha1.AgentExecutionAgentRef{
+			Namespace: agent.Namespace, Name: agent.Name, UID: agent.UID, Generation: agent.Generation,
+		},
+		RuntimeType: agent.Spec.Runtime.Type,
+	}
+	if target.runtimeRef != nil {
+		binding.RuntimeType = ""
+		binding.RuntimeRef = &corev1alpha1.AgentExecutionRuntimeRef{
+			Name: target.runtimeRef.Name, UID: target.runtimeRef.UID, Generation: target.runtimeRef.Generation,
+		}
+	}
 	toolGovernance, err := resolveHarnessV1ToolGovernance(ctx, reader, task, agent, target)
 	if err != nil {
 		return nil, err
@@ -132,7 +150,7 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 		}
 		return nil, err
 	}
-	sessionPrompt, sessionBootstrap, err := r.resolveHarnessV1SessionInput(ctx, task)
+	sessionPrompt, sessionBootstrap, err := r.resolveHarnessV1SessionInput(ctx, task, &binding)
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen harness v1 Session input: %w", err)
 	}
@@ -212,27 +230,9 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 		return nil, err
 	}
 	snapshotDigest := store.CanonicalAgentExecutionSnapshotDigest(encoded)
-	binding := corev1alpha1.AgentExecutionBinding{
-		SchemaVersion:   1,
-		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
-		Backend:         target.backend,
-		Task: corev1alpha1.AgentExecutionBindingTaskRef{
-			NamespaceUID: namespace.UID, UID: task.UID, BoundSpecGeneration: task.Generation,
-		},
-		Agent: &corev1alpha1.AgentExecutionAgentRef{
-			Namespace: agent.Namespace, Name: agent.Name, UID: agent.UID, Generation: agent.Generation,
-		},
-		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{
-			ID: string(task.UID) + "/" + snapshotDigest, Digest: snapshotDigest,
-			SchemaVersion: store.AgentExecutionSnapshotSchemaVersion,
-		},
-		RuntimeType: agent.Spec.Runtime.Type,
-	}
-	if target.runtimeRef != nil {
-		binding.RuntimeType = ""
-		binding.RuntimeRef = &corev1alpha1.AgentExecutionRuntimeRef{
-			Name: target.runtimeRef.Name, UID: target.runtimeRef.UID, Generation: target.runtimeRef.Generation,
-		}
+	binding.Snapshot = corev1alpha1.AgentExecutionSnapshotRef{
+		ID: string(task.UID) + "/" + snapshotDigest, Digest: snapshotDigest,
+		SchemaVersion: store.AgentExecutionSnapshotSchemaVersion,
 	}
 	binding.BindingDigest, err = canonicalAgentExecutionBindingDigest(binding)
 	if err != nil {
@@ -474,6 +474,7 @@ func harnessV1SessionName(task *corev1alpha1.Task) string {
 func (r *TaskReconciler) resolveHarnessV1SessionInput(
 	ctx context.Context,
 	task *corev1alpha1.Task,
+	binding *corev1alpha1.AgentExecutionBinding,
 ) (string, *agentExecutionSnapshotHarnessV1SessionBootstrap, error) {
 	if task == nil {
 		return "", nil, store.ValidationErrorf("Task is required")
@@ -548,6 +549,14 @@ func (r *TaskReconciler) resolveHarnessV1SessionInput(
 			return "", nil, fmt.Errorf("inspect new harness v1 Session transcript: %w", getErr)
 		}
 	}
+	existingTranscriptHasMessages := !newSession && len(messages) > 0
+	if !newSession && !requiresTranscript {
+		lineageProbe, probeErr := r.SessionManager.store.LoadTranscript(ctx, task.Namespace, name, 1)
+		if probeErr != nil && !errors.Is(probeErr, store.ErrNotFound) {
+			return "", nil, fmt.Errorf("inspect harness v1 Session transcript lineage eligibility: %w", probeErr)
+		}
+		existingTranscriptHasMessages = len(lineageProbe) > 0
+	}
 	if newSession && len(messages) > 0 {
 		return "", nil, fmt.Errorf(
 			"%w: control-less Session %s/%s has a non-empty transcript",
@@ -601,6 +610,17 @@ func (r *TaskReconciler) resolveHarnessV1SessionInput(
 			current.LeaseGeneration != control.LeaseGeneration {
 			return "", nil, fmt.Errorf("%w: harness v1 Session control changed while freezing its transcript", store.ErrConflict)
 		}
+		if current.Lineage == nil && existingTranscriptHasMessages {
+			return "", nil, permanentHarnessV1Candidate(fmt.Errorf(
+				"%w: non-empty Session %s/%s has no authoritative execution lineage",
+				store.ErrConflict, task.Namespace, name,
+			))
+		}
+		if current.Lineage != nil {
+			if err := validateHarnessV1CandidateSessionLineage(current.Lineage, binding, task.Namespace, name, current.SessionUID); err != nil {
+				return "", nil, permanentHarnessV1Candidate(err)
+			}
+		}
 	}
 	return prompt, &agentExecutionSnapshotHarnessV1SessionBootstrap{
 		SchemaVersion: harnessV1SessionBootstrapSchemaVersion,
@@ -610,6 +630,32 @@ func (r *TaskReconciler) resolveHarnessV1SessionInput(
 		MessageCount: bootstrap.MessageCount, TotalMessages: totalMessages,
 		Truncated: bootstrap.Truncated,
 	}, nil
+}
+
+func validateHarnessV1CandidateSessionLineage(
+	lineage *store.SessionLineage,
+	binding *corev1alpha1.AgentExecutionBinding,
+	namespace, sessionName, sessionUID string,
+) error {
+	if lineage == nil {
+		return nil
+	}
+	configDigest, err := harnessV1SessionLineageConfigDigest(binding)
+	if err != nil {
+		return err
+	}
+	if lineage.Namespace != namespace || lineage.SessionName != sessionName ||
+		lineage.NamespaceUID != string(binding.Task.NamespaceUID) || lineage.SessionUID != sessionUID ||
+		lineage.ContractVersion != string(corev1alpha1.AgentRuntimeContractHarnessV1) ||
+		lineage.LineageGeneration != 1 ||
+		lineage.RuntimeIdentity != harnessV1SessionRuntimeIdentity(binding) ||
+		lineage.ConfigDigest != configDigest {
+		return fmt.Errorf(
+			"%w: Session %s/%s lineage does not match the prospective harness v1 binding",
+			store.ErrConflict, namespace, sessionName,
+		)
+	}
+	return nil
 }
 
 func harnessV1SessionBootstrapLimits(schemaVersion int) (ACPBootstrapLimits, error) {

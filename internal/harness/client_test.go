@@ -1316,8 +1316,41 @@ func TestNewClientDefaultDoesNotSetTotalHTTPTimeout(t *testing.T) {
 }
 
 func TestClientRejectsInvalidBaseURL(t *testing.T) {
-	if _, err := NewClient("localhost:8080"); err == nil {
-		t.Fatal("NewClient() error = nil, want invalid base URL")
+	tests := []struct {
+		name       string
+		baseURL    string
+		wantError  string
+		notInError []string
+	}{
+		{
+			name: "missing scheme", baseURL: "localhost:8080",
+			wantError: "must include scheme and host",
+		},
+		{
+			name: "username", baseURL: "https://" + "operator" + "@adapter.example",
+			wantError: "must not include userinfo", notInError: []string{"operator@"},
+		},
+		{
+			name: "username and password", baseURL: "https://" + "operator" + ":" + "passphrase" + "@adapter.example",
+			wantError: "must not include userinfo", notInError: []string{"operator", "passphrase"},
+		},
+		{
+			name: "percent-encoded userinfo", baseURL: "https://" + "%6fperator" + ":" + "p%40ss" + "@adapter.example",
+			wantError: "must not include userinfo", notInError: []string{"%6fperator", "p%40ss", "operator", "p@ss"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewClient(tt.baseURL)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("NewClient() error = %v, want %q", err, tt.wantError)
+			}
+			for _, forbidden := range tt.notInError {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("NewClient() error disclosed URL userinfo: %q", err)
+				}
+			}
+		})
 	}
 }
 

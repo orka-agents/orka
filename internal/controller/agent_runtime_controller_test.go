@@ -282,6 +282,40 @@ func TestAgentRuntimeReconcilerMarksHarnessV1RuntimeReady(t *testing.T) {
 	}
 }
 
+func TestValidateHarnessV1AgentRuntimeEndpointSpecRejectsUserinfo(t *testing.T) {
+	tests := []struct {
+		name      string
+		endpoint  string
+		forbidden []string
+	}{
+		{
+			name: "username", endpoint: "https://" + "operator" + "@runtime.example.invalid",
+			forbidden: []string{"operator@"},
+		},
+		{
+			name: "username and password", endpoint: "https://" + "operator" + ":" + "passphrase" + "@runtime.example.invalid",
+			forbidden: []string{"operator", "passphrase"},
+		},
+		{
+			name: "percent-encoded userinfo", endpoint: "https://" + "%6fperator" + ":" + "p%40ss" + "@runtime.example.invalid",
+			forbidden: []string{"%6fperator", "p%40ss", "operator", "p@ss"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateHarnessV1AgentRuntimeEndpointSpec(tt.endpoint)
+			if err == nil || !strings.Contains(err.Error(), "must not include userinfo") {
+				t.Fatalf("validateHarnessV1AgentRuntimeEndpointSpec() error = %v, want userinfo rejection", err)
+			}
+			for _, forbidden := range tt.forbidden {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("endpoint validation error disclosed URL userinfo: %q", err)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateHarnessV1AgentRuntimeExecutableCapabilitiesRequiresControllerCompatibleRuntime(t *testing.T) {
 	base := harness.CapabilitiesResponse{
 		RuntimeName:             "external-v1",

@@ -400,11 +400,25 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 	fence store.ControllerEpochFence,
 	frame harness.HarnessEventFrame,
 ) error {
-	if d == nil || d.ExternalEffects == nil || d.BrokeredToolExecutor == nil {
+	if d == nil {
 		return errors.New("harness v1 brokered tool execution is not configured")
 	}
 	if task == nil || verified == nil || verified.body.HarnessV1 == nil || attempt == nil {
 		return errors.New("harness v1 brokered continuation requires Task, snapshot, and attempt")
+	}
+	if d.ExternalEffects == nil {
+		return errors.New("harness v1 brokered tool execution is not configured")
+	}
+	if attempt.State == store.HarnessV1AttemptCancelRequested {
+		return settleCancelledHarnessV1BrokeredToolEffect(
+			ctx,
+			d.ExternalEffects,
+			fence,
+			harnessV1BrokeredToolEffectIdentity(task, turn, strings.TrimSpace(frame.ToolCallID)),
+		)
+	}
+	if d.BrokeredToolExecutor == nil {
+		return errors.New("harness v1 brokered tool execution is not configured")
 	}
 	request, frozenTool, err := parseHarnessV1BrokeredToolCall(frame, turn, verified.body)
 	if err != nil {
@@ -432,12 +446,7 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 	if err := validateHarnessV1BrokeredToolInput(frozenTool.Parameters, request.Input); err != nil {
 		return fmt.Errorf("validate brokered harness v1 Tool %q input: %w", request.ToolName, err)
 	}
-	identity := store.ExternalEffectIdentity{
-		Kind: "harness-v1-tool", Namespace: task.Namespace, AggregateID: string(task.UID),
-		OperationID: store.CanonicalControlID(
-			"harness-v1-tool-call", string(request.RuntimeSessionID), string(request.TurnID), request.ToolCallID,
-		),
-	}
+	identity := harnessV1BrokeredToolEffectIdentity(task, turn, request.ToolCallID)
 	effectRequest := map[string]any{
 		"taskUID": task.UID, "attempt": attempt.Attempt, "bindingDigest": attempt.BindingDigest,
 		"snapshotDigest": attempt.SnapshotDigest, "toolDefinitionDigest": frozenTool.DefinitionDigest,
@@ -492,6 +501,50 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 		return fmt.Errorf("continue brokered harness v1 turn: %w", err)
 	}
 	return nil
+}
+
+func harnessV1BrokeredToolEffectIdentity(
+	task *corev1alpha1.Task,
+	turn harness.StartTurnRequest,
+	toolCallID string,
+) store.ExternalEffectIdentity {
+	return store.ExternalEffectIdentity{
+		Kind: "harness-v1-tool", Namespace: task.Namespace, AggregateID: string(task.UID),
+		OperationID: store.CanonicalControlID(
+			"harness-v1-tool-call", string(turn.RuntimeSessionID), string(turn.TurnID), toolCallID,
+		),
+	}
+}
+
+// settleCancelledHarnessV1BrokeredToolEffect closes any reservation that may
+// have crossed its execution boundary before cancellation became durable. A
+// missing effect means execution never reserved the call; an already-terminal
+// effect keeps its authoritative classification.
+func settleCancelledHarnessV1BrokeredToolEffect(
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+) error {
+	id, err := identity.CanonicalID()
+	if err != nil {
+		return err
+	}
+	effect, err := effects.GetExternalEffect(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	switch effect.State {
+	case store.ExternalEffectSucceeded, store.ExternalEffectFailed, store.ExternalEffectOutcomeUnknown:
+		return nil
+	default:
+		return settleExternalEffectStore(
+			ctx, effects, fence, identity, store.ExternalEffectOutcomeUnknown, nil,
+		)
+	}
 }
 
 func resolveHarnessV1BrokeredToolSchema(parameters json.RawMessage) (*jsonschema.Resolved, error) {

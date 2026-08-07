@@ -75,6 +75,9 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil, fmt.Errorf("harness base url must include scheme and host")
 	}
+	if parsed.User != nil {
+		return nil, fmt.Errorf("harness base url must not include userinfo")
+	}
 	c := &Client{baseURL: parsed, httpClient: &http.Client{}, controlTimeout: 30 * time.Second}
 	for _, opt := range opts {
 		if opt != nil {

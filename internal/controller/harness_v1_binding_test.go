@@ -34,6 +34,26 @@ type harnessV1SessionControlSequenceStore struct {
 	reads    int
 }
 
+type harnessV1LineageControlStore struct {
+	store.DurableControlStore
+	lineages map[string]*store.SessionLineage
+}
+
+func (s *harnessV1LineageControlStore) GetSessionControl(
+	ctx context.Context,
+	namespace, sessionName string,
+) (*store.SessionControl, error) {
+	control, err := s.DurableControlStore.GetSessionControl(ctx, namespace, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	if lineage := s.lineages[namespace+"\x00"+sessionName]; lineage != nil {
+		copyLineage := *lineage
+		control.Lineage = &copyLineage
+	}
+	return control, nil
+}
+
 func (s *harnessV1SessionControlSequenceStore) GetSessionControl(
 	ctx context.Context,
 	namespace, sessionName string,
@@ -258,6 +278,33 @@ func TestResolveHarnessV1ExecutionCandidateRejectsSessionControlRace(t *testing.
 	}
 }
 
+func TestResolveHarnessV1ExecutionCandidateKeepsReplacementRaceTransient(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t)
+	const sessionName = "replaced-session"
+	seedHarnessV1BindingTranscript(t, ctx, fixture, sessionName, defaultACPSessionType, []store.SessionMessage{
+		{ID: "message-1", Role: "user", Content: "stable request"},
+	})
+	task := fixture.task.DeepCopy()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: sessionName, Append: true}
+	control, err := fixture.controls.GetSessionControl(ctx, task.Namespace, sessionName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := *control
+	replacement.SessionUID = "replacement-session-uid"
+	replacement.Lineage = nil
+	fixture.reconciler.DurableControlStore = &harnessV1SessionControlSequenceStore{
+		DurableControlStore: fixture.controls,
+		controls:            []*store.SessionControl{control, &replacement},
+	}
+
+	candidate, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent)
+	if candidate != nil || err == nil || !errors.Is(err, store.ErrConflict) || isPermanentHarnessV1CandidateError(err) {
+		t.Fatalf("replacement race candidate = %#v, error = %v, want transient ErrConflict", candidate, err)
+	}
+}
+
 func TestResolveHarnessV1ExecutionCandidateFreezesNewSessionUID(t *testing.T) {
 	ctx := context.Background()
 	fixture := newHarnessV1CandidateFixture(t)
@@ -309,6 +356,79 @@ func TestResolveHarnessV1ExecutionCandidateRejectsControlLessTranscriptAdoption(
 	if _, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent); err == nil ||
 		!errors.Is(err, store.ErrConflict) {
 		t.Fatalf("control-less transcript adoption error = %v, want ErrConflict", err)
+	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateRejectsUnclassifiedExistingTranscript(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t)
+	const sessionName = "unclassified-session"
+	transcripts := fixture.reconciler.SessionManager.store
+	now := time.Now().UTC()
+	if err := transcripts.CreateSession(ctx, &store.SessionRecord{
+		Namespace: fixture.task.Namespace, Name: sessionName, SessionType: defaultACPSessionType,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.controls.CreateSessionControl(ctx, &store.SessionControl{
+		Namespace: fixture.task.Namespace, SessionName: sessionName,
+		SessionUID:    "unclassified-session-uid",
+		RequestDigest: store.CanonicalAgentExecutionSnapshotDigest([]byte("unclassified-session-control")),
+		Availability:  store.SessionAvailable, CreatedAt: now, UpdatedAt: now,
+	}, fixture.fence); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcripts.AppendMessages(ctx, fixture.task.Namespace, sessionName, []store.SessionMessage{{
+		ID: "legacy-message", Role: "user", Content: "unclassified history", Timestamp: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.task.DeepCopy()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: sessionName, Append: true}
+
+	candidate, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent)
+	if candidate != nil || err == nil || !errors.Is(err, store.ErrConflict) || !isPermanentHarnessV1CandidateError(err) {
+		t.Fatalf("unclassified Session candidate = %#v, error = %v, want permanent ErrConflict", candidate, err)
+	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateRejectsIncompatibleExistingLineage(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*store.SessionLineage)
+	}{
+		{
+			name: "v2 contract",
+			mutate: func(lineage *store.SessionLineage) {
+				lineage.ContractVersion = string(corev1alpha1.AgentRuntimeContractHarnessV2)
+			},
+		},
+		{
+			name: "different v1 configuration",
+			mutate: func(lineage *store.SessionLineage) {
+				lineage.ConfigDigest = store.CanonicalAgentExecutionSnapshotDigest([]byte("different-v1-configuration"))
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			fixture := newHarnessV1CandidateFixture(t)
+			const sessionName = "incompatible-lineage"
+			seedHarnessV1BindingTranscript(t, ctx, fixture, sessionName, defaultACPSessionType, []store.SessionMessage{
+				{ID: "message-1", Role: "user", Content: "existing request"},
+			})
+			lineage := fixture.lineageControls.lineages[fixture.task.Namespace+"\x00"+sessionName]
+			test.mutate(lineage)
+			task := fixture.task.DeepCopy()
+			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: sessionName, Append: true}
+
+			candidate, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent)
+			if candidate != nil || err == nil || !errors.Is(err, store.ErrConflict) || !isPermanentHarnessV1CandidateError(err) {
+				t.Fatalf("incompatible-lineage candidate = %#v, error = %v, want permanent ErrConflict", candidate, err)
+			}
+		})
 	}
 }
 
@@ -1009,11 +1129,12 @@ func TestValidateHarnessV1RuntimeAuthOnlyRejectsUnsupportedRoute(t *testing.T) {
 }
 
 type harnessV1CandidateFixture struct {
-	reconciler *TaskReconciler
-	controls   store.DurableControlStore
-	fence      store.ControllerEpochFence
-	task       *corev1alpha1.Task
-	agent      *corev1alpha1.Agent
+	reconciler      *TaskReconciler
+	controls        store.DurableControlStore
+	lineageControls *harnessV1LineageControlStore
+	fence           store.ControllerEpochFence
+	task            *corev1alpha1.Task
+	agent           *corev1alpha1.Agent
 }
 
 func seedHarnessV1BindingTranscript(
@@ -1036,13 +1157,33 @@ func seedHarnessV1BindingTranscript(
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if _, err := fixture.controls.CreateSessionControl(ctx, &store.SessionControl{
+	control, err := fixture.controls.CreateSessionControl(ctx, &store.SessionControl{
 		Namespace: fixture.task.Namespace, SessionName: sessionName,
 		SessionUID:    "frozen-" + sessionName + "-uid",
 		RequestDigest: store.CanonicalAgentExecutionSnapshotDigest([]byte("session-control:" + sessionName)),
 		Availability:  store.SessionAvailable, CreatedAt: now, UpdatedAt: now,
-	}, fixture.fence); err != nil {
+	}, fixture.fence)
+	if err != nil {
 		t.Fatal(err)
+	}
+	lineageConfigDigest, err := harnessV1SessionLineageConfigDigest(&corev1alpha1.AgentExecutionBinding{
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+		Backend:         corev1alpha1.AgentExecutionBackendHarnessWrapper,
+		RuntimeType:     fixture.agent.Spec.Runtime.Type,
+		Agent: &corev1alpha1.AgentExecutionAgentRef{
+			Namespace: fixture.agent.Namespace, Name: fixture.agent.Name,
+			UID: fixture.agent.UID, Generation: fixture.agent.Generation,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.lineageControls.lineages[fixture.task.Namespace+"\x00"+sessionName] = &store.SessionLineage{
+		Namespace: fixture.task.Namespace, SessionName: sessionName,
+		NamespaceUID: "harness-v1-recovery-namespace-uid", SessionUID: control.SessionUID,
+		ContractVersion: string(corev1alpha1.AgentRuntimeContractHarnessV1), LineageGeneration: 1,
+		RuntimeIdentity: string(fixture.agent.Spec.Runtime.Type), ConfigDigest: lineageConfigDigest,
+		Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	if len(messages) == 0 {
 		return
@@ -1103,13 +1244,18 @@ func newHarnessV1CandidateFixture(
 	reconciler.HarnessV1AuthSecretName = authSecret.Name
 	reconciler.HarnessV1AuthSecretKey = authSecretKey
 	reconciler.SessionManager = NewSessionManager(durable)
-	reconciler.DurableControlStore = durable
+	lineageControls := &harnessV1LineageControlStore{
+		DurableControlStore: durable,
+		lineages:            make(map[string]*store.SessionLineage),
+	}
+	reconciler.DurableControlStore = lineageControls
 	return &harnessV1CandidateFixture{
-		reconciler: reconciler,
-		controls:   durable,
-		fence:      fence,
-		task:       task,
-		agent:      agent,
+		reconciler:      reconciler,
+		controls:        lineageControls,
+		lineageControls: lineageControls,
+		fence:           fence,
+		task:            task,
+		agent:           agent,
 	}
 }
 

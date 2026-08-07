@@ -1292,9 +1292,13 @@ func (d *HarnessV1Dispatcher) settleTerminalFrameWithReceiptDigest(
 		if store.IsTerminalHarnessV1AttemptState(attempt.State) {
 			return d.reconcileTerminalAttempt(ctx, task, attempt, fence)
 		}
-		attempt, err = d.transitionAttempt(ctx, attempt, fence, store.HarnessV1AttemptSettling, "settling", store.HarnessV1AttemptUpdates{
+		updates := store.HarnessV1AttemptUpdates{
 			TerminalReceiptDigest: &receiptDigest,
-		})
+		}
+		if frame.Seq > attempt.LastEventSeq {
+			updates.LastEventSeq = &frame.Seq
+		}
+		attempt, err = d.transitionAttempt(ctx, attempt, fence, store.HarnessV1AttemptSettling, "settling", updates)
 		if err != nil {
 			return err
 		}

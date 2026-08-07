@@ -99,21 +99,21 @@ func (r *TaskReconciler) planAgentExecution(
 		}
 	}
 
-	if reason := agentACPRuntimeUnsupportedReason(task, agent); reason != "" {
-		return rejectAgentExecutionPlan(reason)
-	}
-	if task.Spec.PriorTaskRef != nil {
-		return rejectAgentExecutionPlan("priorTaskRef continuation is not supported by the ACP core runtime; use sessionRef")
-	}
-
 	switch agent.Spec.Runtime.Type {
 	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode:
 	default:
 		return rejectAgentExecutionPlan(fmt.Sprintf("agent runtime %q is not supported by the ACP core runtime", agent.Spec.Runtime.Type))
 	}
 
-	switch agent.BuiltInContractVersion() {
+	contract := agent.BuiltInContractVersion()
+	switch contract {
 	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		if reason := agentACPRuntimeUnsupportedReason(task, agent); reason != "" {
+			return rejectAgentExecutionPlan(reason)
+		}
+		if task.Spec.PriorTaskRef != nil {
+			return rejectAgentExecutionPlan("priorTaskRef continuation is not supported by the ACP core runtime; use sessionRef")
+		}
 		if !r.ACPRuntimeEnabled {
 			return rejectAgentExecutionPlan("ACP core runtime is disabled; built-in v2 agent runtimes have no fallback execution path")
 		}
@@ -124,6 +124,9 @@ func (r *TaskReconciler) planAgentExecution(
 		}
 		if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
 			return rejectAgentExecutionPlan("new harness v1 OpenCode bindings are prohibited; only sealed-inventory legacy adoption may use the v1 OpenCode path")
+		}
+		if reason := agentHarnessV1InheritedAuthorityUnsupportedReason(agent); reason != "" {
+			return rejectAgentExecutionPlan(reason)
 		}
 		return agentHarnessV1Plan("")
 	default:
@@ -197,4 +200,15 @@ func effectiveAgentResources(task *corev1alpha1.Task, agent *corev1alpha1.Agent)
 		return true
 	}
 	return agent != nil && (len(agent.Spec.Resources.Requests) > 0 || len(agent.Spec.Resources.Limits) > 0)
+}
+
+func agentHarnessV1InheritedAuthorityUnsupportedReason(agent *corev1alpha1.Agent) string {
+	switch {
+	case effectiveAgentResources(nil, agent):
+		return "harness v1 built-in runtimes do not support inherited Agent.spec.resources"
+	case resolveExecution(nil, agent) != nil:
+		return "harness v1 built-in runtimes do not support inherited Agent.spec.execution placement"
+	default:
+		return ""
+	}
 }
