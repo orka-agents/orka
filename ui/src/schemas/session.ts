@@ -1,8 +1,5 @@
 import { z } from 'zod'
-import {
-  agentExecutionResolutionRefSchema,
-  harnessContractVersionSchema,
-} from './task'
+import { harnessContractVersionSchema } from './task'
 
 export const sessionExecutionLineageSchema = z.object({
   namespaceUID: z.string(),
@@ -11,7 +8,6 @@ export const sessionExecutionLineageSchema = z.object({
   generation: z.number(),
   runtimeIdentity: z.string(),
   configDigest: z.string(),
-  provenance: z.enum(['first-use', 'legacy-adopted', 'transcript-bootstrap']),
   establishedAt: z.string(),
 })
 
@@ -28,7 +24,6 @@ export const sessionExecutionControlSchema = z.object({
   relatedPromptAttemptID: z.string().optional(),
   relatedPublicationID: z.string().optional(),
   lineage: sessionExecutionLineageSchema.optional(),
-  agentExecutionResolutionRef: agentExecutionResolutionRefSchema.optional(),
 })
 
 export const sessionSchema = z.object({

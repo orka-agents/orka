@@ -32,7 +32,6 @@ describe('sessionSchema', () => {
           generation: 1,
           runtimeIdentity: 'opencode',
           configDigest: `sha256:${'b'.repeat(64)}`,
-          provenance: 'first-use',
           establishedAt: '2026-08-06T00:00:00Z',
         },
       },

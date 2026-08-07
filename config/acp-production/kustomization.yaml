@@ -5,9 +5,8 @@ kind: Kustomization
 # its explicit vekil-system namespace.
 resources:
   - ../acp-workload
-  - agent_execution_control.yaml
-  # Runtime resources only. The fail-closed webhook/VAP base is applied after
-  # TLS, endpoint, control, and handler-smoke checks.
+  # Runtime resources only. The fail-closed webhook base is applied after TLS,
+  # endpoint, and handler-smoke checks.
   - ../orka-admission
   - ../vekil-ingress
 configMapGenerator:

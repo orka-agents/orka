@@ -407,11 +407,6 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 	intent.SessionUID = strings.TrimSpace(intent.SessionUID)
 	intent.ControlObjectUID = strings.TrimSpace(intent.ControlObjectUID)
 	intent.ControlRequestDigest = strings.TrimSpace(intent.ControlRequestDigest)
-	if intent.Adjudication != nil {
-		intent.Adjudication.ControlObjectUID = strings.TrimSpace(intent.Adjudication.ControlObjectUID)
-		intent.Adjudication.ControlResourceVersion = strings.TrimSpace(intent.Adjudication.ControlResourceVersion)
-		intent.Adjudication.ResolutionDigest = strings.TrimSpace(intent.Adjudication.ResolutionDigest)
-	}
 	intent.LeaseName = strings.TrimSpace(intent.LeaseName)
 	intent.LeaseObjectUID = strings.TrimSpace(intent.LeaseObjectUID)
 	intent.OperationID = strings.TrimSpace(intent.OperationID)
@@ -434,7 +429,7 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 	if intent.SessionUID == "" {
 		if intent.ControlObjectUID != "" || intent.ControlRequestDigest != "" || intent.ExpectedControlVersion != 0 ||
 			intent.ExpectedLeaseGeneration != 0 || intent.LeaseName != "" || intent.LeaseObjectUID != "" ||
-			len(intent.BranchClaims) != 0 || intent.ExpectedVerifiedBaseline != nil || intent.Adjudication != nil {
+			len(intent.BranchClaims) != 0 || intent.ExpectedVerifiedBaseline != nil {
 			return store.ValidationErrorf("transcript-only session cleanup must not carry Kubernetes control fences")
 		}
 		return nil
@@ -445,7 +440,7 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 	if intent.ControlRequestDigest == "" {
 		if intent.ControlObjectUID != "" || intent.ExpectedControlVersion != 0 ||
 			intent.ExpectedControlLastOperationID != "" || intent.ExpectedControlLastDigest != "" ||
-			intent.ExpectedVerifiedBaseline != nil || intent.Adjudication != nil {
+			intent.ExpectedVerifiedBaseline != nil {
 			return store.ValidationErrorf("UID-only session cleanup must not carry RuntimeSessionControl fences")
 		}
 	} else {
@@ -454,19 +449,6 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 		}
 		if intent.ExpectedControlVersion < 1 {
 			return store.ValidationErrorf("session cleanup control version must be at least one")
-		}
-		if intent.Adjudication != nil {
-			if intent.Adjudication.ControlObjectUID == "" || intent.Adjudication.ControlResourceVersion == "" {
-				return store.ValidationErrorf("adjudicated session cleanup control identity is incomplete")
-			}
-			if intent.ControlObjectUID != intent.Adjudication.ControlObjectUID {
-				return store.ValidationErrorf("adjudicated session cleanup control UID does not match the cleanup plan")
-			}
-			if err := store.ValidateCanonicalDigest(
-				"adjudicated session cleanup resolution digest", intent.Adjudication.ResolutionDigest,
-			); err != nil {
-				return err
-			}
 		}
 	}
 	if intent.LeaseName == "" {
@@ -497,13 +479,6 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 		case store.BranchClaimAvailable:
 			if claim.ExpectedBlockedReason != "" || claim.ExpectedPublicationID != "" {
 				return store.ValidationErrorf("available session cleanup branch claim carries blocked state")
-			}
-		case store.BranchClaimReconciliationBlocked:
-			if intent.Adjudication == nil || claim.ExpectedBlockedReason == "" || claim.ExpectedPublicationID == "" {
-				return store.ValidationErrorf("blocked session cleanup branch claim requires exact adjudication state")
-			}
-			if err := store.ValidateControlIdentifier("session cleanup branch publication ID", claim.ExpectedPublicationID); err != nil {
-				return err
 			}
 		default:
 			return store.ValidationErrorf("session cleanup branch claim has unsupported availability %q", claim.ExpectedAvailability)

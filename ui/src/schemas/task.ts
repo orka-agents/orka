@@ -288,29 +288,14 @@ export const harnessRuntimeStatusSchema = z.object({
 // digests only — snapshot bodies are never exposed through ordinary surfaces.
 export const agentExecutionBindingSchema = z.object({
   schemaVersion: z.number(),
-  mode: z.enum(['execute', 'cleanup-only']),
   contractVersion: harnessContractVersionSchema,
   backend: z.enum(['harness-wrapper', 'runtime-pool', 'external-endpoint']),
-  provenance: z.enum(['newly-bound', 'legacy-adopted', 'legacy-cleanup-only']),
   bindingDigest: z.string(),
   task: z.object({
     namespaceUID: z.string(),
     uid: z.string(),
     boundSpecGeneration: z.number(),
   }),
-  backendControl: z.object({
-    name: z.string(),
-    uid: z.string(),
-    generation: z.number(),
-    modeRevision: z.number(),
-    admittedMode: z.string(),
-  }).optional(),
-  policy: z.object({
-    name: z.string(),
-    uid: z.string(),
-    generation: z.number(),
-    digest: z.string(),
-  }).optional(),
   agent: z.object({
     namespace: z.string(),
     name: z.string(),
@@ -325,38 +310,12 @@ export const agentExecutionBindingSchema = z.object({
   runtimeType: z.string().optional(),
   runtimeRef: z.object({
     name: z.string(),
-    uid: z.string().optional(),
-    generation: z.number().optional(),
+    uid: z.string(),
+    generation: z.number(),
   }).optional(),
   runtimeProfileDigest: z.string().optional(),
   runtimeProfileDigestSchemaVersion: z.number().optional(),
   boundAt: z.string(),
-})
-
-export const agentExecutionNoExecutionSchema = z.object({
-  schemaVersion: z.number(),
-  state: z.literal('UnboundNoExecution'),
-  migrationInventoryID: z.string(),
-  evidenceDigest: z.string(),
-  recordedAt: z.string(),
-})
-
-export const agentExecutionQuarantineSchema = z.object({
-  schemaVersion: z.number(),
-  reason: z.string(),
-  migrationInventoryID: z.string(),
-  v1EvidenceDigest: z.string().optional(),
-  v2EvidenceDigest: z.string().optional(),
-  recordedAt: z.string(),
-})
-
-export const agentExecutionResolutionRefSchema = z.object({
-  adjudicationName: z.string(),
-  adjudicationUID: z.string(),
-  action: z.string(),
-  operationDigest: z.string(),
-  resolutionDigest: z.string(),
-  appliedAt: z.string(),
 })
 
 export const taskStatusSchema = z.object({
@@ -371,9 +330,6 @@ export const taskStatusSchema = z.object({
   delivery: taskDeliveryStatusSchema.optional(),
   harnessRuntime: harnessRuntimeStatusSchema.optional(),
   agentExecutionBinding: agentExecutionBindingSchema.optional(),
-  agentExecutionNoExecution: agentExecutionNoExecutionSchema.optional(),
-  agentExecutionQuarantine: agentExecutionQuarantineSchema.optional(),
-  agentExecutionResolutionRef: agentExecutionResolutionRefSchema.optional(),
   webhookDelivered: z.boolean().optional(),
   message: z.string().optional(),
   childTasks: z.array(childTaskStatusSchema).optional(),
@@ -411,9 +367,6 @@ export type ExecutionWorkspaceStatus = z.infer<typeof executionWorkspaceStatusSc
 export type HarnessContractVersion = z.infer<typeof harnessContractVersionSchema>
 export type HarnessRuntimeStatus = z.infer<typeof harnessRuntimeStatusSchema>
 export type AgentExecutionBinding = z.infer<typeof agentExecutionBindingSchema>
-export type AgentExecutionNoExecution = z.infer<typeof agentExecutionNoExecutionSchema>
-export type AgentExecutionQuarantine = z.infer<typeof agentExecutionQuarantineSchema>
-export type AgentExecutionResolutionRef = z.infer<typeof agentExecutionResolutionRefSchema>
 
 export const planStateSchema = z.object({
   summary: z.string().optional(),

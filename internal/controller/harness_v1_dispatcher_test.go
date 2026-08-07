@@ -1730,7 +1730,7 @@ func newHarnessV1DispatcherPreparedFixture(t *testing.T) *harnessV1DispatcherSta
 	}
 	dispatcher := &HarnessV1Dispatcher{
 		Client: reconciler.Client, APIReader: reconciler.Client,
-		Attempts: durable, Snapshots: durable, BindingReservations: durable,
+		Attempts: durable, Snapshots: durable,
 		ResultStore: durable, EventStore: store.NewFakeExecutionEventStore(),
 	}
 	return &harnessV1DispatcherStateFixture{

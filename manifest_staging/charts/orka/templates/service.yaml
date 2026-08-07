@@ -11,12 +11,10 @@ spec:
       targetPort: api
       protocol: TCP
       name: api
-    {{- if .Values.harnessV1.enabled }}
-    - port: {{ .Values.harnessV1.retirement.port }}
-      targetPort: v1-retirement
+    - port: 443
+      targetPort: webhook
       protocol: TCP
-      name: v1-retirement
-    {{- end }}
+      name: webhook
     - port: {{ .Values.controller.metricsPort }}
       targetPort: metrics
       protocol: TCP

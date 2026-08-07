@@ -133,57 +133,6 @@ spec:
               RuntimeSessionControlStatus contains the lifecycle, generation, mutation
               Lease, and independently verified recovery baseline.
             properties:
-              agentExecutionResolutionRef:
-                description: |-
-                  AgentExecutionResolutionRef is the immutable reference to an Applied
-                  adjudication that authorizes a one-way resolution of blocked Session
-                  state. It never changes the recorded lineage.
-                properties:
-                  action:
-                    description: |-
-                      AgentExecutionAdjudicationAction is a one-way operator resolution. Actions
-                      never authorize prompt replay, publication replay, or protocol mutation.
-                      The coexistence API currently admits only cleanup actions whose exact
-                      Applied resolution can be consumed by route-aware finalization. The other
-                      constants below are reserved until their required receipt, break-glass, or
-                      destination-lineage evidence is represented by the API.
-                    enum:
-                    - CleanupV1
-                    - CleanupV2
-                    - CleanupBoth
-                    type: string
-                  adjudicationName:
-                    maxLength: 253
-                    minLength: 1
-                    type: string
-                  adjudicationUID:
-                    description: |-
-                      UID is a type that holds unique ID values, including UUIDs.  Because we
-                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                      intent and helps make sure that UIDs and names do not get conflated.
-                    type: string
-                  appliedAt:
-                    format: date-time
-                    type: string
-                  operationDigest:
-                    description: OperationDigest matches the applying adjudication's
-                      status.operationDigest.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  resolutionDigest:
-                    description: |-
-                      ResolutionDigest is the canonical digest of this resolution reference and
-                      matches the adjudication's status.resolutionRefDigest.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                required:
-                - action
-                - adjudicationName
-                - adjudicationUID
-                - appliedAt
-                - operationDigest
-                - resolutionDigest
-                type: object
               availability:
                 description: RuntimeSessionControlAvailability gates the Session mutation
                   lease.
@@ -282,15 +231,6 @@ spec:
                       NamespaceUID prevents a same-name recreated namespace from attaching to
                       durable state owned by the previous namespace identity.
                     type: string
-                  provenance:
-                    description: |-
-                      RuntimeSessionLineageProvenance records how the immutable Session runtime
-                      lineage was established.
-                    enum:
-                    - first-use
-                    - legacy-adopted
-                    - transcript-bootstrap
-                    type: string
                   runtimeIdentity:
                     description: RuntimeIdentity is the built-in runtime type or AgentRuntime
                       UID.
@@ -309,7 +249,6 @@ spec:
                 - establishedAt
                 - generation
                 - namespaceUID
-                - provenance
                 - runtimeIdentity
                 - sessionUid
                 type: object
@@ -418,9 +357,6 @@ spec:
             - message: runtime Session lineage is append-once and immutable
               rule: '!has(oldSelf.lineage) || (has(self.lineage) && self.lineage ==
                 oldSelf.lineage)'
-            - message: agentExecutionResolutionRef is append-once and immutable
-              rule: '!has(oldSelf.agentExecutionResolutionRef) || (has(self.agentExecutionResolutionRef)
-                && self.agentExecutionResolutionRef == oldSelf.agentExecutionResolutionRef)'
         required:
         - spec
         type: object

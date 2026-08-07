@@ -87,11 +87,10 @@ var errScannerPolicyDigestChanged = errors.New("scanner policy digest changed du
 // RepositoryScanReconciler reconciles RepositoryScan resources.
 type RepositoryScanReconciler struct {
 	client.Client
-	Scheme                           *runtime.Scheme
-	AgentExecutionClassificationGate *AgentExecutionClassificationGate
-	SecurityStore                    store.SecurityStore
-	ArtifactStore                    store.ArtifactStore
-	ResultStore                      store.ResultStore
+	Scheme        *runtime.Scheme
+	SecurityStore store.SecurityStore
+	ArtifactStore store.ArtifactStore
+	ResultStore   store.ResultStore
 }
 
 func repositoryScanConditionMessage(message, fallback string) string {
@@ -132,11 +131,6 @@ func titleCaseMode(mode string) string {
 // Reconcile drives repository scan lifecycle, task creation, and task ingestion.
 func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("repositoryscan")
-	if r.AgentExecutionClassificationGate != nil {
-		if err := r.AgentExecutionClassificationGate.Check(ctx); err != nil {
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		}
-	}
 
 	scan := &corev1alpha1.RepositoryScan{}
 	if err := r.Get(ctx, req.NamespacedName, scan); err != nil {

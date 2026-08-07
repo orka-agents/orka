@@ -21,16 +21,7 @@ import (
 
 func TestEnsureHarnessV1ExecutionBindingFreezesPublicReadOnlyWorkspace(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
-	policy := &corev1alpha1.AgentExecutionPolicy{}
-	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.policy), policy); err != nil {
-		t.Fatal(err)
-	}
-	policy.Spec.AllowPublicReadOnlyWorkspaces = true
-	policy.Generation++
-	if err := fixture.reconciler.Update(ctx, policy); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newHarnessV1CandidateFixture(t)
 	task := &corev1alpha1.Task{}
 	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.task), task); err != nil {
 		t.Fatal(err)
@@ -141,7 +132,7 @@ func TestValidateHarnessV1PublicReadOnlyWorkspace(t *testing.T) {
 	}
 }
 
-func TestResolveHarnessV1PublicReadOnlyWorkspaceRequiresPolicyAndSupportedRuntime(t *testing.T) {
+func TestResolveHarnessV1PublicReadOnlyWorkspaceRequiresSupportedRuntime(t *testing.T) {
 	workspace := &corev1alpha1.WorkspaceConfig{
 		Intent: corev1alpha1.WorkspaceIntentRead, GitRepo: "https://github.com/orka-agents/orka.git",
 	}
@@ -149,38 +140,22 @@ func TestResolveHarnessV1PublicReadOnlyWorkspaceRequiresPolicyAndSupportedRuntim
 	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
 		Type: corev1alpha1.AgentRuntimeCodex,
 	}}}
-	policy := &corev1alpha1.AgentExecutionPolicy{Spec: corev1alpha1.AgentExecutionPolicySpec{
-		AllowPublicReadOnlyWorkspaces: true,
-		NetworkIsolationProfile:       corev1alpha1.AgentExecutionNetworkIsolationDefaultDeny,
-	}}
 	target := resolvedHarnessV1Target{backend: corev1alpha1.AgentExecutionBackendHarnessWrapper}
-	resolved, err := resolveHarnessV1PublicReadOnlyWorkspace(task, agent, policy, target)
+	resolved, err := resolveHarnessV1PublicReadOnlyWorkspace(task, agent, target)
 	if err != nil || resolved == nil || resolved == workspace {
 		t.Fatalf("resolved workspace = %#v, err=%v; want independent frozen copy", resolved, err)
 	}
 
-	disabled := policy.DeepCopy()
-	disabled.Spec.AllowPublicReadOnlyWorkspaces = false
-	if _, err := resolveHarnessV1PublicReadOnlyWorkspace(task, agent, disabled, target); err == nil ||
-		!strings.Contains(err.Error(), "does not authorize") {
-		t.Fatalf("disabled policy error = %v", err)
-	}
 	claude := agent.DeepCopy()
 	claude.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
-	if _, err := resolveHarnessV1PublicReadOnlyWorkspace(task, claude, policy, target); err == nil ||
+	if _, err := resolveHarnessV1PublicReadOnlyWorkspace(task, claude, target); err == nil ||
 		!strings.Contains(err.Error(), "does not support runtime") {
 		t.Fatalf("unsupported runtime error = %v", err)
-	}
-	perTrustDomain := policy.DeepCopy()
-	perTrustDomain.Spec.NetworkIsolationProfile = corev1alpha1.AgentExecutionNetworkIsolationPerTrustDomain
-	if _, err := resolveHarnessV1PublicReadOnlyWorkspace(task, agent, perTrustDomain, target); err == nil ||
-		!strings.Contains(err.Error(), "trust-domain-specific wrapper target") {
-		t.Fatalf("per-trust-domain isolation error = %v", err)
 	}
 	external := target
 	external.backend = corev1alpha1.AgentExecutionBackendExternalEndpoint
 	external.runtimeRef = &corev1alpha1.AgentRuntime{}
-	if _, err := resolveHarnessV1PublicReadOnlyWorkspace(task, agent, policy, external); err == nil ||
+	if _, err := resolveHarnessV1PublicReadOnlyWorkspace(task, agent, external); err == nil ||
 		!strings.Contains(err.Error(), "built-in wrapper") {
 		t.Fatalf("external runtime error = %v", err)
 	}

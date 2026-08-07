@@ -19,7 +19,7 @@ on:
       - "Makefile"
       - "workers/harness/**"
       - "scripts/apply-helm-crds.sh"
-      - "scripts/coexistence-bridge-crd-validate.sh"
+      - "scripts/static-mode-crd-validate.sh"
       - ".github/workflows/helm-chart.yml"
   pull_request:
     paths:
@@ -36,7 +36,7 @@ on:
       - "Makefile"
       - "workers/harness/**"
       - "scripts/apply-helm-crds.sh"
-      - "scripts/coexistence-bridge-crd-validate.sh"
+      - "scripts/static-mode-crd-validate.sh"
       - ".github/workflows/helm-chart.yml"
   workflow_dispatch:
 
@@ -77,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          bash -n scripts/coexistence-bridge-crd-validate.sh
+          bash -n scripts/static-mode-crd-validate.sh
           make manifests
           if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
             echo "Generated staging manifests are stale." >&2
@@ -152,9 +152,9 @@ jobs:
             --set-string admission.tls.existingSecret=orka-admission-tls
             --set-string admission.webhooks.caBundle=Y2E=
           )
-          helm template coexistence manifest_staging/charts/orka "${harness_v1_args[@]}" > "${harness_v1_render}"
-          helm template coexistence manifest_staging/charts/orka "${harness_v1_args[@]}" --show-only templates/harness-wrapper-deployment.yaml > "${harness_v1_deployment}"
-          helm template coexistence manifest_staging/charts/orka "${harness_v1_args[@]}" --show-only templates/harness-wrapper-networkpolicy.yaml > "${harness_v1_network_policy}"
+          helm template harness-v1 manifest_staging/charts/orka "${harness_v1_args[@]}" > "${harness_v1_render}"
+          helm template harness-v1 manifest_staging/charts/orka "${harness_v1_args[@]}" --show-only templates/harness-wrapper-deployment.yaml > "${harness_v1_deployment}"
+          helm template harness-v1 manifest_staging/charts/orka "${harness_v1_args[@]}" --show-only templates/harness-wrapper-networkpolicy.yaml > "${harness_v1_network_policy}"
           "$(pwd)/bin/kustomize" build config/harness-wrapper > "${harness_v1_kustomize}"
 
           grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
@@ -234,7 +234,7 @@ jobs:
             echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
             exit 1
           fi
-          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 29
+          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 26
 
       - name: Install kind
         run: |
@@ -266,9 +266,6 @@ jobs:
           chart_package=${chart_packages[0]}
 
           expected_crds=$(cat <<'CRDS'
-          agentexecutionadjudications.core.orka.ai
-          agentexecutioncontrols.core.orka.ai
-          agentexecutionpolicies.core.orka.ai
           agentruntimes.core.orka.ai
           agents.core.orka.ai
           branchclaims.core.orka.ai
@@ -334,7 +331,7 @@ jobs:
             --set scmEgressProxy.enabled=false
 
           assert_all_orka_crds "after helm install"
-          NAMESPACE="${NAMESPACE}-bridge" scripts/coexistence-bridge-crd-validate.sh
+          NAMESPACE="${NAMESPACE}-static" scripts/static-mode-crd-validate.sh
 
           kubectl patch crd tasks.core.orka.ai --type=json -p='[
             {"op":"add","path":"/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/staleReviewField","value":{"type":"string"}}

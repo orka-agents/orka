@@ -3,7 +3,7 @@ kind: Kustomization
 
 # This compatibility data plane is intentionally not referenced by
 # config/default or config/acp-production. Apply it only after explicitly
-# enabling harness v1 in the durable AgentExecutionControl.
+# selecting a dedicated harness-v1 controller installation.
 namespace: orka-system
 
 # harness-wrapper-auth must be pre-created; see README.md.

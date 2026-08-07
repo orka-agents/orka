@@ -4,7 +4,11 @@ Date: 2026-08-05
 
 ## Status
 
-Accepted. Implements the strategy selected in ADR 0016; the normative
+Superseded by ADR 0018 on 2026-08-07. This record is retained as the historical
+architecture for the rejected shared-population design; it is no longer an
+implementation or release contract.
+
+Previously accepted. Implements the strategy selected in ADR 0016; the normative
 specification is `docs/harness-v1-v2-coexistence-plan.md` (Revision 4). Where
 this record and the plan disagree, the plan governs.
 

@@ -32,24 +32,6 @@ ipv6_image="[2001:db8::1]:5000/team/acp-codex@sha256:$(printf 'a%.0s' {1..64})"
 multiline_image="docker.io/example/acp-codex
 #@sha256:$(printf 'b%.0s' {1..64})"
 
-strip_agent_execution_control() {
-  awk '
-    function flush_document() {
-      if (document != "" && document !~ /(^|\n)kind: AgentExecutionControl(\n|$)/) {
-        printf "%s", document
-      }
-      document = ""
-    }
-    /^---[[:space:]]*$/ {
-      flush_document()
-      document = $0 ORS
-      next
-    }
-    { document = document $0 ORS }
-    END { flush_document() }
-  '
-}
-
 yaml_to_json() {
   ruby -rjson -ryaml -e '
     YAML.load_stream(STDIN.read).each do |document|
@@ -67,7 +49,6 @@ render_snapshot() {
 
   "${renderer}" "${overlay}" "${codex_image}" "${claude_image}" "${copilot_image}" "${opencode_image}"
   "${kustomize}" build "${overlay}" \
-    | strip_agent_execution_control \
     | yaml_to_json \
     | jq -sc '
         [.[] | if .kind == "List" then .items[] else . end] as $items |
@@ -142,19 +123,25 @@ fi
 [[ ! -e "${overlay}/runtime-images-rollout-patch.yaml" ]]
 rendered_manifest="${test_root}/rendered-manifest.yaml"
 "${kustomize}" build "${overlay}" >"${rendered_manifest}"
-[[ "$(grep -c '^kind: AgentExecutionControl$' "${rendered_manifest}")" == "1" ]]
-awk '
-  /^kind: AgentExecutionControl$/ { in_control = 1 }
-  in_control && /^  name: cluster$/ { found_name = 1 }
-  in_control && /^  namespace: orka-system$/ { found_namespace = 1 }
-  in_control && /^---$/ { exit !(found_name && found_namespace) }
-  END { if (in_control) exit !(found_name && found_namespace) }
-' "${rendered_manifest}"
+[[ "$(grep -c '^kind: AgentExecutionControl$' "${rendered_manifest}" || true)" == "0" ]]
 rendered_inventory="${test_root}/rendered-inventory.json"
-strip_agent_execution_control <"${rendered_manifest}" \
-  | yaml_to_json \
+yaml_to_json <"${rendered_manifest}" \
   | jq -sc '[.[] | if .kind == "List" then .items[] else . end]' >"${rendered_inventory}"
 jq -e '
+  ([.[] | select(.kind == "Namespace" and .metadata.name == "orka-system" and
+    .metadata.labels["orka.ai/controller-mode"] == "harness-v2")] | length) == 1 and
+  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager" and
+    .metadata.namespace == "orka-system") |
+    .spec.template.spec.containers[] | select(.name == "manager") | .args] | length) == 1 and
+  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
+    .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
+    select(. == "--controller-mode=harness-v2")] | length) == 1 and
+  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
+    .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
+    select(. == "--watch-namespace=orka-system")] | length) == 1 and
+  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
+    .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
+    select(startswith("--harness-v1-"))] | length) == 0 and
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-admission" and
     .metadata.namespace == "orka-system" and .spec.replicas == 2 and
     .spec.strategy.type == "RollingUpdate" and .spec.strategy.rollingUpdate.maxUnavailable == 0 and
@@ -285,24 +272,6 @@ set -Eeuo pipefail
 
 mkdir -p "${FAKE_KUBE_STATE}/configmaps"
 
-strip_agent_execution_control() {
-  awk '
-    function flush_document() {
-      if (document != "" && document !~ /(^|\n)kind: AgentExecutionControl(\n|$)/) {
-        printf "%s", document
-      }
-      document = ""
-    }
-    /^---[[:space:]]*$/ {
-      flush_document()
-      document = $0 ORS
-      next
-    }
-    { document = document $0 ORS }
-    END { flush_document() }
-  ' "$1"
-}
-
 yaml_to_json() {
   ruby -rjson -ryaml -e '
     YAML.load_stream(STDIN.read).each do |document|
@@ -311,40 +280,48 @@ yaml_to_json() {
   '
 }
 
-emit_control_json() {
-  case "${FAKE_CONTROL_MODE:-valid}" in
-    valid)
-      printf '%s\n' '{"apiVersion":"core.orka.ai/v1alpha1","kind":"AgentExecutionControl","metadata":{"name":"cluster","namespace":"orka-system"},"spec":{"backends":{"v1":{"desiredMode":"disabled"},"v2":{"desiredMode":"enabled"}}}}'
-      ;;
-    duplicate)
-      emit_control_json_valid='{"apiVersion":"core.orka.ai/v1alpha1","kind":"AgentExecutionControl","metadata":{"name":"cluster","namespace":"orka-system"},"spec":{"backends":{"v1":{"desiredMode":"disabled"},"v2":{"desiredMode":"enabled"}}}}'
-      printf '%s\n%s\n' "${emit_control_json_valid}" "${emit_control_json_valid}"
-      ;;
-    missing)
-      ;;
-    wrong-name)
-      printf '%s\n' '{"apiVersion":"core.orka.ai/v1alpha1","kind":"AgentExecutionControl","metadata":{"name":"orka-cluster","namespace":"orka-system"},"spec":{"backends":{"v1":{"desiredMode":"disabled"},"v2":{"desiredMode":"enabled"}}}}'
-      ;;
-    *)
-      echo "unknown FAKE_CONTROL_MODE: ${FAKE_CONTROL_MODE}" >&2
-      exit 2
-      ;;
-  esac
-}
-
 manifest_json() {
   local source="$1"
-  if jq -e '.kind == "AgentExecutionControl"' "${source}" >/dev/null 2>&1; then
+  if jq -e . "${source}" >/dev/null 2>&1; then
     cat "${source}"
     return
   fi
-
-  local filtered="${FAKE_KUBE_STATE}/known-resources.yaml"
-  strip_agent_execution_control "${source}" >"${filtered}"
-  yaml_to_json <"${filtered}"
-  if grep -q '^kind: AgentExecutionControl$' "${source}"; then
-    emit_control_json
-  fi
+  yaml_to_json <"${source}" | jq -sc --arg mode "${FAKE_STATIC_MODE:-valid}" '
+    def controller:
+      .kind == "Deployment" and .metadata.name == "orka-controller-manager";
+    def rewrite_args($f):
+      map(if controller then
+        .spec.template.spec.containers |= map(
+          if .name == "manager" then .args |= $f else . end
+        )
+      else . end);
+    if $mode == "valid" then .
+    elif $mode == "missing-namespace" then
+      map(select((.kind == "Namespace" and .metadata.name == "orka-system") | not))
+    elif $mode == "wrong-namespace-label" then
+      map(if .kind == "Namespace" and .metadata.name == "orka-system" then
+        .metadata.labels["orka.ai/controller-mode"] = "harness-v1"
+      else . end)
+    elif $mode == "missing-controller" then
+      map(select(controller | not))
+    elif $mode == "duplicate-controller" then
+      . + [(.[] | select(controller))]
+    elif $mode == "missing-controller-mode" then
+      rewrite_args(map(select(startswith("--controller-mode=") | not)))
+    elif $mode == "duplicate-controller-mode" then
+      rewrite_args(. + ["--controller-mode=harness-v2"])
+    elif $mode == "wrong-controller-mode" then
+      rewrite_args(map(if startswith("--controller-mode=") then "--controller-mode=harness-v1" else . end))
+    elif $mode == "missing-watch-namespace" then
+      rewrite_args(map(select(startswith("--watch-namespace=") | not)))
+    elif $mode == "wrong-watch-namespace" then
+      rewrite_args(map(if startswith("--watch-namespace=") then "--watch-namespace=other" else . end))
+    elif $mode == "legacy-controller-flag" then
+      rewrite_args(. + ["--harness-v1-endpoint=https://legacy.invalid"])
+    else error("unknown FAKE_STATIC_MODE: " + $mode)
+    end
+    | .[]
+  '
 }
 
 if [[ "$1" == "proxy" ]]; then
@@ -363,36 +340,6 @@ if [[ "$1" == "proxy" ]]; then
   while true; do
     sleep 1
   done
-fi
-
-if [[ "$1" == "create" && "$2" == "-f" && $# -eq 3 ]] \
-  && jq -e '.kind == "AgentExecutionControl"' "$3" >/dev/null 2>&1; then
-  [[ "$(jq -r '.metadata.namespace + "/" + .metadata.name' "$3")" == "orka-system/cluster" ]] || {
-    echo 'wrong AgentExecutionControl identity' >&2
-    exit 27
-  }
-  [[ -e "${FAKE_KUBE_STATE}/namespace" ]] || { echo 'control created before namespace' >&2; exit 28; }
-  config_count="$(find "${FAKE_KUBE_STATE}/configmaps" -type f | wc -l | tr -d '[:space:]')"
-  [[ "${config_count}" -gt 0 ]] || { echo 'control created before runtime ConfigMap' >&2; exit 29; }
-  [[ ! -e "${FAKE_KUBE_STATE}/control.json" ]] || { echo 'control already exists' >&2; exit 32; }
-  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "control" && ! -e "${FAKE_KUBE_STATE}/failed-control" ]]; then
-    : >"${FAKE_KUBE_STATE}/failed-control"
-    printf 'fail-control:cluster\n' >>"${FAKE_KUBE_LOG}"
-    exit 30
-  fi
-  jq '
-    .metadata.uid = "control-uid" |
-    .metadata.generation = 1 |
-    .status = {
-      observedGeneration: 1,
-      backends: {
-        v1: {effectiveMode: .spec.backends.v1.desiredMode, modeRevision: 1},
-        v2: {effectiveMode: .spec.backends.v2.desiredMode, modeRevision: 1}
-      }
-    }
-  ' "$3" >"${FAKE_KUBE_STATE}/control.json"
-  printf 'control-create:cluster\n' >>"${FAKE_KUBE_LOG}"
-  exit 0
 fi
 
 if [[ "$1" == "create" ]]; then
@@ -479,17 +426,6 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "create" && "$4" == "secr
   exit 0
 fi
 
-if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "agentexecutioncontrol.core.orka.ai" && "$5" == "cluster" ]]; then
-  if [[ ! -f "${FAKE_KUBE_STATE}/control.json" ]]; then
-    if [[ " $* " == *" --ignore-not-found "* ]]; then
-      exit 0
-    fi
-    exit 1
-  fi
-  cat "${FAKE_KUBE_STATE}/control.json"
-  exit 0
-fi
-
 if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "rollout" && "$4" == "status" && "$5" == "deployment/orka-admission" ]]; then
   [[ -e "${FAKE_KUBE_STATE}/admission-runtime" ]] || { echo 'admission rollout waited before runtime apply' >&2; exit 36; }
   if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "rollout" && ! -e "${FAKE_KUBE_STATE}/failed-rollout" ]]; then
@@ -498,6 +434,18 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "rollout" && "$4" == "sta
     exit 37
   fi
   printf 'rollout:orka-admission\n' >>"${FAKE_KUBE_LOG}"
+  exit 0
+fi
+
+if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "rollout" && "$4" == "status" && "$5" == "deployment/orka-controller-manager" ]]; then
+  [[ -e "${FAKE_KUBE_STATE}/controller-workload" ]] || { echo 'controller rollout waited before workload apply' >&2; exit 48; }
+  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "controller-rollout" && ! -e "${FAKE_KUBE_STATE}/failed-controller-rollout" ]]; then
+    : >"${FAKE_KUBE_STATE}/failed-controller-rollout"
+    printf 'fail-rollout:orka-controller-manager\n' >>"${FAKE_KUBE_LOG}"
+    exit 49
+  fi
+  : >"${FAKE_KUBE_STATE}/controller-ready"
+  printf 'rollout:orka-controller-manager\n' >>"${FAKE_KUBE_LOG}"
   exit 0
 fi
 
@@ -520,14 +468,19 @@ fi
 }
 
 if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission") else false end' "$3" >/dev/null; then
-  [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'admission policies applied before ready endpoints' >&2; exit 38; }
-  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 9 ]] || { echo 'admission policies applied before every handler smoke' >&2; exit 39; }
+  [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'admission webhooks applied before ready endpoints' >&2; exit 38; }
+  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 7 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
   jq -e '
-    ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 3 and
-    ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 3 and
+    ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
+    ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 7 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 7 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      (.failurePolicy == "Fail" and (.clientConfig.caBundle | length > 0))] | all) and
+      (.failurePolicy == "Fail" and .sideEffects == "None" and
+       .clientConfig.service.name == "orka-admission" and
+       .clientConfig.service.namespace == "orka-system" and
+       (.clientConfig.caBundle | length > 0))] | all) and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") |
       .metadata.annotations["cert-manager.io/inject-ca-from-secret"]] | all(. == null))
     and
@@ -537,21 +490,22 @@ if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConf
       select(contains("orka.ai/cleanup") and
         contains("oldObject.metadata.?finalizers.orValue([]).filter") and
         contains("object.spec == oldObject.spec") and
-        contains("object.?status.orValue({}) == oldObject.?status.orValue({})"))] | length) == 1
-    and
+        contains("object.?status.orValue({}) == oldObject.?status.orValue({})"))] | length) == 1 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      select(.name == "sessionresolution.core.orka.ai") | .matchConditions[] |
-      select(.name == "resolution-reference-introduced") | .expression |
-      select(contains("object.?status.?agentExecutionResolutionRef.hasValue()") and
-        contains("!oldObject.?status.?agentExecutionResolutionRef.hasValue()"))] | length) == 1
-  ' "$3" >/dev/null || { echo 'admission policy wave was not fail-closed and CA-pinned' >&2; exit 40; }
-  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "policies" && ! -e "${FAKE_KUBE_STATE}/failed-policies" ]]; then
-    : >"${FAKE_KUBE_STATE}/failed-policies"
-    printf 'fail-policies:orka-admission\n' >>"${FAKE_KUBE_LOG}"
+      select(.name == "namespaceexecutionmode.core.orka.ai") |
+      select(.clientConfig.service.path == "/validate-v1-namespace-execution-mode")] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "sessionresolution.core.orka.ai" or
+             .name == "agentexecutionadjudication.core.orka.ai" or
+             .name == "agentexecutioncontrolpolicy.core.orka.ai")] | length) == 0
+  ' "$3" >/dev/null || { echo 'admission webhook wave was not static, fail-closed, and CA-pinned' >&2; exit 40; }
+  if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "webhooks" && ! -e "${FAKE_KUBE_STATE}/failed-webhooks" ]]; then
+    : >"${FAKE_KUBE_STATE}/failed-webhooks"
+    printf 'fail-webhooks:orka-admission\n' >>"${FAKE_KUBE_LOG}"
     exit 41
   fi
-  : >"${FAKE_KUBE_STATE}/admission-policies"
-  printf 'policies:orka-admission\n' >>"${FAKE_KUBE_LOG}"
+  : >"${FAKE_KUBE_STATE}/admission-webhooks"
+  printf 'webhooks:orka-admission\n' >>"${FAKE_KUBE_LOG}"
   exit 0
 fi
 
@@ -588,7 +542,7 @@ if [[ "${admission_deployments}" != "0" || "${admission_services}" != "0" ]]; th
     exit 42
   }
   [[ -z "${deployment_ref}" ]] || {
-    echo 'admission runtime wave included the coexistence controller' >&2
+    echo 'admission runtime wave included the harness-v2 controller' >&2
     exit 43
   }
   [[ -e "${FAKE_KUBE_STATE}/namespace" ]] || {
@@ -635,23 +589,16 @@ fi
   echo 'Deployment applied before snapshot Secret' >&2
   exit 23
 }
-[[ -e "${FAKE_KUBE_STATE}/control.json" ]] || {
-  echo 'Deployment applied before AgentExecutionControl' >&2
-  exit 31
-}
 [[ -e "${FAKE_KUBE_STATE}/admission-runtime" ]] || {
-  echo 'coexistence controller applied before the admission runtime' >&2
+  echo 'harness-v2 controller applied before the admission runtime' >&2
   exit 46
 }
-[[ -e "${FAKE_KUBE_STATE}/admission-policies" ]] || {
-  echo 'coexistence controller applied before fail-closed admission protections' >&2
+[[ -e "${FAKE_KUBE_STATE}/admission-webhooks" ]] || {
+  echo 'harness-v2 controller applied before fail-closed admission webhooks' >&2
   exit 47
 }
-if jq -e 'if .kind == "List" then any(.items[]?; .kind == "AgentExecutionControl") else .kind == "AgentExecutionControl" end' "$3" >/dev/null; then
-  echo 'workload wave reapplied AgentExecutionControl bootstrap modes' >&2
-  exit 33
-fi
 printf '%s\n' "${deployment_ref}" >"${FAKE_KUBE_STATE}/deployment-ref"
+: >"${FAKE_KUBE_STATE}/controller-workload"
 printf 'full:%s\n' "${deployment_ref}" >>"${FAKE_KUBE_LOG}"
 EOF_FAKE_KUBECTL
 chmod +x "${fake_bin}/kubectl"
@@ -717,30 +664,32 @@ export PATH="${fake_bin}:${PATH}"
 
 assert_converged() {
   local state_dir="$1"
-  local admission_line rollout_line smoke_line policies_line controller_line reference
+  local admission_line admission_rollout_line smoke_line webhooks_line controller_line controller_rollout_line reference
   reference="$(cat "${state_dir}/deployment-ref")"
   [[ -e "${state_dir}/namespace" ]]
   [[ -e "${state_dir}/configmaps/${reference}" ]]
   [[ -s "${state_dir}/snapshot-key" ]]
-  [[ -e "${state_dir}/control.json" ]]
   [[ -e "${state_dir}/admission-runtime" ]]
   [[ -e "${state_dir}/admission-endpoints" ]]
-  [[ -e "${state_dir}/admission-policies" ]]
+  [[ -e "${state_dir}/admission-webhooks" ]]
+  [[ -e "${state_dir}/controller-workload" ]]
+  [[ -e "${state_dir}/controller-ready" ]]
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" -ge 1 ]]
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" == "$(grep -c '^proxy-stop$' "${state_dir}/apply.log")" ]]
   [[ "$(grep -c '^secret:agent-execution-snapshot-key$' "${state_dir}/apply.log")" == "1" ]]
-  [[ "$(grep -c '^control-create:cluster$' "${state_dir}/apply.log")" == "1" ]]
-  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "9" ]]
-  [[ "$(grep -c '^policies:orka-admission$' "${state_dir}/apply.log")" -ge 1 ]]
+  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "7" ]]
+  [[ "$(grep -c '^webhooks:orka-admission$' "${state_dir}/apply.log")" -ge 1 ]]
   admission_line="$(grep -n '^admission-runtime:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
-  rollout_line="$(grep -n '^rollout:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
+  admission_rollout_line="$(grep -n '^rollout:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
   smoke_line="$(grep -n '^smoke:' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
-  policies_line="$(grep -n '^policies:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
+  webhooks_line="$(grep -n '^webhooks:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
   controller_line="$(grep -n '^full:' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
-  (( admission_line < rollout_line ))
-  (( rollout_line < smoke_line ))
-  (( smoke_line < policies_line ))
-  (( policies_line < controller_line ))
+  controller_rollout_line="$(grep -n '^rollout:orka-controller-manager$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
+  (( admission_line < admission_rollout_line ))
+  (( admission_rollout_line < smoke_line ))
+  (( smoke_line < webhooks_line ))
+  (( webhooks_line < controller_line ))
+  (( controller_line < controller_rollout_line ))
 }
 
 run_apply_scenario() {
@@ -765,13 +714,13 @@ run_apply_scenario() {
 run_apply_scenario ""
 run_apply_scenario namespace
 run_apply_scenario config
-run_apply_scenario control
 run_apply_scenario admission
 run_apply_scenario full
 run_apply_scenario rollout
+run_apply_scenario controller-rollout
 run_apply_scenario endpoints
 run_apply_scenario smoke
-run_apply_scenario policies
+run_apply_scenario webhooks
 
 expected_existing_key="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 existing_state="${test_root}/state-existing-key"
@@ -806,22 +755,6 @@ FAKE_KUBE_STATE="${raw_whitespace_key_state}" FAKE_KUBE_LOG="${raw_whitespace_ke
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
 cmp -s "${raw_whitespace_key_state}/snapshot-key.before" "${raw_whitespace_key_state}/snapshot-key"
 
-preserved_control_state="${test_root}/state-preserved-control"
-mkdir -p "${preserved_control_state}"
-printf '%s' "${expected_existing_key}" >"${preserved_control_state}/snapshot-key"
-cat >"${preserved_control_state}/control.json" <<'EOF_PRESERVED_CONTROL'
-{"apiVersion":"core.orka.ai/v1alpha1","kind":"AgentExecutionControl","metadata":{"name":"cluster","namespace":"orka-system","uid":"control-uid","generation":9},"spec":{"backends":{"v1":{"desiredMode":"drain-only"},"v2":{"desiredMode":"disabled"}}},"status":{"observedGeneration":9,"backends":{"v1":{"effectiveMode":"drain-only","modeRevision":7},"v2":{"effectiveMode":"disabled","modeRevision":4}}}}
-EOF_PRESERVED_CONTROL
-cp "${preserved_control_state}/control.json" "${preserved_control_state}/control.before.json"
-: >"${preserved_control_state}/apply.log"
-FAKE_KUBE_STATE="${preserved_control_state}" FAKE_KUBE_LOG="${preserved_control_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
-  "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
-cmp -s "${preserved_control_state}/control.before.json" "${preserved_control_state}/control.json"
-if grep -q '^control-create:' "${preserved_control_state}/apply.log"; then
-  echo 'existing AgentExecutionControl bootstrap modes were reapplied' >&2
-  exit 1
-fi
-
 for tls_mode in missing missing-ca invalid-cert invalid-key invalid-ca mismatched-key expired future wrong-san wrong-ca; do
   tls_state="${test_root}/state-tls-${tls_mode}"
   mkdir -p "${tls_state}"
@@ -832,8 +765,8 @@ for tls_mode in missing missing-ca invalid-cert invalid-key invalid-ca mismatche
     exit 1
   fi
   grep -F 'orka-admission-tls' <<<"${tls_output}" >/dev/null
-  if grep -Eq '^(config|control-create|full|smoke|policies):' "${tls_state}/apply.log"; then
-    echo 'workloads or admission policies were applied after TLS validation failed' >&2
+  if grep -Eq '^(config|full|smoke|webhooks):' "${tls_state}/apply.log"; then
+    echo 'workloads or admission webhooks were applied after TLS validation failed' >&2
     exit 1
   fi
 done
@@ -853,23 +786,33 @@ if grep -F "${malformed_sentinel}" <<<"${malformed_output}" >/dev/null; then
   echo 'snapshot key material leaked in deployment output' >&2
   exit 1
 fi
-if grep -Eq '^(config|control|full):' "${malformed_state}/apply.log"; then
+if grep -Eq '^(config|full):' "${malformed_state}/apply.log"; then
   echo 'workload prerequisites were applied after snapshot-key validation failed' >&2
   exit 1
 fi
 
-for control_mode in missing duplicate wrong-name; do
-  control_state="${test_root}/state-control-${control_mode}"
-  mkdir -p "${control_state}"
-  : >"${control_state}/apply.log"
-  if FAKE_KUBE_STATE="${control_state}" FAKE_KUBE_LOG="${control_state}/apply.log" FAKE_KUBE_FAIL_MODE="" FAKE_CONTROL_MODE="${control_mode}" \
+for static_mode in \
+  missing-namespace \
+  wrong-namespace-label \
+  missing-controller \
+  duplicate-controller \
+  missing-controller-mode \
+  duplicate-controller-mode \
+  wrong-controller-mode \
+  missing-watch-namespace \
+  wrong-watch-namespace \
+  legacy-controller-flag; do
+  static_state="${test_root}/state-static-${static_mode}"
+  mkdir -p "${static_state}"
+  : >"${static_state}/apply.log"
+  if FAKE_KUBE_STATE="${static_state}" FAKE_KUBE_LOG="${static_state}/apply.log" FAKE_KUBE_FAIL_MODE="" FAKE_STATIC_MODE="${static_mode}" \
     "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null 2>&1; then
-    echo "${control_mode} AgentExecutionControl unexpectedly passed deployment preflight" >&2
+    echo "${static_mode} static controller manifest unexpectedly passed deployment preflight" >&2
     exit 1
   fi
-  [[ ! -s "${control_state}/apply.log" ]]
+  [[ ! -s "${static_state}/apply.log" ]]
 done
 
 grep -F 'scripts/apply-acp-production.sh' "${root}/Makefile" >/dev/null
 
-printf '%s\n' 'ok - ACP deployment preserves modes and keys, activates fail-closed admission after readiness, and only then rolls the coexistence controller'
+printf '%s\n' 'ok - ACP deployment enforces one static harness-v2 identity, preserves keys, activates seven fail-closed webhooks after readiness, and only then rolls the controller'

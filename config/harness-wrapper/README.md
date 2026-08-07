@@ -1,8 +1,16 @@
-# Harness v1 compatibility wrapper
+# Harness v1 wrapper
 
-This Kustomize base is an opt-in compatibility data plane. It is intentionally
-absent from `config/default` and `config/acp-production`; enabling it does not
-change the durable `AgentExecutionControl` backend mode or create a v1 fallback.
+This Kustomize base is the data plane for a static `harness-v1` installation.
+It is intentionally absent from `config/default` and
+`config/acp-production`. Deploy it only with a v1 controller whose non-empty
+watch namespace is labeled `orka.ai/controller-mode: harness-v1` and whose
+startup mode is `--controller-mode=harness-v1`.
+
+The v1 installation has its own controller namespace, watched namespace,
+ServiceAccount, Lease, API endpoint, SQLite store, Secrets, and wrapper ledger.
+It must not share those resources with a `harness-v2` installation. The wrapper
+is never a fallback for failed ACP work, and its Tasks and Sessions cannot be
+continued by v2.
 
 Before applying the base:
 
@@ -33,8 +41,9 @@ acknowledges their exact durable settlement. The shipped 720-hour retention
 window preserves duplicate-suppression and audit/backup evidence before bounded
 garbage collection; configure a longer window when policy requires it.
 
-Before changing any wrapper Pod-template field, run the authenticated drain
-client from the currently deployed wrapper image and wait for it to succeed:
+Before changing any wrapper Pod-template field, run the authenticated wrapper
+drain client from the currently deployed wrapper image and wait for it to
+succeed:
 
 ```bash
 /orka-agent-harness-wrapper drain \
@@ -56,7 +65,11 @@ aborts the rollout: do not mutate the Deployment. After a successful drain, upda
 exactly once for every later wrapper Pod-template replacement; ordinary Pod
 restart with an unchanged template keeps the current generation.
 
-For permanent shutdown or uninstall, omit `--next-generation`; this leaves the
-durable admission close in place and never authorizes a replacement wrapper to
-reopen it. Retain the ledger PVC until the reviewed v1 removal gate and backup
-procedure have completed.
+This wrapper drain protects v1 turn state during a Pod-template replacement. It
+is not a controller mode and does not transfer work to v2.
+
+For permanent shutdown or uninstall, first stop every v1 producer and revoke
+new Task creation. Then omit `--next-generation`; this leaves wrapper admission
+closed and never authorizes a replacement wrapper to reopen it. Retain the
+ledger PVC until all v1 execution and cleanup work is settled and the reviewed
+backup/retention procedure has completed.

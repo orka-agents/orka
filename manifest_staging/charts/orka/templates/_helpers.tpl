@@ -296,6 +296,7 @@ spec:
 {{/* Read the live controller inputs used when the wrapper Deployment is absent. */}}
 {{- define "orka.harnessV1ExistingControllerState" -}}
 {{- $state := "" -}}
+{{- $mode := "" -}}
 {{- $harnessMarker := false -}}
 {{- $harnessEnabled := false -}}
 {{- $harnessDisabled := false -}}
@@ -306,6 +307,9 @@ spec:
 {{- if eq (default "" .name) "controller" -}}
 {{- range (default (list) .args) -}}
 {{- $arg := toString . -}}
+{{- if hasPrefix "--controller-mode=" $arg -}}
+{{- $mode = trimPrefix "--controller-mode=" $arg -}}
+{{- end -}}
 {{- if hasPrefix "--harness-v1-enabled=" $arg -}}
 {{- $harnessMarker = true -}}
 {{- end -}}
@@ -323,7 +327,11 @@ spec:
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- if and $harnessEnabled (not $harnessDisabled) -}}
+{{- if eq $mode "harness-v1" -}}
+{{- $state = "enabled" -}}
+{{- else if eq $mode "harness-v2" -}}
+{{- $state = "disabled" -}}
+{{- else if and $harnessEnabled (not $harnessDisabled) -}}
 {{- $state = "enabled" -}}
 {{- else if and $harnessDisabled (not $harnessEnabled) -}}
 {{- $state = "disabled" -}}
@@ -365,42 +373,16 @@ spec:
 {{- required "existing harness v1 controller Deployment is missing the auth Secret token key" $secretKey -}}
 {{- end }}
 
-{{- define "orka.harnessV1PolicyNamespace" -}}
-{{- if .Values.harnessV1.policy.namespace -}}
-{{- .Values.harnessV1.policy.namespace -}}
-{{- else if .Values.controller.watchNamespace -}}
-{{- .Values.controller.watchNamespace -}}
-{{- else -}}
-{{- .Release.Namespace -}}
-{{- end -}}
-{{- end }}
-
 {{- define "orka.controllerName" -}}
 {{- printf "%s-controller" (include "orka.fullname" . | trunc 52 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "orka.admissionName" -}}
-{{- printf "%s-admission" (include "orka.fullname" . | trunc 53 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- define "orka.controllerClusterRoleName" -}}
+{{- printf "%s-cluster" (include "orka.controllerName" . | trunc 55 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "orka.agentExecutionBindingAdmissionPolicyName" -}}
-{{- printf "%s-agent-execution-binding" (include "orka.fullname" . | trunc 39 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{- define "orka.agentExecutionClassificationAdmissionPolicyName" -}}
-{{- printf "%s-agent-execution-classification" (include "orka.fullname" . | trunc 34 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{- define "orka.agentExecutionResolutionAdmissionPolicyName" -}}
-{{- printf "%s-agent-execution-resolution" (include "orka.fullname" . | trunc 38 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{- define "orka.admissionControllerUsername" -}}
-{{- default (printf "system:serviceaccount:%s:%s" .Release.Namespace (include "orka.serviceAccountName" .)) .Values.admission.identity.controllerUsername -}}
-{{- end }}
-
-{{- define "orka.admissionAdjudicationControllerUsername" -}}
-{{- default (include "orka.admissionControllerUsername" .) .Values.admission.identity.adjudicationControllerUsername -}}
+{{- define "orka.controllerUsername" -}}
+{{- printf "system:serviceaccount:%s:%s" .Release.Namespace (include "orka.serviceAccountName" .) -}}
 {{- end }}
 
 {{- define "orka.publisherName" -}}
@@ -464,7 +446,7 @@ The chart-managed provider proxy is release-namespaced and its NetworkPolicies
 are intentionally pinned to the chart-supported Vekil Service.
 */}}
 {{- define "orka.validateProviderProxyConfig" -}}
-{{- if .Values.providerProxy.enabled -}}
+{{- if and (eq .Values.controller.mode "harness-v2") .Values.providerProxy.enabled -}}
 {{- $configuredNamespace := trim (default "" .Values.controller.acpRuntime.providerProxyNamespace) -}}
 {{- if and $configuredNamespace (ne $configuredNamespace .Release.Namespace) -}}
 {{- fail (printf "controller.acpRuntime.providerProxyNamespace must be empty or match the Helm release namespace %q when providerProxy.enabled=true" .Release.Namespace) -}}
@@ -490,154 +472,132 @@ must have exactly one elected writer and must not overlap Pods during rollout.
 {{- end }}
 
 {{/*
+Every release owns exactly one immutable execution contract and one tenant
+namespace. There is no dual, automatic, or drain controller mode.
+*/}}
+{{- define "orka.validateControllerMode" -}}
+{{- if not (has .Values.controller.mode (list "harness-v1" "harness-v2")) -}}
+{{- fail "controller.mode must be harness-v1 or harness-v2" -}}
+{{- end -}}
+{{- if not (trim (default "" .Values.controller.watchNamespace)) -}}
+{{- fail "controller.watchNamespace is required for an isolated controller installation" -}}
+{{- end -}}
+{{- if ne .Values.controller.watchNamespace .Release.Namespace -}}
+{{- fail (printf "controller.watchNamespace must equal the Helm release namespace %q" .Release.Namespace) -}}
+{{- end -}}
+{{- if not .Values.controller.leaderElect -}}
+{{- fail "controller.leaderElect must be true for an isolated controller installation" -}}
+{{- end -}}
+{{- if .Release.IsUpgrade -}}
+{{- $existingController := lookup "apps/v1" "Deployment" .Release.Namespace (include "orka.controllerName" .) -}}
+{{- if $existingController -}}
+{{- $existingState := include "orka.harnessV1ExistingControllerState" $existingController | trim -}}
+{{- if not $existingState -}}
+{{- fail "cannot determine the existing controller mode; restore a valid static controller before upgrading" -}}
+{{- end -}}
+{{- if and (eq .Values.controller.mode "harness-v1") (ne $existingState "enabled") -}}
+{{- fail "controller.mode is immutable; install harness-v1 as a new release and namespace" -}}
+{{- end -}}
+{{- if and (eq .Values.controller.mode "harness-v2") (eq $existingState "enabled") -}}
+{{- fail "controller.mode is immutable; install harness-v2 as a new release and namespace" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $clientNamespace := trim (default "" .Values.client.namespace) -}}
+{{- if and $clientNamespace (ne $clientNamespace .Values.controller.watchNamespace) -}}
+{{- fail "client.namespace must be empty or match controller.watchNamespace" -}}
+{{- end -}}
+{{- if eq .Values.controller.mode "harness-v2" -}}
+{{- if not (trim (default "" .Values.controller.acpRuntime.namespace)) -}}
+{{- fail "controller.acpRuntime.namespace is required when controller.mode=harness-v2" -}}
+{{- end -}}
+{{- if eq .Values.controller.acpRuntime.namespace .Release.Namespace -}}
+{{- fail "controller.acpRuntime.namespace must differ from the release namespace" -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Agent execution snapshots contain sensitive resolved inputs. When either
 agent protocol is enabled, require an operator-managed Secret for their
 encryption key rather than generating or storing the key in Helm values.
 */}}
 {{- define "orka.validateAgentExecutionSnapshot" -}}
-{{- if or .Values.controller.acpRuntime.enabled .Values.harnessV1.enabled -}}
 {{- if not (trim (default "" .Values.controller.agentExecutionSnapshot.existingSecret)) -}}
 {{- fail "controller.agentExecutionSnapshot.existingSecret is required when agent execution is enabled" -}}
 {{- end -}}
 {{- if not (trim (default "" .Values.controller.agentExecutionSnapshot.key)) -}}
 {{- fail "controller.agentExecutionSnapshot.key is required when agent execution is enabled" -}}
 {{- end -}}
-{{- end -}}
-{{- end }}
-
-{{- define "orka.validateAgentExecutionControl" -}}
-{{- if .Values.controller.agentExecutionControl.create -}}
-{{- if not (has .Values.controller.agentExecutionControl.v1Mode (list "enabled" "drain-only" "disabled")) -}}
-{{- fail "controller.agentExecutionControl.v1Mode must be enabled, drain-only, or disabled" -}}
-{{- end -}}
-{{- if not (has .Values.controller.agentExecutionControl.v2Mode (list "enabled" "drain-only" "disabled")) -}}
-{{- fail "controller.agentExecutionControl.v2Mode must be enabled, drain-only, or disabled" -}}
-{{- end -}}
-{{- end -}}
 {{- end }}
 
 {{/*
-The admission plane is stateless and independent from the singleton controller.
-Its certificate and CA trust are always operator-managed, and fail-closed
-webhooks are a separate activation step after the replicas are ready.
+The release-local controller serves its own fail-closed webhooks. Its
+certificate and CA trust are always operator-managed.
 */}}
-{{- define "orka.validateAdmission" -}}
-{{- if or .Values.controller.acpRuntime.enabled .Values.harnessV1.enabled -}}
-{{- if not .Values.admission.enabled -}}
-{{- fail "admission.enabled must be true when agent execution is enabled" -}}
+{{- define "orka.validateWebhooks" -}}
+{{- if not (trim (default "" .Values.webhooks.tls.existingSecret)) -}}
+{{- fail "webhooks.tls.existingSecret is required" -}}
 {{- end -}}
-{{- if not .Values.admission.webhooks.enabled -}}
-{{- fail "admission.webhooks.enabled must be true when agent execution is enabled" -}}
+{{- if not (trim (default "" .Values.webhooks.tls.certKey)) -}}
+{{- fail "webhooks.tls.certKey is required" -}}
 {{- end -}}
+{{- if not (trim (default "" .Values.webhooks.tls.privateKeyKey)) -}}
+{{- fail "webhooks.tls.privateKeyKey is required" -}}
 {{- end -}}
-{{- if .Values.admission.enabled -}}
-{{- if lt (int .Values.admission.replicas) 2 -}}
-{{- fail "admission.replicas must be at least 2 when admission.enabled=true" -}}
+{{- if and (not (trim (default "" .Values.webhooks.caBundle))) (empty .Values.webhooks.caInjectionAnnotations) -}}
+{{- fail "webhooks requires a nonempty caBundle or caInjectionAnnotations" -}}
 {{- end -}}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) -}}
-{{- fail "controller.image.digest must be a sha256 digest when admission.enabled=true" -}}
-{{- end -}}
-{{- if not (trim (default "" .Values.admission.tls.existingSecret)) -}}
-{{- fail "admission.tls.existingSecret is required when admission.enabled=true" -}}
-{{- end -}}
-{{- if not (trim (default "" .Values.admission.tls.certKey)) -}}
-{{- fail "admission.tls.certKey is required when admission.enabled=true" -}}
-{{- end -}}
-{{- if not (trim (default "" .Values.admission.tls.privateKeyKey)) -}}
-{{- fail "admission.tls.privateKeyKey is required when admission.enabled=true" -}}
-{{- end -}}
-{{- if empty .Values.admission.identity.adminGroups -}}
-{{- fail "admission.identity.adminGroups must contain at least one group when admission.enabled=true" -}}
-{{- end -}}
-{{- range .Values.admission.identity.adminGroups -}}
-{{- if not (trim .) -}}
-{{- fail "admission.identity.adminGroups entries must be nonempty" -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- if .Values.admission.webhooks.enabled -}}
-{{- if not .Values.admission.enabled -}}
-{{- fail "admission.enabled must be true when admission.webhooks.enabled=true" -}}
-{{- end -}}
-{{- if and (not (trim (default "" .Values.admission.webhooks.caBundle))) (empty .Values.admission.webhooks.caInjectionAnnotations) -}}
-{{- fail "admission.webhooks requires a nonempty caBundle or caInjectionAnnotations when enabled" -}}
-{{- end -}}
-{{- if or (lt (int .Values.admission.webhooks.timeoutSeconds) 1) (gt (int .Values.admission.webhooks.timeoutSeconds) 30) -}}
-{{- fail "admission.webhooks.timeoutSeconds must be between 1 and 30" -}}
-{{- end -}}
+{{- if or (lt (int .Values.webhooks.timeoutSeconds) 1) (gt (int .Values.webhooks.timeoutSeconds) 30) -}}
+{{- fail "webhooks.timeoutSeconds must be between 1 and 30" -}}
 {{- end -}}
 {{- end }}
 
 {{/*
-Harness v1 is an explicitly enabled compatibility data plane. Its image must
+Harness v1 is an explicitly selected compatibility data plane. Its image must
 be immutable, its admission ledger durable, and its bearer credential must
 remain outside rendered Helm manifests.
 */}}
 {{- define "orka.validateHarnessV1" -}}
-{{- if .Values.harnessV1.enabled -}}
+{{- if eq .Values.controller.mode "harness-v1" -}}
 {{- if not (trim (default "" .Values.harnessV1.image.repository)) -}}
-{{- fail "harnessV1.image.repository is required when harnessV1.enabled=true" -}}
+{{- fail "harnessV1.image.repository is required when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.harnessV1.image.digest | default "")) -}}
-{{- fail "harnessV1.image.digest must be a sha256 digest when harnessV1.enabled=true" -}}
+{{- fail "harnessV1.image.digest must be a sha256 digest when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if trim (default "" .Values.harnessV1.auth.token) -}}
 {{- fail "harnessV1.auth.token is unsupported; create a Kubernetes Secret and set harnessV1.auth.existingSecret" -}}
 {{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.auth.existingSecret)) -}}
-{{- fail "harnessV1.auth.existingSecret is required when harnessV1.enabled=true" -}}
+{{- fail "harnessV1.auth.existingSecret is required when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.auth.tokenKey)) -}}
-{{- fail "harnessV1.auth.tokenKey is required when harnessV1.enabled=true" -}}
+{{- fail "harnessV1.auth.tokenKey is required when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.ledger.size)) -}}
-{{- fail "harnessV1.ledger.size is required when harnessV1.enabled=true" -}}
+{{- fail "harnessV1.ledger.size is required when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.ledger.retention)) -}}
-{{- fail "harnessV1.ledger.retention is required when harnessV1.enabled=true" -}}
+{{- fail "harnessV1.ledger.retention is required when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if not (regexMatch "^([1-9][0-9]*(ns|us|µs|ms|s|m|h))+$" (trim (default "" .Values.harnessV1.ledger.retention))) -}}
-{{- fail "harnessV1.ledger.retention must be a positive Go duration when harnessV1.enabled=true" -}}
+{{- fail "harnessV1.ledger.retention must be a positive Go duration when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if not .Values.store.persistence.enabled -}}
-{{- fail "store.persistence.enabled must be true when harnessV1.enabled=true" -}}
-{{- end -}}
-{{- if not (trim (default "" .Values.harnessV1.policy.name)) -}}
-{{- fail "harnessV1.policy.name is required when harnessV1.enabled=true" -}}
-{{- end -}}
-{{- if .Values.harnessV1.policy.create -}}
-{{- range .Values.harnessV1.policy.allowedBuiltInRuntimeTypes -}}
-{{- if not (has . (list "codex" "claude")) -}}
-{{- fail "harnessV1.policy.allowedBuiltInRuntimeTypes may contain only codex or claude" -}}
-{{- end -}}
-{{- end -}}
-{{- if not (has .Values.harnessV1.policy.retryEligibility (list "none" "duplicate-safe-only")) -}}
-{{- fail "harnessV1.policy.retryEligibility must be none or duplicate-safe-only" -}}
-{{- end -}}
-{{- if not (has .Values.harnessV1.policy.networkIsolationProfile (list "default-deny" "per-trust-domain")) -}}
-{{- fail "harnessV1.policy.networkIsolationProfile must be default-deny or per-trust-domain" -}}
-{{- end -}}
+{{- fail "store.persistence.enabled must be true when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.dispatch.interval)) -}}
-{{- fail "harnessV1.dispatch.interval is required when harnessV1.enabled=true" -}}
+{{- fail "harnessV1.dispatch.interval is required when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if lt (int .Values.harnessV1.dispatch.workers) 1 -}}
-{{- fail "harnessV1.dispatch.workers must be positive when harnessV1.enabled=true" -}}
-{{- end -}}
-{{- if or (lt (int .Values.harnessV1.retirement.port) 1) (gt (int .Values.harnessV1.retirement.port) 65535) -}}
-{{- fail "harnessV1.retirement.port must be between 1 and 65535 when harnessV1.enabled=true" -}}
-{{- end -}}
-{{- if eq (int .Values.harnessV1.retirement.port) (int .Values.controller.apiPort) -}}
-{{- fail "harnessV1.retirement.port must differ from controller.apiPort when harnessV1.enabled=true" -}}
-{{- end -}}
-{{- if not (trim (default "" .Values.harnessV1.retirement.tokenAudience)) -}}
-{{- fail "harnessV1.retirement.tokenAudience is required when harnessV1.enabled=true" -}}
+{{- fail "harnessV1.dispatch.workers must be positive when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if not (regexMatch "^([1-9][0-9]*(ns|us|µs|ms|s|m|h))+$" (trim (default "" .Values.harnessV1.upgradeDrain.timeout))) -}}
-{{- fail "harnessV1.upgradeDrain.timeout must be a positive Go duration when harnessV1.enabled=true" -}}
+{{- fail "harnessV1.upgradeDrain.timeout must be a positive Go duration when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if not (regexMatch "^([1-9][0-9]*(ns|us|µs|ms|s|m|h))+$" (trim (default "" .Values.harnessV1.upgradeDrain.pollInterval))) -}}
-{{- fail "harnessV1.upgradeDrain.pollInterval must be a positive Go duration when harnessV1.enabled=true" -}}
+{{- fail "harnessV1.upgradeDrain.pollInterval must be a positive Go duration when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- $sandboxMode := trim (default "" .Values.harnessV1.codexSandboxMode) -}}
 {{- if and $sandboxMode (not (has $sandboxMode (list "read-only" "workspace-write" "danger-full-access"))) -}}
@@ -652,17 +612,14 @@ remain outside rendered Helm manifests.
 
 
 {{/*
-Create the namespace for the chart-managed client ServiceAccount.
-When namespace isolation is enforced and the controller watches one namespace,
-place the default client in that namespace so its token remains usable.
+Create the namespace for the chart-managed client ServiceAccount. Static
+installations always place the client in the watched namespace.
 */}}
 {{- define "orka.clientNamespace" -}}
 {{- if .Values.client.namespace }}
 {{- .Values.client.namespace }}
-{{- else if and .Values.controller.enforceNamespaceIsolation .Values.controller.watchNamespace }}
-{{- .Values.controller.watchNamespace }}
 {{- else }}
-{{- .Release.Namespace }}
+{{- .Values.controller.watchNamespace }}
 {{- end }}
 {{- end }}
 
@@ -682,17 +639,17 @@ Create release-scoped worker ClusterRole names.
 {{- end }}
 
 {{/*
-Create release-scoped static worker ClusterRoleBinding names.
+Create release-scoped static worker RoleBinding names.
 */}}
-{{- define "orka.aiWorkerClusterRoleBindingName" -}}
+{{- define "orka.aiWorkerRoleBindingName" -}}
 {{- printf "%s-ai-worker-rolebinding" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "orka.vendorWorkerClusterRoleBindingName" -}}
+{{- define "orka.vendorWorkerRoleBindingName" -}}
 {{- printf "%s-vendor-worker-rolebinding" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "orka.containerWorkerClusterRoleBindingName" -}}
+{{- define "orka.containerWorkerRoleBindingName" -}}
 {{- printf "%s-container-worker-rolebinding" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
 {{- end }}
 

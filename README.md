@@ -83,9 +83,13 @@ credential broker. Artifact access is separately operation-scoped.
 ### Install
 
 ```bash
+kubectl create namespace orka-system
+kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
+
 helm install orka charts/orka \
   --namespace orka-system \
-  --create-namespace \
+  --set controller.mode=harness-v2 \
+  --set controller.watchNamespace=orka-system \
   --set controller.image.repository=docker.io/sozercan/orka \
   --set controller.image.digest=sha256:<controller-digest> \
   --set publisher.image.repository=docker.io/sozercan/orka-workspace-publisher \
@@ -102,6 +106,8 @@ ingress policy that permits model traffic only through Orka's authenticated
 provider proxy:
 
 ```bash
+kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl label namespace orka-system orka.ai/controller-mode=harness-v2 --overwrite
 kubectl apply -k config/acp-production
 ```
 
@@ -110,6 +116,11 @@ the overlay; `make deploy` performs those checks and applies the equivalent
 resource set.
 
 A fresh Helm install creates the chart CRDs unless `--skip-crds` is used. Helm does not update CRDs during `helm upgrade`, so apply the CRDs from the exact target chart before every controller upgrade. Designate one lifecycle owner for cluster-scoped CRDs and see the [Helm CRD lifecycle guide](charts/orka/README.md).
+
+Harness v1 and v2 may share a cluster only as separate static-mode releases
+with disjoint namespaces, endpoints, RBAC, Leases, stores, and data planes.
+Tasks and Sessions never migrate between them. See the
+[harness mode operations guide](website/docs/operations/harness-modes.md).
 
 ### Set Up a Provider
 
@@ -169,6 +180,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [OpenAI Compatibility](website/docs/reference/openai-compat.md)                | OpenAI-compatible chat completions API                |
 | [Anthropic Compatibility](website/docs/reference/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
 | [Gateway API](website/docs/reference/gateway-api.md)                           | Generic Gateway resources, ingress, delivery, and operator APIs |
+| [Harness Modes](website/docs/operations/harness-modes.md)                      | Isolated v1/v2 releases, rollout, rollback, and retirement |
 | [Operating Gateways](website/docs/operations/gateways.md)                      | Gateway readiness, TLS, recovery, upgrades, and operations |
 | [Web Dashboard](website/docs/guides/ui.md)                                  | Frontend architecture and pages                       |
 | [Security](website/docs/concepts/security.md)                                 | Security model and hardening                          |

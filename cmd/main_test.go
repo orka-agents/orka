@@ -31,6 +31,7 @@ import (
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
@@ -61,31 +62,6 @@ func TestBrokeredDelegateTaskSubjectTokenResolverUsesOwnedIncomingSecret(t *test
 	}
 }
 
-func TestMakeRunUsesFailClosedHostOwnershipMode(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "Makefile"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	makefile := string(data)
-	for _, required := range []string{
-		"RUN_LEGACY_FENCE_NAMESPACE ?= orka-system",
-		"--leader-elect=true",
-		"--agent-execution-host-mode=true",
-		"--agent-execution-legacy-fence-namespace=\"$(RUN_LEGACY_FENCE_NAMESPACE)\"",
-	} {
-		if !strings.Contains(makefile, required) {
-			t.Fatalf("make run is missing %q", required)
-		}
-	}
-}
-
-func TestInClusterControllerIdentityDetectedFromKubernetesEnvironment(t *testing.T) {
-	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
-	if !inClusterControllerIdentityDetected() {
-		t.Fatal("Kubernetes service environment was not treated as in-cluster identity evidence")
-	}
-}
-
 func TestControllerHolderIDIsProcessIncarnationUnique(t *testing.T) {
 	first := controllerHolderIDForIncarnation("workstation", "first-process")
 	second := controllerHolderIDForIncarnation("workstation", "second-process")
@@ -94,6 +70,27 @@ func TestControllerHolderIDIsProcessIncarnationUnique(t *testing.T) {
 	}
 	if first == "workstation" || second == "workstation" {
 		t.Fatal("holder ID omitted its process incarnation")
+	}
+}
+
+func TestValidateStaticTrustedServiceReferences(t *testing.T) {
+	sameNamespace, err := outboundaccess.ParseTrustedServiceReferences("team-a/gateway:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossNamespace, err := outboundaccess.ParseTrustedServiceReferences("shared/gateway:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateStaticTrustedServiceReferences("team-a", outboundaccess.TrustConfig{
+		Gateways: sameNamespace,
+	}); err != nil {
+		t.Fatalf("same-namespace trust rejected: %v", err)
+	}
+	if err := validateStaticTrustedServiceReferences("team-a", outboundaccess.TrustConfig{
+		TokenEndpoints: crossNamespace,
+	}); err == nil || !strings.Contains(err.Error(), `must be in controller watch namespace "team-a"`) {
+		t.Fatalf("cross-namespace trust error = %v", err)
 	}
 }
 
@@ -290,14 +287,16 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 	tests := []struct {
 		name                    string
 		runtimeEnabled          bool
+		wantCollector           bool
 		wantRuntimeReservations bool
 	}{
 		{
-			name: "disabled runtime retains cleanup collector only",
+			name: "harness v1 has no ACP artifact wiring",
 		},
 		{
 			name:                    "enabled runtime exposes reservation recorder",
 			runtimeEnabled:          true,
+			wantCollector:           true,
 			wantRuntimeReservations: true,
 		},
 	}
@@ -311,8 +310,14 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 			if err != nil {
 				t.Fatalf("newACPArtifactRetentionWiring() error = %v", err)
 			}
+			if got := wiring.collector != nil; got != tt.wantCollector {
+				t.Fatalf("collector present = %t, want %t", got, tt.wantCollector)
+			}
 			if wiring.collector == nil {
-				t.Fatal("collector is nil")
+				if wiring.taskCleanup != nil || wiring.runtimeReservations != nil {
+					t.Fatal("disabled ACP artifact wiring retained active components")
+				}
+				return
 			}
 			if wiring.taskCleanup != wiring.collector {
 				t.Fatal("Task cleanup retirer does not preserve the collector")
@@ -330,8 +335,8 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 	}
 }
 
-func TestACPArtifactRetentionWiringFailsClosedInCleanupOnlyMode(t *testing.T) {
-	if _, err := newACPArtifactRetentionWiring(false, "relative/artifacts"); err == nil {
+func TestACPArtifactRetentionWiringFailsClosedForUnsafeV2Root(t *testing.T) {
+	if _, err := newACPArtifactRetentionWiring(true, "relative/artifacts"); err == nil {
 		t.Fatal("newACPArtifactRetentionWiring() error = nil, want unsafe-root error")
 	}
 }
@@ -349,9 +354,8 @@ func TestACPControlStoreWiring(t *testing.T) {
 			name: "disabled runtime without controller namespace has no control store",
 		},
 		{
-			name:            "disabled runtime retains Task cleanup store only",
-			withStore:       true,
-			wantTaskCleanup: true,
+			name:      "harness v1 does not receive ACP cleanup wiring",
+			withStore: true,
 		},
 		{
 			name:            "enabled runtime shares store with Task cleanup",
@@ -412,7 +416,6 @@ func TestManagerCacheOptions(t *testing.T) {
 		wantDefault        []string
 		wantRuntimeChild   []string
 		wantChildOverrides bool
-		wantControl        []string
 	}{
 		{
 			name:             "cluster-wide watch is unrestricted",
@@ -425,7 +428,6 @@ func TestManagerCacheOptions(t *testing.T) {
 			wantDefault:        []string{"tenant-a"},
 			wantRuntimeChild:   []string{"orka-runtimes", "tenant-a"},
 			wantChildOverrides: true,
-			wantControl:        []string{corev1alpha1.AgentExecutionControlNamespace},
 		},
 		{
 			name:               "identical tenant and runtime namespaces are deduplicated",
@@ -434,16 +436,14 @@ func TestManagerCacheOptions(t *testing.T) {
 			wantDefault:        []string{"tenant-a"},
 			wantRuntimeChild:   []string{"tenant-a"},
 			wantChildOverrides: true,
-			wantControl:        []string{corev1alpha1.AgentExecutionControlNamespace},
 		},
 		{
-			name:               "runtime cleanup watches remain active when admission is disabled",
+			name:               "v2 runtime children use the isolated runtime namespace",
 			watchNamespace:     "tenant-a",
 			runtimeNamespace:   "orka-runtimes",
 			wantDefault:        []string{"tenant-a"},
 			wantRuntimeChild:   []string{"orka-runtimes", "tenant-a"},
 			wantChildOverrides: true,
-			wantControl:        []string{corev1alpha1.AgentExecutionControlNamespace},
 		},
 		{
 			name:             "blank runtime namespace keeps tenant defaults",
@@ -451,7 +451,6 @@ func TestManagerCacheOptions(t *testing.T) {
 			runtimeNamespace: " ",
 			wantDefault:      []string{"tenant-a"},
 			wantRuntimeChild: []string{"tenant-a"},
-			wantControl:      []string{corev1alpha1.AgentExecutionControlNamespace},
 		},
 	}
 
@@ -472,20 +471,12 @@ func TestManagerCacheOptions(t *testing.T) {
 			}
 
 			wantOverrides := 0
-			if len(tt.wantControl) != 0 {
-				wantOverrides++
-			}
 			if tt.wantChildOverrides {
 				wantOverrides += len(childTypes)
 			}
 			if got := len(options.ByObject); got != wantOverrides {
 				t.Fatalf("ByObject override count = %d, want %d", got, wantOverrides)
 			}
-			_, controlOverridden := cacheByObjectForType(options, &corev1alpha1.AgentExecutionControl{})
-			if controlOverridden != (len(tt.wantControl) != 0) {
-				t.Fatalf("AgentExecutionControl ByObject override = %t, want %t", controlOverridden, len(tt.wantControl) != 0)
-			}
-			assertCacheNamespaces(t, effectiveCacheNamespaces(options, &corev1alpha1.AgentExecutionControl{}), tt.wantControl)
 			for _, object := range childTypes {
 				_, overridden := cacheByObjectForType(options, object)
 				if overridden != tt.wantChildOverrides {

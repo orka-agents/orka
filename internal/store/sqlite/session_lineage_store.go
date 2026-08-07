@@ -49,11 +49,11 @@ func (s *Store) ProjectSessionLineage(ctx context.Context, lineage store.Session
 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO session_lineages
 		(namespace, session_name, namespace_uid, session_uid, contract_version,
-		 lineage_generation, runtime_identity, config_digest, provenance, version, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 lineage_generation, runtime_identity, config_digest, version, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		lineage.Namespace, lineage.SessionName, lineage.NamespaceUID, lineage.SessionUID,
 		lineage.ContractVersion, lineage.LineageGeneration, lineage.RuntimeIdentity, lineage.ConfigDigest,
-		string(lineage.Provenance), lineage.Version, lineage.CreatedAt.UTC(), lineage.UpdatedAt.UTC()); err != nil {
+		lineage.Version, lineage.CreatedAt.UTC(), lineage.UpdatedAt.UTC()); err != nil {
 		return nil, fmt.Errorf("project session lineage: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -94,8 +94,8 @@ func (s *Store) DeleteSessionLineage(ctx context.Context, namespace, sessionName
 }
 
 const sessionLineageSelectSQL = `SELECT namespace, session_name, namespace_uid, session_uid,
-	contract_version, lineage_generation, runtime_identity, config_digest, provenance,
-	version, created_at, updated_at
+	contract_version, lineage_generation, runtime_identity, config_digest, version,
+	created_at, updated_at
 	FROM session_lineages`
 
 type sessionLineageScanner interface {
@@ -103,17 +103,13 @@ type sessionLineageScanner interface {
 }
 
 func scanSessionLineage(row sessionLineageScanner) (*store.SessionLineage, error) {
-	var (
-		lineage    store.SessionLineage
-		provenance string
-	)
+	var lineage store.SessionLineage
 	if err := row.Scan(&lineage.Namespace, &lineage.SessionName, &lineage.NamespaceUID,
 		&lineage.SessionUID, &lineage.ContractVersion, &lineage.LineageGeneration,
-		&lineage.RuntimeIdentity, &lineage.ConfigDigest, &provenance,
+		&lineage.RuntimeIdentity, &lineage.ConfigDigest,
 		&lineage.Version, &lineage.CreatedAt, &lineage.UpdatedAt); err != nil {
 		return nil, err
 	}
-	lineage.Provenance = store.SessionLineageProvenance(provenance)
 	lineage.CreatedAt = lineage.CreatedAt.UTC()
 	lineage.UpdatedAt = lineage.UpdatedAt.UTC()
 	return &lineage, nil
@@ -135,8 +131,6 @@ func sessionLineageProjectionMismatch(existing *store.SessionLineage, lineage st
 		return fmt.Sprintf("is bound to configuration digest %q, not %q", existing.ConfigDigest, lineage.ConfigDigest)
 	case existing.LineageGeneration != lineage.LineageGeneration:
 		return fmt.Sprintf("has lineage generation %d, not %d", existing.LineageGeneration, lineage.LineageGeneration)
-	case existing.Provenance != lineage.Provenance:
-		return fmt.Sprintf("has provenance %q, not %q", existing.Provenance, lineage.Provenance)
 	default:
 		return ""
 	}

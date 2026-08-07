@@ -49,8 +49,6 @@ manifest="${work_dir}/manifest.yaml"
 rendered_json="${work_dir}/rendered.json"
 namespace_resource="${work_dir}/namespace.json"
 runtime_config="${work_dir}/runtime-images-configmap.json"
-execution_control="${work_dir}/agent-execution-control.json"
-existing_control="${work_dir}/existing-agent-execution-control.json"
 admission_runtime_manifest="${work_dir}/admission-runtime-manifest.json"
 workload_manifest="${work_dir}/workload-manifest.json"
 snapshot_secret="${work_dir}/agent-execution-snapshot-key.json"
@@ -65,7 +63,6 @@ admission_ca_cert="${work_dir}/orka-admission-ca.crt"
 admission_tls_cert_public_key="${work_dir}/orka-admission-tls-cert.pub"
 admission_tls_key_public_key="${work_dir}/orka-admission-tls-key.pub"
 admission_endpoints="${work_dir}/orka-admission-endpoints.json"
-admission_control="${work_dir}/orka-admission-control.json"
 admission_webhooks_source="${work_dir}/orka-admission-webhooks.yaml"
 admission_webhooks_rendered="${work_dir}/orka-admission-webhooks-rendered.json"
 admission_webhooks_manifest="${work_dir}/orka-admission-webhooks.json"
@@ -81,21 +78,16 @@ admission_proxy_port=""
 jq -sc '
   [.[] | if .kind == "List" then .items[] else . end]
   | map(select(.kind == "Namespace" and .metadata.name == "orka-system"))
-  | if length == 1 then .[0] else error("expected exactly one orka-system Namespace") end
+  | if length == 1 and .[0].metadata.labels["orka.ai/controller-mode"] == "harness-v2"
+    then .[0]
+    else error("expected exactly one orka-system Namespace claimed by harness-v2")
+    end
 ' "${rendered_json}" >"${namespace_resource}"
 jq -sc '
   [.[] | if .kind == "List" then .items[] else . end]
   | map(select(.kind == "ConfigMap" and .metadata.labels["orka.ai/acp-runtime-images"] == "true"))
   | if length == 1 then .[0] else error("expected exactly one generated ACP runtime image ConfigMap") end
 ' "${rendered_json}" >"${runtime_config}"
-jq -sc '
-  [.[] | if .kind == "List" then .items[] else . end]
-  | map(select(.apiVersion == "core.orka.ai/v1alpha1" and .kind == "AgentExecutionControl"))
-  | if length == 1 and .[0].metadata.namespace == "orka-system" and .[0].metadata.name == "cluster"
-    then .[0]
-    else error("expected exactly one orka-system/cluster AgentExecutionControl")
-    end
-' "${rendered_json}" >"${execution_control}"
 jq -sc '
   [.[] | if .kind == "List" then .items[] else . end]
   | {
@@ -110,18 +102,38 @@ jq -sc '
       apiVersion: "v1",
       kind: "List",
       items: map(select(
-        (.apiVersion != "core.orka.ai/v1alpha1" or .kind != "AgentExecutionControl") and
-        .metadata.labels["app.kubernetes.io/component"] != "admission"
+        .metadata.labels["app.kubernetes.io/component"] != "admission" and
+        (.kind != "Namespace" or .metadata.name != "orka-system") and
+        (.kind != "ConfigMap" or .metadata.labels["orka.ai/acp-runtime-images"] != "true")
       ))
     }
 ' "${rendered_json}" >"${workload_manifest}"
 jq -esc '
   [.[] | if .kind == "List" then .items[] else . end] as $items
   | ($items | map(select(.apiVersion == "apps/v1" and .kind == "Deployment" and
+      .metadata.namespace == "orka-system" and .metadata.name == "orka-controller-manager"))) as $controllers
+  | ($items | map(select(.apiVersion == "apps/v1" and .kind == "Deployment" and
       .metadata.namespace == "orka-system" and .metadata.name == "orka-admission"))) as $deployments
   | ($items | map(select(.apiVersion == "v1" and .kind == "Service" and
       .metadata.namespace == "orka-system" and .metadata.name == "orka-admission"))) as $services
-  | ($deployments | length) == 1 and
+  | ($controllers[0].spec.template.spec.containers[]? | select(.name == "manager") | .args) as $args
+  | ($controllers | length) == 1 and
+    ($controllers[0].spec.template.spec.containers | map(select(.name == "manager")) | length) == 1 and
+    ([$args[] | select(startswith("--controller-mode="))] | length) == 1 and
+    ([$args[] | select(. == "--controller-mode=harness-v2")] | length) == 1 and
+    ([$args[] | select(startswith("--watch-namespace="))] | length) == 1 and
+    ([$args[] | select(. == "--watch-namespace=orka-system")] | length) == 1 and
+    ([$args[] | select(. == "--leader-elect" or . == "--leader-elect=true")] | length) == 1 and
+    ([$args[] | select(startswith("--harness-v1-"))] | length) == 0 and
+    ($controllers[0].spec.template.spec.containers | any(
+      .name == "manager" and
+      (.image | test("@sha256:[a-f0-9]{64}$"))
+    )) and
+    ($items | map(select(
+      .metadata.labels["app.kubernetes.io/component"] == "agent-harness-wrapper" or
+      (.kind == "Deployment" and (.metadata.name | endswith("agent-harness-wrapper")))
+    )) | length) == 0 and
+    ($deployments | length) == 1 and
     ($services | length) == 1 and
     ($deployments[0].spec.replicas >= 2) and
     ($deployments[0].spec.strategy.type == "RollingUpdate") and
@@ -131,7 +143,7 @@ jq -esc '
       (.image | test("@sha256:[a-f0-9]{64}$"))
     ))
 ' "${rendered_json}" >/dev/null || {
-  echo "production overlay must contain one digest-pinned, zero-unavailable, replicated orka-admission runtime and Service" >&2
+  echo "production overlay must contain one digest-pinned static harness-v2 controller, no v1 wrapper path, and one digest-pinned, zero-unavailable, replicated orka-admission runtime and Service" >&2
   exit 1
 }
 
@@ -173,17 +185,6 @@ validate_snapshot_secret() {
 
   echo "agent-execution-snapshot-key/snapshot-key must contain exactly 32 raw bytes or their base64 encoding" >&2
   return 1
-}
-
-ensure_execution_control() {
-  if ! "${kubectl}" -n orka-system get agentexecutioncontrol.core.orka.ai cluster \
-    --ignore-not-found -o json >"${existing_control}"; then
-    echo "unable to inspect orka-system/cluster AgentExecutionControl" >&2
-    return 1
-  fi
-  if [[ ! -s "${existing_control}" ]]; then
-    "${kubectl}" create -f "${execution_control}" >/dev/null
-  fi
 }
 
 ensure_snapshot_secret() {
@@ -275,41 +276,24 @@ render_admission_webhooks() {
       }
   ' "${admission_webhooks_rendered}" >"${admission_webhooks_manifest}"
 
-  jq -e '
-    ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 3 and
-    ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 3 and
+  jq -e --slurpfile tls "${admission_tls_secret}" '
+    ($tls[0].data["ca.crt"]) as $ca |
+    ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
+    ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingAdmissionPolicy") | .spec.failurePolicy] | all(. == "Fail")) and
-    ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding") |
-      .spec.paramRef.parameterNotFoundAction] | all(. == "Deny")) and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 7 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 7 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      (.failurePolicy == "Fail" and (.clientConfig.caBundle | type == "string" and length > 0))] | all)
+      (.failurePolicy == "Fail" and
+       .sideEffects == "None" and
+       .clientConfig.caBundle == $ca and
+       .clientConfig.service.name == "orka-admission" and
+       .clientConfig.service.namespace == "orka-system" and
+       (.clientConfig.service.path | type == "string" and length > 0))] | all)
   ' "${admission_webhooks_manifest}" >/dev/null || {
-    echo "admission policy wave must contain three fail-closed parameterized policies and one CA-pinned webhook configuration" >&2
+    echo "admission wave must contain exactly seven unique, fail-closed, CA-pinned orka-admission webhooks and no legacy coexistence policies" >&2
     return 1
   }
-}
-
-wait_for_execution_control() {
-  local attempt
-  for attempt in {1..60}; do
-    if "${kubectl}" -n orka-system get agentexecutioncontrol.core.orka.ai cluster -o json \
-      >"${admission_control}" 2>/dev/null \
-      && jq -e '
-        (.metadata.uid | type == "string" and length > 0) and
-        (.metadata.generation >= 1) and
-        (.status.observedGeneration == .metadata.generation) and
-        (.status.backends.v1.modeRevision >= 1) and
-        (.status.backends.v2.modeRevision >= 1) and
-        ([.status.backends.v1.effectiveMode, .status.backends.v2.effectiveMode] |
-          all(. == "enabled" or . == "closing" or . == "drain-only" or . == "disabled"))
-      ' "${admission_control}" >/dev/null; then
-      return 0
-    fi
-    sleep 2
-  done
-  echo "orka-system/cluster AgentExecutionControl did not reach its current observed generation" >&2
-  return 1
 }
 
 wait_for_admission_endpoints() {
@@ -351,17 +335,19 @@ start_admission_proxy() {
 }
 
 smoke_admission_handlers() {
-  local handler kind resource uid
+  local handler group version kind resource uid
   local service_proxy
   if ! start_admission_proxy; then
     return 1
   fi
   service_proxy="http://127.0.0.1:${admission_proxy_port}/api/v1/namespaces/orka-system/services/https:orka-admission:443/proxy"
-  while IFS='|' read -r handler kind resource; do
+  while IFS='|' read -r handler group version kind resource; do
     [[ -n "${handler}" ]] || continue
     uid="orka-admission-smoke-${resource}"
     jq -n \
       --arg uid "${uid}" \
+      --arg group "${group}" \
+      --arg version "${version}" \
       --arg kind "${kind}" \
       --arg resource "${resource}" '
       {
@@ -369,18 +355,20 @@ smoke_admission_handlers() {
         kind: "AdmissionReview",
         request: {
           uid: $uid,
-          kind: {group: "core.orka.ai", version: "v1alpha1", kind: $kind},
-          resource: {group: "core.orka.ai", version: "v1alpha1", resource: $resource},
-          requestKind: {group: "core.orka.ai", version: "v1alpha1", kind: $kind},
-          requestResource: {group: "core.orka.ai", version: "v1alpha1", resource: $resource},
+          kind: {group: $group, version: $version, kind: $kind},
+          resource: {group: $group, version: $version, resource: $resource},
+          requestKind: {group: $group, version: $version, kind: $kind},
+          requestResource: {group: $group, version: $version, resource: $resource},
           name: "orka-admission-smoke",
-          namespace: "orka-system",
+          namespace: (if $group == "" then "" else "orka-system" end),
           operation: "CREATE",
           userInfo: {username: "system:admin", groups: ["system:masters"]},
           object: {
-            apiVersion: "core.orka.ai/v1alpha1",
+            apiVersion: (if $group == "" then $version else ($group + "/" + $version) end),
             kind: $kind,
-            metadata: {name: "orka-admission-smoke", namespace: "orka-system"}
+            metadata: ({name: "orka-admission-smoke"} +
+              (if $group == "" then {labels: {"orka.ai/controller-mode": "harness-v2"}}
+               else {namespace: "orka-system"} end))
           },
           oldObject: null,
           dryRun: true,
@@ -409,33 +397,29 @@ smoke_admission_handlers() {
       return 1
     fi
   done <<'EOF_ADMISSION_HANDLERS'
-/validate-core-orka-ai-v1alpha1-task-provenance|Task|tasks
-/validate-core-orka-ai-v1alpha1-task-workspace-class-use|Task|tasks-workspace-class-use
-/validate-core-orka-ai-v1alpha1-tool-workspace-class-use|Tool|tools
-/validate-core-orka-ai-v1alpha1-agent-contract|Agent|agents
-/validate-core-orka-ai-v1alpha1-agentruntime-contract|AgentRuntime|agentruntimes
-/validate-core-orka-ai-v1alpha1-task-execution-authority|Task|tasks-execution-authority
-/validate-core-orka-ai-v1alpha1-agentexecutionadjudication|AgentExecutionAdjudication|agentexecutionadjudications
-/validate-core-orka-ai-v1alpha1-agentexecution-control-policy|AgentExecutionControl|agentexecutioncontrols
-/validate-core-orka-ai-v1alpha1-session-resolution|RuntimeSessionControl|runtimesessioncontrols
+/validate-v1-namespace-execution-mode||v1|Namespace|namespaces
+/validate-core-orka-ai-v1alpha1-task-provenance|core.orka.ai|v1alpha1|Task|tasks
+/validate-core-orka-ai-v1alpha1-task-workspace-class-use|core.orka.ai|v1alpha1|Task|tasks-workspace-class-use
+/validate-core-orka-ai-v1alpha1-tool-workspace-class-use|core.orka.ai|v1alpha1|Tool|tools
+/validate-core-orka-ai-v1alpha1-agent-contract|core.orka.ai|v1alpha1|Agent|agents
+/validate-core-orka-ai-v1alpha1-agentruntime-contract|core.orka.ai|v1alpha1|AgentRuntime|agentruntimes
+/validate-core-orka-ai-v1alpha1-task-execution-authority|core.orka.ai|v1alpha1|Task|tasks-execution-authority
 EOF_ADMISSION_HANDLERS
   stop_admission_proxy
 }
 
 # Establish every workload prerequisite, then activate the independent
-# admission plane before rolling the coexistence controller. Every retry repeats
+# admission plane before rolling the static harness-v2 controller. Every retry repeats
 # these idempotent phases, so interruption after any apply still converges on the
-# desired generation without rotating an existing snapshot key or recreating the
-# durable execution-control singleton.
+# desired generation without rotating an existing snapshot key.
 "${kubectl}" apply -f "${namespace_resource}"
 validate_admission_tls_secret
 ensure_snapshot_secret
 "${kubectl}" apply -f "${runtime_config}"
-ensure_execution_control
 "${kubectl}" apply -f "${admission_runtime_manifest}"
 wait_for_admission_endpoints
 smoke_admission_handlers
 render_admission_webhooks
 "${kubectl}" apply -f "${admission_webhooks_manifest}"
 "${kubectl}" apply -f "${workload_manifest}"
-wait_for_execution_control
+"${kubectl}" -n orka-system rollout status deployment/orka-controller-manager --timeout=2m >/dev/null

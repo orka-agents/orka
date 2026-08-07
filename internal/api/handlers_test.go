@@ -2685,7 +2685,6 @@ func TestHandlers_GetSessionProjectsSafeExecutionControl(t *testing.T) {
 				Generation:      1,
 				RuntimeIdentity: "opencode",
 				ConfigDigest:    "sha256:" + strings.Repeat("b", 64),
-				Provenance:      corev1alpha1.RuntimeSessionLineageFirstUse,
 				EstablishedAt:   metav1.NewTime(time.Date(2026, time.August, 6, 0, 0, 0, 0, time.UTC)),
 			},
 		},

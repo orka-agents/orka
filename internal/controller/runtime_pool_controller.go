@@ -269,9 +269,6 @@ type RuntimePoolReconciler struct {
 	client.Client
 	APIReader client.Reader
 	Scheme    *k8sruntime.Scheme
-	// AgentExecutionClassificationGate prevents runtime-plane mutation until
-	// the exact current coexistence inventory is durably sealed.
-	AgentExecutionClassificationGate *AgentExecutionClassificationGate
 
 	// RuntimeNamespace is used when spec.runtimeNamespace is empty.
 	RuntimeNamespace string
@@ -324,13 +321,6 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{}, err
 	}
-	if r.AgentExecutionClassificationGate != nil {
-		if err := r.AgentExecutionClassificationGate.Check(ctx); err != nil {
-			logger.Info("RuntimePool reconciliation withheld until execution classification is sealed", "reason", err.Error())
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		}
-	}
-
 	if !pool.DeletionTimestamp.IsZero() {
 		return r.finalizeRuntimePool(ctx, pool)
 	}

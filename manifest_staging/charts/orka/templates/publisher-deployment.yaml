@@ -1,7 +1,7 @@
-{{- if and .Values.publisher.enabled (not .Values.scmEgressProxy.enabled) }}
+{{- if and (eq .Values.controller.mode "harness-v2") .Values.publisher.enabled (not .Values.scmEgressProxy.enabled) }}
 {{- fail "publisher.enabled requires scmEgressProxy.enabled so public HTTPS egress remains proxy-only" }}
 {{- end }}
-{{- if .Values.publisher.enabled }}
+{{- if and (eq .Values.controller.mode "harness-v2") .Values.publisher.enabled }}
 {{- $scmProxySecretName := .Values.scmEgressProxy.auth.existingSecret | default (include "orka.scmEgressProxyAuthSecretName" .) }}
 {{- $scmProxyTokenKey := .Values.scmEgressProxy.auth.tokenKey | default "token" }}
 apiVersion: apps/v1

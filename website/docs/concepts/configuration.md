@@ -689,14 +689,14 @@ Key configuration values for the Helm chart:
 |-----------|---------|-------------|
 | `controller.replicas` | `1` | Controller replicas |
 | `controller.image.repository` | `ghcr.io/orka-agents/orka` | Controller image |
-| `controller.watchNamespace` | `""` | Namespace scope (empty = cluster-wide) |
+| `controller.mode` | required | Static agent execution mode: `harness-v1` or `harness-v2`. A release never serves both or changes mode in place. |
+| `controller.watchNamespace` | required | One non-empty namespace labeled `orka.ai/controller-mode` with the matching mode. Cluster-wide watch is rejected. |
 | `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `service.port` | `8080` | Controller Service port used by controller and Publisher in-cluster URLs. |
 | `controller.apiPort` | `8080` | Controller container listener and Service target port. |
 | `controller.metricsPort` | `8081` | Metrics endpoint port |
 | `controller.healthPort` | `8082` | Health probe port |
 | `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
-| `controller.acpRuntime.enabled` | `false` | Enable the only supported built-in agent execution path; there is no legacy fallback. |
 | `controller.acpRuntime.namespace` | `orka-runtimes` | Namespace for controller-owned RuntimePool workloads. |
 | `controller.acpRuntime.providerProxyNamespace` | `""` | Compatibility guard for the chart-managed provider proxy. Leave empty or set exactly to the Helm release namespace; any other nonempty value is rejected when the proxy is enabled. |
 | `controller.acpRuntime.codexImage` | `""` | Digest-pinned Codex ACP image; Tasks fail closed when empty. |
@@ -704,6 +704,8 @@ Key configuration values for the Helm chart:
 | `controller.acpRuntime.copilotImage` | `""` | Digest-pinned GitHub Copilot ACP image; Tasks fail closed when empty. |
 | `controller.acpRuntime.opencodeImage` | `""` | Digest-pinned OpenCode ACP image; Tasks fail closed when empty. |
 | `controller.acpRuntime.upgradeDrain.*` | enabled | Two-phase planned-upgrade admission closure and RuntimePool drain settings. |
+| `harnessV1.image.digest` | `""` | Required immutable wrapper image digest for a `harness-v1` release. |
+| `harnessV1.auth.existingSecret` | `""` | Dedicated v1 wrapper bearer/TLS Secret. Never share it with v2. |
 | `providerProxy.enabled` | `false` | Deploy the authenticated provider boundary in front of Vekil. Required for built-in ACP profiles. |
 | `providerProxy.upstreamBaseURL` | `http://vekil.vekil-system.svc:1337` | Exact supported Vekil upstream. An optional trailing slash is normalized; alternate hosts, namespaces, and ports are rejected to preserve the fixed NetworkPolicies. |
 | `providerProxy.auth.existingSecret` | `""` | Existing current/optional-overlap proxy bearer Secret. RuntimePool copies are controller-managed. |
@@ -786,6 +788,10 @@ The token is an ingress credential for the proxy only; it is not a Git or forge 
 
 CRD behavior is not controlled through chart values. A fresh install creates all CRDs in the chart unless `--skip-crds` is used. Because CRDs are cluster-scoped, designate one lifecycle owner and use `--skip-crds` for other Orka releases. Helm does not update CRDs during `helm upgrade`; apply the CRDs from the exact target chart before upgrading the controller. Helm retains CRDs and Orka custom resources on uninstall. See the [Helm CRD lifecycle guide](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md).
 
+Harness v1 and v2 use separate releases, endpoints, watched namespaces, RBAC,
+Leases, stores, and data planes. They do not migrate Tasks or continue Sessions
+across modes. See [Operating harness v1 and v2 on one cluster](../operations/harness-modes.md).
+
 Context-token flags can also be configured through Helm under
 `controller.contextToken`. For example:
 
@@ -854,7 +860,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--gateway-claim-lease` | `1m` | Event and delivery claim lease |
 | `--gateway-poll-interval` | `500ms` | Dispatcher and delivery poll interval |
 | `--gateway-batch-size` | `25` | Maximum gateway records processed per iteration |
-| `--watch-namespace` | `""` | Namespace to watch (empty = all) |
+| `--controller-mode` / `ORKA_CONTROLLER_MODE` | required | Static controller mode: `harness-v1` or `harness-v2`. `dual`, `auto`, and drain modes are rejected. |
+| `--watch-namespace` | required | One non-empty watched namespace carrying the matching `orka.ai/controller-mode` label. |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
 | `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` env or `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
@@ -916,7 +923,6 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--task-provenance-admission-trusted-users` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS` env or controller ServiceAccount usernames | Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields |
 | `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or `orka-ai-worker` | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation |
 | `--ai-worker-image` | `ghcr.io/orka-agents/orka/ai-worker:latest` | Native AI worker container image |
-| `--acp-runtime-enabled` / `ORKA_ACP_RUNTIME_ENABLED` | `true` | Enable built-in ACP routing. Disabling it makes built-in agent Tasks fail closed. |
 | `--acp-runtime-namespace` / `ORKA_ACP_RUNTIME_NAMESPACE` | `orka-runtimes` | Namespace for managed runtime Deployments, Services, Secrets, and policies. |
 | `--acp-provider-proxy-namespace` / `ORKA_ACP_PROVIDER_PROXY_NAMESPACE` | `vekil-system` | Approved provider-proxy namespace selector. |
 | `--acp-provider-proxy-base-url` / `ORKA_ACP_PROVIDER_PROXY_BASE_URL` | unset | Authenticated provider-proxy URL injected into built-in RuntimePools. |
@@ -946,7 +952,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--chat-max-concurrent` | `10` | Max concurrent chat sessions |
 | `--chat-max-tasks-per-turn` | `5` | Max tasks created per chat turn |
 | `--chat-max-session-size` | `512000` | Soft limit for session size before truncation (bytes) |
-| `--leader-elect` | `false` | Enable leader election |
+| `--leader-elect` | `false` | Enable leader election. Static controller installations require `true`; the Lease is stored in the watched namespace. |
 | `--metrics-bind-address` | `0` | Metrics endpoint address |
 | `--health-probe-bind-address` | `:8081` | Health probe address |
 | `--metrics-secure` | `true` | Serve metrics via HTTPS |

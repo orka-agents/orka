@@ -1509,8 +1509,8 @@ func testSessionLineageClaim(control *controlstore.SessionControl) *controlstore
 		Namespace: control.Namespace, SessionName: control.SessionName,
 		NamespaceUID: "namespace-uid-" + control.Namespace, SessionUID: control.SessionUID,
 		ContractVersion: "orka.harness.v2", LineageGeneration: 1, RuntimeIdentity: "codex",
-		ConfigDigest: testDigest("lineage-config-" + control.SessionUID),
-		Provenance:   controlstore.SessionLineageFirstUse, EstablishIfAbsent: true,
+		ConfigDigest:      testDigest("lineage-config-" + control.SessionUID),
+		EstablishIfAbsent: true,
 	}
 }
 

@@ -1,0 +1,119 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: v2-controller-cluster-role
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - orka-runtimes
+  resources:
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
+  - apiextensions.k8s.io
+  resourceNames:
+  - tasks.core.orka.ai
+  - gatewayclasses.gateway.orka.ai
+  - gateways.gateway.orka.ai
+  - gatewaybindings.gateway.orka.ai
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - branchclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - branchclaims/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - branchclaims/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewayclasses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewayclasses/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewayclasses/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders/finalizers
+  verbs:
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: v2-controller-cluster-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: v2-controller-cluster-role
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: system

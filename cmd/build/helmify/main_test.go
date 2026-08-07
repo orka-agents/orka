@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,9 +92,25 @@ func helmTemplateStaticChart(t *testing.T, args ...string) (string, error) {
 	}
 
 	commandArgs := []string{"template", "test", "static", "--namespace", "orka-test"}
+	commandArgs = append(commandArgs, staticChartDefaultArgs()...)
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
 	return string(output), err
+}
+
+func staticChartDefaultArgs() []string {
+	digest := "sha256:" + strings.Repeat("0", 64)
+	return []string{
+		"--set-string", "controller.mode=harness-v2",
+		"--set-string", "controller.watchNamespace=orka-test",
+		"--set-string", "controller.image.digest=" + digest,
+		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
+		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
+		"--set-string", "webhooks.tls.existingSecret=controller-webhook-tls",
+		"--set-string", "webhooks.caBundle=Y2E=",
+		"--set-string", "publisher.image.digest=" + digest,
+		"--set", "providerProxy.enabled=true",
+	}
 }
 
 func requireHelmRender(t *testing.T, args ...string) string {
@@ -105,16 +120,6 @@ func requireHelmRender(t *testing.T, args ...string) string {
 		t.Fatalf("helm template failed: %v\n%s", err, output)
 	}
 	return output
-}
-
-func staticChartAdmissionArgs(digest string) []string {
-	return []string{
-		"--set", "admission.enabled=true",
-		"--set", "admission.webhooks.enabled=true",
-		"--set-string", "controller.image.digest=" + digest,
-		"--set-string", "admission.tls.existingSecret=orka-admission-tls",
-		"--set-string", "admission.webhooks.caBundle=Y2E=",
-	}
 }
 
 func requireHarnessV1UpgradeDrainHookRender(t *testing.T, matchesDesiredGeneration bool, args ...string) string {
@@ -186,21 +191,11 @@ func helmTemplateHarnessV1UpgradeDrainHook(
 	if state.controllerState != "" {
 		var controllerArgs []string
 		switch state.controllerState {
-		case "enabled", "disabled":
-			enabled := state.controllerState == "enabled"
-			controllerArgs = []string{fmt.Sprintf(`"--harness-v1-enabled=%t"`, enabled)}
-			if enabled {
-				controllerArgs = append(controllerArgs,
-					`"--harness-v1-auth-secret-name=`+state.authSecret+`"`,
-					`"--harness-v1-auth-secret-key=`+state.authKey+`"`,
-				)
-			}
-		case "legacy-v2-disabled":
-			controllerArgs = []string{`"--acp-runtime-enabled=true"`}
-		case "damaged-dual":
+		case "enabled":
 			controllerArgs = []string{
-				`"--acp-runtime-enabled=true"`,
-				`"--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key"`,
+				`"--controller-mode=harness-v1"`,
+				`"--harness-v1-auth-secret-name=` + state.authSecret + `"`,
+				`"--harness-v1-auth-secret-key=` + state.authKey + `"`,
 			}
 		default:
 			t.Fatalf("unsupported forced controller state %q", state.controllerState)
@@ -220,6 +215,7 @@ func helmTemplateHarnessV1UpgradeDrainHook(
 	}
 
 	commandArgs := []string{"template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade"}
+	commandArgs = append(commandArgs, staticChartDefaultArgs()...)
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
 	return string(output), err
@@ -302,7 +298,6 @@ func TestStaticChartProviderProxyConfigurationIsFixedToSupportedBoundary(t *test
 		"--set-string", "controller.acpRuntime.providerProxyNamespace=orka-test",
 		"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:1337/",
 	}
-	args = append(args, staticChartAdmissionArgs(digest)...)
 	rendered := requireHelmRender(t, args...)
 
 	for _, marker := range []string{
@@ -366,7 +361,7 @@ func TestStaticChartEnforcesSQLiteControllerSafety(t *testing.T) {
 		{
 			name:      "leader election disabled",
 			args:      []string{"--set", "controller.leaderElect=false"},
-			wantError: "controller.leaderElect must be true when using the SQLite store backend",
+			wantError: "controller.leaderElect must be true for an isolated controller installation",
 		},
 	}
 
@@ -394,7 +389,7 @@ func TestStaticChartEnforcesSQLiteControllerSafety(t *testing.T) {
 	}
 }
 
-func TestStaticChartRequiresAgentExecutionSnapshotSecretForACPAdmission(t *testing.T) {
+func TestStaticChartRequiresAgentExecutionSnapshotSecret(t *testing.T) {
 	tests := []struct {
 		name      string
 		args      []string
@@ -403,15 +398,14 @@ func TestStaticChartRequiresAgentExecutionSnapshotSecretForACPAdmission(t *testi
 		{
 			name: "missing Secret name",
 			args: []string{
-				"--set", "controller.acpRuntime.enabled=true",
+				"--set-string", "controller.agentExecutionSnapshot.existingSecret=",
 			},
 			wantError: "controller.agentExecutionSnapshot.existingSecret is required when agent execution is enabled",
 		},
 		{
 			name: "missing Secret key",
 			args: []string{
-				"--set", "controller.acpRuntime.enabled=true",
-				"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
+				"--set-string", "controller.agentExecutionSnapshot.key=",
 			},
 			wantError: "controller.agentExecutionSnapshot.key is required when agent execution is enabled",
 		},
@@ -430,19 +424,12 @@ func TestStaticChartRequiresAgentExecutionSnapshotSecretForACPAdmission(t *testi
 	}
 }
 
-func TestStaticChartMountsAgentExecutionSnapshotKeyForACPAdmission(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("0", 64)
+func TestStaticChartMountsAgentExecutionSnapshotKey(t *testing.T) {
 	args := []string{
-		"--set", "controller.acpRuntime.enabled=true",
-		"--set", "providerProxy.enabled=true",
-		"--set", "store.persistence.enabled=true",
-		"--set-string", "controller.image.digest=" + digest,
-		"--set-string", "publisher.image.digest=" + digest,
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--show-only", "templates/deployment.yaml",
 	}
-	args = append(args, staticChartAdmissionArgs(digest)...)
 	rendered := requireHelmRender(t, args...)
 
 	for _, marker := range []string{
@@ -459,325 +446,63 @@ func TestStaticChartMountsAgentExecutionSnapshotKeyForACPAdmission(t *testing.T)
 	}
 }
 
-func TestStaticChartAdmissionRequiresReplicasTLSAndCA(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("3", 64)
-	tests := []struct {
-		name, want string
-		args       []string
-	}{
-		{
-			"replicas", "admission.replicas must be at least 2",
-			[]string{"--set", "admission.enabled=true", "--set", "admission.replicas=1"},
-		},
-		{
-			"TLS", "admission.tls.existingSecret is required",
-			[]string{"--set", "admission.enabled=true", "--set-string", "controller.image.digest=" + digest},
-		},
-		{
-			"runtime", "admission.enabled must be true",
-			[]string{
-				"--set", "admission.webhooks.enabled=true",
-				"--set-string", "admission.webhooks.caBundle=Y2E=",
-			},
-		},
-		{
-			"CA", "requires a nonempty caBundle or caInjectionAnnotations",
-			[]string{
-				"--set", "admission.enabled=true",
-				"--set", "admission.webhooks.enabled=true",
-				"--set-string", "controller.image.digest=" + digest,
-				"--set-string", "admission.tls.existingSecret=orka-admission-tls",
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			output, err := helmTemplateStaticChart(t, tt.args...)
-			if err == nil || !strings.Contains(output, tt.want) {
-				t.Fatalf("helm render error = %v, want %q:\n%s", err, tt.want, output)
-			}
-		})
-	}
-}
-
-func TestStaticChartAgentExecutionRequiresAdmissionAndWebhooks(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("5", 64)
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{
-			name: "ACP v2",
-			args: []string{
-				"--set", "controller.acpRuntime.enabled=true",
-				"--set", "providerProxy.enabled=true",
-				"--set", "store.persistence.enabled=true",
-				"--set-string", "controller.image.digest=" + digest,
-				"--set-string", "publisher.image.digest=" + digest,
-				"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
-				"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
-			},
-		},
-		{
-			name: "harness v1",
-			args: []string{
-				"--set", "harnessV1.enabled=true",
-				"--set", "store.persistence.enabled=true",
-				"--set-string", "controller.image.digest=" + digest,
-				"--set-string", "harnessV1.image.digest=" + digest,
-				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-				"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
-				"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name+" requires admission", func(t *testing.T) {
-			output, err := helmTemplateStaticChart(t, tt.args...)
-			if err == nil || !strings.Contains(output, "admission.enabled must be true when agent execution is enabled") {
-				t.Fatalf("helm render error = %v, want admission runtime requirement:\n%s", err, output)
-			}
-		})
-		t.Run(tt.name+" requires webhooks", func(t *testing.T) {
-			args := append(append([]string{}, tt.args...), "--set", "admission.enabled=true")
-			output, err := helmTemplateStaticChart(t, args...)
-			if err == nil ||
-				!strings.Contains(output, "admission.webhooks.enabled must be true when agent execution is enabled") {
-				t.Fatalf("helm render error = %v, want admission webhook requirement:\n%s", err, output)
-			}
-		})
-	}
-}
-
-func TestStaticChartAdmissionRuntimeAndWebhooksAreIndependent(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("3", 64)
-	base := []string{
-		"--set", "admission.enabled=true",
-		"--set-string", "controller.image.digest=" + digest,
-		"--set-string", "admission.tls.existingSecret=orka-admission-tls",
-	}
-	runtime := requireHelmRender(t, base...)
+func TestStaticChartRendersOneStaticHarnessMode(t *testing.T) {
+	v2 := requireHelmRender(t)
 	for _, marker := range []string{
-		"replicas: 2", "type: RollingUpdate", "command: [/orka-admission]",
-		"port: 443", "targetPort: webhook", "kind: PodDisruptionBudget",
-		"kind: NetworkPolicy", "kind: ClusterRole", "podAntiAffinity:",
-		"preferredDuringSchedulingIgnoredDuringExecution:", "topologyKey: kubernetes.io/hostname",
+		"--controller-mode=harness-v2",
+		"app.kubernetes.io/component: acp-runtime",
+		"app.kubernetes.io/component: provider-auth-proxy",
 	} {
-		if !strings.Contains(runtime, marker) {
-			t.Fatalf("admission runtime is missing %q:\n%s", marker, runtime)
+		if !strings.Contains(v2, marker) {
+			t.Fatalf("harness-v2 render is missing %q:\n%s", marker, v2)
 		}
 	}
-	if strings.Contains(runtime, "kind: ValidatingWebhookConfiguration") {
-		t.Fatalf("admission first wave unexpectedly installed protected webhooks:\n%s", runtime)
-	}
-	if strings.Contains(runtime, "agent-execution-binding") {
-		t.Fatalf("admission first wave unexpectedly installed the parameterized binding policy:\n%s", runtime)
-	}
-	deployment := requireHelmRender(t,
-		append(base, "--show-only", "templates/admission-deployment.yaml")...,
-	)
-	rbac := requireHelmRender(t, append(base, "--show-only", "templates/admission-rbac.yaml")...)
-	for _, forbidden := range []string{
-		"--leader-elect", "/data/orka.db", "agent-execution-snapshot",
-		"provider-auth", "workspace-publisher", "harness-wrapper",
-	} {
-		if strings.Contains(deployment, forbidden) {
-			t.Fatalf("admission Deployment contains forbidden surface %q:\n%s", forbidden, deployment)
-		}
-	}
-	if !strings.Contains(deployment, "--admin-groups=system:masters") {
-		t.Fatalf("admission Deployment is missing the configured administrator group:\n%s", deployment)
-	}
-	for _, forbidden := range []string{"coordination.k8s.io", "leases", "update", "patch", "delete", "watch"} {
-		if strings.Contains(rbac, forbidden) {
-			t.Fatalf("admission RBAC contains forbidden authority %q:\n%s", forbidden, rbac)
-		}
-	}
-	for _, required := range []string{
-		"apiGroups: [authorization.k8s.io]",
-		"resources: [subjectaccessreviews]",
-		"verbs: [create]",
-		"- agentexecutionpolicies",
-	} {
-		if !strings.Contains(rbac, required) {
-			t.Fatalf("admission RBAC is missing workspace authorization marker %q:\n%s", required, rbac)
-		}
-	}
-	standaloneRBACPath := filepath.Join("..", "..", "..", "config", "orka-admission", "rbac.yaml")
-	standaloneRBAC, err := os.ReadFile(standaloneRBACPath)
-	if err != nil {
-		t.Fatalf("read standalone admission RBAC: %v", err)
-	}
-	if !strings.Contains(string(standaloneRBAC), "- agentexecutionpolicies\n    verbs: [get]") {
-		t.Fatalf("standalone admission RBAC cannot read compatibility policies:\n%s", standaloneRBAC)
+	if strings.Contains(v2, "app.kubernetes.io/component: agent-harness-wrapper") {
+		t.Fatalf("harness-v2 render contains the harness-v1 data plane:\n%s", v2)
 	}
 
-	webhookArgs := append(append([]string{}, base...),
-		"--set", "admission.webhooks.enabled=true",
-		"--set-string", "admission.webhooks.caBundle=Y2E=",
-		"--show-only", "templates/admission-validating-webhook.yaml",
-	)
-	webhooks := requireHelmRender(t, webhookArgs...)
-	if got := strings.Count(webhooks, "failurePolicy: Fail"); got != 10 {
-		t.Fatalf("fail-closed webhook count = %d, want 10:\n%s", got, webhooks)
-	}
-	for _, marker := range []string{
-		"/validate-core-orka-ai-v1alpha1-agent-contract",
-		"/validate-core-orka-ai-v1alpha1-agentruntime-contract",
-		"/validate-core-orka-ai-v1alpha1-task-execution-authority",
-		"resources: [tasks, tasks/status]",
-		"/validate-core-orka-ai-v1alpha1-agentexecutionadjudication",
-		"operations: [CREATE, UPDATE, DELETE]",
-		"resources: [agentexecutionadjudications]",
-		"resources: [agentexecutionadjudications/status]",
-		"route-unless-adjudication-controller",
-		"/validate-core-orka-ai-v1alpha1-agentexecution-control-policy",
-		"resources: [agentexecutioncontrols, agentexecutionpolicies]",
-		"route-unless-controller-cleanup-safe",
-		"oldObject.metadata.?finalizers.orValue([]).filter",
-		"object.spec == oldObject.spec",
-		"object.?status.orValue({}) == oldObject.?status.orValue({})",
-		"/validate-core-orka-ai-v1alpha1-session-resolution",
-		"resources: [runtimesessioncontrols/status]",
-		"resolution-reference-introduced",
-		"object.?status.?agentExecutionResolutionRef.hasValue()",
-		"!oldObject.?status.?agentExecutionResolutionRef.hasValue()",
-	} {
-		if !strings.Contains(webhooks, marker) {
-			t.Fatalf("admission webhooks are missing %q:\n%s", marker, webhooks)
-		}
-	}
-
-	bindingPolicyArgs := append(append([]string{}, base...),
-		"--set", "admission.webhooks.enabled=true",
-		"--set-string", "admission.webhooks.caBundle=Y2E=",
-		"--show-only", "templates/agent-execution-binding-admission-policy.yaml",
-	)
-	bindingPolicy := requireHelmRender(t, bindingPolicyArgs...)
-	for _, marker := range []string{
-		"kind: ValidatingAdmissionPolicy",
-		"kind: ValidatingAdmissionPolicyBinding",
-		"failurePolicy: Fail",
-		"resources: [tasks, tasks/status]",
-		"params.status.observedGeneration == params.metadata.generation",
-		"backendControl.name == params.metadata.name",
-		"backendControl.generation == params.metadata.generation",
-		"backendControl.admittedMode == 'enabled'",
-		"effectiveMode == 'enabled'",
-		"admissionClosedAt.hasValue()",
-		"backendControl.modeRevision == params.status.backends.v1.modeRevision",
-		"backendControl.modeRevision == params.status.backends.v2.modeRevision",
-		"provenance == 'legacy-cleanup-only'",
-		"classification.state == 'Open'",
-		"classification.controlUID) == string(params.metadata.uid)",
-		"classification.controlGeneration == params.metadata.generation",
-		"classification.inventoryID == object.status.agentExecutionBinding.migrationInventoryID",
-		"classification.inventoryDigest.matches('^sha256:[a-f0-9]{64}$')",
-		"parameterNotFoundAction: Deny",
-		"name: cluster",
-		"namespace: orka-system",
-	} {
-		if !strings.Contains(bindingPolicy, marker) {
-			t.Fatalf("binding admission policy is missing %q:\n%s", marker, bindingPolicy)
-		}
-	}
-	if strings.Contains(bindingPolicy, "classification.state == 'Sealed'") {
-		t.Fatalf("binding admission policy permits post-seal legacy adoption:\n%s", bindingPolicy)
-	}
-}
-
-func TestStaticChartHarnessV1IsDisabledByDefault(t *testing.T) {
-	rendered := requireHelmRender(t)
-	if strings.Contains(rendered, "agent-harness-wrapper") {
-		t.Fatalf("default chart render unexpectedly enabled the harness v1 data plane")
-	}
-	control := requireHelmRender(t, "--show-only", "templates/agent-execution-control.yaml")
-	for _, marker := range []string{
-		"kind: AgentExecutionControl",
-		"name: cluster",
-		"namespace: orka-system",
-		"desiredMode: \"disabled\"",
-		"desiredMode: \"enabled\"",
-	} {
-		if !strings.Contains(control, marker) {
-			t.Fatalf("default execution control is missing %q:\n%s", marker, control)
-		}
-	}
-}
-
-func TestStaticChartManagesFixedAgentExecutionOwnershipNamespace(t *testing.T) {
-	namespace := requireHelmRender(t,
-		"--show-only", "templates/agent-execution-ownership-namespace.yaml",
-	)
-	for _, marker := range []string{
-		"kind: Namespace",
-		"name: orka-system",
-		"helm.sh/resource-policy: keep",
-		"app.kubernetes.io/component: agent-execution-ownership",
-	} {
-		if !strings.Contains(namespace, marker) {
-			t.Fatalf("ownership namespace is missing %q:\n%s", marker, namespace)
-		}
-	}
-
-	rendered := requireHelmRender(t,
-		"--set", "controller.agentExecutionControl.createNamespace=false",
-	)
-	if strings.Contains(rendered, "app.kubernetes.io/component: agent-execution-ownership") {
-		t.Fatalf("chart rendered the ownership Namespace despite an operator-declared prerequisite:\n%s", rendered)
-	}
-	if !strings.Contains(rendered, "kind: AgentExecutionControl") ||
-		!strings.Contains(rendered, "namespace: orka-system") {
-		t.Fatalf("operator-managed Namespace mode lost the fixed control resource:\n%s", rendered)
-	}
-}
-
-func TestStaticChartManagedHarnessV1PolicyCanBeCleanupOnly(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("1", 64)
-	args := []string{
-		"--set", "harnessV1.enabled=true",
-		"--set", "controller.agentExecutionControl.v1Mode=drain-only",
-		"--set", "controller.agentExecutionControl.v2Mode=disabled",
-		"--set", "store.persistence.enabled=true",
-		"--set-string", "harnessV1.image.digest=" + digest,
+	v1 := requireHelmRender(t,
+		"--set-string", "controller.mode=harness-v1",
+		"--set-string", "harnessV1.image.digest="+digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
-		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
-		"--show-only", "templates/agent-execution-policy.yaml",
-	}
-	args = append(args, staticChartAdmissionArgs(digest)...)
-	policy := requireHelmRender(t, args...)
-	if !strings.Contains(policy, "allowNewV1Bindings: false") {
-		t.Fatalf("managed harness v1 policy is not cleanup-only by default:\n%s", policy)
-	}
-	if strings.Contains(policy, "allowNewV1Bindings: true") {
-		t.Fatalf("cleanup-only managed policy unexpectedly admits new v1 bindings:\n%s", policy)
-	}
-}
-
-func TestStaticChartControllerRBACCoversExecutionAuthority(t *testing.T) {
-	rendered := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
-	controllerRBAC, _, ok := strings.Cut(rendered, "# Controller ClusterRoleBinding")
-	if !ok {
-		t.Fatalf("rendered RBAC is missing the controller ClusterRoleBinding boundary:\n%s", rendered)
-	}
-	for _, rule := range []string{
-		`resources: ["agentexecutionadjudications", "agentexecutioncontrols", "agentexecutionpolicies"]
-    verbs: ["get", "list", "watch"]`,
-		`resources: ["agentexecutionadjudications/status", "agentexecutioncontrols/status"]
-    verbs: ["get", "update", "patch"]`,
+	)
+	for _, marker := range []string{
+		"--controller-mode=harness-v1",
+		"app.kubernetes.io/component: agent-harness-wrapper",
+		"--harness-v1-endpoint=https://test-orka-agent-harness-wrapper.orka-test.svc:8080",
 	} {
-		if !strings.Contains(controllerRBAC, rule) {
-			t.Fatalf("controller RBAC is missing execution-authority rule %q:\n%s", rule, controllerRBAC)
+		if !strings.Contains(v1, marker) {
+			t.Fatalf("harness-v1 render is missing %q:\n%s", marker, v1)
+		}
+	}
+	for _, forbidden := range []string{
+		"app.kubernetes.io/component: acp-runtime",
+		"app.kubernetes.io/component: provider-auth-proxy",
+		"app.kubernetes.io/component: workspace-publisher",
+	} {
+		if strings.Contains(v1, forbidden) {
+			t.Fatalf("harness-v1 render contains harness-v2 component %q:\n%s", forbidden, v1)
 		}
 	}
 }
 
-//nolint:gocyclo // One render matrix verifies the coupled rollout, rollback, retirement, and uninstall invariants.
+func TestStaticChartRejectsNonStaticControllerModes(t *testing.T) {
+	for _, mode := range []string{"", "dual", "auto", "harness-v1-drain", "unknown"} {
+		t.Run(mode, func(t *testing.T) {
+			output, err := helmTemplateStaticChart(t, "--set-string", "controller.mode="+mode)
+			if err == nil || !strings.Contains(output, "controller.mode must be harness-v1 or harness-v2") {
+				t.Fatalf("helm render error = %v, want static-mode rejection:\n%s", err, output)
+			}
+		})
+	}
+}
+
+//nolint:gocyclo // One render matrix verifies the coupled rollout, rollback, and uninstall invariants.
 func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("1", 64)
 	args := []string{
-		"--set", "harnessV1.enabled=true",
+		"--set-string", "controller.mode=harness-v1",
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
@@ -786,8 +511,6 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
-	args = append(args, staticChartAdmissionArgs(digest)...)
-
 	// A fresh installation has no live Deployment and must not emit a drain
 	// hook. The enabled revision must still persist its post-rollback abort hook because
 	// Helm executes hooks recorded in the historical rollback target.
@@ -803,11 +526,6 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		`image: "ghcr.io/orka-agents/orka/agent-harness-wrapper@sha256:` + strings.Repeat("1", 64) + `"`,
 		`secretName: "harness-wrapper-auth"`,
 		`key: "token"`,
-		"--harness-v1-retirement-username=system:serviceaccount:orka-test:test-orka-agent-harness-wrapper",
-		"--harness-v1-retirement-port=8443",
-		"--harness-v1-retirement-tls-cert-file=/var/run/orka/harness-v1-tls/tls.crt",
-		"--harness-v1-retirement-tls-key-file=/var/run/orka/harness-v1-tls/tls.key",
-		"--harness-v1-retirement-token-audience=orka-harness-v1-retirement",
 	} {
 		if !strings.Contains(fresh, marker) {
 			t.Fatalf("fresh enabled revision rollback hook is missing %q:\n%s", marker, fresh)
@@ -823,28 +541,6 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 	}
 	if !strings.Contains(unknown, "cannot determine the previously deployed harness v1 state during upgrade") {
 		t.Fatalf("unknown-state upgrade did not fail closed:\n%s", unknown)
-	}
-
-	legacyV2, err := helmTemplateHarnessV1UpgradeDrainHook(t, harnessV1UpgradeState{
-		wrapperMissing:  true,
-		controllerState: "legacy-v2-disabled",
-	}, args...)
-	if err != nil {
-		t.Fatalf("active legacy v2 route could not upgrade to dual mode: %v\n%s", err, legacyV2)
-	}
-	if strings.Contains(legacyV2, "agent-harness-wrapper-rollover-drain") {
-		t.Fatalf("legacy v2-only route unexpectedly triggered a v1 rollover drain:\n%s", legacyV2)
-	}
-
-	damagedDual, err := helmTemplateHarnessV1UpgradeDrainHook(t, harnessV1UpgradeState{
-		wrapperMissing:  true,
-		controllerState: "damaged-dual",
-	}, args...)
-	if err == nil {
-		t.Fatalf("dual-era controller missing its v1 state rendered successfully:\n%s", damagedDual)
-	}
-	if !strings.Contains(damagedDual, "cannot determine the previously deployed harness v1 state during upgrade") {
-		t.Fatalf("damaged dual state did not fail closed:\n%s", damagedDual)
 	}
 
 	// Render the unchanged hook body from a copied chart with only lookup's
@@ -873,16 +569,10 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		`- "--endpoint=https://test-orka-agent-harness-wrapper.orka-test.svc:8080"`,
 		"- --bearer-token-file=/var/run/orka/harness-wrapper/token",
 		"- --ca-file=/var/run/orka/harness-wrapper/ca.crt",
-		`- "--controller-endpoint=https://test-orka.orka-test.svc:8443/internal/v1/harness-v1/retirement"`,
-		"- --controller-token-file=/var/run/orka/harness-v1-retirement/token",
-		"- --controller-ca-file=/var/run/orka/harness-v1-retirement/ca.crt",
 		`- "--timeout=9m"`,
 		`- "--poll-interval=3s"`,
 		`secretName: "harness-wrapper-auth"`,
 		`key: "token"`,
-		"serviceAccountToken:",
-		"expirationSeconds: 600",
-		`audience: "orka-harness-v1-retirement"`,
 		"defaultMode: 0440",
 	} {
 		if !strings.Contains(hook, marker) {
@@ -911,25 +601,10 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		"kind: Job",
 		"app.kubernetes.io/component: agent-harness-wrapper-delete-drain",
 	)
-	for _, marker := range []string{
-		`- "--controller-endpoint=https://test-orka.orka-test.svc:8443/internal/v1/harness-v1/retirement"`,
-		"- --controller-token-file=/var/run/orka/harness-v1-retirement/token",
-		"- --controller-ca-file=/var/run/orka/harness-v1-retirement/ca.crt",
-		"serviceAccountToken:",
-		"expirationSeconds: 600",
-		`audience: "orka-harness-v1-retirement"`,
-	} {
-		if !strings.Contains(deleteJob, marker) {
-			t.Fatalf("uninstall drain is missing controller retirement marker %q:\n%s", marker, deleteJob)
-		}
-	}
-	deleteEgress := requireRenderedDocument(t, hook,
-		"kind: NetworkPolicy",
-		"name: test-orka-agent-harness-wrapper-delete-egress",
-	)
-	if !strings.Contains(deleteEgress, "app.kubernetes.io/component: controller") ||
-		!strings.Contains(deleteEgress, "port: 8443") {
-		t.Fatalf("uninstall drain egress does not permit the controller retirement call:\n%s", deleteEgress)
+	if strings.Contains(deleteJob, "--controller-endpoint=") ||
+		strings.Contains(deleteJob, "--controller-token-file=") ||
+		strings.Contains(deleteJob, "serviceAccountToken:") {
+		t.Fatalf("uninstall drain unexpectedly coordinates a cross-mode controller retirement:\n%s", deleteJob)
 	}
 	for _, marker := range []string{
 		"app.kubernetes.io/component: agent-harness-wrapper-rollover-abort",
@@ -978,52 +653,18 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 	if !strings.Contains(unchanged, "helm.sh/hook: pre-delete") {
 		t.Fatalf("enabled release lost its uninstall drain hook:\n%s", unchanged)
 	}
-
-	disabledArgs := append(append([]string{}, args...), "--set", "harnessV1.enabled=false")
-	disabled := requireHarnessV1UpgradeDrainHookRender(t, true, disabledArgs...)
-	if !regexp.MustCompile(`--next-generation=retired:[a-f0-9]{64}`).MatchString(disabled) {
-		t.Fatalf("same-template retirement did not use a distinct tombstone generation:\n%s", disabled)
-	}
-	retirementJob := requireRenderedDocument(t, disabled,
-		"kind: Job",
-		"app.kubernetes.io/component: agent-harness-wrapper-rollover-drain",
-	)
-	for _, marker := range []string{
-		`- "--controller-endpoint=https://test-orka.orka-test.svc:8443/internal/v1/harness-v1/retirement"`,
-		"- --controller-token-file=/var/run/orka/harness-v1-retirement/token",
-		"- --controller-ca-file=/var/run/orka/harness-v1-retirement/ca.crt",
-		"serviceAccountToken:",
-		"expirationSeconds: 600",
-		`audience: "orka-harness-v1-retirement"`,
-	} {
-		if !strings.Contains(retirementJob, marker) {
-			t.Fatalf("v1 retirement drain is missing controller barrier marker %q:\n%s", marker, retirementJob)
-		}
-	}
-	retirementEgress := requireRenderedDocument(t, disabled,
-		"kind: NetworkPolicy",
-		"name: test-orka-agent-harness-wrapper-drain-egress",
-	)
-	if !strings.Contains(retirementEgress, "app.kubernetes.io/component: controller") ||
-		!strings.Contains(retirementEgress, "port: 8443") {
-		t.Fatalf("v1 retirement drain egress does not permit the controller barrier call:\n%s", retirementEgress)
-	}
-	if strings.Contains(disabled, "agent-harness-wrapper-delete-drain") {
-		t.Fatalf("disabled release unexpectedly rendered a redundant uninstall drain hook:\n%s", disabled)
-	}
 }
 
 func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("1", 64)
 	baseArgs := []string{
-		"--set", "harnessV1.enabled=true",
+		"--set-string", "controller.mode=harness-v1",
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
-	baseArgs = append(baseArgs, staticChartAdmissionArgs(digest)...)
 	tests := []struct {
 		name      string
 		state     harnessV1UpgradeState
@@ -1096,22 +737,12 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 			}
 		})
 	}
-
-	firstEnableArgs := append(append([]string{}, baseArgs...),
-		"--set-string", "harnessV1.auth.existingSecret=first-enable-auth")
-	firstEnable, err := helmTemplateHarnessV1UpgradeDrainHook(t, harnessV1UpgradeState{
-		wrapperMissing:  true,
-		controllerState: "disabled",
-	}, firstEnableArgs...)
-	if err != nil {
-		t.Fatalf("recorded disabled route blocked first enablement: %v\n%s", err, firstEnable)
-	}
 }
 
 func TestStaticChartHarnessV1GenerationTracksOnlyPodTemplate(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("3", 64)
 	args := []string{
-		"--set", "harnessV1.enabled=true",
+		"--set-string", "controller.mode=harness-v1",
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
@@ -1119,7 +750,6 @@ func TestStaticChartHarnessV1GenerationTracksOnlyPodTemplate(t *testing.T) {
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--show-only", "templates/harness-wrapper-deployment.yaml",
 	}
-	args = append(args, staticChartAdmissionArgs(digest)...)
 	first := requireHelmRender(t, append(append([]string{}, args...), "--set", "controller.apiPort=8080")...)
 	second := requireHelmRender(t, append(append([]string{}, args...), "--set", "controller.apiPort=9090")...)
 	firstGeneration := harnessV1RenderedGeneration(t, first)
@@ -1136,112 +766,19 @@ func TestStaticChartHarnessV1GenerationTracksOnlyPodTemplate(t *testing.T) {
 func TestStaticChartHarnessV1UsesOnlyExistingSecretReferences(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("4", 64)
 	args := []string{
-		"--set", "harnessV1.enabled=true",
+		"--set-string", "controller.mode=harness-v1",
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
-	args = append(args, staticChartAdmissionArgs(digest)...)
 	rendered := requireHelmRender(t, args...)
 	if !strings.Contains(rendered, "secretName: \"harness-wrapper-auth\"") {
 		t.Fatalf("wrapper did not mount the configured existing Secret:\n%s", rendered)
 	}
 	if strings.Contains(rendered, "# Source: orka/templates/harness-wrapper-secret.yaml") {
 		t.Fatalf("chart rendered a managed harness wrapper Secret:\n%s", rendered)
-	}
-}
-
-func TestStaticChartRendersExplicitAgentExecutionBackendModes(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("2", 64)
-	v1Args := []string{
-		"--set", "harnessV1.enabled=true",
-		"--set", "harnessV1.policy.allowNewV1Bindings=true",
-		"--set", "store.persistence.enabled=true",
-		"--set-string", "harnessV1.image.digest=" + digest,
-		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
-		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
-	}
-	v1Args = append(v1Args, staticChartAdmissionArgs(digest)...)
-	v2Args := []string{
-		"--set", "controller.acpRuntime.enabled=true",
-		"--set", "providerProxy.enabled=true",
-		"--set", "store.persistence.enabled=true",
-		"--set-string", "controller.image.digest=" + digest,
-		"--set-string", "publisher.image.digest=" + digest,
-		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
-		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
-	}
-	v2Args = append(v2Args, staticChartAdmissionArgs(digest)...)
-
-	tests := []struct {
-		name             string
-		args             []string
-		v1Mode           string
-		v2Mode           string
-		wantHarnessV1    bool
-		wantManagedACPV2 bool
-	}{
-		{
-			name: "v1 only",
-			args: append(append([]string{}, v1Args...),
-				"--set", "controller.agentExecutionControl.v1Mode=enabled",
-				"--set", "controller.agentExecutionControl.v2Mode=disabled"),
-			v1Mode:           "enabled",
-			v2Mode:           "disabled",
-			wantHarnessV1:    true,
-			wantManagedACPV2: false,
-		},
-		{
-			name: "v2 only",
-			args: append(append([]string{}, v2Args...),
-				"--set", "controller.agentExecutionControl.v1Mode=disabled",
-				"--set", "controller.agentExecutionControl.v2Mode=enabled"),
-			v1Mode:           "disabled",
-			v2Mode:           "enabled",
-			wantHarnessV1:    false,
-			wantManagedACPV2: true,
-		},
-		{
-			name: "dual",
-			args: append(append(append([]string{}, v1Args...), v2Args...),
-				"--set", "controller.agentExecutionControl.v1Mode=enabled",
-				"--set", "controller.agentExecutionControl.v2Mode=enabled"),
-			v1Mode:           "enabled",
-			v2Mode:           "enabled",
-			wantHarnessV1:    true,
-			wantManagedACPV2: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rendered := requireHelmRender(t, tt.args...)
-			for marker, want := range map[string]bool{
-				"--harness-v1-enabled=true":                          tt.wantHarnessV1,
-				"--acp-runtime-enabled=true":                         tt.wantManagedACPV2,
-				"app.kubernetes.io/component: agent-harness-wrapper": tt.wantHarnessV1,
-				"app.kubernetes.io/component: acp-runtime":           tt.wantManagedACPV2,
-			} {
-				if got := strings.Contains(rendered, marker); got != want {
-					t.Fatalf("render marker %q present = %t, want %t", marker, got, want)
-				}
-			}
-
-			controlArgs := append(append([]string{}, tt.args...),
-				"--show-only", "templates/agent-execution-control.yaml")
-			control := requireHelmRender(t, controlArgs...)
-			for _, marker := range []string{
-				"v1:\n      desiredMode: \"" + tt.v1Mode + "\"",
-				"v2:\n      desiredMode: \"" + tt.v2Mode + "\"",
-			} {
-				if !strings.Contains(control, marker) {
-					t.Fatalf("%s control is missing %q:\n%s", tt.name, marker, control)
-				}
-			}
-		})
 	}
 }
 
@@ -1255,22 +792,22 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 		{
 			name: "missing digest",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 			},
-			wantError: "harnessV1.image.digest must be a sha256 digest when harnessV1.enabled=true",
+			wantError: "harnessV1.image.digest must be a sha256 digest when controller.mode=harness-v1",
 		},
 		{
 			name: "mutable tag-shaped digest",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=latest",
 			},
-			wantError: "harnessV1.image.digest must be a sha256 digest when harnessV1.enabled=true",
+			wantError: "harnessV1.image.digest must be a sha256 digest when controller.mode=harness-v1",
 		},
 		{
 			name: "inline bearer token",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.auth.token=" + strings.Repeat("x", 32),
@@ -1280,7 +817,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 		{
 			name: "short bearer token",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.token=too-short",
 			},
@@ -1289,35 +826,35 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 		{
 			name: "missing existing auth Secret",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 			},
-			wantError: "harnessV1.auth.existingSecret is required when harnessV1.enabled=true",
+			wantError: "harnessV1.auth.existingSecret is required when controller.mode=harness-v1",
 		},
 		{
 			name: "missing ledger capacity",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.ledger.size=",
 			},
-			wantError: "harnessV1.ledger.size is required when harnessV1.enabled=true",
+			wantError: "harnessV1.ledger.size is required when controller.mode=harness-v1",
 		},
 		{
 			name: "missing ledger retention",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.ledger.retention=",
 			},
-			wantError: "harnessV1.ledger.retention is required when harnessV1.enabled=true",
+			wantError: "harnessV1.ledger.retention is required when controller.mode=harness-v1",
 		},
 		{
 			name: "zero ledger retention",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.ledger.retention=0s",
@@ -1327,7 +864,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 		{
 			name: "malformed ledger retention",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.ledger.retention=immediate",
@@ -1337,7 +874,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 		{
 			name: "negative ledger retention",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.ledger.retention=-1h",
@@ -1347,7 +884,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 		{
 			name: "unsupported Codex sandbox",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.codexSandboxMode=unrestricted",
@@ -1355,19 +892,9 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			wantError: "harnessV1.codexSandboxMode must be read-only, workspace-write, or danger-full-access",
 		},
 		{
-			name: "unsupported built-in Copilot runtime",
-			args: []string{
-				"--set", "harnessV1.enabled=true",
-				"--set-string", "harnessV1.image.digest=" + digest,
-				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-				"--set", "harnessV1.policy.allowedBuiltInRuntimeTypes={copilot}",
-			},
-			wantError: "harnessV1.policy.allowedBuiltInRuntimeTypes may contain only codex or claude",
-		},
-		{
 			name: "invalid upgrade drain timeout",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.upgradeDrain.timeout=0s",
@@ -1377,7 +904,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 		{
 			name: "invalid upgrade drain poll interval",
 			args: []string{
-				"--set", "harnessV1.enabled=true",
+				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.upgradeDrain.pollInterval=immediate",
@@ -1388,8 +915,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			args := append(append([]string{}, tt.args...), staticChartAdmissionArgs(digest)...)
-			output, err := helmTemplateStaticChart(t, args...)
+			output, err := helmTemplateStaticChart(t, tt.args...)
 			if err == nil {
 				t.Fatalf("helm template unexpectedly accepted unsafe harness v1 values")
 			}
@@ -1403,35 +929,12 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("1", 64)
 	args := []string{
-		"--set", "harnessV1.enabled=true",
-		"--set", "harnessV1.policy.allowNewV1Bindings=true",
+		"--set-string", "controller.mode=harness-v1",
 		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 		"--set-string", "harnessV1.ledger.retention=168h",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
-	}
-	args = append(args, staticChartAdmissionArgs(digest)...)
-
-	policy := requireHelmRender(t, append(args, "--show-only", "templates/agent-execution-policy.yaml")...)
-	for _, marker := range []string{
-		"kind: AgentExecutionPolicy",
-		"name: compatibility",
-		"namespace: orka-test",
-		"allowNewV1Bindings: true",
-		"- codex",
-		"- claude",
-		"allowedBrokeredToolClasses: []",
-		"- transaction-tokens",
-		"- observed-write-tools",
-		"networkIsolationProfile: \"default-deny\"",
-	} {
-		if !strings.Contains(policy, marker) {
-			t.Fatalf("harness v1 policy is missing %q:\n%s", marker, policy)
-		}
-	}
-	if strings.Contains(policy, "- copilot") {
-		t.Fatalf("harness v1 policy unexpectedly advertises unsupported Copilot:\n%s", policy)
 	}
 	controllerDeployment := requireHelmRender(t, append(args, "--show-only", "templates/deployment.yaml")...)
 	for _, marker := range []string{

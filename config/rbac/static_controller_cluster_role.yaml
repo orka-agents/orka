@@ -1,0 +1,46 @@
+# Static controllers need only two common cluster-scoped capabilities:
+# reading namespace mode claims and binding the exact release worker roles into
+# the selected workload namespace. Mode-specific cluster APIs are granted by
+# the corresponding workload overlay, never by this common role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: static-controller-cluster-role
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - system
+  resources:
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resourceNames:
+  - ai-worker-role
+  - vendor-worker-role
+  - container-worker-role
+  resources:
+  - clusterroles
+  verbs:
+  - bind
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: static-controller-cluster-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: static-controller-cluster-role
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: system

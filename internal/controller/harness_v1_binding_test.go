@@ -28,11 +28,6 @@ type harnessV1CandidateErrorReader struct {
 	get func(client.ObjectKey, client.Object) error
 }
 
-type harnessV1PolicySequenceReader struct {
-	client.Reader
-	policyReads int
-}
-
 type harnessV1SessionControlSequenceStore struct {
 	store.DurableControlStore
 	controls []*store.SessionControl
@@ -59,29 +54,9 @@ func (s *harnessV1SessionControlSequenceStore) GetSessionControl(
 	return &copyControl, nil
 }
 
-func (r *harnessV1PolicySequenceReader) Get(
-	ctx context.Context,
-	key client.ObjectKey,
-	object client.Object,
-	options ...client.GetOption,
-) error {
-	if err := r.Reader.Get(ctx, key, object, options...); err != nil {
-		return err
-	}
-	if policy, ok := object.(*corev1alpha1.AgentExecutionPolicy); ok {
-		r.policyReads++
-		if r.policyReads > 1 {
-			policy.Generation++
-			policy.Spec.AllowNewV1Bindings = false
-		}
-	}
-	return nil
-}
-
 type harnessV1BindingResponseLostClient struct {
 	client.Client
-	policyKey client.ObjectKey
-	lost      bool
+	lost bool
 }
 
 func (c *harnessV1BindingResponseLostClient) Status() client.SubResourceWriter {
@@ -109,15 +84,6 @@ func (w *harnessV1BindingResponseLostWriter) Patch(
 	if !ok || task.Status.AgentExecutionBinding == nil || w.parent.lost {
 		return nil
 	}
-	policy := &corev1alpha1.AgentExecutionPolicy{}
-	if err := w.parent.Get(ctx, w.parent.policyKey, policy); err != nil {
-		return fmt.Errorf("read policy before simulated response loss: %w", err)
-	}
-	policy.Spec.AllowNewV1Bindings = false
-	policy.Generation++
-	if err := w.parent.Update(ctx, policy); err != nil {
-		return fmt.Errorf("revoke policy before simulated response loss: %w", err)
-	}
 	w.parent.lost = true
 	return errors.New("simulated binding status response loss")
 }
@@ -142,13 +108,6 @@ func TestEnsureHarnessV1ExecutionBindingRequeuesTransientCandidateErrors(t *test
 		intercept func(client.Object) bool
 	}{
 		{
-			name: "compatibility policy API read",
-			intercept: func(object client.Object) bool {
-				_, ok := object.(*corev1alpha1.AgentExecutionPolicy)
-				return ok
-			},
-		},
-		{
 			name: "wrapper auth Secret API read",
 			intercept: func(object client.Object) bool {
 				_, ok := object.(*corev1.Secret)
@@ -160,7 +119,7 @@ func TestEnsureHarnessV1ExecutionBindingRequeuesTransientCandidateErrors(t *test
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			fixture := newHarnessV1CandidateFixture(t, ctx)
+			fixture := newHarnessV1CandidateFixture(t)
 			transientErr := errors.New("temporary Kubernetes API outage")
 			fixture.reconciler.APIReader = &harnessV1CandidateErrorReader{
 				Reader: fixture.reconciler.Client,
@@ -189,87 +148,11 @@ func TestEnsureHarnessV1ExecutionBindingRequeuesTransientCandidateErrors(t *test
 	}
 }
 
-func TestEnsureHarnessV1ExecutionBindingFailsPermanentPolicyViolation(t *testing.T) {
+func TestEnsureHarnessV1ExecutionBindingRecoversCommittedPatchAfterResponseLoss(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
-	policy := &corev1alpha1.AgentExecutionPolicy{}
-	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.policy), policy); err != nil {
-		t.Fatal(err)
-	}
-	policy.Spec.AllowNewV1Bindings = false
-	if err := fixture.reconciler.Update(ctx, policy); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err, handled := fixture.reconciler.ensureHarnessV1ExecutionBinding(
-		ctx, fixture.task.DeepCopy(), fixture.agent,
-	)
-	if err != nil || !handled {
-		t.Fatalf("ensure binding = handled=%v err=%v, want permanent failure", handled, err)
-	}
-	current := &corev1alpha1.Task{}
-	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.task), current); err != nil {
-		t.Fatal(err)
-	}
-	if current.Status.Phase != corev1alpha1.TaskPhaseFailed ||
-		!strings.Contains(current.Status.Message, "does not authorize new bindings") {
-		t.Fatalf("permanent policy violation status = %#v", current.Status)
-	}
-}
-
-func TestEnsureHarnessV1ExecutionBindingRejectsPolicyChangedBeforeCAS(t *testing.T) {
-	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
-	fixture.reconciler.APIReader = &harnessV1PolicySequenceReader{Reader: fixture.reconciler.Client}
-
-	_, err, handled := fixture.reconciler.ensureHarnessV1ExecutionBinding(
-		ctx, fixture.task.DeepCopy(), fixture.agent,
-	)
-	if err != nil || !handled {
-		t.Fatalf("ensure binding = handled=%v err=%v, want terminal policy rejection", handled, err)
-	}
-	current := &corev1alpha1.Task{}
-	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.task), current); err != nil {
-		t.Fatal(err)
-	}
-	if current.Status.AgentExecutionBinding != nil || current.Status.Phase != corev1alpha1.TaskPhaseFailed ||
-		!strings.Contains(current.Status.Message, "changed or revoked") {
-		t.Fatalf("Task after policy race = %#v", current.Status)
-	}
-	control := &corev1alpha1.AgentExecutionControl{}
-	if err := fixture.reconciler.Get(ctx, client.ObjectKey{
-		Namespace: corev1alpha1.AgentExecutionControlNamespace,
-		Name:      corev1alpha1.AgentExecutionControlName,
-	}, control); err != nil {
-		t.Fatal(err)
-	}
-	inventory, err := fixture.reconciler.AgentExecutionBindingReservations.ListAgentExecutionBindingReservations(
-		ctx,
-		store.AgentExecutionControlRevision{
-			ControlUID:        string(control.UID),
-			ControlGeneration: control.Generation,
-			Backend:           store.AgentExecutionBackendV1,
-			ModeRevision:      control.Status.Backends.V1.ModeRevision,
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(inventory.Reservations) != 1 || inventory.OpenCount != 0 ||
-		inventory.Reservations[0].State != store.AgentExecutionBindingReservationRejected ||
-		inventory.Reservations[0].TerminalReason != "policy-invalidated" {
-		t.Fatalf("policy-race reservation inventory = %#v", inventory)
-	}
-}
-
-func TestEnsureHarnessV1ExecutionBindingRecoversCommittedPatchAfterPolicyRevocation(t *testing.T) {
-	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	baseClient := fixture.reconciler.Client
-	lostClient := &harnessV1BindingResponseLostClient{
-		Client:    baseClient,
-		policyKey: client.ObjectKeyFromObject(fixture.policy),
-	}
+	lostClient := &harnessV1BindingResponseLostClient{Client: baseClient}
 	fixture.reconciler.Client = lostClient
 
 	_, err, handled := fixture.reconciler.ensureHarnessV1ExecutionBinding(
@@ -288,29 +171,11 @@ func TestEnsureHarnessV1ExecutionBindingRecoversCommittedPatchAfterPolicyRevocat
 	if bound.Status.AgentExecutionBinding == nil {
 		t.Fatal("committed binding was not recovered after the response was lost")
 	}
-	policy := &corev1alpha1.AgentExecutionPolicy{}
-	if err := baseClient.Get(ctx, client.ObjectKeyFromObject(fixture.policy), policy); err != nil {
-		t.Fatal(err)
-	}
-	if policy.Spec.AllowNewV1Bindings {
-		t.Fatal("test policy was not revoked after the binding commit")
-	}
-	want, err := agentExecutionBindingReservationFor(bound, bound.Status.AgentExecutionBinding)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reservation, err := fixture.reconciler.AgentExecutionBindingReservations.GetAgentExecutionBindingReservation(ctx, want.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reservation.State != store.AgentExecutionBindingReservationBound {
-		t.Fatalf("recovered reservation state = %s, want Bound", reservation.State)
-	}
 }
 
 func TestResolveHarnessV1ExecutionCandidateMarksSpecViolationPermanent(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	task := fixture.task.DeepCopy()
 	task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{}
 
@@ -322,7 +187,7 @@ func TestResolveHarnessV1ExecutionCandidateMarksSpecViolationPermanent(t *testin
 
 func TestResolveHarnessV1ExecutionCandidateFreezesBoundedSessionTranscript(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	const sessionName = "continued-session"
 	seedHarnessV1BindingTranscript(t, ctx, fixture, sessionName, defaultACPSessionType, []store.SessionMessage{
 		{ID: "message-1", Role: "user", Content: "old request"},
@@ -369,7 +234,7 @@ func TestResolveHarnessV1ExecutionCandidateFreezesBoundedSessionTranscript(t *te
 
 func TestResolveHarnessV1ExecutionCandidateRejectsSessionControlRace(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	const sessionName = "racing-session"
 	seedHarnessV1BindingTranscript(t, ctx, fixture, sessionName, defaultACPSessionType, []store.SessionMessage{
 		{ID: "message-1", Role: "user", Content: "stable request"},
@@ -395,7 +260,7 @@ func TestResolveHarnessV1ExecutionCandidateRejectsSessionControlRace(t *testing.
 
 func TestResolveHarnessV1ExecutionCandidateFreezesNewSessionUID(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	task := fixture.task.DeepCopy()
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{
 		Name: "new-session", Create: true, Append: true,
@@ -423,7 +288,7 @@ func TestResolveHarnessV1ExecutionCandidateFreezesNewSessionUID(t *testing.T) {
 
 func TestResolveHarnessV1ExecutionCandidateRejectsControlLessTranscriptAdoption(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	const sessionName = "legacy-transcript"
 	transcripts := fixture.reconciler.SessionManager.store
 	now := time.Now().UTC()
@@ -449,7 +314,7 @@ func TestResolveHarnessV1ExecutionCandidateRejectsControlLessTranscriptAdoption(
 
 func TestResolveHarnessV1ExecutionCandidateFreezesPromptIncludedCutoff(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	const (
 		sessionName   = "gateway-session"
 		currentPrompt = "answer the canonical gateway message"
@@ -491,7 +356,7 @@ func TestResolveHarnessV1ExecutionCandidateFreezesPromptIncludedCutoff(t *testin
 
 func TestResolveHarnessV1ExecutionCandidateRejectsMissingPromptCutoff(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	seedHarnessV1BindingTranscript(t, ctx, fixture, "gateway-session", store.SessionTypeGateway, nil)
 	task := fixture.task.DeepCopy()
 	task.Spec.Prompt = ""
@@ -508,18 +373,7 @@ func TestResolveHarnessV1ExecutionCandidateRejectsMissingPromptCutoff(t *testing
 
 func TestResolveHarnessV1ExecutionCandidateRejectsCopilotPermanently(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
-	policy := &corev1alpha1.AgentExecutionPolicy{}
-	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.policy), policy); err != nil {
-		t.Fatal(err)
-	}
-	policy.Spec.AllowedBuiltInRuntimeTypes = append(
-		policy.Spec.AllowedBuiltInRuntimeTypes,
-		corev1alpha1.AgentRuntimeCopilot,
-	)
-	if err := fixture.reconciler.Update(ctx, policy); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newHarnessV1CandidateFixture(t)
 	agent := fixture.agent.DeepCopy()
 	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCopilot
 
@@ -652,7 +506,7 @@ func TestResolveHarnessV1TargetRequiresSupportedToolMode(t *testing.T) {
 
 func TestResolveHarnessV1ExecutionCandidateFreezesBrokeredToolAuthority(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	const (
 		runtimeName     = "external-brokered-v1"
 		runtimeEndpoint = "https://runtime.example.invalid"
@@ -660,17 +514,6 @@ func TestResolveHarnessV1ExecutionCandidateFreezesBrokeredToolAuthority(t *testi
 		toolName        = "lookup"
 		toolEndpoint    = "https://tools.example.invalid/lookup"
 	)
-
-	policy := &corev1alpha1.AgentExecutionPolicy{}
-	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.policy), policy); err != nil {
-		t.Fatal(err)
-	}
-	policy.Spec.AllowedBrokeredToolClasses = []corev1alpha1.AgentRuntimeBrokeredToolClass{
-		corev1alpha1.AgentRuntimeBrokeredToolClassRead,
-	}
-	if err := fixture.reconciler.Update(ctx, policy); err != nil {
-		t.Fatal(err)
-	}
 
 	runtimeAuth := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -917,7 +760,7 @@ func TestResolveHarnessV1TargetRevalidatesTLSForReadyRuntime(t *testing.T) {
 
 func TestResolveHarnessV1ExecutionCandidateFreezesRuntimeAuthOnly(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	credential := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: fixture.task.Namespace, Name: "runtime-auth-credentials",
@@ -960,7 +803,7 @@ func TestResolveHarnessV1ExecutionCandidateFreezesRuntimeAuthOnly(t *testing.T) 
 
 func TestResolveHarnessV1CredentialRefsAllowlistsRuntimeProviderKeys(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	tests := []struct {
 		name        string
 		runtimeType corev1alpha1.AgentRuntimeType
@@ -1014,7 +857,7 @@ func TestResolveHarnessV1CredentialRefsAllowlistsRuntimeProviderKeys(t *testing.
 
 func TestResolveHarnessV1CredentialRefsRejectsFoundryOnlyForRuntimeAuthOnly(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	tests := []struct {
 		name string
 		data map[string][]byte
@@ -1066,7 +909,7 @@ func TestResolveHarnessV1CredentialRefsRejectsFoundryOnlyForRuntimeAuthOnly(t *t
 
 func TestResolveHarnessV1CredentialRefsRejectsUnrelatedKeys(t *testing.T) {
 	ctx := context.Background()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	for _, prohibitedKey := range []string{"GITHUB_TOKEN", "GIT_TOKEN", "KONTXT_TXN_TOKEN"} {
 		t.Run(prohibitedKey, func(t *testing.T) {
 			secret := &corev1.Secret{
@@ -1102,19 +945,15 @@ func TestHarnessV1SessionLineageDigestExcludesTurnSnapshot(t *testing.T) {
 		Agent: &corev1alpha1.AgentExecutionAgentRef{
 			Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1,
 		},
-		Policy: &corev1alpha1.AgentExecutionPolicyRef{
-			Name: "compatibility", UID: types.UID("policy-uid"), Generation: 1,
-			Digest: "sha256:" + strings.Repeat("a", 64),
-		},
 		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{Digest: "sha256:" + strings.Repeat("b", 64)},
 	}
-	first, err := agentExecutionLineageConfigDigest(binding)
+	first, err := harnessV1SessionLineageConfigDigest(binding)
 	if err != nil {
 		t.Fatal(err)
 	}
 	secondTurn := *binding
 	secondTurn.Snapshot.Digest = "sha256:" + strings.Repeat("c", 64)
-	second, err := agentExecutionLineageConfigDigest(&secondTurn)
+	second, err := harnessV1SessionLineageConfigDigest(&secondTurn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1123,7 +962,7 @@ func TestHarnessV1SessionLineageDigestExcludesTurnSnapshot(t *testing.T) {
 	}
 	otherRuntime := secondTurn
 	otherRuntime.RuntimeType = corev1alpha1.AgentRuntimeClaude
-	third, err := agentExecutionLineageConfigDigest(&otherRuntime)
+	third, err := harnessV1SessionLineageConfigDigest(&otherRuntime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1169,89 +1008,12 @@ func TestValidateHarnessV1RuntimeAuthOnlyRejectsUnsupportedRoute(t *testing.T) {
 	}
 }
 
-func TestLoadVerifiedHarnessV1ExecutionForRecoveryControlRevision(t *testing.T) {
-	tests := []struct {
-		name          string
-		mutateControl func(*corev1alpha1.AgentExecutionControl, *corev1alpha1.AgentExecutionBackendControlRef)
-		wantError     bool
-	}{
-		{
-			name: "same enabled generation and revision",
-			mutateControl: func(
-				_ *corev1alpha1.AgentExecutionControl,
-				_ *corev1alpha1.AgentExecutionBackendControlRef,
-			) {
-			},
-		},
-		{
-			name: "closing transition",
-			mutateControl: func(
-				control *corev1alpha1.AgentExecutionControl,
-				ref *corev1alpha1.AgentExecutionBackendControlRef,
-			) {
-				control.Generation = ref.Generation + 1
-				control.Spec.Backends.V1.DesiredMode = corev1alpha1.AgentExecutionModeDisabled
-				control.Status.ObservedGeneration = ref.Generation
-				control.Status.Backends.V1 = corev1alpha1.AgentExecutionBackendStatus{
-					EffectiveMode: corev1alpha1.AgentExecutionEffectiveModeClosing,
-					ModeRevision:  ref.ModeRevision + 1,
-				}
-			},
-		},
-		{
-			name: "regressed mode revision",
-			mutateControl: func(
-				control *corev1alpha1.AgentExecutionControl,
-				ref *corev1alpha1.AgentExecutionBackendControlRef,
-			) {
-				control.Status.Backends.V1.ModeRevision = ref.ModeRevision - 1
-			},
-			wantError: true,
-		},
-		{
-			name: "observed generation below binding generation",
-			mutateControl: func(
-				control *corev1alpha1.AgentExecutionControl,
-				ref *corev1alpha1.AgentExecutionBackendControlRef,
-			) {
-				control.Status.ObservedGeneration = ref.Generation - 1
-			},
-			wantError: true,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			ctx := context.Background()
-			reconciler, task := newHarnessV1RecoveryBindingFixture(t, ctx)
-			binding := task.Status.AgentExecutionBinding
-			if binding == nil || binding.BackendControl == nil {
-				t.Fatal("fixture did not persist a harness v1 backend control binding")
-			}
-
-			updateHarnessV1RecoveryControl(t, ctx, reconciler, func(control *corev1alpha1.AgentExecutionControl) {
-				test.mutateControl(control, binding.BackendControl)
-			})
-			_, err := reconciler.loadVerifiedHarnessV1ExecutionForRecovery(
-				ctx, task, binding, false,
-			)
-			if test.wantError && err == nil {
-				t.Fatal("recovery verification unexpectedly accepted regressed backend control")
-			}
-			if !test.wantError && err != nil {
-				t.Fatalf("recovery verification rejected admitted work: %v", err)
-			}
-		})
-	}
-}
-
 type harnessV1CandidateFixture struct {
 	reconciler *TaskReconciler
 	controls   store.DurableControlStore
 	fence      store.ControllerEpochFence
 	task       *corev1alpha1.Task
 	agent      *corev1alpha1.Agent
-	policy     *corev1alpha1.AgentExecutionPolicy
 }
 
 func seedHarnessV1BindingTranscript(
@@ -1297,18 +1059,9 @@ func seedHarnessV1BindingTranscript(
 
 func newHarnessV1CandidateFixture(
 	t *testing.T,
-	ctx context.Context,
 ) *harnessV1CandidateFixture {
 	t.Helper()
 	const authSecretKey = "harness-auth"
-	control := bindingTestControl()
-	control.Generation = 3
-	control.Spec.Backends.V1.DesiredMode = corev1alpha1.AgentExecutionModeEnabled
-	control.Status.ObservedGeneration = control.Generation
-	control.Status.Backends.V1 = corev1alpha1.AgentExecutionBackendStatus{
-		EffectiveMode: corev1alpha1.AgentExecutionEffectiveModeEnabled,
-		ModeRevision:  5,
-	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default", Name: "harness-v1-recovery", UID: types.UID("harness-v1-recovery-task-uid"), Generation: 1,
@@ -1322,24 +1075,6 @@ func newHarnessV1CandidateFixture(
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: task.Namespace, UID: types.UID("harness-v1-recovery-namespace-uid"),
 	}}
-	policy := &corev1alpha1.AgentExecutionPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: task.Namespace, Name: defaultHarnessV1PolicyName,
-			UID: types.UID("harness-v1-recovery-policy-uid"), Generation: 1,
-		},
-		Spec: corev1alpha1.AgentExecutionPolicySpec{
-			AllowNewV1Bindings:         true,
-			AllowedBuiltInRuntimeTypes: []corev1alpha1.AgentRuntimeType{corev1alpha1.AgentRuntimeCodex},
-			RetryEligibility:           corev1alpha1.AgentExecutionRetryNone,
-			ProhibitedFields: []corev1alpha1.AgentExecutionProhibitedField{
-				corev1alpha1.AgentExecutionProhibitWorkspaceCredentials,
-				corev1alpha1.AgentExecutionProhibitForgeCredentials,
-				corev1alpha1.AgentExecutionProhibitDirectPublication,
-				corev1alpha1.AgentExecutionProhibitTransactionTokens,
-			},
-			NetworkIsolationProfile: corev1alpha1.AgentExecutionNetworkIsolationDefaultDeny,
-		},
-	}
 	authSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: task.Namespace, Name: "harness-v1-auth",
@@ -1361,11 +1096,8 @@ func newHarnessV1CandidateFixture(
 		},
 	}
 
-	reconciler, durable := newBindingTestReconciler(t, control, task, namespace, policy, authSecret)
+	reconciler, durable := newBindingTestReconciler(t, task, namespace, authSecret)
 	fence := seedHarnessV1AttemptEpoch(t, durable)
-	configureAgentExecutionBindingTestGate(
-		t, ctx, durable, control, store.AgentExecutionBackendV1,
-	)
 	reconciler.HarnessV1Endpoint = "http://harness-v1.default.svc:8080"
 	reconciler.HarnessV1AuthSecretNamespace = authSecret.Namespace
 	reconciler.HarnessV1AuthSecretName = authSecret.Name
@@ -1378,7 +1110,6 @@ func newHarnessV1CandidateFixture(
 		fence:      fence,
 		task:       task,
 		agent:      agent,
-		policy:     policy,
 	}
 }
 
@@ -1387,7 +1118,7 @@ func newHarnessV1RecoveryBindingFixture(
 	ctx context.Context,
 ) (*TaskReconciler, *corev1alpha1.Task) {
 	t.Helper()
-	fixture := newHarnessV1CandidateFixture(t, ctx)
+	fixture := newHarnessV1CandidateFixture(t)
 	if result, err, handled := fixture.reconciler.ensureHarnessV1ExecutionBinding(
 		ctx, fixture.task.DeepCopy(), fixture.agent,
 	); err != nil || handled {
@@ -1398,35 +1129,4 @@ func newHarnessV1RecoveryBindingFixture(
 		t.Fatal(err)
 	}
 	return fixture.reconciler, bound
-}
-
-func updateHarnessV1RecoveryControl(
-	t *testing.T,
-	ctx context.Context,
-	reconciler *TaskReconciler,
-	mutate func(*corev1alpha1.AgentExecutionControl),
-) {
-	t.Helper()
-	current := &corev1alpha1.AgentExecutionControl{}
-	key := client.ObjectKey{
-		Namespace: corev1alpha1.AgentExecutionControlNamespace,
-		Name:      corev1alpha1.AgentExecutionControlName,
-	}
-	if err := reconciler.Get(ctx, key, current); err != nil {
-		t.Fatal(err)
-	}
-	desired := current.DeepCopy()
-	mutate(desired)
-	desiredStatus := desired.Status
-	desired.Status = current.Status
-	if err := reconciler.Update(ctx, desired); err != nil {
-		t.Fatal(err)
-	}
-	if err := reconciler.Get(ctx, key, current); err != nil {
-		t.Fatal(err)
-	}
-	current.Status = desiredStatus
-	if err := reconciler.Status().Update(ctx, current); err != nil {
-		t.Fatal(err)
-	}
 }

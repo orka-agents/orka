@@ -8,8 +8,6 @@ package api
 
 import (
 	"context"
-	"crypto/tls"
-	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -35,60 +33,38 @@ import (
 
 var log = logf.Log.WithName("api-server")
 
-// AgentExecutionClassificationGate authorizes mutating API traffic only while
-// the coexistence classification inventory remains sealed.
-type AgentExecutionClassificationGate interface {
-	Check(context.Context) error
-}
-
-// HarnessV1RetirementService closes controller-side v1 execution and proves
-// its durable attempt inventory empty before wrapper retirement.
-type HarnessV1RetirementService interface {
-	Retire(context.Context) error
-}
-
-const harnessV1RetirementPath = "/internal/v1/harness-v1/retirement"
-
 // ServerConfig holds configuration for the API server
 type ServerConfig struct {
-	Port                             int
-	MetricsPort                      int
-	WatchNamespace                   string
-	EnforceNamespaceIsolation        bool
-	OIDC                             OIDCConfig
-	ContextTokens                    ContextTokenConfig
-	ContextTokenAuthorization        ContextTokenAuthorizationConfig
-	Chat                             ChatConfig
-	ResultStore                      store.ResultStore
-	SessionStore                     store.SessionStore
-	PlanStore                        store.PlanStore
-	MessageStore                     store.MessageStore
-	ArtifactStore                    store.ArtifactStore
-	ArtifactReservations             artifactcap.CapabilityReservationRecorder
-	MemoryStore                      store.MemoryStore
-	MemoryProposalStore              store.MemoryProposalStore
-	SecurityStore                    store.SecurityStore
-	RepositoryMonitorStore           store.RepositoryMonitorStore
-	ExecutionEventStore              store.ExecutionEventStore
-	GatewayEventStore                store.GatewayEventStore
-	GatewayDeliveryStore             store.GatewayDeliveryStore
-	GatewayService                   *gatewayruntime.Service
-	HealthChecker                    store.HealthChecker
-	Clientset                        kubernetes.Interface
-	APIReader                        client.Reader
-	AgentExecutionClassificationGate AgentExecutionClassificationGate
-	HarnessV1Retirement              HarnessV1RetirementService
-	HarnessV1RetirementUsername      string
-	HarnessV1RetirementPort          int
-	HarnessV1RetirementTLSCertFile   string
-	HarnessV1RetirementTLSKeyFile    string
-	HarnessV1RetirementTokenAudience string
+	Port                      int
+	MetricsPort               int
+	WatchNamespace            string
+	EnforceNamespaceIsolation bool
+	OIDC                      OIDCConfig
+	ContextTokens             ContextTokenConfig
+	ContextTokenAuthorization ContextTokenAuthorizationConfig
+	Chat                      ChatConfig
+	ResultStore               store.ResultStore
+	SessionStore              store.SessionStore
+	PlanStore                 store.PlanStore
+	MessageStore              store.MessageStore
+	ArtifactStore             store.ArtifactStore
+	ArtifactReservations      artifactcap.CapabilityReservationRecorder
+	MemoryStore               store.MemoryStore
+	MemoryProposalStore       store.MemoryProposalStore
+	SecurityStore             store.SecurityStore
+	RepositoryMonitorStore    store.RepositoryMonitorStore
+	ExecutionEventStore       store.ExecutionEventStore
+	GatewayEventStore         store.GatewayEventStore
+	GatewayDeliveryStore      store.GatewayDeliveryStore
+	GatewayService            *gatewayruntime.Service
+	HealthChecker             store.HealthChecker
+	Clientset                 kubernetes.Interface
+	APIReader                 client.Reader
 }
 
 // Server is the REST API server
 type Server struct {
 	app                    *fiber.App
-	retirementApp          *fiber.App
 	client                 client.Client
 	config                 ServerConfig
 	sessionManager         *controller.SessionManager
@@ -174,8 +150,6 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
-	server.setupHarnessV1RetirementServer()
-
 	return server
 }
 
@@ -228,33 +202,6 @@ func (s *Server) setupMiddleware() {
 	// Metrics middleware
 	s.app.Use(NewMetricsMiddleware())
 
-	// Mutating API routes may write SQLite or create new execution demand. Keep
-	// them closed until the coexistence classification inventory is sealed. This
-	// is global so routes registered after NewServer (for example the ACP MCP
-	// broker) cannot accidentally bypass the gate.
-	s.app.Use(s.requireAgentExecutionClassification)
-}
-
-func (s *Server) requireAgentExecutionClassification(c fiber.Ctx) error {
-	if requestMethodIsReadOnly(c.Method()) || c.Path() == harnessV1RetirementPath ||
-		s.config.AgentExecutionClassificationGate == nil {
-		return c.Next()
-	}
-	if err := s.config.AgentExecutionClassificationGate.Check(c.Context()); err != nil {
-		log.Error(err, "rejecting mutating API request while agent execution classification is not sealed",
-			"method", c.Method(), "path", c.Path())
-		return fiber.NewError(fiber.StatusServiceUnavailable, "agent execution mutations are unavailable")
-	}
-	return c.Next()
-}
-
-func requestMethodIsReadOnly(method string) bool {
-	switch method {
-	case fiber.MethodGet, fiber.MethodHead, fiber.MethodOptions:
-		return true
-	default:
-		return false
-	}
 }
 
 func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
@@ -521,25 +468,6 @@ func (s *Server) setupRoutes() {
 	}
 }
 
-func (s *Server) setupHarnessV1RetirementServer() {
-	if s.config.HarnessV1Retirement == nil {
-		return
-	}
-	app := fiber.New(fiber.Config{
-		AppName:      "Orka Harness V1 Retirement API",
-		BodyLimit:    1024,
-		ErrorHandler: customErrorHandler,
-	})
-	app.Use(recover.New())
-	app.Use(requestid.New())
-	app.Use(NewTracingMiddleware())
-	app.Use(NewAuthMiddleware(s.client, AuthConfig{
-		TokenReviewAudiences: []string{s.config.HarnessV1RetirementTokenAudience},
-	}))
-	app.Post(harnessV1RetirementPath, s.handleHarnessV1Retirement)
-	s.retirementApp = app
-}
-
 func (s *Server) hasInternalStores() bool {
 	return s.ResultStore != nil ||
 		s.SessionStore != nil ||
@@ -557,35 +485,17 @@ func (s *Server) Start(ctx context.Context) error {
 	log.Info("starting API server", "address", addr)
 
 	// Start server in a goroutine
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 1)
 	go func() {
 		if err := s.app.Listen(addr); err != nil {
 			errCh <- err
 		}
 	}()
-	if s.retirementApp != nil {
-		retirementAddr := fmt.Sprintf(":%d", s.config.HarnessV1RetirementPort)
-		log.Info("starting harness v1 retirement API", "address", retirementAddr)
-		go func() {
-			if err := s.retirementApp.Listen(retirementAddr, fiber.ListenConfig{
-				CertFile:      s.config.HarnessV1RetirementTLSCertFile,
-				CertKeyFile:   s.config.HarnessV1RetirementTLSKeyFile,
-				TLSMinVersion: tls.VersionTLS13,
-			}); err != nil {
-				errCh <- err
-			}
-		}()
-	}
-
 	// Wait for shutdown signal or error
 	select {
 	case <-ctx.Done():
 		log.Info("shutting down API server")
-		var retirementErr error
-		if s.retirementApp != nil {
-			retirementErr = s.retirementApp.Shutdown()
-		}
-		return errors.Join(s.app.Shutdown(), retirementErr)
+		return s.app.Shutdown()
 	case err := <-errCh:
 		return err
 	}

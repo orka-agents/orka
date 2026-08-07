@@ -9,13 +9,25 @@ packages all 26 canonical Orka CRDs under `crds/`.
 A normal install creates the CRDs before the templated release resources:
 
 ```bash
+kubectl create namespace orka-system
+kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
+
 helm install orka charts/orka \
   --namespace orka-system \
-  --create-namespace \
+  --set controller.mode=harness-v2 \
+  --set controller.watchNamespace=orka-system \
   --wait
 ```
 
-The provider proxy is disabled by default. Before enabling `providerProxy.enabled=true` (required when `controller.acpRuntime.enabled=true`), install Vekil in `vekil-system`; the chart then installs the exact cross-namespace ingress policy there. The chart-managed provider proxy itself always runs in the Helm release namespace. Leave `controller.acpRuntime.providerProxyNamespace` empty or set it to that release namespace. The only supported upstream is `http://vekil.vekil-system.svc:1337` (an optional trailing slash is normalized); alternate hosts, namespaces, and ports are rejected because the chart does not create matching NetworkPolicies.
+The provider proxy is disabled by default. Before enabling it for a
+`harness-v2` release, install Vekil in `vekil-system`; the chart then installs
+the exact cross-namespace ingress policy there. The chart-managed provider
+proxy itself always runs in the Helm release namespace. Leave
+`controller.acpRuntime.providerProxyNamespace` empty or set it to that release
+namespace. The only supported upstream is
+`http://vekil.vekil-system.svc:1337` (an optional trailing slash is normalized);
+alternate hosts, namespaces, and ports are rejected because the chart does not
+create matching NetworkPolicies.
 
 `service.port` is the controller Service port used by controller and Publisher Service URLs. `controller.apiPort` is only the controller container listener and Service target port.
 
@@ -32,13 +44,42 @@ CRDs are cluster-scoped and shared by every Orka release. Use `--skip-crds`
 only when a designated platform or GitOps workflow already manages compatible
 Orka CRDs for the cluster.
 
+## Static harness mode
+
+Every release selects exactly one controller mode: `harness-v1` or
+`harness-v2`. `dual`, `auto`, and `harness-v1-drain` are rejected. Each release
+also requires a distinct, non-empty `controller.watchNamespace` labeled with
+the matching mode:
+
+```bash
+kubectl create namespace orka-v2-system
+kubectl label namespace orka-v2-system orka.ai/controller-mode=harness-v2
+
+helm install orka-v2 charts/orka \
+  --namespace orka-v2-system \
+  --set controller.mode=harness-v2 \
+  --set controller.watchNamespace=orka-v2-system
+```
+
+The mode is an installation identity, not an upgrade toggle. Never change a
+release from v1 to v2 in place or reuse its PVC, SQLite store, ledger, Session,
+or Task identities under the other mode.
+
+A v1 and v2 release may share a cluster only when their release/watch
+namespaces, Services, ServiceAccounts/RBAC, Leases, stores, Secrets, and
+data-plane resources are disjoint. The chart intentionally requires
+`controller.watchNamespace` to equal the Helm release namespace. The v2
+release must also have its own runtime namespace. Install the shared compatible
+CRDs and common admission resources through one designated owner; install the
+second release with `--skip-crds`.
+
 Controller Services, worker ServiceAccounts, and worker RBAC are scoped to the
 Helm release name. Run only one Orka controller release per namespace. If a
 cluster has multiple releases, every release (including the first) must use a
 cluster-unique release name or `fullnameOverride`, a separate controller
-namespace, and a distinct, non-empty `controller.watchNamespace`. Do not mix a
-cluster-wide watcher with namespace-scoped releases: gateway admission policies
-would overlap. All releases share the same cluster-scoped CRDs.
+namespace, and a distinct, non-empty `controller.watchNamespace`. Cluster-wide
+watchers are rejected. All releases share the same cluster-scoped CRDs, and
+cluster-scoped gateway/workspace ownership belongs only to the v2 release.
 
 ## Upgrade
 

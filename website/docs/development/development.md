@@ -268,4 +268,7 @@ HTTP/2 is disabled for metrics and webhook servers due to CVEs ([GHSA-qppj-fm5r-
 
 ### Leader Election
 
-Leader election ID is hardcoded as `03b49a10.orka.ai`. Multiple controller deployments in the same cluster will coordinate via this ID.
+Leader election ID is hardcoded as `03b49a10.orka.ai`, and its Lease is stored
+in the controller's required non-empty watch namespace. Static `harness-v1` and
+`harness-v2` installations use different watched namespaces and therefore
+different Leases; they do not coordinate ownership of one Task population.

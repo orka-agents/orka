@@ -42,9 +42,6 @@ const (
 
 //nolint:gocyclo // ACP queueing keeps durable planning, recovery, and binding gates auditable together.
 func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1alpha1.Task, _ *corev1alpha1.Agent) (ctrl.Result, error) {
-	if err := r.checkAgentExecutionClassification(ctx); err != nil {
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	}
 	if task == nil || task.Status.AgentExecutionBinding == nil {
 		return ctrl.Result{}, errors.New("immutable v2 execution binding is required before ACP queueing")
 	}

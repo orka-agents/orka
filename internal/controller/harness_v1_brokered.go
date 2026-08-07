@@ -75,11 +75,10 @@ func resolveHarnessV1ToolGovernance(
 	reader client.Reader,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
-	policy *corev1alpha1.AgentExecutionPolicy,
 	target resolvedHarnessV1Target,
 ) (resolvedHarnessV1ToolGovernance, error) {
-	if task == nil || agent == nil || agent.Spec.Runtime == nil || policy == nil {
-		return resolvedHarnessV1ToolGovernance{}, errors.New("harness v1 tool governance requires Task, Agent, runtime, and policy")
+	if task == nil || agent == nil || agent.Spec.Runtime == nil {
+		return resolvedHarnessV1ToolGovernance{}, errors.New("harness v1 tool governance requires Task, Agent, and runtime")
 	}
 	supportsObserved := slices.Contains(
 		target.toolExecutionModes,
@@ -91,21 +90,20 @@ func resolveHarnessV1ToolGovernance(
 	) && target.supportsContinuation
 	brokeredToolsRequested := task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.AllowedTools) > 0
 
-	if supportsBrokered && (brokeredToolsRequested || !supportsObserved ||
-		target.runtimeRef != nil && !policy.Spec.AllowTrustedObservedModeRuntimes) {
-		return resolveHarnessV1BrokeredTools(ctx, reader, task, agent, policy, target)
+	if supportsBrokered && (brokeredToolsRequested || !supportsObserved || target.runtimeRef != nil) {
+		return resolveHarnessV1BrokeredTools(ctx, reader, task, agent, target)
 	}
 	if !supportsObserved {
 		if supportsBrokered {
-			return resolveHarnessV1BrokeredTools(ctx, reader, task, agent, policy, target)
+			return resolveHarnessV1BrokeredTools(ctx, reader, task, agent, target)
 		}
 		return resolvedHarnessV1ToolGovernance{}, permanentHarnessV1Candidate(
 			errors.New("harness v1 runtime does not expose an executable tool mode"),
 		)
 	}
-	if target.runtimeRef != nil && !policy.Spec.AllowTrustedObservedModeRuntimes {
+	if target.runtimeRef != nil {
 		return resolvedHarnessV1ToolGovernance{}, permanentHarnessV1Candidate(
-			errors.New("harness v1 policy does not allow trusted observed-mode external runtimes"),
+			errors.New("harness v1 external runtimes must use brokered tool execution"),
 		)
 	}
 	if err := validateHarnessV1ObservedToolPolicy(task, agent, target); err != nil {
@@ -154,7 +152,6 @@ func resolveHarnessV1BrokeredTools(
 	reader client.Reader,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
-	policy *corev1alpha1.AgentExecutionPolicy,
 	target resolvedHarnessV1Target,
 ) (resolvedHarnessV1ToolGovernance, error) {
 	if target.runtimeRef == nil || target.backend != corev1alpha1.AgentExecutionBackendExternalEndpoint {
@@ -214,9 +211,9 @@ func resolveHarnessV1BrokeredTools(
 				fmt.Errorf("brokered harness v1 Tool %q has unsupported class %q", name, class),
 			)
 		}
-		if !slices.Contains(policy.Spec.AllowedBrokeredToolClasses, class) {
+		if class != corev1alpha1.AgentRuntimeBrokeredToolClassRead {
 			return resolvedHarnessV1ToolGovernance{}, permanentHarnessV1Candidate(
-				fmt.Errorf("harness v1 policy does not allow brokered tool class %q", class),
+				fmt.Errorf("harness v1 static safety profile does not allow brokered tool class %q", class),
 			)
 		}
 		if !slices.Contains(target.brokeredToolClasses, class) {

@@ -2,6 +2,10 @@
 
 # Controller configuration
 controller:
+  # Required immutable execution contract for this installation. Install v1
+  # and v2 as separate releases; one release never serves both contracts.
+  mode: ""
+
   # Number of controller replicas
   replicas: 1
 
@@ -21,7 +25,8 @@ controller:
       cpu: 100m
       memory: 256Mi
 
-  # Watch namespace (empty for cluster-scoped)
+  # Required exclusive tenant namespace. Label it with
+  # orka.ai/controller-mode matching controller.mode before startup.
   watchNamespace: ""
 
   # API server port
@@ -38,9 +43,6 @@ controller:
 
   # Log level (debug, info, warn, error)
   logLevel: info
-
-  # Enforce namespace isolation (restrict users to their SA namespace)
-  enforceNamespaceIsolation: true
 
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
@@ -64,22 +66,9 @@ controller:
     # Reference-aware GC scan cadence.
     retentionInterval: 1h
 
-  # Durable singleton backend-mode authority. Empty installations still need
-  # this object so ownership readiness and later mode transitions fail closed.
-  agentExecutionControl:
-    create: true
-    # The ownership namespace is fixed at orka-system. Leave this enabled for
-    # the chart to create it, or set false only when the operator creates that
-    # namespace in an earlier bootstrap wave. The chart retains a namespace it
-    # creates during uninstall so shared ownership state is not deleted.
-    createNamespace: true
-    v1Mode: disabled
-    v2Mode: enabled
-
   # Managed ACP core RuntimePools for built-in agent Tasks.
   acpRuntime:
-    # The supported agent execution path is ACP-only; there is no legacy fallback.
-    enabled: false
+    # Used only when controller.mode is harness-v2; there is no v1 fallback.
     namespace: orka-runtimes
     # The chart-managed provider proxy always runs in the Helm release namespace.
     # Leave empty or set exactly to .Release.Namespace; other values are rejected.
@@ -230,46 +219,20 @@ controller:
       childTokenTTL: ""
       toolTokenTTL: ""
 
-# Stateless fail-closed admission plane. Deploy and verify the replicas first,
-# then enable the protected webhook configurations in a separate Helm upgrade.
-admission:
-  enabled: false
-  replicas: 2
-  identity:
-    # Empty values resolve to the chart controller ServiceAccount identity.
-    # Add only reviewed one-time migration identities to classificationUsernames.
-    controllerUsername: ""
-    adjudicationControllerUsername: ""
-    classificationUsernames: []
-    # Groups allowed to author AgentExecutionControl/Policy specs and create
-    # adjudications. Keep this list narrow and backed by cluster authentication.
-    adminGroups:
-      - system:masters
+# Fail-closed admission served by this release's controller Service. The
+# certificate must authenticate <release>-orka.<namespace>.svc.
+webhooks:
   tls:
-    # Required when enabled. The chart never generates admission certificates.
+    # Required. The chart never generates webhook certificates.
     existingSecret: ""
     certKey: tls.crt
     privateKeyKey: tls.key
-  webhooks:
-    # Enable only after the Service has at least two ready endpoints and an
-    # AdmissionReview smoke test succeeds. All installed webhooks fail closed.
-    enabled: false
-    # Base64-encoded PEM CA bundle. Leave empty when an injector annotation is
-    # configured below.
-    caBundle: ""
-    # For example:
-    # cert-manager.io/inject-ca-from-secret: orka-system/orka-admission-tls
-    caInjectionAnnotations: {}
-    timeoutSeconds: 10
-  resources:
-    requests:
-      cpu: 50m
-      memory: 64Mi
-      ephemeral-storage: 32Mi
-    limits:
-      cpu: 500m
-      memory: 256Mi
-      ephemeral-storage: 128Mi
+  # Base64-encoded PEM CA bundle. Leave empty when an injector annotation is
+  # configured below.
+  caBundle: ""
+  # For example: cert-manager.io/inject-ca-from-secret: orka-v2/orka-webhook-tls
+  caInjectionAnnotations: {}
+  timeoutSeconds: 10
 
 # Clean-room Workspace/Publisher service.
 publisher:
@@ -393,34 +356,12 @@ providerProxy:
       memory: 128Mi
       ephemeral-storage: 128Mi
 
-# Time-bounded orka.harness.v1 compatibility data plane. This is disabled by
-# default and is never an automatic fallback from ACP v2.
+# orka.harness.v1 data plane configuration. It is rendered only when
+# controller.mode is harness-v1 and is never an ACP fallback.
 harnessV1:
-  enabled: false
-  policy:
-    # Set create=false to use a separately administered policy with this name.
-    create: true
-    name: compatibility
-    # Empty places the policy in controller.watchNamespace when set, otherwise
-    # in the Helm release namespace. Create one policy per admitted trust domain.
-    namespace: ""
-    # Cleanup-only is the fail-closed default. Enabling the wrapper does not
-    # by itself authorize new v1 bindings; operators must opt in explicitly.
-    allowNewV1Bindings: false
-    allowedBuiltInRuntimeTypes:
-      - codex
-      - claude
-    allowTrustedObservedModeRuntimes: false
-    retryEligibility: none
-    networkIsolationProfile: default-deny
   dispatch:
     interval: 1s
     workers: 1
-  retirement:
-    # The controller serves the one-way retirement barrier on a dedicated TLS
-    # listener and accepts only projected tokens with this audience.
-    port: 8443
-    tokenAudience: orka-harness-v1-retirement
   upgradeDrain:
     # Before an upgrade, rollback, or deletion mutates an existing wrapper, a
     # Helm hook durably closes admission and proves that no unsettled turns
@@ -439,7 +380,8 @@ harnessV1:
   image:
     repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
     tag: "0.1.1"
-    # Required when enabled. Tags are never accepted for a running wrapper.
+    # Required when controller.mode is harness-v1. Tags are never accepted for
+    # a running wrapper.
     digest: ""
     pullPolicy: IfNotPresent
   auth:
@@ -447,10 +389,8 @@ harnessV1:
     # accepted through Helm values or emitted into rendered release manifests.
     # The Secret must also contain tls.crt, tls.key, and ca.crt. Its serving
     # certificate must authenticate both release-scoped Service DNS names:
-    # <release>-orka-agent-harness-wrapper.<namespace>.svc and
-    # <release>-orka.<namespace>.svc. The controller uses the second identity
-    # only on the dedicated retirement listener.
-    # The Secret source and key are immutable while an enabled wrapper
+    # <release>-orka-agent-harness-wrapper.<namespace>.svc.
+    # The Secret source and key are immutable while a harness-v1 wrapper
     # Deployment exists because controller attempts pin its resourceVersion.
     existingSecret: ""
     tokenKey: token
@@ -577,6 +517,7 @@ client:
   create: true
   # Name of the client service account
   name: orka-client
-  # Namespace for the client service account. Empty defaults to controller.watchNamespace
-  # when namespace isolation is enforced and watchNamespace is set, otherwise the release namespace.
+  # Namespace for the client service account. Empty defaults to
+  # controller.watchNamespace. A different namespace is not supported by an
+  # isolated installation.
   namespace: ""

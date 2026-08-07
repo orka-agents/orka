@@ -15,7 +15,7 @@ Upgrade guidance: helm show readme <the same chart reference or archive>
 
 ⚠️  STORAGE WARNING: SQLite store is using ephemeral storage (emptyDir).
    Task results and session data will be LOST on pod restart.
-{{- if .Values.controller.gateway.enabled }}
+{{- if and (eq .Values.controller.mode "harness-v2") .Values.controller.gateway.enabled }}
    Gateway acknowledgements, deduplication, and queued deliveries are also NOT durable.
 {{- end }}
    For production use, enable persistent storage:

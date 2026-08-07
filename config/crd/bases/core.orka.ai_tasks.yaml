@@ -2163,45 +2163,6 @@ spec:
                     - runtime-pool
                     - external-endpoint
                     type: string
-                  backendControl:
-                    description: |-
-                      BackendControl is absent only on legacy-adopted and legacy-cleanup-only
-                      bindings created by the sealed migration inventory before durable backend
-                      modes existed for the workload.
-                    properties:
-                      admittedMode:
-                        description: AdmittedMode is the effective backend mode observed
-                          at admission.
-                        enum:
-                        - enabled
-                        - closing
-                        - drain-only
-                        - disabled
-                        type: string
-                      generation:
-                        format: int64
-                        minimum: 1
-                        type: integer
-                      modeRevision:
-                        format: int64
-                        minimum: 1
-                        type: integer
-                      name:
-                        minLength: 1
-                        type: string
-                      uid:
-                        description: |-
-                          UID is a type that holds unique ID values, including UUIDs.  Because we
-                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                          intent and helps make sure that UIDs and names do not get conflated.
-                        type: string
-                    required:
-                    - admittedMode
-                    - generation
-                    - modeRevision
-                    - name
-                    - uid
-                    type: object
                   bindingDigest:
                     description: |-
                       BindingDigest is the canonical digest of this binding; every durable
@@ -2219,56 +2180,6 @@ spec:
                     - orka.harness.v1
                     - orka.harness.v2
                     type: string
-                  migrationInventoryID:
-                    description: |-
-                      MigrationInventoryID binds legacy cleanup-only authority to the exact
-                      sealed classification inventory that admitted it. It is absent from all
-                      executable and ordinary legacy-adopted bindings.
-                    maxLength: 253
-                    minLength: 1
-                    type: string
-                  mode:
-                    description: AgentExecutionBindingMode bounds what the binding
-                      authorizes.
-                    enum:
-                    - execute
-                    - cleanup-only
-                    type: string
-                  policy:
-                    description: |-
-                      Policy freezes the evaluated v1 compatibility policy. Required for
-                      newly-bound v1 bindings; absent for v2 bindings.
-                    properties:
-                      digest:
-                        pattern: ^sha256:[a-f0-9]{64}$
-                        type: string
-                      generation:
-                        format: int64
-                        minimum: 1
-                        type: integer
-                      name:
-                        minLength: 1
-                        type: string
-                      uid:
-                        description: |-
-                          UID is a type that holds unique ID values, including UUIDs.  Because we
-                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                          intent and helps make sure that UIDs and names do not get conflated.
-                        type: string
-                    required:
-                    - digest
-                    - generation
-                    - name
-                    - uid
-                    type: object
-                  provenance:
-                    description: AgentExecutionBindingProvenance records how the binding
-                      was established.
-                    enum:
-                    - newly-bound
-                    - legacy-adopted
-                    - legacy-cleanup-only
-                    type: string
                   runtimeProfileDigest:
                     pattern: ^sha256:[a-f0-9]{64}$
                     type: string
@@ -2278,10 +2189,8 @@ spec:
                     format: int32
                     type: integer
                   runtimeRef:
-                    description: |-
-                      AgentExecutionRuntimeRef pins a referenced AgentRuntime identity. UID and
-                      generation are recorded only for legacy cleanup-only bindings whose live
-                      object may no longer exist.
+                    description: AgentExecutionRuntimeRef pins a referenced AgentRuntime
+                      identity.
                     properties:
                       generation:
                         format: int64
@@ -2297,7 +2206,9 @@ spec:
                           intent and helps make sure that UIDs and names do not get conflated.
                         type: string
                     required:
+                    - generation
                     - name
+                    - uid
                     type: object
                   runtimeType:
                     description: RuntimeType is the built-in runtime type, empty for
@@ -2366,8 +2277,6 @@ spec:
                 - bindingDigest
                 - boundAt
                 - contractVersion
-                - mode
-                - provenance
                 - schemaVersion
                 - snapshot
                 - task
@@ -2380,139 +2289,6 @@ spec:
                 - message: the runtime-pool backend requires an orka.harness.v2 binding
                   rule: self.backend != 'runtime-pool' || self.contractVersion ==
                     'orka.harness.v2'
-                - message: legacy-cleanup-only provenance requires cleanup-only mode
-                  rule: self.provenance != 'legacy-cleanup-only' || self.mode == 'cleanup-only'
-                - message: migrationInventoryID is required only for legacy-cleanup-only
-                    provenance
-                  rule: 'self.provenance == ''legacy-cleanup-only'' ? has(self.migrationInventoryID)
-                    : !has(self.migrationInventoryID)'
-              agentExecutionNoExecution:
-                description: |-
-                  AgentExecutionNoExecution records authoritative proof that this Task has
-                  no route-specific executor state; common cleanup only.
-                properties:
-                  evidenceDigest:
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  migrationInventoryID:
-                    description: |-
-                      MigrationInventoryID names the sealed inventory that proved the absence
-                      of route-specific state.
-                    maxLength: 253
-                    minLength: 1
-                    type: string
-                  recordedAt:
-                    format: date-time
-                    type: string
-                  schemaVersion:
-                    enum:
-                    - 1
-                    format: int32
-                    type: integer
-                  state:
-                    description: AgentExecutionNoExecutionState is the proven no-route-state
-                      disposition.
-                    enum:
-                    - UnboundNoExecution
-                    type: string
-                required:
-                - evidenceDigest
-                - migrationInventoryID
-                - recordedAt
-                - schemaVersion
-                - state
-                type: object
-              agentExecutionQuarantine:
-                description: |-
-                  AgentExecutionQuarantine records immutable mixed or unprovable route
-                  evidence; the Task admits no new execution until adjudicated.
-                properties:
-                  migrationInventoryID:
-                    maxLength: 253
-                    minLength: 1
-                    type: string
-                  reason:
-                    description: AgentExecutionQuarantineReason is a bounded quarantine
-                      reason code.
-                    enum:
-                    - MixedV1V2Evidence
-                    - AmbiguousLegacyEvidence
-                    - UnclassifiedAgent
-                    - UnprovableSessionLineage
-                    - PostCutoffBinding
-                    - MissingBindingReservation
-                    - StaleModeRevision
-                    type: string
-                  recordedAt:
-                    format: date-time
-                    type: string
-                  schemaVersion:
-                    enum:
-                    - 1
-                    format: int32
-                    type: integer
-                  v1EvidenceDigest:
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  v2EvidenceDigest:
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                required:
-                - migrationInventoryID
-                - reason
-                - recordedAt
-                - schemaVersion
-                type: object
-              agentExecutionResolutionRef:
-                description: |-
-                  AgentExecutionResolutionRef is the immutable reference to the Applied
-                  adjudication that resolved this Task's quarantine or blocked state.
-                properties:
-                  action:
-                    description: |-
-                      AgentExecutionAdjudicationAction is a one-way operator resolution. Actions
-                      never authorize prompt replay, publication replay, or protocol mutation.
-                      The coexistence API currently admits only cleanup actions whose exact
-                      Applied resolution can be consumed by route-aware finalization. The other
-                      constants below are reserved until their required receipt, break-glass, or
-                      destination-lineage evidence is represented by the API.
-                    enum:
-                    - CleanupV1
-                    - CleanupV2
-                    - CleanupBoth
-                    type: string
-                  adjudicationName:
-                    maxLength: 253
-                    minLength: 1
-                    type: string
-                  adjudicationUID:
-                    description: |-
-                      UID is a type that holds unique ID values, including UUIDs.  Because we
-                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                      intent and helps make sure that UIDs and names do not get conflated.
-                    type: string
-                  appliedAt:
-                    format: date-time
-                    type: string
-                  operationDigest:
-                    description: OperationDigest matches the applying adjudication's
-                      status.operationDigest.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  resolutionDigest:
-                    description: |-
-                      ResolutionDigest is the canonical digest of this resolution reference and
-                      matches the adjudication's status.resolutionRefDigest.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                required:
-                - action
-                - adjudicationName
-                - adjudicationUID
-                - appliedAt
-                - operationDigest
-                - resolutionDigest
-                type: object
               attempts:
                 description: Attempts is the number of attempts made
                 format: int32
@@ -3456,21 +3232,6 @@ spec:
             - message: agentExecutionBinding is write-once and immutable
               rule: '!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding)
                 && self.agentExecutionBinding == oldSelf.agentExecutionBinding)'
-            - message: agentExecutionNoExecution is write-once and immutable
-              rule: '!has(oldSelf.agentExecutionNoExecution) || (has(self.agentExecutionNoExecution)
-                && self.agentExecutionNoExecution == oldSelf.agentExecutionNoExecution)'
-            - message: agentExecutionQuarantine evidence is never cleared or rewritten
-              rule: '!has(oldSelf.agentExecutionQuarantine) || (has(self.agentExecutionQuarantine)
-                && self.agentExecutionQuarantine == oldSelf.agentExecutionQuarantine)'
-            - message: agentExecutionResolutionRef is append-once and immutable
-              rule: '!has(oldSelf.agentExecutionResolutionRef) || (has(self.agentExecutionResolutionRef)
-                && self.agentExecutionResolutionRef == oldSelf.agentExecutionResolutionRef)'
-            - message: a Task cannot be both bound and proven no-execution
-              rule: '!(has(self.agentExecutionBinding) && has(self.agentExecutionNoExecution))'
-            - message: a quarantined Task cannot hold an execution binding
-              rule: '!(has(self.agentExecutionBinding) && has(self.agentExecutionQuarantine))'
-            - message: no-execution and quarantine dispositions are mutually exclusive
-              rule: '!(has(self.agentExecutionNoExecution) && has(self.agentExecutionQuarantine))'
             - message: a v1-bound Task cannot acquire new v2 execution or delivery
                 state
               rule: '!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion
@@ -3483,10 +3244,8 @@ spec:
                 && self.harnessRuntime == oldSelf.harnessRuntime)'
         type: object
         x-kubernetes-validations:
-        - message: Task spec is immutable after execution authority or a migration
-            disposition is recorded
-          rule: '!has(oldSelf.status) || (!(has(oldSelf.status.agentExecutionBinding)
-            || has(oldSelf.status.agentExecutionNoExecution) || has(oldSelf.status.agentExecutionQuarantine))
+        - message: Task spec is immutable after execution authority is recorded
+          rule: '!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding)
             || self.spec == oldSelf.spec)'
     served: true
     storage: true

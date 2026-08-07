@@ -31,6 +31,24 @@ func harnessV1SessionRuntimeIdentity(binding *corev1alpha1.AgentExecutionBinding
 	return string(binding.RuntimeType)
 }
 
+func harnessV1SessionLineageConfigDigest(binding *corev1alpha1.AgentExecutionBinding) (string, error) {
+	if binding == nil {
+		return "", errors.New("execution binding is required for Session lineage")
+	}
+	if store.ValidateCanonicalDigest("runtime profile digest", binding.RuntimeProfileDigest) == nil {
+		return binding.RuntimeProfileDigest, nil
+	}
+	// Harness v1 has no managed RuntimeProfile. Commit to the immutable route,
+	// runtime, and Agent identities while excluding turn-local prompt fields.
+	return acpDomainDigest("agent-execution-session-lineage-config/v1", struct {
+		Contract   corev1alpha1.AgentRuntimeContractVersion `json:"contract"`
+		Backend    corev1alpha1.AgentExecutionBackend       `json:"backend"`
+		Runtime    corev1alpha1.AgentRuntimeType            `json:"runtime,omitempty"`
+		RuntimeRef *corev1alpha1.AgentExecutionRuntimeRef   `json:"runtimeRef,omitempty"`
+		Agent      *corev1alpha1.AgentExecutionAgentRef     `json:"agent,omitempty"`
+	}{binding.ContractVersion, binding.Backend, binding.RuntimeType, binding.RuntimeRef, binding.Agent})
+}
+
 func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -86,7 +104,7 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 	if verified.frozenTask.Spec.Timeout != nil && verified.frozenTask.Spec.Timeout.Duration > 0 {
 		expiresAt = time.Now().UTC().Add(verified.frozenTask.Spec.Timeout.Duration + time.Minute)
 	}
-	lineageConfigDigest, err := agentExecutionLineageConfigDigest(verified.binding)
+	lineageConfigDigest, err := harnessV1SessionLineageConfigDigest(verified.binding)
 	if err != nil {
 		return err
 	}
@@ -109,7 +127,6 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 		NamespaceUID:        string(verified.binding.Task.NamespaceUID),
 		ContractVersion:     corev1alpha1.AgentRuntimeContractHarnessV1,
 		LineageGeneration:   1,
-		LineageProvenance:   store.SessionLineageFirstUse,
 		RuntimeIdentity:     harnessV1SessionRuntimeIdentity(verified.binding),
 		ConfigDigest:        lineageConfigDigest,
 	})
@@ -206,7 +223,7 @@ func (d *HarnessV1Dispatcher) recoverHarnessV1TaskSession(
 	if err != nil {
 		return nil, err
 	}
-	lineageConfigDigest, err := agentExecutionLineageConfigDigest(verified.binding)
+	lineageConfigDigest, err := harnessV1SessionLineageConfigDigest(verified.binding)
 	if err != nil {
 		return nil, err
 	}

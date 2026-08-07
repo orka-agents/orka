@@ -5,8 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -23,28 +21,17 @@ func runDrain(args []string) error {
 	fs := flag.NewFlagSet("drain", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var (
-		endpoint            string
-		bearerTokenFile     string
-		caFile              string
-		nextGeneration      string
-		controllerEndpoint  string
-		controllerTokenFile string
-		controllerCAFile    string
-		timeout             time.Duration
-		pollInterval        time.Duration
+		endpoint        string
+		bearerTokenFile string
+		caFile          string
+		nextGeneration  string
+		timeout         time.Duration
+		pollInterval    time.Duration
 	)
 	fs.StringVar(&endpoint, "endpoint", "", "wrapper HTTPS endpoint")
 	fs.StringVar(&bearerTokenFile, "bearer-token-file", "", "file containing the wrapper control bearer")
 	fs.StringVar(&caFile, "ca-file", "", "CA bundle used to authenticate the wrapper")
 	fs.StringVar(&nextGeneration, "next-generation", "", "optional exact replacement ledger generation")
-	fs.StringVar(&controllerEndpoint, "controller-endpoint", "", "optional controller retirement endpoint")
-	fs.StringVar(
-		&controllerTokenFile,
-		"controller-token-file",
-		"",
-		"projected ServiceAccount token for controller retirement",
-	)
-	fs.StringVar(&controllerCAFile, "controller-ca-file", "", "CA bundle used to authenticate controller retirement")
 	fs.DurationVar(&timeout, "timeout", defaultDrainTimeout, "maximum close-and-drain duration")
 	fs.DurationVar(&pollInterval, "poll-interval", defaultDrainPollInterval, "drain status poll interval")
 	if err := fs.Parse(args); err != nil {
@@ -54,18 +41,11 @@ func runDrain(args []string) error {
 	bearerTokenFile = strings.TrimSpace(bearerTokenFile)
 	caFile = strings.TrimSpace(caFile)
 	nextGeneration = strings.TrimSpace(nextGeneration)
-	controllerEndpoint = strings.TrimSpace(controllerEndpoint)
-	controllerTokenFile = strings.TrimSpace(controllerTokenFile)
-	controllerCAFile = strings.TrimSpace(controllerCAFile)
 	if endpoint == "" || bearerTokenFile == "" || caFile == "" {
 		return fmt.Errorf("drain endpoint, bearer token file, and CA file are required")
 	}
 	if timeout <= 0 || pollInterval <= 0 || pollInterval > timeout {
 		return fmt.Errorf("drain timeout and poll interval must be positive, with poll interval no greater than timeout")
-	}
-	if (controllerEndpoint == "") != (controllerTokenFile == "") ||
-		(controllerEndpoint == "") != (controllerCAFile == "") {
-		return fmt.Errorf("controller retirement endpoint, token file, and CA file must be configured together")
 	}
 	tokenBytes, err := os.ReadFile(bearerTokenFile)
 	if err != nil {
@@ -91,11 +71,6 @@ func runDrain(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if controllerEndpoint != "" {
-		if err := requestControllerRetirement(ctx, controllerEndpoint, controllerTokenFile, controllerCAFile); err != nil {
-			return err
-		}
-	}
 	if _, err := client.CloseDurableAdmission(ctx); err != nil {
 		return fmt.Errorf("close wrapper admission: %w", err)
 	}
@@ -127,42 +102,4 @@ func runDrain(args []string) error {
 		case <-ticker.C:
 		}
 	}
-}
-
-func requestControllerRetirement(ctx context.Context, endpoint, tokenFile, caFile string) error {
-	parsed, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
-		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("controller retirement endpoint must be an HTTPS URL without user info, query, or fragment")
-	}
-	tokenBytes, err := os.ReadFile(strings.TrimSpace(tokenFile))
-	if err != nil {
-		return fmt.Errorf("read controller retirement token file: %w", err)
-	}
-	token := strings.TrimSpace(string(tokenBytes))
-	if token == "" {
-		return fmt.Errorf("controller retirement token file is empty")
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), nil)
-	if err != nil {
-		return fmt.Errorf("create controller retirement request: %w", err)
-	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	client, err := newWrapperTLSHTTPClient(parsed.String(), strings.TrimSpace(caFile))
-	if err != nil {
-		return fmt.Errorf("configure controller retirement TLS: %w", err)
-	}
-	client.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		return fmt.Errorf("request controller retirement: %w", err)
-	}
-	defer func() { _ = response.Body.Close() }()
-	_, _ = io.CopyN(io.Discard, response.Body, 4096)
-	if response.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("controller retirement returned HTTP %d", response.StatusCode)
-	}
-	return nil
 }

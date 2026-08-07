@@ -1,10 +1,9 @@
+{{- $harnessV1 := eq .Values.controller.mode "harness-v1" -}}
+{{- if $harnessV1 }}
 {{- include "orka.validateHarnessV1" . }}
 {{- $wrapperName := include "orka.harnessV1Name" . }}
 {{- $desiredGeneration := include "orka.harnessV1PodTemplateGeneration" . }}
 {{- $rolloverGeneration := $desiredGeneration }}
-{{- if not .Values.harnessV1.enabled }}
-{{- $rolloverGeneration = printf "retired:%s" $desiredGeneration }}
-{{- end }}
 {{- $existingWrapper := lookup "apps/v1" "Deployment" .Release.Namespace $wrapperName }}
 {{- $controllerName := include "orka.controllerName" . }}
 {{- $existingController := lookup "apps/v1" "Deployment" .Release.Namespace $controllerName }}
@@ -26,7 +25,7 @@
 {{- if $existingWrapper }}
 {{- $existingRouteEnabled = true }}
 {{- $existingGeneration := include "orka.harnessV1ExistingGeneration" $existingWrapper | trim }}
-{{- $needsRollover = or (not .Values.harnessV1.enabled) (ne $existingGeneration $desiredGeneration) }}
+{{- $needsRollover = ne $existingGeneration $desiredGeneration }}
 {{- $existingImage = include "orka.harnessV1ExistingImage" $existingWrapper }}
 {{- $existingPullPolicy = include "orka.harnessV1ExistingImagePullPolicy" $existingWrapper }}
 {{- $existingAuthSecret = include "orka.harnessV1ExistingAuthSecretName" $existingWrapper }}
@@ -36,7 +35,7 @@
 {{- $existingAuthSecret = include "orka.harnessV1ExistingControllerAuthSecretName" $existingController }}
 {{- $existingAuthKey = include "orka.harnessV1ExistingControllerAuthSecretKey" $existingController }}
 {{- end }}
-{{- if and $existingRouteEnabled .Values.harnessV1.enabled }}
+{{- if $existingRouteEnabled }}
 {{- if ne $existingAuthSecret $desiredAuthSecret }}
 {{- fail "harnessV1.auth.existingSecret cannot change while the previously deployed harness v1 route remains enabled; retire harness v1 before rotating wrapper auth" }}
 {{- end }}
@@ -108,16 +107,6 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-{{ if not .Values.harnessV1.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-              {{- include "orka.selectorLabels" . | nindent 14 }}
-              app.kubernetes.io/component: controller
-      ports:
-        - protocol: TCP
-          port: {{ .Values.harnessV1.retirement.port }}
-{{ end }}
 ---
 apiVersion: batch/v1
 kind: Job
@@ -159,11 +148,6 @@ spec:
             - {{ printf "--endpoint=https://%s.%s.svc:8080" $wrapperName .Release.Namespace | quote }}
             - --bearer-token-file=/var/run/orka/harness-wrapper/token
             - --ca-file=/var/run/orka/harness-wrapper/ca.crt
-            {{- if not .Values.harnessV1.enabled }}
-            - {{ printf "--controller-endpoint=https://%s.%s.svc:%v/internal/v1/harness-v1/retirement" (include "orka.fullname" .) .Release.Namespace .Values.harnessV1.retirement.port | quote }}
-            - --controller-token-file=/var/run/orka/harness-v1-retirement/token
-            - --controller-ca-file=/var/run/orka/harness-v1-retirement/ca.crt
-            {{- end }}
             - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
             - {{ printf "--poll-interval=%s" .Values.harnessV1.upgradeDrain.pollInterval | quote }}
             - {{ printf "--next-generation=%s" $rolloverGeneration | quote }}
@@ -171,11 +155,6 @@ spec:
             - name: auth
               mountPath: /var/run/orka/harness-wrapper
               readOnly: true
-            {{- if not .Values.harnessV1.enabled }}
-            - name: retirement-token
-              mountPath: /var/run/orka/harness-v1-retirement
-              readOnly: true
-            {{- end }}
             - name: tmp
               mountPath: /tmp
           securityContext:
@@ -200,25 +179,10 @@ spec:
                 path: token
               - key: ca.crt
                 path: ca.crt
-        {{- if not .Values.harnessV1.enabled }}
-        - name: retirement-token
-          projected:
-            defaultMode: 0440
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  expirationSeconds: 600
-                  audience: {{ .Values.harnessV1.retirement.tokenAudience | quote }}
-              - secret:
-                  name: {{ $existingAuthSecret | quote }}
-                  items:
-                    - key: ca.crt
-                      path: ca.crt
-        {{- end }}
         - name: tmp
           emptyDir: {}
 {{- end }}
-{{- if .Values.harnessV1.enabled }}
+{{- if $harnessV1 }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -357,7 +321,7 @@ spec:
         - name: tmp
           emptyDir: {}
 {{- end }}
-{{- if .Values.harnessV1.enabled }}
+{{- if $harnessV1 }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -422,14 +386,6 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-    - to:
-        - podSelector:
-            matchLabels:
-              {{- include "orka.selectorLabels" . | nindent 14 }}
-              app.kubernetes.io/component: controller
-      ports:
-        - protocol: TCP
-          port: {{ .Values.harnessV1.retirement.port }}
 ---
 apiVersion: batch/v1
 kind: Job
@@ -471,17 +427,12 @@ spec:
             - {{ printf "--endpoint=https://%s.%s.svc:8080" $wrapperName .Release.Namespace | quote }}
             - --bearer-token-file=/var/run/orka/harness-wrapper/token
             - --ca-file=/var/run/orka/harness-wrapper/ca.crt
-            - {{ printf "--controller-endpoint=https://%s.%s.svc:%v/internal/v1/harness-v1/retirement" (include "orka.fullname" .) .Release.Namespace .Values.harnessV1.retirement.port | quote }}
-            - --controller-token-file=/var/run/orka/harness-v1-retirement/token
-            - --controller-ca-file=/var/run/orka/harness-v1-retirement/ca.crt
             - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
             - {{ printf "--poll-interval=%s" .Values.harnessV1.upgradeDrain.pollInterval | quote }}
+            - {{ printf "--next-generation=retired:%s" $desiredGeneration | quote }}
           volumeMounts:
             - name: auth
               mountPath: /var/run/orka/harness-wrapper
-              readOnly: true
-            - name: retirement-token
-              mountPath: /var/run/orka/harness-v1-retirement
               readOnly: true
             - name: tmp
               mountPath: /tmp
@@ -507,19 +458,7 @@ spec:
                 path: token
               - key: ca.crt
                 path: ca.crt
-        - name: retirement-token
-          projected:
-            defaultMode: 0440
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  expirationSeconds: 600
-                  audience: {{ .Values.harnessV1.retirement.tokenAudience | quote }}
-              - secret:
-                  name: {{ .Values.harnessV1.auth.existingSecret | quote }}
-                  items:
-                    - key: ca.crt
-                      path: ca.crt
         - name: tmp
           emptyDir: {}
+{{- end }}
 {{- end }}

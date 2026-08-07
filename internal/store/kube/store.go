@@ -24,6 +24,11 @@ var ErrSessionTurnStoreNotConfigured = errors.New("session turn persistence is n
 // persistence adapter was not configured.
 var ErrOutboxStoreNotConfigured = errors.New("outbox persistence is not configured")
 
+// ErrBranchClaimAccessDisabled is returned when a static harness v1
+// installation reaches a publication-only BranchClaim path. Harness v1 must
+// never observe or mutate the cluster-scoped claims owned by harness v2.
+var ErrBranchClaimAccessDisabled = errors.New("cluster-scoped branch claim access is disabled")
+
 // SQLitePersistence is the complete SQLite-owned half of the hard-cutover
 // control store. The concrete sqlite.Store satisfies this interface without
 // treating any SQLite control row as authoritative.
@@ -76,6 +81,16 @@ func WithAPIReader(reader client.Reader) Option {
 	}
 }
 
+// WithoutClusterScopedBranchClaims configures the publication-free harness v1
+// control-store path. Session continuity remains Kubernetes-authoritative, but
+// Session cleanup cannot list or mutate the cluster-scoped BranchClaim kind.
+func WithoutClusterScopedBranchClaims() Option {
+	return func(s *Store) error {
+		s.branchClaimsEnabled = false
+		return nil
+	}
+}
+
 // WithOutboxPersistence configures the SQLite outbox adapter used behind the
 // Kubernetes controller-epoch fence.
 func WithOutboxPersistence(outbox store.OutboxPersistenceStore) Option {
@@ -102,13 +117,14 @@ func WithSessionCleanupPersistence(cleanup store.SessionCleanupPersistenceStore)
 
 // Store maps ACP control-store interfaces to Kubernetes CR status and Leases.
 type Store struct {
-	client            client.Client
-	reader            client.Reader
-	controlNamespace  string
-	sessionTurns      store.SessionTurnPersistenceStore
-	harnessV1Attempts store.HarnessV1AttemptStore
-	outbox            store.OutboxPersistenceStore
-	sessionCleanup    store.SessionCleanupPersistenceStore
+	client              client.Client
+	reader              client.Reader
+	controlNamespace    string
+	sessionTurns        store.SessionTurnPersistenceStore
+	harnessV1Attempts   store.HarnessV1AttemptStore
+	outbox              store.OutboxPersistenceStore
+	sessionCleanup      store.SessionCleanupPersistenceStore
+	branchClaimsEnabled bool
 }
 
 // NewComposite constructs the hard-cutover DurableControlStore: Kubernetes is
@@ -138,7 +154,7 @@ func New(kubeClient client.Client, controlNamespace string, options ...Option) (
 	if err := validateKubernetesNamespace(controlNamespace); err != nil {
 		return nil, err
 	}
-	result := &Store{client: kubeClient, controlNamespace: controlNamespace}
+	result := &Store{client: kubeClient, controlNamespace: controlNamespace, branchClaimsEnabled: true}
 	for _, option := range options {
 		if option == nil {
 			return nil, store.ValidationErrorf("Kubernetes control-store option must not be nil")
@@ -148,6 +164,13 @@ func New(kubeClient client.Client, controlNamespace string, options ...Option) (
 		}
 	}
 	return result, nil
+}
+
+func (s *Store) requireBranchClaimAccess() error {
+	if s == nil || !s.branchClaimsEnabled {
+		return ErrBranchClaimAccessDisabled
+	}
+	return nil
 }
 
 // ControlNamespace returns the namespace containing the controller epoch Lease.

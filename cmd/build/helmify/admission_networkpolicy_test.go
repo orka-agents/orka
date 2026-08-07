@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -12,27 +11,13 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-func TestAdmissionNetworkPoliciesAllowKubernetesAPIServiceAndBackendPorts(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("3", 64)
-	rendered := requireHelmRender(t,
-		"--set", "admission.enabled=true",
-		"--set-string", "controller.image.digest="+digest,
-		"--set-string", "admission.tls.existingSecret=orka-admission-tls",
-		"--show-only", "templates/admission-networkpolicy.yaml",
-	)
-
-	t.Run("Helm", func(t *testing.T) {
-		assertKubernetesAPIEgressPorts(t, []byte(rendered))
-	})
-
-	t.Run("Kustomize", func(t *testing.T) {
-		manifestPath := filepath.Join("..", "..", "..", "config", "orka-admission", "networkpolicy.yaml")
-		manifest, err := os.ReadFile(manifestPath)
-		if err != nil {
-			t.Fatalf("read admission NetworkPolicy: %v", err)
-		}
-		assertKubernetesAPIEgressPorts(t, manifest)
-	})
+func TestSharedAdmissionNetworkPolicyAllowsKubernetesAPIServiceAndBackendPorts(t *testing.T) {
+	manifestPath := filepath.Join("..", "..", "..", "config", "orka-admission", "networkpolicy.yaml")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read admission NetworkPolicy: %v", err)
+	}
+	assertKubernetesAPIEgressPorts(t, manifest)
 }
 
 func assertKubernetesAPIEgressPorts(t *testing.T, manifest []byte) {

@@ -4,8 +4,8 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// orka-admission serves the stateless, fail-closed admission boundary used
-// during harness v1/v2 coexistence. It intentionally owns no controllers,
+// orka-admission serves the stateless, fail-closed admission boundary shared
+// by isolated harness-v1 and harness-v2 installations. It owns no controllers,
 // dispatch state, runtime credentials, SQLite database, or leader-election
 // lease.
 package main
@@ -45,19 +45,16 @@ func init() {
 }
 
 type options struct {
-	healthProbeBindAddress         string
-	webhookCertPath                string
-	webhookCertName                string
-	webhookCertKey                 string
-	webhookServiceDNSName          string
-	webhookPort                    int
-	enableHTTP2                    bool
-	controllerUsername             string
-	adjudicationControllerUsername string
-	classificationUsernames        string
-	adminGroups                    string
-	taskProvenanceTrustedUsers     string
-	taskProvenanceTrustedSAs       string
+	healthProbeBindAddress     string
+	webhookCertPath            string
+	webhookCertName            string
+	webhookCertKey             string
+	webhookServiceDNSName      string
+	webhookPort                int
+	enableHTTP2                bool
+	controllerUsernames        string
+	taskProvenanceTrustedUsers string
+	taskProvenanceTrustedSAs   string
 }
 
 func (o *options) bind(fs *flag.FlagSet) {
@@ -74,22 +71,12 @@ func (o *options) bind(fs *flag.FlagSet) {
 	fs.IntVar(&o.webhookPort, "webhook-port", 9443, "The HTTPS webhook listener port.")
 	fs.BoolVar(&o.enableHTTP2, "enable-http2", false,
 		"Enable HTTP/2 on the webhook listener. HTTP/2 is disabled by default.")
-	fs.StringVar(&o.controllerUsername, "controller-username", os.Getenv("ORKA_ADMISSION_CONTROLLER_USERNAME"),
-		"Exact Kubernetes username authorized for controller-owned execution binding writes.")
-	fs.StringVar(&o.adjudicationControllerUsername, "adjudication-controller-username",
-		os.Getenv("ORKA_ADMISSION_ADJUDICATION_CONTROLLER_USERNAME"),
-		"Exact Kubernetes username authorized for adjudication status and "+
-			"resolution-reference writes; defaults to controller-username.")
-	fs.StringVar(&o.classificationUsernames, "classification-usernames",
-		os.Getenv("ORKA_ADMISSION_CLASSIFICATION_USERNAMES"),
-		"Comma-separated exact Kubernetes usernames authorized for one-time bridge classification writes.")
-	fs.StringVar(&o.adminGroups, "admin-groups",
-		defaultString(os.Getenv("ORKA_ADMISSION_ADMIN_GROUPS"), "system:masters"),
-		"Comma-separated Kubernetes groups authorized to create adjudications and author execution control or policy specs.")
+	fs.StringVar(&o.controllerUsernames, "controller-usernames", os.Getenv("ORKA_ADMISSION_CONTROLLER_USERNAMES"),
+		"Comma-separated exact Kubernetes usernames authorized for controller-owned Task execution writes.")
 	fs.StringVar(&o.taskProvenanceTrustedUsers, "task-provenance-trusted-users",
 		os.Getenv("ORKA_ADMISSION_TASK_PROVENANCE_TRUSTED_USERS"),
-		"Comma-separated exact Kubernetes usernames authorized to write "+
-			"controller-managed Task provenance; defaults to controller-username.")
+		"Comma-separated exact Kubernetes usernames authorized to write controller-managed Task provenance; "+
+			"defaults to controller-usernames.")
 	fs.StringVar(&o.taskProvenanceTrustedSAs, "task-provenance-trusted-service-accounts",
 		os.Getenv("ORKA_ADMISSION_TASK_PROVENANCE_TRUSTED_SERVICE_ACCOUNTS"),
 		"Comma-separated ServiceAccount names trusted in each Task namespace to write managed provenance.")
@@ -109,22 +96,12 @@ func (o options) validate() error {
 		return errors.New("--webhook-service-dns-name is required")
 	}
 	if o.webhookPort < 1 || o.webhookPort > 65535 {
-		return fmt.Errorf("--webhook-port must be between 1 and 65535")
+		return errors.New("--webhook-port must be between 1 and 65535")
 	}
-	if strings.TrimSpace(o.controllerUsername) == "" {
-		return errors.New("--controller-username is required")
-	}
-	if len(splitCommaList(o.adminGroups)) == 0 {
-		return errors.New("--admin-groups must contain at least one group")
+	if len(splitCommaList(o.controllerUsernames)) == 0 {
+		return errors.New("--controller-usernames must contain at least one exact username")
 	}
 	return nil
-}
-
-func defaultString(value, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
-	}
-	return value
 }
 
 func validateFilename(flagName, value string) error {
@@ -186,44 +163,31 @@ func main() {
 		os.Exit(1)
 	}
 	// GetWebhookServer lazily adds the configured server to the manager's
-	// runnable set. Registering directly on the pre-manager value leaves the
-	// server configured but never started.
+	// runnable set. Registering only on the pre-manager value would not start it.
 	webhookServer = mgr.GetWebhookServer()
 
-	adjudicationUsername := strings.TrimSpace(opts.adjudicationControllerUsername)
-	if adjudicationUsername == "" {
-		adjudicationUsername = strings.TrimSpace(opts.controllerUsername)
-	}
+	controllerUsernames := splitCommaList(opts.controllerUsernames)
 	provenanceUsers := strings.TrimSpace(opts.taskProvenanceTrustedUsers)
 	if provenanceUsers == "" {
-		provenanceUsers = strings.TrimSpace(opts.controllerUsername)
+		provenanceUsers = strings.Join(controllerUsernames, ",")
 	}
 	orkaadmission.RegisterTaskProvenanceWebhook(
 		webhookServer,
 		admissionScheme,
-		orkaadmission.NewTaskProvenanceConfig(
-			true,
-			provenanceUsers,
-			opts.taskProvenanceTrustedSAs,
-			"",
-		),
+		orkaadmission.NewTaskProvenanceConfig(true, provenanceUsers, opts.taskProvenanceTrustedSAs, ""),
 	)
 	orkaadmission.RegisterWorkspaceClassUseWebhooks(
 		webhookServer,
 		admissionScheme,
 		controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
 	)
-	orkaadmission.RegisterCoexistenceWebhooks(
+	orkaadmission.RegisterExecutionModeWebhooks(
 		webhookServer,
 		admissionScheme,
 		mgr.GetAPIReader(),
-		orkaadmission.CoexistenceConfig{
-			ControllerUsername:             opts.controllerUsername,
-			AdjudicationControllerUsername: adjudicationUsername,
-			ClassificationUsernames:        splitCommaList(opts.classificationUsernames),
-			AdminGroups:                    splitCommaList(opts.adminGroups),
-		},
+		orkaadmission.ExecutionModeConfig{ControllerUsernames: controllerUsernames},
 	)
+
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to register liveness check")
 		os.Exit(1)
@@ -239,10 +203,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("starting stateless coexistence admission service",
+	setupLog.Info("starting stateless execution-mode admission service",
 		"webhookPort", opts.webhookPort,
-		"controllerUsername", strings.TrimSpace(opts.controllerUsername),
-		"adjudicationControllerUsername", adjudicationUsername,
+		"controllerUsernames", strings.Join(controllerUsernames, ","),
 	)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "admission service stopped with an error")
@@ -281,18 +244,12 @@ func servingCertificateFilesChecker(directory, certificateName, keyName, service
 				return fmt.Errorf("parse webhook serving certificate chain entry %d: %w", index, err)
 			}
 			if now.Before(certificate.NotBefore) {
-				return fmt.Errorf(
-					"webhook serving certificate chain entry %d is not valid before %s",
-					index,
-					certificate.NotBefore.UTC().Format(time.RFC3339),
-				)
+				return fmt.Errorf("webhook serving certificate chain entry %d is not valid before %s",
+					index, certificate.NotBefore.UTC().Format(time.RFC3339))
 			}
 			if !now.Before(certificate.NotAfter) {
-				return fmt.Errorf(
-					"webhook serving certificate chain entry %d expired at %s",
-					index,
-					certificate.NotAfter.UTC().Format(time.RFC3339),
-				)
+				return fmt.Errorf("webhook serving certificate chain entry %d expired at %s",
+					index, certificate.NotAfter.UTC().Format(time.RFC3339))
 			}
 			if index == 0 {
 				if err := certificate.VerifyHostname(strings.TrimSpace(serviceDNSName)); err != nil {

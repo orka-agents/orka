@@ -39,9 +39,6 @@ func (d *ACPDispatcher) recoverStaleAttempts(ctx context.Context) error {
 	if err := d.Client.List(ctx, &tasks); err != nil {
 		return err
 	}
-	if err := d.reconcileLegacyCleanupACPTasks(ctx, tasks.Items); err != nil {
-		return err
-	}
 	for i := range tasks.Items {
 		candidate := tasks.Items[i].DeepCopy()
 		task, recoverable, readErr := d.readRecoverableTask(ctx, candidate)

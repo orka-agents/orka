@@ -1,4 +1,4 @@
-{{- if .Values.providerProxy.enabled }}
+{{- if and (eq .Values.controller.mode "harness-v2") .Values.providerProxy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

@@ -87,7 +87,6 @@ type HarnessV1Dispatcher struct {
 	APIReader            client.Reader
 	Attempts             store.HarnessV1AttemptStore
 	Snapshots            store.AgentExecutionSnapshotStore
-	BindingReservations  store.AgentExecutionBindingReservationStore
 	ResultStore          store.ResultStore
 	EventStore           store.ExecutionEventStore
 	ExternalEffects      store.ExternalEffectStore
@@ -108,8 +107,8 @@ func (d *HarnessV1Dispatcher) NeedLeaderElection() bool { return true }
 
 func (d *HarnessV1Dispatcher) Start(ctx context.Context) error {
 	if d.Client == nil || d.Attempts == nil || d.Snapshots == nil || d.ResultStore == nil ||
-		d.EventStore == nil || d.Sessions == nil || d.Epochs == nil || d.BindingReservations == nil {
-		return errors.New("harness v1 dispatcher requires Kubernetes client, attempt/snapshot/reservation stores, result/event stores, Session continuity, and epoch manager")
+		d.EventStore == nil || d.Sessions == nil || d.Epochs == nil {
+		return errors.New("harness v1 dispatcher requires Kubernetes client, attempt/snapshot stores, result/event stores, Session continuity, and epoch manager")
 	}
 	if d.APIReader == nil {
 		d.APIReader = d.Client
@@ -163,12 +162,6 @@ func (d *HarnessV1Dispatcher) dispatchOnce(ctx context.Context) error {
 	candidates := make([]harnessV1DispatchCandidate, 0, len(tasks.Items))
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		if legacyCleanupBinding(task, corev1alpha1.AgentRuntimeContractHarnessV1) != nil {
-			if err := d.reconcileLegacyCleanupHarnessV1Task(ctx, task.DeepCopy()); err != nil {
-				return fmt.Errorf("reconcile legacy cleanup-only harness v1 Task %s/%s: %w", task.Namespace, task.Name, err)
-			}
-			continue
-		}
 		if !taskDispatchableByHarnessV1(task) {
 			continue
 		}
@@ -283,7 +276,6 @@ func (d *HarnessV1Dispatcher) reconcileAttempt(ctx context.Context, task *corev1
 
 	verifier := TaskReconciler{
 		Client: d.Client, APIReader: d.APIReader, AgentExecutionSnapshots: d.Snapshots,
-		AgentExecutionBindingReservations: d.BindingReservations,
 	}
 	var (
 		verified  *verifiedHarnessV1Execution
@@ -291,12 +283,10 @@ func (d *HarnessV1Dispatcher) reconcileAttempt(ctx context.Context, task *corev1
 	)
 	if attempt.State == store.HarnessV1AttemptPrepared {
 		// Prepared is the one recovery state that may still cross StartTurn.
-		// Verify its immutable reservation, snapshot, and Secret identities here,
-		// then authorize the current enabled/closing/drain revision immediately
-		// before submission below. The generic recovery verifier intentionally
-		// permits disabled cleanup and is therefore not a submission authority.
+		// Verify its immutable binding, snapshot, and Secret identities here
+		// immediately before submission below.
 		verified, verifyErr = verifier.loadHarnessV1ExecutionWithOptions(
-			ctx, task, task.Status.AgentExecutionBinding, true, true, false, true,
+			ctx, task, task.Status.AgentExecutionBinding, true, true,
 		)
 	} else {
 		verified, verifyErr = verifier.loadVerifiedHarnessV1ExecutionForRecovery(
@@ -326,11 +316,7 @@ func (d *HarnessV1Dispatcher) reconcileAttempt(ctx context.Context, task *corev1
 
 	switch attempt.State {
 	case store.HarnessV1AttemptPrepared:
-		authorized, err := d.v1PreparedExecutionAuthorized(ctx, task, verified.binding)
-		if err != nil {
-			return err
-		}
-		if !authorized {
+		if !d.v1PreparedExecutionAuthorized(task, verified.binding) {
 			return d.failUnsubmittedAttempt(ctx, task, attempt, fence, harnessV1ReasonBackendDisabled)
 		}
 		protocolClient, request, err := d.protocolClientAndRequest(ctx, task, verified, attempt)
@@ -397,67 +383,18 @@ func (d *HarnessV1Dispatcher) validateAttemptIdentity(task *corev1alpha1.Task, a
 	return nil
 }
 
-// v1PreparedExecutionAuthorized proves that a Prepared attempt belongs to a
-// durably settled enabled-revision binding. Closing may finish reservations
-// from its exact source revision, and drain-only may finish only reservations
-// proven settled before the recorded cutoff. Disabled and stale enabled
-// revisions never cross StartTurn.
+// v1PreparedExecutionAuthorized proves that a Prepared attempt belongs to the
+// immutable v1 binding. The dispatcher itself is registered only in the
+// process-static harness-v1 controller mode.
 func (d *HarnessV1Dispatcher) v1PreparedExecutionAuthorized(
-	ctx context.Context,
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
-) (bool, error) {
-	if task == nil || binding == nil || binding.BackendControl == nil ||
-		binding.BackendControl.AdmittedMode != corev1alpha1.AgentExecutionEffectiveModeEnabled {
-		return false, nil
+) bool {
+	if task == nil || binding == nil || task.Status.AgentExecutionBinding == nil {
+		return false
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
-	if reader == nil || d.BindingReservations == nil {
-		return false, errors.New("API reader and binding reservation store are required for Prepared dispatch")
-	}
-	verifier := TaskReconciler{AgentExecutionBindingReservations: d.BindingReservations}
-	reservation, err := verifier.loadBoundAgentExecutionReservation(ctx, task, binding)
-	if err != nil {
-		return false, err
-	}
-	if reservation.SettledAt == nil {
-		return false, nil
-	}
-
-	control := &corev1alpha1.AgentExecutionControl{}
-	if err := reader.Get(ctx, types.NamespacedName{
-		Namespace: corev1alpha1.AgentExecutionControlNamespace, Name: corev1alpha1.AgentExecutionControlName,
-	}, control); err != nil {
-		return false, err
-	}
-	ref := binding.BackendControl
-	if control.Name != ref.Name || control.UID == "" || control.UID != ref.UID || control.Status.Backends == nil {
-		return false, nil
-	}
-	observed := control.Status.Backends.V1
-	switch observed.EffectiveMode {
-	case corev1alpha1.AgentExecutionEffectiveModeEnabled:
-		return control.Status.ObservedGeneration == control.Generation &&
-			ref.Generation == control.Generation && ref.ModeRevision == observed.ModeRevision, nil
-	case corev1alpha1.AgentExecutionEffectiveModeClosing:
-		return control.Status.ObservedGeneration == ref.Generation &&
-			ref.Generation <= control.Generation && ref.ModeRevision+1 == observed.ModeRevision, nil
-	case corev1alpha1.AgentExecutionEffectiveModeDrainOnly:
-		if control.Status.ObservedGeneration != control.Generation || observed.AdmissionClosedAt == nil ||
-			observed.CutoffInventoryDigest == "" || ref.Generation > control.Generation ||
-			ref.ModeRevision >= observed.ModeRevision {
-			return false, nil
-		}
-		cutoff := observed.AdmissionClosedAt.Time
-		return !reservation.ReservedAt.After(cutoff) && !reservation.SettledAt.After(cutoff), nil
-	case corev1alpha1.AgentExecutionEffectiveModeDisabled:
-		return false, nil
-	default:
-		return false, fmt.Errorf("unsupported harness v1 effective mode %q", observed.EffectiveMode)
-	}
+	return binding.ContractVersion == corev1alpha1.AgentRuntimeContractHarnessV1 &&
+		task.Status.AgentExecutionBinding.BindingDigest == binding.BindingDigest
 }
 
 func (d *HarnessV1Dispatcher) protocolClientAndRequest(
@@ -1860,7 +1797,6 @@ func (d *HarnessV1Dispatcher) createRetryAttempt(
 	}
 	verifier := TaskReconciler{
 		Client: d.Client, APIReader: d.APIReader, AgentExecutionSnapshots: d.Snapshots,
-		AgentExecutionBindingReservations: d.BindingReservations,
 	}
 	verified, err := verifier.loadVerifiedHarnessV1ExecutionForRecovery(
 		ctx, task, task.Status.AgentExecutionBinding, false,

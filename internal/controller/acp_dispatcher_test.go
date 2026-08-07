@@ -73,14 +73,13 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 		t.Fatal(err)
 	}
 	binder := &TaskReconciler{
-		Client:                            kubeClient,
-		APIReader:                         kubeClient,
-		Scheme:                            scheme,
-		DurableControlStore:               controlStore,
-		AgentExecutionSnapshots:           persistence,
-		AgentExecutionBindingReservations: persistence,
-		ACPRuntimeEnabled:                 true,
-		ACPRuntimeImages:                  images,
+		Client:                  kubeClient,
+		APIReader:               kubeClient,
+		Scheme:                  scheme,
+		DurableControlStore:     controlStore,
+		AgentExecutionSnapshots: persistence,
+		ACPRuntimeEnabled:       true,
+		ACPRuntimeImages:        images,
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, binder, task, agent)
 	verified, err := binder.loadVerifiedBoundExecution(ctx, bound, bound.Status.AgentExecutionBinding)
@@ -606,7 +605,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
-		Snapshots: persistence, BindingReservations: persistence, Epochs: epochs, Sessions: continuity,
+		Snapshots: persistence, Epochs: epochs, Sessions: continuity,
 	}
 	if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
 		t.Fatal(err)
@@ -810,7 +809,7 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 			task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
 			verifier := TaskReconciler{
 				Client: kubeClient, APIReader: kubeClient,
-				AgentExecutionSnapshots: controlStore, AgentExecutionBindingReservations: controlStore,
+				AgentExecutionSnapshots: controlStore,
 			}
 			frozen, err := verifier.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
 			if err != nil {
@@ -843,7 +842,7 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 
 			dispatcher := &ACPDispatcher{
 				Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore,
-				Snapshots: controlStore, BindingReservations: controlStore, Epochs: epochs,
+				Snapshots: controlStore, Epochs: epochs,
 			}
 			if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
 				t.Fatal(err)
@@ -1042,8 +1041,8 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
-		Snapshots: controlStore, BindingReservations: controlStore,
-		Sessions: continuity, Publisher: publisherClient, ArtifactCapabilitySecret: []byte(strings.Repeat("d", 32)),
+		Snapshots: controlStore,
+		Sessions:  continuity, Publisher: publisherClient, ArtifactCapabilitySecret: []byte(strings.Repeat("d", 32)),
 		ArtifactReservations: acceptingArtifactReservations{},
 	}
 	if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
@@ -1193,7 +1192,7 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
-		Snapshots: controlStore, BindingReservations: controlStore,
+		Snapshots: controlStore,
 		runtimeContextFactory: func(parent context.Context, _ *corev1alpha1.Task) (context.Context, context.CancelFunc) {
 			runtimeCtx, cancelCause := context.WithCancelCause(parent)
 			deadlineCancels <- cancelCause
@@ -2154,7 +2153,6 @@ func boundPromptAttemptForTest(attempt *store.PromptAttempt) *store.PromptAttemp
 func testACPExecuteBindingForDispatcher() *corev1alpha1.AgentExecutionBinding {
 	return &corev1alpha1.AgentExecutionBinding{
 		SchemaVersion:   1,
-		Mode:            corev1alpha1.AgentExecutionBindingModeExecute,
 		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
 		Backend:         corev1alpha1.AgentExecutionBackendRuntimePool,
 		BindingDigest:   testControlDigestForDispatcher("test-v2-binding"),

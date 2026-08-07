@@ -131,9 +131,9 @@ verify-helm-crds: ## Verify generated and promoted Helm chart CRDs are identical
 test-helm-crd-sync: ## Test Helm CRD synchronization and drift detection.
 	bash scripts/tests/sync-helm-crds-test.sh
 
-.PHONY: test-coexistence-deploy-gate
-test-coexistence-deploy-gate: ## Test the coexistence CRD and wrapper deployment gate.
-	bash scripts/tests/coexistence-deploy-gate-test.sh
+.PHONY: test-static-mode-deploy-gate
+test-static-mode-deploy-gate: ## Test the static harness-mode CRD deployment gate.
+	bash scripts/tests/static-mode-deploy-gate-test.sh
 
 
 .PHONY: generate
@@ -309,7 +309,7 @@ build: manifests generate fmt vet ui-build ## Build manager and admission binari
 	go build -o bin/orka-admission ./cmd/orka-admission
 
 .PHONY: build-admission
-build-admission: ## Build the stateless coexistence admission binary.
+build-admission: ## Build the stateless admission binary.
 	go build -o bin/orka-admission ./cmd/orka-admission
 
 
@@ -446,25 +446,56 @@ verify-acp-runtime-images: ## Require digest-pinned ACP runtime images for suppo
 		fi; \
 	done
 
-.PHONY: verify-coexistence-crds
-verify-coexistence-crds: ## Refuse workload deployment until the reviewed v1/v2 bridge CRDs are installed.
-	@for crd in runtimepools promptattempts runtimesessioncontrols branchclaims publications controllerepochs externaleffects agentexecutioncontrols agentexecutionpolicies agentexecutionadjudications agentruntimes agents tasks; do \
-		"$(KUBECTL)" get crd "$$crd.core.orka.ai" >/dev/null || { echo "missing coexistence CRD: $$crd.core.orka.ai; apply the reviewed coexistence CRD upgrade wave before workloads" >&2; exit 1; }; \
-		"$(KUBECTL)" wait --for=condition=Established --timeout=60s "crd/$$crd.core.orka.ai" >/dev/null || { echo "coexistence CRD is not Established: $$crd.core.orka.ai" >&2; exit 1; }; \
+.PHONY: verify-static-mode-crds
+verify-static-mode-crds: ## Refuse workload deployment until the platform-owned shared CRD bundle is ready.
+	@for crd in \
+		agentruntimes.core.orka.ai \
+		agents.core.orka.ai \
+		branchclaims.core.orka.ai \
+		controllerepochs.core.orka.ai \
+		executionworkspaceclasses.workspace.orka.ai \
+		executionworkspacepools.workspace.orka.ai \
+		executionworkspaceproviders.workspace.orka.ai \
+		executionworkspaces.workspace.orka.ai \
+		externaleffects.core.orka.ai \
+		fakepoolparameters.fake.workspace.orka.ai \
+		fakeproviderconfigs.fake.workspace.orka.ai \
+		gatewaybindings.gateway.orka.ai \
+		gatewayclasses.gateway.orka.ai \
+		gateways.gateway.orka.ai \
+		outboundaccesspolicies.core.orka.ai \
+		promptattempts.core.orka.ai \
+		providers.core.orka.ai \
+		publications.core.orka.ai \
+		repositorymonitors.core.orka.ai \
+		repositoryscans.core.orka.ai \
+		runtimepools.core.orka.ai \
+		runtimesessioncontrols.core.orka.ai \
+		skills.core.orka.ai \
+		substrateactorpools.core.orka.ai \
+		tasks.core.orka.ai \
+		tools.core.orka.ai; do \
+		"$(KUBECTL)" get crd "$$crd" >/dev/null || { echo "missing shared CRD: $$crd; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }; \
+		"$(KUBECTL)" wait --for=condition=Established --timeout=60s "crd/$$crd" >/dev/null || { echo "shared CRD is not Established: $$crd" >&2; exit 1; }; \
+	done
+	@for crd in agentexecutioncontrols.core.orka.ai agentexecutionpolicies.core.orka.ai agentexecutionadjudications.core.orka.ai; do \
+		if "$(KUBECTL)" get crd "$$crd" >/dev/null 2>&1; then \
+			echo "unsupported superseded coexistence CRD remains installed: $$crd" >&2; \
+			exit 1; \
+		fi; \
 	done
 	@"$(KUBECTL)" get crd agentruntimes.core.orka.ai -o json | jq -e \
 		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] as $$enums | ($$enums | length) > 0 and ($$enums | all(sort == ["orka.harness.v1","orka.harness.v2"]))' >/dev/null || \
-		{ echo "AgentRuntime CRD is not the dual orka.harness.v1/orka.harness.v2 bridge schema; apply the reviewed coexistence CRD upgrade wave before workloads" >&2; exit 1; }
+		{ echo "AgentRuntime CRD is not the shared orka.harness.v1/orka.harness.v2 schema; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
 	@"$(KUBECTL)" get crd agents.core.orka.ai -o json | jq -e \
 		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.runtime as $$runtime | (((($$runtime.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and ((($$runtime["x-kubernetes-validations"] // []) | map(.message) | index("runtime.contractVersion is immutable once set")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
-		{ echo "Agent CRD is missing the immutable dual-contract coexistence schema; apply the reviewed coexistence CRD upgrade wave before workloads" >&2; exit 1; }
+		{ echo "Agent CRD is missing the immutable shared contract selector; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
 	@"$(KUBECTL)" get crd tasks.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema as $$schema | $$schema.properties.status as $$status | ((($$status.properties.agentExecutionBinding.type // "") == "object") and ((($$status.properties.agentExecutionBinding.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and (($$status.properties.agentExecutionNoExecution.type // "") == "object") and (($$status.properties.agentExecutionQuarantine.type // "") == "object") and (($$status.properties.agentExecutionResolutionRef.type // "") == "object") and ((($$status["x-kubernetes-validations"] // []) | map(.message) | index("agentExecutionBinding is write-once and immutable")) != null) and ((($$schema["x-kubernetes-validations"] // []) | map(.message) | index("Task spec is immutable after execution authority or a migration disposition is recorded")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
-		{ echo "Task CRD is missing the immutable coexistence execution-authority schema; apply the reviewed coexistence CRD upgrade wave before workloads" >&2; exit 1; }
-	@COEXISTENCE=1 KUBECTL="$(KUBECTL)" scripts/check-legacy-wrapper-resources.sh
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema as $$schema | $$schema.properties.status as $$status | ((($$status.properties.agentExecutionBinding.type // "") == "object") and ((($$status.properties.agentExecutionBinding.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and (($$status.properties | has("agentExecutionNoExecution")) | not) and (($$status.properties | has("agentExecutionQuarantine")) | not) and (($$status.properties | has("agentExecutionResolutionRef")) | not) and ((($$status["x-kubernetes-validations"] // []) | map(.message) | index("agentExecutionBinding is write-once and immutable")) != null) and ((($$schema["x-kubernetes-validations"] // []) | map(.message) | index("Task spec is immutable after execution authority is recorded")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
+		{ echo "Task CRD is missing the static-mode execution-authority schema; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
 
 .PHONY: deploy
-deploy: verify-acp-runtime-images verify-coexistence-crds manifests kustomize ## Deploy ACP workloads after the coexistence CRD upgrade wave.
+deploy: verify-acp-runtime-images verify-static-mode-crds manifests kustomize ## Deploy the static harness-v2 installation after the shared CRD wave.
 	@"$(KUBECTL)" create namespace orka-system --dry-run=client -o yaml | "$(KUBECTL)" apply -f -
 	@if ! "$(KUBECTL)" -n orka-system get secret acp-artifact-capability >/dev/null 2>&1; then \
 		secret="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \

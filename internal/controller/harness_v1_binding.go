@@ -19,7 +19,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -32,7 +31,6 @@ import (
 )
 
 const (
-	defaultHarnessV1PolicyName  = "compatibility"
 	defaultHarnessV1SessionName = "task"
 
 	harnessV1SessionBootstrapSchemaVersion   = 1
@@ -61,10 +59,9 @@ type verifiedHarnessV1Execution struct {
 	frozenTask *corev1alpha1.Task
 }
 
-// permanentHarnessV1CandidateError marks deterministic Task, Agent, or
-// compatibility-policy violations. Candidate resolution errors without this
-// marker remain retryable because they may depend on mutable control-plane
-// state.
+// permanentHarnessV1CandidateError marks deterministic Task or Agent
+// violations. Candidate resolution errors without this marker remain retryable
+// because they may depend on mutable control-plane state.
 type permanentHarnessV1CandidateError struct{ err error }
 
 func (e *permanentHarnessV1CandidateError) Error() string { return e.err.Error() }
@@ -112,19 +109,15 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Namespace}, namespace); err != nil {
 		return nil, fmt.Errorf("resolve Task namespace identity: %w", err)
 	}
-	policy, policyDigest, err := r.resolveHarnessV1Policy(ctx, reader, task, agent)
-	if err != nil {
-		return nil, err
-	}
 	target, err := r.resolveHarnessV1Target(ctx, reader, task, agent)
 	if err != nil {
 		return nil, err
 	}
-	toolGovernance, err := resolveHarnessV1ToolGovernance(ctx, reader, task, agent, policy, target)
+	toolGovernance, err := resolveHarnessV1ToolGovernance(ctx, reader, task, agent, target)
 	if err != nil {
 		return nil, err
 	}
-	workspace, err := resolveHarnessV1PublicReadOnlyWorkspace(task, agent, policy, target)
+	workspace, err := resolveHarnessV1PublicReadOnlyWorkspace(task, agent, target)
 	if err != nil {
 		return nil, permanentHarnessV1Candidate(err)
 	}
@@ -167,8 +160,7 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	if provider == "" {
 		provider = target.runtimeName
 	}
-	duplicateSafe := policy.Spec.RetryEligibility == corev1alpha1.AgentExecutionRetryDuplicateSafeOnly &&
-		target.backend == corev1alpha1.AgentExecutionBackendHarnessWrapper && len(credentialRefs) == 0
+	duplicateSafe := target.backend == corev1alpha1.AgentExecutionBackendHarnessWrapper && len(credentialRefs) == 0
 	if task.Spec.RetryPolicy != nil && task.Spec.RetryPolicy.MaxRetries > 0 && !duplicateSafe {
 		return nil, permanentHarnessV1Candidate(errors.New("harness v1 retry requires a duplicate-safe built-in workload without provider credentials"))
 	}
@@ -221,14 +213,11 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	}
 	snapshotDigest := store.CanonicalAgentExecutionSnapshotDigest(encoded)
 	binding := corev1alpha1.AgentExecutionBinding{
-		SchemaVersion: 1, Mode: corev1alpha1.AgentExecutionBindingModeExecute,
+		SchemaVersion:   1,
 		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
-		Backend:         target.backend, Provenance: corev1alpha1.AgentExecutionProvenanceNewlyBound,
+		Backend:         target.backend,
 		Task: corev1alpha1.AgentExecutionBindingTaskRef{
 			NamespaceUID: namespace.UID, UID: task.UID, BoundSpecGeneration: task.Generation,
-		},
-		Policy: &corev1alpha1.AgentExecutionPolicyRef{
-			Name: policy.Name, UID: policy.UID, Generation: policy.Generation, Digest: policyDigest,
 		},
 		Agent: &corev1alpha1.AgentExecutionAgentRef{
 			Namespace: agent.Namespace, Name: agent.Name, UID: agent.UID, Generation: agent.Generation,
@@ -244,10 +233,6 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 		binding.RuntimeRef = &corev1alpha1.AgentExecutionRuntimeRef{
 			Name: target.runtimeRef.Name, UID: target.runtimeRef.UID, Generation: target.runtimeRef.Generation,
 		}
-	}
-	binding.BackendControl, err = r.resolveAgentExecutionBackendControlFor(ctx, reader, store.AgentExecutionBackendV1)
-	if err != nil {
-		return nil, err
 	}
 	binding.BindingDigest, err = canonicalAgentExecutionBindingDigest(binding)
 	if err != nil {
@@ -314,98 +299,6 @@ func validateNewHarnessV1Workload(task *corev1alpha1.Task, agent *corev1alpha1.A
 		return errors.New("new harness v1 Copilot bindings are prohibited because provider authentication requires a GitHub mutation-capable credential")
 	case corev1alpha1.AgentRuntimeOpencode:
 		return errors.New("new harness v1 OpenCode bindings are prohibited")
-	}
-	return nil
-}
-
-func (r *TaskReconciler) resolveHarnessV1Policy(
-	ctx context.Context,
-	reader client.Reader,
-	task *corev1alpha1.Task,
-	agent *corev1alpha1.Agent,
-) (*corev1alpha1.AgentExecutionPolicy, string, error) {
-	name := strings.TrimSpace(r.HarnessV1PolicyName)
-	if name == "" {
-		name = defaultHarnessV1PolicyName
-	}
-	policy := &corev1alpha1.AgentExecutionPolicy{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, policy); err != nil {
-		return nil, "", fmt.Errorf("read harness v1 compatibility policy %s/%s: %w", task.Namespace, name, err)
-	}
-	if policy.UID == "" || policy.Generation < 1 {
-		return nil, "", errors.New("harness v1 compatibility policy identity is not ready")
-	}
-	if !policy.Spec.AllowNewV1Bindings {
-		return nil, "", permanentHarnessV1Candidate(errors.New("harness v1 compatibility policy does not authorize new bindings"))
-	}
-	if agent.Spec.Runtime.RuntimeRef == nil {
-		if !slices.Contains(policy.Spec.AllowedBuiltInRuntimeTypes, agent.Spec.Runtime.Type) {
-			return nil, "", permanentHarnessV1Candidate(fmt.Errorf("harness v1 policy does not allow built-in runtime %q", agent.Spec.Runtime.Type))
-		}
-	}
-	mandatory := []corev1alpha1.AgentExecutionProhibitedField{
-		corev1alpha1.AgentExecutionProhibitWorkspaceCredentials,
-		corev1alpha1.AgentExecutionProhibitForgeCredentials,
-		corev1alpha1.AgentExecutionProhibitDirectPublication,
-		corev1alpha1.AgentExecutionProhibitTransactionTokens,
-	}
-	for _, field := range mandatory {
-		if !slices.Contains(policy.Spec.ProhibitedFields, field) {
-			return nil, "", permanentHarnessV1Candidate(fmt.Errorf("harness v1 policy is missing mandatory prohibition %q", field))
-		}
-	}
-	digest, err := store.CanonicalAgentExecutionPolicyDigest(policy.Spec)
-	if err != nil {
-		return nil, "", err
-	}
-	return policy, digest, nil
-}
-
-// validateLiveHarnessV1PolicyBinding revalidates the exact compatibility
-// policy frozen into a prospective binding. The initial candidate read is not
-// an admission fence: an administrator may revoke or replace the policy while
-// snapshot and reservation persistence is in flight.
-func (r *TaskReconciler) validateLiveHarnessV1PolicyBinding(
-	ctx context.Context,
-	reader client.Reader,
-	task *corev1alpha1.Task,
-	binding *corev1alpha1.AgentExecutionBinding,
-) error {
-	if task == nil || binding == nil || binding.Policy == nil ||
-		binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 ||
-		binding.Mode != corev1alpha1.AgentExecutionBindingModeExecute {
-		return permanentHarnessV1Candidate(errors.New(
-			"new harness v1 execution binding requires an exact compatibility policy reference",
-		))
-	}
-	if reader == nil {
-		return errors.New("API reader is required to revalidate the harness v1 compatibility policy")
-	}
-	ref := binding.Policy
-	if strings.TrimSpace(ref.Name) == "" || ref.UID == "" || ref.Generation < 1 ||
-		store.ValidateCanonicalDigest("harness v1 compatibility policy digest", ref.Digest) != nil {
-		return permanentHarnessV1Candidate(errors.New(
-			"harness v1 execution binding carries an incomplete compatibility policy identity",
-		))
-	}
-	policy := &corev1alpha1.AgentExecutionPolicy{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: ref.Name}, policy); err != nil {
-		if apierrors.IsNotFound(err) {
-			return permanentHarnessV1Candidate(errors.New(
-				"harness v1 compatibility policy was removed before binding admission",
-			))
-		}
-		return fmt.Errorf("revalidate harness v1 compatibility policy: %w", err)
-	}
-	digest, err := store.CanonicalAgentExecutionPolicyDigest(policy.Spec)
-	if err != nil {
-		return fmt.Errorf("digest live harness v1 compatibility policy: %w", err)
-	}
-	if policy.UID != ref.UID || policy.Generation != ref.Generation || digest != ref.Digest ||
-		!policy.Spec.AllowNewV1Bindings {
-		return permanentHarnessV1Candidate(errors.New(
-			"harness v1 compatibility policy changed or revoked before binding admission",
-		))
 	}
 	return nil
 }
@@ -800,9 +693,6 @@ func validateHarnessV1Snapshot(
 			return errors.New("harness v1 runtime-auth-only snapshot uses an unsupported runtime")
 		}
 	}
-	if body.Workspace != nil && binding.Policy == nil {
-		return errors.New("harness v1 public workspace snapshot is missing its compatibility policy binding")
-	}
 	if err := validateFrozenHarnessV1PublicReadOnlyWorkspace(body); err != nil {
 		return err
 	}
@@ -909,7 +799,7 @@ func (r *TaskReconciler) loadVerifiedHarnessV1Execution(
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
 ) (*verifiedHarnessV1Execution, error) {
-	return r.loadHarnessV1ExecutionWithOptions(ctx, task, binding, false, false, true, true)
+	return r.loadHarnessV1ExecutionWithOptions(ctx, task, binding, false, true)
 }
 
 // loadVerifiedHarnessV1ExecutionForRecovery performs the same immutable
@@ -925,11 +815,11 @@ func (r *TaskReconciler) loadVerifiedHarnessV1ExecutionForRecovery(
 	binding *corev1alpha1.AgentExecutionBinding,
 	allowDeleting bool,
 ) (*verifiedHarnessV1Execution, error) {
-	return r.loadHarnessV1ExecutionWithOptions(ctx, task, binding, allowDeleting, true, true, true)
+	return r.loadHarnessV1ExecutionWithOptions(ctx, task, binding, allowDeleting, true)
 }
 
 // loadHarnessV1ExecutionForSettlement validates only immutable Task,
-// reservation, namespace, binding, and encrypted-snapshot authority. Terminal
+// namespace, binding, and encrypted-snapshot authority. Terminal
 // Session/outbox settlement does not read live Agent/configuration objects and
 // does not require credentials that are no longer used for executor effects.
 func (d *HarnessV1Dispatcher) loadHarnessV1ExecutionForSettlement(
@@ -939,9 +829,8 @@ func (d *HarnessV1Dispatcher) loadHarnessV1ExecutionForSettlement(
 ) (*verifiedHarnessV1Execution, error) {
 	verifier := TaskReconciler{
 		Client: d.Client, APIReader: d.APIReader, AgentExecutionSnapshots: d.Snapshots,
-		AgentExecutionBindingReservations: d.BindingReservations,
 	}
-	return verifier.loadHarnessV1ExecutionWithOptions(ctx, task, binding, true, true, false, false)
+	return verifier.loadHarnessV1ExecutionWithOptions(ctx, task, binding, true, false)
 }
 
 //nolint:gocyclo // The options separate executor authorization from terminal-only settlement verification.
@@ -950,15 +839,10 @@ func (r *TaskReconciler) loadHarnessV1ExecutionWithOptions(
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
 	allowDeleting bool,
-	allowDisabled bool,
-	verifyBackendControl bool,
 	verifySecrets bool,
 ) (*verifiedHarnessV1Execution, error) {
 	if r.AgentExecutionSnapshots == nil || task == nil || binding == nil {
 		return nil, errors.New("task, v1 binding, and encrypted snapshot store are required")
-	}
-	if err := r.verifyBoundAgentExecutionReservation(ctx, task, binding); err != nil {
-		return nil, err
 	}
 	reader := r.APIReader
 	if reader == nil {
@@ -980,36 +864,12 @@ func (r *TaskReconciler) loadHarnessV1ExecutionWithOptions(
 	if err := reader.Get(ctx, types.NamespacedName{Name: current.Namespace}, namespace); err != nil {
 		return nil, err
 	}
-	if namespace.UID == "" || namespace.UID != binding.Task.NamespaceUID || binding.Mode != corev1alpha1.AgentExecutionBindingModeExecute {
-		return nil, errors.New("harness v1 binding namespace identity or mode is invalid")
+	if namespace.UID == "" || namespace.UID != binding.Task.NamespaceUID {
+		return nil, errors.New("harness v1 binding namespace identity is invalid")
 	}
 	if binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 ||
 		(binding.Backend != corev1alpha1.AgentExecutionBackendHarnessWrapper && binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint) {
 		return nil, errors.New("binding is not dispatchable by HarnessV1Dispatcher")
-	}
-	if !verifyBackendControl {
-		if binding.BackendControl == nil || binding.BackendControl.AdmittedMode != corev1alpha1.AgentExecutionEffectiveModeEnabled {
-			return nil, errors.New("harness v1 binding lacks an enabled admission revision")
-		}
-	} else if allowDisabled {
-		if binding.BackendControl == nil || binding.BackendControl.AdmittedMode != corev1alpha1.AgentExecutionEffectiveModeEnabled {
-			return nil, errors.New("harness v1 binding lacks an enabled admission revision")
-		}
-		control := &corev1alpha1.AgentExecutionControl{}
-		if err := reader.Get(ctx, types.NamespacedName{Namespace: corev1alpha1.AgentExecutionControlNamespace, Name: corev1alpha1.AgentExecutionControlName}, control); err != nil {
-			return nil, err
-		}
-		if control.UID != binding.BackendControl.UID ||
-			control.Status.ObservedGeneration < binding.BackendControl.Generation ||
-			control.Status.ObservedGeneration > control.Generation ||
-			control.Status.Backends == nil ||
-			control.Status.Backends.V1.ModeRevision < binding.BackendControl.ModeRevision {
-			return nil, errors.New("harness v1 backend control no longer authorizes admitted cleanup recovery")
-		}
-	} else if err := r.verifyBoundAgentExecutionBackendMode(
-		ctx, reader, current, binding, store.AgentExecutionBackendV1,
-	); err != nil {
-		return nil, err
 	}
 	snapshot, err := r.AgentExecutionSnapshots.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{
 		TaskUID: string(binding.Task.UID), Digest: binding.Snapshot.Digest,
@@ -1061,9 +921,6 @@ func (r *TaskReconciler) ensureHarnessV1ExecutionBinding(
 	if task == nil {
 		return ctrl.Result{}, errors.New("task is required for harness v1 execution binding"), true
 	}
-	if err := r.checkAgentExecutionClassification(ctx); err != nil {
-		return ctrl.Result{RequeueAfter: time.Second}, nil, true
-	}
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
@@ -1079,10 +936,6 @@ func (r *TaskReconciler) ensureHarnessV1ExecutionBinding(
 		task = current
 	}
 	if existing := task.Status.AgentExecutionBinding; existing != nil {
-		if err := r.recoverBoundAgentExecutionReservation(ctx, task, existing); err != nil {
-			log.Error(err, "harness v1 binding reservation recovery failed")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
-		}
 		if _, err := r.loadVerifiedHarnessV1Execution(ctx, task, existing); err != nil {
 			log.Error(err, "harness v1 bound execution verification failed")
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
@@ -1103,42 +956,20 @@ func (r *TaskReconciler) ensureHarnessV1ExecutionBinding(
 		log.Error(err, "harness v1 immutable snapshot persistence failed")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
 	}
-	reservation, err := r.createAgentExecutionBindingReservation(ctx, task, &candidate.binding)
-	if err != nil {
-		log.Error(err, "harness v1 binding reservation failed")
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
-	}
 	binding, err := r.persistAgentExecutionBinding(ctx, task, candidate)
 	if err != nil {
 		conflict := &errAgentExecutionBindingConflict{}
 		if errors.As(err, &conflict) {
-			if settleErr := r.settleAgentExecutionBindingReservation(
-				ctx, reservation, store.AgentExecutionBindingReservationRejected, "binding-conflict",
-			); settleErr != nil {
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
-			}
 			result, failErr := r.failTask(ctx, task, err.Error())
 			return result, failErr, true
 		}
 		if isPermanentHarnessV1CandidateError(err) {
-			if settleErr := r.settleAgentExecutionBindingReservation(
-				ctx, reservation, store.AgentExecutionBindingReservationRejected, "policy-invalidated",
-			); settleErr != nil {
-				log.Error(settleErr, "reject harness v1 binding reservation after policy invalidation")
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
-			}
 			result, failErr := r.failTask(ctx, task, err.Error())
 			return result, failErr, true
 		}
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
 	}
 	task.Status.AgentExecutionBinding = binding
-	if err := r.settleAgentExecutionBindingReservation(
-		ctx, reservation, store.AgentExecutionBindingReservationBound, "",
-	); err != nil {
-		log.Error(err, "settle harness v1 binding reservation")
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
-	}
 	if _, err := r.loadVerifiedHarnessV1Execution(ctx, task, binding); err != nil {
 		log.Error(err, "verify harness v1 binding after persistence")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
@@ -1150,9 +981,6 @@ func (r *TaskReconciler) queueHarnessV1Task(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 ) (ctrl.Result, error) {
-	if err := r.checkAgentExecutionClassification(ctx); err != nil {
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	}
 	if r.HarnessV1Attempts == nil || r.ControllerEpochManager == nil {
 		return r.failTask(ctx, task, "durable harness v1 attempt store and controller epoch manager are required")
 	}

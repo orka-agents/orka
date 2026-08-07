@@ -31,8 +31,7 @@ import (
 // AgentReconciler reconciles a Agent object
 type AgentReconciler struct {
 	client.Client
-	Scheme                           *runtime.Scheme
-	AgentExecutionClassificationGate *AgentExecutionClassificationGate
+	Scheme *runtime.Scheme
 }
 
 const (
@@ -55,11 +54,6 @@ const (
 // Reconcile validates the Agent configuration and updates its status.
 func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	if r.AgentExecutionClassificationGate != nil {
-		if err := r.AgentExecutionClassificationGate.Check(ctx); err != nil {
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		}
-	}
 
 	// Fetch the Agent
 	agent := &corev1alpha1.Agent{}

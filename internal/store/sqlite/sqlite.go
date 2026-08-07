@@ -1076,7 +1076,7 @@ func migrate(db *sql.DB) error {
 	if err := migrateControlStore(db); err != nil {
 		return err
 	}
-	if err := migrateAgentExecutionCoexistence(db); err != nil {
+	if err := migrateAgentExecution(db); err != nil {
 		return err
 	}
 

@@ -86,8 +86,7 @@ type AgentExecutionSnapshotStore interface {
 
 	// DeleteAgentExecutionSnapshots removes every snapshot for a Task UID. The
 	// caller is responsible for proving all binding, attempt, lineage,
-	// finalizer, quarantine, adjudication, and retention references are
-	// released first.
+	// finalizer, and retention references are released first.
 	DeleteAgentExecutionSnapshots(ctx context.Context, taskUID string) error
 }
 
@@ -120,15 +119,14 @@ func (m AgentExecutionSnapshotMetadata) Validate() error {
 // scoped to their immutable Task UID because they do not store a snapshot
 // digest themselves.
 type AgentExecutionSnapshotReferenceCounts struct {
-	BindingReservations int64
-	HarnessV1Attempts   int64
-	PromptAttempts      int64
-	SessionTurns        int64
+	HarnessV1Attempts int64
+	PromptAttempts    int64
+	SessionTurns      int64
 }
 
 // Total returns the number of durable references across all known sources.
 func (c AgentExecutionSnapshotReferenceCounts) Total() int64 {
-	return c.BindingReservations + c.HarnessV1Attempts + c.PromptAttempts + c.SessionTurns
+	return c.HarnessV1Attempts + c.PromptAttempts + c.SessionTurns
 }
 
 // AgentExecutionSnapshotLifecycleStore is an optional retention/GC extension
@@ -141,11 +139,9 @@ type AgentExecutionSnapshotLifecycleStore interface {
 	ListAgentExecutionSnapshotMetadataBefore(ctx context.Context, cutoff time.Time) ([]AgentExecutionSnapshotMetadata, error)
 
 	// CountAgentExecutionSnapshotReferences returns a consistent count across
-	// open binding reservations, v1 attempts, v2 prompt attempts, and Session
-	// SessionTurns. Terminal Bound and Rejected reservations are audit records
-	// and do not retain snapshots. The first three sources match Task UID and
-	// digest; SessionTurns match the immutable Task UID because they do not
-	// carry a snapshot digest.
+	// v1 attempts, v2 prompt attempts, and SessionTurns. Attempt sources match
+	// Task UID and digest; SessionTurns match the immutable Task UID because they
+	// do not carry a snapshot digest.
 	CountAgentExecutionSnapshotReferences(ctx context.Context, key AgentExecutionSnapshotKey) (AgentExecutionSnapshotReferenceCounts, error)
 
 	// DeleteAgentExecutionSnapshot idempotently deletes one exact Task
@@ -154,25 +150,9 @@ type AgentExecutionSnapshotLifecycleStore interface {
 	DeleteAgentExecutionSnapshot(ctx context.Context, key AgentExecutionSnapshotKey) error
 }
 
-// SessionLineageProvenance records how a Session runtime lineage was created.
-type SessionLineageProvenance string
-
-const (
-	// SessionLineageFirstUse marks lineage established atomically on first
-	// executable use of a fresh Session.
-	SessionLineageFirstUse SessionLineageProvenance = "first-use"
-	// SessionLineageLegacyAdopted marks lineage classified from authoritative
-	// evidence during the sealed migration inventory.
-	SessionLineageLegacyAdopted SessionLineageProvenance = "legacy-adopted"
-	// SessionLineageTranscriptBootstrap marks a new Session lineage created by
-	// an explicit named migration from a reconciled canonical transcript.
-	SessionLineageTranscriptBootstrap SessionLineageProvenance = "transcript-bootstrap"
-)
-
 // SessionLineage durably records the execution protocol and runtime identity
 // of one conversation Session. LineageGeneration is independent of the Session
-// mutation-lease generation and any v2 RuntimeSession generation; it changes
-// only through an explicit named migration.
+// mutation-lease generation and any v2 RuntimeSession generation.
 type SessionLineage struct {
 	Namespace    string
 	SessionName  string
@@ -186,7 +166,6 @@ type SessionLineage struct {
 	// ConfigDigest is the configuration/snapshot digest recorded when the
 	// lineage was established.
 	ConfigDigest string
-	Provenance   SessionLineageProvenance
 	Version      int64
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -198,7 +177,6 @@ func (l SessionLineage) Validate() error {
 		Namespace: l.Namespace, SessionName: l.SessionName, NamespaceUID: l.NamespaceUID,
 		SessionUID: l.SessionUID, ContractVersion: l.ContractVersion,
 		LineageGeneration: l.LineageGeneration, RuntimeIdentity: l.RuntimeIdentity, ConfigDigest: l.ConfigDigest,
-		Provenance: l.Provenance,
 	}
 	if err := claim.Validate(); err != nil {
 		return err
@@ -230,12 +208,10 @@ type ClaimSessionLineageRequest struct {
 	LineageGeneration int64
 	RuntimeIdentity   string
 	ConfigDigest      string
-	Provenance        SessionLineageProvenance
 
 	// EstablishIfAbsent permits creating the lineage row. It must be true only
-	// when the caller has proven the Session is genuinely fresh or is running
-	// the sealed classification sweep: a non-empty pre-existing Session is
-	// never silently treated as unclaimed.
+	// when the caller has proven the Session is genuinely fresh: a non-empty
+	// pre-existing Session is never silently treated as unclaimed.
 	EstablishIfAbsent bool
 }
 
@@ -256,11 +232,6 @@ func (r ClaimSessionLineageRequest) Validate() error {
 		return ValidationErrorf("session lineage generation must be at least 1")
 	case strings.TrimSpace(r.RuntimeIdentity) == "":
 		return ValidationErrorf("session lineage runtime identity is required")
-	}
-	switch r.Provenance {
-	case SessionLineageFirstUse, SessionLineageLegacyAdopted, SessionLineageTranscriptBootstrap:
-	default:
-		return ValidationErrorf("session lineage provenance %q is not supported", string(r.Provenance))
 	}
 	if err := ValidateCanonicalDigest("session lineage config digest", r.ConfigDigest); err != nil {
 		return err

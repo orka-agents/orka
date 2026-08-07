@@ -1,4 +1,4 @@
-name: Coexistence Smoke
+name: Static Harness Modes
 
 on:
   push:
@@ -19,14 +19,15 @@ on:
       - "internal/admission/**"
       - "internal/controller/agent_execution*"
       - "internal/controller/harness_v1*"
+      - "internal/executionmode/**"
       - "internal/harness/**"
       - "internal/store/**"
       - "pkg/harness/**"
       - "scripts/check-legacy-wrapper-resources.sh"
       - "scripts/apply-acp-production.sh"
-      - "scripts/coexistence-*"
+      - "scripts/static-mode-crd-validate.sh"
       - "scripts/tests/acp-runtime-image-rollout-test.sh"
-      - "scripts/tests/coexistence-deploy-gate-test.sh"
+      - "scripts/tests/static-mode-deploy-gate-test.sh"
       - "workers/harness/**"
   pull_request:
     paths:
@@ -46,14 +47,15 @@ on:
       - "internal/admission/**"
       - "internal/controller/agent_execution*"
       - "internal/controller/harness_v1*"
+      - "internal/executionmode/**"
       - "internal/harness/**"
       - "internal/store/**"
       - "pkg/harness/**"
       - "scripts/check-legacy-wrapper-resources.sh"
       - "scripts/apply-acp-production.sh"
-      - "scripts/coexistence-*"
+      - "scripts/static-mode-crd-validate.sh"
       - "scripts/tests/acp-runtime-image-rollout-test.sh"
-      - "scripts/tests/coexistence-deploy-gate-test.sh"
+      - "scripts/tests/static-mode-deploy-gate-test.sh"
       - "workers/harness/**"
   workflow_dispatch:
 
@@ -61,7 +63,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: coexistence-smoke-${{ github.event.pull_request.number || github.ref }}
+  group: static-harness-modes-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -83,22 +85,23 @@ jobs:
       - name: Create UI embed stub
         run: make ensure-ui-embed
 
-      - name: Run coexistence-focused tests
+      - name: Run static-mode focused tests
         run: |
           go test \
             ./api/v1alpha1 \
             ./internal/admission \
             ./internal/controller \
+            ./internal/executionmode \
             ./internal/harness/... \
             ./internal/store/... \
             ./workers/harness/... \
             ./cmd/orka-admission \
             ./cmd/orka-agent-harness-wrapper \
-            -run '(AgentExecution|AgentContract|AgentRuntimeContract|TaskExecutionAuthority|TaskResolution|HarnessV1|RecoverAmbiguousSubmission|RecoverActiveAttempt|DurableAdmission|DurableTurn|Ledger|SessionLineage|ReceiptPersistence|AdmissionClose)' \
+            -run '(ExecutionMode|ControllerMode|AgentContract|AgentRuntimeContract|TaskExecutionAuthority|HarnessV1|RecoverAmbiguousSubmission|RecoverActiveAttempt|DurableAdmission|DurableTurn|Ledger|SessionLineage|ReceiptPersistence|AdmissionClose)' \
             -count=1
 
   shell-syntax:
-    name: Coexistence deployment scripts
+    name: Static-mode deployment scripts
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -109,16 +112,16 @@ jobs:
 
       - name: Validate scripts
         run: |
-          bash -n scripts/coexistence-bridge-crd-validate.sh
+          bash -n scripts/static-mode-crd-validate.sh
           bash -n scripts/check-legacy-wrapper-resources.sh
           bash -n scripts/apply-acp-production.sh
           bash -n scripts/tests/acp-runtime-image-rollout-test.sh
-          bash -n scripts/tests/coexistence-deploy-gate-test.sh
+          bash -n scripts/tests/static-mode-deploy-gate-test.sh
 
       - name: Install kustomize
         run: make kustomize
 
-      - name: Run coexistence deployment tests
+      - name: Run static-mode deployment tests
         run: |
-          bash scripts/tests/coexistence-deploy-gate-test.sh
+          bash scripts/tests/static-mode-deploy-gate-test.sh
           KUSTOMIZE="$PWD/bin/kustomize" bash scripts/tests/acp-runtime-image-rollout-test.sh

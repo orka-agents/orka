@@ -427,12 +427,6 @@ type SkillReference struct {
 // TaskStatus defines the observed state of Task
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome",message="executionOutcome is immutable once recorded"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding) && self.agentExecutionBinding == oldSelf.agentExecutionBinding)",message="agentExecutionBinding is write-once and immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.agentExecutionNoExecution) || (has(self.agentExecutionNoExecution) && self.agentExecutionNoExecution == oldSelf.agentExecutionNoExecution)",message="agentExecutionNoExecution is write-once and immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.agentExecutionQuarantine) || (has(self.agentExecutionQuarantine) && self.agentExecutionQuarantine == oldSelf.agentExecutionQuarantine)",message="agentExecutionQuarantine evidence is never cleared or rewritten"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.agentExecutionResolutionRef) || (has(self.agentExecutionResolutionRef) && self.agentExecutionResolutionRef == oldSelf.agentExecutionResolutionRef)",message="agentExecutionResolutionRef is append-once and immutable"
-// +kubebuilder:validation:XValidation:rule="!(has(self.agentExecutionBinding) && has(self.agentExecutionNoExecution))",message="a Task cannot be both bound and proven no-execution"
-// +kubebuilder:validation:XValidation:rule="!(has(self.agentExecutionBinding) && has(self.agentExecutionQuarantine))",message="a quarantined Task cannot hold an execution binding"
-// +kubebuilder:validation:XValidation:rule="!(has(self.agentExecutionNoExecution) && has(self.agentExecutionQuarantine))",message="no-execution and quarantine dispositions are mutually exclusive"
 // +kubebuilder:validation:XValidation:rule="!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion != 'orka.harness.v1' || ((!has(self.execution) || (has(oldSelf.execution) && self.execution == oldSelf.execution)) && (!has(self.delivery) || (has(oldSelf.delivery) && self.delivery == oldSelf.delivery)))",message="a v1-bound Task cannot acquire new v2 execution or delivery state"
 // +kubebuilder:validation:XValidation:rule="!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion != 'orka.harness.v2' || !has(self.harnessRuntime) || (has(oldSelf.harnessRuntime) && self.harnessRuntime == oldSelf.harnessRuntime)",message="a v2-bound Task cannot acquire new v1 harness state"
 type TaskStatus struct {
@@ -485,21 +479,6 @@ type TaskStatus struct {
 	// execution route for this agent Task.
 	// +optional
 	AgentExecutionBinding *AgentExecutionBinding `json:"agentExecutionBinding,omitempty"`
-
-	// AgentExecutionNoExecution records authoritative proof that this Task has
-	// no route-specific executor state; common cleanup only.
-	// +optional
-	AgentExecutionNoExecution *AgentExecutionNoExecution `json:"agentExecutionNoExecution,omitempty"`
-
-	// AgentExecutionQuarantine records immutable mixed or unprovable route
-	// evidence; the Task admits no new execution until adjudicated.
-	// +optional
-	AgentExecutionQuarantine *AgentExecutionQuarantine `json:"agentExecutionQuarantine,omitempty"`
-
-	// AgentExecutionResolutionRef is the immutable reference to the Applied
-	// adjudication that resolved this Task's quarantine or blocked state.
-	// +optional
-	AgentExecutionResolutionRef *AgentExecutionResolutionRef `json:"agentExecutionResolutionRef,omitempty"`
 
 	// ExecutionOutcome records the immutable outcome of a non-ACP workload before
 	// provider-neutral execution-workspace finalization completes.
@@ -714,7 +693,7 @@ type ChildTaskStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Priority",type=integer,JSONPath=`.spec.priority`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || (!(has(oldSelf.status.agentExecutionBinding) || has(oldSelf.status.agentExecutionNoExecution) || has(oldSelf.status.agentExecutionQuarantine)) || self.spec == oldSelf.spec)",message="Task spec is immutable after execution authority or a migration disposition is recorded"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding) || self.spec == oldSelf.spec)",message="Task spec is immutable after execution authority is recorded"
 
 // Task is the Schema for the tasks API
 type Task struct {

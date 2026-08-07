@@ -8,31 +8,92 @@ import (
 	"testing"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 )
 
-func TestTaskWebhooksBypassExactControllerCleanupAcrossInstallPaths(t *testing.T) {
-	t.Run("Helm", func(t *testing.T) {
-		digest := "sha256:" + strings.Repeat("3", 64)
-		rendered := requireHelmRender(t,
-			"--set", "admission.enabled=true",
-			"--set", "admission.webhooks.enabled=true",
-			"--set-string", "admission.tls.existingSecret=orka-admission-tls",
-			"--set-string", "admission.webhooks.caBundle=Y2E=",
-			"--set-string", "controller.image.digest="+digest,
-			"--show-only", "templates/admission-validating-webhook.yaml",
-		)
-		assertTaskWebhooksBypassExactControllerCleanup(t, []byte(rendered))
-	})
+func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("3", 64)
+	for _, mode := range []string{"harness-v1", "harness-v2"} {
+		t.Run(mode, func(t *testing.T) {
+			args := []string{
+				"--set-string", "controller.mode=" + mode,
+				"--show-only", "templates/controller-validating-webhook.yaml",
+			}
+			if mode == "harness-v1" {
+				args = append(args,
+					"--set-string", "harnessV1.image.digest="+digest,
+					"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				)
+			}
 
-	t.Run("standalone", func(t *testing.T) {
-		path := filepath.Join("..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml")
-		manifest, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read standalone admission webhooks: %v", err)
+			rendered := requireHelmRender(t, args...)
+			configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
+			if err := yaml.Unmarshal([]byte(rendered), &configuration); err != nil {
+				t.Fatalf("decode controller validating webhook configuration: %v", err)
+			}
+			if configuration.Name != "test-orka-controller" {
+				t.Fatalf("controller webhook name = %q, want test-orka-controller", configuration.Name)
+			}
+
+			webhooks := make(map[string]admissionregistrationv1.ValidatingWebhook, len(configuration.Webhooks))
+			for _, webhook := range configuration.Webhooks {
+				webhooks[webhook.Name] = webhook
+				if !strings.HasSuffix(webhook.Name, "."+mode+".orka.ai") {
+					t.Errorf("webhook name %q is not scoped to mode %q", webhook.Name, mode)
+				}
+				if webhook.FailurePolicy == nil || *webhook.FailurePolicy != admissionregistrationv1.Fail {
+					t.Errorf("%s failurePolicy = %v, want Fail", webhook.Name, webhook.FailurePolicy)
+				}
+				service := webhook.ClientConfig.Service
+				if service == nil || service.Name != "test-orka" || service.Namespace != "orka-test" ||
+					service.Port == nil || *service.Port != 443 {
+					t.Errorf("%s service = %#v, want test-orka:443 in orka-test", webhook.Name, service)
+				}
+				selector := webhook.NamespaceSelector
+				if strings.HasPrefix(webhook.Name, "namespace-mode.") {
+					selector = webhook.ObjectSelector
+				}
+				if selector == nil || selector.MatchLabels["orka.ai/controller-mode"] != mode {
+					t.Errorf("%s execution-mode selector = %#v, want %q", webhook.Name, selector, mode)
+				}
+			}
+
+			_, hasTaskWorkspace := webhooks["task-workspace-class."+mode+".orka.ai"]
+			_, hasToolWorkspace := webhooks["tool-workspace-class."+mode+".orka.ai"]
+			wantWorkspace := mode == "harness-v2"
+			if hasTaskWorkspace != wantWorkspace || hasToolWorkspace != wantWorkspace {
+				t.Fatalf("workspace webhooks present = task:%t tool:%t, want %t", hasTaskWorkspace, hasToolWorkspace, wantWorkspace)
+			}
+		})
+	}
+}
+
+func TestControllerServiceExposesWebhookPort(t *testing.T) {
+	rendered := requireHelmRender(t, "--show-only", "templates/service.yaml")
+	service := corev1.Service{}
+	if err := yaml.Unmarshal([]byte(rendered), &service); err != nil {
+		t.Fatalf("decode controller Service: %v", err)
+	}
+
+	for _, port := range service.Spec.Ports {
+		if port.Name == "webhook" {
+			if port.Port != 443 || port.TargetPort.String() != "webhook" {
+				t.Fatalf("webhook Service port = %#v, want 443 -> webhook", port)
+			}
+			return
 		}
-		assertTaskWebhooksBypassExactControllerCleanup(t, manifest)
-	})
+	}
+	t.Fatalf("controller Service has no webhook port: %#v", service.Spec.Ports)
+}
+
+func TestSharedTaskWebhooksBypassExactControllerCleanup(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml")
+	manifest, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read standalone admission webhooks: %v", err)
+	}
+	assertTaskWebhooksBypassExactControllerCleanup(t, manifest)
 }
 
 func assertTaskWebhooksBypassExactControllerCleanup(t *testing.T, manifest []byte) {

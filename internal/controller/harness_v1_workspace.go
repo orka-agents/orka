@@ -22,17 +22,13 @@ import (
 func resolveHarnessV1PublicReadOnlyWorkspace(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
-	policy *corev1alpha1.AgentExecutionPolicy,
 	target resolvedHarnessV1Target,
 ) (*corev1alpha1.WorkspaceConfig, error) {
 	if task == nil || task.Spec.Workspace == nil {
 		return nil, nil
 	}
-	if agent == nil || agent.Spec.Runtime == nil || policy == nil {
-		return nil, errors.New("harness v1 public read-only workspace requires an Agent and compatibility policy")
-	}
-	if !policy.Spec.AllowPublicReadOnlyWorkspaces {
-		return nil, errors.New("harness v1 compatibility policy does not authorize public read-only workspaces")
+	if agent == nil || agent.Spec.Runtime == nil {
+		return nil, errors.New("harness v1 public read-only workspace requires an Agent")
 	}
 	if target.backend != corev1alpha1.AgentExecutionBackendHarnessWrapper || target.runtimeRef != nil {
 		return nil, errors.New("harness v1 public read-only workspace requires the built-in wrapper")
@@ -42,13 +38,6 @@ func resolveHarnessV1PublicReadOnlyWorkspace(
 			"harness v1 public read-only workspace does not support runtime %q",
 			agent.Spec.Runtime.Type,
 		)
-	}
-	switch policy.Spec.NetworkIsolationProfile {
-	case corev1alpha1.AgentExecutionNetworkIsolationDefaultDeny:
-	case corev1alpha1.AgentExecutionNetworkIsolationPerTrustDomain:
-		return nil, errors.New("harness v1 public read-only workspace requires a trust-domain-specific wrapper target")
-	default:
-		return nil, errors.New("harness v1 public read-only workspace requires a fail-closed network isolation profile")
 	}
 	if err := validateHarnessV1PublicReadOnlyWorkspace(task.Spec.Workspace); err != nil {
 		return nil, err

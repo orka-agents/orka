@@ -51,9 +51,8 @@ const (
 // AgentRuntimeReconciler reconciles external harness v1 and v2 registry entries.
 type AgentRuntimeReconciler struct {
 	client.Client
-	APIReader                        client.Reader
-	Scheme                           *k8sruntime.Scheme
-	AgentExecutionClassificationGate *AgentExecutionClassificationGate
+	APIReader client.Reader
+	Scheme    *k8sruntime.Scheme
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch;create;update;patch;delete
@@ -65,11 +64,6 @@ type AgentRuntimeReconciler struct {
 // Reconcile validates one exact external runtime and publishes condition-ready status.
 func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	if r.AgentExecutionClassificationGate != nil {
-		if err := r.AgentExecutionClassificationGate.Check(ctx); err != nil {
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		}
-	}
 	runtime := &corev1alpha1.AgentRuntime{}
 	if err := r.Get(ctx, req.NamespacedName, runtime); err != nil {
 		if apierrors.IsNotFound(err) {

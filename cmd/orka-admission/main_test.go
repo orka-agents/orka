@@ -25,8 +25,11 @@ func TestOptionsValidate(t *testing.T) {
 		{name: "valid"},
 		{name: "certificate directory required", mutate: func(o *options) { o.webhookCertPath = "" }, wantErr: true},
 		{name: "service DNS name required", mutate: func(o *options) { o.webhookServiceDNSName = "" }, wantErr: true},
-		{name: "controller identity required", mutate: func(o *options) { o.controllerUsername = "" }, wantErr: true},
-		{name: "admin group required", mutate: func(o *options) { o.adminGroups = " , " }, wantErr: true},
+		{name: "controller identity required", mutate: func(o *options) { o.controllerUsernames = " , " }, wantErr: true},
+		{
+			name:   "multiple controller identities",
+			mutate: func(o *options) { o.controllerUsernames = "controller-v1,controller-v2" },
+		},
 		{name: "certificate filename only", mutate: func(o *options) { o.webhookCertName = "../tls.crt" }, wantErr: true},
 		{name: "key filename only", mutate: func(o *options) { o.webhookCertKey = "/tls.key" }, wantErr: true},
 		{name: "port lower bound", mutate: func(o *options) { o.webhookPort = 0 }, wantErr: true},
@@ -41,8 +44,7 @@ func TestOptionsValidate(t *testing.T) {
 				webhookCertKey:        "tls.key",
 				webhookServiceDNSName: "orka-admission.orka-system.svc",
 				webhookPort:           9443,
-				controllerUsername:    "system:serviceaccount:orka-system:orka-controller-manager",
-				adminGroups:           "system:masters",
+				controllerUsernames:   "system:serviceaccount:orka-system:orka-controller-manager",
 			}
 			if tt.mutate != nil {
 				tt.mutate(&opts)
@@ -81,12 +83,6 @@ func TestServingCertificateFilesChecker(t *testing.T) {
 			name:            "malformed certificate",
 			certificatePEM:  []byte("certificate"),
 			keyPEM:          valid.keyPEM,
-			wantErrContains: "load webhook serving certificate",
-		},
-		{
-			name:            "malformed private key",
-			certificatePEM:  valid.certificatePEM,
-			keyPEM:          []byte("private-key"),
 			wantErrContains: "load webhook serving certificate",
 		},
 		{

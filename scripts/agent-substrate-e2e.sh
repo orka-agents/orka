@@ -914,16 +914,13 @@ deploy_orka() {
   # omit the unrelated clean-room publisher workload and provide only the
   # controller's required non-secret image metadata and local capability files.
   (
-    cd "${tmp_config}/config/default"
+    cd "${tmp_config}/config/acp-workload"
     "${ROOT_DIR}/bin/kustomize" edit remove resource ../publisher
     "${ROOT_DIR}/bin/kustomize" edit remove resource ../provider-proxy
     "${ROOT_DIR}/bin/kustomize" edit remove resource ../scm-egress-proxy
   )
   kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
-  # Controller readiness is fail-closed until the cluster-wide execution
-  # control exists and its initial classification inventory is sealed. Seed
-  # the canonical v2-only control before creating the controller Deployment.
-  kubectl apply -f "${ROOT_DIR}/config/acp-production/agent_execution_control.yaml"
+  kubectl label namespace orka-system orka.ai/controller-mode=harness-v2 --overwrite
   local placeholder_digest
   placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
   kubectl -n orka-system create configmap acp-runtime-images \
@@ -962,7 +959,7 @@ deploy_orka() {
     --dry-run=client -o yaml | kubectl apply -f -
   rm -rf "${capability_dir}"
 
-  "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/default" | kubectl apply -f -
+  "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -
 
   local patch
   patch="$(jq -cn \
@@ -1008,7 +1005,10 @@ deploy_orka() {
                   "--leader-elect",
                   "--health-probe-bind-address=:8081",
                   "--controller-url=http://orka-api.orka-system.svc:8080",
-                  "--acp-runtime-enabled=false",
+                  "--controller-mode=harness-v2",
+                  "--watch-namespace=orka-system",
+                  "--enforce-namespace-isolation=true",
+                  "--execution-mode-controller-usernames=system:serviceaccount:orka-system:orka-controller-manager",
                   "--execution-workspace-default-provider=substrate",
                   "--agent-sandbox-enabled=false",
                   "--substrate-enabled=true",

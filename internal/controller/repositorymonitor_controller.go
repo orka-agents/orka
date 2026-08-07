@@ -59,14 +59,13 @@ const (
 // RepositoryMonitorReconciler reconciles RepositoryMonitor resources.
 type RepositoryMonitorReconciler struct {
 	client.Client
-	Scheme                           *runtime.Scheme
-	AgentExecutionClassificationGate *AgentExecutionClassificationGate
-	Store                            store.RepositoryMonitorStore
-	ResultStore                      store.ResultStore
-	ArtifactStore                    store.ArtifactStore
-	HTTPClient                       *http.Client
-	GitHubAPIBaseURL                 string
-	EnforceNamespaceIsolation        bool
+	Scheme                    *runtime.Scheme
+	Store                     store.RepositoryMonitorStore
+	ResultStore               store.ResultStore
+	ArtifactStore             store.ArtifactStore
+	HTTPClient                *http.Client
+	GitHubAPIBaseURL          string
+	EnforceNamespaceIsolation bool
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors,verbs=get;list;watch;create;update;patch;delete
@@ -80,11 +79,6 @@ type RepositoryMonitorReconciler struct {
 // Reconcile keeps monitor metadata durable and publishes basic status.
 func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("repositorymonitor")
-	if r.AgentExecutionClassificationGate != nil {
-		if err := r.AgentExecutionClassificationGate.Check(ctx); err != nil {
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		}
-	}
 
 	monitor, found, err := r.getRepositoryMonitor(ctx, req)
 	if err != nil {

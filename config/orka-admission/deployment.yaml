@@ -58,12 +58,9 @@ spec:
             - --webhook-cert-name=tls.crt
             - --webhook-cert-key=tls.key
             - --webhook-service-dns-name=orka-admission.orka-system.svc
-            - --controller-username=system:serviceaccount:orka-system:orka-controller-manager
-            - --adjudication-controller-username=system:serviceaccount:orka-system:orka-controller-manager
-            - --classification-usernames=system:serviceaccount:orka-system:orka-controller-manager
-            - --admin-groups=system:masters
-            - --task-provenance-trusted-users=system:serviceaccount:orka-system:orka-controller-manager
-            - --task-provenance-trusted-service-accounts=orka-ai-worker,orka-vendor-worker
+            - --controller-usernames=system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
+            - --task-provenance-trusted-users=system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
+            - --task-provenance-trusted-service-accounts=orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
           ports:
             - name: webhook
               containerPort: 9443

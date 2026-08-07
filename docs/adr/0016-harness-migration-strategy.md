@@ -4,7 +4,11 @@ Date: 2026-08-05
 
 ## Status
 
-Accepted (engineering). Product and operations countersign are recorded in the
+Superseded by ADR 0018 on 2026-08-07. This record is retained as the historical
+full-active-coexistence decision; it is no longer an implementation or release
+contract.
+
+Previously accepted (engineering). Product and operations countersign are recorded in the
 release tracker before the first dual release ships; implementation may proceed
 on this record, but canary admission (Phase 7 of the plan) must not open without
 the countersign.

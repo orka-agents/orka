@@ -9,6 +9,7 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"sort"
@@ -18,6 +19,46 @@ import (
 
 	"github.com/orka-agents/orka/internal/store"
 )
+
+func TestAgentExecutionMigrationRemovesLegacySessionLineageProvenance(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-lineage.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE session_lineages (
+		namespace TEXT NOT NULL, session_name TEXT NOT NULL, namespace_uid TEXT NOT NULL,
+		session_uid TEXT NOT NULL, contract_version TEXT NOT NULL,
+		lineage_generation INTEGER NOT NULL, runtime_identity TEXT NOT NULL,
+		config_digest TEXT NOT NULL, provenance TEXT NOT NULL, version INTEGER NOT NULL,
+		created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
+		PRIMARY KEY(namespace, session_name), UNIQUE(session_uid)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 7, 9, 0, 0, 0, time.UTC)
+	digest := store.CanonicalAgentExecutionSnapshotDigest([]byte("legacy-lineage"))
+	if _, err := db.Exec(`INSERT INTO session_lineages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"tenant", "chat", "namespace-uid", "session-uid", "orka.harness.v2", 1,
+		"codex", digest, "legacy-adopted", 1, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateAgentExecution(db); err != nil {
+		t.Fatalf("migrateAgentExecution: %v", err)
+	}
+	if sqliteTableHasColumn(t, db, "session_lineages", "provenance") {
+		t.Fatal("legacy provenance column remains after static-mode migration")
+	}
+	var gotUID, gotDigest string
+	if err := db.QueryRow(`SELECT session_uid, config_digest FROM session_lineages
+		WHERE namespace = ? AND session_name = ?`, "tenant", "chat").Scan(&gotUID, &gotDigest); err != nil {
+		t.Fatal(err)
+	}
+	if gotUID != "session-uid" || gotDigest != digest {
+		t.Fatalf("migrated lineage = (%q, %q), want preserved identity", gotUID, gotDigest)
+	}
+}
 
 var (
 	_ store.AgentExecutionSnapshotStore          = (*Store)(nil)
@@ -282,7 +323,6 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 	key := persistLifecycleSnapshot(t, ctx, s, "task-uid", []byte(`{"snapshot":"target"}`), now)
 	otherDigestKey := persistLifecycleSnapshot(t, ctx, s, key.TaskUID, []byte(`{"snapshot":"other"}`), now)
 	otherTaskKey := persistLifecycleSnapshot(t, ctx, s, "other-task-uid", []byte(`{"snapshot":"target"}`), now)
-	rejectedKey := persistLifecycleSnapshot(t, ctx, s, "rejected-task-uid", []byte(`{"snapshot":"rejected"}`), now)
 	bindingDigest := store.CanonicalAgentExecutionSnapshotDigest([]byte("binding"))
 	requestDigest := store.CanonicalAgentExecutionSnapshotDigest([]byte("request"))
 
@@ -291,31 +331,6 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 		if _, err := s.db.ExecContext(ctx, statement, args...); err != nil {
 			t.Fatalf("seed snapshot reference: %v", err)
 		}
-	}
-	seedReservation := func(
-		id, taskUID, snapshotDigest string,
-		state store.AgentExecutionBindingReservationState,
-	) {
-		t.Helper()
-		terminalReason := ""
-		var settledAt any
-		switch state {
-		case store.AgentExecutionBindingReservationOpen:
-		case store.AgentExecutionBindingReservationBound:
-			settledAt = now
-		case store.AgentExecutionBindingReservationRejected:
-			terminalReason = "test-rejection"
-			settledAt = now
-		default:
-			t.Fatalf("unsupported reservation state %q", state)
-		}
-		mustExec(`INSERT INTO agent_execution_binding_reservations
-			(id, task_namespace, task_name, task_uid, control_uid, control_generation,
-			 backend, mode_revision, binding_digest, snapshot_digest, state,
-			 terminal_reason, version, reserved_at, settled_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-			id, "ns", "task-"+id, taskUID, "control-uid", 1, "v2", 1,
-			bindingDigest, snapshotDigest, state, terminalReason, now, settledAt, now)
 	}
 	seedHarnessAttempt := func(id, taskUID string, attempt int, snapshotDigest string) {
 		mustExec(`INSERT INTO harness_v1_attempts
@@ -338,9 +353,8 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 	seedLineage := func(id, configDigest string) {
 		mustExec(`INSERT INTO session_lineages
 			(namespace, session_name, namespace_uid, session_uid, contract_version,
-			 lineage_generation, runtime_identity, config_digest, provenance,
-			 version, created_at, updated_at)
-			VALUES (?, ?, ?, ?, 'orka.harness.v2', 1, 'codex', ?, 'first-use', 1, ?, ?)`,
+			 lineage_generation, runtime_identity, config_digest, version, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 'orka.harness.v2', 1, 'codex', ?, 1, ?, ?)`,
 			"ns", "session-"+id, "namespace-uid", "session-uid-"+id,
 			configDigest, now, now)
 	}
@@ -356,10 +370,6 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 			"turn-prompt-"+id, "turn-attempt-"+id, requestDigest, now, now)
 	}
 
-	seedReservation("reservation-open", key.TaskUID, key.Digest, store.AgentExecutionBindingReservationOpen)
-	seedReservation("reservation-bound", otherTaskKey.TaskUID, key.Digest, store.AgentExecutionBindingReservationBound)
-	seedReservation("reservation-rejected", rejectedKey.TaskUID, rejectedKey.Digest,
-		store.AgentExecutionBindingReservationRejected)
 	seedHarnessAttempt("harness-match-1", key.TaskUID, 1, key.Digest)
 	seedHarnessAttempt("harness-match-2", key.TaskUID, 2, key.Digest)
 	seedHarnessAttempt("harness-other-digest", key.TaskUID, 3, otherDigestKey.Digest)
@@ -381,13 +391,12 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 		t.Fatalf("CountAgentExecutionSnapshotReferences: %v", err)
 	}
 	want := store.AgentExecutionSnapshotReferenceCounts{
-		BindingReservations: 1,
-		HarnessV1Attempts:   2,
-		PromptAttempts:      2,
-		SessionTurns:        2,
+		HarnessV1Attempts: 2,
+		PromptAttempts:    2,
+		SessionTurns:      2,
 	}
-	if counts != want || counts.Total() != 7 {
-		t.Fatalf("reference counts = %#v (total %d), want %#v (total 7)", counts, counts.Total(), want)
+	if counts != want || counts.Total() != 6 {
+		t.Fatalf("reference counts = %#v (total %d), want %#v (total 6)", counts, counts.Total(), want)
 	}
 
 	otherTaskCounts, err := s.CountAgentExecutionSnapshotReferences(ctx, otherTaskKey)
@@ -401,13 +410,6 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 	}
 	if otherTaskCounts != wantOtherTask {
 		t.Fatalf("other Task reference counts = %#v, want %#v", otherTaskCounts, wantOtherTask)
-	}
-	rejectedCounts, err := s.CountAgentExecutionSnapshotReferences(ctx, rejectedKey)
-	if err != nil {
-		t.Fatalf("count rejected Task references: %v", err)
-	}
-	if rejectedCounts != (store.AgentExecutionSnapshotReferenceCounts{}) {
-		t.Fatalf("rejected Task reference counts = %#v, want no retaining references", rejectedCounts)
 	}
 	if _, err := s.CountAgentExecutionSnapshotReferences(ctx, store.AgentExecutionSnapshotKey{}); err == nil {
 		t.Fatal("incomplete snapshot key must fail reference-count validation")
@@ -459,7 +461,6 @@ func TestSessionLineageProjectionIsIdempotentAndRejectsDivergence(t *testing.T) 
 		LineageGeneration: 1,
 		RuntimeIdentity:   "codex",
 		ConfigDigest:      store.CanonicalAgentExecutionSnapshotDigest([]byte("cfg")),
-		Provenance:        store.SessionLineageFirstUse,
 		Version:           1,
 		CreatedAt:         now,
 		UpdatedAt:         now,

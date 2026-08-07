@@ -1,4 +1,4 @@
-{{- if and .Values.publisher.enabled .Values.scmEgressProxy.enabled }}
+{{- if and (eq .Values.controller.mode "harness-v2") .Values.publisher.enabled .Values.scmEgressProxy.enabled }}
 {{- $secretName := .Values.scmEgressProxy.auth.existingSecret | default (include "orka.scmEgressProxyAuthSecretName" .) }}
 {{- $tokenKey := .Values.scmEgressProxy.auth.tokenKey | default "token" }}
 apiVersion: apps/v1

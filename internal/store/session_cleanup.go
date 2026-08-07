@@ -41,19 +41,6 @@ type ReclaimSessionRequest struct {
 	OperationID     string               `json:"operationId"`
 	OperationDigest string               `json:"operationDigest"`
 	RequestedAt     time.Time            `json:"requestedAt"`
-	// Adjudication is present only when route-aware finalization has verified
-	// an exact subject-side reference to an Applied adjudication. It fences the
-	// one-way deletion of an otherwise immutable reconciliation-blocked control.
-	Adjudication *SessionCleanupAdjudicationFence `json:"adjudication,omitempty"`
-}
-
-// SessionCleanupAdjudicationFence identifies the exact resolved control write
-// that authorized cleanup. The blocked evidence remains on the control until
-// the object is deleted; it is never rewritten to Available.
-type SessionCleanupAdjudicationFence struct {
-	ControlObjectUID       string `json:"controlObjectUid"`
-	ControlResourceVersion string `json:"controlResourceVersion"`
-	ResolutionDigest       string `json:"resolutionDigest"`
 }
 
 // SessionCleanupBranchClaim freezes one exact Session-owned BranchClaim.
@@ -76,23 +63,22 @@ type SessionCleanupBranchClaim struct {
 // SessionUID denotes a transcript-only, non-ACP Session; SQLite refuses that
 // form when ACP SessionTurns exist.
 type SessionCleanupIntent struct {
-	Namespace                      string                           `json:"namespace"`
-	SessionName                    string                           `json:"sessionName"`
-	SessionUID                     string                           `json:"sessionUid,omitempty"`
-	ControlObjectUID               string                           `json:"controlObjectUid,omitempty"`
-	ControlRequestDigest           string                           `json:"controlRequestDigest,omitempty"`
-	ExpectedControlVersion         int64                            `json:"expectedControlVersion,omitempty"`
-	ExpectedLeaseGeneration        int64                            `json:"expectedLeaseGeneration,omitempty"`
-	ExpectedControlLastOperationID string                           `json:"expectedControlLastOperationId,omitempty"`
-	ExpectedControlLastDigest      string                           `json:"expectedControlLastDigest,omitempty"`
-	ExpectedVerifiedBaseline       *VerifiedBranchBaseline          `json:"expectedVerifiedBaseline,omitempty"`
-	Adjudication                   *SessionCleanupAdjudicationFence `json:"adjudication,omitempty"`
-	LeaseName                      string                           `json:"leaseName,omitempty"`
-	LeaseObjectUID                 string                           `json:"leaseObjectUid,omitempty"`
-	BranchClaims                   []SessionCleanupBranchClaim      `json:"branchClaims,omitempty"`
-	OperationID                    string                           `json:"operationId"`
-	OperationDigest                string                           `json:"operationDigest"`
-	PreparedAt                     time.Time                        `json:"preparedAt"`
+	Namespace                      string                      `json:"namespace"`
+	SessionName                    string                      `json:"sessionName"`
+	SessionUID                     string                      `json:"sessionUid,omitempty"`
+	ControlObjectUID               string                      `json:"controlObjectUid,omitempty"`
+	ControlRequestDigest           string                      `json:"controlRequestDigest,omitempty"`
+	ExpectedControlVersion         int64                       `json:"expectedControlVersion,omitempty"`
+	ExpectedLeaseGeneration        int64                       `json:"expectedLeaseGeneration,omitempty"`
+	ExpectedControlLastOperationID string                      `json:"expectedControlLastOperationId,omitempty"`
+	ExpectedControlLastDigest      string                      `json:"expectedControlLastDigest,omitempty"`
+	ExpectedVerifiedBaseline       *VerifiedBranchBaseline     `json:"expectedVerifiedBaseline,omitempty"`
+	LeaseName                      string                      `json:"leaseName,omitempty"`
+	LeaseObjectUID                 string                      `json:"leaseObjectUid,omitempty"`
+	BranchClaims                   []SessionCleanupBranchClaim `json:"branchClaims,omitempty"`
+	OperationID                    string                      `json:"operationId"`
+	OperationDigest                string                      `json:"operationDigest"`
+	PreparedAt                     time.Time                   `json:"preparedAt"`
 }
 
 // CompleteSessionCleanupRequest deletes SQLite-owned state only after the

@@ -38,23 +38,16 @@ func TestAgentExecutionSnapshotRetentionRequiresTwoReferenceFreeWindows(t *testi
 	require.Equal(t, []store.AgentExecutionSnapshotKey{item.Key}, lifecycle.deleted)
 }
 
-func TestAgentExecutionSnapshotRetentionHonorsEveryKubernetesReference(t *testing.T) {
+func TestAgentExecutionSnapshotRetentionHonorsKubernetesReferences(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	taskItem := snapshotRetentionMetadata("task-reference", "task", now.Add(-3*time.Hour))
-	adjudicationItem := snapshotRetentionMetadata("adjudication-reference", "adjudication", now.Add(-3*time.Hour))
 	leaseItem := snapshotRetentionMetadata("lease-reference", "lease", now.Add(-3*time.Hour))
-	lifecycle := newSnapshotRetentionLifecycleStore(taskItem, adjudicationItem, leaseItem)
+	lifecycle := newSnapshotRetentionLifecycleStore(taskItem, leaseItem)
 
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "default", Name: "retained-task", UID: types.UID(taskItem.Key.TaskUID),
 	}}
-	adjudication := &corev1alpha1.AgentExecutionAdjudication{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "retained-adjudication"},
-		Spec: corev1alpha1.AgentExecutionAdjudicationSpec{
-			TaskRef: corev1alpha1.AgentExecutionSubjectReference{UID: types.UID(adjudicationItem.Key.TaskUID)},
-		},
-	}
 	session := &corev1alpha1.RuntimeSessionControl{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "retained-session"},
 		Status: corev1alpha1.RuntimeSessionControlStatus{
@@ -62,7 +55,7 @@ func TestAgentExecutionSnapshotRetentionHonorsEveryKubernetesReference(t *testin
 		},
 	}
 	manager := &AgentExecutionSnapshotRetentionManager{
-		APIReader: snapshotRetentionClient(t, task, adjudication, session),
+		APIReader: snapshotRetentionClient(t, task, session),
 		Store:     lifecycle, Retention: time.Hour, Now: func() time.Time { return now },
 	}
 

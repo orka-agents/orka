@@ -174,7 +174,6 @@ func (m *AgentExecutionSnapshotRetentionManager) collectOnce(ctx context.Context
 
 type agentExecutionSnapshotKubernetesReferences struct {
 	taskUIDs             map[string]struct{}
-	adjudicationTaskUIDs map[string]struct{}
 	sessionLeaseTaskUIDs map[string]struct{}
 }
 
@@ -183,7 +182,6 @@ func (m *AgentExecutionSnapshotRetentionManager) loadKubernetesReferences(
 ) (agentExecutionSnapshotKubernetesReferences, error) {
 	result := agentExecutionSnapshotKubernetesReferences{
 		taskUIDs:             make(map[string]struct{}),
-		adjudicationTaskUIDs: make(map[string]struct{}),
 		sessionLeaseTaskUIDs: make(map[string]struct{}),
 	}
 	tasks := &corev1alpha1.TaskList{}
@@ -193,15 +191,6 @@ func (m *AgentExecutionSnapshotRetentionManager) loadKubernetesReferences(
 	for i := range tasks.Items {
 		if uid := strings.TrimSpace(string(tasks.Items[i].UID)); uid != "" {
 			result.taskUIDs[uid] = struct{}{}
-		}
-	}
-	adjudications := &corev1alpha1.AgentExecutionAdjudicationList{}
-	if err := m.APIReader.List(ctx, adjudications); err != nil {
-		return result, fmt.Errorf("list adjudications for snapshot retention: %w", err)
-	}
-	for i := range adjudications.Items {
-		if uid := strings.TrimSpace(string(adjudications.Items[i].Spec.TaskRef.UID)); uid != "" {
-			result.adjudicationTaskUIDs[uid] = struct{}{}
 		}
 	}
 	sessions := &corev1alpha1.RuntimeSessionControlList{}
@@ -221,9 +210,6 @@ func (m *AgentExecutionSnapshotRetentionManager) loadKubernetesReferences(
 
 func (r agentExecutionSnapshotKubernetesReferences) retains(key store.AgentExecutionSnapshotKey) bool {
 	if _, ok := r.taskUIDs[key.TaskUID]; ok {
-		return true
-	}
-	if _, ok := r.adjudicationTaskUIDs[key.TaskUID]; ok {
 		return true
 	}
 	_, ok := r.sessionLeaseTaskUIDs[key.TaskUID]

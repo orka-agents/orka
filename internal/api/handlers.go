@@ -1021,12 +1021,8 @@ func (h *Handlers) getSessionExecutionControl(
 			"generation":      control.Status.Lineage.Generation,
 			"runtimeIdentity": control.Status.Lineage.RuntimeIdentity,
 			"configDigest":    control.Status.Lineage.ConfigDigest,
-			"provenance":      control.Status.Lineage.Provenance,
 			"establishedAt":   control.Status.Lineage.EstablishedAt,
 		}
-	}
-	if control.Status.AgentExecutionResolutionRef != nil {
-		projection["agentExecutionResolutionRef"] = control.Status.AgentExecutionResolutionRef
 	}
 
 	return projection, nil

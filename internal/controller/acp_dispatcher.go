@@ -70,7 +70,6 @@ type ACPDispatcher struct {
 	Store                    store.DurableControlStore
 	ResultStore              store.ResultStore
 	Snapshots                store.AgentExecutionSnapshotStore
-	BindingReservations      store.AgentExecutionBindingReservationStore
 	Epochs                   *ControllerEpochManager
 	Sessions                 *ACPSessionContinuity
 	Publisher                *publisherservice.Client
@@ -94,9 +93,8 @@ type ACPDispatcher struct {
 func (d *ACPDispatcher) NeedLeaderElection() bool { return true }
 
 func (d *ACPDispatcher) Start(ctx context.Context) error {
-	if d.Client == nil || d.Store == nil || d.ResultStore == nil || d.Snapshots == nil ||
-		d.BindingReservations == nil || d.Epochs == nil {
-		return fmt.Errorf("ACP dispatcher requires Kubernetes client, durable control store, result store, immutable snapshot/reservation stores, and epoch manager")
+	if d.Client == nil || d.Store == nil || d.ResultStore == nil || d.Snapshots == nil || d.Epochs == nil {
+		return fmt.Errorf("ACP dispatcher requires Kubernetes client, durable control store, result store, immutable snapshot store, and epoch manager")
 	}
 	if d.APIReader == nil {
 		d.APIReader = d.Client
@@ -153,9 +151,6 @@ func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
 	}
 	var tasks corev1alpha1.TaskList
 	if err := d.Client.List(ctx, &tasks); err != nil {
-		return err
-	}
-	if err := d.reconcileLegacyCleanupACPTasks(ctx, tasks.Items); err != nil {
 		return err
 	}
 	if err := d.scheduleACPDeliveryRecoveries(ctx, tasks.Items); err != nil {
@@ -650,17 +645,16 @@ func (d *ACPDispatcher) loadVerifiedACPDispatchExecution(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 ) (*verifiedAgentExecution, error) {
-	if d.Snapshots == nil || d.BindingReservations == nil {
-		return nil, errors.New("ACP dispatch requires immutable execution snapshot and binding reservation stores")
+	if d.Snapshots == nil {
+		return nil, errors.New("ACP dispatch requires an immutable execution snapshot store")
 	}
 	if task == nil || task.Status.AgentExecutionBinding == nil || task.Status.Execution == nil {
 		return nil, errors.New("ACP dispatch requires a Task execution binding and queued attempt")
 	}
 	verifier := TaskReconciler{
-		Client:                            d.Client,
-		APIReader:                         d.APIReader,
-		AgentExecutionSnapshots:           d.Snapshots,
-		AgentExecutionBindingReservations: d.BindingReservations,
+		Client:                  d.Client,
+		APIReader:               d.APIReader,
+		AgentExecutionSnapshots: d.Snapshots,
 	}
 	bound, err := verifier.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
 	if err != nil {

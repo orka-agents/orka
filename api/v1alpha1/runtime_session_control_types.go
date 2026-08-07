@@ -19,17 +19,6 @@ type RuntimeSessionControlLifecycle string
 // +kubebuilder:validation:Enum=Available;ReconciliationBlocked
 type RuntimeSessionControlAvailability string
 
-// RuntimeSessionLineageProvenance records how the immutable Session runtime
-// lineage was established.
-// +kubebuilder:validation:Enum=first-use;legacy-adopted;transcript-bootstrap
-type RuntimeSessionLineageProvenance string
-
-const (
-	RuntimeSessionLineageFirstUse            RuntimeSessionLineageProvenance = "first-use"
-	RuntimeSessionLineageLegacyAdopted       RuntimeSessionLineageProvenance = "legacy-adopted"
-	RuntimeSessionLineageTranscriptBootstrap RuntimeSessionLineageProvenance = "transcript-bootstrap"
-)
-
 // RuntimeSessionLineageStatus is the Kubernetes-authoritative, append-once
 // protocol/runtime identity for one conversation Session. Generation is
 // independent from mutation-lease and ACP RuntimeSession generations.
@@ -57,8 +46,6 @@ type RuntimeSessionLineageStatus struct {
 	// when the lineage was established.
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	ConfigDigest string `json:"configDigest"`
-
-	Provenance RuntimeSessionLineageProvenance `json:"provenance"`
 
 	EstablishedAt metav1.Time `json:"establishedAt"`
 }
@@ -147,7 +134,6 @@ type RuntimeSessionMutationLeaseStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.availability) || self.availability != 'Available' || ((!has(self.blockedReason) || size(self.blockedReason) == 0) && (!has(self.relatedPromptAttemptId) || size(self.relatedPromptAttemptId) == 0) && (!has(self.relatedPublicationId) || size(self.relatedPublicationId) == 0))",message="available sessions must clear reconciliation block metadata"
 // +kubebuilder:validation:XValidation:rule="!has(self.availability) || self.availability != 'ReconciliationBlocked' || (has(self.blockedReason) && size(self.blockedReason) > 0)",message="reconciliation-blocked sessions require a reason"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.lineage) || (has(self.lineage) && self.lineage == oldSelf.lineage)",message="runtime Session lineage is append-once and immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.agentExecutionResolutionRef) || (has(self.agentExecutionResolutionRef) && self.agentExecutionResolutionRef == oldSelf.agentExecutionResolutionRef)",message="agentExecutionResolutionRef is append-once and immutable"
 type RuntimeSessionControlStatus struct {
 	// Generation is the monotonic ACP RuntimeSession generation.
 	// +optional
@@ -187,12 +173,6 @@ type RuntimeSessionControlStatus struct {
 	// status CAS that mirrors the authoritative mutation Lease.
 	// +optional
 	Lineage *RuntimeSessionLineageStatus `json:"lineage,omitempty"`
-
-	// AgentExecutionResolutionRef is the immutable reference to an Applied
-	// adjudication that authorizes a one-way resolution of blocked Session
-	// state. It never changes the recorded lineage.
-	// +optional
-	AgentExecutionResolutionRef *AgentExecutionResolutionRef `json:"agentExecutionResolutionRef,omitempty"`
 
 	ControlRecordMutationStatus `json:",inline"`
 }

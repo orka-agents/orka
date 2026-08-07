@@ -817,23 +817,21 @@ func sameSessionMutationLeaseValue(value store.SessionMutationLease, request sto
 
 func sessionLineageClaimDigest(claim store.ClaimSessionLineageRequest) string {
 	canonical, _ := json.Marshal(struct {
-		Namespace         string                         `json:"namespace"`
-		SessionName       string                         `json:"sessionName"`
-		NamespaceUID      string                         `json:"namespaceUID"`
-		SessionUID        string                         `json:"sessionUID"`
-		ContractVersion   string                         `json:"contractVersion"`
-		LineageGeneration int64                          `json:"lineageGeneration"`
-		RuntimeIdentity   string                         `json:"runtimeIdentity"`
-		ConfigDigest      string                         `json:"configDigest"`
-		Provenance        store.SessionLineageProvenance `json:"provenance"`
+		Namespace         string `json:"namespace"`
+		SessionName       string `json:"sessionName"`
+		NamespaceUID      string `json:"namespaceUID"`
+		SessionUID        string `json:"sessionUID"`
+		ContractVersion   string `json:"contractVersion"`
+		LineageGeneration int64  `json:"lineageGeneration"`
+		RuntimeIdentity   string `json:"runtimeIdentity"`
+		ConfigDigest      string `json:"configDigest"`
 	}{
 		Namespace: claim.Namespace, SessionName: claim.SessionName,
 		NamespaceUID: claim.NamespaceUID, SessionUID: claim.SessionUID,
 		ContractVersion: claim.ContractVersion, LineageGeneration: claim.LineageGeneration,
 		RuntimeIdentity: claim.RuntimeIdentity, ConfigDigest: claim.ConfigDigest,
-		Provenance: claim.Provenance,
 	})
-	return canonicalBytesDigest(append([]byte("orka.session-lineage.v1\x00"), canonical...))
+	return canonicalBytesDigest(append([]byte("orka.session-lineage.v2\x00"), canonical...))
 }
 
 func sessionLineageDigest(lineage *store.SessionLineage) string {
@@ -842,7 +840,7 @@ func sessionLineageDigest(lineage *store.SessionLineage) string {
 		NamespaceUID: lineage.NamespaceUID, SessionUID: lineage.SessionUID,
 		ContractVersion: lineage.ContractVersion, RuntimeIdentity: lineage.RuntimeIdentity,
 		LineageGeneration: lineage.LineageGeneration,
-		ConfigDigest:      lineage.ConfigDigest, Provenance: lineage.Provenance,
+		ConfigDigest:      lineage.ConfigDigest,
 	})
 }
 
@@ -907,8 +905,7 @@ func sessionLineageFromAPI(object *corev1alpha1.RuntimeSessionControl) *store.Se
 		Namespace: object.Namespace, SessionName: object.Spec.SessionName,
 		NamespaceUID: string(lineage.NamespaceUID), SessionUID: lineage.SessionUID,
 		ContractVersion: string(lineage.ContractVersion), LineageGeneration: lineage.Generation,
-		RuntimeIdentity: lineage.RuntimeIdentity, ConfigDigest: lineage.ConfigDigest,
-		Provenance: store.SessionLineageProvenance(lineage.Provenance), Version: 1,
+		RuntimeIdentity: lineage.RuntimeIdentity, ConfigDigest: lineage.ConfigDigest, Version: 1,
 		CreatedAt: establishedAt, UpdatedAt: establishedAt,
 	}
 }
@@ -922,7 +919,6 @@ func sessionLineageToAPI(lineage *store.SessionLineage) *corev1alpha1.RuntimeSes
 		ContractVersion: corev1alpha1.AgentRuntimeContractVersion(lineage.ContractVersion),
 		Generation:      lineage.LineageGeneration, RuntimeIdentity: lineage.RuntimeIdentity,
 		ConfigDigest:  lineage.ConfigDigest,
-		Provenance:    corev1alpha1.RuntimeSessionLineageProvenance(lineage.Provenance),
 		EstablishedAt: metav1.NewTime(lineage.CreatedAt.UTC()),
 	}
 }
@@ -939,8 +935,7 @@ func resolveSessionLineage(existing *store.SessionLineage, claim store.ClaimSess
 			Namespace: claim.Namespace, SessionName: claim.SessionName,
 			NamespaceUID: claim.NamespaceUID, SessionUID: claim.SessionUID,
 			ContractVersion: claim.ContractVersion, LineageGeneration: claim.LineageGeneration,
-			RuntimeIdentity: claim.RuntimeIdentity, ConfigDigest: claim.ConfigDigest,
-			Provenance: claim.Provenance, Version: 1,
+			RuntimeIdentity: claim.RuntimeIdentity, ConfigDigest: claim.ConfigDigest, Version: 1,
 			CreatedAt: establishedAt.UTC(), UpdatedAt: establishedAt.UTC(),
 		}
 		if err := lineage.Validate(); err != nil {
@@ -961,8 +956,6 @@ func resolveSessionLineage(existing *store.SessionLineage, claim store.ClaimSess
 		return nil, controlConflict("session %s/%s lineage runtime identity is %q, not %q", claim.Namespace, claim.SessionName, existing.RuntimeIdentity, claim.RuntimeIdentity)
 	case existing.ConfigDigest != claim.ConfigDigest:
 		return nil, controlConflict("session %s/%s lineage configuration digest does not match", claim.Namespace, claim.SessionName)
-	case existing.Provenance != claim.Provenance:
-		return nil, controlConflict("session %s/%s lineage provenance is %q, not %q", claim.Namespace, claim.SessionName, existing.Provenance, claim.Provenance)
 	case existing.LineageGeneration != claim.LineageGeneration:
 		return nil, controlConflict("session %s/%s lineage generation is %d, not %d", claim.Namespace, claim.SessionName, existing.LineageGeneration, claim.LineageGeneration)
 	default:

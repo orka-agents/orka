@@ -34,12 +34,12 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/leaderelection"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -60,6 +60,7 @@ import (
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/harness"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -84,6 +85,7 @@ import (
 const (
 	taskResourceKind            = "Task"
 	serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	controllerLeaderElectionID  = "03b49a10.orka.ai"
 )
 
 var (
@@ -126,6 +128,25 @@ func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnable
 	return nil
 }
 
+func validateStaticTrustedServiceReferences(
+	watchNamespace string,
+	trust outboundaccess.TrustConfig,
+) error {
+	watchNamespace = strings.TrimSpace(watchNamespace)
+	for _, ref := range append(trust.Gateways.References(), trust.TokenEndpoints.References()...) {
+		if ref.Namespace != watchNamespace {
+			return fmt.Errorf(
+				"trusted Service %s/%s:%d must be in controller watch namespace %q",
+				ref.Namespace,
+				ref.Name,
+				ref.Port,
+				watchNamespace,
+			)
+		}
+	}
+	return nil
+}
+
 func workspaceCleanupAPIsInstalled(mapper meta.RESTMapper) (bool, error) {
 	for _, gvk := range []schema.GroupVersionKind{
 		workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceProvider"),
@@ -154,8 +175,6 @@ func main() {
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
-	var agentExecutionHostMode bool
-	var agentExecutionLegacyFenceNamespace string
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -168,7 +187,7 @@ func main() {
 	var aiWorkerClusterRoleName string
 	var vendorWorkerClusterRoleName string
 	var containerWorkerClusterRoleName string
-	var workerClusterRoleBindingNamePrefix string
+	var workerRoleBindingNamePrefix string
 	var chatEnabled bool
 	var chatProvider string
 	var chatModel string
@@ -199,21 +218,15 @@ func main() {
 	var controllerURL string
 	var enforceNamespaceIsolation bool
 	var maxTasksPerNamespace int
-	var harnessV1Enabled bool
+	var controllerModeValue string
+	var executionModeControllerUsernames string
 	var harnessV1Endpoint string
 	var harnessV1CAFile string
 	var harnessV1AuthSecretNamespace string
 	var harnessV1AuthSecretName string
 	var harnessV1AuthSecretKey string
-	var harnessV1PolicyName string
 	var harnessV1DispatchInterval time.Duration
 	var harnessV1DispatchWorkers int
-	var harnessV1RetirementUsername string
-	var harnessV1RetirementPort int
-	var harnessV1RetirementTLSCertFile string
-	var harnessV1RetirementTLSKeyFile string
-	var harnessV1RetirementTokenAudience string
-	var acpRuntimeEnabled bool
 	var acpIdlePoolTTL time.Duration
 	var acpCodexRuntimeImage string
 	var acpClaudeRuntimeImage string
@@ -294,17 +307,18 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
-	flag.BoolVar(&agentExecutionHostMode, "agent-execution-host-mode", false,
-		"Use the fail-closed out-of-cluster ownership preflight for host development.")
-	flag.StringVar(&agentExecutionLegacyFenceNamespace, "agent-execution-legacy-fence-namespace", "",
-		"Namespace in which host development retains the legacy controller Lease fence.")
+	flag.StringVar(&controllerModeValue, "controller-mode", os.Getenv("ORKA_CONTROLLER_MODE"),
+		"Required controller mode: harness-v1 or harness-v2. An installation never serves both modes.")
+	flag.StringVar(&executionModeControllerUsernames, "execution-mode-controller-usernames",
+		os.Getenv("ORKA_EXECUTION_MODE_CONTROLLER_USERNAMES"),
+		"Comma-separated exact Kubernetes usernames authorized to write controller-owned Task execution authority.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.BoolVar(&taskProvenanceAdmissionEnabled, "task-provenance-admission-enabled",
-		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED", false),
+		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED"),
 		"Enable validating admission that rejects untrusted direct Task writes to Orka-managed "+
 			"provenance fields.")
 	flag.StringVar(&taskProvenanceAdmissionTrustedUsers, "task-provenance-admission-trusted-users",
@@ -323,15 +337,15 @@ func main() {
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.IntVar(&apiPort, "api-port", 8080, "The port the REST API server binds to.")
-	flag.StringVar(&watchNamespace, "watch-namespace", "", "Namespace to watch for resources. Empty for all namespaces.")
+	flag.StringVar(&watchNamespace, "watch-namespace", "", "Required single namespace to watch for resources.")
 	flag.BoolVar(&workspaceProviderAPIEnabled, "enable-workspace-provider-api",
-		envBool("ORKA_ENABLE_WORKSPACE_PROVIDER_API", false),
+		envBool("ORKA_ENABLE_WORKSPACE_PROVIDER_API"),
 		"Enable workspace.orka.ai provider/class/pool/workspace coordination controllers.")
 	flag.BoolVar(&workspaceClassUseAdmissionEnabled, "workspace-class-use-admission-enabled",
-		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED", false),
+		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED"),
 		"Enable fail-closed Task and Tool admission checks for ExecutionWorkspaceClass use.")
 	flag.BoolVar(&fakeWorkspaceProviderEnabled, "enable-fake-workspace-provider",
-		envBool("ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER", false),
+		envBool("ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER"),
 		"Enable the development-only fake.workspace.orka.ai/v1 adapter; requires --enable-workspace-provider-api.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
@@ -349,9 +363,9 @@ func main() {
 		controller.DefaultVendorWorkerClusterRoleName, "ClusterRole name for vendor worker tasks.")
 	flag.StringVar(&containerWorkerClusterRoleName, "container-worker-cluster-role-name",
 		controller.DefaultContainerWorkerClusterRoleName, "ClusterRole name for container worker tasks.")
-	flag.StringVar(&workerClusterRoleBindingNamePrefix, "worker-cluster-role-binding-prefix",
-		os.Getenv("ORKA_WORKER_CLUSTER_ROLE_BINDING_PREFIX"),
-		"Prefix for per-namespace worker ClusterRoleBinding names. Empty uses the legacy 'orka' prefix.")
+	flag.StringVar(&workerRoleBindingNamePrefix, "worker-role-binding-prefix",
+		os.Getenv("ORKA_WORKER_ROLE_BINDING_PREFIX"),
+		"Prefix for per-namespace worker RoleBinding names. Empty uses the 'orka' prefix.")
 	flag.BoolVar(&chatEnabled, "chat-enabled", true, "Enable the chat endpoint.")
 	flag.StringVar(&chatProvider, "chat-provider", "", "Default Provider CRD name for chat.")
 	flag.StringVar(&chatModel, "chat-model", "", "Default model for chat.")
@@ -404,8 +418,6 @@ func main() {
 		"When true, restrict users to their ServiceAccount's namespace for all operations.")
 	flag.IntVar(&maxTasksPerNamespace, "max-tasks-per-namespace", 0,
 		"Maximum active tasks per namespace (0 = unlimited).")
-	flag.BoolVar(&harnessV1Enabled, "harness-v1-enabled", envBool("ORKA_HARNESS_V1_ENABLED", false),
-		"Enable explicitly selected orka.harness.v1 agent Tasks; this is never a fallback from ACP v2.")
 	flag.StringVar(&harnessV1Endpoint, "harness-v1-endpoint", os.Getenv("ORKA_HARNESS_V1_ENDPOINT"),
 		"Base URL of the built-in harness v1 wrapper Service.")
 	flag.StringVar(&harnessV1CAFile, "harness-v1-ca-file", os.Getenv("ORKA_HARNESS_V1_CA_FILE"),
@@ -419,31 +431,12 @@ func main() {
 	flag.StringVar(&harnessV1AuthSecretKey, "harness-v1-auth-secret-key",
 		envStringDefault("ORKA_HARNESS_V1_AUTH_SECRET_KEY", "token"),
 		"Key in the dedicated harness v1 wrapper bearer-token Secret.")
-	flag.StringVar(&harnessV1PolicyName, "harness-v1-policy-name",
-		envStringDefault("ORKA_HARNESS_V1_POLICY_NAME", "compatibility"),
-		"Namespaced AgentExecutionPolicy authorizing new harness v1 bindings.")
 	flag.DurationVar(&harnessV1DispatchInterval, "harness-v1-dispatch-interval",
 		envDurationDefault("ORKA_HARNESS_V1_DISPATCH_INTERVAL", controller.DefaultHarnessV1DispatchInterval),
 		"Interval between durable harness v1 attempt recovery scans.")
 	flag.IntVar(&harnessV1DispatchWorkers, "harness-v1-dispatch-workers",
 		controller.DefaultHarnessV1DispatchWorkers,
 		"Maximum concurrent harness v1 attempt workers.")
-	flag.StringVar(&harnessV1RetirementUsername, "harness-v1-retirement-username",
-		os.Getenv("ORKA_HARNESS_V1_RETIREMENT_USERNAME"),
-		"Exact Kubernetes ServiceAccount username authorized to invoke the one-way harness v1 retirement barrier.")
-	flag.IntVar(&harnessV1RetirementPort, "harness-v1-retirement-port", 8443,
-		"Dedicated TLS port for the harness v1 retirement barrier.")
-	flag.StringVar(&harnessV1RetirementTLSCertFile, "harness-v1-retirement-tls-cert-file",
-		os.Getenv("ORKA_HARNESS_V1_RETIREMENT_TLS_CERT_FILE"),
-		"Serving certificate for the dedicated harness v1 retirement listener.")
-	flag.StringVar(&harnessV1RetirementTLSKeyFile, "harness-v1-retirement-tls-key-file",
-		os.Getenv("ORKA_HARNESS_V1_RETIREMENT_TLS_KEY_FILE"),
-		"Serving private key for the dedicated harness v1 retirement listener.")
-	flag.StringVar(&harnessV1RetirementTokenAudience, "harness-v1-retirement-token-audience",
-		envStringDefault("ORKA_HARNESS_V1_RETIREMENT_TOKEN_AUDIENCE", "orka-harness-v1-retirement"),
-		"Exact projected ServiceAccount token audience accepted by the harness v1 retirement listener.")
-	flag.BoolVar(&acpRuntimeEnabled, "acp-runtime-enabled", envBool("ORKA_ACP_RUNTIME_ENABLED", true),
-		"Route built-in codex/claude/copilot/opencode agent Tasks through managed orka.harness.v2 RuntimePools.")
 	flag.DurationVar(&acpIdlePoolTTL, "acp-idle-pool-ttl", envDurationDefault("ORKA_ACP_IDLE_POOL_TTL", controller.DefaultACPIdlePoolTTL),
 		"Scale an idle ACP RuntimePool to zero after this duration.")
 	flag.StringVar(&acpCodexRuntimeImage, "acp-codex-runtime-image", os.Getenv("ORKA_ACP_CODEX_RUNTIME_IMAGE"),
@@ -691,8 +684,36 @@ func main() {
 		}
 		return
 	}
+	mode, err := executionmode.Parse(controllerModeValue)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	watchNamespace = strings.TrimSpace(watchNamespace)
+	if watchNamespace == "" {
+		fmt.Fprintln(os.Stderr, "--watch-namespace is required; controller modes cannot use a cluster-wide watch")
+		os.Exit(1)
+	}
+	if !enforceNamespaceIsolation {
+		fmt.Fprintln(os.Stderr, "--enforce-namespace-isolation=true is required for a static controller installation")
+		os.Exit(1)
+	}
+	harnessV1Enabled := mode == executionmode.HarnessV1
+	acpRuntimeEnabled := mode == executionmode.HarnessV2
+	if harnessV1Enabled {
+		// Cluster-scoped gateway/workspace infrastructure is owned only by the
+		// harness-v2 installation. A v1 installation must remain namespaced.
+		gatewayEnabled = false
+		workspaceProviderAPIEnabled = false
+		workspaceClassUseAdmissionEnabled = false
+		fakeWorkspaceProviderEnabled = false
+	}
 	if !enableLeaderElection {
-		fmt.Fprintln(os.Stderr, "--leader-elect=true is required; agent execution ownership fails closed")
+		fmt.Fprintln(os.Stderr, "--leader-elect=true is required for an isolated controller installation")
+		os.Exit(1)
+	}
+	if len(splitCommaList(executionModeControllerUsernames)) == 0 {
+		fmt.Fprintln(os.Stderr, "--execution-mode-controller-usernames must contain at least one exact username")
 		os.Exit(1)
 	}
 	if err := validateAgentExecutionSnapshotRetentionOptions(
@@ -704,18 +725,13 @@ func main() {
 		os.Exit(1)
 	}
 	if harnessV1Enabled {
-		missing := make([]string, 0, 10)
+		missing := make([]string, 0, 5)
 		for name, value := range map[string]string{
-			"--harness-v1-endpoint":                  harnessV1Endpoint,
-			"--harness-v1-ca-file":                   harnessV1CAFile,
-			"--harness-v1-auth-secret-namespace":     harnessV1AuthSecretNamespace,
-			"--harness-v1-auth-secret-name":          harnessV1AuthSecretName,
-			"--harness-v1-auth-secret-key":           harnessV1AuthSecretKey,
-			"--harness-v1-policy-name":               harnessV1PolicyName,
-			"--harness-v1-retirement-username":       harnessV1RetirementUsername,
-			"--harness-v1-retirement-tls-cert-file":  harnessV1RetirementTLSCertFile,
-			"--harness-v1-retirement-tls-key-file":   harnessV1RetirementTLSKeyFile,
-			"--harness-v1-retirement-token-audience": harnessV1RetirementTokenAudience,
+			"--harness-v1-endpoint":              harnessV1Endpoint,
+			"--harness-v1-ca-file":               harnessV1CAFile,
+			"--harness-v1-auth-secret-namespace": harnessV1AuthSecretNamespace,
+			"--harness-v1-auth-secret-name":      harnessV1AuthSecretName,
+			"--harness-v1-auth-secret-key":       harnessV1AuthSecretKey,
 		} {
 			if strings.TrimSpace(value) == "" {
 				missing = append(missing, name)
@@ -736,10 +752,6 @@ func main() {
 		}
 		if harnessV1DispatchInterval <= 0 || harnessV1DispatchWorkers <= 0 {
 			fmt.Fprintln(os.Stderr, "harness v1 dispatch interval and worker count must be positive")
-			os.Exit(1)
-		}
-		if harnessV1RetirementPort < 1 || harnessV1RetirementPort > 65535 || harnessV1RetirementPort == apiPort {
-			fmt.Fprintln(os.Stderr, "harness v1 retirement port must be between 1 and 65535 and differ from the API port")
 			os.Exit(1)
 		}
 	}
@@ -766,6 +778,7 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
 
 	executionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProvider(executionWorkspaceDefaultProviderFlag)
 	if !controller.WorkspaceProviderSupported(executionWorkspaceDefaultProvider) {
@@ -865,6 +878,10 @@ func main() {
 		os.Exit(1)
 	}
 	outboundAccessTrust := outboundaccess.TrustConfig{Gateways: trustedGateways, TokenEndpoints: trustedTokenEndpoints}
+	if err := validateStaticTrustedServiceReferences(watchNamespace, outboundAccessTrust); err != nil {
+		setupLog.Error(err, "invalid static-controller outbound trust configuration")
+		os.Exit(1)
+	}
 
 	if err := validateWorkspaceProviderSecurityConfig(
 		workspaceProviderAPIEnabled,
@@ -940,90 +957,29 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	restConfig := ctrl.GetConfigOrDie()
-	kubeClient, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		setupLog.Error(err, "unable to create Kubernetes clientset for ownership preflight")
-		os.Exit(1)
-	}
-	controllerHolderID := currentControllerHolderID()
-	ownershipPodNamespace, ownershipPodName := currentPodNamespace(), currentPodName()
-	if agentExecutionHostMode {
-		ownershipPodNamespace, ownershipPodName = "", ""
-	}
-	ownershipLock, err := controller.NewAgentExecutionOwnershipLock(kubeClient, controller.AgentExecutionOwnershipLockConfig{
-		Identity:                  controllerHolderID,
-		CurrentPodNamespace:       ownershipPodNamespace,
-		CurrentPodName:            ownershipPodName,
-		LegacyFenceNamespace:      agentExecutionLegacyFenceNamespace,
-		WatchNamespace:            watchNamespace,
-		HostDevelopmentMode:       agentExecutionHostMode,
-		InClusterIdentityDetected: inClusterControllerIdentityDetected(),
-	})
-	if err != nil {
-		setupLog.Error(err, "unable to configure global agent execution ownership")
-		os.Exit(1)
-	}
 	processCtx, stopProcess := context.WithCancel(ctrl.SetupSignalHandler())
 	defer stopProcess()
-	ownershipAcquired := make(chan struct{})
-	ownershipStopped := make(chan struct{})
-	elector, err := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
-		Lock:            ownershipLock,
-		LeaseDuration:   15 * time.Second,
-		RenewDeadline:   10 * time.Second,
-		RetryPeriod:     2 * time.Second,
-		ReleaseOnCancel: true,
-		Name:            corev1alpha1.AgentExecutionOwnershipLeaseName,
-		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: func(context.Context) {
-				close(ownershipAcquired)
-			},
-			OnStoppedLeading: func() {
-				stopProcess()
-			},
-			OnNewLeader: func(identity string) {
-				if identity != controllerHolderID {
-					setupLog.Info("observed agent execution ownership leader", "identity", identity)
-				}
-			},
-		},
-	})
-	if err != nil {
-		setupLog.Error(err, "unable to create agent execution ownership elector")
-		os.Exit(1)
-	}
-	go func() {
-		defer close(ownershipStopped)
-		elector.Run(processCtx)
-	}()
-	select {
-	case <-ownershipAcquired:
-		setupLog.Info("acquired complete agent execution ownership fence set",
-			"leaseNamespace", corev1alpha1.AgentExecutionControlNamespace,
-			"leaseName", corev1alpha1.AgentExecutionOwnershipLeaseName)
-	case <-ownershipStopped:
-		setupLog.Error(fmt.Errorf("ownership election stopped before acquisition"), "agent execution ownership unavailable")
-		return
-	case <-processCtx.Done():
-		return
-	}
-
+	restConfig := ctrl.GetConfigOrDie()
 	mgrOptions := ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
-		HealthProbeBindAddress: probeAddr,
-		// The process-level composite election above gates construction of the
-		// manager and SQLite. Manager runnables start only after it succeeds.
-		LeaderElection: false,
+		Scheme:                        scheme,
+		Metrics:                       metricsServerOptions,
+		WebhookServer:                 webhookServer,
+		HealthProbeBindAddress:        probeAddr,
+		LeaderElection:                enableLeaderElection,
+		LeaderElectionID:              controllerLeaderElectionID,
+		LeaderElectionNamespace:       watchNamespace,
+		LeaderElectionReleaseOnCancel: true,
 	}
 
-	// Keep tenant resources namespace-scoped while allowing only RuntimePool
-	// child kinds to be cached from the separate ACP runtime namespace.
+	// Tenant resources are always namespace-scoped. Only harness v2 may also
+	// cache RuntimePool child kinds from its separately owned runtime namespace.
+	runtimeCacheNamespace := ""
+	if acpRuntimeEnabled {
+		runtimeCacheNamespace = acpRuntimeNamespace
+	}
 	mgrOptions.Cache = managerCacheOptions(
 		watchNamespace,
-		acpRuntimeNamespace,
+		runtimeCacheNamespace,
 	)
 
 	mgr, err := ctrl.NewManager(restConfig, mgrOptions)
@@ -1031,7 +987,23 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
-	classificationGate := &controller.AgentExecutionClassificationGate{APIReader: mgr.GetAPIReader()}
+	kubeClient, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "unable to create Kubernetes clientset")
+		os.Exit(1)
+	}
+	modeNamespace, err := kubeClient.CoreV1().Namespaces().Get(
+		context.Background(), watchNamespace, metav1.GetOptions{},
+	)
+	if err != nil {
+		setupLog.Error(err, "unable to read controller-mode namespace", "namespace", watchNamespace)
+		os.Exit(1)
+	}
+	if err := executionmode.ValidateNamespace(modeNamespace, mode); err != nil {
+		setupLog.Error(err, "controller-mode namespace claim failed")
+		os.Exit(1)
+	}
+	controllerHolderID := currentControllerHolderID()
 	if gatewayEnabled {
 		checkCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := gatewayruntime.WaitForGatewayPrerequisites(checkCtx, mgr.GetAPIReader(), 500*time.Millisecond)
@@ -1068,9 +1040,17 @@ func main() {
 			"trustedServiceAccounts", strings.Join(admissionConfig.TrustedServiceAccountNames, ","),
 		)
 	}
+	orkaadmission.RegisterExecutionModeWebhooks(
+		mgr.GetWebhookServer(),
+		mgr.GetScheme(),
+		mgr.GetAPIReader(),
+		orkaadmission.ExecutionModeConfig{
+			ControllerUsernames: splitCommaList(executionModeControllerUsernames),
+		},
+	)
+	setupLog.Info("registered immutable namespace mode and execution-authority admission")
 
-	// The clientset was created before manager construction for the global
-	// ownership preflight and is reused for pod log and broker operations.
+	// The clientset is reused for pod log and broker operations.
 	outboundAccessResolver := &outboundaccess.KubernetesResolver{
 		Reader:     mgr.GetAPIReader(),
 		KubeClient: kubeClient,
@@ -1147,7 +1127,7 @@ func main() {
 		agentExecutionBindingEnabled = true
 		setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
 	} else {
-		setupLog.Info("agent execution binding stage disabled: no --agent-execution-snapshot-key-file configured; the coexistence release requires it")
+		setupLog.Info("agent execution binding stage disabled: no --agent-execution-snapshot-key-file configured; harness-v1 requires it")
 	}
 	agentExecutionSnapshotStore := taskAgentExecutionSnapshotStore(agentExecutionBindingEnabled, sqliteStore)
 	if agentExecutionBindingEnabled {
@@ -1177,12 +1157,15 @@ func main() {
 	var taskCleanupControlStore store.DurableControlStore
 	var durableControlStore store.DurableControlStore
 	var controllerEpochManager *controller.ControllerEpochManager
-	var ownershipStatusProjector *controller.AgentExecutionOwnershipStatusProjector
 	var acpSessionContinuity *controller.ACPSessionContinuity
 	var kubeControlStore *storekube.Store
 	if controlNamespace != "" {
+		controlStoreOptions := []storekube.Option{storekube.WithAPIReader(mgr.GetAPIReader())}
+		if harnessV1Enabled {
+			controlStoreOptions = append(controlStoreOptions, storekube.WithoutClusterScopedBranchClaims())
+		}
 		kubeControlStore, err = storekube.NewComposite(
-			mgr.GetClient(), controlNamespace, sqliteStore, storekube.WithAPIReader(mgr.GetAPIReader()),
+			mgr.GetClient(), controlNamespace, sqliteStore, controlStoreOptions...,
 		)
 		if err != nil {
 			setupLog.Error(err, "unable to configure Kubernetes ACP control store")
@@ -1195,17 +1178,8 @@ func main() {
 			setupLog.Error(err, "unable to add controller epoch manager")
 			os.Exit(1)
 		}
-		ownershipStatusProjector = &controller.AgentExecutionOwnershipStatusProjector{
-			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Ownership: ownershipLock, Epochs: controllerEpochManager,
-		}
-		if err := mgr.Add(ownershipStatusProjector); err != nil {
-			setupLog.Error(err, "unable to add agent execution ownership status projector")
-			os.Exit(1)
-		}
 		sessionCleanupRecovery := controller.NewSessionCleanupRecoveryManager(kubeControlStore, controllerEpochManager)
-		if err := mgr.Add(&controller.AgentExecutionClassificationGatedRunnable{
-			Gate: classificationGate, Runnable: sessionCleanupRecovery,
-		}); err != nil {
+		if err := mgr.Add(sessionCleanupRecovery); err != nil {
 			setupLog.Error(err, "unable to add Session cleanup recovery manager")
 			os.Exit(1)
 		}
@@ -1223,42 +1197,45 @@ func main() {
 				"unable to create shared agent Session continuity manager")
 			os.Exit(1)
 		}
-		acpSessionContinuity, err = controller.NewACPSessionContinuity(controller.ACPSessionContinuityConfig{
-			SessionControls: kubeControlStore, Transcripts: sqliteStore, Publications: kubeControlStore, BranchClaims: kubeControlStore,
-			Lineages: sqliteStore,
-		})
+		if harnessV1Enabled {
+			acpSessionContinuity, err = controller.NewHarnessV1SessionContinuity(controller.HarnessV1SessionContinuityConfig{
+				SessionControls: kubeControlStore, Transcripts: sqliteStore, Lineages: sqliteStore,
+			})
+		} else {
+			acpSessionContinuity, err = controller.NewACPSessionContinuity(controller.ACPSessionContinuityConfig{
+				SessionControls: kubeControlStore, Transcripts: sqliteStore, Publications: kubeControlStore, BranchClaims: kubeControlStore,
+				Lineages: sqliteStore,
+			})
+		}
 		if err != nil {
 			setupLog.Error(err, "unable to create shared agent Session continuity manager")
 			os.Exit(1)
 		}
 	}
 
-	// Artifact retirement is cleanup, not admission. Keep the collector and
-	// Task-facing retirer active after ACP admission is disabled so durable
-	// Task finalization and crash-recovery sweeps can reclaim existing artifacts.
-	// All supported controller deployments use strategy Recreate, so an old
-	// artifact service cannot overlap this lock/tombstone-aware collector on the
-	// shared PVC during rollout.
-	artifactRoot := strings.TrimSpace(os.Getenv("ORKA_ACP_ARTIFACT_ROOT"))
-	if artifactRoot == "" {
-		artifactRoot = artifactcap.DefaultRoot
-	}
-	artifactRetentionWiring, err := newACPArtifactRetentionWiring(acpRuntimeEnabled, artifactRoot)
-	if err != nil {
-		setupLog.Error(err, "unable to configure ACP artifact retention")
-		os.Exit(1)
-	}
-	acpArtifactCollector := artifactRetentionWiring.collector
-	if err := mgr.Add(&controller.AgentExecutionClassificationGatedRunnable{
-		Gate: classificationGate, Runnable: acpArtifactCollector,
-	}); err != nil {
-		setupLog.Error(err, "unable to add ACP artifact retention")
-		os.Exit(1)
-	}
-	publisherClient, artifactCapabilitySecret, publisherWorkspaceArtifactMaxBytes, err := workspacePublisherClientFromEnv()
-	if err != nil {
-		setupLog.Error(err, "unable to configure Workspace/Publisher client")
-		os.Exit(1)
+	var artifactRetentionWiring acpArtifactRetentionWiring
+	var publisherClient *publisherservice.Client
+	var artifactCapabilitySecret []byte
+	publisherWorkspaceArtifactMaxBytes := artifactcap.DefaultWorkspaceArtifactMaxBytes
+	if acpRuntimeEnabled {
+		artifactRoot := strings.TrimSpace(os.Getenv("ORKA_ACP_ARTIFACT_ROOT"))
+		if artifactRoot == "" {
+			artifactRoot = artifactcap.DefaultRoot
+		}
+		artifactRetentionWiring, err = newACPArtifactRetentionWiring(true, artifactRoot)
+		if err != nil {
+			setupLog.Error(err, "unable to configure ACP artifact retention")
+			os.Exit(1)
+		}
+		if err := mgr.Add(artifactRetentionWiring.collector); err != nil {
+			setupLog.Error(err, "unable to add ACP artifact retention")
+			os.Exit(1)
+		}
+		publisherClient, artifactCapabilitySecret, publisherWorkspaceArtifactMaxBytes, err = workspacePublisherClientFromEnv()
+		if err != nil {
+			setupLog.Error(err, "unable to configure Workspace/Publisher client")
+			os.Exit(1)
+		}
 	}
 	sessionManager.SetGatewayEventStore(sqliteStore)
 	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
@@ -1275,9 +1252,7 @@ func main() {
 	gatewayService := gatewayruntime.NewService(mgr.GetClient(), sqliteStore, sqliteStore, sqliteStore, gatewayConfig)
 	gatewayService.APIReader = mgr.GetAPIReader()
 	if gatewayEnabled {
-		if err := mgr.Add(&controller.AgentExecutionClassificationGatedRunnable{
-			Gate: classificationGate, Runnable: gatewayService,
-		}); err != nil {
+		if err := mgr.Add(gatewayService); err != nil {
 			setupLog.Error(err, "unable to add gateway service")
 			os.Exit(1)
 		}
@@ -1340,17 +1315,13 @@ func main() {
 		agentSandboxConfig.ControllerNamespace = currentPodNamespace()
 	}
 
-	// Keep RuntimePool finalization active after ACP admission is disabled so
-	// pools created by an earlier controller version can still be deleted.
-	runtimePoolReconciler := &controller.RuntimePoolReconciler{
-		Client:                           mgr.GetClient(),
-		APIReader:                        mgr.GetAPIReader(),
-		Scheme:                           mgr.GetScheme(),
-		AgentExecutionClassificationGate: classificationGate,
-		RuntimeNamespace:                 acpRuntimeNamespace,
-		CleanupOnly:                      !acpRuntimeEnabled,
-	}
 	if acpRuntimeEnabled {
+		runtimePoolReconciler := &controller.RuntimePoolReconciler{
+			Client:           mgr.GetClient(),
+			APIReader:        mgr.GetAPIReader(),
+			Scheme:           mgr.GetScheme(),
+			RuntimeNamespace: acpRuntimeNamespace,
+		}
 		providerProxyLabels, err := parseExactLabels(acpProviderProxyPodLabels)
 		if err != nil {
 			setupLog.Error(err, "unable to configure authenticated ACP provider proxy labels")
@@ -1372,60 +1343,40 @@ func main() {
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,
 		}
-	}
-	if err := runtimePoolReconciler.SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "RuntimePool")
-		os.Exit(1)
-	}
-
-	if err := (&controller.AgentExecutionControlReconciler{
-		Client:                            mgr.GetClient(),
-		APIReader:                         mgr.GetAPIReader(),
-		AgentExecutionBindingReservations: sqliteStore,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "AgentExecutionControl")
-		os.Exit(1)
-	}
-	if err := (&controller.AgentExecutionAdjudicationReconciler{
-		Client:                           mgr.GetClient(),
-		APIReader:                        mgr.GetAPIReader(),
-		AgentExecutionClassificationGate: classificationGate,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "AgentExecutionAdjudication")
-		os.Exit(1)
+		if err := runtimePoolReconciler.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "RuntimePool")
+			os.Exit(1)
+		}
 	}
 
 	// Setup Task controller with helper components.
 	taskReconciler := &controller.TaskReconciler{
-		Client:                            mgr.GetClient(),
-		APIReader:                         mgr.GetAPIReader(),
-		Scheme:                            mgr.GetScheme(),
-		JobBuilder:                        jobBuilder,
-		SessionManager:                    sessionManager,
-		WebhookNotifier:                   webhookNotifier,
-		KubeClient:                        kubeClient,
-		ResultStore:                       sqliteStore,
-		PlanStore:                         sqliteStore,
-		MessageStore:                      sqliteStore,
-		ArtifactStore:                     sqliteStore,
-		ExecutionEventStore:               sqliteStore,
-		DurableControlStore:               taskCleanupControlStore,
-		AgentExecutionSnapshots:           agentExecutionSnapshotStore,
-		MCPRegistry:                       acpMCPRegistry,
-		AgentExecutionBindingReservations: sqliteStore,
-		HarnessV1Enabled:                  harnessV1Enabled,
-		HarnessV1Endpoint:                 harnessV1Endpoint,
-		HarnessV1AuthSecretNamespace:      harnessV1AuthSecretNamespace,
-		HarnessV1AuthSecretName:           harnessV1AuthSecretName,
-		HarnessV1AuthSecretKey:            harnessV1AuthSecretKey,
-		HarnessV1PolicyName:               harnessV1PolicyName,
-		HarnessV1Attempts:                 sqliteStore,
-		ACPArtifactRetirer:                artifactRetentionWiring.taskCleanup,
-		ACPPublicationReclaimer:           publisherClient,
-		ControllerEpochManager:            controllerEpochManager,
-		ACPAdmissionGate:                  acpAdmissionGate,
-		AgentExecutionClassificationGate:  classificationGate,
-		ACPRuntimeEnabled:                 acpRuntimeEnabled,
+		Client:                       mgr.GetClient(),
+		APIReader:                    mgr.GetAPIReader(),
+		Scheme:                       mgr.GetScheme(),
+		JobBuilder:                   jobBuilder,
+		SessionManager:               sessionManager,
+		WebhookNotifier:              webhookNotifier,
+		KubeClient:                   kubeClient,
+		ResultStore:                  sqliteStore,
+		PlanStore:                    sqliteStore,
+		MessageStore:                 sqliteStore,
+		ArtifactStore:                sqliteStore,
+		ExecutionEventStore:          sqliteStore,
+		DurableControlStore:          taskCleanupControlStore,
+		AgentExecutionSnapshots:      agentExecutionSnapshotStore,
+		MCPRegistry:                  acpMCPRegistry,
+		HarnessV1Enabled:             harnessV1Enabled,
+		HarnessV1Endpoint:            harnessV1Endpoint,
+		HarnessV1AuthSecretNamespace: harnessV1AuthSecretNamespace,
+		HarnessV1AuthSecretName:      harnessV1AuthSecretName,
+		HarnessV1AuthSecretKey:       harnessV1AuthSecretKey,
+		HarnessV1Attempts:            sqliteStore,
+		ACPArtifactRetirer:           artifactRetentionWiring.taskCleanup,
+		ACPPublicationReclaimer:      publisherClient,
+		ControllerEpochManager:       controllerEpochManager,
+		ACPAdmissionGate:             acpAdmissionGate,
+		ACPRuntimeEnabled:            acpRuntimeEnabled,
 		ACPRuntimeImages: controller.ACPRuntimeImages{
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,
@@ -1434,22 +1385,22 @@ func main() {
 		OutboundAccessResolver:      outboundAccessResolver,
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
-		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
-		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
-		ExecutionWorkspaceDefaultProvider:  executionWorkspaceDefaultProvider,
-		WorkspaceProviderAPIEnabled:        workspaceProviderAPIEnabled,
-		AgentSandboxEnabled:                agentSandboxEnabled,
-		AgentSandboxConfig:                 agentSandboxConfig,
-		SubstrateEnabled:                   substrateEnabled,
-		SubstrateConfig:                    substrateConfig,
-		AIWorkerServiceAccountName:         aiWorkerServiceAccountName,
-		VendorWorkerServiceAccountName:     vendorWorkerServiceAccountName,
-		ContainerWorkerServiceAccountName:  containerWorkerServiceAccountName,
-		AIWorkerClusterRoleName:            aiWorkerClusterRoleName,
-		VendorWorkerClusterRoleName:        vendorWorkerClusterRoleName,
-		ContainerWorkerClusterRoleName:     containerWorkerClusterRoleName,
-		WorkerClusterRoleBindingNamePrefix: workerClusterRoleBindingNamePrefix,
-		EnforceTransactionCredentialAuth:   contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
+		EnforceNamespaceIsolation:         enforceNamespaceIsolation,
+		MaxTasksPerNamespace:              maxTasksPerNamespaceValue,
+		ExecutionWorkspaceDefaultProvider: executionWorkspaceDefaultProvider,
+		WorkspaceProviderAPIEnabled:       workspaceProviderAPIEnabled,
+		AgentSandboxEnabled:               agentSandboxEnabled,
+		AgentSandboxConfig:                agentSandboxConfig,
+		SubstrateEnabled:                  substrateEnabled,
+		SubstrateConfig:                   substrateConfig,
+		AIWorkerServiceAccountName:        aiWorkerServiceAccountName,
+		VendorWorkerServiceAccountName:    vendorWorkerServiceAccountName,
+		ContainerWorkerServiceAccountName: containerWorkerServiceAccountName,
+		AIWorkerClusterRoleName:           aiWorkerClusterRoleName,
+		VendorWorkerClusterRoleName:       vendorWorkerClusterRoleName,
+		ContainerWorkerClusterRoleName:    containerWorkerClusterRoleName,
+		WorkerRoleBindingNamePrefix:       workerRoleBindingNamePrefix,
+		EnforceTransactionCredentialAuth:  contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
 		TransactionCredentialReadScopes: append(
 			[]string(nil),
 			contextTokenAuthzConfig.SecretCredentialReadScopes()...,
@@ -1458,19 +1409,6 @@ func main() {
 	}
 	if err := taskReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
-		os.Exit(1)
-	}
-	if err := (&controller.AgentExecutionClassificationReconciler{
-		Client:          mgr.GetClient(),
-		APIReader:       mgr.GetAPIReader(),
-		WatchNamespace:  watchNamespace,
-		Snapshots:       agentExecutionSnapshotStore,
-		HarnessAttempts: sqliteStore,
-		RuntimeSessions: sqliteStore,
-		TaskBinder:      taskReconciler,
-		SessionLineages: sqliteStore,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "AgentExecutionClassification")
 		os.Exit(1)
 	}
 	if harnessV1Enabled {
@@ -1485,14 +1423,13 @@ func main() {
 			os.Exit(1)
 		}
 		harnessV1Dispatcher := &controller.HarnessV1Dispatcher{
-			Client:              mgr.GetClient(),
-			APIReader:           mgr.GetAPIReader(),
-			Attempts:            sqliteStore,
-			Snapshots:           agentExecutionSnapshotStore,
-			BindingReservations: sqliteStore,
-			ResultStore:         sqliteStore,
-			EventStore:          sqliteStore,
-			ExternalEffects:     kubeControlStore,
+			Client:          mgr.GetClient(),
+			APIReader:       mgr.GetAPIReader(),
+			Attempts:        sqliteStore,
+			Snapshots:       agentExecutionSnapshotStore,
+			ResultStore:     sqliteStore,
+			EventStore:      sqliteStore,
+			ExternalEffects: kubeControlStore,
 			BrokeredToolExecutor: controller.HarnessV1BrokeredToolExecutorFunc(func(
 				ctx context.Context,
 				namespace string,
@@ -1512,9 +1449,7 @@ func main() {
 			MaxConcurrent: harnessV1DispatchWorkers,
 			HTTPClient:    harnessV1HTTPClient,
 		}
-		if err := mgr.Add(&controller.AgentExecutionClassificationGatedRunnable{
-			Gate: classificationGate, Runnable: harnessV1Dispatcher,
-		}); err != nil {
+		if err := mgr.Add(harnessV1Dispatcher); err != nil {
 			setupLog.Error(err, "unable to add harness v1 dispatcher")
 			os.Exit(1)
 		}
@@ -1522,26 +1457,22 @@ func main() {
 	if acpRuntimeEnabled {
 		acpDispatcher := &controller.ACPDispatcher{
 			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: durableControlStore, ResultStore: sqliteStore,
-			Snapshots: agentExecutionSnapshotStore, BindingReservations: sqliteStore,
-			Epochs: controllerEpochManager, Sessions: acpSessionContinuity,
+			Snapshots: agentExecutionSnapshotStore,
+			Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
 			Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,
-			ArtifactReservations: acpArtifactCollector,
+			ArtifactReservations: artifactRetentionWiring.collector,
 			AdmissionGate:        acpAdmissionGate,
 			IdlePoolTTL:          acpIdlePoolTTL,
 			MCPRegistry:          acpMCPRegistry,
 		}
-		if err := mgr.Add(&controller.AgentExecutionClassificationGatedRunnable{
-			Gate: classificationGate, Runnable: acpDispatcher,
-		}); err != nil {
+		if err := mgr.Add(acpDispatcher); err != nil {
 			setupLog.Error(err, "unable to add ACP dispatcher")
 			os.Exit(1)
 		}
 		acpOutboxProjector := &controller.ACPOutboxProjector{
 			Client: mgr.GetClient(), Store: durableControlStore, Epochs: controllerEpochManager, WorkerID: controllerHolderID + "-outbox",
 		}
-		if err := mgr.Add(&controller.AgentExecutionClassificationGatedRunnable{
-			Gate: classificationGate, Runnable: acpOutboxProjector,
-		}); err != nil {
+		if err := mgr.Add(acpOutboxProjector); err != nil {
 			setupLog.Error(err, "unable to add ACP outbox projector")
 			os.Exit(1)
 		}
@@ -1553,9 +1484,7 @@ func main() {
 			&controller.KubernetesACPUpgradeDrainBarrierObserver{Reader: mgr.GetAPIReader(), Outbox: sqliteStore},
 			acpAdmissionGate, acpUpgradeDrainOptions,
 		)
-		if err := mgr.Add(&controller.AgentExecutionClassificationGatedRunnable{
-			Gate: classificationGate, Runnable: upgradeDrain,
-		}); err != nil {
+		if err := mgr.Add(upgradeDrain); err != nil {
 			setupLog.Error(err, "unable to add ACP planned-upgrade drain coordinator")
 			os.Exit(1)
 		}
@@ -1606,8 +1535,8 @@ func main() {
 		)
 		os.Exit(1)
 	}
-	registerWorkspaceCoreControllers := workspaceProviderAPIEnabled
-	if !workspaceProviderAPIEnabled {
+	registerWorkspaceCoreControllers := acpRuntimeEnabled && workspaceProviderAPIEnabled
+	if acpRuntimeEnabled && !workspaceProviderAPIEnabled {
 		workspaceAPIsInstalled, err := workspaceCleanupAPIsInstalled(mgr.GetRESTMapper())
 		if err != nil {
 			setupLog.Error(err, "unable to discover workspace cleanup APIs")
@@ -1629,12 +1558,11 @@ func main() {
 			os.Exit(1)
 		}
 		if err := (&controller.ExecutionWorkspaceReconciler{
-			Client:                           mgr.GetClient(),
-			APIReader:                        mgr.GetAPIReader(),
-			RESTMapper:                       mgr.GetRESTMapper(),
-			AgentExecutionClassificationGate: classificationGate,
-			AdmissionLeaseNamespace:          currentPodNamespace(),
-			CleanupOnly:                      !workspaceProviderAPIEnabled,
+			Client:                  mgr.GetClient(),
+			APIReader:               mgr.GetAPIReader(),
+			RESTMapper:              mgr.GetRESTMapper(),
+			AdmissionLeaseNamespace: currentPodNamespace(),
+			CleanupOnly:             !workspaceProviderAPIEnabled,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ExecutionWorkspaceCore")
 			os.Exit(1)
@@ -1675,19 +1603,17 @@ func main() {
 	}
 
 	if err := (&controller.AgentReconciler{
-		Client:                           mgr.GetClient(),
-		Scheme:                           mgr.GetScheme(),
-		AgentExecutionClassificationGate: classificationGate,
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
 	}
 
 	if err := (&controller.AgentRuntimeReconciler{
-		Client:                           mgr.GetClient(),
-		APIReader:                        mgr.GetAPIReader(),
-		Scheme:                           mgr.GetScheme(),
-		AgentExecutionClassificationGate: classificationGate,
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRuntime")
 		os.Exit(1)
@@ -1731,25 +1657,23 @@ func main() {
 	}
 
 	if err := (&controller.RepositoryScanReconciler{
-		Client:                           mgr.GetClient(),
-		Scheme:                           mgr.GetScheme(),
-		AgentExecutionClassificationGate: classificationGate,
-		SecurityStore:                    sqliteStore,
-		ArtifactStore:                    sqliteStore,
-		ResultStore:                      sqliteStore,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		SecurityStore: sqliteStore,
+		ArtifactStore: sqliteStore,
+		ResultStore:   sqliteStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryScan")
 		os.Exit(1)
 	}
 
 	if err := (&controller.RepositoryMonitorReconciler{
-		Client:                           mgr.GetClient(),
-		Scheme:                           mgr.GetScheme(),
-		AgentExecutionClassificationGate: classificationGate,
-		Store:                            sqliteStore,
-		ResultStore:                      sqliteStore,
-		ArtifactStore:                    sqliteStore,
-		EnforceNamespaceIsolation:        enforceNamespaceIsolation,
+		Client:                    mgr.GetClient(),
+		Scheme:                    mgr.GetScheme(),
+		Store:                     sqliteStore,
+		ResultStore:               sqliteStore,
+		ArtifactStore:             sqliteStore,
+		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
 		os.Exit(1)
@@ -1764,27 +1688,10 @@ func main() {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("agent-execution-ownership", ownershipLock.ReadyzChecker()); err != nil {
-		setupLog.Error(err, "unable to add agent execution ownership readiness check")
+	if err := mgr.AddReadyzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+		setupLog.Error(err, "unable to set up webhook ready check")
 		os.Exit(1)
 	}
-	if ownershipStatusProjector == nil {
-		setupLog.Error(fmt.Errorf("ownership status projector is unavailable"), "unable to configure ownership readiness")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("agent-execution-ownership-status", ownershipStatusProjector.ReadyzChecker()); err != nil {
-		setupLog.Error(err, "unable to add agent execution ownership status readiness check")
-		os.Exit(1)
-	}
-	classificationReadiness := &controller.AgentExecutionClassificationReadiness{
-		APIReader:      mgr.GetAPIReader(),
-		WatchNamespace: watchNamespace,
-	}
-	if err := mgr.AddReadyzCheck("agent-execution-classification", classificationReadiness.ReadyzChecker()); err != nil {
-		setupLog.Error(err, "unable to add agent execution classification readiness check")
-		os.Exit(1)
-	}
-
 	// Register coordination tools the Anthropic/OpenAI proxy advertises but that
 	// RegisterChatToolsDefault does not provide. Without these the proxy lists the
 	// tool in coordinatorProxyTools but ToLLMTools silently drops it, leaving the
@@ -1793,12 +1700,6 @@ func main() {
 	tools.RegisterProxyPRTools(mgr.GetClient())
 
 	// Start REST API server
-	var harnessV1Retirement api.HarnessV1RetirementService
-	if harnessV1Enabled && strings.TrimSpace(harnessV1RetirementUsername) != "" {
-		harnessV1Retirement = &controller.HarnessV1RetirementCoordinator{
-			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Attempts: sqliteStore,
-		}
-	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:                      apiPort,
 		WatchNamespace:            watchNamespace,
@@ -1810,32 +1711,25 @@ func main() {
 			AllowedSubjects: splitCommaList(oidcAllowedSubjects),
 			Namespace:       oidcNamespace,
 		},
-		ContextTokens:                    contextTokenConfig,
-		ContextTokenAuthorization:        contextTokenAuthzConfig,
-		ResultStore:                      sqliteStore,
-		SessionStore:                     sqliteStore,
-		PlanStore:                        sqliteStore,
-		MessageStore:                     sqliteStore,
-		ArtifactStore:                    sqliteStore,
-		ArtifactReservations:             artifactRetentionWiring.runtimeReservations,
-		MemoryStore:                      sqliteStore,
-		MemoryProposalStore:              sqliteStore,
-		SecurityStore:                    sqliteStore,
-		RepositoryMonitorStore:           sqliteStore,
-		ExecutionEventStore:              sqliteStore,
-		GatewayEventStore:                sqliteStore,
-		GatewayDeliveryStore:             sqliteStore,
-		GatewayService:                   gatewayService,
-		HealthChecker:                    sqliteStore,
-		Clientset:                        kubeClient,
-		APIReader:                        mgr.GetAPIReader(),
-		AgentExecutionClassificationGate: classificationGate,
-		HarnessV1Retirement:              harnessV1Retirement,
-		HarnessV1RetirementUsername:      harnessV1RetirementUsername,
-		HarnessV1RetirementPort:          harnessV1RetirementPort,
-		HarnessV1RetirementTLSCertFile:   harnessV1RetirementTLSCertFile,
-		HarnessV1RetirementTLSKeyFile:    harnessV1RetirementTLSKeyFile,
-		HarnessV1RetirementTokenAudience: harnessV1RetirementTokenAudience,
+		ContextTokens:             contextTokenConfig,
+		ContextTokenAuthorization: contextTokenAuthzConfig,
+		ResultStore:               sqliteStore,
+		SessionStore:              sqliteStore,
+		PlanStore:                 sqliteStore,
+		MessageStore:              sqliteStore,
+		ArtifactStore:             sqliteStore,
+		ArtifactReservations:      artifactRetentionWiring.runtimeReservations,
+		MemoryStore:               sqliteStore,
+		MemoryProposalStore:       sqliteStore,
+		SecurityStore:             sqliteStore,
+		RepositoryMonitorStore:    sqliteStore,
+		ExecutionEventStore:       sqliteStore,
+		GatewayEventStore:         sqliteStore,
+		GatewayDeliveryStore:      sqliteStore,
+		GatewayService:            gatewayService,
+		HealthChecker:             sqliteStore,
+		Clientset:                 kubeClient,
+		APIReader:                 mgr.GetAPIReader(),
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,
@@ -2051,11 +1945,6 @@ func managerCacheOptions(watchNamespace, acpRuntimeNamespace string) cache.Optio
 
 	options := cache.Options{
 		DefaultNamespaces: map[string]cache.Config{watchNamespace: {}},
-		ByObject: map[crclient.Object]cache.ByObject{
-			&corev1alpha1.AgentExecutionControl{}: {
-				Namespaces: map[string]cache.Config{corev1alpha1.AgentExecutionControlNamespace: {}},
-			},
-		},
 	}
 	runtimeNamespace := strings.TrimSpace(acpRuntimeNamespace)
 	if runtimeNamespace == "" {
@@ -2066,6 +1955,7 @@ func managerCacheOptions(watchNamespace, acpRuntimeNamespace string) cache.Optio
 		watchNamespace:   {},
 		runtimeNamespace: {},
 	}
+	options.ByObject = make(map[crclient.Object]cache.ByObject)
 	options.ByObject[&appsv1.Deployment{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	options.ByObject[&appsv1.ReplicaSet{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	options.ByObject[&corev1.Pod{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
@@ -2076,11 +1966,10 @@ func managerCacheOptions(watchNamespace, acpRuntimeNamespace string) cache.Optio
 	return options
 }
 
-func envBool(name string, fallback bool) bool {
-
+func envBool(name string) bool {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
-		return fallback
+		return false
 	}
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
@@ -2108,18 +1997,17 @@ type acpArtifactRetentionWiring struct {
 }
 
 func newACPArtifactRetentionWiring(runtimeEnabled bool, root string) (acpArtifactRetentionWiring, error) {
+	if !runtimeEnabled {
+		return acpArtifactRetentionWiring{}, nil
+	}
 	collector, err := artifactcap.NewCollector(artifactcap.CollectorConfig{Root: root})
 	if err != nil {
 		return acpArtifactRetentionWiring{}, err
 	}
 	wiring := acpArtifactRetentionWiring{
-		collector:   collector,
-		taskCleanup: collector,
-	}
-	if runtimeEnabled {
-		// Capability reservations are a runtime-admission surface and are only
-		// exposed to the dispatcher while ACP runtime admission is enabled.
-		wiring.runtimeReservations = collector
+		collector:           collector,
+		taskCleanup:         collector,
+		runtimeReservations: collector,
 	}
 	return wiring, nil
 }
@@ -2131,19 +2019,13 @@ type acpControlStoreWiring struct {
 
 func newACPControlStoreWiring(runtimeEnabled bool, kubeControlStore *storekube.Store) (acpControlStoreWiring, error) {
 	var wiring acpControlStoreWiring
-	if kubeControlStore != nil {
-		// Task finalization must retain the authoritative Kubernetes cleanup
-		// store across a true-to-false ACP feature-gate transition.
-		wiring.taskCleanup = kubeControlStore
-	}
 	if !runtimeEnabled {
 		return wiring, nil
 	}
 	if kubeControlStore == nil {
 		return acpControlStoreWiring{}, fmt.Errorf("kubernetes ACP control store is unavailable")
 	}
-	// Runtime admission and dispatch receive the store only while the feature
-	// gate is enabled; cleanup-only wiring cannot start new ACP work.
+	wiring.taskCleanup = kubeControlStore
 	wiring.runtime = kubeControlStore
 	return wiring, nil
 }
@@ -2167,17 +2049,6 @@ func controllerHolderIDForIncarnation(hostname, incarnation string) string {
 	return hostname + "-" + strings.TrimSpace(incarnation)
 }
 
-func currentPodName() string {
-	if name := strings.TrimSpace(os.Getenv("POD_NAME")); name != "" {
-		return name
-	}
-	hostname, err := os.Hostname()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(hostname)
-}
-
 func currentPodNamespace() string {
 	if namespace := strings.TrimSpace(os.Getenv(workerenv.PodNamespace)); namespace != "" {
 		return namespace
@@ -2187,20 +2058,6 @@ func currentPodNamespace() string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
-}
-
-func inClusterControllerIdentityDetected() bool {
-	for _, name := range []string{"POD_NAME", workerenv.PodNamespace, "KUBERNETES_SERVICE_HOST"} {
-		if strings.TrimSpace(os.Getenv(name)) != "" {
-			return true
-		}
-	}
-	for _, path := range []string{workerenv.ServiceAccountTokenFile, serviceAccountNamespaceFile} {
-		if _, err := os.Stat(path); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 // loadAgentExecutionSnapshotCipher reads the AES-256 snapshot key from a file

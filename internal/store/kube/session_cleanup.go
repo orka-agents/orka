@@ -62,6 +62,9 @@ func (s *Store) ReclaimSession(ctx context.Context, request store.ReclaimSession
 	if intent.OperationID != request.OperationID || intent.OperationDigest != request.OperationDigest {
 		return controlConflict("session cleanup for %s/%s belongs to a different operation", request.Namespace, request.SessionName)
 	}
+	if err := s.validateSessionCleanupBranchClaimScope(*intent); err != nil {
+		return err
+	}
 	if err := s.reclaimSessionBranchClaims(ctx, *intent); err != nil {
 		return err
 	}
@@ -141,19 +144,16 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 	intent := store.SessionCleanupIntent{
 		Namespace: request.Namespace, SessionName: request.SessionName,
 		OperationID: request.OperationID, OperationDigest: request.OperationDigest,
-		PreparedAt: request.RequestedAt, Adjudication: cloneSessionCleanupAdjudicationFence(request.Adjudication),
+		PreparedAt: request.RequestedAt,
 	}
 	object, err := s.getSessionControlObject(ctx, request.Namespace, request.SessionName)
 	if errors.Is(err, store.ErrNotFound) {
-		if request.Adjudication != nil {
-			return nil, controlConflict("adjudicated session cleanup for %s/%s lost its exact control before intent preparation", request.Namespace, request.SessionName)
-		}
 		sessionUID, identityErr := s.sessionCleanup.GetSessionCleanupIdentity(ctx, request.Namespace, request.SessionName)
 		if identityErr != nil && !errors.Is(identityErr, store.ErrNotFound) {
 			return nil, identityErr
 		}
 		if strings.TrimSpace(sessionUID) != "" {
-			claims, claimErr := s.sessionBranchClaimCleanupPlan(ctx, sessionUID, false, "")
+			claims, claimErr := s.sessionBranchClaimCleanupPlan(ctx, sessionUID)
 			if claimErr != nil {
 				return nil, claimErr
 			}
@@ -183,12 +183,7 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 		return nil, err
 	}
 	control := sessionControlFromObject(object)
-	adjudicated := request.Adjudication != nil
-	if adjudicated {
-		if err := validateAdjudicatedSessionCleanupControl(object, control, *request.Adjudication); err != nil {
-			return nil, err
-		}
-	} else if control.Availability != store.SessionAvailable || control.Lease != nil ||
+	if control.Availability != store.SessionAvailable || control.Lease != nil ||
 		control.BlockedReason != "" || control.RelatedPromptAttemptID != "" || control.RelatedPublicationID != "" {
 		return nil, controlConflict("session %s/%s has active or unresolved authoritative state", request.Namespace, request.SessionName)
 	}
@@ -202,9 +197,7 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 	if leaseState.Mode != leaseModeEmpty || leaseState.Generation != control.LeaseGeneration {
 		return nil, controlConflict("session %s/%s coordination Lease does not match the quiescent control generation", request.Namespace, request.SessionName)
 	}
-	claims, err := s.sessionBranchClaimCleanupPlan(
-		ctx, control.SessionUID, adjudicated, control.RelatedPublicationID,
-	)
+	claims, err := s.sessionBranchClaimCleanupPlan(ctx, control.SessionUID)
 	if err != nil {
 		return nil, err
 	}
@@ -225,9 +218,10 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 func (s *Store) sessionBranchClaimCleanupPlan(
 	ctx context.Context,
 	sessionUID string,
-	adjudicated bool,
-	relatedPublicationID string,
 ) ([]store.SessionCleanupBranchClaim, error) {
+	if !s.branchClaimsEnabled {
+		return nil, nil
+	}
 	list := &corev1alpha1.BranchClaimList{}
 	if err := s.readClient().List(ctx, list); err != nil {
 		return nil, mapKubernetesError("list Session-owned branch claims", err)
@@ -241,10 +235,7 @@ func (s *Store) sessionBranchClaimCleanupPlan(
 		claim := branchClaimFromObject(object)
 		available := claim.Availability == store.BranchClaimAvailable &&
 			claim.BlockedReason == "" && claim.RelatedPublicationID == ""
-		adjudicatedBlock := adjudicated && relatedPublicationID != "" &&
-			claim.Availability == store.BranchClaimReconciliationBlocked &&
-			claim.RelatedPublicationID == relatedPublicationID && claim.BlockedReason != ""
-		if !available && !adjudicatedBlock {
+		if !available {
 			return nil, controlConflict("Session-owned branch claim %q is reconciliation-blocked", claim.ID)
 		}
 		claims = append(claims, store.SessionCleanupBranchClaim{
@@ -261,6 +252,9 @@ func (s *Store) sessionBranchClaimCleanupPlan(
 }
 
 func (s *Store) reclaimSessionBranchClaims(ctx context.Context, intent store.SessionCleanupIntent) error {
+	if !s.branchClaimsEnabled {
+		return s.validateSessionCleanupBranchClaimScope(intent)
+	}
 	for _, expected := range intent.BranchClaims {
 		object, err := s.getBranchClaimObject(ctx, expected.ID)
 		if errors.Is(err, store.ErrNotFound) {
@@ -306,6 +300,9 @@ func (s *Store) ensureNoSessionBranchClaims(ctx context.Context, sessionUID stri
 	if sessionUID == "" {
 		return nil
 	}
+	if !s.branchClaimsEnabled {
+		return nil
+	}
 	list := &corev1alpha1.BranchClaimList{}
 	if err := s.readClient().List(ctx, list); err != nil {
 		return mapKubernetesError("verify Session-owned branch claim cleanup", err)
@@ -315,6 +312,16 @@ func (s *Store) ensureNoSessionBranchClaims(ctx context.Context, sessionUID stri
 		if store.BranchClaimOwnerKind(claim.Spec.OwnerKind) == store.BranchClaimOwnerSession && claim.Spec.OwnerUID == sessionUID {
 			return controlConflict("Session UID %q still owns branch claim %q after cleanup", sessionUID, claim.Spec.ID)
 		}
+	}
+	return nil
+}
+
+func (s *Store) validateSessionCleanupBranchClaimScope(intent store.SessionCleanupIntent) error {
+	if s.branchClaimsEnabled {
+		return nil
+	}
+	if len(intent.BranchClaims) != 0 || intent.ExpectedVerifiedBaseline != nil {
+		return fmt.Errorf("%w: Session cleanup contains publication state", ErrBranchClaimAccessDisabled)
 	}
 	return nil
 }
@@ -377,11 +384,7 @@ func (s *Store) reclaimSessionControl(ctx context.Context, intent store.SessionC
 		!reflect.DeepEqual(control.VerifiedBaseline, intent.ExpectedVerifiedBaseline) {
 		return controlConflict("session %s/%s control no longer matches its cleanup fence", intent.Namespace, intent.SessionName)
 	}
-	if intent.Adjudication != nil {
-		if err := validateAdjudicatedSessionCleanupControl(object, control, *intent.Adjudication); err != nil {
-			return err
-		}
-	} else if control.Availability != store.SessionAvailable || control.Lease != nil || control.BlockedReason != "" ||
+	if control.Availability != store.SessionAvailable || control.Lease != nil || control.BlockedReason != "" ||
 		control.RelatedPromptAttemptID != "" || control.RelatedPublicationID != "" {
 		return controlConflict("session %s/%s control no longer matches its cleanup fence", intent.Namespace, intent.SessionName)
 	}
@@ -463,53 +466,12 @@ func normalizeReclaimSessionRequest(request *store.ReclaimSessionRequest) error 
 	if err := store.ValidateCanonicalDigest("session cleanup operation digest", request.OperationDigest); err != nil {
 		return err
 	}
-	if request.Adjudication != nil {
-		request.Adjudication.ControlObjectUID = strings.TrimSpace(request.Adjudication.ControlObjectUID)
-		request.Adjudication.ControlResourceVersion = strings.TrimSpace(request.Adjudication.ControlResourceVersion)
-		request.Adjudication.ResolutionDigest = strings.TrimSpace(request.Adjudication.ResolutionDigest)
-		if request.Adjudication.ControlObjectUID == "" || request.Adjudication.ControlResourceVersion == "" {
-			return store.ValidationErrorf("adjudicated session cleanup control identity is incomplete")
-		}
-		if err := store.ValidateCanonicalDigest("adjudicated session cleanup resolution digest", request.Adjudication.ResolutionDigest); err != nil {
-			return err
-		}
-	}
 	if request.RequestedAt.IsZero() {
 		request.RequestedAt = time.Now().UTC()
 	} else {
 		request.RequestedAt = request.RequestedAt.UTC()
 	}
 	return nil
-}
-
-func validateAdjudicatedSessionCleanupControl(
-	object *corev1alpha1.RuntimeSessionControl,
-	control store.SessionControl,
-	fence store.SessionCleanupAdjudicationFence,
-) error {
-	if object == nil || string(object.UID) != fence.ControlObjectUID ||
-		object.ResourceVersion != fence.ControlResourceVersion {
-		return controlConflict("adjudicated session cleanup control identity changed")
-	}
-	resolution := object.Status.AgentExecutionResolutionRef
-	if resolution == nil || resolution.ResolutionDigest != fence.ResolutionDigest {
-		return controlConflict("adjudicated session cleanup resolution reference changed")
-	}
-	if control.Availability != store.SessionReconciliationBlocked || control.Lease != nil ||
-		strings.TrimSpace(control.BlockedReason) == "" {
-		return controlConflict("adjudicated session cleanup subject is no longer the exact blocked control")
-	}
-	return nil
-}
-
-func cloneSessionCleanupAdjudicationFence(
-	value *store.SessionCleanupAdjudicationFence,
-) *store.SessionCleanupAdjudicationFence {
-	if value == nil {
-		return nil
-	}
-	copyValue := *value
-	return &copyValue
 }
 
 func deleteObjectWithExactPreconditions(ctx context.Context, kubeClient client.Client, object client.Object) error {

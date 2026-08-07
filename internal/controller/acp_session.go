@@ -40,6 +40,16 @@ type ACPSessionContinuityConfig struct {
 	Lineages store.SessionLineageStore
 }
 
+// HarnessV1SessionContinuityConfig supplies only the namespaced continuity
+// stores used by the publication-free harness v1 contract.
+type HarnessV1SessionContinuityConfig struct {
+	SessionControls store.SessionControlStore
+	Transcripts     store.SessionStore
+	BootstrapLimits ACPBootstrapLimits
+	NewSessionUID   func() (string, error)
+	Lineages        store.SessionLineageStore
+}
+
 // ACPSessionContinuity is the controller-side integration boundary for durable
 // ACP Session identity, mutation fencing, canonical transcript bootstrap, and
 // atomic SessionTurn completion. It deliberately does not submit prompts.
@@ -65,6 +75,26 @@ func NewACPSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionCont
 	if config.SessionControls == nil || config.Transcripts == nil || config.Publications == nil || config.BranchClaims == nil {
 		return nil, fmt.Errorf("ACP session continuity requires session-control, transcript, publication, and branch-claim stores")
 	}
+	return newSessionContinuity(config)
+}
+
+// NewHarnessV1SessionContinuity creates the publication-free v1 continuity
+// boundary. A nonempty publication ID fails closed because no PublicationStore
+// or cluster-scoped BranchClaimStore is attached.
+func NewHarnessV1SessionContinuity(config HarnessV1SessionContinuityConfig) (*ACPSessionContinuity, error) {
+	if config.SessionControls == nil || config.Transcripts == nil {
+		return nil, fmt.Errorf("harness v1 session continuity requires session-control and transcript stores")
+	}
+	return newSessionContinuity(ACPSessionContinuityConfig{
+		SessionControls: config.SessionControls,
+		Transcripts:     config.Transcripts,
+		BootstrapLimits: config.BootstrapLimits,
+		NewSessionUID:   config.NewSessionUID,
+		Lineages:        config.Lineages,
+	})
+}
+
+func newSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionContinuity, error) {
 	limits, err := config.BootstrapLimits.withDefaults()
 	if err != nil {
 		return nil, err
@@ -268,7 +298,6 @@ type ACPAcquireSessionLeaseRequest struct {
 	NamespaceUID      string
 	ContractVersion   corev1alpha1.AgentRuntimeContractVersion
 	LineageGeneration int64
-	LineageProvenance store.SessionLineageProvenance
 	RuntimeIdentity   string
 	ConfigDigest      string
 }
@@ -370,10 +399,6 @@ func (c *ACPSessionContinuity) prepareSessionLineageClaim(ctx context.Context, r
 	if lineageGeneration == 0 {
 		lineageGeneration = 1
 	}
-	provenance := request.LineageProvenance
-	if provenance == "" {
-		provenance = store.SessionLineageFirstUse
-	}
 	claim := &store.ClaimSessionLineageRequest{
 		Namespace:         request.Session.Namespace,
 		SessionName:       request.Session.SessionName,
@@ -383,18 +408,16 @@ func (c *ACPSessionContinuity) prepareSessionLineageClaim(ctx context.Context, r
 		LineageGeneration: lineageGeneration,
 		RuntimeIdentity:   request.RuntimeIdentity,
 		ConfigDigest:      request.ConfigDigest,
-		Provenance:        provenance,
 	}
 	if request.Session.Lineage != nil {
-		claim.Provenance = request.Session.Lineage.Provenance
 		claim.LineageGeneration = request.Session.Lineage.LineageGeneration
 	} else {
 		record, err := c.transcripts.GetSession(ctx, request.Session.Namespace, request.Session.SessionName)
 		if err != nil {
 			return nil, fmt.Errorf("read session transcript for lineage classification: %w", err)
 		}
-		// A nonempty unclassified Session is never adopted implicitly. The
-		// sealed inventory/adjudication path must establish its lineage first.
+		// A nonempty unclassified Session is never adopted implicitly. Static
+		// mode installations require it to be recreated with fresh lineage.
 		claim.EstablishIfAbsent = record.MessageCount == 0
 	}
 	if err := claim.Validate(); err != nil {
@@ -736,6 +759,9 @@ func (c *ACPSessionContinuity) publicationBlockReason(ctx context.Context, publi
 	}
 	if err := store.ValidateControlIdentifier("publication ID", publicationID); err != nil {
 		return "", err
+	}
+	if c.publications == nil {
+		return "", fmt.Errorf("%w: harness v1 Session finalization cannot reference a publication", store.ErrConflict)
 	}
 	publication, err := c.publications.GetPublication(ctx, publicationID)
 	if err != nil {

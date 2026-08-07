@@ -227,17 +227,28 @@ grep -Fq 'name: "ORKA_WORKSPACE_PUBLISHER_URL",' <<<"${publisher_disable_patch}"
 grep -Fq '"$patch": "delete"' <<<"${publisher_disable_patch}" || \
   fail 'Substrate controller patch does not disable the omitted Publisher client'
 
-# Readiness also requires the durable cluster execution control. Install the
-# canonical v2-only object after its namespace exists and before the controller
-# workload is applied, otherwise the rollout remains permanently unready.
+# Substrate is a harness-v2 workspace-provider evaluation, not a third
+# controller mode. Claim the namespace before applying the statically configured
+# v2 workload and keep every required controller identity flag in the final
+# strategic patch.
 namespace_apply_line="$(grep -nF 'kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -' "${e2e}" | head -n1 | cut -d: -f1 || true)"
-control_apply_line="$(grep -nF 'kubectl apply -f "${ROOT_DIR}/config/acp-production/agent_execution_control.yaml"' "${e2e}" | head -n1 | cut -d: -f1 || true)"
-controller_apply_line="$(grep -nF '"${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/default" | kubectl apply -f -' "${e2e}" | head -n1 | cut -d: -f1 || true)"
+namespace_label_line="$(grep -nF 'kubectl label namespace orka-system orka.ai/controller-mode=harness-v2 --overwrite' "${e2e}" | head -n1 | cut -d: -f1 || true)"
+controller_apply_line="$(grep -nF '"${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -' "${e2e}" | head -n1 | cut -d: -f1 || true)"
 [[ "${namespace_apply_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not create the Orka namespace'
-[[ "${control_apply_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not apply the canonical AgentExecutionControl'
+[[ "${namespace_label_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not claim the Orka namespace for harness-v2'
 [[ "${controller_apply_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not apply the controller workload'
-(( namespace_apply_line < control_apply_line && control_apply_line < controller_apply_line )) || \
-  fail 'Substrate deploy must create the namespace and AgentExecutionControl before the controller workload'
+(( namespace_apply_line < namespace_label_line && namespace_label_line < controller_apply_line )) || \
+  fail 'Substrate deploy must claim the namespace before the harness-v2 controller workload'
+for required_arg in \
+  '"--controller-mode=harness-v2"' \
+  '"--watch-namespace=orka-system"' \
+  '"--enforce-namespace-isolation=true"' \
+  '"--execution-mode-controller-usernames=system:serviceaccount:orka-system:orka-controller-manager"'; do
+  grep -Fq -- "${required_arg}" "${e2e}" || fail "Substrate controller patch omits ${required_arg}"
+done
+if grep -Fq -- '"--acp-runtime-enabled=false"' "${e2e}"; then
+  fail 'Substrate deploy still passes the removed dynamic ACP mode flag'
+fi
 
 # The controller Deployment mounts the encrypted execution-snapshot key even
 # when ACP dispatch is disabled. Provision it before applying the workload so

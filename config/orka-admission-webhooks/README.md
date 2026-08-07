@@ -1,27 +1,32 @@
 # Orka fail-closed admission webhooks
 
-This is the second admission installation wave. Apply it only after:
+This is the second admission installation wave for the immutable namespace
+mode, Agent and AgentRuntime contracts, Task execution authority,
+Task-provenance, and workspace-class authorization boundaries. Apply it only
+after:
 
 - `../orka-admission` has at least two ready Service endpoints;
 - `orka-admission-tls` contains a valid serving certificate for
   `orka-admission.orka-system.svc` and a `ca.crt` bundle;
 - the Secret is annotated `cert-manager.io/allow-direct-injection: "true"`;
-- an AdmissionReview smoke test has reached every protected handler.
-- the singleton `orka-system/cluster` `AgentExecutionControl` exists and its
-  observed generation and backend modes are current.
+- an AdmissionReview smoke test has reached every enabled handler.
 
-The controller and adjudication-controller usernames embedded in
-`validating_webhook.yaml` must exactly match the corresponding arguments in
-`../orka-admission/deployment.yaml`. If noncanonical ServiceAccounts are used,
-patch both installation waves as one reviewed change before enabling the
-webhooks; otherwise cleanup-safe outage bypasses and handler identity checks
-would disagree.
+Trusted identities embedded in `validating_webhook.yaml` must exactly match the
+corresponding admission-runtime arguments. The checked-in example authorizes
+the exact controller identities for Helm releases `orka-v1` in
+`orka-v1-system` and `orka-v2` in `orka-v2-system`. If either identity differs,
+patch the shared runtime and all three `route-unless-controller-cleanup-safe`
+conditions as one reviewed platform change before enabling the webhooks.
 
-The configuration uses `failurePolicy: Fail` and a parameterized binding
-policy with `parameterNotFoundAction: Deny`. The policy requires exact control
-identity, generation, enabled mode, and mode revision for executable bindings;
-only the exact live `Open` migration inventory may create
-`legacy-cleanup-only` bindings without backend control. Once the inventory is
-`Sealed`, no additional migration binding may be introduced.
-Delete this configuration before removing the last admission endpoint or its
-TLS Secret.
+The namespace webhook permits the first valid `orka.ai/controller-mode` claim
+and then makes it immutable. The resource webhooks require contracts and new
+Task bindings to match that claim. The static harness architecture does not
+install admission policies for dynamic backend modes, cross-protocol binding,
+migration classification, or adjudication. Each controller accepts one
+startup mode and one labeled watch namespace; the two releases do not share a
+Task population.
+
+All retained webhook entries use `failurePolicy: Fail`. Delete their
+configurations before removing the last admission endpoint or its TLS Secret.
+The platform owner installs this `ValidatingWebhookConfiguration` exactly
+once; neither controller release owns a second copy.

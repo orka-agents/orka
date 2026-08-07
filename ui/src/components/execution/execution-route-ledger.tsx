@@ -10,7 +10,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
-import type { AgentExecutionResolutionRef, Task } from '@/schemas/task'
+import type { Task } from '@/schemas/task'
 import type { Session } from '@/schemas/session'
 import { abbreviateEvidence, words } from './execution-route-format'
 
@@ -113,84 +113,10 @@ export function TaskExecutionRouteLedger({ task }: { task: Task }) {
 
   const status = task.status
   const binding = status?.agentExecutionBinding
-  const quarantine = status?.agentExecutionQuarantine
-  const noExecution = status?.agentExecutionNoExecution
-  const resolution = status?.agentExecutionResolutionRef
   const outcomeUnknown = status?.execution?.outcome === 'OutcomeUnknown'
     || status?.execution?.state === 'OutcomeUnknown'
     || status?.harnessRuntime?.outcome === 'OutcomeUnknown'
     || status?.harnessRuntime?.state === 'OutcomeUnknown'
-
-  if (quarantine) {
-    return (
-      <ExecutionRouteLedger
-        title="Execution route"
-        summary={resolution ? 'Resolution applied' : 'Reconciliation required'}
-        summaryTone={resolution ? 'warning' : 'danger'}
-        rows={[
-          {
-            label: 'Route',
-            title: 'Execution held in quarantine',
-            detail: quarantine.reason,
-            icon: Route,
-            tone: 'danger',
-          },
-          {
-            label: 'Evidence',
-            title: 'Immutable migration evidence',
-            detail: (
-              <div className="space-y-1">
-                <p>{quarantine.migrationInventoryID}</p>
-                {quarantine.v1EvidenceDigest && (
-                  <p>v1 <EvidenceValue value={quarantine.v1EvidenceDigest} /></p>
-                )}
-                {quarantine.v2EvidenceDigest && (
-                  <p>v2 <EvidenceValue value={quarantine.v2EvidenceDigest} /></p>
-                )}
-              </div>
-            ),
-            icon: Database,
-            tone: 'warning',
-          },
-          resolutionRow(resolution),
-        ]}
-      />
-    )
-  }
-
-  if (noExecution) {
-    return (
-      <ExecutionRouteLedger
-        title="Execution route"
-        summary="No executor state"
-        summaryTone="neutral"
-        rows={[
-          {
-            label: 'Route',
-            title: 'Common cleanup only',
-            detail: noExecution.state,
-            icon: Route,
-          },
-          {
-            label: 'Evidence',
-            title: 'No-route proof recorded',
-            detail: noExecution.migrationInventoryID,
-            mono: noExecution.evidenceDigest,
-            icon: Database,
-          },
-          resolution
-            ? resolutionRow(resolution)
-            : {
-                label: 'Reconciliation',
-                title: 'No operator decision required',
-                detail: 'Authoritative inventory proved no executor accepted this Task.',
-                icon: CircleCheck,
-                tone: 'good',
-              },
-        ]}
-      />
-    )
-  }
 
   if (!binding) {
     return (
@@ -207,7 +133,6 @@ export function TaskExecutionRouteLedger({ task }: { task: Task }) {
     )
   }
 
-  const control = binding.backendControl
   const snapshotDetail = binding.runtimeProfileDigest
     ? <>Snapshot and runtime profile pinned</>
     : <>Snapshot retained while this binding is referenced</>
@@ -215,16 +140,14 @@ export function TaskExecutionRouteLedger({ task }: { task: Task }) {
   return (
     <ExecutionRouteLedger
       title="Execution route"
-      summary={outcomeUnknown ? (resolution ? 'Resolution applied' : 'Outcome unknown') : 'Route locked'}
-      summaryTone={outcomeUnknown ? (resolution ? 'warning' : 'danger') : 'good'}
+      summary={outcomeUnknown ? 'Outcome unknown' : 'Route locked'}
+      summaryTone={outcomeUnknown ? 'danger' : 'good'}
       rows={[
         {
           label: 'Route',
           title: bindingRouteTitle(task),
           detail: (
-            <span className="capitalize">
-              {binding.mode} · {words(binding.provenance)}
-            </span>
+            <span>{words(binding.backend)}</span>
           ),
           mono: binding.bindingDigest,
           icon: Route,
@@ -237,9 +160,7 @@ export function TaskExecutionRouteLedger({ task }: { task: Task }) {
           mono: binding.snapshot.digest,
           icon: Database,
         },
-        resolution
-          ? resolutionRow(resolution)
-          : outcomeUnknown
+        outcomeUnknown
           ? {
               label: 'Reconciliation',
               title: 'Human reconciliation required',
@@ -249,12 +170,8 @@ export function TaskExecutionRouteLedger({ task }: { task: Task }) {
             }
           : {
               label: 'Admission',
-              title: control
-                ? `${control.admittedMode} · revision ${control.modeRevision}`
-                : 'Legacy admission evidence',
-              detail: binding.policy
-                ? <>Policy <EvidenceValue value={binding.policy.digest} /></>
-                : 'No compatibility policy required for this route',
+              title: 'Static namespace route',
+              detail: `Contract ${binding.contractVersion} is fixed by the installation mode`,
               icon: GitBranch,
               tone: 'good',
             },
@@ -268,7 +185,6 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
   if (!control) return null
 
   const lineage = control.lineage
-  const resolution = control.agentExecutionResolutionRef
   const blocked = control.availability === 'ReconciliationBlocked'
   const available = control.availability === 'Available'
   const routeTitle = lineage
@@ -280,20 +196,18 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
       title="Session lineage"
       summary={
         blocked
-          ? resolution
-            ? 'Resolution applied'
-            : 'Reconciliation required'
+          ? 'Reconciliation required'
           : available
             ? 'Available'
             : 'Availability unknown'
       }
-      summaryTone={blocked ? (resolution ? 'warning' : 'danger') : available ? 'good' : 'warning'}
+      summaryTone={blocked ? 'danger' : available ? 'good' : 'warning'}
       rows={[
         {
           label: 'Route',
           title: routeTitle,
           detail: lineage
-            ? `${lineage.runtimeIdentity} · ${words(lineage.provenance)}`
+            ? lineage.runtimeIdentity
             : `Lifecycle ${control.lifecycle ?? 'unclassified'}`,
           mono: lineage?.sessionUID ?? control.sessionUID,
           icon: Route,
@@ -311,13 +225,10 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
         blocked
           ? {
               label: 'Reconciliation',
-              title: resolution ? 'Operator resolution recorded' : 'Continuation is blocked',
-              detail: resolution
-                ? `${resolution.action} · ${resolution.adjudicationName}`
-                : control.blockedReason,
-              mono: resolution?.resolutionDigest,
+              title: 'Continuation is blocked',
+              detail: control.blockedReason,
               icon: ShieldAlert,
-              tone: resolution ? 'warning' : 'danger',
+              tone: 'danger',
             }
           : {
               label: 'Availability',
@@ -329,24 +240,4 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
       ]}
     />
   )
-}
-
-function resolutionRow(resolution?: AgentExecutionResolutionRef): LedgerRow {
-  if (!resolution) {
-    return {
-      label: 'Reconciliation',
-      title: 'Operator decision required',
-      detail: 'Execution remains held until evidence is adjudicated.',
-      icon: ShieldAlert,
-      tone: 'danger',
-    }
-  }
-  return {
-    label: 'Reconciliation',
-    title: 'Operator resolution recorded',
-    detail: `${resolution.action} · ${resolution.adjudicationName}`,
-    mono: resolution.resolutionDigest,
-    icon: ShieldAlert,
-    tone: 'warning',
-  }
 }
