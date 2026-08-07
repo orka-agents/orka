@@ -920,6 +920,10 @@ deploy_orka() {
     "${ROOT_DIR}/bin/kustomize" edit remove resource ../scm-egress-proxy
   )
   kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
+  # Controller readiness is fail-closed until the cluster-wide execution
+  # control exists and its initial classification inventory is sealed. Seed
+  # the canonical v2-only control before creating the controller Deployment.
+  kubectl apply -f "${ROOT_DIR}/config/acp-production/agent_execution_control.yaml"
   local placeholder_digest
   placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
   kubectl -n orka-system create configmap acp-runtime-images \

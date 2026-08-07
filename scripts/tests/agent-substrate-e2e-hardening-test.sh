@@ -227,6 +227,18 @@ grep -Fq 'name: "ORKA_WORKSPACE_PUBLISHER_URL",' <<<"${publisher_disable_patch}"
 grep -Fq '"$patch": "delete"' <<<"${publisher_disable_patch}" || \
   fail 'Substrate controller patch does not disable the omitted Publisher client'
 
+# Readiness also requires the durable cluster execution control. Install the
+# canonical v2-only object after its namespace exists and before the controller
+# workload is applied, otherwise the rollout remains permanently unready.
+namespace_apply_line="$(grep -nF 'kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -' "${e2e}" | head -n1 | cut -d: -f1 || true)"
+control_apply_line="$(grep -nF 'kubectl apply -f "${ROOT_DIR}/config/acp-production/agent_execution_control.yaml"' "${e2e}" | head -n1 | cut -d: -f1 || true)"
+controller_apply_line="$(grep -nF '"${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/default" | kubectl apply -f -' "${e2e}" | head -n1 | cut -d: -f1 || true)"
+[[ "${namespace_apply_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not create the Orka namespace'
+[[ "${control_apply_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not apply the canonical AgentExecutionControl'
+[[ "${controller_apply_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not apply the controller workload'
+(( namespace_apply_line < control_apply_line && control_apply_line < controller_apply_line )) || \
+  fail 'Substrate deploy must create the namespace and AgentExecutionControl before the controller workload'
+
 # The controller Deployment mounts the encrypted execution-snapshot key even
 # when ACP dispatch is disabled. Provision it before applying the workload so
 # the Substrate-only rollout cannot stall in ContainerCreating.
