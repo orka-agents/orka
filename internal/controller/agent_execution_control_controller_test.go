@@ -232,7 +232,8 @@ func TestAgentExecutionControlReconcilerRejectsStableOrphanBeforeDisabledCutoff(
 	}
 }
 
-func TestAgentExecutionControlReconcilerKeepsLiveUnboundReservationOpenForRecovery(t *testing.T) {
+//nolint:gocyclo // The regression intentionally proves the full disposition, rejection, cutoff, and reopen sequence.
+func TestAgentExecutionControlReconcilerTerminalizesLiveUnboundReservationBeforeRejection(t *testing.T) {
 	ctx := context.Background()
 	control := agentExecutionControlTestObject()
 	task := &corev1alpha1.Task{
@@ -272,6 +273,7 @@ func TestAgentExecutionControlReconcilerKeepsLiveUnboundReservationOpenForRecove
 		t.Fatalf("initialize control: %v", err)
 	}
 	current := getAgentExecutionControlForTest(t, ctx, kubeClient)
+	expectedInventoryID := agentExecutionClassificationInventoryID(current.UID, current.Generation)
 	binding := agentExecutionControlTestBinding(current, string(task.UID), store.AgentExecutionBackendV1)
 	reservation, err := agentExecutionBindingReservationFor(task, binding)
 	if err != nil {
@@ -291,55 +293,54 @@ func TestAgentExecutionControlReconcilerKeepsLiveUnboundReservationOpenForRecove
 	if _, err := reconciler.Reconcile(ctx, request); err != nil {
 		t.Fatalf("enter closing: %v", err)
 	}
-	if _, err := reconciler.Reconcile(ctx, request); err == nil ||
-		!strings.Contains(err.Error(), "unclassified open reservations") {
-		t.Fatalf("live unbound reservation closing error = %v", err)
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("record terminal no-execution disposition: %v", err)
 	}
 	open, err := durable.GetAgentExecutionBindingReservation(ctx, created.ID)
 	if err != nil || open.State != store.AgentExecutionBindingReservationOpen {
-		t.Fatalf("live unbound reservation = %#v, %v; want Open", open, err)
+		t.Fatalf("disposition-first reservation = %#v, %v; want Open", open, err)
+	}
+	disposed := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), disposed); err != nil {
+		t.Fatal(err)
+	}
+	if disposed.Status.Phase != corev1alpha1.TaskPhaseCancelled ||
+		disposed.Status.AgentExecutionBinding != nil ||
+		disposed.Status.AgentExecutionNoExecution == nil ||
+		disposed.Status.AgentExecutionNoExecution.State != corev1alpha1.AgentExecutionNoExecutionUnbound ||
+		disposed.Status.AgentExecutionNoExecution.MigrationInventoryID != expectedInventoryID {
+		t.Fatalf("closing Task disposition = %#v", disposed.Status)
 	}
 	closing := getAgentExecutionControlForTest(t, ctx, kubeClient)
 	if closing.Status.Backends.V1.EffectiveMode != corev1alpha1.AgentExecutionEffectiveModeClosing {
-		t.Fatalf("effective mode with live unbound reservation = %s, want closing",
+		t.Fatalf("effective mode after Task disposition = %s, want closing",
 			closing.Status.Backends.V1.EffectiveMode)
 	}
 
-	// The exact acknowledged reservation remains reusable after the gate closes,
-	// allowing classification/binding recovery to finish without a new admission.
-	reused, err := durable.CreateAgentExecutionBindingReservation(ctx, reservation)
-	if err != nil || reused.ID != created.ID || reused.State != store.AgentExecutionBindingReservationOpen {
-		t.Fatalf("reuse closed-gate reservation = %#v, %v", reused, err)
+	// The reservation remains Open until the durable Task disposition is
+	// observed in a stable closing inventory, then becomes safely rejectable.
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("record disposed reservation inventory: %v", err)
 	}
-	currentTask := &corev1alpha1.Task{}
-	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), currentTask); err != nil {
-		t.Fatal(err)
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("reject disposed reservation: %v", err)
 	}
-	currentTask.Status.AgentExecutionBinding = binding.DeepCopy()
-	if err := kubeClient.Status().Update(ctx, currentTask); err != nil {
-		t.Fatalf("project recovered binding: %v", err)
-	}
-	if _, err := durable.SettleAgentExecutionBindingReservation(
-		ctx,
-		store.SettleAgentExecutionBindingReservationRequest{
-			ID: reused.ID, ExpectedVersion: reused.Version,
-			TargetState:   store.AgentExecutionBindingReservationBound,
-			BindingDigest: reused.BindingDigest, SettledAt: now.Add(time.Second),
-		},
-	); err != nil {
-		t.Fatalf("settle recovered reservation: %v", err)
+	rejected, err := durable.GetAgentExecutionBindingReservation(ctx, created.ID)
+	if err != nil || rejected.State != store.AgentExecutionBindingReservationRejected ||
+		rejected.TerminalReason != "closing-orphan-without-binding" {
+		t.Fatalf("disposed reservation = %#v, %v; want Rejected", rejected, err)
 	}
 
 	if _, err := reconciler.Reconcile(ctx, request); err != nil {
-		t.Fatalf("record recovered inventory: %v", err)
+		t.Fatalf("record zero-open inventory: %v", err)
 	}
 	if _, err := reconciler.Reconcile(ctx, request); err != nil {
-		t.Fatalf("seal recovered cutoff: %v", err)
+		t.Fatalf("seal disabled cutoff: %v", err)
 	}
 	disabled := getAgentExecutionControlForTest(t, ctx, kubeClient)
 	if disabled.Status.ObservedGeneration != disabled.Generation ||
 		disabled.Status.Backends.V1.EffectiveMode != corev1alpha1.AgentExecutionEffectiveModeDisabled {
-		t.Fatalf("disabled status after reservation recovery = %#v", disabled.Status)
+		t.Fatalf("disabled status after reservation disposition = %#v", disabled.Status)
 	}
 
 	disabled.Spec.Backends.V1.DesiredMode = corev1alpha1.AgentExecutionModeEnabled

@@ -176,6 +176,94 @@ func TestAgentExecutionClassificationReconcilerWritesDispositionsLineageAndSeal(
 	}
 }
 
+func TestAgentExecutionClassificationDefersAbsentSessionControlToFirstUse(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "first-use", UID: "task-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAgent,
+			SessionRef: &corev1alpha1.SessionReference{Name: "chat", Create: true},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhasePending,
+			AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
+				ContractVersion:      corev1alpha1.AgentRuntimeContractHarnessV2,
+				RuntimeType:          corev1alpha1.AgentRuntimeCodex,
+				RuntimeProfileDigest: "sha256:" + strings.Repeat("a", 64),
+			},
+		},
+	}
+	reader := fake.NewClientBuilder().WithScheme(scheme).Build()
+	complete, mutated, objects, err := (&AgentExecutionClassificationReconciler{}).classifySessions(
+		context.Background(), reader, []corev1alpha1.Task{task}, "inventory-1", nil,
+	)
+	if err != nil {
+		t.Fatalf("classifySessions() error = %v", err)
+	}
+	if !complete || mutated {
+		t.Fatalf("classifySessions() = complete %t, mutated %t; want true, false", complete, mutated)
+	}
+	if len(objects) != 1 || objects[0].Kind != "Session" || objects[0].Namespace != "default" ||
+		objects[0].Name != "chat" || objects[0].Classification != "absent-control" {
+		t.Fatalf("Session inventory = %#v, want stable absent-control entry", objects)
+	}
+}
+
+func TestAgentExecutionClassificationQuarantinesCrossNamespaceAgentWithIsolation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "cross-namespace", UID: "task-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{
+				Name: "classified", Namespace: "tenant-b",
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-b", Name: "classified", UID: "agent-uid"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: &contract,
+		}},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task, agent).Build()
+	reconciler := &AgentExecutionClassificationReconciler{
+		Client: kubeClient, APIReader: kubeClient,
+		TaskBinder: &TaskReconciler{EnforceNamespaceIsolation: true},
+	}
+	mutated, err := reconciler.classifyTask(
+		context.Background(), kubeClient, task, "inventory-1", agentExecutionClassificationEvidence{},
+	)
+	if err != nil {
+		t.Fatalf("classifyTask() error = %v", err)
+	}
+	if !mutated {
+		t.Fatal("classifyTask() mutated = false, want immutable quarantine")
+	}
+	got := &corev1alpha1.Task{}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(task), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.AgentExecutionBinding != nil {
+		t.Fatalf("cross-namespace Task gained binding = %#v", got.Status.AgentExecutionBinding)
+	}
+	if got.Status.AgentExecutionQuarantine == nil ||
+		got.Status.AgentExecutionQuarantine.Reason != corev1alpha1.AgentExecutionQuarantineUnclassifiedAgent ||
+		got.Status.AgentExecutionQuarantine.MigrationInventoryID != "inventory-1" {
+		t.Fatalf("cross-namespace Task quarantine = %#v", got.Status.AgentExecutionQuarantine)
+	}
+}
+
 func TestAgentExecutionClassificationBlocksActiveLegacySessionLease(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {

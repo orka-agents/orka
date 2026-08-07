@@ -521,11 +521,24 @@ func (r *AgentExecutionControlReconciler) closingInventory(
 				return agentExecutionClosingInventory{}, false, nil,
 					fmt.Errorf("open reservation %q conflicts with the Task's immutable binding", reservation.ID)
 			} else if taskErr == nil && task != nil && string(task.UID) == reservation.TaskUID {
-				// The Task may have persisted its reservation immediately before
-				// admission closed but not yet projected the write-once binding.
-				// Keep that exact reservation Open so the idempotent binding path
-				// can finish after gate closure. Only absent or replacement Tasks
-				// are safe to classify as abandoned reservations below.
+				if task.Status.AgentExecutionNoExecution != nil || task.Status.AgentExecutionQuarantine != nil {
+					orphans = append(orphans, reservation.ID)
+					break
+				}
+				// The Task persisted its reservation immediately before admission
+				// closed but did not project the write-once binding. Closing admission
+				// deliberately cannot create that binding: first record a terminal,
+				// immutable no-execution disposition, then reject the reservation on a
+				// later stable pass. The ordering is fail-closed across Kubernetes and
+				// SQLite crashes because an Open reservation is retained until the
+				// Task can no longer enter either executor path.
+				projected, projectErr := r.projectClosingReservationNoExecution(
+					ctx, reader, control, task, reservation,
+				)
+				if projectErr != nil {
+					return agentExecutionClosingInventory{}, false, nil, projectErr
+				}
+				changed = changed || projected
 			} else if taskErr != nil && !apierrors.IsNotFound(taskErr) {
 				return agentExecutionClosingInventory{}, false, nil, taskErr
 			} else {
@@ -610,6 +623,75 @@ func (r *AgentExecutionControlReconciler) closingInventory(
 	return agentExecutionClosingInventory{
 		digest: digest, watermark: stored.Watermark, openCount: stored.OpenCount,
 	}, false, orphans, nil
+}
+
+func (r *AgentExecutionControlReconciler) projectClosingReservationNoExecution(
+	ctx context.Context,
+	reader client.Reader,
+	control *corev1alpha1.AgentExecutionControl,
+	task *corev1alpha1.Task,
+	reservation *store.AgentExecutionBindingReservation,
+) (bool, error) {
+	if control == nil || reservation == nil ||
+		reservation.Revision.ControlUID != string(control.UID) || reservation.Revision.ControlGeneration < 1 {
+		return false, errors.New("source classification revision is required to terminalize an unbound closing reservation")
+	}
+	if task == nil || string(task.UID) != reservation.TaskUID {
+		return false, errors.New("exact Task and binding reservation identities are required for closing disposition")
+	}
+	evidenceDigest, err := acpDomainDigest("agent-execution-closing-reservation-no-execution/v1", struct {
+		TaskNamespace  string                              `json:"taskNamespace"`
+		TaskName       string                              `json:"taskName"`
+		TaskUID        string                              `json:"taskUid"`
+		ReservationID  string                              `json:"reservationId"`
+		Revision       store.AgentExecutionControlRevision `json:"revision"`
+		BindingDigest  string                              `json:"bindingDigest"`
+		SnapshotDigest string                              `json:"snapshotDigest"`
+	}{
+		TaskNamespace: reservation.TaskNamespace, TaskName: reservation.TaskName,
+		TaskUID: reservation.TaskUID, ReservationID: reservation.ID, Revision: reservation.Revision,
+		BindingDigest: reservation.BindingDigest, SnapshotDigest: reservation.SnapshotDigest,
+	})
+	if err != nil {
+		return false, err
+	}
+
+	current := &corev1alpha1.Task{}
+	key := types.NamespacedName{Namespace: reservation.TaskNamespace, Name: reservation.TaskName}
+	if err := reader.Get(ctx, key, current); err != nil {
+		return false, err
+	}
+	if string(current.UID) != reservation.TaskUID {
+		return false, fmt.Errorf("task %s/%s UID changed before closing disposition", current.Namespace, current.Name)
+	}
+	if current.Status.AgentExecutionBinding != nil {
+		return false, fmt.Errorf("task %s/%s acquired a binding before closing disposition", current.Namespace, current.Name)
+	}
+	if current.Status.AgentExecutionQuarantine != nil || current.Status.AgentExecutionNoExecution != nil {
+		return false, nil
+	}
+
+	base := current.DeepCopy()
+	now := metav1.NewTime(r.now())
+	current.Status.Phase = corev1alpha1.TaskPhaseCancelled
+	current.Status.Message = "agent execution admission closed after reservation and before binding; execution is permanently disabled"
+	current.Status.CompletionTime = &now
+	current.Status.AgentExecutionNoExecution = &corev1alpha1.AgentExecutionNoExecution{
+		SchemaVersion: 1,
+		State:         corev1alpha1.AgentExecutionNoExecutionUnbound,
+		MigrationInventoryID: agentExecutionClassificationInventoryID(
+			control.UID, reservation.Revision.ControlGeneration,
+		),
+		EvidenceDigest: evidenceDigest,
+		RecordedAt:     now,
+	}
+	if err := r.Status().Patch(
+		ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}),
+	); err != nil {
+		return false, fmt.Errorf("record closing no-execution disposition for Task %s/%s: %w",
+			current.Namespace, current.Name, err)
+	}
+	return true, nil
 }
 
 func readAgentExecutionReservationTask(

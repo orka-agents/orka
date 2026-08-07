@@ -48,6 +48,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -9175,8 +9176,21 @@ func TestHandleDeletionWaitsForHarnessV1AttemptReclamation(t *testing.T) {
 	attempt := &store.HarnessV1Attempt{
 		Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID), Attempt: 1,
 		BindingDigest: bindingDigest, SnapshotDigest: snapshotDigest, RequestDigest: requestDigest,
-		TurnID: "turn-v1-active-delete", State: store.HarnessV1AttemptPrepared,
+		TurnID: "turn-v1-active-delete", RuntimeSessionID: "runtime-v1-active-delete",
+		State:      store.HarnessV1AttemptPrepared,
 		RetryClass: store.HarnessV1RetryClassNone,
+	}
+	runtimeSession := &harness.RuntimeSession{
+		ID: harness.RuntimeSessionID(attempt.RuntimeSessionID),
+		Owner: harness.RuntimeSessionOwner{
+			Namespace: task.Namespace, SessionName: "task-runtime", ActiveTask: task.Name,
+			Provider: harness.ProviderKindKubernetesService,
+		},
+		State: harness.RuntimeSessionStateReady, CleanupPolicy: harness.RuntimeCleanupPolicyDelete,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := durable.CreateRuntimeSession(ctx, runtimeSession); err != nil {
+		t.Fatal(err)
 	}
 	if err := durable.CreateHarnessV1Attempt(ctx, attempt, fence); err != nil {
 		t.Fatal(err)
@@ -9236,6 +9250,9 @@ func TestHandleDeletionWaitsForHarnessV1AttemptReclamation(t *testing.T) {
 		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1,
 	}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("reclaimed harness v1 attempt error = %v, want not found", err)
+	}
+	if _, err := durable.GetRuntimeSession(ctx, task.Namespace, runtimeSession.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("reclaimed harness v1 runtime session error = %v, want not found", err)
 	}
 	deleted := &corev1alpha1.Task{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(task), deleted); err == nil {

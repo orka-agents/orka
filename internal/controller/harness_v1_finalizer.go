@@ -36,6 +36,35 @@ func (r *TaskReconciler) harnessV1TaskDeletionReady(
 	if r.ControllerEpochManager == nil {
 		return false, fmt.Errorf("controller epoch manager is required for harness v1 deletion")
 	}
+	attempts, err := r.HarnessV1Attempts.ListHarnessV1AttemptsByTask(
+		ctx, task.Namespace, string(task.UID),
+	)
+	if err != nil {
+		return false, fmt.Errorf("list harness v1 attempts before Task deletion: %w", err)
+	}
+	for i := range attempts {
+		attempt := &attempts[i]
+		if attempt.Namespace != task.Namespace || attempt.TaskName != task.Name ||
+			attempt.TaskUID != string(task.UID) || attempt.BindingDigest != binding.BindingDigest {
+			return false, fmt.Errorf("harness v1 attempt identity or binding changed before Task deletion")
+		}
+		if !store.IsTerminalHarnessV1AttemptState(attempt.State) {
+			return false, nil
+		}
+	}
+	// A crash may occur after terminal attempt persistence but before ordinary
+	// dispatcher settlement retires the legacy runtime_sessions row. Perform
+	// the same idempotent settlement used by dispatcher and adjudicated cleanup
+	// before the attempt aggregate can be reclaimed.
+	runtimeSessions := HarnessV1Dispatcher{Attempts: r.HarnessV1Attempts}
+	for i := range attempts {
+		if err := runtimeSessions.settleHarnessV1RuntimeSessionRecord(ctx, task, &attempts[i]); err != nil {
+			if errors.Is(err, store.ErrNotReady) {
+				return false, nil
+			}
+			return false, fmt.Errorf("settle harness v1 runtime session before Task deletion: %w", err)
+		}
+	}
 	fence, err := r.ControllerEpochManager.CurrentFence(ctx)
 	if err != nil {
 		return false, err

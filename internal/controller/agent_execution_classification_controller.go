@@ -329,7 +329,7 @@ func (r *AgentExecutionClassificationReconciler) classifyTask(
 		return r.persistTaskQuarantine(ctx, task, corev1alpha1.AgentExecutionQuarantineAmbiguousLegacyEvidence,
 			inventoryID, "", "")
 	case task.Status.Phase == "" || task.Status.Phase == corev1alpha1.TaskPhasePending:
-		return r.persistTaskLocalLegacyBinding(ctx, reader, task)
+		return r.persistTaskLocalLegacyBinding(ctx, reader, task, inventoryID)
 	default:
 		return false, nil
 	}
@@ -339,6 +339,7 @@ func (r *AgentExecutionClassificationReconciler) persistTaskLocalLegacyBinding(
 	ctx context.Context,
 	reader client.Reader,
 	task *corev1alpha1.Task,
+	inventoryID string,
 ) (bool, error) {
 	if r.TaskBinder == nil || task.Spec.AgentRef == nil || strings.TrimSpace(task.Spec.AgentRef.Name) == "" {
 		return false, nil
@@ -346,6 +347,10 @@ func (r *AgentExecutionClassificationReconciler) persistTaskLocalLegacyBinding(
 	agentNamespace := strings.TrimSpace(task.Spec.AgentRef.Namespace)
 	if agentNamespace == "" {
 		agentNamespace = task.Namespace
+	}
+	if r.TaskBinder.EnforceNamespaceIsolation && agentNamespace != task.Namespace {
+		return r.persistTaskQuarantine(ctx, task, corev1alpha1.AgentExecutionQuarantineUnclassifiedAgent,
+			inventoryID, "", "")
 	}
 	agent := &corev1alpha1.Agent{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: agentNamespace, Name: task.Spec.AgentRef.Name}, agent); err != nil {
@@ -802,9 +807,12 @@ func (r *AgentExecutionClassificationReconciler) classifySessions(
 	for key, values := range claims {
 		control := bySession[key]
 		if control == nil {
-			complete = false
+			// No Kubernetes-authoritative Session exists to migrate. Once the
+			// inventory seals, the dispatcher may create it and atomically establish
+			// first-use lineage with the mutation Lease. A pre-existing nonempty
+			// transcript remains fail-closed in that lineage-acquisition path.
 			objects = append(objects, agentExecutionClassificationInventoryObject{
-				Kind: "Session", Namespace: key.Namespace, Name: key.Name, Classification: "missing-control",
+				Kind: "Session", Namespace: key.Namespace, Name: key.Name, Classification: "absent-control",
 			})
 			continue
 		}
