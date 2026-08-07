@@ -163,7 +163,9 @@ func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReco
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshotStore.SetAgentExecutionSnapshotCipher(cipher)
+	if err := snapshotStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
+		t.Fatal(err)
+	}
 	configureAgentExecutionBindingTestGate(
 		t, context.Background(), snapshotStore, control, store.AgentExecutionBackendV2,
 	)

@@ -762,8 +762,9 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		"imagePullPolicy: Always",
 		`command: ["/orka-agent-harness-wrapper"]`,
 		"- drain",
-		`- "--endpoint=http://test-orka-agent-harness-wrapper:8080"`,
+		`- "--endpoint=https://test-orka-agent-harness-wrapper.orka-test.svc:8080"`,
 		"- --bearer-token-file=/var/run/orka/harness-wrapper/token",
+		"- --ca-file=/var/run/orka/harness-wrapper/ca.crt",
 		`- "--timeout=9m"`,
 		`- "--poll-interval=3s"`,
 		`secretName: "harness-wrapper-auth"`,
@@ -811,8 +812,9 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		"app.kubernetes.io/component: agent-harness-wrapper-rollover-abort",
 		"helm.sh/hook: post-rollback",
 		"- abort-rollover",
-		`- "--endpoint=http://test-orka-agent-harness-wrapper:8080"`,
+		`- "--endpoint=https://test-orka-agent-harness-wrapper.orka-test.svc:8080"`,
 		"- --bearer-token-file=/var/run/orka/harness-wrapper/token",
+		"- --ca-file=/var/run/orka/harness-wrapper/ca.crt",
 		`secretName: "harness-wrapper-auth"`,
 		`key: "token"`,
 	} {
@@ -1251,11 +1253,17 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		t.Fatalf("harness v1 policy unexpectedly advertises unsupported Copilot:\n%s", policy)
 	}
 	controllerDeployment := requireHelmRender(t, append(args, "--show-only", "templates/deployment.yaml")...)
-	if !strings.Contains(controllerDeployment, "--harness-v1-dispatch-workers=1") {
-		t.Fatalf(
-			"controller Deployment does not align dispatch capacity with the single-turn wrapper:\n%s",
-			controllerDeployment,
-		)
+	for _, marker := range []string{
+		"--harness-v1-dispatch-workers=1",
+		"--harness-v1-endpoint=https://test-orka-agent-harness-wrapper.orka-test.svc:8080",
+		"--harness-v1-ca-file=/var/run/orka/harness-v1-tls/ca.crt",
+		"mountPath: /var/run/orka/harness-v1-tls",
+		`secretName: "harness-wrapper-auth"`,
+		"key: ca.crt",
+	} {
+		if !strings.Contains(controllerDeployment, marker) {
+			t.Fatalf("controller Deployment is missing harness v1 TLS marker %q:\n%s", marker, controllerDeployment)
+		}
 	}
 
 	deployment := requireHelmRender(t, append(args, "--show-only", "templates/harness-wrapper-deployment.yaml")...)
@@ -1265,6 +1273,12 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		`image: "ghcr.io/orka-agents/orka/agent-harness-wrapper@` + digest + `"`,
 		"serviceAccountName: test-orka-agent-harness-wrapper",
 		"automountServiceAccountToken: false",
+		"name: https",
+		"name: ORKA_HARNESS_WRAPPER_TLS_CERT_FILE",
+		"value: /var/run/orka/harness-wrapper/tls.crt",
+		"name: ORKA_HARNESS_WRAPPER_TLS_KEY_FILE",
+		"value: /var/run/orka/harness-wrapper/tls.key",
+		"scheme: HTTPS",
 		"name: ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH",
 		"value: /var/lib/orka/harness-v1/admission-ledger.db",
 		"name: ORKA_HARNESS_WRAPPER_LEDGER_GENERATION",
@@ -1273,6 +1287,9 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"mountPath: /var/lib/orka/harness-v1",
 		"claimName: test-orka-harness-v1-ledger",
 		`secretName: "harness-wrapper-auth"`,
+		"key: tls.crt",
+		"key: tls.key",
+		"key: ca.crt",
 	} {
 		if !strings.Contains(deployment, marker) {
 			t.Fatalf("harness v1 Deployment is missing %q:\n%s", marker, deployment)
@@ -1295,7 +1312,9 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"templates/harness-wrapper-service.yaml": {
 			"kind: Service",
 			"name: test-orka-agent-harness-wrapper",
+			"name: https",
 			"port: 8080",
+			"targetPort: https",
 		},
 		"templates/harness-wrapper-serviceaccount.yaml": {
 			"kind: ServiceAccount",

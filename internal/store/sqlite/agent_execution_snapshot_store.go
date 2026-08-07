@@ -70,9 +70,47 @@ func (c *AgentExecutionSnapshotCipher) open(taskUID, digest string, schemaVersio
 }
 
 // SetAgentExecutionSnapshotCipher installs the required at-rest encryption
-// cipher. Snapshot persistence fails closed until a cipher is configured.
-func (s *Store) SetAgentExecutionSnapshotCipher(snapshotCipher *AgentExecutionSnapshotCipher) {
+// cipher after proving that it can authenticate every retained snapshot.
+// Callers must configure the cipher before snapshot readers or writers start.
+// This rejects key rotation while any snapshot encrypted by the previous key
+// remains, preventing one database from silently accumulating mixed-key rows.
+func (s *Store) SetAgentExecutionSnapshotCipher(snapshotCipher *AgentExecutionSnapshotCipher) error {
+	if snapshotCipher == nil {
+		return errors.New("agent execution snapshot cipher is required")
+	}
+	rows, err := s.db.Query(`SELECT task_uid, digest, schema_version, nonce, ciphertext
+		FROM agent_execution_snapshots ORDER BY task_uid ASC, digest ASC`)
+	if err != nil {
+		return fmt.Errorf("verify agent execution snapshot key: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			taskUID       string
+			digest        string
+			schemaVersion int32
+			nonce         []byte
+			ciphertext    []byte
+		)
+		if err := rows.Scan(&taskUID, &digest, &schemaVersion, &nonce, &ciphertext); err != nil {
+			return fmt.Errorf("scan retained agent execution snapshot while verifying key: %w", err)
+		}
+		body, err := snapshotCipher.open(taskUID, digest, schemaVersion, nonce, ciphertext)
+		if err != nil {
+			return fmt.Errorf(
+				"candidate agent execution snapshot key cannot authenticate retained snapshot %s/%s; restore the previous key or wait for reference-aware retention before rotating: %w",
+				taskUID, digest, err,
+			)
+		}
+		if computed := store.CanonicalAgentExecutionSnapshotDigest(body); computed != digest {
+			return fmt.Errorf("retained agent execution snapshot %s/%s failed integrity verification while activating key", taskUID, digest)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate retained agent execution snapshots while verifying key: %w", err)
+	}
 	s.snapshotCipher = snapshotCipher
+	return nil
 }
 
 var errSnapshotCipherRequired = errors.New("agent execution snapshot encryption is not configured; snapshot persistence fails closed")

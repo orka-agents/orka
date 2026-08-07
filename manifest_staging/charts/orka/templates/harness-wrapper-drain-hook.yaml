@@ -146,8 +146,9 @@ spec:
           command: ["/orka-agent-harness-wrapper"]
           args:
             - drain
-            - {{ printf "--endpoint=http://%s:8080" $wrapperName | quote }}
+            - {{ printf "--endpoint=https://%s.%s.svc:8080" $wrapperName .Release.Namespace | quote }}
             - --bearer-token-file=/var/run/orka/harness-wrapper/token
+            - --ca-file=/var/run/orka/harness-wrapper/ca.crt
             - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
             - {{ printf "--poll-interval=%s" .Values.harnessV1.upgradeDrain.pollInterval | quote }}
             - {{ printf "--next-generation=%s" $rolloverGeneration | quote }}
@@ -177,6 +178,8 @@ spec:
             items:
               - key: {{ $existingAuthKey | quote }}
                 path: token
+              - key: ca.crt
+                path: ca.crt
         - name: tmp
           emptyDir: {}
 {{- end }}
@@ -283,8 +286,9 @@ spec:
           command: ["/orka-agent-harness-wrapper"]
           args:
             - abort-rollover
-            - {{ printf "--endpoint=http://%s:8080" $wrapperName | quote }}
+            - {{ printf "--endpoint=https://%s.%s.svc:8080" $wrapperName .Release.Namespace | quote }}
             - --bearer-token-file=/var/run/orka/harness-wrapper/token
+            - --ca-file=/var/run/orka/harness-wrapper/ca.crt
             - {{ printf "--expected-generation=%s" $desiredGeneration | quote }}
             - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
           volumeMounts:
@@ -313,6 +317,8 @@ spec:
             items:
               - key: {{ .Values.harnessV1.auth.tokenKey | quote }}
                 path: token
+              - key: ca.crt
+                path: ca.crt
         - name: tmp
           emptyDir: {}
 {{- end }}
@@ -419,8 +425,9 @@ spec:
           command: ["/orka-agent-harness-wrapper"]
           args:
             - drain
-            - {{ printf "--endpoint=http://%s:8080" $wrapperName | quote }}
+            - {{ printf "--endpoint=https://%s.%s.svc:8080" $wrapperName .Release.Namespace | quote }}
             - --bearer-token-file=/var/run/orka/harness-wrapper/token
+            - --ca-file=/var/run/orka/harness-wrapper/ca.crt
             - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
             - {{ printf "--poll-interval=%s" .Values.harnessV1.upgradeDrain.pollInterval | quote }}
           volumeMounts:
@@ -449,6 +456,8 @@ spec:
             items:
               - key: {{ .Values.harnessV1.auth.tokenKey | quote }}
                 path: token
+              - key: ca.crt
+                path: ca.crt
         - name: tmp
           emptyDir: {}
 {{- end }}

@@ -140,7 +140,7 @@ spec:
       image: {{ include "orka.imageRef" $root.Values.harnessV1.image | quote }}
       imagePullPolicy: {{ $root.Values.harnessV1.image.pullPolicy }}
       ports:
-        - name: http
+        - name: https
           containerPort: 8080
           protocol: TCP
       env:
@@ -150,6 +150,10 @@ spec:
           value: :8080
         - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
           value: /var/run/orka/harness-wrapper/token
+        - name: ORKA_HARNESS_WRAPPER_TLS_CERT_FILE
+          value: /var/run/orka/harness-wrapper/tls.crt
+        - name: ORKA_HARNESS_WRAPPER_TLS_KEY_FILE
+          value: /var/run/orka/harness-wrapper/tls.key
         - name: ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH
           value: /var/lib/orka/harness-v1/admission-ledger.db
         - name: ORKA_HARNESS_WRAPPER_LEDGER_GENERATION
@@ -189,13 +193,15 @@ spec:
       livenessProbe:
         httpGet:
           path: /v1/health
-          port: http
+          port: https
+          scheme: HTTPS
         initialDelaySeconds: 10
         periodSeconds: 20
       readinessProbe:
         httpGet:
           path: /v1/ready
-          port: http
+          port: https
+          scheme: HTTPS
         initialDelaySeconds: 5
         periodSeconds: 10
       {{- with $root.Values.harnessV1.resources }}
@@ -210,6 +216,12 @@ spec:
         items:
           - key: {{ $root.Values.harnessV1.auth.tokenKey | quote }}
             path: token
+          - key: tls.crt
+            path: tls.crt
+          - key: tls.key
+            path: tls.key
+          - key: ca.crt
+            path: ca.crt
     - name: ledger
       persistentVolumeClaim:
         claimName: {{ include "orka.harnessV1LedgerName" $root }}

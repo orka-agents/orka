@@ -23,12 +23,14 @@ func runDrain(args []string) error {
 	var (
 		endpoint        string
 		bearerTokenFile string
+		caFile          string
 		nextGeneration  string
 		timeout         time.Duration
 		pollInterval    time.Duration
 	)
-	fs.StringVar(&endpoint, "endpoint", "", "wrapper HTTP endpoint")
+	fs.StringVar(&endpoint, "endpoint", "", "wrapper HTTPS endpoint")
 	fs.StringVar(&bearerTokenFile, "bearer-token-file", "", "file containing the wrapper control bearer")
+	fs.StringVar(&caFile, "ca-file", "", "CA bundle used to authenticate the wrapper")
 	fs.StringVar(&nextGeneration, "next-generation", "", "optional exact replacement ledger generation")
 	fs.DurationVar(&timeout, "timeout", defaultDrainTimeout, "maximum close-and-drain duration")
 	fs.DurationVar(&pollInterval, "poll-interval", defaultDrainPollInterval, "drain status poll interval")
@@ -37,9 +39,10 @@ func runDrain(args []string) error {
 	}
 	endpoint = strings.TrimSpace(endpoint)
 	bearerTokenFile = strings.TrimSpace(bearerTokenFile)
+	caFile = strings.TrimSpace(caFile)
 	nextGeneration = strings.TrimSpace(nextGeneration)
-	if endpoint == "" || bearerTokenFile == "" {
-		return fmt.Errorf("drain endpoint and bearer token file are required")
+	if endpoint == "" || bearerTokenFile == "" || caFile == "" {
+		return fmt.Errorf("drain endpoint, bearer token file, and CA file are required")
 	}
 	if timeout <= 0 || pollInterval <= 0 || pollInterval > timeout {
 		return fmt.Errorf("drain timeout and poll interval must be positive, with poll interval no greater than timeout")
@@ -53,10 +56,15 @@ func runDrain(args []string) error {
 		return fmt.Errorf("wrapper drain bearer token file is empty")
 	}
 	controlTimeout := min(10*time.Second, timeout)
+	httpClient, err := newWrapperTLSHTTPClient(endpoint, caFile)
+	if err != nil {
+		return fmt.Errorf("configure wrapper drain TLS: %w", err)
+	}
 	client, err := harness.NewClient(
 		endpoint,
 		harness.WithBearerToken(bearer),
 		harness.WithControlTimeout(controlTimeout),
+		harness.WithHTTPClient(httpClient),
 	)
 	if err != nil {
 		return fmt.Errorf("configure wrapper drain client: %w", err)

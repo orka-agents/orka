@@ -12,8 +12,8 @@ spec:
     {{- include "orka.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: agent-harness-wrapper
   ports:
-    - name: http
+    - name: https
       port: 8080
-      targetPort: http
+      targetPort: https
       protocol: TCP
 {{- end }}

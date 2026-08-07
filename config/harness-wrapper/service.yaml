@@ -11,7 +11,7 @@ spec:
     app.kubernetes.io/name: orka
     app.kubernetes.io/component: agent-harness-wrapper
   ports:
-    - name: http
+    - name: https
       port: 8080
-      targetPort: http
+      targetPort: https
       protocol: TCP

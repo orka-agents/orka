@@ -440,6 +440,9 @@ harnessV1:
   auth:
     # Use a dedicated operator-created Secret. Bearer credentials are never
     # accepted through Helm values or emitted into rendered release manifests.
+    # The Secret must also contain tls.crt, tls.key, and ca.crt. Its serving
+    # certificate must authenticate the release-scoped wrapper Service DNS
+    # name: <release>-orka-agent-harness-wrapper.<namespace>.svc.
     # The Secret source and key are immutable while an enabled wrapper
     # Deployment exists because controller attempts pin its resourceVersion.
     existingSecret: ""

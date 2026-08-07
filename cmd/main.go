@@ -199,6 +199,7 @@ func main() {
 	var maxTasksPerNamespace int
 	var harnessV1Enabled bool
 	var harnessV1Endpoint string
+	var harnessV1CAFile string
 	var harnessV1AuthSecretNamespace string
 	var harnessV1AuthSecretName string
 	var harnessV1AuthSecretKey string
@@ -400,6 +401,8 @@ func main() {
 		"Enable explicitly selected orka.harness.v1 agent Tasks; this is never a fallback from ACP v2.")
 	flag.StringVar(&harnessV1Endpoint, "harness-v1-endpoint", os.Getenv("ORKA_HARNESS_V1_ENDPOINT"),
 		"Base URL of the built-in harness v1 wrapper Service.")
+	flag.StringVar(&harnessV1CAFile, "harness-v1-ca-file", os.Getenv("ORKA_HARNESS_V1_CA_FILE"),
+		"CA bundle used to authenticate the built-in harness v1 wrapper Service.")
 	flag.StringVar(&harnessV1AuthSecretNamespace, "harness-v1-auth-secret-namespace",
 		os.Getenv("ORKA_HARNESS_V1_AUTH_SECRET_NAMESPACE"),
 		"Namespace of the dedicated harness v1 wrapper bearer-token Secret.")
@@ -680,9 +683,10 @@ func main() {
 		os.Exit(1)
 	}
 	if harnessV1Enabled {
-		missing := make([]string, 0, 5)
+		missing := make([]string, 0, 6)
 		for name, value := range map[string]string{
 			"--harness-v1-endpoint":              harnessV1Endpoint,
+			"--harness-v1-ca-file":               harnessV1CAFile,
 			"--harness-v1-auth-secret-namespace": harnessV1AuthSecretNamespace,
 			"--harness-v1-auth-secret-name":      harnessV1AuthSecretName,
 			"--harness-v1-auth-secret-key":       harnessV1AuthSecretKey,
@@ -695,6 +699,10 @@ func main() {
 		if len(missing) != 0 {
 			slices.Sort(missing)
 			fmt.Fprintf(os.Stderr, "harness v1 requires %s\n", strings.Join(missing, ", "))
+			os.Exit(1)
+		}
+		if err := validateHarnessV1TLSEndpoint(harnessV1Endpoint); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		if strings.TrimSpace(agentExecutionSnapshotKeyFile) == "" {
@@ -1102,7 +1110,11 @@ func main() {
 				"path", agentExecutionSnapshotKeyFile)
 			os.Exit(1)
 		}
-		sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher)
+		if cipherErr := sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher); cipherErr != nil {
+			setupLog.Error(cipherErr, "unable to activate agent execution snapshot key; snapshot encryption fails closed",
+				"path", agentExecutionSnapshotKeyFile)
+			os.Exit(1)
+		}
 		agentExecutionBindingEnabled = true
 		setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
 	} else {
@@ -1438,6 +1450,11 @@ func main() {
 				"unable to add harness v1 dispatcher")
 			os.Exit(1)
 		}
+		harnessV1HTTPClient, clientErr := newHarnessV1TLSHTTPClient(harnessV1CAFile)
+		if clientErr != nil {
+			setupLog.Error(clientErr, "unable to configure harness v1 TLS client")
+			os.Exit(1)
+		}
 		harnessV1Dispatcher := &controller.HarnessV1Dispatcher{
 			Client:              mgr.GetClient(),
 			APIReader:           mgr.GetAPIReader(),
@@ -1450,6 +1467,7 @@ func main() {
 			Epochs:              controllerEpochManager,
 			Interval:            harnessV1DispatchInterval,
 			MaxConcurrent:       harnessV1DispatchWorkers,
+			HTTPClient:          harnessV1HTTPClient,
 		}
 		if err := mgr.Add(&controller.AgentExecutionClassificationGatedRunnable{
 			Gate: classificationGate, Runnable: harnessV1Dispatcher,

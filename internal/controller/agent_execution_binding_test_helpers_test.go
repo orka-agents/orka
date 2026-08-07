@@ -41,7 +41,9 @@ func configureAgentExecutionBindingTest(
 			if err != nil {
 				t.Fatal(err)
 			}
-			sqliteStore.SetAgentExecutionSnapshotCipher(cipher)
+			if err := sqliteStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
+				t.Fatal(err)
+			}
 			reconciler.AgentExecutionSnapshots = sqliteStore
 		} else {
 			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "binding-snapshots.db"))
@@ -54,7 +56,9 @@ func configureAgentExecutionBindingTest(
 			if err != nil {
 				t.Fatal(err)
 			}
-			snapshotStore.SetAgentExecutionSnapshotCipher(cipher)
+			if err := snapshotStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
+				t.Fatal(err)
+			}
 			reconciler.AgentExecutionSnapshots = snapshotStore
 		}
 	}

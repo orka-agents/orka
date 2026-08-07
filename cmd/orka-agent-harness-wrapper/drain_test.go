@@ -19,7 +19,7 @@ func TestRunDrainClosesWaitsAndPreparesExactGeneration(t *testing.T) {
 		drainCalls    atomic.Int32
 		rolloverCalls atomic.Int32
 	)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+token {
 			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
@@ -50,6 +50,7 @@ func TestRunDrainClosesWaitsAndPreparesExactGeneration(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	caFile := writeTLSServerCA(t, server)
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
 		t.Fatal(err)
@@ -58,6 +59,7 @@ func TestRunDrainClosesWaitsAndPreparesExactGeneration(t *testing.T) {
 	if err := runDrain([]string{
 		"--endpoint=" + server.URL,
 		"--bearer-token-file=" + tokenFile,
+		"--ca-file=" + caFile,
 		"--next-generation=42",
 		"--timeout=2s",
 		"--poll-interval=1ms",
@@ -72,7 +74,7 @@ func TestRunDrainClosesWaitsAndPreparesExactGeneration(t *testing.T) {
 func TestRunDrainTimesOutWithoutPreparingRolloverOrLeakingBearer(t *testing.T) {
 	const token = "timeout-drain-token-value"
 	var rolloverCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case harness.AdminClosePath:
 			harness.WriteJSON(w, http.StatusOK, harness.DurableAdmissionCloseResponse{AdmissionClosed: true})
@@ -84,6 +86,7 @@ func TestRunDrainTimesOutWithoutPreparingRolloverOrLeakingBearer(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	caFile := writeTLSServerCA(t, server)
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
 		t.Fatal(err)
@@ -92,6 +95,7 @@ func TestRunDrainTimesOutWithoutPreparingRolloverOrLeakingBearer(t *testing.T) {
 	err := runDrain([]string{
 		"--endpoint=" + server.URL,
 		"--bearer-token-file=" + tokenFile,
+		"--ca-file=" + caFile,
 		"--next-generation=2",
 		"--timeout=30ms",
 		"--poll-interval=5ms",
@@ -110,7 +114,7 @@ func TestRunDrainTimesOutWithoutPreparingRolloverOrLeakingBearer(t *testing.T) {
 func TestRunDrainWithoutReplacementGenerationClosesAndDrainsOnly(t *testing.T) {
 	const token = "shutdown-drain-token-value"
 	var rolloverCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+token {
 			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
@@ -128,6 +132,7 @@ func TestRunDrainWithoutReplacementGenerationClosesAndDrainsOnly(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	caFile := writeTLSServerCA(t, server)
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
 		t.Fatal(err)
@@ -136,6 +141,7 @@ func TestRunDrainWithoutReplacementGenerationClosesAndDrainsOnly(t *testing.T) {
 	if err := runDrain([]string{
 		"--endpoint=" + server.URL,
 		"--bearer-token-file=" + tokenFile,
+		"--ca-file=" + caFile,
 		"--timeout=2s",
 		"--poll-interval=1ms",
 	}); err != nil {

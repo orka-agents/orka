@@ -51,7 +51,9 @@ func prepareBoundACPDispatcherTaskForTest(
 	if err != nil {
 		t.Fatal(err)
 	}
-	controlStore.SetAgentExecutionSnapshotCipher(cipher)
+	if err := controlStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
+		t.Fatal(err)
+	}
 	binder := &TaskReconciler{
 		Client:                            kubeClient,
 		APIReader:                         kubeClient,

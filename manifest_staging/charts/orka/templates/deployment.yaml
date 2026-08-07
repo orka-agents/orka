@@ -92,7 +92,8 @@ spec:
             - --acp-runtime-enabled={{ .Values.controller.acpRuntime.enabled }}
             - --harness-v1-enabled={{ .Values.harnessV1.enabled }}
             {{- if .Values.harnessV1.enabled }}
-            - --harness-v1-endpoint=http://{{ include "orka.harnessV1Name" . }}.{{ .Release.Namespace }}.svc:8080
+            - --harness-v1-endpoint=https://{{ include "orka.harnessV1Name" . }}.{{ .Release.Namespace }}.svc:8080
+            - --harness-v1-ca-file=/var/run/orka/harness-v1-tls/ca.crt
             - --harness-v1-auth-secret-namespace={{ .Release.Namespace }}
             - --harness-v1-auth-secret-name={{ .Values.harnessV1.auth.existingSecret }}
             - --harness-v1-auth-secret-key={{ .Values.harnessV1.auth.tokenKey }}
@@ -466,6 +467,11 @@ spec:
               mountPath: /var/run/orka/agent-execution-snapshot
               readOnly: true
             {{- end }}
+            {{- if .Values.harnessV1.enabled }}
+            - name: harness-v1-tls
+              mountPath: /var/run/orka/harness-v1-tls
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -511,6 +517,15 @@ spec:
             items:
               - key: {{ .Values.controller.agentExecutionSnapshot.key | quote }}
                 path: key
+        {{- end }}
+        {{- if .Values.harnessV1.enabled }}
+        - name: harness-v1-tls
+          secret:
+            secretName: {{ .Values.harnessV1.auth.existingSecret | quote }}
+            defaultMode: 0400
+            items:
+              - key: ca.crt
+                path: ca.crt
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

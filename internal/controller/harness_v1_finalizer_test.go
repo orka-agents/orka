@@ -153,7 +153,9 @@ func TestHarnessV1LegacyCleanupDeletionReclaimsOnlyInventoriedRuntimeWithoutAtte
 			if err != nil {
 				t.Fatal(err)
 			}
-			durable.SetAgentExecutionSnapshotCipher(cipher)
+			if err := durable.SetAgentExecutionSnapshotCipher(cipher); err != nil {
+				t.Fatal(err)
+			}
 			task := harnessV1LegacyCleanupFinalizerTask(
 				"legacy-runtime-only-"+strings.ReplaceAll(test.name, " ", "-"),
 				types.UID("legacy-runtime-only-"+strings.ReplaceAll(test.name, " ", "-")+"-uid"),

@@ -8,15 +8,19 @@ Before applying the base:
 
 1. Replace the all-zero wrapper image digest through an operator-controlled
    overlay with the exact reviewed `repository@sha256:<digest>` reference.
-2. Create the dedicated bearer Secret in `orka-system` without printing its
-   value:
+2. Create the dedicated bearer and TLS Secret in `orka-system` without printing
+   the bearer value. The serving certificate must authenticate
+   `agent-harness-wrapper.orka-system.svc`:
 
    ```bash
    kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
    if ! kubectl -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then
      openssl rand -hex 32 | \
        kubectl -n orka-system create secret generic harness-wrapper-auth \
-         --from-file=token=/dev/stdin
+         --from-file=token=/dev/stdin \
+         --from-file=tls.crt=/path/to/tls.crt \
+         --from-file=tls.key=/path/to/tls.key \
+         --from-file=ca.crt=/path/to/ca.crt
    fi
    ```
 
@@ -34,8 +38,9 @@ client from the currently deployed wrapper image and wait for it to succeed:
 
 ```bash
 /orka-agent-harness-wrapper drain \
-  --endpoint=http://agent-harness-wrapper:8080 \
+  --endpoint=https://agent-harness-wrapper.orka-system.svc:8080 \
   --bearer-token-file=/var/run/orka/harness-wrapper/token \
+  --ca-file=/var/run/orka/harness-wrapper/ca.crt \
   --timeout=15m \
   --poll-interval=2s \
   --next-generation=2

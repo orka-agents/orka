@@ -16,7 +16,7 @@ import (
 func TestRunAbortRolloverAuthenticatesAndRequiresExactGeneration(t *testing.T) {
 	const token = "abort-rollover-controller-token-value"
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		if r.URL.Path != harness.AdminAbortRolloverPath || r.Method != http.MethodPost {
 			harness.WriteError(w, http.StatusNotFound, "not found")
@@ -37,6 +37,7 @@ func TestRunAbortRolloverAuthenticatesAndRequiresExactGeneration(t *testing.T) {
 		})
 	}))
 	defer server.Close()
+	caFile := writeTLSServerCA(t, server)
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
 		t.Fatal(err)
@@ -45,6 +46,7 @@ func TestRunAbortRolloverAuthenticatesAndRequiresExactGeneration(t *testing.T) {
 	if err := runAbortRollover([]string{
 		"--endpoint=" + server.URL,
 		"--bearer-token-file=" + tokenFile,
+		"--ca-file=" + caFile,
 		"--expected-generation=generation-41",
 		"--timeout=2s",
 	}); err != nil {
@@ -57,13 +59,14 @@ func TestRunAbortRolloverAuthenticatesAndRequiresExactGeneration(t *testing.T) {
 
 func TestRunAbortRolloverRejectsInvalidResponseWithoutLeakingBearer(t *testing.T) {
 	const token = "abort-rollover-secret-token-value"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		harness.WriteJSON(w, http.StatusOK, harness.DurableRolloverAbortResponse{
 			CurrentGeneration: "different-generation",
 			AdmissionReopened: true,
 		})
 	}))
 	defer server.Close()
+	caFile := writeTLSServerCA(t, server)
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
 		t.Fatal(err)
@@ -72,6 +75,7 @@ func TestRunAbortRolloverRejectsInvalidResponseWithoutLeakingBearer(t *testing.T
 	err := runAbortRollover([]string{
 		"--endpoint=" + server.URL,
 		"--bearer-token-file=" + tokenFile,
+		"--ca-file=" + caFile,
 		"--expected-generation=generation-41",
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid rollover abort") {

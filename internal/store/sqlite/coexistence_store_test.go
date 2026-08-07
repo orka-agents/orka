@@ -92,7 +92,9 @@ func TestAgentExecutionSnapshotFailsClosedWithoutCipher(t *testing.T) {
 func TestAgentExecutionSnapshotRoundTripEncryptedAtRest(t *testing.T) {
 	ctx := context.Background()
 	s := newCoexistenceTestStore(t)
-	s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t))
+	if err := s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)); err != nil {
+		t.Fatal(err)
+	}
 
 	body := []byte(`{"prompt":"SENSITIVE-RESOLVED-PROMPT","model":"provider/model"}`)
 	snapshot := store.AgentExecutionSnapshot{
@@ -151,10 +153,62 @@ func TestAgentExecutionSnapshotRoundTripEncryptedAtRest(t *testing.T) {
 	}
 }
 
+func TestAgentExecutionSnapshotCipherActivationRejectsRotationWithRetainedSnapshots(t *testing.T) {
+	ctx := context.Background()
+	s := newCoexistenceTestStore(t)
+	previousCipher := testSnapshotCipher(t)
+	if err := s.SetAgentExecutionSnapshotCipher(previousCipher); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"prompt":"retained"}`)
+	snapshot := store.AgentExecutionSnapshot{
+		TaskUID:       "task-uid-rotation",
+		Digest:        store.CanonicalAgentExecutionSnapshotDigest(body),
+		SchemaVersion: store.AgentExecutionSnapshotSchemaVersion,
+		Body:          body,
+	}
+	if err := s.PersistAgentExecutionSnapshot(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	rotatedCipher, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x43}, AgentExecutionSnapshotKeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewStore(s.db, "restart-with-rotated-key")
+	if err := restarted.SetAgentExecutionSnapshotCipher(rotatedCipher); err == nil || !strings.Contains(err.Error(), "cannot authenticate retained snapshot") {
+		t.Fatalf("rotated key activation error = %v", err)
+	}
+	if err := restarted.PersistAgentExecutionSnapshot(ctx, snapshot); !errors.Is(err, errSnapshotCipherRequired) {
+		t.Fatalf("failed key activation must leave snapshot persistence closed, got %v", err)
+	}
+
+	restartedWithPreviousKey := NewStore(s.db, "restart-with-previous-key")
+	if err := restartedWithPreviousKey.SetAgentExecutionSnapshotCipher(previousCipher); err != nil {
+		t.Fatalf("activate previous key after restart: %v", err)
+	}
+	if _, err := restartedWithPreviousKey.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{
+		TaskUID: snapshot.TaskUID,
+		Digest:  snapshot.Digest,
+	}); err != nil {
+		t.Fatalf("read retained snapshot with previous key: %v", err)
+	}
+
+	if err := s.DeleteAgentExecutionSnapshots(ctx, snapshot.TaskUID); err != nil {
+		t.Fatal(err)
+	}
+	restartedAfterRetention := NewStore(s.db, "restart-after-retention")
+	if err := restartedAfterRetention.SetAgentExecutionSnapshotCipher(rotatedCipher); err != nil {
+		t.Fatalf("activate rotated key after retained snapshots are removed: %v", err)
+	}
+}
+
 func TestAgentExecutionSnapshotLifecycleMetadataOrderingAndStrictCutoff(t *testing.T) {
 	ctx := context.Background()
 	s := newCoexistenceTestStore(t)
-	s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t))
+	if err := s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)); err != nil {
+		t.Fatal(err)
+	}
 
 	base := time.Date(2026, 8, 6, 8, 0, 0, 0, time.UTC)
 	early := persistLifecycleSnapshot(t, ctx, s, "task-z", []byte(`{"snapshot":"early"}`), base)
@@ -221,7 +275,9 @@ func TestAgentExecutionSnapshotLifecycleMetadataRejectsCorruptStoredIdentity(t *
 func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 	ctx := context.Background()
 	s := newCoexistenceTestStore(t)
-	s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t))
+	if err := s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 8, 6, 10, 0, 0, 0, time.UTC)
 	key := persistLifecycleSnapshot(t, ctx, s, "task-uid", []byte(`{"snapshot":"target"}`), now)
 	otherDigestKey := persistLifecycleSnapshot(t, ctx, s, key.TaskUID, []byte(`{"snapshot":"other"}`), now)
@@ -361,7 +417,9 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 func TestAgentExecutionSnapshotLifecycleDeletesOnlyExactKey(t *testing.T) {
 	ctx := context.Background()
 	s := newCoexistenceTestStore(t)
-	s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t))
+	if err := s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 8, 6, 11, 0, 0, 0, time.UTC)
 	targetBody := []byte(`{"snapshot":"target"}`)
 	target := persistLifecycleSnapshot(t, ctx, s, "task-uid", targetBody, now)

@@ -23,6 +23,12 @@ import (
 
 const wrapperTestShellPath = "/bin/sh"
 
+type commandRunnerFunc func(context.Context, *CommandSpec) (CommandResult, error)
+
+func (run commandRunnerFunc) Run(ctx context.Context, spec *CommandSpec) (CommandResult, error) {
+	return run(ctx, spec)
+}
+
 func TestServerHealthCapabilitiesAndAfterSeq(t *testing.T) {
 	baseURL, cleanup := startWrapperServer(t, NewFakeAdapter(FakeBehaviorSuccess))
 	defer cleanup()
@@ -262,6 +268,102 @@ func TestServerChildProcessCleanupFailureRetainsTurnAndClosesAdmission(t *testin
 	server.Handler().ServeHTTP(startRecorder, startRequest)
 	if startRecorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("StartTurn after child cleanup failure = %d, want 503", startRecorder.Code)
+	}
+}
+
+func TestServerSecurityArtifactFollowUpChildCleanupFailureFailsClosed(t *testing.T) {
+	t.Setenv(EnvChildUID, "")
+	t.Setenv(EnvChildGID, "")
+	t.Setenv("ORKA_ARTIFACTS_DIR", filepath.Join(t.TempDir(), "artifacts"))
+
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic = GenericAdapterConfig{
+		Command:    wrapperTestShellPath,
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeStdout,
+	}
+	server, err := NewServer(cfg, NewGenericAdapter(cfg.Generic))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	runnerCalls := 0
+	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+		if spec == nil {
+			t.Fatal("command spec is nil")
+		}
+		runnerCalls++
+		switch runnerCalls {
+		case 1:
+			return CommandResult{Stdout: "initial result", FullStdout: "initial result"}, nil
+		case 2:
+			return CommandResult{Stdout: "follow-up output must not be exposed"}, fmt.Errorf(
+				"%w: test child process drain failure",
+				errChildCredentialProcessCleanupUnproven,
+			)
+		default:
+			t.Fatalf("runner calls = %d, want at most 2", runnerCalls)
+			return CommandResult{}, nil
+		}
+	})
+
+	request := validWrapperStartTurnRequest()
+	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-findings.v2.json\nreview the repository"
+	request = sealDurableWrapperRequest(request)
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+
+	server.runTurn(turn)
+
+	if runnerCalls != 2 {
+		t.Fatalf("runner calls = %d, want initial run plus security follow-up", runnerCalls)
+	}
+	if server.childCredentialProcessesHealthy() {
+		t.Fatal("follow-up child process cleanup failure did not close readiness")
+	}
+	if !server.turnRegistry.active(request.TurnID) {
+		t.Fatal("follow-up child process cleanup failure released the active turn")
+	}
+	frames, closed := turn.framesFrom(1)
+	if closed {
+		t.Fatal("follow-up child process cleanup failure closed the active turn stream")
+	}
+	for _, frame := range frames {
+		switch frame.Type {
+		case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
+			t.Fatalf("follow-up child process cleanup failure exposed terminal frame %#v", frame)
+		}
+		if strings.Contains(frame.ContentText, "follow-up output must not be exposed") {
+			t.Fatalf("follow-up child process cleanup failure exposed subprocess output %#v", frame)
+		}
+	}
+
+	readiness := server.healthResponse()
+	if readiness.Ready || readiness.Metadata["childCredentialProcesses"] != childCredentialCleanupFailed {
+		t.Fatalf("readiness after follow-up child cleanup failure = %#v", readiness)
+	}
+
+	next := validWrapperStartTurnRequest()
+	next.TurnID = "turn-after-follow-up-child-cleanup-failure"
+	next.CorrelationID = "corr-after-follow-up-child-cleanup-failure"
+	next = sealDurableWrapperRequest(next)
+	nextBody, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("marshal next StartTurn: %v", err)
+	}
+	startRecorder := httptest.NewRecorder()
+	startRequest := httptest.NewRequest(http.MethodPost, harness.TurnsPath, bytes.NewReader(nextBody))
+	server.Handler().ServeHTTP(startRecorder, startRequest)
+	if startRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("StartTurn after follow-up child cleanup failure = %d, want 503", startRecorder.Code)
 	}
 }
 

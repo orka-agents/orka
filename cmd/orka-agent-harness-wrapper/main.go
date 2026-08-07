@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"net/http"
@@ -14,6 +15,11 @@ import (
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/harness/cliwrapper"
+)
+
+const (
+	envHarnessWrapperTLSCertFile = "ORKA_HARNESS_WRAPPER_TLS_CERT_FILE"
+	envHarnessWrapperTLSKeyFile  = "ORKA_HARNESS_WRAPPER_TLS_KEY_FILE"
 )
 
 type repeatedString []string
@@ -51,9 +57,13 @@ func run(args []string) error {
 	cfg.AuthValue = ""
 	var extraArgs repeatedString
 	var extraEnv repeatedString
+	tlsCertFile := strings.TrimSpace(os.Getenv(envHarnessWrapperTLSCertFile))
+	tlsKeyFile := strings.TrimSpace(os.Getenv(envHarnessWrapperTLSKeyFile))
 	fs := flag.NewFlagSet("orka-agent-harness-wrapper", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	fs.StringVar(&cfg.ListenAddr, "listen-addr", cfg.ListenAddr, "HTTP listen address")
+	fs.StringVar(&cfg.ListenAddr, "listen-addr", cfg.ListenAddr, "HTTPS listen address")
+	fs.StringVar(&tlsCertFile, "tls-cert-file", tlsCertFile, "server TLS certificate file")
+	fs.StringVar(&tlsKeyFile, "tls-key-file", tlsKeyFile, "server TLS private key file")
 	fs.StringVar(&cfg.Runtime, "runtime", cfg.Runtime, "runtime adapter: generic, codex, claude, copilot, opencode, multi")
 	fs.StringVar(&cfg.WorkDir, "workdir", cfg.WorkDir, "default command working directory")
 	fs.StringVar(&cfg.Generic.Command, "command", cfg.Generic.Command, "generic adapter command path")
@@ -103,6 +113,11 @@ func run(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	tlsCertFile = strings.TrimSpace(tlsCertFile)
+	tlsKeyFile = strings.TrimSpace(tlsKeyFile)
+	if tlsCertFile == "" || tlsKeyFile == "" {
+		return fmt.Errorf("TLS certificate and private key files are required")
+	}
 	if len(extraArgs) > 0 {
 		cfg.Generic.Args = append(cfg.Generic.Args, extraArgs...)
 	}
@@ -146,11 +161,14 @@ func run(args []string) error {
 			fmt.Fprintf(os.Stderr, "warning: failed to close wrapper admission ledger: %v\n", closeErr)
 		}
 	}()
-	httpServer := &http.Server{Addr: cfg.ListenAddr, Handler: server.Handler()}
+	httpServer := &http.Server{
+		Addr: cfg.ListenAddr, Handler: server.Handler(),
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(os.Stderr, "orka agent harness wrapper listening on %s (runtime=%s)\n", cfg.ListenAddr, adapter.Name())
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(os.Stderr, "orka agent harness wrapper listening with TLS on %s (runtime=%s)\n", cfg.ListenAddr, adapter.Name())
+		if err := httpServer.ListenAndServeTLS(tlsCertFile, tlsKeyFile); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 			return
 		}

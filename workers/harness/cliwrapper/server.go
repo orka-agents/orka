@@ -47,7 +47,7 @@ const (
 type Server struct {
 	config  Config
 	adapter RuntimeAdapter
-	runner  CommandRunner
+	runner  commandRunner
 	now     func() time.Time
 
 	turnRegistry *turnRegistry
@@ -60,6 +60,10 @@ type Server struct {
 	// failures. Ambiguous admission reconciliation failures remain fail-closed.
 	admissionLedgerErrRetryable bool
 	childCredentialProcessErr   error
+}
+
+type commandRunner interface {
+	Run(context.Context, *CommandSpec) (CommandResult, error)
 }
 
 type RuntimeSupportProvider interface {
@@ -366,6 +370,14 @@ func (s *Server) setChildCredentialProcessError(err error) {
 	s.healthMu.Lock()
 	s.childCredentialProcessErr = err
 	s.healthMu.Unlock()
+}
+
+func (s *Server) latchChildCredentialProcessCleanupFailure(err error) bool {
+	if !errors.Is(err, errChildCredentialProcessCleanupUnproven) {
+		return false
+	}
+	s.setChildCredentialProcessError(err)
+	return true
 }
 
 func (s *Server) childCredentialProcessesHealthy() bool {
@@ -1228,8 +1240,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		"command": path.Base(spec.Path),
 	}))
 	run, runErr := s.runner.Run(ctx, spec)
-	if errors.Is(runErr, errChildCredentialProcessCleanupUnproven) {
-		s.setChildCredentialProcessError(runErr)
+	if s.latchChildCredentialProcessCleanupFailure(runErr) {
 		return
 	}
 	if run.FullStdoutTruncated && strings.TrimSpace(spec.ResultFile) == "" {
@@ -1307,6 +1318,9 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			s.securityArtifactFollowUp(turn, turnCtx),
 			turnArtifactsDir,
 		); artifactErr != nil {
+			if errors.Is(artifactErr, errChildCredentialProcessCleanupUnproven) {
+				return
+			}
 			turn.appendFrame(s.failedFrame(turn, "required_security_artifacts_missing", artifactErr.Error(), false))
 			return
 		} else {
@@ -1423,6 +1437,9 @@ func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) com
 			"command": path.Base(spec.Path),
 		}))
 		run, runErr := s.runner.Run(ctx, spec)
+		if s.latchChildCredentialProcessCleanupFailure(runErr) {
+			return "", runErr
+		}
 		if strings.TrimSpace(run.Stdout) != "" {
 			turn.appendFrame(s.outputFrame(turn, "stdout", run.Stdout))
 		}
