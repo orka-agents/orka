@@ -100,7 +100,7 @@ func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext, effort string) []str
 	}
 	if tools := claudeAvailableTools(allowedTools); len(tools) > 0 {
 		args = append(args, "--tools", strings.Join(tools, ","))
-	} else if readOnly && cfg.AllowedToolsSet {
+	} else if cfg.AllowedToolsSet {
 		args = append(args, "--tools", "")
 	}
 	workDir := firstNonEmpty(turn.RootDir, turn.WorkDir)

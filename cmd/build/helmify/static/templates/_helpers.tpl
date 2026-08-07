@@ -516,8 +516,8 @@ release-local Secret, but operator-supplied tokens must have adequate entropy.
 {{- end -}}
 {{- if .Values.harnessV1.policy.create -}}
 {{- range .Values.harnessV1.policy.allowedBuiltInRuntimeTypes -}}
-{{- if not (has . (list "codex" "claude" "copilot")) -}}
-{{- fail "harnessV1.policy.allowedBuiltInRuntimeTypes may contain only codex, claude, or copilot" -}}
+{{- if not (has . (list "codex" "claude")) -}}
+{{- fail "harnessV1.policy.allowedBuiltInRuntimeTypes may contain only codex or claude" -}}
 {{- end -}}
 {{- end -}}
 {{- if not (has .Values.harnessV1.policy.retryEligibility (list "none" "duplicate-safe-only")) -}}

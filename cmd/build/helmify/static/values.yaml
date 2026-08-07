@@ -410,7 +410,6 @@ harnessV1:
     allowedBuiltInRuntimeTypes:
       - codex
       - claude
-      - copilot
     allowTrustedObservedModeRuntimes: false
     retryEligibility: none
     networkIsolationProfile: default-deny

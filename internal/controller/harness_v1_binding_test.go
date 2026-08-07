@@ -132,6 +132,123 @@ func TestResolveHarnessV1ExecutionCandidateMarksSpecViolationPermanent(t *testin
 	}
 }
 
+func TestResolveHarnessV1ExecutionCandidateRejectsCopilotPermanently(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	policy := &corev1alpha1.AgentExecutionPolicy{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.policy), policy); err != nil {
+		t.Fatal(err)
+	}
+	policy.Spec.AllowedBuiltInRuntimeTypes = append(
+		policy.Spec.AllowedBuiltInRuntimeTypes,
+		corev1alpha1.AgentRuntimeCopilot,
+	)
+	if err := fixture.reconciler.Update(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	agent := fixture.agent.DeepCopy()
+	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCopilot
+
+	candidate, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, fixture.task, agent)
+	if candidate != nil || err == nil || !isPermanentHarnessV1CandidateError(err) ||
+		!strings.Contains(err.Error(), "GitHub mutation-capable credential") {
+		t.Fatalf("Copilot candidate = %#v, error = %v, want permanent safe-credential rejection", candidate, err)
+	}
+}
+
+func TestResolveHarnessV1TargetRequiresObservedMode(t *testing.T) {
+	const (
+		endpoint   = "https://runtime.example.invalid"
+		runtimeKey = "token"
+	)
+	tests := []struct {
+		name         string
+		capabilities *corev1alpha1.AgentRuntimeObservedCapabilities
+		wantError    bool
+	}{
+		{name: "missing capabilities", wantError: true},
+		{
+			name: "brokered only",
+			capabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
+				ToolExecutionModes: []corev1alpha1.AgentRuntimeToolExecutionMode{
+					corev1alpha1.AgentRuntimeToolExecutionModeBrokered,
+				},
+			},
+			wantError: true,
+		},
+		{
+			name: "observed only",
+			capabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
+				ToolExecutionModes: []corev1alpha1.AgentRuntimeToolExecutionMode{
+					corev1alpha1.AgentRuntimeToolExecutionModeObserved,
+				},
+			},
+		},
+		{
+			name: "observed and brokered",
+			capabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
+				ToolExecutionModes: []corev1alpha1.AgentRuntimeToolExecutionMode{
+					corev1alpha1.AgentRuntimeToolExecutionModeObserved,
+					corev1alpha1.AgentRuntimeToolExecutionModeBrokered,
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &corev1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: "external-v1", UID: types.UID("external-v1-uid"), Generation: 1,
+				},
+				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+					ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
+					Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
+						Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: endpoint,
+					},
+					ClientAuth: corev1alpha1.AgentRuntimeClientAuth{
+						BearerAuthRef: &corev1alpha1.AgentRuntimeBearerAuthReference{Name: "external-v1-auth", Key: runtimeKey},
+					},
+				},
+				Status: corev1alpha1.AgentRuntimeStatus{
+					Ready: true, ObservedGeneration: 1, ObservedAuthRefResourceVersion: "1",
+					ObservedCapabilities: test.capabilities,
+				},
+			}
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: runtime.Namespace, Name: runtime.Spec.ClientAuth.BearerAuthRef.Name,
+					UID: types.UID("external-v1-auth-uid"), ResourceVersion: "1",
+					Labels: map[string]string{
+						agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: runtime.Name,
+					},
+					Annotations: map[string]string{agentRuntimeAuthEndpointAnnotation: endpoint},
+				},
+				Data: map[string][]byte{runtimeKey: []byte("runtime-auth-value")},
+			}
+			reconciler, _ := newBindingTestReconciler(t, runtime, secret)
+			task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: runtime.Namespace}}
+			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtime.Name},
+			}}}
+
+			target, err := reconciler.resolveHarnessV1Target(t.Context(), reconciler.Client, task, agent)
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "required observed tool execution mode") {
+					t.Fatalf("resolve target = %#v, error = %v, want observed-mode rejection", target, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target.runtimeRef == nil || target.runtimeRef.Name != runtime.Name ||
+				target.backend != corev1alpha1.AgentExecutionBackendExternalEndpoint {
+				t.Fatalf("resolved target = %#v, want external AgentRuntime %q", target, runtime.Name)
+			}
+		})
+	}
+}
+
 func TestResolveHarnessV1ExecutionCandidateFreezesRuntimeAuthOnly(t *testing.T) {
 	ctx := context.Background()
 	fixture := newHarnessV1CandidateFixture(t, ctx)

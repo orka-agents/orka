@@ -931,6 +931,15 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			wantError: "harnessV1.codexSandboxMode must be read-only, workspace-write, or danger-full-access",
 		},
 		{
+			name: "unsupported built-in Copilot runtime",
+			args: []string{
+				"--set", "harnessV1.enabled=true",
+				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set", "harnessV1.policy.allowedBuiltInRuntimeTypes={copilot}",
+			},
+			wantError: "harnessV1.policy.allowedBuiltInRuntimeTypes may contain only codex or claude",
+		},
+		{
 			name: "invalid upgrade drain timeout",
 			args: []string{
 				"--set", "harnessV1.enabled=true",
@@ -982,7 +991,6 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"allowNewV1Bindings: true",
 		"- codex",
 		"- claude",
-		"- copilot",
 		"allowedBrokeredToolClasses: []",
 		"- transaction-tokens",
 		"- observed-write-tools",
@@ -991,6 +999,9 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		if !strings.Contains(policy, marker) {
 			t.Fatalf("harness v1 policy is missing %q:\n%s", marker, policy)
 		}
+	}
+	if strings.Contains(policy, "- copilot") {
+		t.Fatalf("harness v1 policy unexpectedly advertises unsupported Copilot:\n%s", policy)
 	}
 
 	deployment := requireHelmRender(t, append(args, "--show-only", "templates/harness-wrapper-deployment.yaml")...)

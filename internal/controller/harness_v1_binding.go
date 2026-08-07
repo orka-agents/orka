@@ -282,7 +282,10 @@ func validateNewHarnessV1Workload(task *corev1alpha1.Task, agent *corev1alpha1.A
 	if agent.Spec.Model != nil && len(agent.Spec.Model.Fallbacks) != 0 {
 		return errors.New("new harness v1 bindings reject model fallbacks")
 	}
-	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeCopilot:
+		return errors.New("new harness v1 Copilot bindings are prohibited because provider authentication requires a GitHub mutation-capable credential")
+	case corev1alpha1.AgentRuntimeOpencode:
 		return errors.New("new harness v1 OpenCode bindings are prohibited")
 	}
 	allowed := agent.Spec.Runtime.DefaultAllowedTools
@@ -386,6 +389,9 @@ func (r *TaskReconciler) resolveHarnessV1Target(
 		!runtime.Status.Ready || runtime.Status.ObservedGeneration != runtime.Generation {
 		return resolvedHarnessV1Target{}, errors.New("harness v1 AgentRuntime is not current-generation Ready with the exact v1 contract")
 	}
+	if !supportsHarnessV1ObservedToolExecution(runtime) {
+		return resolvedHarnessV1Target{}, errors.New("harness v1 AgentRuntime does not advertise the required observed tool execution mode")
+	}
 	if _, err := harness.NewClient(runtime.Spec.Deployment.Endpoint); err != nil {
 		return resolvedHarnessV1Target{}, fmt.Errorf("validate harness v1 AgentRuntime endpoint: %w", err)
 	}
@@ -413,6 +419,14 @@ func (r *TaskReconciler) resolveHarnessV1Target(
 		backend:  corev1alpha1.AgentExecutionBackendExternalEndpoint, runtimeName: runtimeName,
 		authSecret: secret, authSecretKey: strings.TrimSpace(ref.Key), runtimeRef: runtime,
 	}, nil
+}
+
+func supportsHarnessV1ObservedToolExecution(runtime *corev1alpha1.AgentRuntime) bool {
+	capabilities := runtime.Status.ObservedCapabilities
+	return capabilities != nil && slices.Contains(
+		capabilities.ToolExecutionModes,
+		corev1alpha1.AgentRuntimeToolExecutionModeObserved,
+	)
 }
 
 func resolveHarnessV1CredentialRefs(
