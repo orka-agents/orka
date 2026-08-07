@@ -425,13 +425,13 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 	// failed after the Kubernetes-authoritative status CAS.
 	lease, err := d.acquireTaskSessionLease(ctx, task, fence, control, lineage)
 	if err != nil {
-		_ = d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
-		return nil, nil, err
+		requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+		return nil, nil, errors.Join(err, requeueErr)
 	}
 	if lease.Key.LeaseGeneration != leaseGeneration {
 		err := fmt.Errorf("%w: acquired ACP Session lease generation changed after PromptAttempt binding", store.ErrConflict)
-		_ = d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
-		return nil, nil, err
+		requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+		return nil, nil, errors.Join(err, requeueErr)
 	}
 	turn, err := d.Sessions.OpenTurn(ctx, ACPOpenSessionTurnRequest{
 		Lease: *lease, Fence: fence, PromptAttemptID: attemptID,

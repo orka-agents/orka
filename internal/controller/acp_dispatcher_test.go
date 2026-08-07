@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,6 +34,7 @@ import (
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
+	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -2665,6 +2667,139 @@ func TestACPDispatcherReservedRetryReportsOnlyBoundedStage(t *testing.T) {
 	}
 	if strings.Contains(updated.Status.Execution.Message, "sensitive provider diagnostic") {
 		t.Fatalf("retry message exposed the underlying cause: %q", updated.Status.Execution.Message)
+	}
+}
+
+func TestACPDispatcherReserveTaskRecoversIncompletePreSubmissionRollback(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	task := runtimePoolReservationTestTask("session-rollback", "session-rollback-uid", "pool-uid")
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateReserved
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-rollback", Create: true, Append: true}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: "pool", UID: types.UID("pool-uid"), Generation: 1},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			DesiredReplicas: 1,
+			Capacity: &corev1alpha1.RuntimePoolCapacitySpec{
+				MaxResidentSessions: 1,
+				MaxRunningPrompts:   1,
+			},
+		},
+		Status: corev1alpha1.RuntimePoolStatus{
+			Lifecycle:      corev1alpha1.RuntimePoolLifecycleServing,
+			AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
+			ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
+				RuntimeInstanceID: "pod-uid.boot-id",
+				ControllerEpoch:   1,
+			},
+			Capacity: corev1alpha1.RuntimePoolCapacityStatus{
+				MaxResidentSessions: 1,
+				MaxRunningPrompts:   1,
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(
+			&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{},
+			&corev1alpha1.ControllerEpoch{}, &corev1alpha1.PromptAttempt{},
+		).
+		WithObjects(task.DeepCopy(), pool.DeepCopy()).
+		Build()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "session-rollback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	sqliteStore := sqlite.NewStore(db, "session-rollback-test")
+	controlStore, err := kubestore.NewComposite(kubeClient, "orka-system", sqliteStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epochs := NewControllerEpochManager(controlStore, "session-rollback-controller")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fence, err := epochs.CurrentFence(ctx)
+	if err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if fence.Epoch != pool.Status.ActiveInstance.ControllerEpoch {
+		cancelEpoch()
+		t.Fatalf("controller epoch = %d, want %d", fence.Epoch, pool.Status.ActiveInstance.ControllerEpoch)
+	}
+
+	key := store.PromptAttemptKey{
+		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID,
+	}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+	}), fence)
+	if err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	dispatcher := &ACPDispatcher{
+		Client: kubeClient, APIReader: kubeClient, Store: controlStore, Epochs: epochs,
+		ReservationTTL: time.Minute,
+	}
+	if err := dispatcher.transitionAttempt(
+		ctx, attempt.ID, fence, store.PromptExecutionQueued, store.PromptExecutionReserved, "reserve-session-rollback", nil,
+	); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if err := dispatcher.transitionAttempt(
+		ctx, attempt.ID, fence, store.PromptExecutionReserved, store.PromptExecutionSessionStarting,
+		"session-starting-session-rollback", &attemptRuntimeBinding{
+			RuntimeInstanceID: "pod-uid.boot-id", SessionUID: "session-uid", SessionGeneration: 1,
+		},
+	); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+
+	reserved, target, err := dispatcher.reserveTask(ctx, task.DeepCopy())
+	if err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if reserved == nil || target.pool == nil || target.reservation == nil {
+		cancelEpoch()
+		t.Fatalf("reserveTask() = task %#v, target %#v; want recovered reservation", reserved, target)
+	}
+	recovered, err := controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if recovered.ExecutionState != store.PromptExecutionReserved || recovered.SessionUID != "" || recovered.SessionLeaseGeneration != 0 {
+		cancelEpoch()
+		t.Fatalf("recovered PromptAttempt = %#v, want unbound Reserved", recovered)
+	}
+	if reserved.Status.Execution == nil || reserved.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		reserved.Status.Execution.Reason != "" || reserved.Status.Execution.Message != "" {
+		cancelEpoch()
+		t.Fatalf("recovered Task execution = %#v, want clean Reserved", reserved.Status.Execution)
+	}
+	if err := dispatcher.releaseRuntimePoolReservation(ctx, *target.reservation); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	cancelEpoch()
+	if err := <-epochDone; err != nil {
+		t.Fatal(err)
 	}
 }
 

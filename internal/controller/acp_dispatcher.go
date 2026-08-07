@@ -2638,17 +2638,12 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		releaseClaim()
 		return nil, acpDispatchTarget{}, nil
 	}
-	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	ready, err := d.preparePromptAttemptReservation(ctx, task, attemptID, fence)
 	if err != nil {
 		releaseClaim()
 		return nil, acpDispatchTarget{}, err
 	}
-	if attempt.ExecutionState == store.PromptExecutionQueued {
-		if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionQueued, store.PromptExecutionReserved, "reserve", nil); err != nil {
-			releaseClaim()
-			return nil, acpDispatchTarget{}, err
-		}
-	} else if attempt.ExecutionState != store.PromptExecutionReserved {
+	if !ready {
 		releaseClaim()
 		return nil, acpDispatchTarget{}, nil
 	}
@@ -2681,6 +2676,48 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		return nil, acpDispatchTarget{}, nil
 	}
 	return task, target, nil
+}
+
+func (d *ACPDispatcher) preparePromptAttemptReservation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+) (bool, error) {
+	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		return false, err
+	}
+	switch attempt.ExecutionState {
+	case store.PromptExecutionQueued:
+		if err := d.transitionAttempt(
+			ctx, attemptID, fence, store.PromptExecutionQueued, store.PromptExecutionReserved, "reserve", nil,
+		); err != nil {
+			return false, err
+		}
+		return true, nil
+	case store.PromptExecutionReserved:
+		return true, nil
+	case store.PromptExecutionSessionStarting, store.PromptExecutionPlanned:
+		// The pre-submission path advances the durable PromptAttempt before it
+		// acquires the Session lease and projects the Task state. If its fenced
+		// rollback fails after a transient cross-store error, the Task remains
+		// Reserved while the PromptAttempt is left one step ahead. Re-enter the
+		// existing idempotent recovery barrier before strict dispatch verification
+		// so the exact Session lease/turn can be retried without replaying a prompt.
+		if task == nil || task.Status.Execution == nil ||
+			task.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved {
+			return false, nil
+		}
+		if err := d.requeuePreSubmissionTask(
+			ctx, task, attemptID, fence, errors.New("recover incomplete pre-submission rollback"),
+		); err != nil {
+			return false, err
+		}
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func (d *ACPDispatcher) settleFrozenWorkspaceCredentialBlocked(
