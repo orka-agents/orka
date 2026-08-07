@@ -218,7 +218,27 @@ jobs:
             grep -Eq "resources: \\[.*\"${resource}\"" "${secondary_rbac}"
             grep -Eq "resources: \\[.*\"${resource}/status\"" "${secondary_rbac}"
           done
-          test "$(grep -Fc 'resources: ["serviceaccounts/token"]' manifest_staging/charts/orka/templates/rbac.yaml)" -eq 1
+          if ! ruby -ryaml -e '
+            rendered_rbac, expected_name, expected_namespace = ARGV
+            token_rules = []
+            YAML.load_stream(File.read(rendered_rbac)).each do |document|
+              next unless document.is_a?(Hash)
+
+              Array(document["rules"]).each do |rule|
+                token_rules << [document, rule] if Array(rule["resources"]).include?("serviceaccounts/token")
+              end
+            end
+            valid = token_rules.length == 1 &&
+              token_rules[0][0]["kind"] == "Role" &&
+              token_rules[0][0].dig("metadata", "name") == expected_name &&
+              token_rules[0][0].dig("metadata", "namespace") == expected_namespace &&
+              Array(token_rules[0][1]["apiGroups"]) == [""] &&
+              Array(token_rules[0][1]["verbs"]) == ["create"]
+            exit(valid ? 0 : 1)
+          ' "${secondary_rbac}" secondary-orka-controller "${NAMESPACE}"; then
+            echo "Harness v2 must render exactly one namespaced, create-only controller TokenRequest rule." >&2
+            exit 1
+          fi
           if grep -Fq 'ai-worker-tokenrequest' manifest_staging/charts/orka/templates/rbac.yaml; then
             echo "AI workers must not receive an unrestricted TokenRequest ClusterRole." >&2
             exit 1
