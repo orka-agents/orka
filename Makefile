@@ -305,7 +305,7 @@ ui-test-coverage: ## Run UI unit tests with coverage.
 
 .PHONY: build
 build: manifests generate fmt vet ui-build ## Build manager and admission binaries.
-	go build -o bin/manager cmd/main.go
+	go build -o bin/manager ./cmd
 	go build -o bin/orka-admission ./cmd/orka-admission
 
 .PHONY: build-admission

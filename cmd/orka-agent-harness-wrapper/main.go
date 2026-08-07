@@ -167,7 +167,12 @@ func run(args []string) error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(os.Stderr, "orka agent harness wrapper listening with TLS on %s (runtime=%s)\n", cfg.ListenAddr, adapter.Name())
+		fmt.Fprintf(
+			os.Stderr,
+			"orka agent harness wrapper listening with TLS on %s (runtime=%s)\n",
+			cfg.ListenAddr,
+			adapter.Name(),
+		)
 		if err := httpServer.ListenAndServeTLS(tlsCertFile, tlsKeyFile); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 			return
