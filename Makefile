@@ -456,21 +456,10 @@ verify-coexistence-crds: ## Refuse workload deployment until the reviewed v1/v2 
 		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] as $$enums | ($$enums | length) > 0 and ($$enums | all(sort == ["orka.harness.v1","orka.harness.v2"]))' >/dev/null || \
 		{ echo "AgentRuntime CRD is not the dual orka.harness.v1/orka.harness.v2 bridge schema; apply the reviewed coexistence CRD upgrade wave before workloads" >&2; exit 1; }
 	@"$(KUBECTL)" get crd agents.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.runtime as $$runtime | \
-			(((($$runtime.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and \
-			((($$runtime["x-kubernetes-validations"] // []) | map(.message) | index("runtime.contractVersion is immutable once set")) != null))] as $$checks | \
-		($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.runtime as $$runtime | (((($$runtime.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and ((($$runtime["x-kubernetes-validations"] // []) | map(.message) | index("runtime.contractVersion is immutable once set")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
 		{ echo "Agent CRD is missing the immutable dual-contract coexistence schema; apply the reviewed coexistence CRD upgrade wave before workloads" >&2; exit 1; }
 	@"$(KUBECTL)" get crd tasks.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema as $$schema | $$schema.properties.status as $$status | \
-			((($$status.properties.agentExecutionBinding.type // "") == "object") and \
-			((($$status.properties.agentExecutionBinding.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and \
-			(($$status.properties.agentExecutionNoExecution.type // "") == "object") and \
-			(($$status.properties.agentExecutionQuarantine.type // "") == "object") and \
-			(($$status.properties.agentExecutionResolutionRef.type // "") == "object") and \
-			((($$status["x-kubernetes-validations"] // []) | map(.message) | index("agentExecutionBinding is write-once and immutable")) != null) and \
-			((($$schema["x-kubernetes-validations"] // []) | map(.message) | index("Task spec is immutable after execution authority or a migration disposition is recorded")) != null))] as $$checks | \
-		($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema as $$schema | $$schema.properties.status as $$status | ((($$status.properties.agentExecutionBinding.type // "") == "object") and ((($$status.properties.agentExecutionBinding.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and (($$status.properties.agentExecutionNoExecution.type // "") == "object") and (($$status.properties.agentExecutionQuarantine.type // "") == "object") and (($$status.properties.agentExecutionResolutionRef.type // "") == "object") and ((($$status["x-kubernetes-validations"] // []) | map(.message) | index("agentExecutionBinding is write-once and immutable")) != null) and ((($$schema["x-kubernetes-validations"] // []) | map(.message) | index("Task spec is immutable after execution authority or a migration disposition is recorded")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
 		{ echo "Task CRD is missing the immutable coexistence execution-authority schema; apply the reviewed coexistence CRD upgrade wave before workloads" >&2; exit 1; }
 	@COEXISTENCE=1 KUBECTL="$(KUBECTL)" scripts/check-legacy-wrapper-resources.sh
 
