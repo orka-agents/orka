@@ -7,6 +7,8 @@
 {{- $existingPullPolicy := "" }}
 {{- $existingAuthSecret := "" }}
 {{- $existingAuthKey := "" }}
+{{- $desiredAuthSecret := .Values.harnessV1.auth.existingSecret | default (include "orka.harnessV1AuthSecretName" .) }}
+{{- $desiredAuthKey := .Values.harnessV1.auth.tokenKey }}
 {{- if $existingWrapper }}
 {{- $existingGeneration := include "orka.harnessV1ExistingGeneration" $existingWrapper | trim }}
 {{- $needsRollover = or (not .Values.harnessV1.enabled) (ne $existingGeneration $desiredGeneration) }}
@@ -14,6 +16,27 @@
 {{- $existingPullPolicy = include "orka.harnessV1ExistingImagePullPolicy" $existingWrapper }}
 {{- $existingAuthSecret = include "orka.harnessV1ExistingAuthSecretName" $existingWrapper }}
 {{- $existingAuthKey = include "orka.harnessV1ExistingAuthSecretKey" $existingWrapper }}
+{{- if .Values.harnessV1.enabled }}
+{{- if ne $existingAuthSecret $desiredAuthSecret }}
+{{- fail "harnessV1.auth.existingSecret cannot change while an enabled harness v1 wrapper Deployment exists; retire harness v1 before rotating wrapper auth" }}
+{{- end }}
+{{- if ne $existingAuthKey $desiredAuthKey }}
+{{- fail "harnessV1.auth.tokenKey cannot change while an enabled harness v1 wrapper Deployment exists; retire harness v1 before rotating wrapper auth" }}
+{{- end }}
+{{- if not .Values.harnessV1.auth.existingSecret }}
+{{- $existingManagedAuth := lookup "v1" "Secret" .Release.Namespace $desiredAuthSecret }}
+{{- if not $existingManagedAuth }}
+{{- fail "the live chart-managed harness v1 auth Secret must exist while an enabled harness v1 wrapper Deployment exists" }}
+{{- end }}
+{{- $existingManagedAuthData := $existingManagedAuth.data | default (dict) }}
+{{- if or (not (hasKey $existingManagedAuthData $desiredAuthKey)) (empty (index $existingManagedAuthData $desiredAuthKey)) }}
+{{- fail "the live chart-managed harness v1 auth Secret must contain the configured nonempty token key" }}
+{{- end }}
+{{- if and .Values.harnessV1.auth.token (ne (index $existingManagedAuthData $desiredAuthKey) (.Values.harnessV1.auth.token | b64enc)) }}
+{{- fail "harnessV1.auth.token cannot change while an enabled harness v1 wrapper Deployment exists; retire harness v1 before rotating wrapper auth" }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- if $needsRollover }}
 apiVersion: networking.k8s.io/v1

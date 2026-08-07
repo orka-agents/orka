@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,6 +109,30 @@ func requireHelmRender(t *testing.T, args ...string) string {
 
 func requireHarnessV1UpgradeDrainHookRender(t *testing.T, matchesDesiredGeneration bool, args ...string) string {
 	t.Helper()
+	output, err := helmTemplateHarnessV1UpgradeDrainHook(t, harnessV1UpgradeState{
+		matchesDesiredGeneration: matchesDesiredGeneration,
+		authSecret:               "harness-wrapper-auth",
+		authKey:                  "token",
+	}, args...)
+	if err != nil {
+		t.Fatalf("helm template forced wrapper upgrade hook failed: %v\n%s", err, output)
+	}
+	return output
+}
+
+type harnessV1UpgradeState struct {
+	matchesDesiredGeneration bool
+	authSecret               string
+	authKey                  string
+	managedToken             string
+}
+
+func helmTemplateHarnessV1UpgradeDrainHook(
+	t *testing.T,
+	state harnessV1UpgradeState,
+	args ...string,
+) (string, error) {
+	t.Helper()
 	helm, err := exec.LookPath("helm")
 	if err != nil {
 		t.Skip("helm is required for static chart render tests")
@@ -124,7 +149,7 @@ func requireHarnessV1UpgradeDrainHookRender(t *testing.T, matchesDesiredGenerati
 	}
 	lookup := `{{- $existingWrapper := lookup "apps/v1" "Deployment" .Release.Namespace $wrapperName }}`
 	existingGeneration := `"current-generation"`
-	if matchesDesiredGeneration {
+	if state.matchesDesiredGeneration {
 		existingGeneration = `$desiredGeneration`
 	}
 	currentImage := "registry.example/current-wrapper@sha256:" + strings.Repeat("2", 64)
@@ -137,12 +162,22 @@ func requireHarnessV1UpgradeDrainHookRender(t *testing.T, matchesDesiredGenerati
 		`"env" (list (dict "name" "ORKA_HARNESS_WRAPPER_LEDGER_GENERATION"`,
 		`"value" ` + existingGeneration + `))))`,
 		`"volumes" (list (dict "name" "auth" "secret"`,
-		`(dict "secretName" "current-wrapper-auth" "items"`,
-		`(list (dict "key" "current-token" "path" "token")))))))) }}`,
+		`(dict "secretName" "` + state.authSecret + `" "items"`,
+		`(list (dict "key" "` + state.authKey + `" "path" "token")))))))) }}`,
 	}, " ")
 	forced := strings.Replace(string(hook), lookup, forcedLookup, 1)
 	if forced == string(hook) {
 		t.Fatalf("wrapper drain hook is not gated by the exact existing Deployment lookup")
+	}
+	if state.managedToken != "" {
+		managedAuthLookup := `{{- $existingManagedAuth := lookup "v1" "Secret" .Release.Namespace $desiredAuthSecret }}`
+		forcedManagedAuthLookup := `{{- $existingManagedAuth := dict "data" (dict $desiredAuthKey "` +
+			base64.StdEncoding.EncodeToString([]byte(state.managedToken)) + `") }}`
+		withManagedAuth := strings.Replace(forced, managedAuthLookup, forcedManagedAuthLookup, 1)
+		if withManagedAuth == forced {
+			t.Fatalf("wrapper drain hook is not gated by the exact chart-managed auth Secret lookup")
+		}
+		forced = withManagedAuth
 	}
 	if err := os.WriteFile(hookPath, []byte(forced), 0o600); err != nil {
 		t.Fatalf("force existing wrapper lookup in copied chart: %v", err)
@@ -151,10 +186,7 @@ func requireHarnessV1UpgradeDrainHookRender(t *testing.T, matchesDesiredGenerati
 	commandArgs := []string{"template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade"}
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("helm template forced wrapper upgrade hook failed: %v\n%s", err, output)
-	}
-	return string(output)
+	return string(output), err
 }
 
 var harnessV1GenerationPattern = regexp.MustCompile(
@@ -664,9 +696,8 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		"- --bearer-token-file=/var/run/orka/harness-wrapper/token",
 		`- "--timeout=9m"`,
 		`- "--poll-interval=3s"`,
-		`secretName: "current-wrapper-auth"`,
-		`key: "current-token"`,
 		`secretName: "harness-wrapper-auth"`,
+		`key: "token"`,
 		"defaultMode: 0440",
 	} {
 		if !strings.Contains(hook, marker) {
@@ -727,6 +758,101 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 	}
 	if !strings.Contains(unchanged, "helm.sh/hook: pre-delete") {
 		t.Fatalf("enabled release lost its uninstall drain hook:\n%s", unchanged)
+	}
+}
+
+func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("1", 64)
+	baseArgs := []string{
+		"--set", "harnessV1.enabled=true",
+		"--set", "store.persistence.enabled=true",
+		"--set-string", "harnessV1.image.digest=" + digest,
+		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
+		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
+	}
+	managedSecretName := "test-orka-harness-wrapper-auth"
+	oldToken := strings.Repeat("a", 32)
+	newToken := strings.Repeat("b", 32)
+	tests := []struct {
+		name      string
+		state     harnessV1UpgradeState
+		args      []string
+		wantError string
+	}{
+		{
+			name: "Secret source",
+			state: harnessV1UpgradeState{
+				authSecret: "current-wrapper-auth",
+				authKey:    "token",
+			},
+			args: []string{
+				"--set-string", "harnessV1.auth.existingSecret=next-wrapper-auth",
+			},
+			wantError: "harnessV1.auth.existingSecret cannot change while an enabled harness v1 wrapper Deployment exists",
+		},
+		{
+			name: "Secret key",
+			state: harnessV1UpgradeState{
+				authSecret: "harness-wrapper-auth",
+				authKey:    "current-token",
+			},
+			args: []string{
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.auth.tokenKey=next-token",
+			},
+			wantError: "harnessV1.auth.tokenKey cannot change while an enabled harness v1 wrapper Deployment exists",
+		},
+		{
+			name: "managed token",
+			state: harnessV1UpgradeState{
+				authSecret:   managedSecretName,
+				authKey:      "token",
+				managedToken: oldToken,
+			},
+			args: []string{
+				"--set-string", "harnessV1.auth.token=" + newToken,
+			},
+			wantError: "harnessV1.auth.token cannot change while an enabled harness v1 wrapper Deployment exists",
+		},
+		{
+			name: "missing managed Secret",
+			state: harnessV1UpgradeState{
+				authSecret: managedSecretName,
+				authKey:    "token",
+			},
+			args: []string{
+				"--set-string", "harnessV1.auth.token=" + oldToken,
+			},
+			wantError: "the live chart-managed harness v1 auth Secret must exist while " +
+				"an enabled harness v1 wrapper Deployment exists",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append(append([]string{}, baseArgs...), tt.args...)
+			output, err := helmTemplateHarnessV1UpgradeDrainHook(t, tt.state, args...)
+			if err == nil {
+				t.Fatalf("unsafe live auth rotation rendered successfully:\n%s", output)
+			}
+			if !strings.Contains(output, tt.wantError) {
+				t.Fatalf("helm template error is missing %q:\n%s", tt.wantError, output)
+			}
+		})
+	}
+
+	unchangedArgs := append(append([]string{}, baseArgs...),
+		"--set-string", "harnessV1.auth.token="+oldToken)
+	unchanged, err := helmTemplateHarnessV1UpgradeDrainHook(t, harnessV1UpgradeState{
+		authSecret:   managedSecretName,
+		authKey:      "token",
+		managedToken: oldToken,
+	}, unchangedArgs...)
+	if err != nil {
+		t.Fatalf("unchanged managed auth blocked image-only wrapper rollover: %v\n%s", err, unchanged)
+	}
+	if !strings.Contains(unchanged, "app.kubernetes.io/component: agent-harness-wrapper-rollover-drain") {
+		t.Fatalf("unchanged managed auth lost image-only wrapper rollover drain:\n%s", unchanged)
 	}
 }
 

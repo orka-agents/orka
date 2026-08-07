@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
+	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -55,10 +57,11 @@ func (v *ControlPolicyValidator) Handle(_ context.Context, req ctrladmission.Req
 		return ctrladmission.Allowed("admin-authored execution control or policy")
 	}
 	if req.Operation == admissionv1.Delete {
-		if !v.config.admin(req.UserInfo.Groups) {
-			return ctrladmission.Denied(req.Kind.Kind + " deletion is restricted to configured admin groups")
+		cleanupController := slices.Contains(kubernetesCleanupUsernames, strings.TrimSpace(req.UserInfo.Username))
+		if !cleanupController && !v.config.admin(req.UserInfo.Groups) {
+			return ctrladmission.Denied(req.Kind.Kind + " deletion is restricted to configured admin groups and Kubernetes cleanup controllers")
 		}
-		return ctrladmission.Allowed("admin-authorized execution control or policy deletion")
+		return ctrladmission.Allowed("authorized execution control or policy deletion")
 	}
 
 	changed, err := v.specChanged(req)

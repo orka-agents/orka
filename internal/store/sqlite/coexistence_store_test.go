@@ -288,6 +288,17 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 			"ns", "session-"+id, "namespace-uid", "session-uid-"+id,
 			configDigest, now, now)
 	}
+	seedSessionTurn := func(id, taskUID string, attempt int) {
+		sessionName := "turn-session-" + id
+		mustExec(`INSERT INTO sessions(namespace, name, session_type) VALUES (?, ?, 'task')`, "ns", sessionName)
+		mustExec(`INSERT INTO session_turns
+			(id, namespace, session_name, session_uid, lease_generation, task_uid,
+			 attempt, prompt_id, prompt_attempt_id, request_digest, user_prompt,
+			 state, controller_epoch_name, controller_epoch, version, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 'prompt', 'Open', 'epoch', 1, 1, ?, ?)`,
+			"turn-"+id, "ns", sessionName, "turn-session-uid-"+id, taskUID, attempt,
+			"turn-prompt-"+id, "turn-attempt-"+id, requestDigest, now, now)
+	}
 
 	seedReservation("reservation-open", key.TaskUID, key.Digest, store.AgentExecutionBindingReservationOpen)
 	seedReservation("reservation-bound", otherTaskKey.TaskUID, key.Digest, store.AgentExecutionBindingReservationBound)
@@ -301,6 +312,10 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 	seedPromptAttempt("prompt-match-2", key.TaskUID, 2, key.Digest)
 	seedPromptAttempt("prompt-other-digest", key.TaskUID, 3, otherDigestKey.Digest)
 	seedPromptAttempt("prompt-other-task", otherTaskKey.TaskUID, 1, key.Digest)
+	seedSessionTurn("match-1", key.TaskUID, 1)
+	seedSessionTurn("match-2", key.TaskUID, 2)
+	seedSessionTurn("other-task", otherTaskKey.TaskUID, 1)
+	// A lineage configuration digest is not an execution snapshot reference.
 	seedLineage("match-1", key.Digest)
 	seedLineage("match-2", key.Digest)
 	seedLineage("other", otherDigestKey.Digest)
@@ -313,7 +328,7 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 		BindingReservations: 1,
 		HarnessV1Attempts:   2,
 		PromptAttempts:      2,
-		SessionLineages:     2,
+		SessionTurns:        2,
 	}
 	if counts != want || counts.Total() != 7 {
 		t.Fatalf("reference counts = %#v (total %d), want %#v (total 7)", counts, counts.Total(), want)
@@ -326,7 +341,7 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 	wantOtherTask := store.AgentExecutionSnapshotReferenceCounts{
 		HarnessV1Attempts: 1,
 		PromptAttempts:    1,
-		SessionLineages:   2,
+		SessionTurns:      1,
 	}
 	if otherTaskCounts != wantOtherTask {
 		t.Fatalf("other Task reference counts = %#v, want %#v", otherTaskCounts, wantOtherTask)

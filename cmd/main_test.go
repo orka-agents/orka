@@ -61,6 +61,31 @@ func TestBrokeredDelegateTaskSubjectTokenResolverUsesOwnedIncomingSecret(t *test
 	}
 }
 
+func TestMakeRunUsesFailClosedHostOwnershipMode(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	makefile := string(data)
+	for _, required := range []string{
+		"RUN_LEGACY_FENCE_NAMESPACE ?= orka-system",
+		"--leader-elect=true",
+		"--agent-execution-host-mode=true",
+		"--agent-execution-legacy-fence-namespace=\"$(RUN_LEGACY_FENCE_NAMESPACE)\"",
+	} {
+		if !strings.Contains(makefile, required) {
+			t.Fatalf("make run is missing %q", required)
+		}
+	}
+}
+
+func TestInClusterControllerIdentityDetectedFromKubernetesEnvironment(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	if !inClusterControllerIdentityDetected() {
+		t.Fatal("Kubernetes service environment was not treated as in-cluster identity evidence")
+	}
+}
+
 func TestBrokeredDelegateTaskSubjectTokenResolverRejectsUnownedIncomingSecret(t *testing.T) {
 	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 		Name: "parent", Namespace: "team-a", UID: types.UID("parent-uid"),

@@ -32,10 +32,13 @@ const (
 // AgentExecutionOwnershipLockConfig identifies the one controller Pod and
 // Task watch scope that may participate in the coexistence ownership election.
 type AgentExecutionOwnershipLockConfig struct {
-	Identity            string
-	CurrentPodNamespace string
-	CurrentPodName      string
-	WatchNamespace      string
+	Identity                  string
+	CurrentPodNamespace       string
+	CurrentPodName            string
+	LegacyFenceNamespace      string
+	WatchNamespace            string
+	HostDevelopmentMode       bool
+	InClusterIdentityDetected bool
 }
 
 // AgentExecutionOwnershipSnapshot is an immutable observation of the complete
@@ -83,12 +86,31 @@ func NewAgentExecutionOwnershipLock(
 	config.Identity = strings.TrimSpace(config.Identity)
 	config.CurrentPodNamespace = strings.TrimSpace(config.CurrentPodNamespace)
 	config.CurrentPodName = strings.TrimSpace(config.CurrentPodName)
+	config.LegacyFenceNamespace = strings.TrimSpace(config.LegacyFenceNamespace)
 	config.WatchNamespace = strings.TrimSpace(config.WatchNamespace)
 	if config.Identity == "" {
 		return nil, fmt.Errorf("agent execution ownership identity is required")
 	}
-	if config.CurrentPodNamespace == "" || config.CurrentPodName == "" {
-		return nil, fmt.Errorf("current Pod namespace and name are required for ownership overlap preflight")
+	if config.HostDevelopmentMode {
+		if config.InClusterIdentityDetected {
+			return nil, fmt.Errorf("host development ownership mode is refused when in-cluster identity is detected")
+		}
+		if config.CurrentPodNamespace != "" || config.CurrentPodName != "" {
+			return nil, fmt.Errorf("host development ownership mode cannot identify itself as a controller Pod")
+		}
+		if config.LegacyFenceNamespace == "" {
+			return nil, fmt.Errorf("legacy fence namespace is required for host development ownership mode")
+		}
+	} else {
+		if config.CurrentPodNamespace == "" || config.CurrentPodName == "" {
+			return nil, fmt.Errorf("current Pod namespace and name are required for ownership overlap preflight")
+		}
+		if config.LegacyFenceNamespace == "" {
+			config.LegacyFenceNamespace = config.CurrentPodNamespace
+		}
+		if config.LegacyFenceNamespace != config.CurrentPodNamespace {
+			return nil, fmt.Errorf("in-cluster legacy fence namespace must match the current Pod namespace")
+		}
 	}
 
 	primary, err := resourcelock.NewWithLabels(
@@ -269,10 +291,10 @@ func (l *AgentExecutionOwnershipLock) discoverLegacyLeases(
 	// Pre-create and continuously retain the legacy fence in the current
 	// controller namespace. This blocks an old binary installed back into the
 	// same namespace while the coexistence bridge is active.
-	key := namespacedLeaseKey(l.config.CurrentPodNamespace, corev1alpha1.AgentExecutionLegacyLeaseName)
+	key := namespacedLeaseKey(l.config.LegacyFenceNamespace, corev1alpha1.AgentExecutionLegacyLeaseName)
 	if _, ok := result[key]; !ok {
 		result[key] = &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-			Namespace: l.config.CurrentPodNamespace,
+			Namespace: l.config.LegacyFenceNamespace,
 			Name:      corev1alpha1.AgentExecutionLegacyLeaseName,
 		}}
 	}
@@ -319,9 +341,13 @@ func (l *AgentExecutionOwnershipLock) acquireOrRenewLegacyLease(
 }
 
 func (l *AgentExecutionOwnershipLock) preflight(ctx context.Context) error {
-	currentDeploymentUID, err := l.currentDeploymentUID(ctx)
-	if err != nil {
-		return fmt.Errorf("resolve current controller Deployment: %w", err)
+	var currentDeploymentUID types.UID
+	if !l.config.HostDevelopmentMode {
+		var err error
+		currentDeploymentUID, err = l.currentDeploymentUID(ctx)
+		if err != nil {
+			return fmt.Errorf("resolve current controller Deployment: %w", err)
+		}
 	}
 	deployments, err := l.kube.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -329,7 +355,7 @@ func (l *AgentExecutionOwnershipLock) preflight(ctx context.Context) error {
 	}
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
-		if deployment.UID == currentDeploymentUID {
+		if !l.config.HostDevelopmentMode && deployment.UID == currentDeploymentUID {
 			if err := l.validateCurrentDeployment(deployment); err != nil {
 				return err
 			}
@@ -350,7 +376,7 @@ func (l *AgentExecutionOwnershipLock) preflight(ctx context.Context) error {
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if pod.Namespace == l.config.CurrentPodNamespace && pod.Name == l.config.CurrentPodName {
+		if !l.config.HostDevelopmentMode && pod.Namespace == l.config.CurrentPodNamespace && pod.Name == l.config.CurrentPodName {
 			continue
 		}
 		if !activeControllerPod(pod) || !watchScopesOverlap(l.config.WatchNamespace, controllerWatchNamespace(pod.Spec.Containers)) {

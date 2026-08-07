@@ -440,6 +440,8 @@ harnessV1:
   auth:
     # Use a dedicated existing Secret, or leave empty for a chart-managed
     # release-local Secret. Do not reuse provider, publisher, or Git Secrets.
+    # The Secret source, key, and token are immutable while an enabled wrapper
+    # Deployment exists because controller attempts pin its resourceVersion.
     existingSecret: ""
     tokenKey: token
     # Optional explicit token for a chart-managed Secret. Empty generates a

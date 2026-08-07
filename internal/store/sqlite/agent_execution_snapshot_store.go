@@ -245,17 +245,17 @@ func (s *Store) CountAgentExecutionSnapshotReferences(
 			WHERE task_uid = ? AND snapshot_digest = ?),
 		(SELECT COUNT(*) FROM prompt_attempts
 			WHERE task_uid = ? AND snapshot_digest = ?),
-		(SELECT COUNT(*) FROM session_lineages
-			WHERE config_digest = ?)`,
+		(SELECT COUNT(*) FROM session_turns
+			WHERE task_uid = ?)`,
 		key.TaskUID, key.Digest, store.AgentExecutionBindingReservationOpen,
 		key.TaskUID, key.Digest,
 		key.TaskUID, key.Digest,
-		key.Digest,
+		key.TaskUID,
 	).Scan(
 		&counts.BindingReservations,
 		&counts.HarnessV1Attempts,
 		&counts.PromptAttempts,
-		&counts.SessionLineages,
+		&counts.SessionTurns,
 	)
 	if err != nil {
 		return store.AgentExecutionSnapshotReferenceCounts{}, fmt.Errorf("count agent execution snapshot references: %w", err)

@@ -43,9 +43,8 @@ func TestAgentExecutionSnapshotRetentionHonorsEveryKubernetesReference(t *testin
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	taskItem := snapshotRetentionMetadata("task-reference", "task", now.Add(-3*time.Hour))
 	adjudicationItem := snapshotRetentionMetadata("adjudication-reference", "adjudication", now.Add(-3*time.Hour))
-	lineageItem := snapshotRetentionMetadata("lineage-reference", "lineage", now.Add(-3*time.Hour))
 	leaseItem := snapshotRetentionMetadata("lease-reference", "lease", now.Add(-3*time.Hour))
-	lifecycle := newSnapshotRetentionLifecycleStore(taskItem, adjudicationItem, lineageItem, leaseItem)
+	lifecycle := newSnapshotRetentionLifecycleStore(taskItem, adjudicationItem, leaseItem)
 
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "default", Name: "retained-task", UID: types.UID(taskItem.Key.TaskUID),
@@ -59,7 +58,6 @@ func TestAgentExecutionSnapshotRetentionHonorsEveryKubernetesReference(t *testin
 	session := &corev1alpha1.RuntimeSessionControl{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "retained-session"},
 		Status: corev1alpha1.RuntimeSessionControlStatus{
-			Lineage:       &corev1alpha1.RuntimeSessionLineageStatus{ConfigDigest: lineageItem.Key.Digest},
 			MutationLease: &corev1alpha1.RuntimeSessionMutationLeaseStatus{TaskUID: leaseItem.Key.TaskUID},
 		},
 	}
@@ -75,6 +73,28 @@ func TestAgentExecutionSnapshotRetentionHonorsEveryKubernetesReference(t *testin
 	require.Empty(t, manager.unreferencedSince)
 }
 
+func TestAgentExecutionSnapshotRetentionDoesNotTreatLineageConfigAsSnapshot(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	item := snapshotRetentionMetadata("lineage-task", "snapshot", now.Add(-3*time.Hour))
+	lifecycle := newSnapshotRetentionLifecycleStore(item)
+	session := &corev1alpha1.RuntimeSessionControl{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "unrelated-lineage"},
+		Status: corev1alpha1.RuntimeSessionControlStatus{
+			Lineage: &corev1alpha1.RuntimeSessionLineageStatus{ConfigDigest: item.Key.Digest},
+		},
+	}
+	manager := &AgentExecutionSnapshotRetentionManager{
+		APIReader: snapshotRetentionClient(t, session),
+		Store:     lifecycle, Retention: time.Hour, Now: func() time.Time { return now },
+	}
+
+	require.NoError(t, manager.collectOnce(ctx))
+	now = now.Add(time.Hour)
+	require.NoError(t, manager.collectOnce(ctx))
+	require.Equal(t, []store.AgentExecutionSnapshotKey{item.Key}, lifecycle.deleted)
+}
+
 func TestAgentExecutionSnapshotRetentionDurableReferenceResetsClock(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
@@ -87,7 +107,7 @@ func TestAgentExecutionSnapshotRetentionDurableReferenceResetsClock(t *testing.T
 
 	require.NoError(t, manager.collectOnce(ctx))
 	now = now.Add(time.Hour)
-	lifecycle.references[item.Key.ID()] = store.AgentExecutionSnapshotReferenceCounts{PromptAttempts: 1}
+	lifecycle.references[item.Key.ID()] = store.AgentExecutionSnapshotReferenceCounts{SessionTurns: 1}
 	require.NoError(t, manager.collectOnce(ctx))
 	require.Empty(t, manager.unreferencedSince)
 

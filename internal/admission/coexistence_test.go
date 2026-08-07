@@ -70,6 +70,24 @@ func TestAgentContractValidatorRequiresAndFreezesExplicitContract(t *testing.T) 
 	))
 	require.False(t, response.Allowed)
 	require.Contains(t, response.Result.Message, "immutable once explicit")
+
+	external := unclassified.DeepCopy()
+	external.Spec.Runtime.Type = ""
+	external.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external"}
+	for _, username := range []string{"alice", coexistenceControllerUsername} {
+		response = validator.Handle(context.Background(), coexistenceRequest(
+			t, admissionv1.Update, username, external, unclassified, "",
+		))
+		require.False(t, response.Allowed)
+		require.Contains(t, response.Result.Message, "cannot switch to an external runtimeRef")
+	}
+
+	updatedExternal := external.DeepCopy()
+	updatedExternal.Spec.Runtime.RuntimeRef.Name = "replacement"
+	response = validator.Handle(context.Background(), coexistenceRequest(
+		t, admissionv1.Update, "alice", updatedExternal, external, "",
+	))
+	require.True(t, response.Allowed, response.Result.Message)
 }
 
 func TestAgentRuntimeContractValidatorFreezesExplicitContract(t *testing.T) {
@@ -373,6 +391,14 @@ func TestControlPolicyValidatorRestrictsSpecAuthorship(t *testing.T) {
 		t, admissionv1.Delete, "operator", []string{"orka-admins"}, nil, policy, "",
 	))
 	require.True(t, response.Allowed, response.Result.Message)
+	response = validator.Handle(context.Background(), coexistenceRequestWithGroups(
+		t, admissionv1.Delete, "system:serviceaccount:kube-system:namespace-controller", nil, nil, policy, "",
+	))
+	require.True(t, response.Allowed, response.Result.Message)
+	response = validator.Handle(context.Background(), coexistenceRequestWithGroups(
+		t, admissionv1.Delete, "system:serviceaccount:kube-system:namespace-controller-evil", nil, nil, policy, "",
+	))
+	require.False(t, response.Allowed)
 
 	unexpected := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "unexpected", Namespace: admissionTestNamespace}}
 	response = validator.Handle(context.Background(), coexistenceRequestWithGroups(

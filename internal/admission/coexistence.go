@@ -132,6 +132,16 @@ func (v *AgentContractValidator) Handle(_ context.Context, req ctrladmission.Req
 	if err := v.decoder.Decode(req, object); err != nil {
 		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode agent: %w", err))
 	}
+	var oldObject *corev1alpha1.Agent
+	if req.Operation == admissionv1.Update {
+		oldObject = &corev1alpha1.Agent{}
+		if err := v.decoder.DecodeRaw(req.OldObject, oldObject); err != nil {
+			return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old agent: %w", err))
+		}
+		if agentUsesBuiltInRuntime(oldObject) && object.Spec.Runtime != nil && object.Spec.Runtime.RuntimeRef != nil {
+			return ctrladmission.Denied("a built-in Agent cannot switch to an external runtimeRef")
+		}
+	}
 	if !agentUsesBuiltInRuntime(object) {
 		return ctrladmission.Allowed("Agent derives no built-in contract")
 	}
@@ -140,10 +150,6 @@ func (v *AgentContractValidator) Handle(_ context.Context, req ctrladmission.Req
 	}
 	if req.Operation == admissionv1.Create {
 		return ctrladmission.Allowed("new Agent has an explicit contract")
-	}
-	oldObject := &corev1alpha1.Agent{}
-	if err := v.decoder.DecodeRaw(req.OldObject, oldObject); err != nil {
-		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old agent: %w", err))
 	}
 	if oldObject.Spec.Runtime != nil && oldObject.Spec.Runtime.ContractVersion != nil {
 		if !agentUsesBuiltInRuntime(oldObject) ||

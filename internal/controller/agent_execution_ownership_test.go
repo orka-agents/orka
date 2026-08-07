@@ -170,6 +170,109 @@ func TestAgentExecutionOwnershipLockAllowsDisjointWatchScope(t *testing.T) {
 	}
 }
 
+func TestAgentExecutionOwnershipHostModeRequiresSafeConfig(t *testing.T) {
+	client := fake.NewClientset()
+	_, err := NewAgentExecutionOwnershipLock(client, AgentExecutionOwnershipLockConfig{
+		Identity:            "host-controller",
+		HostDevelopmentMode: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "legacy fence namespace is required") {
+		t.Fatalf("missing host legacy namespace error = %v", err)
+	}
+
+	_, err = NewAgentExecutionOwnershipLock(client, AgentExecutionOwnershipLockConfig{
+		Identity:                  "host-controller",
+		LegacyFenceNamespace:      "orka-system",
+		HostDevelopmentMode:       true,
+		InClusterIdentityDetected: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "in-cluster identity") {
+		t.Fatalf("in-cluster host mode error = %v", err)
+	}
+}
+
+func TestAgentExecutionOwnershipHostModeAcquiresCompleteFenceSet(t *testing.T) {
+	client := fake.NewClientset()
+	lock, err := NewAgentExecutionOwnershipLock(client, AgentExecutionOwnershipLockConfig{
+		Identity:             "host-controller",
+		LegacyFenceNamespace: "development-orka",
+		HostDevelopmentMode:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := ownershipLeaderRecord(time.Now().UTC())
+	record.HolderIdentity = "host-controller"
+	if err := lock.Create(context.Background(), record); err != nil {
+		t.Fatalf("host ownership acquisition: %v", err)
+	}
+	lease, err := client.CoordinationV1().Leases("development-orka").Get(
+		context.Background(), corev1alpha1.AgentExecutionLegacyLeaseName, metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != "host-controller" {
+		t.Fatalf("host legacy Lease holder = %#v", lease.Spec.HolderIdentity)
+	}
+}
+
+func TestAgentExecutionOwnershipHostModeRejectsEveryOverlappingController(t *testing.T) {
+	one := int32(1)
+	objects := map[string]runtime.Object{
+		"Deployment": &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "orka-system", Name: "deployed-controller", UID: "deployed-controller"},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &one,
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app.kubernetes.io/component": "controller"}},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "controller", Args: []string{"--leader-elect=true"}}}},
+				},
+			},
+		},
+		"Pod": &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "orka-system", Name: "standalone-controller",
+				Labels: map[string]string{"app.kubernetes.io/component": "controller"},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "controller", Args: []string{"--leader-elect=true"}}}},
+		},
+	}
+	for name, object := range objects {
+		t.Run(name, func(t *testing.T) {
+			client := fake.NewClientset(object)
+			lock, err := NewAgentExecutionOwnershipLock(client, AgentExecutionOwnershipLockConfig{
+				Identity:             "host-controller",
+				LegacyFenceNamespace: "orka-system",
+				HostDevelopmentMode:  true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := lock.preflight(context.Background()); err == nil || !strings.Contains(err.Error(), "overlapping controller") {
+				t.Fatalf("host overlap error = %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentExecutionOwnershipDeploymentModeRequiresDeploymentOwnedPod(t *testing.T) {
+	client := fake.NewClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "orka-system", Name: "controller-pod",
+	}})
+	lock, err := NewAgentExecutionOwnershipLock(client, AgentExecutionOwnershipLockConfig{
+		Identity:            "controller-current",
+		CurrentPodNamespace: "orka-system",
+		CurrentPodName:      "controller-pod",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.preflight(context.Background()); err == nil || !strings.Contains(err.Error(), "is not owned by a Deployment") {
+		t.Fatalf("deployment ownership error = %v", err)
+	}
+}
+
 func newTestAgentExecutionOwnershipLock(
 	t *testing.T,
 	client *fake.Clientset,

@@ -13,6 +13,7 @@ ACP_CLAUDE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-claude-runtime:latest
 ACP_COPILOT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-copilot-runtime:latest
 ACP_OPENCODE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-opencode-runtime:latest
 WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
+RUN_LEGACY_FENCE_NAMESPACE ?= orka-system
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -329,7 +330,8 @@ build-all: build build-cli ## Build all binaries.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+	go run ./cmd/main.go --leader-elect=true --agent-execution-host-mode=true \
+		--agent-execution-legacy-fence-namespace="$(RUN_LEGACY_FENCE_NAMESPACE)"
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.

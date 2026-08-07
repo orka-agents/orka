@@ -78,7 +78,10 @@ import (
 	// +kubebuilder:scaffold:imports
 )
 
-const taskResourceKind = "Task"
+const (
+	taskResourceKind            = "Task"
+	serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+)
 
 var (
 	scheme   = runtime.NewScheme()
@@ -147,6 +150,8 @@ func main() {
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
+	var agentExecutionHostMode bool
+	var agentExecutionLegacyFenceNamespace string
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -279,6 +284,10 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
+	flag.BoolVar(&agentExecutionHostMode, "agent-execution-host-mode", false,
+		"Use the fail-closed out-of-cluster ownership preflight for host development.")
+	flag.StringVar(&agentExecutionLegacyFenceNamespace, "agent-execution-legacy-fence-namespace", "",
+		"Namespace in which host development retains the legacy controller Lease fence.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
@@ -899,11 +908,18 @@ func main() {
 		os.Exit(1)
 	}
 	controllerHolderID := currentControllerHolderID()
+	ownershipPodNamespace, ownershipPodName := currentPodNamespace(), currentPodName()
+	if agentExecutionHostMode {
+		ownershipPodNamespace, ownershipPodName = "", ""
+	}
 	ownershipLock, err := controller.NewAgentExecutionOwnershipLock(kubeClient, controller.AgentExecutionOwnershipLockConfig{
-		Identity:            controllerHolderID,
-		CurrentPodNamespace: currentPodNamespace(),
-		CurrentPodName:      currentPodName(),
-		WatchNamespace:      watchNamespace,
+		Identity:                  controllerHolderID,
+		CurrentPodNamespace:       ownershipPodNamespace,
+		CurrentPodName:            ownershipPodName,
+		LegacyFenceNamespace:      agentExecutionLegacyFenceNamespace,
+		WatchNamespace:            watchNamespace,
+		HostDevelopmentMode:       agentExecutionHostMode,
+		InClusterIdentityDetected: inClusterControllerIdentityDetected(),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to configure global agent execution ownership")
@@ -2083,11 +2099,25 @@ func currentPodNamespace() string {
 	if namespace := strings.TrimSpace(os.Getenv(workerenv.PodNamespace)); namespace != "" {
 		return namespace
 	}
-	data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	data, err := os.ReadFile(serviceAccountNamespaceFile)
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+func inClusterControllerIdentityDetected() bool {
+	for _, name := range []string{"POD_NAME", workerenv.PodNamespace, "KUBERNETES_SERVICE_HOST"} {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			return true
+		}
+	}
+	for _, path := range []string{workerenv.ServiceAccountTokenFile, serviceAccountNamespaceFile} {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // loadAgentExecutionSnapshotCipher reads the AES-256 snapshot key from a file

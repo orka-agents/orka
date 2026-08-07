@@ -116,19 +116,19 @@ func (m AgentExecutionSnapshotMetadata) Validate() error {
 }
 
 // AgentExecutionSnapshotReferenceCounts reports every durable SQLite
-// reference that can retain a snapshot. Session lineage references are
-// intentionally digest-wide because session_lineages predates Task-scoped
-// snapshot keys and stores only the configuration digest.
+// reference that can retain a snapshot. SessionTurns retain every snapshot
+// scoped to their immutable Task UID because they do not store a snapshot
+// digest themselves.
 type AgentExecutionSnapshotReferenceCounts struct {
 	BindingReservations int64
 	HarnessV1Attempts   int64
 	PromptAttempts      int64
-	SessionLineages     int64
+	SessionTurns        int64
 }
 
 // Total returns the number of durable references across all known sources.
 func (c AgentExecutionSnapshotReferenceCounts) Total() int64 {
-	return c.BindingReservations + c.HarnessV1Attempts + c.PromptAttempts + c.SessionLineages
+	return c.BindingReservations + c.HarnessV1Attempts + c.PromptAttempts + c.SessionTurns
 }
 
 // AgentExecutionSnapshotLifecycleStore is an optional retention/GC extension
@@ -142,10 +142,10 @@ type AgentExecutionSnapshotLifecycleStore interface {
 
 	// CountAgentExecutionSnapshotReferences returns a consistent count across
 	// open binding reservations, v1 attempts, v2 prompt attempts, and Session
-	// lineages. Terminal Bound and Rejected reservations are audit records and
-	// do not retain snapshots. The first three sources match Task UID and
-	// digest; Session lineages conservatively match every occurrence of the
-	// digest.
+	// SessionTurns. Terminal Bound and Rejected reservations are audit records
+	// and do not retain snapshots. The first three sources match Task UID and
+	// digest; SessionTurns match the immutable Task UID because they do not
+	// carry a snapshot digest.
 	CountAgentExecutionSnapshotReferences(ctx context.Context, key AgentExecutionSnapshotKey) (AgentExecutionSnapshotReferenceCounts, error)
 
 	// DeleteAgentExecutionSnapshot idempotently deletes one exact Task
