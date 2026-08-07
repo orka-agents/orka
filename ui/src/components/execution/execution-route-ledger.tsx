@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import {
+  CircleAlert,
   CircleCheck,
   Database,
   GitBranch,
@@ -269,6 +270,7 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
   const lineage = control.lineage
   const resolution = control.agentExecutionResolutionRef
   const blocked = control.availability === 'ReconciliationBlocked'
+  const available = control.availability === 'Available'
   const routeTitle = lineage
     ? `${lineage.contractVersion === 'orka.harness.v1' ? 'Harness v1' : 'ACP v2'} · lineage ${lineage.generation}`
     : 'Lineage not yet established'
@@ -276,8 +278,16 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
   return (
     <ExecutionRouteLedger
       title="Session lineage"
-      summary={blocked ? (resolution ? 'Resolution applied' : 'Reconciliation required') : 'Available'}
-      summaryTone={blocked ? (resolution ? 'warning' : 'danger') : 'good'}
+      summary={
+        blocked
+          ? resolution
+            ? 'Resolution applied'
+            : 'Reconciliation required'
+          : available
+            ? 'Available'
+            : 'Availability unknown'
+      }
+      summaryTone={blocked ? (resolution ? 'warning' : 'danger') : available ? 'good' : 'warning'}
       rows={[
         {
           label: 'Route',
@@ -311,10 +321,10 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
             }
           : {
               label: 'Availability',
-              title: control.availability ?? 'Control state recorded',
+              title: available ? 'Available' : 'Availability not yet established',
               detail: `Lifecycle ${control.lifecycle ?? 'unclassified'} · lease generation ${control.mutationLeaseGeneration ?? 0}`,
-              icon: CircleCheck,
-              tone: 'good',
+              icon: available ? CircleCheck : CircleAlert,
+              tone: available ? 'good' : 'warning',
             },
       ]}
     />

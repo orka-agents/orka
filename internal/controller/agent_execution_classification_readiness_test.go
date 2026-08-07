@@ -64,6 +64,44 @@ func TestAgentExecutionClassificationReadinessAcceptsImmutableDispositions(t *te
 	}
 }
 
+func TestAgentExecutionClassificationReadinessAcceptsOrdinaryPostSealTasks(t *testing.T) {
+	for _, phase := range []corev1alpha1.TaskPhase{
+		corev1alpha1.TaskPhasePending,
+		corev1alpha1.TaskPhaseFailed,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			checker := classificationReadinessForTest(t, &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "ordinary-post-seal", Namespace: "default", Finalizers: []string{labels.TaskFinalizer},
+				},
+				Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+				Status: corev1alpha1.TaskStatus{Phase: phase},
+			})
+			if err := checker.Check(context.Background()); err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentExecutionClassificationReadinessIgnoresOrdinaryPostSealTaskSession(t *testing.T) {
+	checker := classificationReadinessForTest(t,
+		&corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "ordinary-post-seal", Namespace: "default", Finalizers: []string{labels.TaskFinalizer},
+			},
+			Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent, SessionRef: &corev1alpha1.SessionReference{Name: "chat"},
+			},
+			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+		},
+		classifiedReadinessSession(false),
+	)
+	if err := checker.Check(context.Background()); err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+}
+
 func TestAgentExecutionClassificationReadinessRejectsIncompleteInventory(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -88,13 +126,18 @@ func TestAgentExecutionClassificationReadinessRejectsIncompleteInventory(t *test
 			want: "has no contract classification",
 		},
 		{
-			name: "active Task",
+			name: "unclassified route-specific Task",
 			objects: []client.Object{&corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{Name: "unclassified", Namespace: "default", Finalizers: []string{labels.TaskFinalizer}},
 				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
-				Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhasePending,
+					HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{
+						RuntimeName: "legacy-runtime",
+					},
+				},
 			}},
-			want: "has no binding, no-execution disposition, or quarantine",
+			want: "has route-specific status evidence but no binding, no-execution disposition, or quarantine",
 		},
 		{
 			name:    "referenced Session lineage",

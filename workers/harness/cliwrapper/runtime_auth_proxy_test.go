@@ -64,13 +64,13 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 					"no_proxy=lower.internal",
 				},
 			}
-			protected, closeProxy, err := protectRuntimeAuthTurn(turn)
+			protected, redactionValue, closeProxy, err := protectRuntimeAuthTurn(turn)
 			if err != nil {
 				t.Fatalf("protectRuntimeAuthTurn() error = %v", err)
 			}
 			defer closeProxy()
 			if strings.Contains(strings.Join(protected.Env, "\n"), upstreamValue) {
-				t.Fatalf("protected child environment retained upstream value: %#v", protected.Env)
+				t.Fatal("protected child environment retained the upstream credential")
 			}
 			for _, name := range []string{"NO_PROXY", "no_proxy"} {
 				value := envEntryValue(protected.Env, name)
@@ -99,6 +99,15 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 				t.Fatalf("NewRequest() error = %v", err)
 			}
 			proxyValue := envEntryValue(protected.Env, tt.authField)
+			if redactionValue == "" {
+				t.Fatal("generated redaction value is empty")
+			}
+			if redactionValue == upstreamValue {
+				t.Fatal("generated redaction value reused the upstream credential")
+			}
+			if redactionValue != proxyValue {
+				t.Fatal("generated redaction value does not match the child-facing proxy credential")
+			}
 			if tt.requestHeader == "Authorization" {
 				request.Header.Set(tt.requestHeader, "Bearer "+proxyValue)
 			} else {
@@ -208,7 +217,7 @@ func TestProtectRuntimeAuthTurnProtectsReadOnlyCodexCredentials(t *testing.T) {
 			workerenv.OpenAIAPIKey + "=upstream-value",
 		},
 	}
-	protected, closeProxy, err := protectRuntimeAuthTurn(turn)
+	protected, _, closeProxy, err := protectRuntimeAuthTurn(turn)
 	if err != nil {
 		t.Fatalf("protectRuntimeAuthTurn() error = %v", err)
 	}
@@ -241,7 +250,7 @@ func TestProtectRuntimeAuthTurnCollapsesDuplicateCredentialEntries(t *testing.T)
 			workerenv.CodexAPIKey + "=upstream-codex",
 		},
 	}
-	protected, closeProxy, err := protectRuntimeAuthTurn(turn)
+	protected, _, closeProxy, err := protectRuntimeAuthTurn(turn)
 	if err != nil {
 		t.Fatalf("protectRuntimeAuthTurn() error = %v", err)
 	}
@@ -251,7 +260,7 @@ func TestProtectRuntimeAuthTurnCollapsesDuplicateCredentialEntries(t *testing.T)
 		"leaked-openai-first", "upstream-openai", "leaked-codex-first", "upstream-codex", "bypass.invalid",
 	} {
 		if strings.Contains(joined, secret) {
-			t.Fatalf("protected environment retained %q: %#v", secret, protected.Env)
+			t.Fatal("protected environment retained an upstream credential or endpoint")
 		}
 	}
 	for _, name := range []string{workerenv.OpenAIBaseURL, workerenv.OpenAIAPIKey, workerenv.CodexAPIKey} {
@@ -295,7 +304,7 @@ func TestProtectRuntimeAuthTurnRejectsNonLoopbackHTTPUpstream(t *testing.T) {
 					workerenv.OpenAIAPIKey + "=upstream-value",
 				},
 			}
-			_, _, err := protectRuntimeAuthTurn(turn)
+			_, _, _, err := protectRuntimeAuthTurn(turn)
 			if err == nil || !strings.Contains(err.Error(), "must use HTTPS or literal loopback HTTP") {
 				t.Fatalf("protectRuntimeAuthTurn() error = %v, want cleartext upstream rejection", err)
 			}
@@ -325,7 +334,7 @@ func TestProtectRuntimeAuthTurnAllowsTLSUpstream(t *testing.T) {
 			workerenv.OpenAIAPIKey + "=" + upstreamValue,
 		},
 	}
-	protected, closeProxy, err := protectRuntimeAuthTurn(turn)
+	protected, _, closeProxy, err := protectRuntimeAuthTurn(turn)
 	if err != nil {
 		t.Fatalf("protectRuntimeAuthTurn() error = %v", err)
 	}
@@ -357,7 +366,7 @@ func TestProtectRuntimeAuthTurnRejectsClaudeFoundry(t *testing.T) {
 		"CLAUDE_CODE_USE_FOUNDRY=1",
 		workerenv.AnthropicAPIKey + "=upstream-value",
 	}}
-	_, _, err := protectRuntimeAuthTurn(turn)
+	_, _, _, err := protectRuntimeAuthTurn(turn)
 	if err == nil || !strings.Contains(err.Error(), "does not support Azure AI Foundry") {
 		t.Fatalf("protectRuntimeAuthTurn() error = %v, want Foundry rejection", err)
 	}
@@ -380,7 +389,7 @@ func TestRuntimeAuthProxyRestrictsBasePathAndFixedQuery(t *testing.T) {
 			workerenv.OpenAIAPIKey + "=upstream-value",
 		},
 	}
-	protected, closeProxy, err := protectRuntimeAuthTurn(turn)
+	protected, _, closeProxy, err := protectRuntimeAuthTurn(turn)
 	if err != nil {
 		t.Fatalf("protectRuntimeAuthTurn() error = %v", err)
 	}
@@ -439,7 +448,7 @@ func TestProtectRuntimeAuthTurnRequiresChildIdentityBoundary(t *testing.T) {
 	turn := TurnContext{RuntimeName: RuntimeCodex, Metadata: map[string]string{"runtimeAuthOnly": "true"}, Env: []string{
 		workerenv.OpenAIAPIKey + "=upstream-value",
 	}}
-	_, _, err := protectRuntimeAuthTurn(turn)
+	_, _, _, err := protectRuntimeAuthTurn(turn)
 	if err == nil || !strings.Contains(err.Error(), "dedicated non-root child UID/GID") {
 		t.Fatalf("protectRuntimeAuthTurn() error = %v, want child identity boundary rejection", err)
 	}
@@ -447,7 +456,7 @@ func TestProtectRuntimeAuthTurnRequiresChildIdentityBoundary(t *testing.T) {
 
 func TestProtectRuntimeAuthTurnRejectsUnsupportedRuntime(t *testing.T) {
 	turn := TurnContext{RuntimeName: RuntimeGeneric, Metadata: map[string]string{"runtimeAuthOnly": "true"}}
-	_, _, err := protectRuntimeAuthTurn(turn)
+	_, _, _, err := protectRuntimeAuthTurn(turn)
 	if err == nil || !strings.Contains(err.Error(), "does not support runtime") {
 		t.Fatalf("protectRuntimeAuthTurn() error = %v, want unsupported runtime rejection", err)
 	}

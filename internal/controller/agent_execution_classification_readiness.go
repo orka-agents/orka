@@ -17,9 +17,9 @@ const maxAgentExecutionReadinessExamples = 8
 // closed before the coexistence controller is advertised as ready. The check
 // uses the uncached API reader: cached absence must never authorize execution.
 //
-// A transiently new Task may make readiness false until the controller writes
-// its immutable binding. That is intentional and fail-closed; reconciliation
-// continues while the Pod is unready.
+// Once the bounded migration inventory is sealed, ordinary new Tasks without
+// route-specific evidence are reconciled under the persisted execution gate;
+// they do not reopen the migration inventory or make the serving Pod unready.
 type AgentExecutionClassificationReadiness struct {
 	APIReader      client.Reader
 	WatchNamespace string
@@ -170,9 +170,12 @@ func (c *AgentExecutionClassificationReadiness) Check(ctx context.Context) error
 			continue
 		}
 		if classifications == 0 {
-			issues = appendReadinessIssue(issues, fmt.Sprintf(
-				"Task %s/%s has no binding, no-execution disposition, or quarantine", task.Namespace, task.Name,
-			))
+			if task.Status.HarnessRuntime != nil || task.Status.Execution != nil || task.Status.Delivery != nil {
+				issues = appendReadinessIssue(issues, fmt.Sprintf(
+					"Task %s/%s has route-specific status evidence but no binding, no-execution disposition, or quarantine",
+					task.Namespace, task.Name,
+				))
+			}
 			continue
 		}
 		if task.Spec.SessionRef != nil && task.Status.AgentExecutionNoExecution == nil {

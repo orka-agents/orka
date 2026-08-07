@@ -1198,6 +1198,92 @@ func (eventingSecretAdapter) RunTurn(
 	})
 }
 
+type runtimeAuthTokenEchoAdapter struct{}
+
+func (runtimeAuthTokenEchoAdapter) Name() string { return RuntimeCodex }
+func (runtimeAuthTokenEchoAdapter) BuildCommand(_ context.Context, turn TurnContext) (*CommandSpec, error) {
+	return &CommandSpec{Path: "test-runtime", Env: append([]string(nil), turn.Env...)}, nil
+}
+func (runtimeAuthTokenEchoAdapter) ParseResult(
+	_ context.Context,
+	_ TurnContext,
+	run CommandResult,
+) (TurnResult, error) {
+	return TurnResult{Result: run.ExactStdout()}, nil
+}
+
+func TestServerRedactsGeneratedRuntimeAuthProxyTokenAtOutputSinks(t *testing.T) {
+	previousBoundary := runtimeAuthChildBoundaryAvailable
+	runtimeAuthChildBoundaryAvailable = func() bool { return true }
+	t.Cleanup(func() { runtimeAuthChildBoundaryAvailable = previousBoundary })
+
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := NewServer(cfg, runtimeAuthTokenEchoAdapter{})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	generatedToken := make(chan string, 1)
+	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+		token := envEntryValue(spec.Env, workerenv.OpenAIAPIKey)
+		if token == "" {
+			return CommandResult{}, errors.New("child command is missing the runtime-auth proxy credential")
+		}
+		generatedToken <- token
+		output := "generated runtime-auth proxy credential: " + token
+		return CommandResult{Stdout: output, FullStdout: output, Stderr: output}, nil
+	})
+	srv := httptest.NewServer(server.Handler())
+	defer func() {
+		srv.Close()
+		if err := server.Close(); err != nil {
+			t.Errorf("close wrapper server: %v", err)
+		}
+	}()
+	client, err := harness.NewClient(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	request.Metadata["runtimeAuthOnly"] = "true"
+	request.Input.Env = []harness.TurnEnvVar{{Name: workerenv.OpenAIAPIKey, Value: "upstream-runtime-credential"}}
+	request = sealDurableWrapperRequest(request)
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	var token string
+	select {
+	case token = <-generatedToken:
+	default:
+		t.Fatal("runner did not receive the generated runtime-auth proxy credential")
+	}
+	encoded, err := json.Marshal(frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(token)) {
+		t.Fatal("frames leaked the generated runtime-auth proxy credential")
+	}
+	if !bytes.Contains(encoded, []byte("[REDACTED]")) {
+		t.Fatal("frames did not redact the generated runtime-auth proxy credential")
+	}
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil || last.Completed.OutputRef == "" {
+		t.Fatal("turn did not complete with an output reference")
+	}
+	output, err := client.FetchTurnOutput(context.Background(), request.TurnID, last.Completed.OutputRef)
+	if err != nil {
+		t.Fatalf("FetchTurnOutput: %v", err)
+	}
+	if bytes.Contains(output, []byte(token)) {
+		t.Fatal("stored output leaked the generated runtime-auth proxy credential")
+	}
+	if !bytes.Contains(output, []byte("[REDACTED]")) {
+		t.Fatal("stored output did not redact the generated runtime-auth proxy credential")
+	}
+}
+
 func TestServerRedactsEventingAdapterTerminalPayloads(t *testing.T) {
 	baseURL, cleanup := startWrapperServer(t, eventingSecretAdapter{})
 	defer cleanup()

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1207,11 +1208,12 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			workerenv.GitUsername,
 		)
 	}
-	turnCtx, closeRuntimeAuthProxy, err := protectRuntimeAuthTurn(turnCtx)
+	turnCtx, runtimeAuthProxyToken, closeRuntimeAuthProxy, err := protectRuntimeAuthTurn(turnCtx)
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "runtime_auth_proxy_failed", err.Error(), false))
 		return
 	}
+	turn.addExactRedactionValue(runtimeAuthProxyToken)
 	defer closeRuntimeAuthProxy()
 	spec, err := s.adapter.BuildCommand(ctx, turnCtx)
 	if err != nil {
@@ -2078,6 +2080,21 @@ func (t *turnState) exactRedactionValuesSnapshot() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return append([]string(nil), t.exactRedactionValues...)
+}
+
+func (t *turnState) addExactRedactionValue(value string) {
+	if value == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if slices.Contains(t.exactRedactionValues, value) {
+		return
+	}
+	t.exactRedactionValues = append(t.exactRedactionValues, value)
+	sort.Slice(t.exactRedactionValues, func(i, j int) bool {
+		return len(t.exactRedactionValues[i]) > len(t.exactRedactionValues[j])
+	})
 }
 
 func (t *turnState) clearExactRedactionValues() {

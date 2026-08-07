@@ -158,6 +158,24 @@ describe('TaskExecutionRouteLedger', () => {
 })
 
 describe('SessionExecutionRouteLedger', () => {
+  it('keeps missing availability in an explicit warning state', () => {
+    const session: Session = {
+      name: 'initializing-session',
+      namespace: 'default',
+      executionControl: {
+        sessionUID: 'session-uid-0000000000000001',
+        generation: 1,
+        lifecycle: 'Active',
+      },
+    }
+
+    render(<SessionExecutionRouteLedger session={session} />)
+
+    expect(screen.getByText('Availability unknown')).toHaveClass('text-status-pending')
+    expect(screen.getByText('Lineage not yet established')).toBeInTheDocument()
+    expect(screen.getByText('Availability not yet established')).toBeInTheDocument()
+  })
+
   it('shows lineage evidence and a blocked continuation requiring adjudication', () => {
     const session: Session = {
       name: 'blocked-session',
