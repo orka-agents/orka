@@ -573,6 +573,15 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
 		}
+		if task.Spec.SessionRef != nil {
+			ready, err := r.adjudicatedBlockedSessionDeletionReady(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !ready {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+		}
 		// Clean up result data from store
 		if r.ResultStore != nil {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {

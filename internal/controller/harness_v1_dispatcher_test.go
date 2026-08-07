@@ -38,6 +38,16 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 		},
 		body: agentExecutionSnapshotBody{
 			Prompt: "perform the work", Timeout: "2m",
+			Configuration: agentExecutionSnapshotConfig{
+				Model: "frozen-model", SystemPrompt: "frozen system prompt",
+				MaxTurns: 7, ReasoningEffort: "high",
+			},
+			DefaultTools: &agentExecutionSnapshotToolPolicy{
+				AllowedToolsOmitted: false, AllowedTools: []string{"Read"}, AllowBash: new(true),
+			},
+			RuntimeOverride: &corev1alpha1.AgentRuntimeSpec{
+				AllowedTools: []string{}, DisallowedTools: []string{"Bash"}, AllowBash: new(false),
+			},
 			HarnessV1: &agentExecutionSnapshotHarnessV1{
 				SessionName: "session-a", RuntimeName: "runtime-a", RuntimeAuthOnly: true,
 			},
@@ -60,6 +70,21 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 	}
 	if request.Metadata["runtimeAuthOnly"] != "true" {
 		t.Fatalf("runtimeAuthOnly metadata = %q, want true", request.Metadata["runtimeAuthOnly"])
+	}
+	for key, want := range map[string]string{
+		harness.MetadataRuntimePolicyFrozen: "true",
+		harness.MetadataAllowedToolsSet:     "true",
+		"model":                             "frozen-model",
+		"systemPrompt":                      "frozen system prompt",
+		"maxTurns":                          "7",
+		"reasoningEffort":                   "high",
+		"allowedTools":                      "",
+		"disallowedTools":                   "Bash",
+		"allowBash":                         "false",
+	} {
+		if got := request.Metadata[key]; got != want {
+			t.Fatalf("metadata[%q] = %q, want %q", key, got, want)
+		}
 	}
 	digest, err := harness.CanonicalStartTurnRequestDigest(request)
 	if err != nil {
@@ -856,19 +881,40 @@ func TestHarnessV1DispatcherSettlingRecoveryFinalizesDurableDecision(t *testing.
 	}
 }
 
-func TestHarnessV1DispatcherLostAcceptedTurnBecomesOutcomeUnknownWithoutReplay(t *testing.T) {
+func TestHarnessV1DispatcherReconnectsAcceptedTurnAfterTransientStreamFailure(t *testing.T) {
 	fixture := newHarnessV1DispatcherStateFixture(t)
 	protocolClient := &recordingHarnessV1RecoveryClient{
-		statusErr: errors.New("durable turn not found"),
-		stream: func(
-			context.Context,
-			harness.HarnessTurnID,
-			int64,
-			func(harness.HarnessEventFrame) error,
-		) error {
-			return errors.New("wrapper lost accepted turn")
+		status: &harness.DurableTurnStatus{
+			TurnID: fixture.attempt.TurnID, TaskUID: fixture.attempt.TaskUID,
+			Attempt: fixture.attempt.Attempt, RequestDigest: fixture.attempt.RequestDigest,
+			State: harness.DurableTurnAccepted,
 		},
 	}
+	protocolClient.stream = func(
+		_ context.Context,
+		_ harness.HarnessTurnID,
+		_ int64,
+		onFrame func(harness.HarnessEventFrame) error,
+	) error {
+		if protocolClient.streamCalls == 1 {
+			return errors.New("transient stream reset")
+		}
+		return onFrame(harnessV1CompletedFrame(fixture.request, "reconnected"))
+	}
+
+	err := fixture.dispatcher.recoverActiveAttempt(
+		fixture.ctx,
+		fixture.task,
+		fixture.verified,
+		protocolClient,
+		fixture.request,
+		fixture.attempt,
+		fixture.fence,
+	)
+	if !errors.Is(err, errHarnessV1StreamEndedWithoutTerminal) {
+		t.Fatalf("first recoverActiveAttempt error = %v, want retryable stream boundary", err)
+	}
+	fixture.attempt = assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptAccepted)
 
 	if err := fixture.dispatcher.recoverActiveAttempt(
 		fixture.ctx,
@@ -879,15 +925,19 @@ func TestHarnessV1DispatcherLostAcceptedTurnBecomesOutcomeUnknownWithoutReplay(t
 		fixture.attempt,
 		fixture.fence,
 	); err != nil {
-		t.Fatalf("recoverActiveAttempt: %v", err)
+		t.Fatalf("second recoverActiveAttempt: %v", err)
 	}
-	persisted := assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptOutcomeUnknown)
-	if persisted.TerminalReason != harnessV1ReasonOutcomeUnknown {
-		t.Fatalf("terminal reason = %q, want %q", persisted.TerminalReason, harnessV1ReasonOutcomeUnknown)
+	assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSucceeded)
+	result, err := fixture.durable.GetResult(fixture.ctx, fixture.task.Namespace, fixture.task.Name)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if protocolClient.statusCalls != 1 || protocolClient.streamCalls != 1 || protocolClient.startCalls != 0 {
+	if string(result) != "reconnected" {
+		t.Fatalf("result = %q, want reconnected", result)
+	}
+	if protocolClient.statusCalls != 2 || protocolClient.streamCalls != 2 || protocolClient.startCalls != 0 {
 		t.Fatalf(
-			"recovery calls: status=%d stream=%d start=%d, want 1/1/0",
+			"recovery calls: status=%d stream=%d start=%d, want 2/2/0",
 			protocolClient.statusCalls,
 			protocolClient.streamCalls,
 			protocolClient.startCalls,
@@ -895,17 +945,20 @@ func TestHarnessV1DispatcherLostAcceptedTurnBecomesOutcomeUnknownWithoutReplay(t
 	}
 }
 
-func TestHarnessV1DispatcherCancelAcknowledgementIsNonterminal(t *testing.T) {
+func TestHarnessV1DispatcherRetriesCancellationUntilAcknowledged(t *testing.T) {
 	fixture := newHarnessV1DispatcherStateFixture(t)
 	protocolClient := &recordingHarnessV1RecoveryClient{}
 	protocolClient.cancel = func(context.Context, harness.CancelTurnRequest) (*harness.CancelTurnResponse, error) {
+		if protocolClient.cancelCalls == 1 {
+			return nil, errors.New("transient cancellation transport failure")
+		}
 		return &harness.CancelTurnResponse{Accepted: true}, nil
 	}
 	protocolClient.stream = func(
-		context.Context,
-		harness.HarnessTurnID,
-		int64,
-		func(harness.HarnessEventFrame) error,
+		_ context.Context,
+		_ harness.HarnessTurnID,
+		_ int64,
+		onFrame func(harness.HarnessEventFrame) error,
 	) error {
 		persisted, err := fixture.durable.GetHarnessV1Attempt(fixture.ctx, harnessV1AttemptKey(fixture.attempt))
 		if err != nil {
@@ -914,10 +967,29 @@ func TestHarnessV1DispatcherCancelAcknowledgementIsNonterminal(t *testing.T) {
 		if persisted.State != store.HarnessV1AttemptCancelRequested || persisted.CancelRequestedAt == nil {
 			t.Fatalf("attempt at stream boundary = %+v, want nonterminal CancelRequested", persisted)
 		}
-		return errors.New("no terminal cancellation receipt")
+		return onFrame(harness.HarnessEventFrame{
+			Version: harness.ProtocolVersion, Type: harness.FrameTurnCancelled,
+			RuntimeSessionID: fixture.request.RuntimeSessionID, TurnID: fixture.request.TurnID,
+			CorrelationID: fixture.request.CorrelationID, Seq: 1,
+		})
 	}
 	fixture.dispatcher.clientFactory = func(string, string, *http.Client) (harnessV1ProtocolClient, error) {
 		return protocolClient, nil
+	}
+
+	err := fixture.dispatcher.cancelAttempt(
+		fixture.ctx,
+		fixture.task,
+		fixture.verified,
+		fixture.attempt,
+		fixture.fence,
+	)
+	if err == nil || !strings.Contains(err.Error(), "transient cancellation transport failure") {
+		t.Fatalf("first cancelAttempt error = %v, want transient transport failure", err)
+	}
+	fixture.attempt = assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptCancelRequested)
+	if protocolClient.cancelCalls != 1 || protocolClient.streamCalls != 0 {
+		t.Fatalf("first cancellation calls: cancel=%d stream=%d, want 1/0", protocolClient.cancelCalls, protocolClient.streamCalls)
 	}
 
 	if err := fixture.dispatcher.cancelAttempt(
@@ -927,19 +999,118 @@ func TestHarnessV1DispatcherCancelAcknowledgementIsNonterminal(t *testing.T) {
 		fixture.attempt,
 		fixture.fence,
 	); err != nil {
-		t.Fatalf("cancelAttempt: %v", err)
+		t.Fatalf("second cancelAttempt: %v", err)
 	}
-	persisted := assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptOutcomeUnknown)
-	if persisted.TerminalReason != harnessV1ReasonOutcomeUnknown {
-		t.Fatalf("terminal reason = %q, want %q", persisted.TerminalReason, harnessV1ReasonOutcomeUnknown)
-	}
-	if protocolClient.cancelCalls != 1 || protocolClient.streamCalls != 1 || protocolClient.startCalls != 0 {
+	assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptCancelled)
+	if protocolClient.cancelCalls != 2 || protocolClient.streamCalls != 1 || protocolClient.startCalls != 0 {
 		t.Fatalf(
-			"cancellation calls: cancel=%d stream=%d start=%d, want 1/1/0",
+			"cancellation calls: cancel=%d stream=%d start=%d, want 2/1/0",
 			protocolClient.cancelCalls,
 			protocolClient.streamCalls,
 			protocolClient.startCalls,
 		)
+	}
+}
+
+func TestHarnessV1DispatcherRetriesOutputAcknowledgementBeforeProjection(t *testing.T) {
+	fixture := newHarnessV1DispatcherStateFixture(t)
+	frame := harnessV1CompletedFrame(fixture.request, "")
+	frame.Completed.OutputRef = "durable-output-v1"
+	appendPersistedHarnessV1Frame(t, fixture, frame)
+	ackErr := errors.New("lost output acknowledgement response")
+	protocolClient := &recordingHarnessV1RecoveryClient{
+		fetch: func(context.Context, harness.HarnessTurnID, string) ([]byte, error) {
+			return []byte("durable result"), nil
+		},
+	}
+	protocolClient.acknowledge = func(_ context.Context, request harness.TurnOutputAcknowledgementRequest) error {
+		persisted, err := fixture.durable.GetHarnessV1Attempt(fixture.ctx, harnessV1AttemptKey(fixture.attempt))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if persisted.State != store.HarnessV1AttemptSucceeded || persisted.TerminalReceiptDigest != request.TerminalReceiptDigest {
+			t.Fatalf("attempt at acknowledgement boundary = %+v, want durable Succeeded receipt", persisted)
+		}
+		result, err := fixture.durable.GetResult(fixture.ctx, fixture.task.Namespace, fixture.task.Name)
+		if err != nil || string(result) != "durable result" {
+			t.Fatalf("result at acknowledgement boundary = %q, %v", result, err)
+		}
+		if protocolClient.ackCalls == 1 {
+			return ackErr
+		}
+		return nil
+	}
+	fixture.dispatcher.clientFactory = func(string, string, *http.Client) (harnessV1ProtocolClient, error) {
+		return protocolClient, nil
+	}
+
+	err := fixture.dispatcher.settleTerminalFrame(
+		fixture.ctx, fixture.task, protocolClient, fixture.request, fixture.attempt, fixture.fence, frame,
+	)
+	if !errors.Is(err, ackErr) {
+		t.Fatalf("settleTerminalFrame error = %v, want lost acknowledgement response", err)
+	}
+	fixture.attempt = assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSucceeded)
+	latest := &corev1alpha1.Task{}
+	if err := fixture.dispatcher.Client.Get(
+		fixture.ctx,
+		types.NamespacedName{Namespace: fixture.task.Namespace, Name: fixture.task.Name},
+		latest,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if harnessV1AttemptProjectionMatches(latest, fixture.attempt) {
+		t.Fatal("terminal attempt was projected before output acknowledgement")
+	}
+
+	fixture.dispatcher.Epochs = readyHarnessV1TestEpochManager(fixture.durable, fixture.fence)
+	if err := fixture.dispatcher.reconcileAttempt(fixture.ctx, latest, fixture.attempt); err != nil {
+		t.Fatalf("reconcile terminal acknowledgement retry: %v", err)
+	}
+	if err := fixture.dispatcher.Client.Get(
+		fixture.ctx,
+		types.NamespacedName{Namespace: fixture.task.Namespace, Name: fixture.task.Name},
+		latest,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !harnessV1AttemptProjectionMatches(latest, fixture.attempt) {
+		t.Fatalf("terminal attempt was not projected after acknowledgement: %+v", latest.Status.HarnessRuntime)
+	}
+	if protocolClient.fetchCalls != 1 || protocolClient.ackCalls != 2 || protocolClient.statusCalls != 0 {
+		t.Fatalf(
+			"output recovery calls: fetch=%d ack=%d status=%d, want 1/2/0",
+			protocolClient.fetchCalls, protocolClient.ackCalls, protocolClient.statusCalls,
+		)
+	}
+}
+
+func TestHarnessV1AttemptProjectionMatchesRequiresCompleteTerminalProjection(t *testing.T) {
+	completedAt := metav1.NewTime(time.Date(2026, 8, 7, 1, 0, 0, 0, time.UTC))
+	attempt := &store.HarnessV1Attempt{
+		Attempt: 2, TurnID: "turn-terminal", RuntimeSessionID: "runtime-terminal",
+		State: store.HarnessV1AttemptSucceeded, TerminalReason: "Succeeded",
+		TerminalReceiptDigest: "sha256:" + strings.Repeat("a", 64),
+		RequestDigest:         "sha256:" + strings.Repeat("b", 64),
+		ControllerEpoch:       3, LastEventSeq: 7,
+	}
+	task := &corev1alpha1.Task{Status: corev1alpha1.TaskStatus{
+		Phase: corev1alpha1.TaskPhaseSucceeded, Attempts: attempt.Attempt,
+		CompletionTime: &completedAt,
+		HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{
+			Attempt: attempt.Attempt, TurnID: attempt.TurnID, RuntimeSessionID: attempt.RuntimeSessionID,
+			State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
+			Reason: attempt.TerminalReason, TerminalReceiptDigest: attempt.TerminalReceiptDigest,
+			RequestDigest: attempt.RequestDigest, ControllerEpoch: attempt.ControllerEpoch,
+			LastEventSeq: attempt.LastEventSeq, LastTransitionTime: &completedAt,
+		},
+	}}
+	if !harnessV1AttemptProjectionMatches(task, attempt) {
+		t.Fatal("complete terminal projection did not match")
+	}
+	task.Status.CompletionTime = nil
+	if harnessV1AttemptProjectionMatches(task, attempt) {
+		t.Fatal("terminal projection without completion time matched")
 	}
 }
 
@@ -1203,10 +1374,14 @@ type recordingHarnessV1RecoveryClient struct {
 	statusErr   error
 	start       func(context.Context, harness.StartTurnRequest) (*harness.StartTurnResponse, error)
 	stream      func(context.Context, harness.HarnessTurnID, int64, func(harness.HarnessEventFrame) error) error
+	fetch       func(context.Context, harness.HarnessTurnID, string) ([]byte, error)
+	acknowledge func(context.Context, harness.TurnOutputAcknowledgementRequest) error
 	cancel      func(context.Context, harness.CancelTurnRequest) (*harness.CancelTurnResponse, error)
 	statusCalls int
 	startCalls  int
 	streamCalls int
+	fetchCalls  int
+	ackCalls    int
 	cancelCalls int
 }
 
@@ -1289,8 +1464,27 @@ func (c *recordingHarnessV1RecoveryClient) StreamFrames(
 	return errors.New("unexpected frame stream")
 }
 
-func (*recordingHarnessV1RecoveryClient) FetchTurnOutput(context.Context, harness.HarnessTurnID, string) ([]byte, error) {
+func (c *recordingHarnessV1RecoveryClient) FetchTurnOutput(
+	ctx context.Context,
+	turnID harness.HarnessTurnID,
+	outputRef string,
+) ([]byte, error) {
+	c.fetchCalls++
+	if c.fetch != nil {
+		return c.fetch(ctx, turnID, outputRef)
+	}
 	return nil, errors.New("unexpected output fetch")
+}
+
+func (c *recordingHarnessV1RecoveryClient) AcknowledgeTurnOutput(
+	ctx context.Context,
+	request harness.TurnOutputAcknowledgementRequest,
+) error {
+	c.ackCalls++
+	if c.acknowledge != nil {
+		return c.acknowledge(ctx, request)
+	}
+	return errors.New("unexpected output acknowledgement")
 }
 
 func (c *recordingHarnessV1RecoveryClient) CancelTurn(

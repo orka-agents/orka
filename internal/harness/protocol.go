@@ -34,11 +34,13 @@ const (
 // these extension keys, while the coexistence wrapper requires them before it
 // accepts a new turn.
 const (
-	MetadataTaskUID        = "orka.taskUID"
-	MetadataAttempt        = "orka.attempt"
-	MetadataBindingDigest  = "orka.bindingDigest"
-	MetadataSnapshotDigest = "orka.snapshotDigest"
-	MetadataRequestDigest  = "orka.requestDigest"
+	MetadataTaskUID             = "orka.taskUID"
+	MetadataAttempt             = "orka.attempt"
+	MetadataBindingDigest       = "orka.bindingDigest"
+	MetadataSnapshotDigest      = "orka.snapshotDigest"
+	MetadataRequestDigest       = "orka.requestDigest"
+	MetadataRuntimePolicyFrozen = "orka.runtimePolicyFrozen"
+	MetadataAllowedToolsSet     = "orka.allowedToolsSet"
 )
 
 type RuntimeSessionID string
@@ -350,6 +352,58 @@ type DurableTurnStatus struct {
 	TerminalReceiptDigest string                      `json:"terminalReceiptDigest,omitempty"`
 	TerminalReceipt       *DurableTurnTerminalReceipt `json:"terminalReceipt,omitempty"`
 	UpdatedAt             time.Time                   `json:"updatedAt"`
+}
+
+// TurnOutputAcknowledgementRequest authorizes deletion of one durable output
+// only after the controller has durably stored and settled the exact terminal
+// receipt that referenced it.
+type TurnOutputAcknowledgementRequest struct {
+	Version               string        `json:"version"`
+	TurnID                HarnessTurnID `json:"turnID"`
+	OutputRef             string        `json:"outputRef"`
+	TerminalReceiptDigest string        `json:"terminalReceiptDigest"`
+}
+
+// ValidateFor rejects acknowledgements that are not fenced to the requested
+// turn and its canonical terminal receipt.
+func (r TurnOutputAcknowledgementRequest) ValidateFor(turnID HarnessTurnID) error {
+	if err := validateVersion(r.Version); err != nil {
+		return err
+	}
+	if err := ValidateTurnPathSegment(r.TurnID); err != nil {
+		return err
+	}
+	if r.TurnID != turnID {
+		return fmt.Errorf("turn id does not match request path")
+	}
+	if strings.TrimSpace(r.OutputRef) == "" {
+		return fmt.Errorf("output ref is required")
+	}
+	if !isCanonicalSHA256Digest(r.TerminalReceiptDigest) {
+		return fmt.Errorf("terminal receipt digest must be a canonical sha256 digest")
+	}
+	return nil
+}
+
+// TurnOutputAcknowledgementResponse confirms the idempotent tombstone.
+type TurnOutputAcknowledgementResponse struct {
+	Version               string        `json:"version"`
+	TurnID                HarnessTurnID `json:"turnID"`
+	OutputRef             string        `json:"outputRef"`
+	TerminalReceiptDigest string        `json:"terminalReceiptDigest"`
+	Acknowledged          bool          `json:"acknowledged"`
+}
+
+// ValidateFor rejects ambiguous or mismatched acknowledgement responses.
+func (r TurnOutputAcknowledgementResponse) ValidateFor(request TurnOutputAcknowledgementRequest) error {
+	if err := validateVersion(r.Version); err != nil {
+		return err
+	}
+	if !r.Acknowledged || r.TurnID != request.TurnID || r.OutputRef != request.OutputRef ||
+		r.TerminalReceiptDigest != request.TerminalReceiptDigest {
+		return fmt.Errorf("output acknowledgement does not match request")
+	}
+	return nil
 }
 
 type DurableDrainStatus struct {

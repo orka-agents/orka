@@ -13,10 +13,12 @@ spec:
       {{- include "orka.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: admission
   policyTypes: [Ingress, Egress]
-  # The ClusterIP is not externally exposed. Permit kube-apiserver sources on
-  # only the webhook port; control-plane source CIDRs vary across providers.
+  # The ClusterIP is not externally exposed. Permit kube-apiserver webhook
+  # traffic and kubelet health probes; their source CIDRs vary across providers.
   ingress:
-    - ports: [{protocol: TCP, port: 9443}]
+    - ports:
+        - {protocol: TCP, port: 9443}
+        - {protocol: TCP, port: 8081}
   # Coexistence validators use a dedicated read-only Kubernetes client. Network
   # policy cannot portably select an externally hosted kube-apiserver endpoint,
   # so allow only TCP/443; the ServiceAccount RBAC contains no Lease or writes.

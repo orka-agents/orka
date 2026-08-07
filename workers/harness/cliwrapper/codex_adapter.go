@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -321,10 +322,11 @@ func codexOpenAIBaseURL() string {
 }
 
 func codexReasoningEffort(metadata map[string]string) (string, error) {
-	effort := strings.ToLower(strings.TrimSpace(firstNonEmpty(
-		metadata["reasoningEffort"],
-		os.Getenv(codexReasoningEffortEnv),
-	)))
+	raw := metadata["reasoningEffort"]
+	if !strings.EqualFold(strings.TrimSpace(metadata[harness.MetadataRuntimePolicyFrozen]), "true") {
+		raw = firstNonEmpty(raw, os.Getenv(codexReasoningEffortEnv))
+	}
+	effort := strings.ToLower(strings.TrimSpace(raw))
 	if effort == "" {
 		return "", nil
 	}

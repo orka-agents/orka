@@ -12,6 +12,7 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -47,6 +49,7 @@ type options struct {
 	webhookCertPath                string
 	webhookCertName                string
 	webhookCertKey                 string
+	webhookServiceDNSName          string
 	webhookPort                    int
 	enableHTTP2                    bool
 	controllerUsername             string
@@ -66,6 +69,8 @@ func (o *options) bind(fs *flag.FlagSet) {
 		"The webhook serving certificate filename.")
 	fs.StringVar(&o.webhookCertKey, "webhook-cert-key", "tls.key",
 		"The webhook serving private-key filename.")
+	fs.StringVar(&o.webhookServiceDNSName, "webhook-service-dns-name", "",
+		"The Kubernetes Service DNS name that the webhook serving certificate must cover.")
 	fs.IntVar(&o.webhookPort, "webhook-port", 9443, "The HTTPS webhook listener port.")
 	fs.BoolVar(&o.enableHTTP2, "enable-http2", false,
 		"Enable HTTP/2 on the webhook listener. HTTP/2 is disabled by default.")
@@ -99,6 +104,9 @@ func (o options) validate() error {
 	}
 	if err := validateFilename("--webhook-cert-key", o.webhookCertKey); err != nil {
 		return err
+	}
+	if strings.TrimSpace(o.webhookServiceDNSName) == "" {
+		return errors.New("--webhook-service-dns-name is required")
 	}
 	if o.webhookPort < 1 || o.webhookPort > 65535 {
 		return fmt.Errorf("--webhook-port must be between 1 and 65535")
@@ -217,7 +225,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := mgr.AddReadyzCheck("webhook-certificates", servingCertificateFilesChecker(
-		opts.webhookCertPath, opts.webhookCertName, opts.webhookCertKey,
+		opts.webhookCertPath, opts.webhookCertName, opts.webhookCertKey, opts.webhookServiceDNSName,
 	)); err != nil {
 		setupLog.Error(err, "unable to register webhook certificate readiness check")
 		os.Exit(1)
@@ -238,9 +246,9 @@ func main() {
 	}
 }
 
-func servingCertificateFilesChecker(directory string, names ...string) healthz.Checker {
+func servingCertificateFilesChecker(directory, certificateName, keyName, serviceDNSName string) healthz.Checker {
 	return func(_ *http.Request) error {
-		for _, name := range names {
+		for _, name := range []string{certificateName, keyName} {
 			path := filepath.Join(directory, name)
 			info, err := os.Stat(path)
 			if err != nil {
@@ -248,6 +256,44 @@ func servingCertificateFilesChecker(directory string, names ...string) healthz.C
 			}
 			if !info.Mode().IsRegular() || info.Size() == 0 {
 				return fmt.Errorf("webhook serving certificate file %s is not a nonempty regular file", name)
+			}
+		}
+
+		pair, err := tls.LoadX509KeyPair(
+			filepath.Join(directory, certificateName),
+			filepath.Join(directory, keyName),
+		)
+		if err != nil {
+			return fmt.Errorf("load webhook serving certificate and private key: %w", err)
+		}
+		if len(pair.Certificate) == 0 {
+			return errors.New("webhook serving certificate chain is empty")
+		}
+
+		now := time.Now()
+		for index, rawCertificate := range pair.Certificate {
+			certificate, err := x509.ParseCertificate(rawCertificate)
+			if err != nil {
+				return fmt.Errorf("parse webhook serving certificate chain entry %d: %w", index, err)
+			}
+			if now.Before(certificate.NotBefore) {
+				return fmt.Errorf(
+					"webhook serving certificate chain entry %d is not valid before %s",
+					index,
+					certificate.NotBefore.UTC().Format(time.RFC3339),
+				)
+			}
+			if !now.Before(certificate.NotAfter) {
+				return fmt.Errorf(
+					"webhook serving certificate chain entry %d expired at %s",
+					index,
+					certificate.NotAfter.UTC().Format(time.RFC3339),
+				)
+			}
+			if index == 0 {
+				if err := certificate.VerifyHostname(strings.TrimSpace(serviceDNSName)); err != nil {
+					return fmt.Errorf("webhook serving certificate is not valid for %s: %w", serviceDNSName, err)
+				}
 			}
 		}
 		return nil

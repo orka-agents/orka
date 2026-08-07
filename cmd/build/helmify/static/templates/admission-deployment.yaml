@@ -54,6 +54,7 @@ spec:
             - --webhook-cert-path=/var/run/orka/admission/tls
             - {{ printf "--webhook-cert-name=%s" .Values.admission.tls.certKey | quote }}
             - {{ printf "--webhook-cert-key=%s" .Values.admission.tls.privateKeyKey | quote }}
+            - {{ printf "--webhook-service-dns-name=%s.%s.svc" (include "orka.admissionName" .) .Release.Namespace | quote }}
             - {{ printf "--controller-username=%s" (include "orka.admissionControllerUsername" .) | quote }}
             - {{ printf "--adjudication-controller-username=%s" (include "orka.admissionAdjudicationControllerUsername" .) | quote }}
             - {{ printf "--admin-groups=%s" (join "," .Values.admission.identity.adminGroups) | quote }}

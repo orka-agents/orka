@@ -5,7 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 renderer="${root}/scripts/render-acp-runtime-images.sh"
 kustomize="${KUSTOMIZE:-${root}/bin/kustomize}"
 
-for command in "${renderer}" "${kustomize}" jq ruby; do
+for command in "${renderer}" "${kustomize}" jq openssl ruby; do
   command -v "${command}" >/dev/null 2>&1 || {
     echo "required command not found: ${command}" >&2
     exit 1
@@ -200,6 +200,83 @@ if "${renderer}" "${overlay}" "${codex_b}" "${claude_b}" "${copilot_b}" "not-dig
 fi
 
 apply_script="${root}/scripts/apply-acp-production.sh"
+tls_fixture_dir="${test_root}/admission-tls"
+mkdir -p "${tls_fixture_dir}"
+ruby -ropenssl - "${tls_fixture_dir}" <<'RUBY_TLS_FIXTURES'
+directory = ARGV.fetch(0)
+now = Time.now
+
+def issue_ca(common_name, key, not_before, not_after, serial)
+  certificate = OpenSSL::X509::Certificate.new
+  certificate.version = 2
+  certificate.serial = serial
+  certificate.subject = OpenSSL::X509::Name.parse("/CN=#{common_name}")
+  certificate.issuer = certificate.subject
+  certificate.public_key = key.public_key
+  certificate.not_before = not_before
+  certificate.not_after = not_after
+  extensions = OpenSSL::X509::ExtensionFactory.new
+  extensions.subject_certificate = certificate
+  extensions.issuer_certificate = certificate
+  certificate.add_extension(extensions.create_extension("basicConstraints", "CA:TRUE", true))
+  certificate.add_extension(extensions.create_extension("keyUsage", "keyCertSign,cRLSign", true))
+  certificate.add_extension(extensions.create_extension("subjectKeyIdentifier", "hash", false))
+  certificate.add_extension(extensions.create_extension("authorityKeyIdentifier", "keyid:always", false))
+  certificate.sign(key, OpenSSL::Digest::SHA256.new)
+  certificate
+end
+
+def issue_server(ca_certificate, ca_key, server_key, dns_name, not_before, not_after, serial)
+  certificate = OpenSSL::X509::Certificate.new
+  certificate.version = 2
+  certificate.serial = serial
+  certificate.subject = OpenSSL::X509::Name.parse("/CN=#{dns_name}")
+  certificate.issuer = ca_certificate.subject
+  certificate.public_key = server_key.public_key
+  certificate.not_before = not_before
+  certificate.not_after = not_after
+  extensions = OpenSSL::X509::ExtensionFactory.new
+  extensions.subject_certificate = certificate
+  extensions.issuer_certificate = ca_certificate
+  certificate.add_extension(extensions.create_extension("basicConstraints", "CA:FALSE", true))
+  certificate.add_extension(extensions.create_extension("keyUsage", "digitalSignature,keyEncipherment", true))
+  certificate.add_extension(extensions.create_extension("extendedKeyUsage", "serverAuth", false))
+  certificate.add_extension(extensions.create_extension("subjectAltName", "DNS:#{dns_name}", false))
+  certificate.add_extension(extensions.create_extension("subjectKeyIdentifier", "hash", false))
+  certificate.add_extension(extensions.create_extension("authorityKeyIdentifier", "keyid:always", false))
+  certificate.sign(ca_key, OpenSSL::Digest::SHA256.new)
+  certificate
+end
+
+ca_key = OpenSSL::PKey::RSA.new(2048)
+ca_certificate = issue_ca("Orka Admission Test CA", ca_key, now - 3600, now + 86_400, 1)
+other_ca_key = OpenSSL::PKey::RSA.new(2048)
+other_ca_certificate = issue_ca("Untrusted Test CA", other_ca_key, now - 3600, now + 86_400, 2)
+server_key = OpenSSL::PKey::RSA.new(2048)
+mismatched_key = OpenSSL::PKey::RSA.new(2048)
+service_dns = "orka-admission.orka-system.svc"
+
+File.binwrite(File.join(directory, "ca.crt"), ca_certificate.to_pem)
+File.binwrite(File.join(directory, "other-ca.crt"), other_ca_certificate.to_pem)
+File.binwrite(File.join(directory, "tls.key"), server_key.to_pem)
+File.binwrite(File.join(directory, "mismatched.key"), mismatched_key.to_pem)
+File.binwrite(File.join(directory, "tls.crt"), issue_server(
+  ca_certificate, ca_key, server_key, service_dns, now - 3600, now + 86_400, 3
+).to_pem)
+File.binwrite(File.join(directory, "wrong-san.crt"), issue_server(
+  ca_certificate, ca_key, server_key, "not-orka-admission.orka-system.svc", now - 3600, now + 86_400, 4
+).to_pem)
+File.binwrite(File.join(directory, "expired.crt"), issue_server(
+  ca_certificate, ca_key, server_key, service_dns, now - 7200, now - 3600, 5
+).to_pem)
+File.binwrite(File.join(directory, "future.crt"), issue_server(
+  ca_certificate, ca_key, server_key, service_dns, now + 3600, now + 7200, 6
+).to_pem)
+File.binwrite(File.join(directory, "invalid.crt"), "not a certificate\n")
+File.binwrite(File.join(directory, "invalid.key"), "not a private key\n")
+RUBY_TLS_FIXTURES
+export FAKE_TLS_FIXTURE_DIR="${tls_fixture_dir}"
+
 fake_bin="${test_root}/fake-bin"
 mkdir -p "${fake_bin}"
 cat >"${fake_bin}/kubectl" <<'EOF_FAKE_KUBECTL'
@@ -346,11 +423,28 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "secret"
 fi
 
 if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "secret" && "$5" == "orka-admission-tls" ]]; then
-  [[ "${FAKE_TLS_MODE:-valid}" != "missing" ]] || exit 1
-  cert="$(printf 'fake-serving-certificate' | base64 | tr -d '\r\n')"
-  key="$(printf 'fake-serving-private-key' | base64 | tr -d '\r\n')"
-  ca="$(printf 'fake-admission-ca' | base64 | tr -d '\r\n')"
-  if [[ "${FAKE_TLS_MODE:-valid}" == "missing-ca" ]]; then
+  tls_mode="${FAKE_TLS_MODE:-valid}"
+  [[ "${tls_mode}" != "missing" ]] || exit 1
+  tls_directory="${FAKE_TLS_FIXTURE_DIR:?}"
+  cert_path="${tls_directory}/tls.crt"
+  key_path="${tls_directory}/tls.key"
+  ca_path="${tls_directory}/ca.crt"
+  case "${tls_mode}" in
+    valid|missing-ca) ;;
+    invalid-cert) cert_path="${tls_directory}/invalid.crt" ;;
+    invalid-key) key_path="${tls_directory}/invalid.key" ;;
+    invalid-ca) ca_path="${tls_directory}/invalid.crt" ;;
+    mismatched-key) key_path="${tls_directory}/mismatched.key" ;;
+    expired) cert_path="${tls_directory}/expired.crt" ;;
+    future) cert_path="${tls_directory}/future.crt" ;;
+    wrong-san) cert_path="${tls_directory}/wrong-san.crt" ;;
+    wrong-ca) ca_path="${tls_directory}/other-ca.crt" ;;
+    *) echo "unknown FAKE_TLS_MODE: ${tls_mode}" >&2; exit 2 ;;
+  esac
+  cert="$(base64 <"${cert_path}" | tr -d '\r\n')"
+  key="$(base64 <"${key_path}" | tr -d '\r\n')"
+  ca="$(base64 <"${ca_path}" | tr -d '\r\n')"
+  if [[ "${tls_mode}" == "missing-ca" ]]; then
     jq -n --arg cert "${cert}" --arg key "${key}" '{apiVersion:"v1",kind:"Secret",type:"kubernetes.io/tls",metadata:{name:"orka-admission-tls",namespace:"orka-system"},data:{"tls.crt":$cert,"tls.key":$key}}'
   else
     jq -n --arg cert "${cert}" --arg key "${key}" --arg ca "${ca}" '{apiVersion:"v1",kind:"Secret",type:"kubernetes.io/tls",metadata:{name:"orka-admission-tls",namespace:"orka-system"},data:{"tls.crt":$cert,"tls.key":$key,"ca.crt":$ca}}'
@@ -622,7 +716,7 @@ if grep -q '^control-create:' "${preserved_control_state}/apply.log"; then
   exit 1
 fi
 
-for tls_mode in missing missing-ca; do
+for tls_mode in missing missing-ca invalid-cert invalid-key invalid-ca mismatched-key expired future wrong-san wrong-ca; do
   tls_state="${test_root}/state-tls-${tls_mode}"
   mkdir -p "${tls_state}"
   : >"${tls_state}/apply.log"

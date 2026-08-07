@@ -431,15 +431,25 @@ func resolveHarnessV1CredentialRefs(
 	if secret.UID == "" || secret.ResourceVersion == "" {
 		return nil, errors.New("harness v1 provider credential Secret identity is incomplete")
 	}
+	allowedKeys, err := readOnlyAgentRuntimeSecretKeys(agent)
+	if err != nil {
+		return nil, permanentHarnessV1Candidate(fmt.Errorf("resolve harness v1 provider credential keys: %w", err))
+	}
+	allowedKeySet := make(map[string]struct{}, len(allowedKeys))
+	for _, key := range allowedKeys {
+		allowedKeySet[key] = struct{}{}
+	}
 	keys := make([]string, 0, len(secret.Data))
 	for key, value := range secret.Data {
 		key = strings.TrimSpace(key)
-		upper := strings.ToUpper(key)
 		if key == "" || len(value) == 0 {
 			continue
 		}
-		if strings.Contains(upper, "TXN_TOKEN") || strings.Contains(upper, "TX_TOKEN") || strings.Contains(upper, "TRANSACTION_TOKEN") || strings.Contains(upper, "KONTXT") {
-			return nil, permanentHarnessV1Candidate(fmt.Errorf("provider credential Secret key %q is prohibited for harness v1", key))
+		if _, ok := allowedKeySet[key]; !ok {
+			return nil, permanentHarnessV1Candidate(fmt.Errorf(
+				"provider credential Secret key %q is not allowed for harness v1 runtime %q",
+				key, agent.Spec.Runtime.Type,
+			))
 		}
 		keys = append(keys, key)
 	}

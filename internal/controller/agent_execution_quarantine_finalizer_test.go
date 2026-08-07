@@ -14,6 +14,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -230,5 +231,52 @@ func TestAdjudicatedHarnessV1DeletionRetainsActiveAttempt(t *testing.T) {
 	}
 	if _, err := durable.GetHarnessV1Attempt(ctx, key); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("reclaimed attempt error = %v, want not found", err)
+	}
+}
+
+func TestAdjudicatedHarnessV1DeletionReclaimsInventoriedRuntimeWithoutAttempt(t *testing.T) {
+	ctx := context.Background()
+	task := adjudicationTestQuarantinedTask(true, false)
+	task.Name = "quarantined-runtime-only-v1"
+	task.UID = types.UID("quarantined-runtime-only-v1-uid")
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	durable := sqlite.NewStore(db, "quarantined-runtime-only-v1-test")
+	runtimeSession := &harness.RuntimeSession{
+		ID: "legacy-runtime-only-v1",
+		Owner: harness.RuntimeSessionOwner{
+			Namespace: task.Namespace, SessionName: "legacy-chat", ActiveTask: task.Name,
+			Provider: harness.ProviderKindKubernetesService,
+		},
+		State: harness.RuntimeSessionStatePending, CleanupPolicy: harness.RuntimeCleanupPolicyDelete,
+		CreatedAt: time.Date(2026, 8, 6, 23, 50, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 8, 6, 23, 50, 0, 0, time.UTC),
+	}
+	if err := durable.CreateRuntimeSession(ctx, runtimeSession); err != nil {
+		t.Fatal(err)
+	}
+	evidence := []agentExecutionClassificationEvidenceItem{classificationEvidenceItem(
+		"LegacyRuntimeSession", task.Namespace, string(runtimeSession.ID), "", "", *runtimeSession,
+	)}
+	sortClassificationEvidence(evidence)
+	task.Status.AgentExecutionQuarantine.V1EvidenceDigest = evidenceItemsDigest(evidence)
+
+	r := &TaskReconciler{HarnessV1Attempts: durable}
+	ready, err := r.adjudicatedHarnessV1TaskDeletionReady(ctx, task)
+	if err != nil {
+		t.Fatalf("runtime-only adjudicated v1 deletion: %v", err)
+	}
+	if !ready {
+		t.Fatal("runtime-only adjudicated v1 deletion did not become ready")
+	}
+	if _, err := durable.GetRuntimeSession(ctx, task.Namespace, runtimeSession.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("legacy runtime row error = %v, want not found", err)
+	}
+	ready, err = r.adjudicatedHarnessV1TaskDeletionReady(ctx, task)
+	if err != nil || !ready {
+		t.Fatalf("runtime-only adjudicated v1 retry = ready %t, err %v", ready, err)
 	}
 }

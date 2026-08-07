@@ -2,6 +2,7 @@ package cliwrapper
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,7 +81,6 @@ func TestDurableTurnOutputSurvivesWrapperRestart(t *testing.T) {
 	stop()
 
 	baseURL, stop = startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
-	defer stop()
 	client, err = harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +91,135 @@ func TestDurableTurnOutputSurvivesWrapperRestart(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Fatalf("fetched output = %q, want %q", got, want)
+	}
+	receipt, err := harness.DurableTurnTerminalReceiptFromFrame(last)
+	if err != nil {
+		t.Fatalf("terminal receipt: %v", err)
+	}
+	receiptDigest, err := harness.DurableTurnTerminalReceiptDigest(receipt)
+	if err != nil {
+		t.Fatalf("terminal receipt digest: %v", err)
+	}
+	acknowledgement := harness.TurnOutputAcknowledgementRequest{
+		Version:               harness.ProtocolVersion,
+		TurnID:                request.TurnID,
+		OutputRef:             last.Completed.OutputRef,
+		TerminalReceiptDigest: receiptDigest,
+	}
+	if err := client.AcknowledgeTurnOutput(context.Background(), acknowledgement); err != nil {
+		t.Fatalf("AcknowledgeTurnOutput: %v", err)
+	}
+	if _, err := client.FetchTurnOutput(
+		context.Background(), request.TurnID, last.Completed.OutputRef,
+	); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("FetchTurnOutput(after acknowledgement) error = %v, want 404", err)
+	}
+	stop()
+
+	baseURL, stop = startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer stop()
+	client, err = harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.AcknowledgeTurnOutput(context.Background(), acknowledgement); err != nil {
+		t.Fatalf("AcknowledgeTurnOutput(after restart): %v", err)
+	}
+}
+
+func TestDurableTurnEnvValuesAreRedactedAcrossRestart(t *testing.T) {
+	testCases := []struct {
+		name   string
+		script string
+		failed bool
+	}{
+		{
+			name: "completed",
+			script: "printf 'stdout:%s' \"$OPAQUE_TURN_ENV\"; " +
+				"printf 'stderr:%s' \"$OPAQUE_TURN_ENV\" >&2; " +
+				"printf 'result:%s' \"$OPAQUE_TURN_ENV\" > result.txt",
+		},
+		{
+			name: "failed",
+			script: "printf 'stdout:%s' \"$OPAQUE_TURN_ENV\"; " +
+				"printf 'stderr:%s' \"$OPAQUE_TURN_ENV\" >&2; " +
+				"printf 'result:%s' \"$OPAQUE_TURN_ENV\" > result.txt; exit 7",
+			failed: true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			const opaqueValue = "opaque-turn-env-value-84e23a"
+			cfg := DefaultConfig()
+			cfg.AuthValue = durableAdmissionControllerToken
+			cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+			cfg.Generic = GenericAdapterConfig{
+				Command:    wrapperTestShellPath,
+				Args:       []string{"-c", testCase.script},
+				PromptMode: PromptModeStdin,
+				ResultMode: ResultModeFile,
+				ResultFile: "result.txt",
+			}
+			request := validWrapperStartTurnRequest()
+			request.Input.Env = []harness.TurnEnvVar{{Name: "OPAQUE_TURN_ENV", Value: opaqueValue}}
+			request = sealDurableWrapperRequest(request)
+
+			baseURL, stop := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+			client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.StartTurn(context.Background(), request); err != nil {
+				t.Fatalf("StartTurn: %v", err)
+			}
+			frames := collectWrapperFrames(t, client, request.TurnID, 0)
+			encoded, err := json.Marshal(frames)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), opaqueValue) {
+				t.Fatalf("SSE frames leaked exact turn env value: %s", encoded)
+			}
+			if !strings.Contains(string(encoded), "[REDACTED]") {
+				t.Fatalf("SSE frames did not contain a redaction marker: %s", encoded)
+			}
+
+			last := frames[len(frames)-1]
+			var outputRef string
+			if testCase.failed {
+				if last.Failed == nil {
+					t.Fatalf("terminal frame = %#v, want failed", last)
+				}
+				outputRef = last.Failed.OutputRef
+			} else {
+				if last.Completed == nil {
+					t.Fatalf("terminal frame = %#v, want completed", last)
+				}
+				outputRef = last.Completed.OutputRef
+			}
+			if outputRef != localOutputRef {
+				t.Fatalf("terminal output ref = %q, want %q", outputRef, localOutputRef)
+			}
+			stop()
+
+			baseURL, stop = startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+			defer stop()
+			client, err = harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := client.FetchTurnOutput(context.Background(), request.TurnID, outputRef)
+			if err != nil {
+				t.Fatalf("FetchTurnOutput(after restart): %v", err)
+			}
+			if strings.Contains(string(output), opaqueValue) {
+				t.Fatalf("durable output leaked exact turn env value: %q", output)
+			}
+			if !strings.Contains(string(output), "[REDACTED]") {
+				t.Fatalf("durable output did not contain a redaction marker: %q", output)
+			}
+		})
 	}
 }
 

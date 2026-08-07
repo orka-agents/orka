@@ -929,18 +929,23 @@ deploy_orka() {
     --from-literal="ORKA_ACP_OPENCODE_RUNTIME_IMAGE=example.invalid/orka/acp-opencode@${placeholder_digest}" \
     --dry-run=client -o yaml | kubectl apply -f -
 
-  local capability_dir artifact_capability_field publisher_controller_field publisher_operation_field provider_field
+  local capability_dir snapshot_key_field artifact_capability_field publisher_controller_field publisher_operation_field provider_field
   capability_dir="$(mktemp -d "${TMP_ROOT}/acp-capabilities.XXXXXX")"
+  snapshot_key_field="snapshot-key"
   artifact_capability_field="capability-secret"
   publisher_controller_field="controller-token"
   publisher_operation_field="operation-capability-secret"
   provider_field="token"
   chmod 0700 "${capability_dir}"
+  dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/snapshot-key"
   dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/artifact-capability"
   dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/publisher-token"
   dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/publisher-capability"
   dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/provider-token"
   chmod 0600 "${capability_dir}"/*
+  kubectl -n orka-system create secret generic agent-execution-snapshot-key \
+    --from-file="${snapshot_key_field}=${capability_dir}/snapshot-key" \
+    --dry-run=client -o yaml | kubectl apply -f -
   kubectl -n orka-system create secret generic acp-artifact-capability \
     --from-file="${artifact_capability_field}=${capability_dir}/artifact-capability" \
     --dry-run=client -o yaml | kubectl apply -f -

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +172,128 @@ func TestResolveHarnessV1ExecutionCandidateFreezesRuntimeAuthOnly(t *testing.T) 
 	}
 	if unprotected.binding.Snapshot.Digest == candidate.binding.Snapshot.Digest {
 		t.Fatal("runtime-auth-only annotation did not change the immutable snapshot digest")
+	}
+}
+
+func TestResolveHarnessV1CredentialRefsAllowlistsRuntimeProviderKeys(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	tests := []struct {
+		name        string
+		runtimeType corev1alpha1.AgentRuntimeType
+		data        map[string][]byte
+		wantKeys    []string
+	}{
+		{
+			name: "codex", runtimeType: corev1alpha1.AgentRuntimeCodex,
+			data: map[string][]byte{
+				"OPENAI_API_KEY":  []byte("codex-provider-key"),
+				"OPENAI_BASE_URL": []byte("https://provider.example.invalid"),
+			},
+			wantKeys: []string{"OPENAI_API_KEY", "OPENAI_BASE_URL"},
+		},
+		{
+			name: "claude", runtimeType: corev1alpha1.AgentRuntimeClaude,
+			data: map[string][]byte{
+				"ANTHROPIC_API_KEY":  []byte("claude-provider-key"),
+				"ANTHROPIC_BASE_URL": []byte("https://provider.example.invalid"),
+			},
+			wantKeys: []string{"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: fixture.task.Namespace, Name: "provider-" + tt.name,
+					UID: types.UID("provider-" + tt.name + "-uid"),
+				},
+				Data: tt.data,
+			}
+			if err := fixture.reconciler.Create(ctx, secret); err != nil {
+				t.Fatal(err)
+			}
+			agent := fixture.agent.DeepCopy()
+			agent.Spec.Runtime.Type = tt.runtimeType
+			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secret.Name}
+			refs, err := resolveHarnessV1CredentialRefs(
+				ctx, fixture.reconciler.Client, agent, resolvedHarnessV1Target{},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(refs) != 1 || !slices.Equal(refs[0].Keys, tt.wantKeys) {
+				t.Fatalf("credential refs = %#v, want keys %v", refs, tt.wantKeys)
+			}
+		})
+	}
+}
+
+func TestResolveHarnessV1CredentialRefsRejectsUnrelatedKeys(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	for _, prohibitedKey := range []string{"GITHUB_TOKEN", "GIT_TOKEN", "KONTXT_TXN_TOKEN"} {
+		t.Run(prohibitedKey, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: fixture.task.Namespace, Name: "provider-" + strings.ToLower(prohibitedKey),
+					UID: types.UID("provider-" + strings.ToLower(prohibitedKey) + "-uid"),
+				},
+				Data: map[string][]byte{
+					"OPENAI_API_KEY": []byte("provider-key"),
+					prohibitedKey:    []byte("unrelated-sensitive-value"),
+				},
+			}
+			if err := fixture.reconciler.Create(ctx, secret); err != nil {
+				t.Fatal(err)
+			}
+			agent := fixture.agent.DeepCopy()
+			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secret.Name}
+			_, err := resolveHarnessV1CredentialRefs(
+				ctx, fixture.reconciler.Client, agent, resolvedHarnessV1Target{},
+			)
+			if err == nil || !isPermanentHarnessV1CandidateError(err) || !strings.Contains(err.Error(), prohibitedKey) {
+				t.Fatalf("unrelated credential key error = %v, want permanent rejection mentioning %s", err, prohibitedKey)
+			}
+		})
+	}
+}
+
+func TestHarnessV1SessionLineageDigestExcludesTurnSnapshot(t *testing.T) {
+	binding := &corev1alpha1.AgentExecutionBinding{
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+		Backend:         corev1alpha1.AgentExecutionBackendHarnessWrapper,
+		RuntimeType:     corev1alpha1.AgentRuntimeCodex,
+		Agent: &corev1alpha1.AgentExecutionAgentRef{
+			Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1,
+		},
+		Policy: &corev1alpha1.AgentExecutionPolicyRef{
+			Name: "compatibility", UID: types.UID("policy-uid"), Generation: 1,
+			Digest: "sha256:" + strings.Repeat("a", 64),
+		},
+		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{Digest: "sha256:" + strings.Repeat("b", 64)},
+	}
+	first, err := agentExecutionLineageConfigDigest(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTurn := *binding
+	secondTurn.Snapshot.Digest = "sha256:" + strings.Repeat("c", 64)
+	second, err := agentExecutionLineageConfigDigest(&secondTurn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("turn-specific snapshots changed v1 Session lineage digest: %s != %s", first, second)
+	}
+	otherRuntime := secondTurn
+	otherRuntime.RuntimeType = corev1alpha1.AgentRuntimeClaude
+	third, err := agentExecutionLineageConfigDigest(&otherRuntime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third == first {
+		t.Fatal("runtime identity change did not change v1 Session lineage digest")
 	}
 }
 

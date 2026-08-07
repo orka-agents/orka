@@ -227,6 +227,17 @@ grep -Fq 'name: "ORKA_WORKSPACE_PUBLISHER_URL",' <<<"${publisher_disable_patch}"
 grep -Fq '"$patch": "delete"' <<<"${publisher_disable_patch}" || \
   fail 'Substrate controller patch does not disable the omitted Publisher client'
 
+# The controller Deployment mounts the encrypted execution-snapshot key even
+# when ACP dispatch is disabled. Provision it before applying the workload so
+# the Substrate-only rollout cannot stall in ContainerCreating.
+grep -F 'dd if=/dev/urandom bs=32 count=1' "${e2e}" | \
+  grep -F '>"${capability_dir}/snapshot-key"' >/dev/null || \
+  fail 'Substrate deploy does not generate a 32-byte execution-snapshot key'
+grep -F 'create secret generic agent-execution-snapshot-key' "${e2e}" >/dev/null || \
+  fail 'Substrate deploy does not provision the execution-snapshot Secret'
+grep -F -- '--from-file="${snapshot_key_field}=${capability_dir}/snapshot-key"' "${e2e}" >/dev/null || \
+  fail 'Substrate execution-snapshot Secret does not use the required key field'
+
 # The extended path now installs a fail-once executable on the assigned worker,
 # requires the patched verified-presence retry log, and restores the real runsc.
 grep -F 'install_runsc_delete_failure_injector "${worker_name}"' "${e2e}" >/dev/null

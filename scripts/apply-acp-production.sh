@@ -14,7 +14,7 @@ overlay_dir="$1"
 kustomize="$2"
 kubectl="$3"
 
-for command in "${kustomize}" "${kubectl}" base64 dd jq sleep tr wc; do
+for command in "${kustomize}" "${kubectl}" base64 cmp dd jq openssl sleep tr wc; do
   command -v "${command}" >/dev/null 2>&1 || {
     echo "required command not found: ${command}" >&2
     exit 1
@@ -52,6 +52,8 @@ admission_tls_secret="${work_dir}/orka-admission-tls.json"
 admission_tls_cert="${work_dir}/orka-admission-tls.crt"
 admission_tls_key="${work_dir}/orka-admission-tls.key"
 admission_ca_cert="${work_dir}/orka-admission-ca.crt"
+admission_tls_cert_public_key="${work_dir}/orka-admission-tls-cert.pub"
+admission_tls_key_public_key="${work_dir}/orka-admission-tls-key.pub"
 admission_endpoints="${work_dir}/orka-admission-endpoints.json"
 admission_control="${work_dir}/orka-admission-control.json"
 admission_webhooks_source="${work_dir}/orka-admission-webhooks.yaml"
@@ -177,6 +179,7 @@ ensure_snapshot_secret() {
 }
 
 validate_admission_tls_secret() {
+  local service_dns="orka-admission.orka-system.svc"
   if ! "${kubectl}" -n orka-system get secret orka-admission-tls -o json >"${admission_tls_secret}"; then
     echo "orka-system/orka-admission-tls is required before admission rollout" >&2
     return 1
@@ -190,7 +193,7 @@ validate_admission_tls_secret() {
     echo "orka-system/orka-admission-tls must be a TLS Secret containing tls.crt, tls.key, and ca.crt" >&2
     return 1
   fi
-  local key output
+  local key output san_extension
   for key in tls.crt tls.key ca.crt; do
     case "${key}" in
       tls.crt) output="${admission_tls_cert}" ;;
@@ -203,6 +206,33 @@ validate_admission_tls_secret() {
       return 1
     fi
   done
+
+  if ! openssl x509 -in "${admission_tls_cert}" -noout >/dev/null 2>&1 \
+    || ! openssl pkey -in "${admission_tls_key}" -passin pass: -noout >/dev/null 2>&1 \
+    || ! openssl x509 -in "${admission_ca_cert}" -noout >/dev/null 2>&1; then
+    echo "orka-system/orka-admission-tls must contain parseable PEM certificate, private-key, and CA material" >&2
+    return 1
+  fi
+  if ! openssl x509 -in "${admission_tls_cert}" -pubkey -noout \
+      >"${admission_tls_cert_public_key}" 2>/dev/null \
+    || ! openssl pkey -in "${admission_tls_key}" -passin pass: -pubout \
+      >"${admission_tls_key_public_key}" 2>/dev/null \
+    || ! cmp -s "${admission_tls_cert_public_key}" "${admission_tls_key_public_key}"; then
+    echo "orka-system/orka-admission-tls tls.crt and tls.key do not form a key pair" >&2
+    return 1
+  fi
+  if ! san_extension="$(openssl x509 -in "${admission_tls_cert}" -noout -ext subjectAltName 2>/dev/null)" \
+    || [[ "${san_extension}" != *"X509v3 Subject Alternative Name"* ]] \
+    || ! openssl x509 -in "${admission_tls_cert}" -noout -checkhost "${service_dns}" >/dev/null 2>&1; then
+    echo "orka-system/orka-admission-tls tls.crt must contain a subjectAltName for ${service_dns}" >&2
+    return 1
+  fi
+  if ! openssl verify -x509_strict -purpose sslserver -verify_hostname "${service_dns}" \
+      -CAfile "${admission_ca_cert}" -untrusted "${admission_tls_cert}" \
+      "${admission_tls_cert}" >/dev/null 2>&1; then
+    echo "orka-system/orka-admission-tls tls.crt must be currently valid for ${service_dns} and chain to ca.crt" >&2
+    return 1
+  fi
 }
 
 render_admission_webhooks() {
@@ -332,8 +362,8 @@ EOF_ADMISSION_HANDLERS
 # after any apply still converges on the desired generation without rotating an
 # existing snapshot key or recreating the durable execution-control singleton.
 "${kubectl}" apply -f "${namespace_resource}"
-ensure_snapshot_secret
 validate_admission_tls_secret
+ensure_snapshot_secret
 "${kubectl}" apply -f "${runtime_config}"
 ensure_execution_control
 "${kubectl}" apply -f "${workload_manifest}"

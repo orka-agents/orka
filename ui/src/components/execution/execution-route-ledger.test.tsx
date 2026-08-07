@@ -18,6 +18,24 @@ function agentTask(status: Task['status']): Task {
   }
 }
 
+function harnessV1Binding(): NonNullable<NonNullable<Task['status']>['agentExecutionBinding']> {
+  return {
+    schemaVersion: 1,
+    mode: 'execute',
+    contractVersion: 'orka.harness.v1',
+    backend: 'harness-wrapper',
+    provenance: 'newly-bound',
+    bindingDigest: digest('c'),
+    task: { namespaceUID: 'namespace-uid', uid: 'task-uid', boundSpecGeneration: 2 },
+    backendControl: {
+      name: 'cluster', uid: 'control-uid', generation: 4, modeRevision: 12, admittedMode: 'enabled',
+    },
+    snapshot: { id: 'task-uid/snapshot', digest: digest('d'), schemaVersion: 1 },
+    runtimeType: 'codex',
+    boundAt: '2026-08-06T00:00:00Z',
+  }
+}
+
 describe('TaskExecutionRouteLedger', () => {
   it('shows the immutable v2 route, snapshot, and admission revision without full digests', () => {
     const { container } = render(
@@ -97,6 +115,45 @@ describe('TaskExecutionRouteLedger', () => {
     expect(screen.getByText('Common cleanup only')).toBeInTheDocument()
     expect(screen.getByText('No-route proof recorded')).toBeInTheDocument()
     expect(screen.getByText('No operator decision required')).toBeInTheDocument()
+  })
+
+  it('requires reconciliation for a harness v1 unknown outcome', () => {
+    render(
+      <TaskExecutionRouteLedger
+        task={agentTask({
+          phase: 'Failed',
+          agentExecutionBinding: harnessV1Binding(),
+          harnessRuntime: { state: 'OutcomeUnknown', outcome: 'OutcomeUnknown' },
+        })}
+      />,
+    )
+
+    expect(screen.getByText('Outcome unknown')).toHaveClass('text-status-failed')
+    expect(screen.getByText('Human reconciliation required')).toBeInTheDocument()
+  })
+
+  it('shows an applied resolution for a harness v1 unknown outcome', () => {
+    render(
+      <TaskExecutionRouteLedger
+        task={agentTask({
+          phase: 'Failed',
+          agentExecutionBinding: harnessV1Binding(),
+          harnessRuntime: { state: 'OutcomeUnknown', outcome: 'OutcomeUnknown' },
+          agentExecutionResolutionRef: {
+            adjudicationName: 'resolve-v1-outcome',
+            adjudicationUID: 'adjudication-uid',
+            action: 'CleanupV1',
+            operationDigest: digest('e'),
+            resolutionDigest: digest('f'),
+            appliedAt: '2026-08-06T01:00:00Z',
+          },
+        })}
+      />,
+    )
+
+    expect(screen.getByText('Resolution applied')).toHaveClass('text-status-pending')
+    expect(screen.getByText('Operator resolution recorded')).toBeInTheDocument()
+    expect(screen.getByText('CleanupV1 · resolve-v1-outcome')).toBeInTheDocument()
   })
 })
 

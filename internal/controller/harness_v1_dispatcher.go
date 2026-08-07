@@ -50,13 +50,17 @@ const (
 	harnessV1AdmissionClosedMessage   = "harness v1 wrapper admission is temporarily closed"
 )
 
-var errHarnessV1TerminalFrame = errors.New("harness v1 terminal frame received")
+var (
+	errHarnessV1TerminalFrame              = errors.New("harness v1 terminal frame received")
+	errHarnessV1StreamEndedWithoutTerminal = errors.New("harness v1 frame stream ended without terminal evidence")
+)
 
 type harnessV1ProtocolClient interface {
 	StartTurn(context.Context, harness.StartTurnRequest) (*harness.StartTurnResponse, error)
 	DurableTurnStatus(context.Context, harness.HarnessTurnID) (*harness.DurableTurnStatus, error)
 	StreamFrames(context.Context, harness.HarnessTurnID, int64, func(harness.HarnessEventFrame) error) error
 	FetchTurnOutput(context.Context, harness.HarnessTurnID, string) ([]byte, error)
+	AcknowledgeTurnOutput(context.Context, harness.TurnOutputAcknowledgementRequest) error
 	CancelTurn(context.Context, harness.CancelTurnRequest) (*harness.CancelTurnResponse, error)
 }
 
@@ -156,6 +160,9 @@ func (d *HarnessV1Dispatcher) dispatchOnce(ctx context.Context) error {
 			continue
 		}
 		latest := attempts[len(attempts)-1]
+		if store.IsTerminalHarnessV1AttemptState(latest.State) && harnessV1AttemptProjectionMatches(task, &latest) {
+			continue
+		}
 		select {
 		case d.sem <- struct{}{}:
 			if !d.markActive(task.UID) {
@@ -215,7 +222,7 @@ func (d *HarnessV1Dispatcher) reconcileAttempt(ctx context.Context, task *corev1
 	}
 
 	if store.IsTerminalHarnessV1AttemptState(attempt.State) {
-		return d.reconcileTerminalAttempt(ctx, task, attempt, fence)
+		return d.reconcileTerminalAttemptAfterOutputAcknowledgement(ctx, task, attempt, fence)
 	}
 
 	verifier := TaskReconciler{
@@ -461,18 +468,34 @@ func buildHarnessV1StartTurnRequest(
 		Input:             harness.TurnInput{Prompt: verified.body.Prompt, Env: env},
 		ToolExecutionMode: harness.ToolExecutionModeObserved,
 		Metadata: map[string]string{
-			harness.MetadataTaskUID:        attempt.TaskUID,
-			harness.MetadataAttempt:        strconv.FormatInt(int64(attempt.Attempt), 10),
-			harness.MetadataBindingDigest:  attempt.BindingDigest,
-			harness.MetadataSnapshotDigest: attempt.SnapshotDigest,
-			"orka.runtimeName":             verified.body.HarnessV1.RuntimeName,
+			harness.MetadataTaskUID:             attempt.TaskUID,
+			harness.MetadataAttempt:             strconv.FormatInt(int64(attempt.Attempt), 10),
+			harness.MetadataBindingDigest:       attempt.BindingDigest,
+			harness.MetadataSnapshotDigest:      attempt.SnapshotDigest,
+			"orka.runtimeName":                  verified.body.HarnessV1.RuntimeName,
+			harness.MetadataRuntimePolicyFrozen: booleanTrueValue,
+			"model":                             verified.body.Configuration.Model,
+			"systemPrompt":                      verified.body.Configuration.SystemPrompt,
+			"maxTurns":                          strconv.FormatInt(int64(verified.body.Configuration.MaxTurns), 10),
+			"reasoningEffort":                   verified.body.Configuration.ReasoningEffort,
 		},
 	}
+	if verified.body.Configuration.MaxTurns < 1 {
+		return harness.StartTurnRequest{}, errors.New("frozen harness v1 max turns must be positive")
+	}
+	allowedTools, allowedToolsSet, disallowedTools, allowBash := frozenHarnessV1ToolPolicy(verified.body)
+	if !allowedToolsSet || allowBash == nil {
+		return harness.StartTurnRequest{}, errors.New("frozen harness v1 tool policy must explicitly set allowedTools and allowBash")
+	}
+	request.Metadata[harness.MetadataAllowedToolsSet] = booleanTrueValue
+	request.Metadata["allowedTools"] = strings.Join(allowedTools, ",")
+	request.Metadata["disallowedTools"] = strings.Join(disallowedTools, ",")
+	request.Metadata["allowBash"] = strconv.FormatBool(*allowBash)
 	if attempt.RequestDigest != "" {
 		request.Metadata[harness.MetadataRequestDigest] = attempt.RequestDigest
 	}
 	if verified.body.HarnessV1.RuntimeAuthOnly {
-		request.Metadata["runtimeAuthOnly"] = "true"
+		request.Metadata["runtimeAuthOnly"] = booleanTrueValue
 	}
 	if err := request.Validate(); err != nil {
 		return harness.StartTurnRequest{}, err
@@ -485,6 +508,33 @@ func buildHarnessV1StartTurnRequest(
 		return harness.StartTurnRequest{}, errors.New("reconstructed harness v1 request digest does not match the durable attempt")
 	}
 	return request, nil
+}
+
+func frozenHarnessV1ToolPolicy(
+	body agentExecutionSnapshotBody,
+) (allowedTools []string, allowedToolsSet bool, disallowedTools []string, allowBash *bool) {
+	if body.DefaultTools != nil {
+		if !body.DefaultTools.AllowedToolsOmitted {
+			allowedTools = append([]string(nil), body.DefaultTools.AllowedTools...)
+			allowedToolsSet = true
+		}
+		if body.DefaultTools.AllowBash != nil {
+			value := *body.DefaultTools.AllowBash
+			allowBash = &value
+		}
+	}
+	if body.RuntimeOverride != nil {
+		if body.RuntimeOverride.AllowedTools != nil {
+			allowedTools = append([]string(nil), body.RuntimeOverride.AllowedTools...)
+			allowedToolsSet = true
+		}
+		disallowedTools = append([]string(nil), body.RuntimeOverride.DisallowedTools...)
+		if body.RuntimeOverride.AllowBash != nil {
+			value := *body.RuntimeOverride.AllowBash
+			allowBash = &value
+		}
+	}
+	return allowedTools, allowedToolsSet, disallowedTools, allowBash
 }
 
 func resolveFrozenHarnessV1Env(
@@ -1004,18 +1054,9 @@ func (d *HarnessV1Dispatcher) streamAcceptedAttempt(
 		if errors.As(streamErr, &clientErr) && clientErr.IsProtocolViolation() {
 			return d.markOutcomeUnknown(ctx, task, current, fence, harnessV1ReasonProtocolViolation)
 		}
-		return d.recoverAcceptedWithoutTerminal(ctx, task, current, fence)
+		return fmt.Errorf("%w: %v", errHarnessV1StreamEndedWithoutTerminal, streamErr)
 	}
-	return d.recoverAcceptedWithoutTerminal(ctx, task, current, fence)
-}
-
-func (d *HarnessV1Dispatcher) recoverAcceptedWithoutTerminal(
-	ctx context.Context,
-	task *corev1alpha1.Task,
-	attempt *store.HarnessV1Attempt,
-	fence store.ControllerEpochFence,
-) error {
-	return d.markOutcomeUnknown(ctx, task, attempt, fence, harnessV1ReasonOutcomeUnknown)
+	return errHarnessV1StreamEndedWithoutTerminal
 }
 
 func (d *HarnessV1Dispatcher) persistedEvidence(
@@ -1142,17 +1183,36 @@ func (d *HarnessV1Dispatcher) settleTerminalFrameWithReceiptDigest(
 		if frame.Completed.OutputRef != "" {
 			result, err = protocolClient.FetchTurnOutput(ctx, request.TurnID, frame.Completed.OutputRef)
 			if err != nil {
-				return d.finishAttempt(ctx, task, attempt, fence, store.HarnessV1AttemptFailed, harnessV1ReasonOutputUnavailable, receiptDigest)
+				return fmt.Errorf("fetch harness v1 terminal output: %w", err)
 			}
 		}
 		if err := d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
 			return err
+		}
+		if frame.Completed.OutputRef != "" {
+			return d.finishAttemptWithOutputAcknowledgement(
+				ctx, task, protocolClient, request, attempt, fence,
+				store.HarnessV1AttemptSucceeded, "Succeeded", receiptDigest, frame.Completed.OutputRef,
+			)
 		}
 		return d.finishAttempt(ctx, task, attempt, fence, store.HarnessV1AttemptSucceeded, "Succeeded", receiptDigest)
 	case harness.FrameTurnFailed:
 		reason := harnessV1ReasonFailed
 		if frame.Failed != nil && frame.Failed.Retryable {
 			reason = harnessV1ReasonRetryableFailure
+		}
+		if frame.Failed != nil && frame.Failed.OutputRef != "" {
+			result, err := protocolClient.FetchTurnOutput(ctx, request.TurnID, frame.Failed.OutputRef)
+			if err != nil {
+				return fmt.Errorf("fetch harness v1 failed-turn output: %w", err)
+			}
+			if err := d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
+				return err
+			}
+			return d.finishAttemptWithOutputAcknowledgement(
+				ctx, task, protocolClient, request, attempt, fence,
+				store.HarnessV1AttemptFailed, reason, receiptDigest, frame.Failed.OutputRef,
+			)
 		}
 		return d.finishAttempt(ctx, task, attempt, fence, store.HarnessV1AttemptFailed, reason, receiptDigest)
 	case harness.FrameTurnCancelled:
@@ -1185,14 +1245,14 @@ func (d *HarnessV1Dispatcher) cancelAttempt(
 		if err != nil {
 			return err
 		}
-		_, cancelErr := protocolClient.CancelTurn(ctx, harness.CancelTurnRequest{
-			Version: harness.ProtocolVersion, Namespace: task.Namespace, TaskName: task.Name,
-			SessionName: request.SessionName, RuntimeSessionID: request.RuntimeSessionID,
-			TurnID: request.TurnID, CorrelationID: request.CorrelationID, Reason: "Task cancellation requested",
-		})
-		if cancelErr != nil {
-			return d.streamAcceptedAttempt(ctx, task, verified, protocolClient, request, attempt, fence)
-		}
+	}
+	_, cancelErr := protocolClient.CancelTurn(ctx, harness.CancelTurnRequest{
+		Version: harness.ProtocolVersion, Namespace: task.Namespace, TaskName: task.Name,
+		SessionName: request.SessionName, RuntimeSessionID: request.RuntimeSessionID,
+		TurnID: request.TurnID, CorrelationID: request.CorrelationID, Reason: "Task cancellation requested",
+	})
+	if cancelErr != nil {
+		return fmt.Errorf("request harness v1 cancellation: %w", cancelErr)
 	}
 	// CancelAccepted is explicitly nonterminal; only a terminal frame or durable
 	// receipt may settle the attempt.
@@ -1265,18 +1325,185 @@ func (d *HarnessV1Dispatcher) finishAttempt(
 	target store.HarnessV1AttemptState,
 	reason, receiptDigest string,
 ) error {
+	updated, err := d.finishAttemptDurably(ctx, attempt, fence, target, reason, receiptDigest)
+	if err != nil {
+		return err
+	}
+	return d.reconcileTerminalAttempt(ctx, task, updated, fence)
+}
+
+func (d *HarnessV1Dispatcher) finishAttemptWithOutputAcknowledgement(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	protocolClient harnessV1ProtocolClient,
+	request harness.StartTurnRequest,
+	attempt *store.HarnessV1Attempt,
+	fence store.ControllerEpochFence,
+	target store.HarnessV1AttemptState,
+	reason, receiptDigest, outputRef string,
+) error {
+	updated, err := d.finishAttemptDurably(ctx, attempt, fence, target, reason, receiptDigest)
+	if err != nil {
+		return err
+	}
+	if err := d.acknowledgeTerminalOutput(ctx, task, protocolClient, request, updated, outputRef); err != nil {
+		return err
+	}
+	return d.reconcileTerminalAttempt(ctx, task, updated, fence)
+}
+
+func (d *HarnessV1Dispatcher) finishAttemptDurably(
+	ctx context.Context,
+	attempt *store.HarnessV1Attempt,
+	fence store.ControllerEpochFence,
+	target store.HarnessV1AttemptState,
+	reason, receiptDigest string,
+) (*store.HarnessV1Attempt, error) {
 	if attempt.State == target {
-		return d.reconcileTerminalAttempt(ctx, task, attempt, fence)
+		return attempt, nil
 	}
 	updates := store.HarnessV1AttemptUpdates{TerminalReason: &reason}
 	if receiptDigest != "" {
 		updates.TerminalReceiptDigest = &receiptDigest
 	}
-	updated, err := d.transitionAttempt(ctx, attempt, fence, target, "terminal-"+string(target), updates)
+	return d.transitionAttempt(ctx, attempt, fence, target, "terminal-"+string(target), updates)
+}
+
+func (d *HarnessV1Dispatcher) reconcileTerminalAttemptAfterOutputAcknowledgement(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.HarnessV1Attempt,
+	fence store.ControllerEpochFence,
+) error {
+	if (attempt.State != store.HarnessV1AttemptSucceeded && attempt.State != store.HarnessV1AttemptFailed) ||
+		attempt.TerminalReceiptDigest == "" {
+		return d.reconcileTerminalAttempt(ctx, task, attempt, fence)
+	}
+
+	outputRef, found, err := d.persistedTerminalOutputRef(ctx, task, attempt)
 	if err != nil {
 		return err
 	}
-	return d.reconcileTerminalAttempt(ctx, task, updated, fence)
+	var (
+		protocolClient harnessV1ProtocolClient
+		request        harness.StartTurnRequest
+	)
+	if !found {
+		verified, loadErr := d.loadHarnessV1ExecutionForSettlement(ctx, task, task.Status.AgentExecutionBinding)
+		if loadErr != nil {
+			return loadErr
+		}
+		protocolClient, request, err = d.protocolClientAndRequest(ctx, task, verified, attempt)
+		if err != nil {
+			return err
+		}
+		status, statusErr := protocolClient.DurableTurnStatus(ctx, request.TurnID)
+		if statusErr != nil {
+			return fmt.Errorf("recover harness v1 terminal output receipt: %w", statusErr)
+		}
+		if status == nil || status.TurnID != attempt.TurnID || status.TaskUID != attempt.TaskUID ||
+			status.Attempt != attempt.Attempt || status.RequestDigest != attempt.RequestDigest ||
+			status.State != harness.DurableTurnTerminal || status.TerminalReceiptDigest != attempt.TerminalReceiptDigest {
+			return errors.New("durable terminal output receipt does not match the settled attempt")
+		}
+		if err := validateHarnessV1DurableTerminalReceipt(status, request, false); err != nil {
+			return fmt.Errorf("validate harness v1 terminal output receipt: %w", err)
+		}
+		frame, ok := status.TerminalReceipt.HarnessFrame()
+		if !ok {
+			return errors.New("durable terminal output receipt has no terminal frame")
+		}
+		outputRef = harnessV1TerminalOutputRef(frame)
+	}
+	if outputRef == "" {
+		return d.reconcileTerminalAttempt(ctx, task, attempt, fence)
+	}
+	if protocolClient == nil {
+		verified, loadErr := d.loadHarnessV1ExecutionForSettlement(ctx, task, task.Status.AgentExecutionBinding)
+		if loadErr != nil {
+			return loadErr
+		}
+		protocolClient, request, err = d.protocolClientAndRequest(ctx, task, verified, attempt)
+		if err != nil {
+			return err
+		}
+	}
+	if err := d.acknowledgeTerminalOutput(ctx, task, protocolClient, request, attempt, outputRef); err != nil {
+		return err
+	}
+	return d.reconcileTerminalAttempt(ctx, task, attempt, fence)
+}
+
+func (d *HarnessV1Dispatcher) persistedTerminalOutputRef(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.HarnessV1Attempt,
+) (string, bool, error) {
+	evidence, err := d.persistedEvidence(ctx, task, attempt)
+	if err != nil {
+		return "", false, err
+	}
+	if evidence.terminal == "" {
+		return "", false, nil
+	}
+	frame := harness.HarnessEventFrame{
+		Version: harness.ProtocolVersion, Type: evidence.terminal,
+		RuntimeSessionID: harness.RuntimeSessionID(attempt.RuntimeSessionID),
+		TurnID:           harness.HarnessTurnID(attempt.TurnID), CorrelationID: attempt.CorrelationID,
+		Seq: evidence.lastSeq, Completed: evidence.completed, Failed: evidence.failed,
+	}
+	receipt, err := harness.DurableTurnTerminalReceiptFromFrame(frame)
+	if err != nil {
+		return "", false, err
+	}
+	digest, err := harness.DurableTurnTerminalReceiptDigest(receipt)
+	if err != nil {
+		return "", false, err
+	}
+	if digest != attempt.TerminalReceiptDigest {
+		return "", false, errors.New("persisted terminal output receipt does not match the settled attempt")
+	}
+	return harnessV1TerminalOutputRef(frame), true, nil
+}
+
+func harnessV1TerminalOutputRef(frame harness.HarnessEventFrame) string {
+	switch frame.Type {
+	case harness.FrameTurnCompleted:
+		if frame.Completed != nil {
+			return frame.Completed.OutputRef
+		}
+	case harness.FrameTurnFailed:
+		if frame.Failed != nil {
+			return frame.Failed.OutputRef
+		}
+	}
+	return ""
+}
+
+func (d *HarnessV1Dispatcher) acknowledgeTerminalOutput(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	protocolClient harnessV1ProtocolClient,
+	request harness.StartTurnRequest,
+	attempt *store.HarnessV1Attempt,
+	outputRef string,
+) error {
+	if outputRef == "" {
+		return nil
+	}
+	if !store.IsTerminalHarnessV1AttemptState(attempt.State) {
+		return errors.New("harness v1 output cannot be acknowledged before terminal attempt settlement")
+	}
+	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
+		return fmt.Errorf("verify durable harness v1 result before output acknowledgement: %w", err)
+	}
+	if err := protocolClient.AcknowledgeTurnOutput(ctx, harness.TurnOutputAcknowledgementRequest{
+		Version: harness.ProtocolVersion, TurnID: request.TurnID,
+		OutputRef: outputRef, TerminalReceiptDigest: attempt.TerminalReceiptDigest,
+	}); err != nil {
+		return fmt.Errorf("acknowledge durable harness v1 terminal output: %w", err)
+	}
+	return nil
 }
 
 func (d *HarnessV1Dispatcher) reconcileTerminalAttempt(
@@ -1479,6 +1706,9 @@ func (d *HarnessV1Dispatcher) projectAttemptState(
 		if latest.Status.HarnessRuntime != nil && latest.Status.HarnessRuntime.Attempt > attempt.Attempt {
 			return nil
 		}
+		if harnessV1AttemptProjectionMatches(latest, attempt) {
+			return nil
+		}
 		base := latest.DeepCopy()
 		now := metav1.Now()
 		state, outcome, phase := harnessV1TaskProjection(attempt.State)
@@ -1514,6 +1744,31 @@ func (d *HarnessV1Dispatcher) projectAttemptState(
 		}
 		return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
 	})
+}
+
+func harnessV1AttemptProjectionMatches(task *corev1alpha1.Task, attempt *store.HarnessV1Attempt) bool {
+	if task == nil || attempt == nil || task.Status.HarnessRuntime == nil {
+		return false
+	}
+	state, outcome, phase := harnessV1TaskProjection(attempt.State)
+	runtime := task.Status.HarnessRuntime
+	if runtime.Attempt != attempt.Attempt || runtime.TurnID != attempt.TurnID ||
+		runtime.RuntimeSessionID != attempt.RuntimeSessionID || runtime.State != state ||
+		runtime.Outcome != outcome || runtime.Reason != attempt.TerminalReason ||
+		runtime.TerminalReceiptDigest != attempt.TerminalReceiptDigest ||
+		runtime.RequestDigest != attempt.RequestDigest || runtime.ControllerEpoch != attempt.ControllerEpoch ||
+		runtime.LastEventSeq != attempt.LastEventSeq || runtime.LastTransitionTime == nil ||
+		task.Status.Attempts != attempt.Attempt || task.Status.Phase != phase {
+		return false
+	}
+	if attempt.CancelRequestedAt == nil {
+		if runtime.CancelRequestedAt != nil {
+			return false
+		}
+	} else if runtime.CancelRequestedAt == nil || !runtime.CancelRequestedAt.Time.Equal(attempt.CancelRequestedAt.UTC()) {
+		return false
+	}
+	return !store.IsTerminalHarnessV1AttemptState(attempt.State) || task.Status.CompletionTime != nil
 }
 
 func harnessV1TaskProjection(state store.HarnessV1AttemptState) (

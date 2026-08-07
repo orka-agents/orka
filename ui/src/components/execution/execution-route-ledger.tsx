@@ -115,7 +115,10 @@ export function TaskExecutionRouteLedger({ task }: { task: Task }) {
   const quarantine = status?.agentExecutionQuarantine
   const noExecution = status?.agentExecutionNoExecution
   const resolution = status?.agentExecutionResolutionRef
-  const outcomeUnknown = status?.execution?.outcome === 'OutcomeUnknown' || status?.execution?.state === 'OutcomeUnknown'
+  const outcomeUnknown = status?.execution?.outcome === 'OutcomeUnknown'
+    || status?.execution?.state === 'OutcomeUnknown'
+    || status?.harnessRuntime?.outcome === 'OutcomeUnknown'
+    || status?.harnessRuntime?.state === 'OutcomeUnknown'
 
   if (quarantine) {
     return (

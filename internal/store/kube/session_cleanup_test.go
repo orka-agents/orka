@@ -83,6 +83,97 @@ func TestReclaimSessionDeletesPublishedCrossStoreStateAndIsIdempotent(t *testing
 	}
 }
 
+func TestReclaimSessionConsumesExactAppliedAdjudicationWithoutClearingBlockedEvidence(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, kubeClient, sqliteStore, _, fence := newSessionCleanupTestStore(t, nil)
+	control, claim := seedSessionCleanupState(t, ctx, kubeStore, sqliteStore, fence, "session-adjudicated-cleanup")
+	const publicationID = "publication-adjudicated-cleanup"
+	blockedClaim, err := kubeStore.CompareAndSwapBranchClaim(ctx, controlstore.BranchClaimCAS{
+		ID: claim.ID, Fence: fence, ExpectedVersion: claim.Version, ExpectedGeneration: claim.Generation,
+		NewGeneration: claim.Generation, ExpectedLastVerified: claim.LastVerified, NewLastVerified: claim.LastVerified,
+		ExpectedAvailability: controlstore.BranchClaimAvailable,
+		NewAvailability:      controlstore.BranchClaimReconciliationBlocked,
+		BlockedReason:        "immutable publication ambiguity", RelatedPublicationID: publicationID,
+		OperationID: "block-claim-for-adjudication", OperationDigest: testDigest("block-claim-for-adjudication"),
+		UpdatedAt: testNow.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("block Session branch claim: %v", err)
+	}
+	if blockedClaim.Availability != controlstore.BranchClaimReconciliationBlocked {
+		t.Fatalf("blocked claim = %#v", blockedClaim)
+	}
+
+	object := &corev1alpha1.RuntimeSessionControl{}
+	key := client.ObjectKey{Namespace: control.Namespace, Name: runtimeSessionObjectName(control.SessionName)}
+	if err := kubeClient.Get(ctx, key, object); err != nil {
+		t.Fatal(err)
+	}
+	object.UID = "session-adjudicated-control-uid"
+	if err := kubeClient.Update(ctx, object); err != nil {
+		t.Fatalf("assign fake control UID: %v", err)
+	}
+	if err := kubeClient.Get(ctx, key, object); err != nil {
+		t.Fatal(err)
+	}
+	resolutionDigest := testDigest("applied-session-resolution")
+	object.Status.Availability = corev1alpha1.RuntimeSessionControlAvailability(controlstore.SessionReconciliationBlocked)
+	object.Status.BlockedReason = "immutable publication ambiguity"
+	object.Status.RelatedPublicationID = publicationID
+	object.Status.AgentExecutionResolutionRef = &corev1alpha1.AgentExecutionResolutionRef{
+		AdjudicationName: "cleanup-session", AdjudicationUID: "cleanup-session-uid",
+		Action:          corev1alpha1.AgentExecutionAdjudicationCleanupV2,
+		OperationDigest: testDigest("applied-session-operation"), ResolutionDigest: resolutionDigest,
+		AppliedAt: metav1.NewTime(testNow.Add(2 * time.Minute)),
+	}
+	object.Status.Version++
+	object.Status.LastOperationID = "block-session-for-adjudication"
+	object.Status.LastOperationDigest = testDigest("block-session-for-adjudication")
+	if err := kubeClient.Status().Update(ctx, object); err != nil {
+		t.Fatalf("block Session control: %v", err)
+	}
+	if err := kubeClient.Get(ctx, key, object); err != nil {
+		t.Fatal(err)
+	}
+
+	request := controlstore.ReclaimSessionRequest{
+		Namespace: control.Namespace, SessionName: control.SessionName, Fence: fence,
+		OperationID: "adjudicated-session-cleanup", OperationDigest: testDigest("adjudicated-session-cleanup"),
+		RequestedAt: testNow.Add(3 * time.Minute),
+		Adjudication: &controlstore.SessionCleanupAdjudicationFence{
+			ControlObjectUID: string(object.UID), ControlResourceVersion: object.ResourceVersion,
+			ResolutionDigest: resolutionDigest,
+		},
+	}
+	stale := request
+	stale.Adjudication = &controlstore.SessionCleanupAdjudicationFence{
+		ControlObjectUID: string(object.UID), ControlResourceVersion: "stale-resource-version",
+		ResolutionDigest: resolutionDigest,
+	}
+	if err := kubeStore.ReclaimSession(ctx, stale); !errors.Is(err, controlstore.ErrConflict) {
+		t.Fatalf("stale adjudicated cleanup error = %v, want conflict", err)
+	}
+	if _, err := sqliteStore.GetSessionCleanupIntent(ctx, control.Namespace, control.SessionName); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("stale adjudication persisted cleanup intent: %v", err)
+	}
+
+	if err := kubeStore.ReclaimSession(ctx, request); err != nil {
+		t.Fatalf("ReclaimSession(adjudicated): %v", err)
+	}
+	if err := kubeClient.Get(ctx, key, &corev1alpha1.RuntimeSessionControl{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("resolved blocked control still exists: %v", err)
+	}
+	if _, err := kubeStore.GetBranchClaim(ctx, claim.ID); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("resolved blocked branch claim error = %v, want not found", err)
+	}
+	if _, err := sqliteStore.GetSession(ctx, control.Namespace, control.SessionName); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("resolved Session transcript error = %v, want not found", err)
+	}
+	if err := kubeStore.ReclaimSession(ctx, request); err != nil {
+		t.Fatalf("ReclaimSession(adjudicated retry): %v", err)
+	}
+}
+
 func TestReclaimSessionCompletionDetectsRawKubernetesOwnershipReappearance(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, sqliteStore, _, fence := newSessionCleanupTestStore(t, nil)

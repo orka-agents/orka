@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -204,6 +205,7 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) finishTurn(turn *turnState) {
+	defer turn.clearExactRedactionValues()
 	if s.ledger != nil {
 		receipt, outcomeUnknown := s.durableTerminalReceipt(turn)
 		var durableOutput *ledger.TurnOutput
@@ -754,8 +756,20 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if resource == harness.TurnResourceOutputAcknowledgement {
+		if r.Method != http.MethodPost {
+			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if s.ledger == nil {
+			writeSafeError(w, http.StatusServiceUnavailable, "durable turn output acknowledgement is unavailable")
+			return
+		}
+		s.handleOutputAcknowledgement(w, r, turnID)
+		return
+	}
 	turn := s.turnRegistry.lookup(turnID)
-	if turn == nil && resource == "output" && r.Method == http.MethodGet && s.ledger != nil {
+	if turn == nil && resource == harness.TurnResourceOutput && r.Method == http.MethodGet && s.ledger != nil {
 		s.handleDurableOutput(w, r, turnID)
 		return
 	}
@@ -764,19 +778,19 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch resource {
-	case "events":
+	case harness.TurnResourceEvents:
 		if r.Method != http.MethodGet {
 			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		s.handleEvents(w, r, turn)
-	case "cancel":
+	case harness.TurnResourceCancel:
 		if r.Method != http.MethodPost {
 			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		s.handleCancel(w, r, turn)
-	case "output":
+	case harness.TurnResourceOutput:
 		if r.Method != http.MethodGet {
 			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
@@ -849,6 +863,38 @@ func (s *Server) handleDurableOutput(w http.ResponseWriter, r *http.Request, tur
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	_, _ = w.Write(data)
+}
+
+func (s *Server) handleOutputAcknowledgement(w http.ResponseWriter, r *http.Request, turnID harness.HarnessTurnID) {
+	var request harness.TurnOutputAcknowledgementRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeSafeError(w, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	if err := request.ValidateFor(turnID); err != nil {
+		writeSafeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.ledger.AcknowledgeTurnOutput(
+		r.Context(), string(turnID), request.OutputRef, request.TerminalReceiptDigest,
+	); err != nil {
+		switch {
+		case errors.Is(err, ledger.ErrNotFound):
+			writeSafeError(w, http.StatusNotFound, "output not found")
+		case errors.Is(err, ledger.ErrOutputAcknowledgementMismatch):
+			writeSafeError(w, http.StatusConflict, "output acknowledgement does not match durable receipt")
+		default:
+			writeSafeError(w, http.StatusServiceUnavailable, "failed to acknowledge durable turn output")
+		}
+		return
+	}
+	harness.WriteJSON(w, http.StatusOK, harness.TurnOutputAcknowledgementResponse{
+		Version:               harness.ProtocolVersion,
+		TurnID:                request.TurnID,
+		OutputRef:             request.OutputRef,
+		TerminalReceiptDigest: request.TerminalReceiptDigest,
+		Acknowledged:          true,
+	})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, turn *turnState) {
@@ -1363,7 +1409,8 @@ func (s *Server) normalizeFrame(turn *turnState, frame harness.HarnessEventFrame
 			frame.Content = nil
 		}
 	}
-	return s.sanitizeTerminalFrame(frame)
+	frame = s.sanitizeTerminalFrame(frame)
+	return redactHarnessFrameExactValues(frame, turn.exactRedactionValuesSnapshot())
 }
 
 func (s *Server) sanitizeTerminalFrame(frame harness.HarnessEventFrame) harness.HarnessEventFrame {
@@ -1444,8 +1491,12 @@ func (s *Server) completedFrame(turn *turnState, result TurnResult) (harness.Har
 		RetainSession: false,
 	})
 	if len(result.Metadata) > 0 {
+		exactValues := turn.exactRedactionValuesSnapshot()
 		for k, v := range result.Metadata {
-			frame.Metadata[k] = events.RedactExecutionEventText(v)
+			frame.Metadata[redactExactValues(k, exactValues)] = redactExactValues(
+				events.RedactExecutionEventText(v),
+				exactValues,
+			)
 		}
 	}
 	return frame, nil
@@ -1466,7 +1517,12 @@ func (s *Server) failedFrameWithResult(
 	result string,
 	retryable bool,
 ) harness.HarnessEventFrame {
-	frame := s.failedFrame(turn, reason, message, retryable)
+	frame := s.failedFrame(
+		turn,
+		reason,
+		redactExactValues(message, turn.exactRedactionValuesSnapshot()),
+		retryable,
+	)
 	if strings.TrimSpace(result) == "" || frame.Failed == nil {
 		return frame
 	}
@@ -1585,24 +1641,43 @@ type turnState struct {
 	cancel   context.CancelFunc
 	now      func() time.Time
 
-	mu              sync.Mutex
-	frames          []harness.HarnessEventFrame
-	terminal        bool
-	closed          bool
-	resultPath      string
-	resultRead      bool
-	resultKeepUntil time.Time
+	mu                   sync.Mutex
+	frames               []harness.HarnessEventFrame
+	terminal             bool
+	closed               bool
+	resultPath           string
+	resultRead           bool
+	resultKeepUntil      time.Time
+	exactRedactionValues []string
 }
 
 func newTurnState(request harness.StartTurnRequest, now func() time.Time) *turnState {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &turnState{
-		request:  request,
-		identity: identityFromStartTurnRequest(request),
-		ctx:      ctx,
-		cancel:   cancel,
-		now:      now,
+		request:              request,
+		identity:             identityFromStartTurnRequest(request),
+		ctx:                  ctx,
+		cancel:               cancel,
+		now:                  now,
+		exactRedactionValues: exactTurnInputValues(request.Input.Env),
 	}
+}
+
+func exactTurnInputValues(env []harness.TurnEnvVar) []string {
+	seen := make(map[string]struct{}, len(env))
+	values := make([]string, 0, len(env))
+	for _, item := range env {
+		if item.Value == "" {
+			continue
+		}
+		if _, ok := seen[item.Value]; ok {
+			continue
+		}
+		seen[item.Value] = struct{}{}
+		values = append(values, item.Value)
+	}
+	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	return values
 }
 
 func identityFromStartTurnRequest(request harness.StartTurnRequest) turnIdentity {
@@ -1642,6 +1717,7 @@ func (t *turnState) materializeContext(runtimeName string, cfg Config) TurnConte
 }
 
 func (t *turnState) storeOutput(result string) (string, error) {
+	result = redactExactValues(result, t.exactRedactionValuesSnapshot())
 	file, err := os.CreateTemp("", "harness-turn-output-*")
 	if err != nil {
 		return "", fmt.Errorf("create turn output file: %w", err)
@@ -1721,6 +1797,7 @@ func (t *turnState) cleanupOutput() {
 func (t *turnState) appendFrame(frame harness.HarnessEventFrame) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	frame = redactHarnessFrameOutputValues(frame, t.exactRedactionValues)
 	if frame.Seq <= 0 {
 		frame.Seq = int64(len(t.frames) + 1)
 	}
@@ -1732,6 +1809,189 @@ func (t *turnState) appendFrame(frame harness.HarnessEventFrame) {
 	case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
 		t.terminal = true
 	}
+}
+
+func (t *turnState) exactRedactionValuesSnapshot() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.exactRedactionValues...)
+}
+
+func (t *turnState) clearExactRedactionValues() {
+	t.mu.Lock()
+	for i := range t.exactRedactionValues {
+		t.exactRedactionValues[i] = ""
+	}
+	t.exactRedactionValues = nil
+	t.mu.Unlock()
+}
+
+func redactExactValues(value string, exactValues []string) string {
+	for _, exact := range exactValues {
+		value = harness.RedactExactBearerValue(value, exact)
+	}
+	return value
+}
+
+func redactHarnessFrameExactValues(
+	frame harness.HarnessEventFrame,
+	exactValues []string,
+) harness.HarnessEventFrame {
+	if len(exactValues) == 0 {
+		return frame
+	}
+	frame = redactHarnessFrameOutputValues(frame, exactValues)
+	frame.Summary = redactExactValues(frame.Summary, exactValues)
+	frame.ToolName = redactExactValues(frame.ToolName, exactValues)
+	frame.ToolCallID = redactExactValues(frame.ToolCallID, exactValues)
+	frame.ApprovalID = redactExactValues(frame.ApprovalID, exactValues)
+	if len(frame.Metadata) > 0 {
+		metadata := make(map[string]string, len(frame.Metadata))
+		for key, value := range frame.Metadata {
+			metadata[redactExactValues(key, exactValues)] = redactExactValues(value, exactValues)
+		}
+		frame.Metadata = metadata
+	}
+	if frame.Completed != nil {
+		completed := *frame.Completed
+		completed.OutputRef = redactExactValues(completed.OutputRef, exactValues)
+		frame.Completed = &completed
+	}
+	if frame.Failed != nil {
+		failed := *frame.Failed
+		failed.Reason = redactExactValues(failed.Reason, exactValues)
+		failed.Message = redactExactValues(failed.Message, exactValues)
+		failed.OutputRef = redactExactValues(failed.OutputRef, exactValues)
+		frame.Failed = &failed
+	}
+	if frame.Error != nil {
+		errorInfo := *frame.Error
+		errorInfo.Code = redactExactValues(errorInfo.Code, exactValues)
+		errorInfo.Message = redactExactValues(errorInfo.Message, exactValues)
+		frame.Error = &errorInfo
+	}
+	return frame
+}
+
+// redactHarnessFrameOutputValues scrubs unambiguously child-controlled text and
+// result bodies while preserving wrapper-owned protocol text and structural
+// fields. Eventing-adapter frames pass through the stricter helper above before
+// this sink, because all of their fields are runtime-controlled.
+func redactHarnessFrameOutputValues(
+	frame harness.HarnessEventFrame,
+	exactValues []string,
+) harness.HarnessEventFrame {
+	if len(exactValues) == 0 {
+		return frame
+	}
+	frame.ContentText = redactExactValues(frame.ContentText, exactValues)
+	frame.Content = redactExactJSON(frame.Content, exactValues)
+	if frame.Completed != nil {
+		completed := *frame.Completed
+		completed.Result = redactExactValues(completed.Result, exactValues)
+		completed.Data = redactExactData(completed.Data, exactValues)
+		completed.Artifacts = redactExactArtifacts(completed.Artifacts, exactValues)
+		frame.Completed = &completed
+	}
+	if frame.Failed != nil {
+		failed := *frame.Failed
+		failed.Result = redactExactValues(failed.Result, exactValues)
+		failed.Data = redactExactData(failed.Data, exactValues)
+		failed.Artifacts = redactExactArtifacts(failed.Artifacts, exactValues)
+		frame.Failed = &failed
+	}
+	return frame
+}
+
+func redactExactJSON(value json.RawMessage, exactValues []string) json.RawMessage {
+	if len(value) == 0 {
+		return nil
+	}
+	var decoded any
+	decoder := json.NewDecoder(strings.NewReader(string(value)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil
+	}
+	redacted := redactExactJSONValue(decoded, exactValues)
+	encoded, err := json.Marshal(redacted)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func redactExactJSONValue(value any, exactValues []string) any {
+	switch typed := value.(type) {
+	case string:
+		return redactExactValues(typed, exactValues)
+	case []any:
+		for i := range typed {
+			typed[i] = redactExactJSONValue(typed[i], exactValues)
+		}
+		return typed
+	case map[string]any:
+		redacted := make(map[string]any, len(typed))
+		for key, item := range typed {
+			redacted[redactExactValues(key, exactValues)] = redactExactJSONValue(item, exactValues)
+		}
+		return redacted
+	case json.Number:
+		text := typed.String()
+		if redacted := redactExactValues(text, exactValues); redacted != text {
+			return redacted
+		}
+		return typed
+	case bool:
+		text := strconv.FormatBool(typed)
+		if redacted := redactExactValues(text, exactValues); redacted != text {
+			return redacted
+		}
+		return typed
+	case nil:
+		if redacted := redactExactValues("null", exactValues); redacted != "null" {
+			return redacted
+		}
+		return nil
+	default:
+		return value
+	}
+}
+
+func redactExactData(value map[string]any, exactValues []string) map[string]any {
+	if len(value) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	redacted := redactExactJSON(encoded, exactValues)
+	var out map[string]any
+	if len(redacted) == 0 || json.Unmarshal(redacted, &out) != nil {
+		return nil
+	}
+	return out
+}
+
+func redactExactArtifacts(
+	artifacts []harness.ArtifactRef,
+	exactValues []string,
+) []harness.ArtifactRef {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	out := append([]harness.ArtifactRef(nil), artifacts...)
+	for i := range out {
+		out[i].Filename = redactExactValues(out[i].Filename, exactValues)
+		out[i].ContentType = redactExactValues(out[i].ContentType, exactValues)
+		out[i].Description = redactExactValues(out[i].Description, exactValues)
+	}
+	return out
 }
 
 func (t *turnState) framesFrom(seq int64) ([]harness.HarnessEventFrame, bool) {
@@ -1749,6 +2009,10 @@ func (t *turnState) framesFrom(seq int64) ([]harness.HarnessEventFrame, bool) {
 func (t *turnState) close() {
 	t.mu.Lock()
 	t.closed = true
+	for i := range t.exactRedactionValues {
+		t.exactRedactionValues[i] = ""
+	}
+	t.exactRedactionValues = nil
 	t.mu.Unlock()
 }
 

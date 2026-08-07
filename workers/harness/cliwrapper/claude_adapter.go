@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -118,11 +119,11 @@ func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext, effort string) []str
 }
 
 func claudeEffort(metadata map[string]string, turnEnv []string) (string, error) {
-	effort := strings.ToLower(strings.TrimSpace(firstNonEmpty(
-		metadata["reasoningEffort"],
-		envEntryValue(turnEnv, claudeEffortEnv),
-		os.Getenv(claudeEffortEnv),
-	)))
+	raw := metadata["reasoningEffort"]
+	if !strings.EqualFold(strings.TrimSpace(metadata[harness.MetadataRuntimePolicyFrozen]), "true") {
+		raw = firstNonEmpty(raw, envEntryValue(turnEnv, claudeEffortEnv), os.Getenv(claudeEffortEnv))
+	}
+	effort := strings.ToLower(strings.TrimSpace(raw))
 	if effort == "" {
 		return "", nil
 	}

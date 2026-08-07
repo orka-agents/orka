@@ -528,6 +528,31 @@ func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outp
 	return data, nil
 }
 
+// AcknowledgeTurnOutput confirms that the controller durably stored and
+// settled the output referenced by the exact terminal receipt. The wrapper
+// may then reclaim the payload while preserving an idempotent tombstone.
+func (c *Client) AcknowledgeTurnOutput(
+	ctx context.Context,
+	request TurnOutputAcknowledgementRequest,
+) (err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
+	if err := request.ValidateFor(request.TurnID); err != nil {
+		return safeClientError("acknowledge_turn_output", 0, err.Error(), err)
+	}
+	rel, err := OutputAcknowledgementTurnPath(request.TurnID)
+	if err != nil {
+		return safeClientError("acknowledge_turn_output", 0, err.Error(), err)
+	}
+	var response TurnOutputAcknowledgementResponse
+	if err := c.postJSON(ctx, rel, request, &response); err != nil {
+		return err
+	}
+	if err := response.ValidateFor(request); err != nil {
+		return safeClientError("acknowledge_turn_output", 0, err.Error(), err)
+	}
+	return nil
+}
+
 func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSeq int64, emit func(HarnessEventFrame) error) error {
 	if emit == nil {
 		return c.sanitizeClientError(safeClientError("stream_frames", 0, "emit callback is required"))

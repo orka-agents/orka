@@ -247,6 +247,73 @@ func TestLedgerTerminalOutputSurvivesRestartAndFailsClosedOnCorruption(t *testin
 	}
 }
 
+func TestLedgerTerminalOutputAcknowledgementReclaimsPayloadAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	l, path := openTestLedger(t)
+	if _, _, err := l.AdmitTurn(
+		ctx, "turn-ack", "task-uid", 1, "sha256:aaaa", testRuntimeSessionID, testCorrelationID,
+	); err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	if err := l.MarkTurnAccepted(ctx, "turn-ack"); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	receipt := []byte(`{"outcome":"succeeded","outputRef":"cliwrapper-result-v1"}`)
+	receiptDigest := ReceiptDigest(receipt)
+	output := &TurnOutput{Ref: "cliwrapper-result-v1", Data: []byte("durable result bytes")}
+	if err := l.RecordTurnTerminalWithOutput(ctx, "turn-ack", receipt, false, output); err != nil {
+		t.Fatalf("terminal with output: %v", err)
+	}
+	if err := l.AcknowledgeTurnOutput(
+		ctx, "turn-ack", output.Ref, ReceiptDigest([]byte("different receipt")),
+	); !errors.Is(err, ErrOutputAcknowledgementMismatch) {
+		t.Fatalf("wrong digest acknowledgement error = %v, want mismatch", err)
+	}
+	if err := l.AcknowledgeTurnOutput(
+		ctx, "turn-ack", "wrong-ref", receiptDigest,
+	); !errors.Is(err, ErrOutputAcknowledgementMismatch) {
+		t.Fatalf("wrong ref acknowledgement error = %v, want mismatch", err)
+	}
+	if err := l.AcknowledgeTurnOutput(ctx, "turn-ack", output.Ref, receiptDigest); err != nil {
+		t.Fatalf("acknowledge output: %v", err)
+	}
+	if _, err := l.GetTurnOutput(ctx, "turn-ack", output.Ref); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetTurnOutput(after acknowledgement) error = %v, want ErrNotFound", err)
+	}
+	var outputRows, acknowledgementRows int
+	if err := l.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM turn_outputs WHERE turn_id = ?`, "turn-ack").Scan(
+		&outputRows,
+	); err != nil {
+		t.Fatalf("count output rows: %v", err)
+	}
+	if err := l.db.QueryRowContext(
+		ctx, `SELECT COUNT(*) FROM turn_output_acknowledgements WHERE turn_id = ?`, "turn-ack",
+	).Scan(&acknowledgementRows); err != nil {
+		t.Fatalf("count acknowledgement rows: %v", err)
+	}
+	if outputRows != 0 || acknowledgementRows != 1 {
+		t.Fatalf("output rows = %d, acknowledgement rows = %d, want 0/1", outputRows, acknowledgementRows)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.AcknowledgeTurnOutput(ctx, "turn-ack", output.Ref, receiptDigest); err != nil {
+		t.Fatalf("idempotent acknowledgement after restart: %v", err)
+	}
+	if err := reopened.RecordTurnTerminalWithOutput(ctx, "turn-ack", receipt, false, output); err != nil {
+		t.Fatalf("idempotent terminal replay after acknowledgement: %v", err)
+	}
+	if _, err := reopened.GetTurnOutput(ctx, "turn-ack", output.Ref); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetTurnOutput(after replay) error = %v, want ErrNotFound", err)
+	}
+}
+
 //nolint:gocyclo // One test keeps the full close, drain, prepare, restart, and activation protocol in order.
 func TestLedgerRolloverRequiresCompletedDrainAndExactGeneration(t *testing.T) {
 	ctx := context.Background()

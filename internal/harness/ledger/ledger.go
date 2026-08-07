@@ -68,6 +68,10 @@ var ErrDigestMismatch = errors.New("turn ID was already admitted with a differen
 // ErrNotFound reports a missing turn record.
 var ErrNotFound = errors.New("turn record not found")
 
+// ErrOutputAcknowledgementMismatch reports an acknowledgement that is not
+// fenced to the output and terminal receipt durably recorded for the turn.
+var ErrOutputAcknowledgementMismatch = errors.New("turn output acknowledgement does not match durable receipt")
+
 // TurnRecord is one durable admission record.
 type TurnRecord struct {
 	TurnID                string
@@ -192,6 +196,14 @@ func migrate(db *sql.DB, initialGeneration string) error {
 			output_digest  TEXT NOT NULL,
 			output_size    INTEGER NOT NULL CHECK(output_size >= 0),
 			created_at     TIMESTAMP NOT NULL,
+			FOREIGN KEY(turn_id) REFERENCES turn_admissions(turn_id) ON DELETE CASCADE
+		)`,
+		`CREATE TABLE IF NOT EXISTS turn_output_acknowledgements (
+			turn_id                 TEXT PRIMARY KEY,
+			output_ref              TEXT NOT NULL,
+			output_digest           TEXT NOT NULL,
+			terminal_receipt_digest TEXT NOT NULL,
+			acknowledged_at          TIMESTAMP NOT NULL,
 			FOREIGN KEY(turn_id) REFERENCES turn_admissions(turn_id) ON DELETE CASCADE
 		)`,
 	}
@@ -388,6 +400,21 @@ func (l *Ledger) RecordTurnTerminalWithOutput(
 			return fmt.Errorf("turn %s already recorded a different terminal receipt", turnID)
 		}
 		if output != nil {
+			var acknowledgedRef, acknowledgedOutputDigest, acknowledgedReceiptDigest string
+			ackErr := tx.QueryRowContext(ctx, `SELECT output_ref, output_digest, terminal_receipt_digest
+				FROM turn_output_acknowledgements WHERE turn_id = ?`, turnID).Scan(
+				&acknowledgedRef, &acknowledgedOutputDigest, &acknowledgedReceiptDigest,
+			)
+			if ackErr == nil {
+				if acknowledgedRef != output.Ref || acknowledgedOutputDigest != ReceiptDigest(output.Data) ||
+					acknowledgedReceiptDigest != digest {
+					return fmt.Errorf("turn %s already acknowledged different terminal output", turnID)
+				}
+				return tx.Commit()
+			}
+			if !errors.Is(ackErr, sql.ErrNoRows) {
+				return fmt.Errorf("read terminal turn output acknowledgement: %w", ackErr)
+			}
 			persisted, outputErr := getTurnOutput(ctx, tx, turnID, output.Ref)
 			if outputErr != nil || !bytes.Equal(persisted, output.Data) {
 				return fmt.Errorf("turn %s already recorded different terminal output", turnID)
@@ -477,6 +504,91 @@ func (l *Ledger) GetTurnOutput(ctx context.Context, turnID, outputRef string) ([
 		return nil, fmt.Errorf("turn ID and output ref are required")
 	}
 	return getTurnOutput(ctx, l.db, turnID, outputRef)
+}
+
+// AcknowledgeTurnOutput atomically records a receipt-bound tombstone and
+// deletes the acknowledged output payload. The tombstone makes a lost
+// acknowledgement response or controller restart safe to retry without
+// retaining the potentially large blob.
+func (l *Ledger) AcknowledgeTurnOutput(
+	ctx context.Context,
+	turnID, outputRef, terminalReceiptDigest string,
+) error {
+	turnID = strings.TrimSpace(turnID)
+	outputRef = strings.TrimSpace(outputRef)
+	terminalReceiptDigest = strings.TrimSpace(terminalReceiptDigest)
+	if turnID == "" || outputRef == "" {
+		return fmt.Errorf("turn ID and output ref are required")
+	}
+	if !isCanonicalReceiptDigest(terminalReceiptDigest) {
+		return fmt.Errorf("terminal receipt digest must be a canonical sha256 digest")
+	}
+
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin terminal turn output acknowledgement: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var state, persistedReceiptDigest string
+	err = tx.QueryRowContext(ctx, `SELECT state, terminal_receipt_digest
+		FROM turn_admissions WHERE turn_id = ?`, turnID).Scan(&state, &persistedReceiptDigest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: turn %s", ErrNotFound, turnID)
+	}
+	if err != nil {
+		return fmt.Errorf("read terminal turn for output acknowledgement: %w", err)
+	}
+	if TurnState(state) != TurnTerminal || persistedReceiptDigest != terminalReceiptDigest {
+		return fmt.Errorf("%w: turn %s", ErrOutputAcknowledgementMismatch, turnID)
+	}
+
+	var acknowledgedRef, acknowledgedReceiptDigest string
+	err = tx.QueryRowContext(ctx, `SELECT output_ref, terminal_receipt_digest
+		FROM turn_output_acknowledgements WHERE turn_id = ?`, turnID).Scan(
+		&acknowledgedRef, &acknowledgedReceiptDigest,
+	)
+	if err == nil {
+		if acknowledgedRef != outputRef || acknowledgedReceiptDigest != terminalReceiptDigest {
+			return fmt.Errorf("%w: turn %s", ErrOutputAcknowledgementMismatch, turnID)
+		}
+		return tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read terminal turn output acknowledgement: %w", err)
+	}
+
+	var persistedRef, outputDigest string
+	err = tx.QueryRowContext(ctx, `SELECT output_ref, output_digest FROM turn_outputs WHERE turn_id = ?`, turnID).Scan(
+		&persistedRef, &outputDigest,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: output for turn %s", ErrNotFound, turnID)
+	}
+	if err != nil {
+		return fmt.Errorf("read terminal turn output for acknowledgement: %w", err)
+	}
+	if persistedRef != outputRef {
+		return fmt.Errorf("%w: turn %s", ErrOutputAcknowledgementMismatch, turnID)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO turn_output_acknowledgements
+		(turn_id, output_ref, output_digest, terminal_receipt_digest, acknowledged_at)
+		VALUES (?, ?, ?, ?, ?)`, turnID, persistedRef, outputDigest, terminalReceiptDigest, time.Now().UTC()); err != nil {
+		return fmt.Errorf("persist terminal turn output acknowledgement: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM turn_outputs WHERE turn_id = ?`, turnID); err != nil {
+		return fmt.Errorf("delete acknowledged terminal turn output: %w", err)
+	}
+	return tx.Commit()
+}
+
+func isCanonicalReceiptDigest(value string) bool {
+	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	encoded := strings.TrimPrefix(value, "sha256:")
+	decoded, err := hex.DecodeString(encoded)
+	return err == nil && len(decoded) == sha256.Size && encoded == strings.ToLower(encoded)
 }
 
 type queryScanner interface {

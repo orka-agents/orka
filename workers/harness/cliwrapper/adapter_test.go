@@ -434,6 +434,40 @@ func TestAgentConfigFromTurnDisjointAllowlistsRemainDenyAll(t *testing.T) {
 	}
 }
 
+func TestAgentConfigFromTurnFrozenPolicyOverridesWorkerDefaults(t *testing.T) {
+	t.Setenv(workerenv.Model, "worker-model")
+	t.Setenv(workerenv.SystemPrompt, "worker system prompt")
+	t.Setenv(workerenv.MaxTurns, "99")
+	t.Setenv(workerenv.AllowedTools, "file_read,web_search")
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(codexReasoningEffortEnv, "xhigh")
+	t.Setenv(claudeEffortEnv, "max")
+
+	metadata := map[string]string{
+		harness.MetadataRuntimePolicyFrozen: "true",
+		harness.MetadataAllowedToolsSet:     "true",
+		"model":                             "",
+		"systemPrompt":                      "",
+		"maxTurns":                          "7",
+		"reasoningEffort":                   "",
+		"allowedTools":                      "",
+		"allowBash":                         "false",
+	}
+	cfg := agentConfigFromTurn(TurnContext{Metadata: metadata})
+	if cfg.Model != "" || cfg.SystemPrompt != "" || cfg.MaxTurns != 7 {
+		t.Fatalf("frozen scalar policy = model=%q systemPrompt=%q maxTurns=%d", cfg.Model, cfg.SystemPrompt, cfg.MaxTurns)
+	}
+	if !cfg.AllowedToolsSet || len(cfg.AllowedTools) != 0 || cfg.AllowBash {
+		t.Fatalf("frozen tool policy = set=%v tools=%v allowBash=%v", cfg.AllowedToolsSet, cfg.AllowedTools, cfg.AllowBash)
+	}
+	if effort, err := codexReasoningEffort(metadata); err != nil || effort != "" {
+		t.Fatalf("frozen empty Codex effort = %q, err=%v", effort, err)
+	}
+	if effort, err := claudeEffort(metadata, nil); err != nil || effort != "" {
+		t.Fatalf("frozen empty Claude effort = %q, err=%v", effort, err)
+	}
+}
+
 func TestPrepareTurnContextRejectsUnsafePRBaseRepo(t *testing.T) {
 	root := t.TempDir()
 	turn := &TurnContext{

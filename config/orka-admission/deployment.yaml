@@ -57,6 +57,7 @@ spec:
             - --webhook-cert-path=/var/run/orka/admission/tls
             - --webhook-cert-name=tls.crt
             - --webhook-cert-key=tls.key
+            - --webhook-service-dns-name=orka-admission.orka-system.svc
             - --controller-username=system:serviceaccount:orka-system:orka-controller-manager
             - --adjudication-controller-username=system:serviceaccount:orka-system:orka-controller-manager
             - --classification-usernames=system:serviceaccount:orka-system:orka-controller-manager

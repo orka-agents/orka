@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -23,6 +24,15 @@ import (
 type agentExecutionCleanupRoutes struct {
 	harnessV1 bool
 	harnessV2 bool
+}
+
+type adjudicatedHarnessV1RuntimeSessionReclaimer interface {
+	ReclaimRuntimeSessionsForTask(
+		context.Context,
+		string,
+		string,
+		[]harness.RuntimeSession,
+	) error
 }
 
 // adjudicatedQuarantineCleanupRoutes verifies the live adjudication referenced
@@ -186,7 +196,7 @@ func (r *TaskReconciler) adjudicatedHarnessV1TaskDeletionReady(
 		return false, fmt.Errorf("list adjudicated harness v1 attempts: %w", err)
 	}
 	if len(attempts) == 0 {
-		return true, nil
+		return r.reclaimAdjudicatedHarnessV1RuntimeSessionsWithoutAttempt(ctx, task)
 	}
 	bindingDigest := attempts[0].BindingDigest
 	if err := store.ValidateCanonicalDigest("adjudicated harness v1 binding digest", bindingDigest); err != nil {
@@ -239,6 +249,66 @@ func (r *TaskReconciler) adjudicatedHarnessV1TaskDeletionReady(
 	}
 	if err != nil {
 		return false, fmt.Errorf("reclaim adjudicated harness v1 attempts: %w", err)
+	}
+	return true, nil
+}
+
+// reclaimAdjudicatedHarnessV1RuntimeSessionsWithoutAttempt closes the legacy
+// crash window in which inventory found a runtime_sessions row but no durable
+// HarnessV1Attempt. The immutable quarantine digest is re-proved before the
+// SQLite implementation atomically drives every exact row through
+// Deleting/Deleted and physically removes it. A retry after commit observes no
+// rows and converges without weakening the original evidence record.
+func (r *TaskReconciler) reclaimAdjudicatedHarnessV1RuntimeSessionsWithoutAttempt(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (bool, error) {
+	runtimes, ok := r.HarnessV1Attempts.(harness.RuntimeSessionStore)
+	if !ok {
+		return false, errors.New("harness v1 runtime session store is required for no-attempt adjudicated deletion")
+	}
+	reclaimer, ok := r.HarnessV1Attempts.(adjudicatedHarnessV1RuntimeSessionReclaimer)
+	if !ok {
+		return false, errors.New("atomic harness v1 runtime session reclamation is required for no-attempt adjudicated deletion")
+	}
+
+	var sessions []harness.RuntimeSession
+	cursor := ""
+	for {
+		page, next, err := runtimes.ListRuntimeSessions(ctx, harness.RuntimeSessionFilter{
+			Namespace: task.Namespace, ActiveTask: task.Name, IncludeDeleted: true,
+			Limit: 200, Cursor: cursor,
+		})
+		if err != nil {
+			return false, fmt.Errorf("list no-attempt harness v1 runtime sessions: %w", err)
+		}
+		sessions = append(sessions, page...)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(sessions) == 0 {
+		return true, nil
+	}
+
+	evidence := make([]agentExecutionClassificationEvidenceItem, 0, len(sessions))
+	for i := range sessions {
+		session := sessions[i]
+		if session.Owner.Namespace != task.Namespace || session.Owner.ActiveTask != task.Name {
+			return false, errors.New("legacy runtime session inventory escaped the exact Task filter")
+		}
+		evidence = append(evidence, classificationEvidenceItem(
+			"LegacyRuntimeSession", task.Namespace, string(session.ID), "", "", session,
+		))
+	}
+	sortClassificationEvidence(evidence)
+	if task.Status.AgentExecutionQuarantine == nil ||
+		evidenceItemsDigest(evidence) != task.Status.AgentExecutionQuarantine.V1EvidenceDigest {
+		return false, errors.New("live legacy runtime sessions do not match the immutable v1 quarantine evidence")
+	}
+	if err := reclaimer.ReclaimRuntimeSessionsForTask(ctx, task.Namespace, task.Name, sessions); err != nil {
+		return false, fmt.Errorf("reclaim no-attempt harness v1 runtime sessions: %w", err)
 	}
 	return true, nil
 }

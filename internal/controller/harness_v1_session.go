@@ -77,6 +77,10 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 	if verified.frozenTask.Spec.Timeout != nil && verified.frozenTask.Spec.Timeout.Duration > 0 {
 		expiresAt = time.Now().UTC().Add(verified.frozenTask.Spec.Timeout.Duration + time.Minute)
 	}
+	lineageConfigDigest, err := agentExecutionLineageConfigDigest(verified.binding)
+	if err != nil {
+		return err
+	}
 	lease, err := d.Sessions.AcquireMutationLease(ctx, ACPAcquireSessionLeaseRequest{
 		Session:             *control,
 		Fence:               fence,
@@ -91,7 +95,7 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 		LineageGeneration:   1,
 		LineageProvenance:   store.SessionLineageFirstUse,
 		RuntimeIdentity:     harnessV1SessionRuntimeIdentity(verified.binding),
-		ConfigDigest:        verified.binding.Snapshot.Digest,
+		ConfigDigest:        lineageConfigDigest,
 	})
 	if err != nil {
 		return err
@@ -127,11 +131,15 @@ func (d *HarnessV1Dispatcher) recoverHarnessV1TaskSession(
 	if err != nil {
 		return nil, err
 	}
+	lineageConfigDigest, err := agentExecutionLineageConfigDigest(verified.binding)
+	if err != nil {
+		return nil, err
+	}
 	lineage := control.Lineage
 	if lineage == nil || lineage.ContractVersion != string(corev1alpha1.AgentRuntimeContractHarnessV1) ||
 		lineage.NamespaceUID != string(verified.binding.Task.NamespaceUID) ||
 		lineage.RuntimeIdentity != harnessV1SessionRuntimeIdentity(verified.binding) ||
-		lineage.ConfigDigest != verified.binding.Snapshot.Digest {
+		lineage.ConfigDigest != lineageConfigDigest {
 		return nil, fmt.Errorf("%w: harness v1 Session lineage does not match the immutable Task binding", store.ErrConflict)
 	}
 	key := store.SessionTurnKey{

@@ -785,6 +785,86 @@ func TestServerRedactsEventingAdapterTerminalPayloads(t *testing.T) {
 	}
 }
 
+func TestTurnStateExactRedactsProviderValuesAtFrameAndOutputSinks(t *testing.T) {
+	exactValue := "q7Zp4vN8m2L6s0D3f5H9j1K7w4X8c2V6"
+	request := validWrapperStartTurnRequest()
+	request.Input.Env = []harness.TurnEnvVar{
+		{Name: "OPENAI_API_KEY", Value: exactValue},
+		{Name: "OPENAI_API_KEY_DUPLICATE", Value: exactValue},
+		{Name: "EMPTY_VALUE", Value: ""},
+	}
+	turn := newTurnState(request, time.Now)
+	t.Cleanup(turn.cleanupOutput)
+
+	frame := harness.HarnessEventFrame{
+		Type:        harness.FrameRuntimeLog,
+		Summary:     "summary " + exactValue,
+		ContentText: "stdout " + exactValue,
+		Content:     json.RawMessage(`{"nested":{"value":"` + exactValue + `"},"items":["` + exactValue + `"]}`),
+		ToolName:    "tool-" + exactValue,
+		ToolCallID:  "call-" + exactValue,
+		ApprovalID:  "approval-" + exactValue,
+		Metadata:    map[string]string{"note": "metadata " + exactValue},
+		Error:       &harness.ErrorInfo{Code: "error-" + exactValue, Message: "message " + exactValue},
+	}
+	turn.appendFrame(redactHarnessFrameExactValues(frame, turn.exactRedactionValuesSnapshot()))
+	turn.appendFrame(harness.HarnessEventFrame{
+		Type: harness.FrameTurnCompleted,
+		Completed: &harness.TurnCompleted{
+			Result: "result " + exactValue,
+			Data: map[string]any{
+				"nested": map[string]any{"value": exactValue},
+			},
+			Artifacts: []harness.ArtifactRef{{
+				Filename: "artifact-" + exactValue, ContentType: "type/" + exactValue,
+				Description: "description " + exactValue,
+			}},
+		},
+	})
+	failedTurn := newTurnState(request, time.Now)
+	failedFrame := harness.HarnessEventFrame{
+		Type: harness.FrameTurnFailed,
+		Failed: &harness.TurnFailed{
+			Reason: "reason-" + exactValue, Message: "failed " + exactValue,
+			Result: "partial " + exactValue,
+			Data:   map[string]any{"value": exactValue},
+			Artifacts: []harness.ArtifactRef{{
+				Filename: "failed-" + exactValue, Description: "failed description " + exactValue,
+			}},
+		},
+	}
+	failedTurn.appendFrame(redactHarnessFrameExactValues(
+		failedFrame,
+		failedTurn.exactRedactionValuesSnapshot(),
+	))
+
+	frames, _ := turn.framesFrom(1)
+	failedFrames, _ := failedTurn.framesFrom(1)
+	encoded, err := json.Marshal(append(frames, failedFrames...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), exactValue) || !strings.Contains(string(encoded), "[REDACTED]") {
+		t.Fatalf("exact-redacted frames = %s", encoded)
+	}
+
+	if _, err := turn.storeOutput("durable output " + exactValue); err != nil {
+		t.Fatal(err)
+	}
+	output, ok, err := turn.output()
+	if err != nil || !ok {
+		t.Fatalf("stored output = %q, ok=%v, err=%v", output, ok, err)
+	}
+	if strings.Contains(string(output), exactValue) || !strings.Contains(string(output), "[REDACTED]") {
+		t.Fatalf("exact-redacted durable output = %q", output)
+	}
+
+	turn.clearExactRedactionValues()
+	if values := turn.exactRedactionValuesSnapshot(); len(values) != 0 {
+		t.Fatalf("exact redaction values retained after clear: %v", values)
+	}
+}
+
 func TestServerStoresOversizedCompletedResultOutOfBand(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
@@ -1102,6 +1182,10 @@ func TestServerRejectsUnsupportedRuntimeAuthOnlyCommand(t *testing.T) {
 	frames := collectWrapperFrames(t, client, request.TurnID, 0)
 	last := frames[len(frames)-1]
 	if last.Type != harness.FrameTurnFailed || last.Failed == nil || last.Failed.Reason != "runtime_auth_proxy_failed" {
-		t.Fatalf("last frame = %#v, want runtime auth proxy failure", last)
+		t.Fatalf("last frame = %#v failed = %#v, want runtime auth proxy failure", last, last.Failed)
+	}
+	wantMessage := `runtime-auth-only credential proxy does not support runtime "generic"`
+	if got, want := last.Failed.Message, wantMessage; got != want {
+		t.Fatalf("failed message = %q, want %q", got, want)
 	}
 }
