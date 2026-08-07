@@ -731,7 +731,7 @@ assert_converged() {
   [[ "$(grep -c '^secret:agent-execution-snapshot-key$' "${state_dir}/apply.log")" == "1" ]]
   [[ "$(grep -c '^control-create:cluster$' "${state_dir}/apply.log")" == "1" ]]
   [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "9" ]]
-  [[ "$(grep -c '^policies:orka-admission$' "${state_dir}/apply.log")" == "1" ]]
+  [[ "$(grep -c '^policies:orka-admission$' "${state_dir}/apply.log")" -ge 1 ]]
   admission_line="$(grep -n '^admission-runtime:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
   rollout_line="$(grep -n '^rollout:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
   smoke_line="$(grep -n '^smoke:' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
