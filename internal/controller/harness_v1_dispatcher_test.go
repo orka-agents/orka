@@ -960,6 +960,119 @@ func TestHarnessV1DispatcherTerminalFrameWinsOverTrailingStreamError(t *testing.
 	}
 }
 
+func TestHarnessV1DispatcherBoundedStreamPollAllowsCancellationFollowUp(t *testing.T) {
+	tests := []struct {
+		name       string
+		deleteTask bool
+		mutate     func(*corev1alpha1.Task)
+	}{
+		{
+			name: "cancelled Task",
+			mutate: func(task *corev1alpha1.Task) {
+				task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+			},
+		},
+		{
+			name:       "deleting Task",
+			deleteTask: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newHarnessV1DispatcherStateFixture(t)
+			fixture.dispatcher.Interval = 10 * time.Millisecond
+			fixture.dispatcher.Epochs = readyHarnessV1TestEpochManager(fixture.durable, fixture.fence)
+			protocolClient := &recordingHarnessV1RecoveryClient{}
+			protocolClient.cancel = func(ctx context.Context, request harness.CancelTurnRequest) (*harness.CancelTurnResponse, error) {
+				if err := ctx.Err(); err != nil {
+					t.Fatalf("CancelTurn context already ended: %v", err)
+				}
+				if request.TurnID != fixture.request.TurnID || request.RuntimeSessionID != fixture.request.RuntimeSessionID {
+					t.Fatalf("CancelTurn request = %#v, want exact accepted turn", request)
+				}
+				return &harness.CancelTurnResponse{Accepted: true}, nil
+			}
+			protocolClient.stream = func(
+				ctx context.Context,
+				_ harness.HarnessTurnID,
+				_ int64,
+				onFrame func(harness.HarnessEventFrame) error,
+			) error {
+				if protocolClient.cancelCalls == 0 {
+					deadline, ok := ctx.Deadline()
+					if !ok || time.Until(deadline) > 100*time.Millisecond {
+						t.Fatalf("accepted stream context deadline = %v, %t; want bounded poll", deadline, ok)
+					}
+					<-ctx.Done()
+					return ctx.Err()
+				}
+				return onFrame(harness.HarnessEventFrame{
+					Version: harness.ProtocolVersion, Type: harness.FrameTurnCancelled,
+					RuntimeSessionID: fixture.request.RuntimeSessionID, TurnID: fixture.request.TurnID,
+					CorrelationID: fixture.request.CorrelationID, Seq: 1,
+				})
+			}
+			fixture.dispatcher.clientFactory = func(string, string, *http.Client) (harnessV1ProtocolClient, error) {
+				return protocolClient, nil
+			}
+
+			managerCtx, cancelManager := context.WithTimeout(context.Background(), time.Second)
+			defer cancelManager()
+			if err := fixture.dispatcher.streamAcceptedAttempt(
+				managerCtx,
+				fixture.task,
+				fixture.verified,
+				protocolClient,
+				fixture.request,
+				fixture.attempt,
+				fixture.fence,
+			); err != nil {
+				t.Fatalf("bounded accepted stream poll: %v", err)
+			}
+			if protocolClient.streamCalls != 1 || protocolClient.cancelCalls != 0 {
+				t.Fatalf(
+					"first pass calls: stream=%d cancel=%d, want 1/0",
+					protocolClient.streamCalls,
+					protocolClient.cancelCalls,
+				)
+			}
+
+			current := &corev1alpha1.Task{}
+			key := types.NamespacedName{Namespace: fixture.task.Namespace, Name: fixture.task.Name}
+			if err := fixture.dispatcher.Client.Get(fixture.ctx, key, current); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if test.deleteTask {
+				err = fixture.dispatcher.Client.Delete(fixture.ctx, current)
+			} else {
+				test.mutate(current)
+				err = fixture.dispatcher.Client.Status().Update(fixture.ctx, current)
+			}
+			if err != nil {
+				t.Fatalf("persist %s intent: %v", test.name, err)
+			}
+			if err := fixture.dispatcher.Client.Get(fixture.ctx, key, current); err != nil {
+				t.Fatal(err)
+			}
+			fixture.attempt = assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptAccepted)
+
+			if err := fixture.dispatcher.reconcileAttempt(fixture.ctx, current, fixture.attempt); err != nil {
+				t.Fatalf("cancellation follow-up reconcile: %v", err)
+			}
+			assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptCancelled)
+			if protocolClient.cancelCalls != 1 || protocolClient.streamCalls != 2 || protocolClient.startCalls != 0 {
+				t.Fatalf(
+					"follow-up calls: cancel=%d stream=%d start=%d, want 1/2/0",
+					protocolClient.cancelCalls,
+					protocolClient.streamCalls,
+					protocolClient.startCalls,
+				)
+			}
+		})
+	}
+}
+
 func TestHarnessV1DispatcherSettlingRecoveryFinalizesDurableDecision(t *testing.T) {
 	fixture := newHarnessV1DispatcherStateFixture(t)
 	frame := harnessV1CompletedFrame(fixture.request, "durably recovered")

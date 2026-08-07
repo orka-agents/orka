@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
@@ -20,6 +21,8 @@ import (
 const wrapperSafeCommandPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 const turnMetadataSkillsFiles = "skillsFiles"
+
+const wrapperGitPostTurnTimeout = 30 * time.Second
 
 var wrapperGitBinary = resolveSafeExecutable("git")
 
@@ -42,7 +45,7 @@ func resolveSafeExecutable(name string) string {
 // dedicated child identity boundary. Harness v1 workspaces never carry
 // publication authority, so finalization records a diff without committing or
 // pushing it. A non-git or empty workDir falls back to the raw agent output.
-func FinalizeTurnResult(workDir, output string) ([]byte, error) {
+func FinalizeTurnResult(ctx context.Context, workDir, output string) ([]byte, error) {
 	workDir = strings.TrimSpace(workDir)
 	if workDir == "" {
 		return []byte(output), nil
@@ -50,20 +53,25 @@ func FinalizeTurnResult(workDir, output string) ([]byte, error) {
 	if strings.TrimSpace(os.Getenv(workerenv.PushBranch)) != "" {
 		return nil, errors.New("harness v1 wrapper finalization does not permit branch publication")
 	}
-	baseSHA, err := wrapperGitOutput(workDir, "rev-parse", "HEAD")
+	ctx, cancel := context.WithTimeout(ctx, wrapperGitPostTurnTimeout)
+	defer cancel()
+	baseSHA, err := wrapperGitOutput(ctx, workDir, "rev-parse", "HEAD")
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return []byte(output), nil
 	}
 	baseSHA = strings.TrimSpace(baseSHA)
-	if err := neutralizeWrapperRepoExecutableConfig(workDir); err != nil {
+	if err := neutralizeWrapperRepoExecutableConfig(ctx, workDir); err != nil {
 		return nil, fmt.Errorf("neutralize child-owned repository executable Git configuration: %w", err)
 	}
-	if staged, err := wrapperGitOutput(workDir, "add", "-A"); err != nil {
+	if staged, err := wrapperGitOutput(ctx, workDir, "add", "-A"); err != nil {
 		return nil, fmt.Errorf("stage harness v1 workspace result: %w: %s", err, strings.TrimSpace(staged))
 	}
-	_, _ = wrapperGitOutput(workDir, "reset", "-q", "--", ".orka-artifacts", ":(glob)**/.orka-artifacts")
+	_, _ = wrapperGitOutput(ctx, workDir, "reset", "-q", "--", ".orka-artifacts", ":(glob)**/.orka-artifacts")
 	diff, err := wrapperGitOutput(
-		workDir, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv",
+		ctx, workDir, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("render harness v1 workspace diff: %w", err)
@@ -73,9 +81,14 @@ func FinalizeTurnResult(workDir, output string) ([]byte, error) {
 		{"diff", "--cached", "--name-status", "-z", "--no-ext-diff", "--no-textconv"},
 		{"diff", "--name-status", "-z", "--no-ext-diff", "--no-textconv"},
 	} {
-		if names, namesErr := wrapperGitOutput(workDir, args...); namesErr == nil {
-			files = append(files, parseWrapperDiffNameStatusPaths(names)...)
+		names, namesErr := wrapperGitOutput(ctx, workDir, args...)
+		if namesErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			continue
 		}
+		files = append(files, parseWrapperDiffNameStatusPaths(names)...)
 	}
 	files = uniqueWrapperPaths(files)
 	result := &common.StructuredResult{
@@ -383,13 +396,16 @@ func setTemporaryEnv(key, value string) func() {
 	}
 }
 
-func wrapperGitOutput(dir string, args ...string) (string, error) {
-	out, err := wrapperGitCommand(dir, args...).CombinedOutput()
+func wrapperGitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	out, err := wrapperGitCommand(ctx, dir, args...).CombinedOutput()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return string(out), ctxErr
+	}
 	return string(out), err
 }
 
-func neutralizeWrapperRepoExecutableConfig(dir string) error {
-	raw, err := wrapperGitOutput(dir, "config", "--local", "--no-includes", "--name-only", "-z", "--list")
+func neutralizeWrapperRepoExecutableConfig(ctx context.Context, dir string) error {
+	raw, err := wrapperGitOutput(ctx, dir, "config", "--local", "--no-includes", "--name-only", "-z", "--list")
 	if err != nil {
 		return fmt.Errorf("list local Git configuration: %w", err)
 	}
@@ -399,7 +415,7 @@ func neutralizeWrapperRepoExecutableConfig(dir string) error {
 			continue
 		}
 		if out, err := wrapperGitOutput(
-			dir, "config", "--local", "--no-includes", "--unset-all", key,
+			ctx, dir, "config", "--local", "--no-includes", "--unset-all", key,
 		); err != nil {
 			return fmt.Errorf("remove executable Git configuration %q: %w: %s", key, err, strings.TrimSpace(out))
 		}
@@ -463,7 +479,7 @@ func uniqueWrapperPaths(paths []string) []string {
 	return unique
 }
 
-func wrapperGitCommand(dir string, args ...string) *exec.Cmd {
+func wrapperGitCommand(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	safeDir := strings.TrimSpace(dir)
 	if abs, err := filepath.Abs(safeDir); err == nil {
 		safeDir = abs
@@ -478,7 +494,7 @@ func wrapperGitCommand(dir string, args ...string) *exec.Cmd {
 		"-c", "core.pager=cat",
 		"-C", dir,
 	}, args...)
-	cmd := exec.Command(wrapperGitBinary, gitArgs...)
+	cmd := exec.CommandContext(ctx, wrapperGitBinary, gitArgs...)
 	cmd.Env = []string{
 		"GIT_ASKPASS=/bin/false",
 		"GIT_CONFIG_GLOBAL=/dev/null",
@@ -495,24 +511,38 @@ func wrapperGitCommand(dir string, args ...string) *exec.Cmd {
 	return cmd
 }
 
-func ShouldFinalizeWorkDir(workDir string) bool {
+func ShouldFinalizeWorkDir(ctx context.Context, workDir string) (bool, error) {
 	workDir = strings.TrimSpace(workDir)
 	if workDir == "" {
-		return false
+		return false, nil
 	}
-	return wrapperGitCommand(workDir, "rev-parse", "--show-toplevel").Run() == nil
+	ctx, cancel := context.WithTimeout(ctx, wrapperGitPostTurnTimeout)
+	defer cancel()
+	_, err := wrapperGitOutput(ctx, workDir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		return false, nil
+	}
+	return true, nil
 }
 
-func CleanFinalizedWorkDir(workDir string) error {
+func CleanFinalizedWorkDir(ctx context.Context, workDir string) error {
 	workDir = strings.TrimSpace(workDir)
 	if workDir == "" {
 		return nil
 	}
-	rootOut, err := wrapperGitCommand(workDir, "rev-parse", "--show-toplevel").Output()
+	ctx, cancel := context.WithTimeout(ctx, wrapperGitPostTurnTimeout)
+	defer cancel()
+	rootOut, err := wrapperGitOutput(ctx, workDir, "rev-parse", "--show-toplevel")
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return nil
 	}
-	repoRoot := strings.TrimSpace(string(rootOut))
+	repoRoot := strings.TrimSpace(rootOut)
 	if repoRoot == "" {
 		return nil
 	}
@@ -529,22 +559,22 @@ func CleanFinalizedWorkDir(workDir string) error {
 		return fmt.Errorf("clean finalized workdir %q is outside repository root %q", cleanPath, repoRoot)
 	}
 	if relPath == "." {
-		if out, err := wrapperGitCommand(repoRoot, "reset", "--hard", "HEAD").CombinedOutput(); err != nil {
-			return fmt.Errorf("clean finalized workdir reset: %w: %s", err, strings.TrimSpace(string(out)))
+		if out, err := wrapperGitOutput(ctx, repoRoot, "reset", "--hard", "HEAD"); err != nil {
+			return fmt.Errorf("clean finalized workdir reset: %w: %s", err, strings.TrimSpace(out))
 		}
-		if out, err := wrapperGitCommand(repoRoot, "clean", "-fd").CombinedOutput(); err != nil {
-			return fmt.Errorf("clean finalized workdir clean: %w: %s", err, strings.TrimSpace(string(out)))
+		if out, err := wrapperGitOutput(ctx, repoRoot, "clean", "-fd"); err != nil {
+			return fmt.Errorf("clean finalized workdir clean: %w: %s", err, strings.TrimSpace(out))
 		}
 		return nil
 	}
-	if out, err := wrapperGitCommand(repoRoot, "reset", "HEAD", "--", relPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("clean finalized workdir unstage: %w: %s", err, strings.TrimSpace(string(out)))
+	if out, err := wrapperGitOutput(ctx, repoRoot, "reset", "HEAD", "--", relPath); err != nil {
+		return fmt.Errorf("clean finalized workdir unstage: %w: %s", err, strings.TrimSpace(out))
 	}
-	if out, err := wrapperGitCommand(repoRoot, "checkout", "--", relPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("clean finalized workdir checkout: %w: %s", err, strings.TrimSpace(string(out)))
+	if out, err := wrapperGitOutput(ctx, repoRoot, "checkout", "--", relPath); err != nil {
+		return fmt.Errorf("clean finalized workdir checkout: %w: %s", err, strings.TrimSpace(out))
 	}
-	if out, err := wrapperGitCommand(repoRoot, "clean", "-fd", "--", relPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("clean finalized workdir clean: %w: %s", err, strings.TrimSpace(string(out)))
+	if out, err := wrapperGitOutput(ctx, repoRoot, "clean", "-fd", "--", relPath); err != nil {
+		return fmt.Errorf("clean finalized workdir clean: %w: %s", err, strings.TrimSpace(out))
 	}
 	return nil
 }

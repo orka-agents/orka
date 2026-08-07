@@ -1,6 +1,7 @@
 package cliwrapper
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,7 +39,7 @@ func TestFinalizeTurnResultNeutralizesExecutableRepositoryConfig(t *testing.T) {
 	}
 	t.Setenv(workerenv.PushBranch, "")
 
-	raw, err := FinalizeTurnResult(repo, "finished safely")
+	raw, err := FinalizeTurnResult(context.Background(), repo, "finished safely")
 	if err != nil {
 		t.Fatalf("FinalizeTurnResult: %v", err)
 	}
@@ -63,7 +64,7 @@ func TestFinalizeTurnResultNeutralizesExecutableRepositoryConfig(t *testing.T) {
 
 func TestFinalizeTurnResultRejectsPublication(t *testing.T) {
 	t.Setenv(workerenv.PushBranch, "agent-branch")
-	if _, err := FinalizeTurnResult(t.TempDir(), "result"); err == nil ||
+	if _, err := FinalizeTurnResult(context.Background(), t.TempDir(), "result"); err == nil ||
 		!strings.Contains(err.Error(), "does not permit branch publication") {
 		t.Fatalf("publication error = %v, want refusal", err)
 	}

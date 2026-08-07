@@ -1102,7 +1102,12 @@ func (d *HarnessV1Dispatcher) streamAcceptedAttempt(
 	}
 	current := attempt
 	var terminal *harness.HarnessEventFrame
-	streamErr := protocolClient.StreamFrames(ctx, request.TurnID, current.LastEventSeq, func(frame harness.HarnessEventFrame) error {
+	pollTimeout := d.Interval
+	if pollTimeout <= 0 {
+		pollTimeout = DefaultHarnessV1DispatchInterval
+	}
+	streamCtx, cancelStream := context.WithTimeout(ctx, pollTimeout)
+	streamErr := protocolClient.StreamFrames(streamCtx, request.TurnID, current.LastEventSeq, func(frame harness.HarnessEventFrame) error {
 		if frame.RuntimeSessionID != request.RuntimeSessionID || frame.TurnID != request.TurnID ||
 			frame.CorrelationID != request.CorrelationID || frame.Seq <= current.LastEventSeq {
 			return fmt.Errorf("harness frame identity or sequence does not match the durable attempt")
@@ -1133,11 +1138,23 @@ func (d *HarnessV1Dispatcher) streamAcceptedAttempt(
 		}
 		return nil
 	})
+	streamCtxErr := streamCtx.Err()
+	cancelStream()
 	if errors.Is(streamErr, errHarnessV1TerminalFrame) {
 		streamErr = nil
 	}
 	if terminal != nil {
 		return d.settleTerminalFrame(ctx, task, protocolClient, request, current, fence, *terminal)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if errors.Is(streamCtxErr, context.DeadlineExceeded) &&
+		(streamErr == nil || errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded)) {
+		// A bounded poll lets the dispatcher release its active-Task guard so the
+		// next scan can observe post-accept cancellation or deletion and issue
+		// CancelTurn. It is a normal retry boundary, not a stream failure.
+		return nil
 	}
 	if streamErr != nil {
 		var clientErr harness.ClientError
