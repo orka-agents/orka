@@ -301,7 +301,6 @@ wait_for_admission_endpoints() {
 smoke_admission_handlers() {
   local handler kind resource uid
   local service_proxy="/api/v1/namespaces/orka-system/services/https:orka-admission:443/proxy"
-  "${kubectl}" get --raw "${service_proxy}/readyz" >/dev/null
   while IFS='|' read -r handler kind resource; do
     [[ -n "${handler}" ]] || continue
     uid="orka-admission-smoke-${resource}"

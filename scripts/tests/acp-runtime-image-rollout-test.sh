@@ -512,13 +512,6 @@ if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "endpoin
   exit 0
 fi
 
-if [[ "$1" == "get" && "$2" == "--raw" && "$3" == */services/https:orka-admission:443/proxy/readyz ]]; then
-  [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || exit 1
-  printf 'ok\n'
-  printf 'proxy-ready:orka-admission\n' >>"${FAKE_KUBE_LOG}"
-  exit 0
-fi
-
 [[ "$1" == "apply" && "$2" == "-f" && $# -eq 3 ]] || {
   echo "unexpected fake kubectl invocation: $*" >&2
   exit 2
