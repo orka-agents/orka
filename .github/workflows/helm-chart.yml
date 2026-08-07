@@ -314,7 +314,6 @@ jobs:
             --create-namespace \
             --set-string "controller.agentExecutionSnapshot.existingSecret=${SNAPSHOT_SECRET}" \
             --set-string "controller.agentExecutionSnapshot.key=${SNAPSHOT_KEY}" \
-            --set controller.replicas=0 \
             --set-string controller.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
             --set-string controller.image.tag="${PAUSE_IMAGE_TAG}" \
             --set controller.image.pullPolicy=IfNotPresent \
