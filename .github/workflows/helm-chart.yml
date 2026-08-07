@@ -139,12 +139,18 @@ jobs:
           helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/scm-egress-proxy-secret.yaml > "${long_scm_secret}"
 
           harness_v1_digest="sha256:$(printf '1%.0s' {1..64})"
+          admission_digest="sha256:$(printf '3%.0s' {1..64})"
           harness_v1_args=(
             "${snapshot_args[@]}"
             --namespace "${NAMESPACE}"
             --set harnessV1.enabled=true
             --set-string "harnessV1.image.digest=${harness_v1_digest}"
             --set-string harnessV1.auth.existingSecret=harness-wrapper-auth
+            --set admission.enabled=true
+            --set admission.webhooks.enabled=true
+            --set-string "controller.image.digest=${admission_digest}"
+            --set-string admission.tls.existingSecret=orka-admission-tls
+            --set-string admission.webhooks.caBundle=Y2E=
           )
           helm template coexistence manifest_staging/charts/orka "${harness_v1_args[@]}" > "${harness_v1_render}"
           helm template coexistence manifest_staging/charts/orka "${harness_v1_args[@]}" --show-only templates/harness-wrapper-deployment.yaml > "${harness_v1_deployment}"
