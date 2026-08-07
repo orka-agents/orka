@@ -220,6 +220,11 @@ var _ = BeforeSuite(func() {
 		}
 	}, 60*time.Second, time.Second).Should(Succeed())
 
+	By("bootstrapping test-only admission TLS")
+	cmd = exec.Command("bash", filepath.Join(projectDir, "scripts", "lib", "e2e-admission-tls.sh"))
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to bootstrap admission TLS")
+
 	By("deploying the controller-manager")
 	cmd = exec.Command("make", "deploy",
 		fmt.Sprintf("IMG=%s", managerRef),

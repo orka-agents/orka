@@ -27,6 +27,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${script_dir}/lib/kind-local-registry.sh"
+# shellcheck source=scripts/lib/e2e-admission-tls.sh
+. "${script_dir}/lib/e2e-admission-tls.sh"
 
 kind_cluster="${KIND_CLUSTER:-orka-security-scan-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
@@ -307,6 +309,7 @@ main() {
   require_cmd kind
   require_cmd kubectl
   require_cmd jq
+  require_cmd openssl
 
   cd "${repo_root}"
   [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
@@ -337,6 +340,9 @@ main() {
   local manager_ref publisher_ref
   manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
   publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+
+  log "Bootstrapping test-only admission TLS"
+  orka_e2e_bootstrap_admission_tls
 
   log "Deploying Orka manager with inert digest-pinned ACP images for the deferred RepositoryScan agent path"
   local placeholder_digest

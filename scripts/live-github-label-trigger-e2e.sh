@@ -54,6 +54,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${script_dir}/lib/kind-local-registry.sh"
+# shellcheck source=scripts/lib/e2e-admission-tls.sh
+. "${script_dir}/lib/e2e-admission-tls.sh"
 
 kind_cluster="${KIND_CLUSTER:-orka-live-github-label-trigger-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
@@ -370,6 +372,7 @@ main() {
   require_cmd curl
   require_cmd jq
   require_cmd python3
+  require_cmd openssl
   check_docker_ready
 
   if [[ ! "${target_number}" =~ ^[0-9]+$ || "${target_number}" -le 0 ]]; then
@@ -416,6 +419,8 @@ main() {
   manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
   publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
   placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
+  log "Bootstrapping test-only admission TLS"
+  orka_e2e_bootstrap_admission_tls
   log "Deploying Orka manager"
   run make deploy \
     IMG="${manager_ref}" \

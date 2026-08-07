@@ -85,7 +85,7 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 		return nil, errors.New("task and Agent immutable identities are required for a harness v1 binding")
 	}
 	if agent.Spec.Runtime == nil {
-		return nil, permanentHarnessV1Candidate(errors.New("Agent runtime configuration is required for a harness v1 binding"))
+		return nil, permanentHarnessV1Candidate(errors.New("agent runtime configuration is required for a harness v1 binding"))
 	}
 	if err := validateNewHarnessV1Workload(task, agent); err != nil {
 		return nil, permanentHarnessV1Candidate(err)

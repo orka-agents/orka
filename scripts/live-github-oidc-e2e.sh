@@ -15,6 +15,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${script_dir}/lib/kind-local-registry.sh"
+# shellcheck source=scripts/lib/e2e-admission-tls.sh
+. "${script_dir}/lib/e2e-admission-tls.sh"
 cluster="${KIND_CLUSTER:-orka-live-github-oidc-e2e}"
 namespace="${ORKA_NAMESPACE:-orka-system}"
 deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
@@ -101,7 +103,7 @@ wait_for_api() {
   die "Orka API did not become ready"
 }
 
-for cmd in make go docker kind kubectl curl jq; do require_cmd "${cmd}"; done
+for cmd in make go docker kind kubectl curl jq openssl; do require_cmd "${cmd}"; done
 cd "${repo_root}"
 cp "${kustomization}" "${backup}"
 require_token_source
@@ -120,6 +122,8 @@ kind load docker-image "${manager_image}" --name "${cluster}"
 manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
 publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
 placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
+log "Bootstrapping test-only admission TLS"
+orka_e2e_bootstrap_admission_tls
 make deploy \
   IMG="${manager_ref}" \
   WORKSPACE_PUBLISHER_IMG="${publisher_ref}" \

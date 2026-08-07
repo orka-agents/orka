@@ -751,6 +751,7 @@ const (
 	sessionLineagePatchBlocked
 )
 
+//nolint:gocyclo // Session migration classification intentionally keeps its fail-closed cases in one auditable path.
 func (r *AgentExecutionClassificationReconciler) classifySessions(
 	ctx context.Context,
 	reader client.Reader,

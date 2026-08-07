@@ -58,6 +58,8 @@ jobs:
       KIND_SHA256: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
       KIND_VERSION: v0.31.0
       NAMESPACE: orka-helm-crd-lifecycle
+      SNAPSHOT_KEY: snapshot-key
+      SNAPSHOT_SECRET: agent-execution-snapshot-key
       PAUSE_IMAGE_REPOSITORY: registry.k8s.io/pause
       PAUSE_IMAGE_TAG: 3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
     steps:
@@ -117,23 +119,28 @@ jobs:
           harness_v1_network_policy=$(mktemp)
           harness_v1_kustomize=$(mktemp)
           trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}" "${harness_v1_render}" "${harness_v1_deployment}" "${harness_v1_network_policy}" "${harness_v1_kustomize}"' EXIT
-          helm template orka manifest_staging/charts/orka             --namespace "${NAMESPACE}"             > "${default_render}"
-          helm template secondary manifest_staging/charts/orka             --namespace "${NAMESPACE}"             > "${secondary_render}"
-          helm template secondary manifest_staging/charts/orka             --namespace "${NAMESPACE}"             --show-only templates/rbac.yaml             > "${secondary_rbac}"
-          helm template secondary manifest_staging/charts/orka             --namespace "${NAMESPACE}"             --show-only templates/serviceaccount.yaml             > "${secondary_serviceaccounts}"
-          helm template secondary manifest_staging/charts/orka             --namespace "${NAMESPACE}"             --show-only templates/gateway-task-admission-policy.yaml             > "${secondary_gateway_policy}"
+          snapshot_args=(
+            --set-string "controller.agentExecutionSnapshot.existingSecret=${SNAPSHOT_SECRET}"
+            --set-string "controller.agentExecutionSnapshot.key=${SNAPSHOT_KEY}"
+          )
+          helm template orka manifest_staging/charts/orka "${snapshot_args[@]}"             --namespace "${NAMESPACE}"             > "${default_render}"
+          helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}"             --namespace "${NAMESPACE}"             > "${secondary_render}"
+          helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}"             --namespace "${NAMESPACE}"             --show-only templates/rbac.yaml             > "${secondary_rbac}"
+          helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}"             --namespace "${NAMESPACE}"             --show-only templates/serviceaccount.yaml             > "${secondary_serviceaccounts}"
+          helm template secondary manifest_staging/charts/orka "${snapshot_args[@]}"             --namespace "${NAMESPACE}"             --show-only templates/gateway-task-admission-policy.yaml             > "${secondary_gateway_policy}"
 
           long_release=$(printf 'r%.0s' {1..53})
-          helm template "${long_release}" manifest_staging/charts/orka             --namespace "${NAMESPACE}"             > "${long_render}"
-          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --show-only templates/publisher-service.yaml > "${long_publisher_service}"
-          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --show-only templates/publisher-secret.yaml > "${long_publisher_secret}"
-          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --set providerProxy.enabled=true --show-only templates/provider-proxy-service.yaml > "${long_provider_service}"
-          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --set providerProxy.enabled=true --show-only templates/provider-proxy-secret.yaml > "${long_provider_secret}"
-          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --show-only templates/scm-egress-proxy-service.yaml > "${long_scm_service}"
-          helm template "${long_release}" manifest_staging/charts/orka --namespace "${NAMESPACE}" --show-only templates/scm-egress-proxy-secret.yaml > "${long_scm_secret}"
+          helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}"             --namespace "${NAMESPACE}"             > "${long_render}"
+          helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/publisher-service.yaml > "${long_publisher_service}"
+          helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/publisher-secret.yaml > "${long_publisher_secret}"
+          helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --set providerProxy.enabled=true --show-only templates/provider-proxy-service.yaml > "${long_provider_service}"
+          helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --set providerProxy.enabled=true --show-only templates/provider-proxy-secret.yaml > "${long_provider_secret}"
+          helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/scm-egress-proxy-service.yaml > "${long_scm_service}"
+          helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/scm-egress-proxy-secret.yaml > "${long_scm_secret}"
 
           harness_v1_digest="sha256:$(printf '1%.0s' {1..64})"
           harness_v1_args=(
+            "${snapshot_args[@]}"
             --namespace "${NAMESPACE}"
             --set harnessV1.enabled=true
             --set-string "harnessV1.image.digest=${harness_v1_digest}"
@@ -155,7 +162,7 @@ jobs:
             echo "Default Helm values must keep harness v1 disabled." >&2
             exit 1
           fi
-          if helm template unsafe manifest_staging/charts/orka --namespace "${NAMESPACE}" --set harnessV1.enabled=true >/dev/null 2>&1; then
+          if helm template unsafe manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --set harnessV1.enabled=true >/dev/null 2>&1; then
             echo "Harness v1 must reject an enabled render without an immutable image digest." >&2
             exit 1
           fi
@@ -305,6 +312,8 @@ jobs:
           helm install orka "${chart_package}" \
             --namespace "${NAMESPACE}" \
             --create-namespace \
+            --set-string "controller.agentExecutionSnapshot.existingSecret=${SNAPSHOT_SECRET}" \
+            --set-string "controller.agentExecutionSnapshot.key=${SNAPSHOT_KEY}" \
             --set controller.replicas=0 \
             --set-string controller.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
             --set-string controller.image.tag="${PAUSE_IMAGE_TAG}" \

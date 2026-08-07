@@ -27,6 +27,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${script_dir}/lib/kind-local-registry.sh"
+# shellcheck source=scripts/lib/e2e-admission-tls.sh
+. "${script_dir}/lib/e2e-admission-tls.sh"
 
 agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v0.5.0}"
 kind_cluster="${KIND_CLUSTER:-orka-live-agent-sandbox-e2e}"
@@ -828,6 +830,7 @@ main() {
   require_cmd kubectl
   require_cmd curl
   require_cmd jq
+  require_cmd openssl
 
   cd "${repo_root}"
   [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
@@ -863,6 +866,9 @@ main() {
   local manager_ref publisher_ref
   manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
   publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+
+  log "Bootstrapping test-only admission TLS"
+  orka_e2e_bootstrap_admission_tls
 
   log "Deploying Orka manager with inert digest-pinned ACP images (agent-sandbox RuntimeSession dispatch is deferred)"
   local placeholder_digest

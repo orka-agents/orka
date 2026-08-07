@@ -116,13 +116,13 @@ func TestAgentExecutionClassificationReconcilerWritesDispositionsLineageAndSeal(
 	}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}}
 
-	client := fake.NewClientBuilder().WithScheme(scheme).
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(
 			&corev1alpha1.AgentExecutionControl{}, &corev1alpha1.Task{}, &corev1alpha1.RuntimeSessionControl{},
 		).
 		WithObjects(control, deleting, mixed, bound, session, namespace).Build()
 	reconciler := &AgentExecutionClassificationReconciler{
-		Client: client, APIReader: client, Interval: time.Nanosecond,
+		Client: kubeClient, APIReader: kubeClient, Interval: time.Nanosecond,
 		StabilityDelay: time.Second, Now: func() time.Time { return now },
 	}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{
@@ -136,7 +136,7 @@ func TestAgentExecutionClassificationReconcilerWritesDispositionsLineageAndSeal(
 	}
 
 	gotDeleting := &corev1alpha1.Task{}
-	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "deleting"}, gotDeleting); err != nil {
+	if err := kubeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "deleting"}, gotDeleting); err != nil {
 		t.Fatal(err)
 	}
 	if gotDeleting.Status.AgentExecutionNoExecution == nil ||
@@ -144,7 +144,7 @@ func TestAgentExecutionClassificationReconcilerWritesDispositionsLineageAndSeal(
 		t.Fatalf("deleting disposition = %#v", gotDeleting.Status.AgentExecutionNoExecution)
 	}
 	gotMixed := &corev1alpha1.Task{}
-	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "mixed"}, gotMixed); err != nil {
+	if err := kubeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "mixed"}, gotMixed); err != nil {
 		t.Fatal(err)
 	}
 	if gotMixed.Status.AgentExecutionQuarantine == nil ||
@@ -152,7 +152,7 @@ func TestAgentExecutionClassificationReconcilerWritesDispositionsLineageAndSeal(
 		t.Fatalf("mixed disposition = %#v", gotMixed.Status.AgentExecutionQuarantine)
 	}
 	gotSession := &corev1alpha1.RuntimeSessionControl{}
-	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "session-control"}, gotSession); err != nil {
+	if err := kubeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "session-control"}, gotSession); err != nil {
 		t.Fatal(err)
 	}
 	if gotSession.Status.Lineage == nil ||
@@ -168,7 +168,7 @@ func TestAgentExecutionClassificationReconcilerWritesDispositionsLineageAndSeal(
 		}
 	}
 	gotControl := &corev1alpha1.AgentExecutionControl{}
-	if err := client.Get(context.Background(), request.NamespacedName, gotControl); err != nil {
+	if err := kubeClient.Get(context.Background(), request.NamespacedName, gotControl); err != nil {
 		t.Fatal(err)
 	}
 	if !sealedAgentExecutionClassification(gotControl) {

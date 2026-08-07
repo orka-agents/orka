@@ -4,9 +4,8 @@ set -Eeuo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 renderer="${root}/scripts/render-acp-runtime-images.sh"
 kustomize="${KUSTOMIZE:-${root}/bin/kustomize}"
-kubectl="${KUBECTL:-kubectl}"
 
-for command in "${renderer}" "${kustomize}" "${kubectl}" jq; do
+for command in "${renderer}" "${kustomize}" jq ruby; do
   command -v "${command}" >/dev/null 2>&1 || {
     echo "required command not found: ${command}" >&2
     exit 1
@@ -51,6 +50,14 @@ strip_agent_execution_control() {
   '
 }
 
+yaml_to_json() {
+  ruby -rjson -ryaml -e '
+    YAML.load_stream(STDIN.read).each do |document|
+      puts JSON.generate(document) unless document.nil?
+    end
+  '
+}
+
 render_snapshot() {
   local codex_image="$1"
   local claude_image="$2"
@@ -61,7 +68,7 @@ render_snapshot() {
   "${renderer}" "${overlay}" "${codex_image}" "${claude_image}" "${copilot_image}" "${opencode_image}"
   "${kustomize}" build "${overlay}" \
     | strip_agent_execution_control \
-    | "${kubectl}" create --dry-run=client --validate=false -f - -o json \
+    | yaml_to_json \
     | jq -sc '
         [.[] | if .kind == "List" then .items[] else . end] as $items |
         ($items | map(select(.kind == "ConfigMap" and .metadata.labels["orka.ai/acp-runtime-images"] == "true")) | .[0]) as $config |
@@ -145,7 +152,7 @@ awk '
 ' "${rendered_manifest}"
 rendered_inventory="${test_root}/rendered-inventory.json"
 strip_agent_execution_control <"${rendered_manifest}" \
-  | "${kubectl}" create --dry-run=client --validate=false -f - -o json \
+  | yaml_to_json \
   | jq -sc '[.[] | if .kind == "List" then .items[] else . end]' >"${rendered_inventory}"
 jq -e '
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-admission" and
@@ -193,7 +200,6 @@ if "${renderer}" "${overlay}" "${codex_b}" "${claude_b}" "${copilot_b}" "not-dig
 fi
 
 apply_script="${root}/scripts/apply-acp-production.sh"
-real_kubectl="$(command -v "${kubectl}")"
 fake_bin="${test_root}/fake-bin"
 mkdir -p "${fake_bin}"
 cat >"${fake_bin}/kubectl" <<'EOF_FAKE_KUBECTL'
@@ -218,6 +224,14 @@ strip_agent_execution_control() {
     { document = document $0 ORS }
     END { flush_document() }
   ' "$1"
+}
+
+yaml_to_json() {
+  ruby -rjson -ryaml -e '
+    YAML.load_stream(STDIN.read).each do |document|
+      puts JSON.generate(document) unless document.nil?
+    end
+  '
 }
 
 emit_control_json() {
@@ -250,7 +264,7 @@ manifest_json() {
 
   local filtered="${FAKE_KUBE_STATE}/known-resources.yaml"
   strip_agent_execution_control "${source}" >"${filtered}"
-  "${REAL_KUBECTL}" create --dry-run=client --validate=false -f "${filtered}" -o json
+  yaml_to_json <"${filtered}"
   if grep -q '^kind: AgentExecutionControl$' "${source}"; then
     emit_control_json
   fi
@@ -538,13 +552,13 @@ run_apply_scenario() {
   : >"${log_file}"
 
   if [[ -n "${mode}" ]]; then
-    if REAL_KUBECTL="${real_kubectl}" FAKE_KUBE_STATE="${state_dir}" FAKE_KUBE_LOG="${log_file}" FAKE_KUBE_FAIL_MODE="${mode}" \
+    if FAKE_KUBE_STATE="${state_dir}" FAKE_KUBE_LOG="${log_file}" FAKE_KUBE_FAIL_MODE="${mode}" \
       "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null 2>&1; then
       echo "expected injected ${mode} apply failure" >&2
       exit 1
     fi
   fi
-  REAL_KUBECTL="${real_kubectl}" FAKE_KUBE_STATE="${state_dir}" FAKE_KUBE_LOG="${log_file}" FAKE_KUBE_FAIL_MODE="" \
+  FAKE_KUBE_STATE="${state_dir}" FAKE_KUBE_LOG="${log_file}" FAKE_KUBE_FAIL_MODE="" \
     "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
   assert_converged "${state_dir}"
 }
@@ -565,7 +579,7 @@ mkdir -p "${existing_state}"
 printf '%s' "${expected_existing_key}" >"${existing_state}/snapshot-key"
 cp "${existing_state}/snapshot-key" "${existing_state}/snapshot-key.before"
 : >"${existing_state}/apply.log"
-REAL_KUBECTL="${real_kubectl}" FAKE_KUBE_STATE="${existing_state}" FAKE_KUBE_LOG="${existing_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
+FAKE_KUBE_STATE="${existing_state}" FAKE_KUBE_LOG="${existing_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
 cmp -s "${existing_state}/snapshot-key.before" "${existing_state}/snapshot-key"
 if grep -q '^secret:' "${existing_state}/apply.log"; then
@@ -578,7 +592,7 @@ mkdir -p "${newline_key_state}"
 printf '%s\n' "${expected_existing_key}" >"${newline_key_state}/snapshot-key"
 cp "${newline_key_state}/snapshot-key" "${newline_key_state}/snapshot-key.before"
 : >"${newline_key_state}/apply.log"
-REAL_KUBECTL="${real_kubectl}" FAKE_KUBE_STATE="${newline_key_state}" FAKE_KUBE_LOG="${newline_key_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
+FAKE_KUBE_STATE="${newline_key_state}" FAKE_KUBE_LOG="${newline_key_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
 cmp -s "${newline_key_state}/snapshot-key.before" "${newline_key_state}/snapshot-key"
 
@@ -588,7 +602,7 @@ printf ' %030d\n' 0 >"${raw_whitespace_key_state}/snapshot-key"
 [[ "$(wc -c <"${raw_whitespace_key_state}/snapshot-key" | tr -d '[:space:]')" == "32" ]]
 cp "${raw_whitespace_key_state}/snapshot-key" "${raw_whitespace_key_state}/snapshot-key.before"
 : >"${raw_whitespace_key_state}/apply.log"
-REAL_KUBECTL="${real_kubectl}" FAKE_KUBE_STATE="${raw_whitespace_key_state}" FAKE_KUBE_LOG="${raw_whitespace_key_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
+FAKE_KUBE_STATE="${raw_whitespace_key_state}" FAKE_KUBE_LOG="${raw_whitespace_key_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
 cmp -s "${raw_whitespace_key_state}/snapshot-key.before" "${raw_whitespace_key_state}/snapshot-key"
 
@@ -600,7 +614,7 @@ cat >"${preserved_control_state}/control.json" <<'EOF_PRESERVED_CONTROL'
 EOF_PRESERVED_CONTROL
 cp "${preserved_control_state}/control.json" "${preserved_control_state}/control.before.json"
 : >"${preserved_control_state}/apply.log"
-REAL_KUBECTL="${real_kubectl}" FAKE_KUBE_STATE="${preserved_control_state}" FAKE_KUBE_LOG="${preserved_control_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
+FAKE_KUBE_STATE="${preserved_control_state}" FAKE_KUBE_LOG="${preserved_control_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
 cmp -s "${preserved_control_state}/control.before.json" "${preserved_control_state}/control.json"
 if grep -q '^control-create:' "${preserved_control_state}/apply.log"; then
@@ -612,7 +626,7 @@ for tls_mode in missing missing-ca; do
   tls_state="${test_root}/state-tls-${tls_mode}"
   mkdir -p "${tls_state}"
   : >"${tls_state}/apply.log"
-  if tls_output="$(REAL_KUBECTL="${real_kubectl}" FAKE_KUBE_STATE="${tls_state}" FAKE_KUBE_LOG="${tls_state}/apply.log" FAKE_KUBE_FAIL_MODE="" FAKE_TLS_MODE="${tls_mode}" \
+  if tls_output="$(FAKE_KUBE_STATE="${tls_state}" FAKE_KUBE_LOG="${tls_state}/apply.log" FAKE_KUBE_FAIL_MODE="" FAKE_TLS_MODE="${tls_mode}" \
     "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" 2>&1)"; then
     echo "${tls_mode} admission TLS Secret unexpectedly passed deployment preflight" >&2
     exit 1
@@ -629,7 +643,7 @@ malformed_state="${test_root}/state-malformed-key"
 mkdir -p "${malformed_state}"
 printf '%s' "${malformed_sentinel}" >"${malformed_state}/snapshot-key"
 : >"${malformed_state}/apply.log"
-if malformed_output="$(REAL_KUBECTL="${real_kubectl}" FAKE_KUBE_STATE="${malformed_state}" FAKE_KUBE_LOG="${malformed_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
+if malformed_output="$(FAKE_KUBE_STATE="${malformed_state}" FAKE_KUBE_LOG="${malformed_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" 2>&1)"; then
   echo 'malformed snapshot key unexpectedly passed deployment preflight' >&2
   exit 1
@@ -648,7 +662,7 @@ for control_mode in missing duplicate wrong-name; do
   control_state="${test_root}/state-control-${control_mode}"
   mkdir -p "${control_state}"
   : >"${control_state}/apply.log"
-  if REAL_KUBECTL="${real_kubectl}" FAKE_KUBE_STATE="${control_state}" FAKE_KUBE_LOG="${control_state}/apply.log" FAKE_KUBE_FAIL_MODE="" FAKE_CONTROL_MODE="${control_mode}" \
+  if FAKE_KUBE_STATE="${control_state}" FAKE_KUBE_LOG="${control_state}/apply.log" FAKE_KUBE_FAIL_MODE="" FAKE_CONTROL_MODE="${control_mode}" \
     "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null 2>&1; then
     echo "${control_mode} AgentExecutionControl unexpectedly passed deployment preflight" >&2
     exit 1

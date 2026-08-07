@@ -6,6 +6,11 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   exit 2
 fi
 
+live_acp_kind_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/e2e-admission-tls.sh
+. "${live_acp_kind_lib_dir}/e2e-admission-tls.sh"
+unset live_acp_kind_lib_dir
+
 # Internal port-forward state is process-local. Reset inherited values so a
 # caller-controlled environment can never make cleanup signal or unlink an
 # unrelated resource.
@@ -43,7 +48,7 @@ live_acp_kind_run() {
 
 live_acp_kind_preflight() {
   local command
-  for command in curl docker git go jq kind kubectl make python3; do
+  for command in curl docker git go jq kind kubectl make openssl python3; do
     live_acp_kind_require_cmd "${command}" || return 1
   done
   if live_acp_kind_enabled "${RELEASE_GATE:-0}"; then
@@ -408,6 +413,9 @@ live_acp_kind_deploy_orka() {
     crd/runtimesessioncontrols.core.orka.ai crd/branchclaims.core.orka.ai \
     crd/publications.core.orka.ai crd/controllerepochs.core.orka.ai \
     crd/externaleffects.core.orka.ai --timeout="${LIVE_ACP_ROLLOUT_TIMEOUT}"
+
+  live_acp_kind_log "Bootstrapping test-only admission TLS"
+  orka_e2e_bootstrap_admission_tls
 
   live_acp_kind_log "Deploying digest-pinned Orka ACP workloads"
   live_acp_kind_run make -C "${LIVE_ACP_REPO_ROOT}" deploy \
