@@ -220,20 +220,27 @@ jobs:
           done
           if ! ruby -ryaml -e '
             rendered_rbac, expected_name, expected_namespace = ARGV
-            token_rules = []
+            token_request_grants = []
             YAML.load_stream(File.read(rendered_rbac)).each do |document|
               next unless document.is_a?(Hash)
 
               Array(document["rules"]).each do |rule|
-                token_rules << [document, rule] if Array(rule["resources"]).include?("serviceaccounts/token")
+                api_groups = Array(rule["apiGroups"])
+                resources = Array(rule["resources"])
+                verbs = Array(rule["verbs"])
+                next unless api_groups.include?("") || api_groups.include?("*")
+                next unless resources.include?("serviceaccounts/token") || resources.include?("*")
+                next unless verbs.include?("create") || verbs.include?("*")
+
+                token_request_grants << [document, rule]
               end
             end
-            valid = token_rules.length == 1 &&
-              token_rules[0][0]["kind"] == "Role" &&
-              token_rules[0][0].dig("metadata", "name") == expected_name &&
-              token_rules[0][0].dig("metadata", "namespace") == expected_namespace &&
-              Array(token_rules[0][1]["apiGroups"]) == [""] &&
-              Array(token_rules[0][1]["verbs"]) == ["create"]
+            valid = token_request_grants.length == 1 &&
+              token_request_grants[0][0]["kind"] == "Role" &&
+              token_request_grants[0][0].dig("metadata", "name") == expected_name &&
+              token_request_grants[0][0].dig("metadata", "namespace") == expected_namespace &&
+              Array(token_request_grants[0][1]["apiGroups"]) == [""] &&
+              Array(token_request_grants[0][1]["verbs"]) == ["create"]
             exit(valid ? 0 : 1)
           ' "${secondary_rbac}" secondary-orka-controller "${NAMESPACE}"; then
             echo "Harness v2 must render exactly one namespaced, create-only controller TokenRequest rule." >&2
