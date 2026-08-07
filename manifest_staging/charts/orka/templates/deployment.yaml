@@ -94,7 +94,7 @@ spec:
             {{- if .Values.harnessV1.enabled }}
             - --harness-v1-endpoint=http://{{ include "orka.harnessV1Name" . }}.{{ .Release.Namespace }}.svc:8080
             - --harness-v1-auth-secret-namespace={{ .Release.Namespace }}
-            - --harness-v1-auth-secret-name={{ .Values.harnessV1.auth.existingSecret | default (include "orka.harnessV1AuthSecretName" .) }}
+            - --harness-v1-auth-secret-name={{ .Values.harnessV1.auth.existingSecret }}
             - --harness-v1-auth-secret-key={{ .Values.harnessV1.auth.tokenKey }}
             - --harness-v1-policy-name={{ .Values.harnessV1.policy.name }}
             - --harness-v1-dispatch-interval={{ .Values.harnessV1.dispatch.interval }}

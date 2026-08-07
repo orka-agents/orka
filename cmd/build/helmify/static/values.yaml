@@ -438,15 +438,12 @@ harnessV1:
     digest: ""
     pullPolicy: IfNotPresent
   auth:
-    # Use a dedicated existing Secret, or leave empty for a chart-managed
-    # release-local Secret. Do not reuse provider, publisher, or Git Secrets.
-    # The Secret source, key, and token are immutable while an enabled wrapper
+    # Use a dedicated operator-created Secret. Bearer credentials are never
+    # accepted through Helm values or emitted into rendered release manifests.
+    # The Secret source and key are immutable while an enabled wrapper
     # Deployment exists because controller attempts pin its resourceVersion.
     existingSecret: ""
     tokenKey: token
-    # Optional explicit token for a chart-managed Secret. Empty generates a
-    # cryptographically random value; explicit values must be at least 32 chars.
-    token: ""
   ledger:
     # The admission ledger is always PVC-backed when harness v1 is enabled.
     size: 1Gi

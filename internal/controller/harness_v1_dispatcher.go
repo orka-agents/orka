@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +69,11 @@ type harnessV1ProtocolClient interface {
 }
 
 type harnessV1ClientFactory func(endpoint, bearer string, httpClient *http.Client) (harnessV1ProtocolClient, error)
+
+type harnessV1DispatchCandidate struct {
+	task    *corev1alpha1.Task
+	attempt store.HarnessV1Attempt
+}
 
 // HarnessV1Dispatcher owns harness v1 network effects outside Task reconcile.
 // A Prepared attempt is moved durably to Submitting before StartTurn. On
@@ -150,6 +156,7 @@ func (d *HarnessV1Dispatcher) dispatchOnce(ctx context.Context) error {
 	if err := d.Client.List(ctx, &tasks); err != nil {
 		return err
 	}
+	candidates := make([]harnessV1DispatchCandidate, 0, len(tasks.Items))
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		if !taskManagedByHarnessV1(task) {
@@ -166,6 +173,12 @@ func (d *HarnessV1Dispatcher) dispatchOnce(ctx context.Context) error {
 		if store.IsTerminalHarnessV1AttemptState(latest.State) && harnessV1AttemptProjectionMatches(task, &latest) {
 			continue
 		}
+		candidates = append(candidates, harnessV1DispatchCandidate{task: task, attempt: latest})
+	}
+	sortHarnessV1DispatchCandidates(candidates, time.Now().UTC())
+	for i := range candidates {
+		candidate := candidates[i]
+		task, latest := candidate.task, candidate.attempt
 		select {
 		case d.sem <- struct{}{}:
 			if !d.markActive(task.UID) {
@@ -187,6 +200,36 @@ func (d *HarnessV1Dispatcher) dispatchOnce(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func sortHarnessV1DispatchCandidates(candidates []harnessV1DispatchCandidate, now time.Time) {
+	ranks := make(map[*corev1alpha1.Task]acpTaskQueueRank, len(candidates))
+	for i := range candidates {
+		task := candidates[i].task
+		ranks[task] = rankTaskForQueue(task, now.UTC(), harnessV1TaskQueuedAt(task))
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		leftRecovery := candidates[i].attempt.State != store.HarnessV1AttemptPrepared
+		rightRecovery := candidates[j].attempt.State != store.HarnessV1AttemptPrepared
+		if leftRecovery != rightRecovery {
+			return leftRecovery
+		}
+		return taskQueueRankLess(ranks[candidates[i].task], ranks[candidates[j].task])
+	})
+}
+
+func harnessV1TaskQueuedAt(task *corev1alpha1.Task) time.Time {
+	if task == nil {
+		return time.Unix(0, 0).UTC()
+	}
+	if task.Status.HarnessRuntime != nil && task.Status.HarnessRuntime.LastTransitionTime != nil &&
+		!task.Status.HarnessRuntime.LastTransitionTime.IsZero() {
+		return task.Status.HarnessRuntime.LastTransitionTime.UTC()
+	}
+	if !task.CreationTimestamp.IsZero() {
+		return task.CreationTimestamp.UTC()
+	}
+	return time.Unix(0, 0).UTC()
 }
 
 func (d *HarnessV1Dispatcher) markActive(uid types.UID) bool {

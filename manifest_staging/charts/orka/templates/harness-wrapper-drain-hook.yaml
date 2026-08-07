@@ -17,7 +17,7 @@
 {{- $existingPullPolicy := "" }}
 {{- $existingAuthSecret := "" }}
 {{- $existingAuthKey := "" }}
-{{- $desiredAuthSecret := .Values.harnessV1.auth.existingSecret | default (include "orka.harnessV1AuthSecretName" .) }}
+{{- $desiredAuthSecret := .Values.harnessV1.auth.existingSecret }}
 {{- $desiredAuthKey := .Values.harnessV1.auth.tokenKey }}
 {{- if $existingWrapper }}
 {{- $existingRouteEnabled = true }}
@@ -38,19 +38,6 @@
 {{- end }}
 {{- if ne $existingAuthKey $desiredAuthKey }}
 {{- fail "harnessV1.auth.tokenKey cannot change while the previously deployed harness v1 route remains enabled; retire harness v1 before rotating wrapper auth" }}
-{{- end }}
-{{- if not .Values.harnessV1.auth.existingSecret }}
-{{- $existingManagedAuth := lookup "v1" "Secret" .Release.Namespace $desiredAuthSecret }}
-{{- if not $existingManagedAuth }}
-{{- fail "the live chart-managed harness v1 auth Secret must exist while the previously deployed harness v1 route remains enabled" }}
-{{- end }}
-{{- $existingManagedAuthData := $existingManagedAuth.data | default (dict) }}
-{{- if or (not (hasKey $existingManagedAuthData $desiredAuthKey)) (empty (index $existingManagedAuthData $desiredAuthKey)) }}
-{{- fail "the live chart-managed harness v1 auth Secret must contain the configured nonempty token key while the previously deployed harness v1 route remains enabled" }}
-{{- end }}
-{{- if and .Values.harnessV1.auth.token (ne (index $existingManagedAuthData $desiredAuthKey) (.Values.harnessV1.auth.token | b64enc)) }}
-{{- fail "harnessV1.auth.token cannot change while the previously deployed harness v1 route remains enabled; retire harness v1 before rotating wrapper auth" }}
-{{- end }}
 {{- end }}
 {{- end }}
 {{- if $needsRollover }}
@@ -317,7 +304,7 @@ spec:
       volumes:
         - name: auth
           secret:
-            secretName: {{ .Values.harnessV1.auth.existingSecret | default (include "orka.harnessV1AuthSecretName" .) | quote }}
+            secretName: {{ .Values.harnessV1.auth.existingSecret | quote }}
             defaultMode: 0440
             items:
               - key: {{ .Values.harnessV1.auth.tokenKey | quote }}
@@ -453,7 +440,7 @@ spec:
       volumes:
         - name: auth
           secret:
-            secretName: {{ .Values.harnessV1.auth.existingSecret | default (include "orka.harnessV1AuthSecretName" .) | quote }}
+            secretName: {{ .Values.harnessV1.auth.existingSecret | quote }}
             defaultMode: 0440
             items:
               - key: {{ .Values.harnessV1.auth.tokenKey | quote }}

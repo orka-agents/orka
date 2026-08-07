@@ -27,6 +27,7 @@ const (
 	agentExecutionFenceLabel = "orka.ai/agent-execution-ownership-fence"
 	legacyFenceLabelValue    = "legacy"
 	globalFenceLabelValue    = "global"
+	agentExecutionAppName    = "orka"
 )
 
 // AgentExecutionOwnershipLockConfig identifies the one controller Pod and
@@ -466,9 +467,14 @@ func activeControllerPod(pod *corev1.Pod) bool {
 }
 
 func controllerLabels(values map[string]string) bool {
+	if values["orka.ai/network-role"] == AgentSandboxNamespaceStrategyController {
+		return true
+	}
+	if values["app.kubernetes.io/name"] != agentExecutionAppName {
+		return false
+	}
 	return values["app.kubernetes.io/component"] == AgentSandboxNamespaceStrategyController ||
-		values["control-plane"] == "controller-manager" ||
-		values["orka.ai/network-role"] == AgentSandboxNamespaceStrategyController
+		values["control-plane"] == "controller-manager"
 }
 
 func controllerLeaderElectionEnabled(containers []corev1.Container) bool {

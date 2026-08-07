@@ -135,6 +135,67 @@ func TestDefaultHarnessV1DispatchWorkersMatchesShippedWrapperCapacity(t *testing
 	}
 }
 
+func TestSortHarnessV1DispatchCandidatesPrioritizesRecoveryAndQueueRank(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	lowPriority, highPriority := int32(100), int32(900)
+	queuedAt := metav1.NewTime(now.Add(-time.Minute))
+	task := func(name string, priority int32) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default", Name: name, UID: types.UID(name + "-uid"),
+				CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Minute)),
+			},
+			Spec: corev1alpha1.TaskSpec{Priority: &priority},
+			Status: corev1alpha1.TaskStatus{HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{
+				LastTransitionTime: &queuedAt,
+			}},
+		}
+	}
+	candidates := []harnessV1DispatchCandidate{
+		{task: task("low-prepared", lowPriority), attempt: store.HarnessV1Attempt{State: store.HarnessV1AttemptPrepared}},
+		{task: task("high-prepared", highPriority), attempt: store.HarnessV1Attempt{State: store.HarnessV1AttemptPrepared}},
+		{task: task("recovery", lowPriority), attempt: store.HarnessV1Attempt{State: store.HarnessV1AttemptAccepted}},
+	}
+
+	sortHarnessV1DispatchCandidates(candidates, now)
+	want := []string{"recovery", "high-prepared", "low-prepared"}
+	for i := range want {
+		if got := candidates[i].task.Name; got != want[i] {
+			t.Fatalf("candidate[%d] = %q, want %q", i, got, want[i])
+		}
+	}
+}
+
+func TestSortHarnessV1DispatchCandidatesPromotesMaximumWait(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	lowPriority, highPriority := int32(0), int32(1000)
+	oldQueuedAt := metav1.NewTime(now.Add(-DefaultACPQueueMaximumWait))
+	recentQueuedAt := metav1.NewTime(now.Add(-time.Minute))
+	oldTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "old", UID: "old-uid"},
+		Spec:       corev1alpha1.TaskSpec{Priority: &lowPriority},
+		Status: corev1alpha1.TaskStatus{HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{
+			LastTransitionTime: &oldQueuedAt,
+		}},
+	}
+	recentTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "recent", UID: "recent-uid"},
+		Spec:       corev1alpha1.TaskSpec{Priority: &highPriority},
+		Status: corev1alpha1.TaskStatus{HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{
+			LastTransitionTime: &recentQueuedAt,
+		}},
+	}
+	candidates := []harnessV1DispatchCandidate{
+		{task: recentTask, attempt: store.HarnessV1Attempt{State: store.HarnessV1AttemptPrepared}},
+		{task: oldTask, attempt: store.HarnessV1Attempt{State: store.HarnessV1AttemptPrepared}},
+	}
+
+	sortHarnessV1DispatchCandidates(candidates, now)
+	if got := candidates[0].task.Name; got != "old" {
+		t.Fatalf("first candidate = %q, want promoted old Task", got)
+	}
+}
+
 func seedHarnessV1AttemptEpoch(t *testing.T, attemptStore *sqlite.Store) store.ControllerEpochFence {
 	t.Helper()
 	epoch, err := attemptStore.CompareAndSwapControllerEpoch(context.Background(), store.ControllerEpochCAS{

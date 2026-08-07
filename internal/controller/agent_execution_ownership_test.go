@@ -129,8 +129,10 @@ func TestAgentExecutionOwnershipLockRejectsElectionDisabledOverlap(t *testing.T)
 			Replicas: &one,
 			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"control-plane": "controller-manager"}},
-				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "manager", Args: []string{"--leader-elect=false"}}}},
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					"app.kubernetes.io/name": "orka", "control-plane": "controller-manager",
+				}},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "manager", Args: []string{"--leader-elect=false"}}}},
 			},
 		},
 	})
@@ -151,7 +153,9 @@ func TestAgentExecutionOwnershipLockAllowsDisjointWatchScope(t *testing.T) {
 			Replicas: &one,
 			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"control-plane": "controller-manager"}},
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					"app.kubernetes.io/name": "orka", "control-plane": "controller-manager",
+				}},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "manager", Args: []string{
 					"--leader-elect=true", "--watch-namespace=tenant-b",
 				}}}},
@@ -225,15 +229,19 @@ func TestAgentExecutionOwnershipHostModeRejectsEveryOverlappingController(t *tes
 			Spec: appsv1.DeploymentSpec{
 				Replicas: &one,
 				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app.kubernetes.io/component": "controller"}},
-					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "controller", Args: []string{"--leader-elect=true"}}}},
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+						"app.kubernetes.io/name": "orka", "app.kubernetes.io/component": "controller",
+					}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "controller", Args: []string{"--leader-elect=true"}}}},
 				},
 			},
 		},
 		"Pod": &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "orka-system", Name: "standalone-controller",
-				Labels: map[string]string{"app.kubernetes.io/component": "controller"},
+				Labels: map[string]string{
+					"app.kubernetes.io/name": "orka", "app.kubernetes.io/component": "controller",
+				},
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "controller", Args: []string{"--leader-elect=true"}}}},
 		},
@@ -251,6 +259,49 @@ func TestAgentExecutionOwnershipHostModeRejectsEveryOverlappingController(t *tes
 			}
 			if err := lock.preflight(context.Background()); err == nil || !strings.Contains(err.Error(), "overlapping controller") {
 				t.Fatalf("host overlap error = %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentExecutionOwnershipHostModeIgnoresUnrelatedGenericControllers(t *testing.T) {
+	one := int32(1)
+	objects := map[string]runtime.Object{
+		"Deployment": &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "other-system", Name: "other-controller", UID: "other-controller"},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &one,
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"control-plane": "controller-manager"}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "manager", Args: []string{"--leader-elect=false"},
+					}}},
+				},
+			},
+		},
+		"Pod": &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "other-system", Name: "other-controller",
+				Labels: map[string]string{"app.kubernetes.io/component": "controller"},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: "manager", Args: []string{"--leader-elect=false"},
+			}}},
+		},
+	}
+	for name, object := range objects {
+		t.Run(name, func(t *testing.T) {
+			client := fake.NewClientset(object)
+			lock, err := NewAgentExecutionOwnershipLock(client, AgentExecutionOwnershipLockConfig{
+				Identity:             "host-controller",
+				LegacyFenceNamespace: "orka-system",
+				HostDevelopmentMode:  true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := lock.preflight(context.Background()); err != nil {
+				t.Fatalf("unrelated generic controller failed preflight: %v", err)
 			}
 		})
 	}
@@ -301,8 +352,10 @@ func ownershipCurrentControllerObjects() []runtime.Object {
 				Replicas: &one,
 				Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app.kubernetes.io/component": "controller"}},
-					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "controller", Args: []string{"--leader-elect=true"}}}},
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+						"app.kubernetes.io/name": "orka", "app.kubernetes.io/component": "controller",
+					}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "controller", Args: []string{"--leader-elect=true"}}}},
 				},
 			},
 		},
@@ -317,7 +370,9 @@ func ownershipCurrentControllerObjects() []runtime.Object {
 		&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "orka-system", Name: "controller-pod", UID: "pod-current",
-				Labels: map[string]string{"app.kubernetes.io/component": "controller"},
+				Labels: map[string]string{
+					"app.kubernetes.io/name": "orka", "app.kubernetes.io/component": "controller",
+				},
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "orka-rs", UID: "replicaset-current", Controller: &controller,
 				}},

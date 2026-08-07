@@ -23,6 +23,7 @@ import (
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -247,6 +248,16 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 		return ctrladmission.Denied(
 			"Task spec is immutable after execution authority or a migration disposition is recorded",
 		)
+	}
+	if taskHasExecutionAuthority(oldObject) &&
+		slices.Contains(oldObject.Finalizers, labels.TaskFinalizer) &&
+		!slices.Contains(object.Finalizers, labels.TaskFinalizer) {
+		if strings.TrimSpace(req.UserInfo.Username) != v.config.ControllerUsername ||
+			oldObject.DeletionTimestamp.IsZero() || object.DeletionTimestamp.IsZero() {
+			return ctrladmission.Denied(
+				"only the controller may remove the Task cleanup finalizer while completing deletion cleanup",
+			)
+		}
 	}
 
 	if response := v.validateBinding(ctx, req, oldObject, object); !response.Allowed {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -127,7 +126,6 @@ type harnessV1UpgradeState struct {
 	controllerState          string
 	authSecret               string
 	authKey                  string
-	managedToken             string
 }
 
 func helmTemplateHarnessV1UpgradeDrainHook(
@@ -206,16 +204,6 @@ func helmTemplateHarnessV1UpgradeDrainHook(
 			t.Fatalf("wrapper drain hook is not gated by the exact existing controller Deployment lookup")
 		}
 		forced = withController
-	}
-	if state.managedToken != "" {
-		managedAuthLookup := `{{- $existingManagedAuth := lookup "v1" "Secret" .Release.Namespace $desiredAuthSecret }}`
-		forcedManagedAuthLookup := `{{- $existingManagedAuth := dict "data" (dict $desiredAuthKey "` +
-			base64.StdEncoding.EncodeToString([]byte(state.managedToken)) + `") }}`
-		withManagedAuth := strings.Replace(forced, managedAuthLookup, forcedManagedAuthLookup, 1)
-		if withManagedAuth == forced {
-			t.Fatalf("wrapper drain hook is not gated by the exact chart-managed auth Secret lookup")
-		}
-		forced = withManagedAuth
 	}
 	if err := os.WriteFile(hookPath, []byte(forced), 0o600); err != nil {
 		t.Fatalf("force existing wrapper lookup in copied chart: %v", err)
@@ -834,12 +822,10 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 		"--set", "harnessV1.enabled=true",
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "harnessV1.image.digest=" + digest,
+		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
-	managedSecretName := "test-orka-harness-wrapper-auth"
-	oldToken := strings.Repeat("a", 32)
-	newToken := strings.Repeat("b", 32)
 	tests := []struct {
 		name      string
 		state     harnessV1UpgradeState
@@ -871,30 +857,6 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 			wantError: "harnessV1.auth.tokenKey cannot change while the previously deployed harness v1 route remains enabled",
 		},
 		{
-			name: "managed token",
-			state: harnessV1UpgradeState{
-				authSecret:   managedSecretName,
-				authKey:      "token",
-				managedToken: oldToken,
-			},
-			args: []string{
-				"--set-string", "harnessV1.auth.token=" + newToken,
-			},
-			wantError: "harnessV1.auth.token cannot change while the previously deployed harness v1 route remains enabled",
-		},
-		{
-			name: "missing managed Secret",
-			state: harnessV1UpgradeState{
-				authSecret: managedSecretName,
-				authKey:    "token",
-			},
-			args: []string{
-				"--set-string", "harnessV1.auth.token=" + oldToken,
-			},
-			wantError: "the live chart-managed harness v1 auth Secret must exist while " +
-				"the previously deployed harness v1 route remains enabled",
-		},
-		{
 			name: "missing wrapper Secret source",
 			state: harnessV1UpgradeState{
 				wrapperMissing:  true,
@@ -922,20 +884,6 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 			},
 			wantError: "harnessV1.auth.tokenKey cannot change while the previously deployed harness v1 route remains enabled",
 		},
-		{
-			name: "missing wrapper managed token",
-			state: harnessV1UpgradeState{
-				wrapperMissing:  true,
-				controllerState: "enabled",
-				authSecret:      managedSecretName,
-				authKey:         "token",
-				managedToken:    oldToken,
-			},
-			args: []string{
-				"--set-string", "harnessV1.auth.token=" + newToken,
-			},
-			wantError: "harnessV1.auth.token cannot change while the previously deployed harness v1 route remains enabled",
-		},
 	}
 
 	for _, tt := range tests {
@@ -949,20 +897,6 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 				t.Fatalf("helm template error is missing %q:\n%s", tt.wantError, output)
 			}
 		})
-	}
-
-	unchangedArgs := append(append([]string{}, baseArgs...),
-		"--set-string", "harnessV1.auth.token="+oldToken)
-	unchanged, err := helmTemplateHarnessV1UpgradeDrainHook(t, harnessV1UpgradeState{
-		authSecret:   managedSecretName,
-		authKey:      "token",
-		managedToken: oldToken,
-	}, unchangedArgs...)
-	if err != nil {
-		t.Fatalf("unchanged managed auth blocked image-only wrapper rollover: %v\n%s", err, unchanged)
-	}
-	if !strings.Contains(unchanged, "app.kubernetes.io/component: agent-harness-wrapper-rollover-drain") {
-		t.Fatalf("unchanged managed auth lost image-only wrapper rollover drain:\n%s", unchanged)
 	}
 
 	firstEnableArgs := append(append([]string{}, baseArgs...),
@@ -1000,30 +934,22 @@ func TestStaticChartHarnessV1GenerationTracksOnlyPodTemplate(t *testing.T) {
 	}
 }
 
-func TestStaticChartHarnessV1GenerationTracksManagedTokenDigestWithoutExposingToken(t *testing.T) {
+func TestStaticChartHarnessV1UsesOnlyExistingSecretReferences(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("4", 64)
 	args := []string{
 		"--set", "harnessV1.enabled=true",
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "harnessV1.image.digest=" + digest,
+		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
-		"--show-only", "templates/harness-wrapper-deployment.yaml",
 	}
-	firstToken := strings.Repeat("a", 32)
-	secondToken := strings.Repeat("b", 32)
-	firstArgs := append(append([]string{}, args...), "--set-string", "harnessV1.auth.token="+firstToken)
-	secondArgs := append(append([]string{}, args...), "--set-string", "harnessV1.auth.token="+secondToken)
-	first := requireHelmRender(t, firstArgs...)
-	second := requireHelmRender(t, secondArgs...)
-	firstGeneration := harnessV1RenderedGeneration(t, first)
-	if secondGeneration := harnessV1RenderedGeneration(t, second); secondGeneration == firstGeneration {
-		t.Fatalf("managed token rotation preserved wrapper generation %s", firstGeneration)
+	rendered := requireHelmRender(t, args...)
+	if !strings.Contains(rendered, "secretName: \"harness-wrapper-auth\"") {
+		t.Fatalf("wrapper did not mount the configured existing Secret:\n%s", rendered)
 	}
-	for _, rendered := range []string{first, second} {
-		if strings.Contains(rendered, firstToken) || strings.Contains(rendered, secondToken) {
-			t.Fatalf("wrapper Pod template exposed managed token material:\n%s", rendered)
-		}
+	if strings.Contains(rendered, "# Source: orka/templates/harness-wrapper-secret.yaml") {
+		t.Fatalf("chart rendered a managed harness wrapper Secret:\n%s", rendered)
 	}
 }
 
@@ -1140,14 +1066,14 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			wantError: "harnessV1.image.digest must be a sha256 digest when harnessV1.enabled=true",
 		},
 		{
-			name: "ambiguous bearer token source",
+			name: "inline bearer token",
 			args: []string{
 				"--set", "harnessV1.enabled=true",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.auth.token=" + strings.Repeat("x", 32),
 			},
-			wantError: "harnessV1.auth.existingSecret and harnessV1.auth.token are mutually exclusive",
+			wantError: "harnessV1.auth.token is unsupported",
 		},
 		{
 			name: "short bearer token",
@@ -1156,13 +1082,22 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.token=too-short",
 			},
-			wantError: "harnessV1.auth.token must be at least 32 characters when set",
+			wantError: "harnessV1.auth.token is unsupported",
+		},
+		{
+			name: "missing existing auth Secret",
+			args: []string{
+				"--set", "harnessV1.enabled=true",
+				"--set-string", "harnessV1.image.digest=" + digest,
+			},
+			wantError: "harnessV1.auth.existingSecret is required when harnessV1.enabled=true",
 		},
 		{
 			name: "missing ledger capacity",
 			args: []string{
 				"--set", "harnessV1.enabled=true",
 				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.ledger.size=",
 			},
 			wantError: "harnessV1.ledger.size is required when harnessV1.enabled=true",
@@ -1172,6 +1107,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			args: []string{
 				"--set", "harnessV1.enabled=true",
 				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.codexSandboxMode=unrestricted",
 			},
 			wantError: "harnessV1.codexSandboxMode must be read-only, workspace-write, or danger-full-access",
@@ -1181,6 +1117,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			args: []string{
 				"--set", "harnessV1.enabled=true",
 				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set", "harnessV1.policy.allowedBuiltInRuntimeTypes={copilot}",
 			},
 			wantError: "harnessV1.policy.allowedBuiltInRuntimeTypes may contain only codex or claude",
@@ -1190,6 +1127,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			args: []string{
 				"--set", "harnessV1.enabled=true",
 				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.upgradeDrain.timeout=0s",
 			},
 			wantError: "harnessV1.upgradeDrain.timeout must be a positive Go duration",
@@ -1199,6 +1137,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			args: []string{
 				"--set", "harnessV1.enabled=true",
 				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.upgradeDrain.pollInterval=immediate",
 			},
 			wantError: "harnessV1.upgradeDrain.pollInterval must be a positive Go duration",

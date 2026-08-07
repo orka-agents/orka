@@ -431,37 +431,25 @@ type acpTaskQueueRank struct {
 }
 
 func sortACPTasksByQueuePriority(tasks []*corev1alpha1.Task, now time.Time) {
+	sortTasksByQueuePriority(tasks, now, acpTaskQueuedAt)
+}
+
+func sortTasksByQueuePriority(
+	tasks []*corev1alpha1.Task,
+	now time.Time,
+	queuedAt func(*corev1alpha1.Task) time.Time,
+) {
 	now = now.UTC()
 	ranks := make(map[*corev1alpha1.Task]acpTaskQueueRank, len(tasks))
 	for _, task := range tasks {
-		ranks[task] = rankACPTaskForQueue(task, now)
+		ranks[task] = rankTaskForQueue(task, now, queuedAt(task))
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {
-		left, right := ranks[tasks[i]], ranks[tasks[j]]
-		if left.promoted != right.promoted {
-			return left.promoted
-		}
-		if !left.promoted && left.effectivePriority != right.effectivePriority {
-			return left.effectivePriority > right.effectivePriority
-		}
-		if !left.queuedAt.Equal(right.queuedAt) {
-			return left.queuedAt.Before(right.queuedAt)
-		}
-		if !left.createdAt.Equal(right.createdAt) {
-			return left.createdAt.Before(right.createdAt)
-		}
-		if left.namespace != right.namespace {
-			return left.namespace < right.namespace
-		}
-		if left.name != right.name {
-			return left.name < right.name
-		}
-		return left.uid < right.uid
+		return taskQueueRankLess(ranks[tasks[i]], ranks[tasks[j]])
 	})
 }
 
-func rankACPTaskForQueue(task *corev1alpha1.Task, now time.Time) acpTaskQueueRank {
-	queuedAt := acpTaskQueuedAt(task)
+func rankTaskForQueue(task *corev1alpha1.Task, now, queuedAt time.Time) acpTaskQueueRank {
 	age := max(now.Sub(queuedAt), 0)
 	priority := defaultACPTaskPriority
 	if task != nil && task.Spec.Priority != nil {
@@ -481,6 +469,28 @@ func rankACPTaskForQueue(task *corev1alpha1.Task, now time.Time) acpTaskQueueRan
 		promoted: age >= DefaultACPQueueMaximumWait, effectivePriority: int32(agedPriority),
 		queuedAt: queuedAt, createdAt: createdAt, namespace: namespace, name: name, uid: uid,
 	}
+}
+
+func taskQueueRankLess(left, right acpTaskQueueRank) bool {
+	if left.promoted != right.promoted {
+		return left.promoted
+	}
+	if !left.promoted && left.effectivePriority != right.effectivePriority {
+		return left.effectivePriority > right.effectivePriority
+	}
+	if !left.queuedAt.Equal(right.queuedAt) {
+		return left.queuedAt.Before(right.queuedAt)
+	}
+	if !left.createdAt.Equal(right.createdAt) {
+		return left.createdAt.Before(right.createdAt)
+	}
+	if left.namespace != right.namespace {
+		return left.namespace < right.namespace
+	}
+	if left.name != right.name {
+		return left.name < right.name
+	}
+	return left.uid < right.uid
 }
 
 func acpTaskQueuedAt(task *corev1alpha1.Task) time.Time {

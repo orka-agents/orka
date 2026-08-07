@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -24,6 +25,7 @@ import (
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -192,6 +194,64 @@ func TestTaskExecutionAuthorityValidatorRequiresLiveEnabledRevision(t *testing.T
 	))
 	require.False(t, response.Allowed)
 	require.Contains(t, response.Result.Message, "Task spec is immutable")
+}
+
+func TestTaskExecutionAuthorityValidatorProtectsCleanupFinalizer(t *testing.T) {
+	t.Parallel()
+	scheme := coexistenceTestScheme(t)
+	validator := &TaskExecutionAuthorityValidator{
+		decoder: ctrladmission.NewDecoder(scheme),
+		config:  CoexistenceConfig{ControllerUsername: coexistenceControllerUsername}.normalized(),
+	}
+	bound := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: admissionTestTaskName, Namespace: admissionTestNamespace,
+			UID: types.UID("task-uid"), Finalizers: []string{labels.TaskFinalizer, "example.test/other"},
+		},
+		Status: corev1alpha1.TaskStatus{AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
+			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+		}},
+	}
+	removed := bound.DeepCopy()
+	removed.Finalizers = []string{"example.test/other"}
+
+	for _, username := range []string{"alice", coexistenceControllerUsername} {
+		response := validator.Handle(context.Background(), coexistenceRequest(
+			t, admissionv1.Update, username, removed, bound, "",
+		))
+		require.False(t, response.Allowed)
+		require.Contains(t, response.Result.Message, "completing deletion cleanup")
+	}
+
+	deletionTime := metav1.NewTime(time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC))
+	deleting := bound.DeepCopy()
+	deleting.DeletionTimestamp = &deletionTime
+	deletingRemoved := deleting.DeepCopy()
+	deletingRemoved.Finalizers = []string{"example.test/other"}
+	response := validator.Handle(context.Background(), coexistenceRequest(
+		t, admissionv1.Update, "alice", deletingRemoved, deleting, "",
+	))
+	require.False(t, response.Allowed)
+	response = validator.Handle(context.Background(), coexistenceRequest(
+		t, admissionv1.Update, coexistenceControllerUsername, deletingRemoved, deleting, "",
+	))
+	require.True(t, response.Allowed, response.Result.Message)
+
+	unrelatedRemoved := bound.DeepCopy()
+	unrelatedRemoved.Finalizers = []string{labels.TaskFinalizer}
+	response = validator.Handle(context.Background(), coexistenceRequest(
+		t, admissionv1.Update, "alice", unrelatedRemoved, bound, "",
+	))
+	require.True(t, response.Allowed, response.Result.Message)
+
+	unbound := bound.DeepCopy()
+	unbound.Status.AgentExecutionBinding = nil
+	unboundRemoved := unbound.DeepCopy()
+	unboundRemoved.Finalizers = nil
+	response = validator.Handle(context.Background(), coexistenceRequest(
+		t, admissionv1.Update, "alice", unboundRemoved, unbound, "",
+	))
+	require.True(t, response.Allowed, response.Result.Message)
 }
 
 func TestTaskResolutionAppendRequiresExactApplyingOperation(t *testing.T) {

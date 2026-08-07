@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
@@ -212,6 +213,59 @@ func TestAgentExecutionClassificationDefersAbsentSessionControlToFirstUse(t *tes
 	}
 }
 
+func TestAgentExecutionClassificationQuarantinesNameOnlyLegacyRuntimeSession(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "recreated", UID: "new-task-uid"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	reconciler := &AgentExecutionClassificationReconciler{
+		Client: kubeClient, APIReader: kubeClient,
+		RuntimeSessions: &classificationRuntimeSessionStore{sessions: []harness.RuntimeSession{{
+			ID: "old-runtime-session",
+			Owner: harness.RuntimeSessionOwner{
+				Namespace: task.Namespace, ActiveTask: task.Name,
+			},
+		}}},
+	}
+	evidence := agentExecutionClassificationEvidence{}
+	if err := reconciler.collectStoreEvidence(context.Background(), task, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if !evidence.V1NameOnlyUncorroborated || len(evidence.V1) != 1 {
+		t.Fatalf("name-only evidence = %#v, want one uncorroborated v1 item", evidence)
+	}
+	mutated, err := reconciler.classifyTask(context.Background(), kubeClient, task, "inventory-1", evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mutated {
+		t.Fatal("name-only legacy session did not persist a quarantine")
+	}
+	got := &corev1alpha1.Task{}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(task), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.AgentExecutionBinding != nil || got.Status.AgentExecutionQuarantine == nil ||
+		got.Status.AgentExecutionQuarantine.Reason != corev1alpha1.AgentExecutionQuarantineAmbiguousLegacyEvidence {
+		t.Fatalf("recreated Task classification = binding %#v quarantine %#v", got.Status.AgentExecutionBinding, got.Status.AgentExecutionQuarantine)
+	}
+
+	corroborated := agentExecutionClassificationEvidence{V1: []agentExecutionClassificationEvidenceItem{{Kind: "HarnessV1Attempt"}}}
+	if err := reconciler.collectStoreEvidence(context.Background(), task, &corroborated); err != nil {
+		t.Fatal(err)
+	}
+	if corroborated.V1NameOnlyUncorroborated {
+		t.Fatal("UID-bound v1 evidence did not corroborate the name-only runtime session")
+	}
+}
+
 func TestAgentExecutionClassificationQuarantinesCrossNamespaceAgentWithIsolation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -359,4 +413,42 @@ func TestAgentExecutionClassificationBlocksActiveLegacySessionLease(t *testing.T
 			}
 		})
 	}
+}
+
+type classificationRuntimeSessionStore struct {
+	sessions []harness.RuntimeSession
+}
+
+func (s *classificationRuntimeSessionStore) CreateRuntimeSession(context.Context, *harness.RuntimeSession) error {
+	return nil
+}
+
+func (s *classificationRuntimeSessionStore) GetRuntimeSession(
+	context.Context,
+	string,
+	harness.RuntimeSessionID,
+) (*harness.RuntimeSession, error) {
+	return nil, nil
+}
+
+func (s *classificationRuntimeSessionStore) ListRuntimeSessions(
+	context.Context,
+	harness.RuntimeSessionFilter,
+) ([]harness.RuntimeSession, string, error) {
+	return append([]harness.RuntimeSession(nil), s.sessions...), "", nil
+}
+
+func (s *classificationRuntimeSessionStore) TransitionRuntimeSession(
+	context.Context,
+	harness.RuntimeSessionTransition,
+) (*harness.RuntimeSession, error) {
+	return nil, nil
+}
+
+func (s *classificationRuntimeSessionStore) DeleteRuntimeSession(
+	context.Context,
+	string,
+	harness.RuntimeSessionID,
+) error {
+	return nil
 }

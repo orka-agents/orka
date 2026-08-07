@@ -86,10 +86,6 @@ longest suffix so names remain valid DNS labels for long Helm release names.
 {{- printf "%s-agent-harness-wrapper" (include "orka.fullname" . | trunc 41 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "orka.harnessV1AuthSecretName" -}}
-{{- printf "%s-harness-wrapper-auth" (include "orka.fullname" . | trunc 42 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
 {{- define "orka.harnessV1LedgerName" -}}
 {{- printf "%s-harness-v1-ledger" (include "orka.fullname" . | trunc 45 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
@@ -207,7 +203,7 @@ spec:
   volumes:
     - name: auth
       secret:
-        secretName: {{ $root.Values.harnessV1.auth.existingSecret | default (include "orka.harnessV1AuthSecretName" $root) | quote }}
+        secretName: {{ $root.Values.harnessV1.auth.existingSecret | quote }}
         defaultMode: 0400
         items:
           - key: {{ $root.Values.harnessV1.auth.tokenKey | quote }}
@@ -221,11 +217,7 @@ spec:
 
 {{- define "orka.harnessV1PodTemplateGeneration" -}}
 {{- $template := include "orka.harnessV1PodTemplate" (dict "root" . "generation" "ORKA_HARNESS_V1_TEMPLATE_GENERATION") | fromYaml -}}
-{{- if and (not .Values.harnessV1.auth.existingSecret) .Values.harnessV1.auth.token -}}
-{{- toJson (dict "podTemplate" $template "managedAuthTokenDigest" (.Values.harnessV1.auth.token | sha256sum)) | sha256sum -}}
-{{- else -}}
 {{- toJson $template | sha256sum -}}
-{{- end -}}
 {{- end }}
 
 {{/* Read the live wrapper inputs used by rollover hooks. */}}
@@ -556,9 +548,8 @@ webhooks are a separate activation step after the replicas are ready.
 
 {{/*
 Harness v1 is an explicitly enabled compatibility data plane. Its image must
-be immutable, its admission ledger durable, and its bearer credential must be
-unambiguous. Inline tokens remain optional because the chart can generate a
-release-local Secret, but operator-supplied tokens must have adequate entropy.
+be immutable, its admission ledger durable, and its bearer credential must
+remain outside rendered Helm manifests.
 */}}
 {{- define "orka.validateHarnessV1" -}}
 {{- if .Values.harnessV1.enabled -}}
@@ -568,14 +559,14 @@ release-local Secret, but operator-supplied tokens must have adequate entropy.
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.harnessV1.image.digest | default "")) -}}
 {{- fail "harnessV1.image.digest must be a sha256 digest when harnessV1.enabled=true" -}}
 {{- end -}}
+{{- if trim (default "" .Values.harnessV1.auth.token) -}}
+{{- fail "harnessV1.auth.token is unsupported; create a Kubernetes Secret and set harnessV1.auth.existingSecret" -}}
+{{- end -}}
+{{- if not (trim (default "" .Values.harnessV1.auth.existingSecret)) -}}
+{{- fail "harnessV1.auth.existingSecret is required when harnessV1.enabled=true" -}}
+{{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.auth.tokenKey)) -}}
 {{- fail "harnessV1.auth.tokenKey is required when harnessV1.enabled=true" -}}
-{{- end -}}
-{{- if and .Values.harnessV1.auth.existingSecret .Values.harnessV1.auth.token -}}
-{{- fail "harnessV1.auth.existingSecret and harnessV1.auth.token are mutually exclusive" -}}
-{{- end -}}
-{{- if and .Values.harnessV1.auth.token (lt (len .Values.harnessV1.auth.token) 32) -}}
-{{- fail "harnessV1.auth.token must be at least 32 characters when set" -}}
 {{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.ledger.size)) -}}
 {{- fail "harnessV1.ledger.size is required when harnessV1.enabled=true" -}}

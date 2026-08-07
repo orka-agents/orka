@@ -64,10 +64,11 @@ type agentExecutionClassificationEvidenceItem struct {
 }
 
 type agentExecutionClassificationEvidence struct {
-	V1                []agentExecutionClassificationEvidenceItem
-	V2                []agentExecutionClassificationEvidenceItem
-	V1RuntimeIdentity string
-	V2RuntimeIdentity string
+	V1                       []agentExecutionClassificationEvidenceItem
+	V2                       []agentExecutionClassificationEvidenceItem
+	V1RuntimeIdentity        string
+	V2RuntimeIdentity        string
+	V1NameOnlyUncorroborated bool
 }
 
 type agentExecutionClassificationInventoryObject struct {
@@ -313,6 +314,9 @@ func (r *AgentExecutionClassificationReconciler) classifyTask(
 ) (bool, error) {
 	v1, v2 := len(evidence.V1) != 0, len(evidence.V2) != 0
 	switch {
+	case evidence.V1NameOnlyUncorroborated:
+		return r.persistTaskQuarantine(ctx, task, corev1alpha1.AgentExecutionQuarantineAmbiguousLegacyEvidence,
+			inventoryID, evidenceItemsDigest(evidence.V1), evidenceItemsDigest(evidence.V2))
 	case v1 && v2:
 		return r.persistTaskQuarantine(ctx, task, corev1alpha1.AgentExecutionQuarantineMixedEvidence,
 			inventoryID, evidenceItemsDigest(evidence.V1), evidenceItemsDigest(evidence.V2))
@@ -564,6 +568,7 @@ func (r *AgentExecutionClassificationReconciler) collectStoreEvidence(
 	task *corev1alpha1.Task,
 	evidence *agentExecutionClassificationEvidence,
 ) error {
+	uidBoundV1 := len(evidence.V1) != 0
 	if r.HarnessAttempts != nil {
 		attempts, err := r.HarnessAttempts.ListHarnessV1AttemptsByTask(ctx, task.Namespace, string(task.UID))
 		if err != nil {
@@ -575,6 +580,7 @@ func (r *AgentExecutionClassificationReconciler) collectStoreEvidence(
 				(store.HarnessV1AttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: attempt.Attempt}).CanonicalID(),
 				"", "", attempt))
 		}
+		uidBoundV1 = uidBoundV1 || len(attempts) != 0
 	}
 	if r.RuntimeSessions != nil {
 		sessions, _, err := r.RuntimeSessions.ListRuntimeSessions(ctx, harness.RuntimeSessionFilter{
@@ -582,6 +588,9 @@ func (r *AgentExecutionClassificationReconciler) collectStoreEvidence(
 		})
 		if err != nil {
 			return fmt.Errorf("list legacy runtime Sessions for Task %s/%s: %w", task.Namespace, task.Name, err)
+		}
+		if len(sessions) != 0 && !uidBoundV1 {
+			evidence.V1NameOnlyUncorroborated = true
 		}
 		for i := range sessions {
 			session := sessions[i]
