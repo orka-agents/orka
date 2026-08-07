@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -176,6 +177,121 @@ func TestServerAcceptanceFailureReconcilesAdmissionWithIndependentContext(t *tes
 	}
 	if !server.admissionLedgerHealthy() {
 		t.Fatal("successful admission reconciliation closed readiness")
+	}
+}
+
+func TestServerCanceledStartTurnReclaimDoesNotPoisonAdmissionLedger(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodPost, harness.TurnsPath, strings.NewReader("{"))
+	request = request.WithContext(canceledCtx)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("canceled StartTurn status = %d, want 400 after independent reclamation", recorder.Code)
+	}
+	if !server.admissionLedgerHealthy() {
+		t.Fatal("canceled reclamation caller poisoned durable admission")
+	}
+
+	retryRecorder := httptest.NewRecorder()
+	retryRequest := httptest.NewRequest(http.MethodPost, harness.TurnsPath, strings.NewReader("{"))
+	server.Handler().ServeHTTP(retryRecorder, retryRequest)
+	if retryRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("StartTurn after canceled caller = %d, want 400", retryRecorder.Code)
+	}
+}
+
+func TestServerChildProcessCleanupFailureRetainsTurnAndClosesAdmission(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	request := validWrapperStartTurnRequest()
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+	server.setChildCredentialProcessError(errChildCredentialProcessCleanupUnproven)
+	server.finishTurn(turn)
+
+	if !server.turnRegistry.active(request.TurnID) {
+		t.Fatal("child process cleanup failure released the active turn")
+	}
+	if _, closed := turn.framesFrom(1); closed {
+		t.Fatal("child process cleanup failure closed the active turn stream")
+	}
+	readinessRecorder := httptest.NewRecorder()
+	readinessRequest := httptest.NewRequest(http.MethodGet, harness.ReadinessPath, nil)
+	server.Handler().ServeHTTP(readinessRecorder, readinessRequest)
+	if readinessRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status = %d, want 503", readinessRecorder.Code)
+	}
+	var readiness harness.HealthResponse
+	if err := json.Unmarshal(readinessRecorder.Body.Bytes(), &readiness); err != nil {
+		t.Fatalf("decode readiness: %v", err)
+	}
+	if readiness.Metadata["childCredentialProcesses"] != childCredentialCleanupFailed {
+		t.Fatalf("readiness after child cleanup failure = %#v", readiness)
+	}
+
+	next := validWrapperStartTurnRequest()
+	next.TurnID = "turn-after-child-cleanup-failure"
+	next.CorrelationID = "corr-after-child-cleanup-failure"
+	nextBody, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("marshal next StartTurn: %v", err)
+	}
+	startRecorder := httptest.NewRecorder()
+	startRequest := httptest.NewRequest(http.MethodPost, harness.TurnsPath, bytes.NewReader(nextBody))
+	server.Handler().ServeHTTP(startRecorder, startRequest)
+	if startRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("StartTurn after child cleanup failure = %d, want 503", startRecorder.Code)
+	}
+}
+
+func TestServerRetriesTransientAdmissionLedgerReclaimError(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	server.setRetryableAdmissionLedgerError(errors.New("temporary reclamation failure"))
+	if server.admissionLedgerHealthy() {
+		t.Fatal("transient reclamation failure did not close readiness")
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, harness.TurnsPath, strings.NewReader("{"))
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("StartTurn reclaim retry status = %d, want 400", recorder.Code)
+	}
+	if !server.admissionLedgerHealthy() {
+		t.Fatal("successful reclamation retry did not restore readiness")
 	}
 }
 

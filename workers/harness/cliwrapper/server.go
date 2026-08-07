@@ -36,7 +36,9 @@ const (
 	localOutputRef                   = "cliwrapper-result-v1"
 	terminalLedgerPersistFailed      = "persist-failed"
 	admissionLedgerReconcileFailed   = "reconcile-failed"
+	childCredentialCleanupFailed     = "cleanup-failed"
 	durableAdmissionReconcileTimeout = 5 * time.Second
+	durableLedgerReclaimTimeout      = 5 * time.Second
 	durableLedgerReclaimBatch        = 128
 	durableAcceptanceRejectionReason = "wrapper-durable-acceptance-failed"
 	durableLocalRejectionReason      = "wrapper-local-admission-rejected"
@@ -54,6 +56,10 @@ type Server struct {
 	healthMu           sync.RWMutex
 	terminalLedgerErr  error
 	admissionLedgerErr error
+	// admissionLedgerErrRetryable is true only for bounded ledger reclamation
+	// failures. Ambiguous admission reconciliation failures remain fail-closed.
+	admissionLedgerErrRetryable bool
+	childCredentialProcessErr   error
 }
 
 type RuntimeSupportProvider interface {
@@ -168,10 +174,15 @@ func (s *Server) reclaimSettledTurns(ctx context.Context) error {
 	if s == nil || s.ledger == nil {
 		return nil
 	}
+	reclaimCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), durableLedgerReclaimTimeout)
+	defer cancel()
 	cutoff := s.now().UTC().Add(-s.config.LedgerRetention)
-	if _, err := s.ledger.ReclaimSettledTurnsBefore(ctx, cutoff, durableLedgerReclaimBatch); err != nil {
-		return fmt.Errorf("reclaim settled wrapper ledger turns: %w", err)
+	if _, err := s.ledger.ReclaimSettledTurnsBefore(reclaimCtx, cutoff, durableLedgerReclaimBatch); err != nil {
+		reclaimErr := fmt.Errorf("reclaim settled wrapper ledger turns: %w", err)
+		s.setRetryableAdmissionLedgerError(reclaimErr)
+		return reclaimErr
 	}
+	s.clearRetryableAdmissionLedgerError()
 	return nil
 }
 
@@ -224,6 +235,9 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 
 func (s *Server) finishTurn(turn *turnState) {
 	defer turn.clearExactRedactionValues()
+	if !s.childCredentialProcessesHealthy() {
+		return
+	}
 	if s.ledger != nil {
 		receipt, outcomeUnknown := s.durableTerminalReceipt(turn)
 		var durableOutput *ledger.TurnOutput
@@ -312,13 +326,52 @@ func (s *Server) terminalLedgerHealthy() bool {
 func (s *Server) setAdmissionLedgerError(err error) {
 	s.healthMu.Lock()
 	s.admissionLedgerErr = err
+	s.admissionLedgerErrRetryable = false
 	s.healthMu.Unlock()
+}
+
+func (s *Server) setRetryableAdmissionLedgerError(err error) {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if s.admissionLedgerErr != nil && !s.admissionLedgerErrRetryable {
+		return
+	}
+	s.admissionLedgerErr = err
+	s.admissionLedgerErrRetryable = err != nil
+}
+
+func (s *Server) clearRetryableAdmissionLedgerError() {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if !s.admissionLedgerErrRetryable {
+		return
+	}
+	s.admissionLedgerErr = nil
+	s.admissionLedgerErrRetryable = false
+}
+
+func (s *Server) admissionLedgerReclaimRetryable() bool {
+	s.healthMu.RLock()
+	defer s.healthMu.RUnlock()
+	return s.admissionLedgerErr == nil || s.admissionLedgerErrRetryable
 }
 
 func (s *Server) admissionLedgerHealthy() bool {
 	s.healthMu.RLock()
 	defer s.healthMu.RUnlock()
 	return s.admissionLedgerErr == nil
+}
+
+func (s *Server) setChildCredentialProcessError(err error) {
+	s.healthMu.Lock()
+	s.childCredentialProcessErr = err
+	s.healthMu.Unlock()
+}
+
+func (s *Server) childCredentialProcessesHealthy() bool {
+	s.healthMu.RLock()
+	defer s.healthMu.RUnlock()
+	return s.childCredentialProcessErr == nil
 }
 
 func (s *Server) scheduleTurnEviction(turn *turnState) {
@@ -379,6 +432,11 @@ func (s *Server) healthResponse() harness.HealthResponse {
 		status = harness.HealthStatusUnhealthy
 		ready = false
 		metadata["admissionLedger"] = admissionLedgerReconcileFailed
+	}
+	if !s.childCredentialProcessesHealthy() {
+		status = harness.HealthStatusUnhealthy
+		ready = false
+		metadata["childCredentialProcesses"] = childCredentialCleanupFailed
 	}
 	return harness.HealthResponse{
 		Version:   harness.ProtocolVersion,
@@ -676,12 +734,19 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !s.admissionLedgerHealthy() {
+	if !s.childCredentialProcessesHealthy() {
+		writeSafeError(w, http.StatusServiceUnavailable, "turn process isolation is unavailable")
+		return
+	}
+	if !s.admissionLedgerReclaimRetryable() {
 		writeSafeError(w, http.StatusServiceUnavailable, "durable turn admission is unavailable")
 		return
 	}
 	if err := s.reclaimSettledTurns(r.Context()); err != nil {
-		s.setAdmissionLedgerError(err)
+		writeSafeError(w, http.StatusServiceUnavailable, "durable turn admission is unavailable")
+		return
+	}
+	if !s.admissionLedgerHealthy() {
 		writeSafeError(w, http.StatusServiceUnavailable, "durable turn admission is unavailable")
 		return
 	}
@@ -973,7 +1038,6 @@ func (s *Server) handleSettlementAcknowledgement(w http.ResponseWriter, r *http.
 		return
 	}
 	if err := s.reclaimSettledTurns(r.Context()); err != nil {
-		s.setAdmissionLedgerError(err)
 		writeSafeError(w, http.StatusServiceUnavailable, "failed to reclaim settled wrapper turns")
 		return
 	}
@@ -1164,6 +1228,10 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		"command": path.Base(spec.Path),
 	}))
 	run, runErr := s.runner.Run(ctx, spec)
+	if errors.Is(runErr, errChildCredentialProcessCleanupUnproven) {
+		s.setChildCredentialProcessError(runErr)
+		return
+	}
 	if run.FullStdoutTruncated && strings.TrimSpace(spec.ResultFile) == "" {
 		turn.appendFrame(s.failedFrame(turn, "result_too_large", "runtime stdout exceeded harness storage limit", false))
 		return

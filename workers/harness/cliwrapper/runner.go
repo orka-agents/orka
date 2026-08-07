@@ -19,6 +19,8 @@ type CommandRunner struct {
 	CancelGrace      time.Duration
 }
 
+var errChildCredentialProcessCleanupUnproven = errors.New("child credential process cleanup was not proven")
+
 func NewCommandRunner(cfg Config) CommandRunner {
 	stdoutLimit := cfg.StdoutLimitBytes
 	if stdoutLimit == 0 {
@@ -111,13 +113,19 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 	if !cancelled {
 		terminateProcessGroup(cmd.Process, 0)
 	}
-	terminateChildCredentialProcesses(r.CancelGrace)
+	cleanupErr := terminateChildCredentialProcesses(r.CancelGrace)
 	if waitErr == nil {
 		if err := ctx.Err(); err != nil {
 			cancelled = true
 			timedOut = errors.Is(err, context.DeadlineExceeded)
 			waitErr = err
 		}
+	}
+	if cleanupErr != nil {
+		waitErr = errors.Join(
+			waitErr,
+			fmt.Errorf("%w: %w", errChildCredentialProcessCleanupUnproven, cleanupErr),
+		)
 	}
 	waitForPipeCopies(&copyWG, stdoutPipe, stderrPipe, 5*time.Second)
 
