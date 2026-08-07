@@ -21,7 +21,11 @@ spec:
         - {protocol: TCP, port: 8081}
   # Coexistence validators use a dedicated read-only Kubernetes client. Network
   # policy cannot portably select an externally hosted kube-apiserver endpoint,
-  # so allow only TCP/443; the ServiceAccount RBAC contains no Lease or writes.
+  # and implementations may enforce before or after Service DNAT. Permit the
+  # Kubernetes Service port and common backend port; the ServiceAccount RBAC
+  # contains no Lease or writes.
   egress:
-    - ports: [{protocol: TCP, port: 443}]
+    - ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 6443}
 {{- end }}
