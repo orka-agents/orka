@@ -131,6 +131,7 @@ type TaskReconciler struct {
 	HarnessV1AuthSecretName           string
 	HarnessV1AuthSecretKey            string
 	HarnessV1Attempts                 store.HarnessV1AttemptStore
+	HarnessV1SettlementAcknowledger   HarnessV1SettlementAcknowledger
 	ACPRuntimeEnabled                 bool
 	ACPRuntimeImages                  ACPRuntimeImages
 	ACPRuntimeNamespace               string

@@ -1462,6 +1462,7 @@ func main() {
 			MaxConcurrent: harnessV1DispatchWorkers,
 			HTTPClient:    harnessV1HTTPClient,
 		}
+		taskReconciler.HarnessV1SettlementAcknowledger = harnessV1Dispatcher
 		if err := mgr.Add(harnessV1Dispatcher); err != nil {
 			setupLog.Error(err, "unable to add harness v1 dispatcher")
 			os.Exit(1)

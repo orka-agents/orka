@@ -15,10 +15,20 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+// HarnessV1SettlementAcknowledger proves that a terminal wrapper ledger row
+// may be reclaimed before its durable attempt identity is removed.
+type HarnessV1SettlementAcknowledger interface {
+	AcknowledgeHarnessV1Settlement(
+		context.Context,
+		*corev1alpha1.Task,
+		*store.HarnessV1Attempt,
+	) error
+}
+
 // harnessV1TaskDeletionReady atomically re-proves every route-specific v1
-// terminal and Session/outbox barrier before removing the attempt aggregates.
-// Reclamation is the finalization proof: an active attempt or incomplete
-// Session projection retains the Task finalizer for dispatcher recovery.
+// terminal, wrapper-settlement, and Session/outbox barrier before removing the
+// attempt aggregates. Reclamation is the finalization proof: an active attempt
+// or incomplete settlement retains the Task finalizer for dispatcher recovery.
 func (r *TaskReconciler) harnessV1TaskDeletionReady(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -53,6 +63,9 @@ func (r *TaskReconciler) harnessV1TaskDeletionReady(
 		if attempt.BindingDigest != reclamationBindingDigest {
 			return false, errors.New("harness v1 attempt binding changed before Task deletion")
 		}
+		if attempt.Backend != string(binding.Backend) {
+			return false, errors.New("harness v1 attempt backend changed before Task deletion")
+		}
 		if !store.IsTerminalHarnessV1AttemptState(attempt.State) {
 			allTerminal = false
 		}
@@ -60,10 +73,13 @@ func (r *TaskReconciler) harnessV1TaskDeletionReady(
 	if !allTerminal {
 		return false, nil
 	}
+	if len(attempts) > 0 && r.HarnessV1SettlementAcknowledger == nil {
+		return false, errors.New("harness v1 settlement acknowledger is required for deletion")
+	}
 	// A crash may occur after terminal attempt persistence but before ordinary
-	// dispatcher settlement retires the legacy runtime_sessions row. Perform
-	// the same idempotent settlement used by dispatcher and adjudicated cleanup
-	// before the attempt aggregate can be reclaimed.
+	// dispatcher settlement retires the wrapper ledger and legacy
+	// runtime_sessions rows. Perform the same idempotent settlement used by the
+	// dispatcher before the attempt aggregate can be reclaimed.
 	runtimeSessions := HarnessV1Dispatcher{Attempts: r.HarnessV1Attempts}
 	for i := range attempts {
 		if err := runtimeSessions.settleHarnessV1RuntimeSessionRecord(ctx, task, &attempts[i]); err != nil {
@@ -71,6 +87,11 @@ func (r *TaskReconciler) harnessV1TaskDeletionReady(
 				return false, nil
 			}
 			return false, fmt.Errorf("settle harness v1 runtime session before Task deletion: %w", err)
+		}
+		if err := r.HarnessV1SettlementAcknowledger.AcknowledgeHarnessV1Settlement(
+			ctx, task, &attempts[i],
+		); err != nil {
+			return false, fmt.Errorf("acknowledge harness v1 wrapper settlement before Task deletion: %w", err)
 		}
 	}
 	fence, err := r.ControllerEpochManager.CurrentFence(ctx)

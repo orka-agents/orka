@@ -73,6 +73,17 @@ type harnessV1ProtocolClient interface {
 
 type harnessV1ClientFactory func(endpoint, bearer string, httpClient *http.Client) (harnessV1ProtocolClient, error)
 
+func defaultHarnessV1ClientFactory(
+	endpoint, bearer string,
+	httpClient *http.Client,
+) (harnessV1ProtocolClient, error) {
+	options := []harness.ClientOption{harness.WithBearerToken(bearer)}
+	if httpClient != nil {
+		options = append(options, harness.WithHTTPClient(httpClient))
+	}
+	return harness.NewClient(endpoint, options...)
+}
+
 type harnessV1DispatchCandidate struct {
 	task    *corev1alpha1.Task
 	attempt store.HarnessV1Attempt
@@ -119,15 +130,6 @@ func (d *HarnessV1Dispatcher) Start(ctx context.Context) error {
 	}
 	if d.MaxConcurrent <= 0 {
 		d.MaxConcurrent = DefaultHarnessV1DispatchWorkers
-	}
-	if d.clientFactory == nil {
-		d.clientFactory = func(endpoint, bearer string, httpClient *http.Client) (harnessV1ProtocolClient, error) {
-			options := []harness.ClientOption{harness.WithBearerToken(bearer)}
-			if httpClient != nil {
-				options = append(options, harness.WithHTTPClient(httpClient))
-			}
-			return harness.NewClient(endpoint, options...)
-		}
 	}
 	d.mu.Lock()
 	if d.active == nil {
@@ -408,8 +410,15 @@ func (d *HarnessV1Dispatcher) protocolClientAndRequest(
 		return nil, harness.StartTurnRequest{}, errors.New("verified harness v1 snapshot is required")
 	}
 	target := verified.body.HarnessV1
+	reader := d.APIReader
+	if reader == nil {
+		reader = d.Client
+	}
+	if reader == nil {
+		return nil, harness.StartTurnRequest{}, errors.New("kubernetes reader is required for harness v1 protocol client")
+	}
 	auth := &corev1.Secret{}
-	if err := d.APIReader.Get(ctx, types.NamespacedName{Namespace: target.AuthSecretNamespace, Name: target.AuthSecretName}, auth); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: target.AuthSecretNamespace, Name: target.AuthSecretName}, auth); err != nil {
 		return nil, harness.StartTurnRequest{}, err
 	}
 	if string(auth.UID) != target.AuthSecretUID || auth.ResourceVersion != target.AuthSecretResourceVersion {
@@ -419,7 +428,7 @@ func (d *HarnessV1Dispatcher) protocolClientAndRequest(
 	if strings.TrimSpace(bearer) == "" {
 		return nil, harness.StartTurnRequest{}, errors.New("frozen harness auth Secret key is empty")
 	}
-	env, err := resolveFrozenHarnessV1Env(ctx, d.APIReader, target.CredentialRefs)
+	env, err := resolveFrozenHarnessV1Env(ctx, reader, target.CredentialRefs)
 	if err != nil {
 		return nil, harness.StartTurnRequest{}, err
 	}
@@ -427,7 +436,11 @@ func (d *HarnessV1Dispatcher) protocolClientAndRequest(
 	if err != nil {
 		return nil, harness.StartTurnRequest{}, err
 	}
-	protocolClient, err := d.clientFactory(target.Endpoint, bearer, d.HTTPClient)
+	clientFactory := d.clientFactory
+	if clientFactory == nil {
+		clientFactory = defaultHarnessV1ClientFactory
+	}
+	protocolClient, err := clientFactory(target.Endpoint, bearer, d.HTTPClient)
 	return protocolClient, request, err
 }
 
@@ -1708,17 +1721,10 @@ func (d *HarnessV1Dispatcher) acknowledgeDurableHarnessV1Settlement(
 	if task == nil || verified == nil || verified.body.HarnessV1 == nil || attempt == nil {
 		return errors.New("harness v1 settlement acknowledgement requires Task, execution, and attempt")
 	}
-	if attempt.Backend != string(corev1alpha1.AgentExecutionBackendHarnessWrapper) {
+	if !harnessV1AttemptRequiresWrapperSettlementAcknowledgement(attempt) {
 		return nil
 	}
-	ledgerBackedRejection := attempt.State == store.HarnessV1AttemptRejected &&
-		attempt.TerminalReason == harnessV1ReasonRejected && attempt.TerminalReceiptDigest == ""
-	ledgerBackedTerminal := attempt.TerminalReceiptDigest != "" &&
-		(attempt.State == store.HarnessV1AttemptSucceeded || attempt.State == store.HarnessV1AttemptFailed ||
-			attempt.State == store.HarnessV1AttemptCancelled || attempt.State == store.HarnessV1AttemptOutcomeUnknown)
-	if !ledgerBackedRejection && !ledgerBackedTerminal {
-		return nil
-	}
+	ledgerBackedRejection := harnessV1AttemptIsLedgerBackedRejection(attempt)
 	var requestValue harness.StartTurnRequest
 	if protocolClient == nil || request == nil {
 		var err error
@@ -1745,6 +1751,42 @@ func (d *HarnessV1Dispatcher) acknowledgeDurableHarnessV1Settlement(
 		return fmt.Errorf("acknowledge durable harness v1 turn settlement: %w", err)
 	}
 	return nil
+}
+
+// AcknowledgeHarnessV1Settlement retries the wrapper's idempotent terminal
+// acknowledgement before Task finalization removes the durable attempt used
+// to reconstruct it.
+func (d *HarnessV1Dispatcher) AcknowledgeHarnessV1Settlement(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.HarnessV1Attempt,
+) error {
+	if !harnessV1AttemptRequiresWrapperSettlementAcknowledgement(attempt) {
+		return nil
+	}
+	if task == nil || task.Status.AgentExecutionBinding == nil {
+		return errors.New("harness v1 settlement acknowledgement requires Task binding")
+	}
+	verified, err := d.loadHarnessV1ExecutionForSettlement(ctx, task, task.Status.AgentExecutionBinding)
+	if err != nil {
+		return fmt.Errorf("load harness v1 execution for settlement acknowledgement: %w", err)
+	}
+	return d.acknowledgeDurableHarnessV1Settlement(ctx, task, verified, attempt, nil, nil)
+}
+
+func harnessV1AttemptRequiresWrapperSettlementAcknowledgement(attempt *store.HarnessV1Attempt) bool {
+	if attempt == nil || attempt.Backend != string(corev1alpha1.AgentExecutionBackendHarnessWrapper) {
+		return false
+	}
+	return harnessV1AttemptIsLedgerBackedRejection(attempt) ||
+		(attempt.TerminalReceiptDigest != "" &&
+			(attempt.State == store.HarnessV1AttemptSucceeded || attempt.State == store.HarnessV1AttemptFailed ||
+				attempt.State == store.HarnessV1AttemptCancelled || attempt.State == store.HarnessV1AttemptOutcomeUnknown))
+}
+
+func harnessV1AttemptIsLedgerBackedRejection(attempt *store.HarnessV1Attempt) bool {
+	return attempt != nil && attempt.State == store.HarnessV1AttemptRejected &&
+		attempt.TerminalReason == harnessV1ReasonRejected && attempt.TerminalReceiptDigest == ""
 }
 
 func (d *HarnessV1Dispatcher) frozenRetryPolicy(
@@ -2027,3 +2069,4 @@ func harnessV1AttemptKey(a *store.HarnessV1Attempt) store.HarnessV1AttemptKey {
 }
 
 var _ interface{ NeedLeaderElection() bool } = (*HarnessV1Dispatcher)(nil)
+var _ HarnessV1SettlementAcknowledger = (*HarnessV1Dispatcher)(nil)

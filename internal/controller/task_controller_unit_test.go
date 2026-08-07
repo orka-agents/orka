@@ -8985,6 +8985,7 @@ func TestHandleDeletionWaitsForHarnessV1AttemptReclamation(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.HarnessV1Attempts = durable
+	r.HarnessV1SettlementAcknowledger = &recordingHarnessV1SettlementAcknowledger{}
 	r.ControllerEpochManager = epochs
 	r.APIReader = r.Client
 
