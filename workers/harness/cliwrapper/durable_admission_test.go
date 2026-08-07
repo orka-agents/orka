@@ -218,6 +218,64 @@ func TestDurableRolloverReopensOnlyPreparedReplacementGeneration(t *testing.T) {
 	}
 }
 
+func TestDurableRolloverAbortReopensOnlyExactCurrentGeneration(t *testing.T) {
+	ctx := context.Background()
+	cfg := DefaultConfig()
+	cfg.AuthValue = durableAdmissionControllerToken
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	cfg.Generic.Command = testEchoCommand
+
+	baseURL, stop := startWrapperServerWithConfig(t, cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	defer stop()
+	client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CloseDurableAdmission(ctx); err != nil {
+		t.Fatalf("CloseDurableAdmission: %v", err)
+	}
+	if _, err := client.PrepareDurableRollover(ctx, "2"); err != nil {
+		t.Fatalf("PrepareDurableRollover: %v", err)
+	}
+
+	unauthenticated, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unauthenticated.AbortDurableRollover(ctx, "1"); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("unauthenticated AbortDurableRollover error = %v, want 401", err)
+	}
+	if _, err := client.AbortDurableRollover(ctx, "2"); err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("AbortDurableRollover(stale generation) error = %v, want 409", err)
+	}
+	if status, err := client.DurableDrainStatus(ctx); err != nil || !status.AdmissionClosed || !status.Completed {
+		t.Fatalf("DurableDrainStatus(after stale abort) = %#v, %v, want completed close", status, err)
+	}
+
+	aborted, err := client.AbortDurableRollover(ctx, "1")
+	if err != nil {
+		t.Fatalf("AbortDurableRollover: %v", err)
+	}
+	if !aborted.AdmissionReopened || aborted.CurrentGeneration != "1" {
+		t.Fatalf("rollover abort = %#v", aborted)
+	}
+	if _, err := client.AbortDurableRollover(ctx, "1"); err != nil {
+		t.Fatalf("AbortDurableRollover(idempotent): %v", err)
+	}
+	if status, err := client.DurableDrainStatus(ctx); err != nil || status.AdmissionClosed || status.Completed {
+		t.Fatalf("DurableDrainStatus(after abort) = %#v, %v, want open", status, err)
+	}
+
+	request := validWrapperStartTurnRequest()
+	request.TurnID = "turn-after-aborted-rollover"
+	request.CorrelationID = "correlation-after-aborted-rollover"
+	request = sealDurableWrapperRequest(request)
+	if _, err := client.StartTurn(ctx, request); err != nil {
+		t.Fatalf("StartTurn(after abort): %v", err)
+	}
+	_ = collectWrapperFrames(t, client, request.TurnID, 0)
+}
+
 func TestDurableAdmissionRejectsRequestDigestMismatch(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AuthValue = durableAdmissionControllerToken

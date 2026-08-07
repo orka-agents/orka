@@ -318,6 +318,45 @@ func TestLedgerRolloverRequiresCompletedDrainAndExactGeneration(t *testing.T) {
 	}
 }
 
+func TestLedgerAbortRolloverReopensOnlyExactCurrentGeneration(t *testing.T) {
+	ctx := context.Background()
+	l, _ := openTestLedger(t)
+	if err := l.CloseAdmission(ctx); err != nil {
+		t.Fatalf("CloseAdmission: %v", err)
+	}
+	if _, err := l.PrepareRollover(ctx, "2"); err != nil {
+		t.Fatalf("PrepareRollover: %v", err)
+	}
+	if err := l.AbortRollover(ctx, "2"); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("AbortRollover(stale generation) error = %v, want exact-generation rejection", err)
+	}
+	if closed, _, err := l.AdmissionClosed(ctx); err != nil || !closed {
+		t.Fatalf("stale abort changed admission: closed=%v err=%v", closed, err)
+	}
+	if err := l.AbortRollover(ctx, "1"); err != nil {
+		t.Fatalf("AbortRollover: %v", err)
+	}
+	if closed, _, err := l.AdmissionClosed(ctx); err != nil || closed {
+		t.Fatalf("aborted rollover admission closed=%v err=%v, want open", closed, err)
+	}
+	if err := l.ActivateGeneration(ctx, "2"); err == nil || !strings.Contains(err.Error(), "was not prepared") {
+		t.Fatalf("ActivateGeneration(aborted) error = %v, want missing preparation", err)
+	}
+	if err := l.AbortRollover(ctx, "1"); err != nil {
+		t.Fatalf("AbortRollover(idempotent): %v", err)
+	}
+
+	if err := l.CloseAdmission(ctx); err != nil {
+		t.Fatalf("CloseAdmission(without prepare): %v", err)
+	}
+	if err := l.AbortRollover(ctx, "1"); err == nil || !strings.Contains(err.Error(), "without a prepared rollover") {
+		t.Fatalf("AbortRollover(bare close) error = %v, want fail-closed rejection", err)
+	}
+	if closed, _, err := l.AdmissionClosed(ctx); err != nil || !closed {
+		t.Fatalf("bare-close abort changed admission: closed=%v err=%v", closed, err)
+	}
+}
+
 func TestLedgerFreshGenerationInitializationDoesNotOverrideExistingLedger(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "generation.db")

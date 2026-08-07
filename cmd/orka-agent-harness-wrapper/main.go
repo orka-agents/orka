@@ -38,6 +38,8 @@ func run(args []string) error {
 			return cliwrapper.RunCopilotTurnCLI(context.Background(), os.Stdin, os.Stdout)
 		case "drain":
 			return runDrain(args[1:])
+		case "abort-rollover":
+			return runAbortRollover(args[1:])
 		}
 	}
 	cfg, err := cliwrapper.LoadConfigFromEnvUnvalidated()

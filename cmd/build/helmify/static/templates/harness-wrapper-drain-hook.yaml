@@ -3,15 +3,21 @@
 {{- $desiredGeneration := include "orka.harnessV1PodTemplateGeneration" . }}
 {{- $existingWrapper := lookup "apps/v1" "Deployment" .Release.Namespace $wrapperName }}
 {{- $needsRollover := false }}
+{{- $needsAbort := false }}
+{{- $existingImage := "" }}
+{{- $existingPullPolicy := "" }}
+{{- $existingAuthSecret := "" }}
+{{- $existingAuthKey := "" }}
 {{- if $existingWrapper }}
 {{- $existingGeneration := include "orka.harnessV1ExistingGeneration" $existingWrapper | trim }}
 {{- $needsRollover = or (not .Values.harnessV1.enabled) (ne $existingGeneration $desiredGeneration) }}
+{{- $needsAbort = .Values.harnessV1.enabled }}
+{{- $existingImage = include "orka.harnessV1ExistingImage" $existingWrapper }}
+{{- $existingPullPolicy = include "orka.harnessV1ExistingImagePullPolicy" $existingWrapper }}
+{{- $existingAuthSecret = include "orka.harnessV1ExistingAuthSecretName" $existingWrapper }}
+{{- $existingAuthKey = include "orka.harnessV1ExistingAuthSecretKey" $existingWrapper }}
 {{- end }}
 {{- if $needsRollover }}
-{{- $existingImage := include "orka.harnessV1ExistingImage" $existingWrapper }}
-{{- $existingPullPolicy := include "orka.harnessV1ExistingImagePullPolicy" $existingWrapper }}
-{{- $existingAuthSecret := include "orka.harnessV1ExistingAuthSecretName" $existingWrapper }}
-{{- $existingAuthKey := include "orka.harnessV1ExistingAuthSecretKey" $existingWrapper }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -143,6 +149,142 @@ spec:
             defaultMode: 0440
             items:
               - key: {{ $existingAuthKey | quote }}
+                path: token
+        - name: tmp
+          emptyDir: {}
+{{- end }}
+{{- if $needsAbort }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "orka.harnessV1AbortName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-harness-wrapper-rollover-abort
+  annotations:
+    helm.sh/hook: post-rollback
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "orka.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent-harness-wrapper
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "orka.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent-harness-wrapper-rollover-abort
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "orka.harnessV1AbortEgressName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-harness-wrapper-rollover-abort
+  annotations:
+    helm.sh/hook: post-rollback
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "orka.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent-harness-wrapper-rollover-abort
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "orka.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent-harness-wrapper
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "orka.harnessV1AbortName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-harness-wrapper-rollover-abort
+  annotations:
+    helm.sh/hook: post-rollback
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "orka.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: agent-harness-wrapper-rollover-abort
+    spec:
+      serviceAccountName: {{ include "orka.harnessV1Name" . }}
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: abort-rollover
+          image: {{ include "orka.imageRef" .Values.harnessV1.image | quote }}
+          imagePullPolicy: {{ .Values.harnessV1.image.pullPolicy }}
+          command: ["/orka-agent-harness-wrapper"]
+          args:
+            - abort-rollover
+            - {{ printf "--endpoint=http://%s:8080" $wrapperName | quote }}
+            - --bearer-token-file=/var/run/orka/harness-wrapper/token
+            - {{ printf "--expected-generation=%s" $desiredGeneration | quote }}
+            - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
+          volumeMounts:
+            - name: auth
+              mountPath: /var/run/orka/harness-wrapper
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop: [ALL]
+          {{- with .Values.harnessV1.upgradeDrain.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: auth
+          secret:
+            secretName: {{ .Values.harnessV1.auth.existingSecret | default (include "orka.harnessV1AuthSecretName" .) | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.harnessV1.auth.tokenKey | quote }}
                 path: token
         - name: tmp
           emptyDir: {}

@@ -178,6 +178,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(harness.AdminDrainPath, s.handleAdminDrain)
 	mux.HandleFunc(harness.AdminClosePath, s.handleAdminClose)
 	mux.HandleFunc(harness.AdminRolloverPath, s.handleAdminRollover)
+	mux.HandleFunc(harness.AdminAbortRolloverPath, s.handleAdminAbortRollover)
 	return mux
 }
 
@@ -602,6 +603,34 @@ func (s *Server) handleAdminRollover(w http.ResponseWriter, r *http.Request) {
 		CurrentGeneration: currentGeneration,
 		NextGeneration:    nextGeneration,
 		Prepared:          true,
+	})
+}
+
+func (s *Server) handleAdminAbortRollover(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.ledger == nil {
+		writeSafeError(w, http.StatusServiceUnavailable, "durable admission ledger is not configured")
+		return
+	}
+	var request harness.DurableRolloverAbortRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeSafeError(w, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	expectedGeneration := strings.TrimSpace(request.ExpectedGeneration)
+	if err := s.ledger.AbortRollover(r.Context(), expectedGeneration); err != nil {
+		writeSafeError(w, http.StatusConflict, "durable rollover abort failed")
+		return
+	}
+	harness.WriteJSON(w, http.StatusOK, harness.DurableRolloverAbortResponse{
+		CurrentGeneration: expectedGeneration,
+		AdmissionReopened: true,
 	})
 }
 

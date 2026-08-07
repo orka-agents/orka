@@ -102,6 +102,14 @@ longest suffix so names remain valid DNS labels for long Helm release names.
 {{- printf "%s-egress" (include "orka.harnessV1DrainName" . | trunc 56 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "orka.harnessV1AbortName" -}}
+{{- printf "%s-abort" (include "orka.harnessV1Name" . | trunc 57 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.harnessV1AbortEgressName" -}}
+{{- printf "%s-egress" (include "orka.harnessV1AbortName" . | trunc 56 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 {{- define "orka.harnessV1DeleteDrainName" -}}
 {{- printf "%s-delete" (include "orka.harnessV1Name" . | trunc 56 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
@@ -213,7 +221,11 @@ spec:
 
 {{- define "orka.harnessV1PodTemplateGeneration" -}}
 {{- $template := include "orka.harnessV1PodTemplate" (dict "root" . "generation" "ORKA_HARNESS_V1_TEMPLATE_GENERATION") | fromYaml -}}
+{{- if and (not .Values.harnessV1.auth.existingSecret) .Values.harnessV1.auth.token -}}
+{{- toJson (dict "podTemplate" $template "managedAuthTokenDigest" (.Values.harnessV1.auth.token | sha256sum)) | sha256sum -}}
+{{- else -}}
 {{- toJson $template | sha256sum -}}
+{{- end -}}
 {{- end }}
 
 {{/* Read the live wrapper inputs used by rollover hooks. */}}

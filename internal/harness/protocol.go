@@ -18,14 +18,15 @@ const (
 )
 
 const (
-	HealthPath        = "/v1/health"
-	ReadinessPath     = "/v1/ready"
-	CapabilitiesPath  = "/v1/capabilities"
-	TurnsPath         = "/v1/turns"
-	AdminTurnsPath    = "/v1/admin/turns"
-	AdminDrainPath    = "/v1/admin/drain"
-	AdminClosePath    = "/v1/admin/admission/close"
-	AdminRolloverPath = "/v1/admin/admission/prepare-rollover"
+	HealthPath             = "/v1/health"
+	ReadinessPath          = "/v1/ready"
+	CapabilitiesPath       = "/v1/capabilities"
+	TurnsPath              = "/v1/turns"
+	AdminTurnsPath         = "/v1/admin/turns"
+	AdminDrainPath         = "/v1/admin/drain"
+	AdminClosePath         = "/v1/admin/admission/close"
+	AdminRolloverPath      = "/v1/admin/admission/prepare-rollover"
+	AdminAbortRolloverPath = "/v1/admin/admission/abort-rollover"
 )
 
 // Durable harness v1 admission metadata is safe, non-secret identity copied
@@ -370,6 +371,19 @@ type DurableRolloverPrepareResponse struct {
 	CurrentGeneration string `json:"currentGeneration"`
 	NextGeneration    string `json:"nextGeneration"`
 	Prepared          bool   `json:"prepared"`
+}
+
+// DurableRolloverAbortRequest identifies the exact live generation a rollback
+// hook is authorized to reopen.
+type DurableRolloverAbortRequest struct {
+	ExpectedGeneration string `json:"expectedGeneration"`
+}
+
+// DurableRolloverAbortResponse confirms that the exact live generation is
+// accepting admissions again.
+type DurableRolloverAbortResponse struct {
+	CurrentGeneration string `json:"currentGeneration"`
+	AdmissionReopened bool   `json:"admissionReopened"`
 }
 
 type ToolExecutionMode string

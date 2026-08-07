@@ -87,6 +87,12 @@ func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, func(), error) {
 	if err != nil || upstream == nil || !validScheme || upstream.Host == "" || upstream.User != nil {
 		return turn, nil, fmt.Errorf("runtime-auth-only credential proxy endpoint is invalid for runtime %q", runtimeName)
 	}
+	if !runtimeAuthProxyUpstreamTransportAllowed(upstream) {
+		return turn, nil, fmt.Errorf(
+			"runtime-auth-only credential proxy endpoint must use HTTPS or literal loopback HTTP for runtime %q",
+			runtimeName,
+		)
+	}
 	token, err := newRuntimeAuthProxyToken()
 	if err != nil {
 		return turn, nil, err
@@ -128,6 +134,20 @@ func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, func(), error) {
 	}
 	turn.Env = runtimeAuthProxyAddNoProxyHosts(turn.Env, runtimeAuthProxyLoopback, "localhost")
 	return turn, closeProxy, nil
+}
+
+func runtimeAuthProxyUpstreamTransportAllowed(upstream *url.URL) bool {
+	if upstream == nil {
+		return false
+	}
+	if upstream.Scheme == runtimeAuthProxyHTTPS {
+		return true
+	}
+	if upstream.Scheme != runtimeAuthProxyHTTP {
+		return false
+	}
+	ip := net.ParseIP(upstream.Hostname())
+	return ip != nil && ip.IsLoopback()
 }
 
 func runtimeAuthProxyAddNoProxyHosts(env []string, hosts ...string) []string {

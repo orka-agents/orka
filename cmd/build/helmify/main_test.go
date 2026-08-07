@@ -665,6 +665,18 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 	if !regexp.MustCompile(`--next-generation=[a-f0-9]{64}`).MatchString(hook) {
 		t.Fatalf("rollover hook is missing its canonical replacement generation:\n%s", hook)
 	}
+	for _, marker := range []string{
+		"app.kubernetes.io/component: agent-harness-wrapper-rollover-abort",
+		"helm.sh/hook: post-rollback",
+		"- abort-rollover",
+		`image: "ghcr.io/orka-agents/orka/agent-harness-wrapper@sha256:` + strings.Repeat("1", 64) + `"`,
+		`secretName: "harness-wrapper-auth"`,
+		`key: "token"`,
+	} {
+		if !strings.Contains(hook, marker) {
+			t.Fatalf("changed-generation rollback hook is missing %q:\n%s", marker, hook)
+		}
+	}
 	if strings.Contains(hook, "/usr/local/bin/node") {
 		t.Fatalf("delete drain hook assumes an unavailable Node runtime:\n%s", hook)
 	}
@@ -676,6 +688,25 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 	if strings.Contains(unchanged, "helm.sh/hook: pre-upgrade,pre-rollback") ||
 		strings.Contains(unchanged, "agent-harness-wrapper-rollover-drain") {
 		t.Fatalf("unchanged wrapper Pod template unexpectedly triggered a rollover drain:\n%s", unchanged)
+	}
+	for _, marker := range []string{
+		"app.kubernetes.io/component: agent-harness-wrapper-rollover-abort",
+		"helm.sh/hook: post-rollback",
+		"- abort-rollover",
+		`- "--endpoint=http://test-orka-agent-harness-wrapper:8080"`,
+		"- --bearer-token-file=/var/run/orka/harness-wrapper/token",
+		`secretName: "harness-wrapper-auth"`,
+		`key: "token"`,
+	} {
+		if !strings.Contains(unchanged, marker) {
+			t.Fatalf("same-generation rollback hook is missing %q:\n%s", marker, unchanged)
+		}
+	}
+	if got := strings.Count(unchanged, "helm.sh/hook: post-rollback"); got != 3 {
+		t.Fatalf("rollback abort hook annotation count = %d, want 3:\n%s", got, unchanged)
+	}
+	if !regexp.MustCompile(`--expected-generation=[a-f0-9]{64}`).MatchString(unchanged) {
+		t.Fatalf("rollback abort hook is missing its exact live generation:\n%s", unchanged)
 	}
 	if !strings.Contains(unchanged, "helm.sh/hook: pre-delete") {
 		t.Fatalf("enabled release lost its uninstall drain hook:\n%s", unchanged)
@@ -703,6 +734,33 @@ func TestStaticChartHarnessV1GenerationTracksOnlyPodTemplate(t *testing.T) {
 	changed := requireHelmRender(t, changedArgs...)
 	if changedGeneration := harnessV1RenderedGeneration(t, changed); changedGeneration == firstGeneration {
 		t.Fatalf("wrapper Pod-template change preserved generation %s", changedGeneration)
+	}
+}
+
+func TestStaticChartHarnessV1GenerationTracksManagedTokenDigestWithoutExposingToken(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("4", 64)
+	args := []string{
+		"--set", "harnessV1.enabled=true",
+		"--set", "store.persistence.enabled=true",
+		"--set-string", "harnessV1.image.digest=" + digest,
+		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
+		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
+		"--show-only", "templates/harness-wrapper-deployment.yaml",
+	}
+	firstToken := strings.Repeat("a", 32)
+	secondToken := strings.Repeat("b", 32)
+	firstArgs := append(append([]string{}, args...), "--set-string", "harnessV1.auth.token="+firstToken)
+	secondArgs := append(append([]string{}, args...), "--set-string", "harnessV1.auth.token="+secondToken)
+	first := requireHelmRender(t, firstArgs...)
+	second := requireHelmRender(t, secondArgs...)
+	firstGeneration := harnessV1RenderedGeneration(t, first)
+	if secondGeneration := harnessV1RenderedGeneration(t, second); secondGeneration == firstGeneration {
+		t.Fatalf("managed token rotation preserved wrapper generation %s", firstGeneration)
+	}
+	for _, rendered := range []string{first, second} {
+		if strings.Contains(rendered, firstToken) || strings.Contains(rendered, secondToken) {
+			t.Fatalf("wrapper Pod template exposed managed token material:\n%s", rendered)
+		}
 	}
 }
 

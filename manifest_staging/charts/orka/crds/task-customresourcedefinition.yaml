@@ -3392,10 +3392,11 @@ spec:
                   rule: '!has(self.state) || !(self.state in [''Succeeded'', ''Failed'',
                     ''Cancelled'', ''OutcomeUnknown'']) || has(self.outcome)'
                 - message: harness outcome requires a terminal state
-                  rule: '!has(self.outcome) || self.state in [''Succeeded'', ''Failed'',
-                    ''Cancelled'', ''OutcomeUnknown'']'
+                  rule: '!has(self.outcome) || (has(self.state) && self.state in [''Succeeded'',
+                    ''Failed'', ''Cancelled'', ''OutcomeUnknown''])'
                 - message: OutcomeUnknown harness state requires OutcomeUnknown outcome
-                  rule: self.state != 'OutcomeUnknown' || self.outcome == 'OutcomeUnknown'
+                  rule: '!has(self.state) || self.state != ''OutcomeUnknown'' || (has(self.outcome)
+                    && self.outcome == ''OutcomeUnknown'')'
               iteration:
                 description: |-
                   Iteration is the current autonomous loop iteration (0-based).

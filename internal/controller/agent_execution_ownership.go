@@ -452,7 +452,7 @@ func controllerLeaderElectionEnabled(containers []corev1.Container) bool {
 		}
 		if value, present := commandFlag(container.Args, "leader-elect"); present {
 			parsed := strings.TrimSpace(strings.ToLower(value))
-			return parsed == "" || parsed == "true" || parsed == "1"
+			return parsed == "" || parsed == booleanTrueValue || parsed == "1"
 		}
 	}
 	return false

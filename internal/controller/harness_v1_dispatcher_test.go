@@ -39,7 +39,7 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 		body: agentExecutionSnapshotBody{
 			Prompt: "perform the work", Timeout: "2m",
 			HarnessV1: &agentExecutionSnapshotHarnessV1{
-				SessionName: "session-a", RuntimeName: "runtime-a",
+				SessionName: "session-a", RuntimeName: "runtime-a", RuntimeAuthOnly: true,
 			},
 		},
 	}
@@ -57,6 +57,9 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 	wantDeadline := boundAt.Add(2 * time.Minute)
 	if !request.Deadline.Equal(wantDeadline) {
 		t.Fatalf("deadline = %s, want %s", request.Deadline, wantDeadline)
+	}
+	if request.Metadata["runtimeAuthOnly"] != "true" {
+		t.Fatalf("runtimeAuthOnly metadata = %q, want true", request.Metadata["runtimeAuthOnly"])
 	}
 	digest, err := harness.CanonicalStartTurnRequestDigest(request)
 	if err != nil {
@@ -77,6 +80,16 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 	}
 	if reconstructedDigest != digest {
 		t.Fatalf("reconstructed digest = %q, want %q", reconstructedDigest, digest)
+	}
+
+	mutatedAuth := *verified
+	mutatedAuth.body = verified.body
+	mutatedHarnessV1 := *verified.body.HarnessV1
+	mutatedHarnessV1.RuntimeAuthOnly = false
+	mutatedAuth.body.HarnessV1 = &mutatedHarnessV1
+	if _, err := buildHarnessV1StartTurnRequest(task, &mutatedAuth, attempt, env); err == nil ||
+		!strings.Contains(err.Error(), "does not match the durable attempt") {
+		t.Fatalf("mutated runtime-auth-only error = %v, want durable digest mismatch", err)
 	}
 
 	mutated := *verified

@@ -287,6 +287,29 @@ func (c *Client) PrepareDurableRollover(
 	return &response, nil
 }
 
+// AbortDurableRollover discards a prepared replacement and reopens admission
+// only when the live wrapper still owns the exact rollback generation.
+func (c *Client) AbortDurableRollover(
+	ctx context.Context,
+	expectedGeneration string,
+) (_ *DurableRolloverAbortResponse, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
+	expectedGeneration = strings.TrimSpace(expectedGeneration)
+	if expectedGeneration == "" {
+		return nil, safeClientError("abort_durable_rollover", 0, "expected generation is required")
+	}
+	var response DurableRolloverAbortResponse
+	if err := c.postJSON(ctx, AdminAbortRolloverPath, DurableRolloverAbortRequest{
+		ExpectedGeneration: expectedGeneration,
+	}, &response); err != nil {
+		return nil, err
+	}
+	if !response.AdmissionReopened || response.CurrentGeneration != expectedGeneration {
+		return nil, safeClientError("abort_durable_rollover", 0, "wrapper returned invalid rollover abort")
+	}
+	return &response, nil
+}
+
 func (c *Client) sanitizeHealthResponse(response HealthResponse) (HealthResponse, error) {
 	for name, value := range map[string]string{
 		"version":          response.Version,

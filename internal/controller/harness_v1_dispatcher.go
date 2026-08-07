@@ -471,6 +471,9 @@ func buildHarnessV1StartTurnRequest(
 	if attempt.RequestDigest != "" {
 		request.Metadata[harness.MetadataRequestDigest] = attempt.RequestDigest
 	}
+	if verified.body.HarnessV1.RuntimeAuthOnly {
+		request.Metadata["runtimeAuthOnly"] = "true"
+	}
 	if err := request.Validate(); err != nil {
 		return harness.StartTurnRequest{}, err
 	}

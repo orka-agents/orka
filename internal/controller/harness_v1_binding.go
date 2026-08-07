@@ -110,6 +110,10 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	if err != nil {
 		return nil, err
 	}
+	runtimeAuthOnly, err := validateHarnessV1RuntimeAuthOnly(task, agent, target)
+	if err != nil {
+		return nil, err
+	}
 	systemPrompt, err := resolveACPSystemPrompt(ctx, reader, agent)
 	if err != nil {
 		if isPermanentACPAgentConfigurationError(err) {
@@ -121,6 +125,9 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	credentialRefs, err := resolveHarnessV1CredentialRefs(ctx, reader, agent, target)
 	if err != nil {
 		return nil, err
+	}
+	if runtimeAuthOnly && len(credentialRefs) == 0 {
+		return nil, permanentHarnessV1Candidate(errors.New("harness v1 runtime-auth-only binding requires frozen provider credentials"))
 	}
 	maxTurns := int32(50)
 	if agent.Spec.Runtime.DefaultMaxTurns != nil {
@@ -163,6 +170,7 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 		RuntimeOverride: task.Spec.AgentRuntime.DeepCopy(),
 		HarnessV1: &agentExecutionSnapshotHarnessV1{
 			Endpoint: target.endpoint, Backend: string(target.backend), RuntimeName: target.runtimeName,
+			RuntimeAuthOnly:     runtimeAuthOnly,
 			AuthSecretNamespace: target.authSecret.Namespace, AuthSecretName: target.authSecret.Name,
 			AuthSecretKey: target.authSecretKey, AuthSecretUID: string(target.authSecret.UID),
 			AuthSecretResourceVersion: target.authSecret.ResourceVersion,
@@ -220,6 +228,28 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	}
 	binding.BoundAt = metav1.Now()
 	return &agentExecutionCandidate{binding: binding, snapshotBody: encoded}, nil
+}
+
+func validateHarnessV1RuntimeAuthOnly(
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	target resolvedHarnessV1Target,
+) (bool, error) {
+	if !taskRequestsRuntimeAuthOnly(task) {
+		return false, nil
+	}
+	if target.backend != corev1alpha1.AgentExecutionBackendHarnessWrapper || target.runtimeRef != nil {
+		return false, permanentHarnessV1Candidate(errors.New("harness v1 runtime-auth-only binding requires the built-in wrapper"))
+	}
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude:
+		return true, nil
+	default:
+		return false, permanentHarnessV1Candidate(fmt.Errorf(
+			"harness v1 runtime-auth-only binding does not support runtime %q",
+			agent.Spec.Runtime.Type,
+		))
+	}
 }
 
 func validateNewHarnessV1Workload(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
@@ -469,6 +499,17 @@ func validateHarnessV1Snapshot(
 		body.HarnessV1.AuthSecretKey == "" || body.HarnessV1.AuthSecretUID == "" ||
 		body.HarnessV1.AuthSecretResourceVersion == "" || body.HarnessV1.SessionName == "" {
 		return errors.New("harness v1 snapshot has incomplete frozen endpoint/auth/session identity")
+	}
+	if body.HarnessV1.RuntimeAuthOnly {
+		if body.HarnessV1.Backend != string(corev1alpha1.AgentExecutionBackendHarnessWrapper) ||
+			len(body.HarnessV1.CredentialRefs) == 0 {
+			return errors.New("harness v1 runtime-auth-only snapshot is not bound to the built-in wrapper and frozen credentials")
+		}
+		switch corev1alpha1.AgentRuntimeType(body.RuntimeType) {
+		case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude:
+		default:
+			return errors.New("harness v1 runtime-auth-only snapshot uses an unsupported runtime")
+		}
 	}
 	if body.RetryPolicy != nil {
 		if body.RetryPolicy.MaxRetries < 0 ||

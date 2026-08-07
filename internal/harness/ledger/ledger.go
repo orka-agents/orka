@@ -606,6 +606,70 @@ func (l *Ledger) PrepareRollover(ctx context.Context, nextGeneration string) (st
 	return current, nil
 }
 
+// AbortRollover atomically discards a prepared replacement and reopens the
+// fully drained current generation. The exact current generation is required
+// so a stale rollback hook can never reopen a different wrapper generation.
+// An already-open matching generation is an idempotent success; a bare close
+// without a prepared rollover remains fail-closed.
+func (l *Ledger) AbortRollover(ctx context.Context, expectedGeneration string) error {
+	if err := validateGeneration(expectedGeneration); err != nil {
+		return err
+	}
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin wrapper ledger rollover abort: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	current, found, err := controlValue(ctx, tx, "generation")
+	if err != nil || !found {
+		if err == nil {
+			err = errors.New("generation is missing")
+		}
+		return fmt.Errorf("read wrapper ledger generation: %w", err)
+	}
+	if current != expectedGeneration {
+		return fmt.Errorf("wrapper ledger generation %q does not match rollback generation %q", current, expectedGeneration)
+	}
+	pending, pendingFound, err := controlValue(ctx, tx, "pending-generation")
+	if err != nil {
+		return fmt.Errorf("read pending wrapper ledger generation: %w", err)
+	}
+	closed, _, err := admissionClosed(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !pendingFound {
+		if closed {
+			return fmt.Errorf("wrapper admission is closed without a prepared rollover")
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit idempotent wrapper ledger rollover abort: %w", err)
+		}
+		return nil
+	}
+	if err := validateGeneration(pending); err != nil {
+		return fmt.Errorf("pending wrapper ledger generation is invalid: %w", err)
+	}
+	if !closed {
+		return fmt.Errorf("prepared wrapper rollover is missing its admission close")
+	}
+	unsettled, err := unsettledTurnCount(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if unsettled != 0 {
+		return fmt.Errorf("wrapper drain is incomplete: %d turn(s) remain unsettled", unsettled)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ledger_control WHERE key IN ('pending-generation', 'admission-closed-at')`); err != nil {
+		return fmt.Errorf("abort wrapper ledger rollover: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit wrapper ledger rollover abort: %w", err)
+	}
+	return nil
+}
+
 // ActivateGeneration atomically reopens a fully drained ledger only for the
 // exact generation prepared by the prior wrapper. Starting the same generation
 // is always permitted but never removes a durable close marker.

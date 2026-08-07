@@ -851,8 +851,8 @@ type LegacyAgentWorkspaceConfig struct {
 // surfaces, so terminal ambiguity is represented here without weakening route
 // exclusivity.
 // +kubebuilder:validation:XValidation:rule="!has(self.state) || !(self.state in ['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown']) || has(self.outcome)",message="terminal harness state requires an outcome"
-// +kubebuilder:validation:XValidation:rule="!has(self.outcome) || self.state in ['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown']",message="harness outcome requires a terminal state"
-// +kubebuilder:validation:XValidation:rule="self.state != 'OutcomeUnknown' || self.outcome == 'OutcomeUnknown'",message="OutcomeUnknown harness state requires OutcomeUnknown outcome"
+// +kubebuilder:validation:XValidation:rule="!has(self.outcome) || (has(self.state) && self.state in ['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown'])",message="harness outcome requires a terminal state"
+// +kubebuilder:validation:XValidation:rule="!has(self.state) || self.state != 'OutcomeUnknown' || (has(self.outcome) && self.outcome == 'OutcomeUnknown')",message="OutcomeUnknown harness state requires OutcomeUnknown outcome"
 type HarnessRuntimeStatus struct {
 	// RuntimeRefName is the AgentRuntime name for custom runtimeRef turns.
 	// Empty means built-in CLI wrapper.

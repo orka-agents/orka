@@ -2,6 +2,7 @@ package cliwrapper
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -44,7 +45,7 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 				anthropicHeader string
 			}
 			observed := make(chan observedRequest, 1)
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			upstream := newRuntimeAuthLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				observed <- observedRequest{
 					path: r.URL.Path, authorization: r.Header.Get("Authorization"),
 					anthropicHeader: r.Header.Get("x-api-key"),
@@ -52,7 +53,6 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, `{"ok":true}`)
 			}))
-			t.Cleanup(upstream.Close)
 			basePath := strings.TrimSuffix(tt.upstreamPath, strings.TrimPrefix(tt.upstreamPath, "/v1"))
 			turn := TurnContext{
 				RuntimeName: tt.runtimeName,
@@ -197,10 +197,9 @@ func TestProtectRuntimeAuthTurnProtectsReadOnlyCodexCredentials(t *testing.T) {
 	previousBoundary := runtimeAuthChildBoundaryAvailable
 	runtimeAuthChildBoundaryAvailable = func() bool { return true }
 	t.Cleanup(func() { runtimeAuthChildBoundaryAvailable = previousBoundary })
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := newRuntimeAuthLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	t.Cleanup(upstream.Close)
 	turn := TurnContext{
 		RuntimeName: RuntimeCodex,
 		Metadata:    map[string]string{"readOnly": "true"},
@@ -227,10 +226,9 @@ func TestProtectRuntimeAuthTurnCollapsesDuplicateCredentialEntries(t *testing.T)
 	previousBoundary := runtimeAuthChildBoundaryAvailable
 	runtimeAuthChildBoundaryAvailable = func() bool { return true }
 	t.Cleanup(func() { runtimeAuthChildBoundaryAvailable = previousBoundary })
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := newRuntimeAuthLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	t.Cleanup(upstream.Close)
 	turn := TurnContext{
 		RuntimeName: RuntimeCodex,
 		Metadata:    map[string]string{"runtimeAuthOnly": "true"},
@@ -280,6 +278,80 @@ func TestRuntimeAuthProxyTransportDisablesEnvironmentProxy(t *testing.T) {
 	}
 }
 
+func TestProtectRuntimeAuthTurnRejectsNonLoopbackHTTPUpstream(t *testing.T) {
+	previousBoundary := runtimeAuthChildBoundaryAvailable
+	runtimeAuthChildBoundaryAvailable = func() bool { return true }
+	t.Cleanup(func() { runtimeAuthChildBoundaryAvailable = previousBoundary })
+	for _, endpoint := range []string{
+		"http://api.openai.com/v1",
+		"http://10.0.0.1/v1",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			turn := TurnContext{
+				RuntimeName: RuntimeCodex,
+				Metadata:    map[string]string{"runtimeAuthOnly": "true"},
+				Env: []string{
+					workerenv.OpenAIBaseURL + "=" + endpoint,
+					workerenv.OpenAIAPIKey + "=upstream-value",
+				},
+			}
+			_, _, err := protectRuntimeAuthTurn(turn)
+			if err == nil || !strings.Contains(err.Error(), "must use HTTPS or literal loopback HTTP") {
+				t.Fatalf("protectRuntimeAuthTurn() error = %v, want cleartext upstream rejection", err)
+			}
+		})
+	}
+}
+
+func TestProtectRuntimeAuthTurnAllowsTLSUpstream(t *testing.T) {
+	previousBoundary := runtimeAuthChildBoundaryAvailable
+	runtimeAuthChildBoundaryAvailable = func() bool { return true }
+	t.Cleanup(func() { runtimeAuthChildBoundaryAvailable = previousBoundary })
+	upstreamValue := "upstream-model-value"
+	observed := make(chan string, 1)
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observed <- r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = upstream.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	turn := TurnContext{
+		RuntimeName: RuntimeCodex,
+		Metadata:    map[string]string{"runtimeAuthOnly": "true"},
+		Env: []string{
+			workerenv.OpenAIBaseURL + "=" + upstream.URL + "/v1",
+			workerenv.OpenAIAPIKey + "=" + upstreamValue,
+		},
+	}
+	protected, closeProxy, err := protectRuntimeAuthTurn(turn)
+	if err != nil {
+		t.Fatalf("protectRuntimeAuthTurn() error = %v", err)
+	}
+	defer closeProxy()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		envEntryValue(protected.Env, workerenv.OpenAIBaseURL)+"/responses",
+		strings.NewReader(`{}`),
+	)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+envEntryValue(protected.Env, workerenv.OpenAIAPIKey))
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("TLS proxy request error = %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("TLS proxy status = %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+	if got := <-observed; got != "Bearer "+upstreamValue {
+		t.Fatalf("TLS upstream authorization was not injected")
+	}
+}
+
 func TestProtectRuntimeAuthTurnRejectsClaudeFoundry(t *testing.T) {
 	turn := TurnContext{RuntimeName: RuntimeClaude, Metadata: map[string]string{"runtimeAuthOnly": "true"}, Env: []string{
 		"CLAUDE_CODE_USE_FOUNDRY=1",
@@ -296,11 +368,10 @@ func TestRuntimeAuthProxyRestrictsBasePathAndFixedQuery(t *testing.T) {
 	runtimeAuthChildBoundaryAvailable = func() bool { return true }
 	t.Cleanup(func() { runtimeAuthChildBoundaryAvailable = previousBoundary })
 	observed := make(chan *http.Request, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newRuntimeAuthLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		observed <- r.Clone(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	t.Cleanup(upstream.Close)
 	turn := TurnContext{
 		RuntimeName: RuntimeCodex,
 		Metadata:    map[string]string{"runtimeAuthOnly": "true"},
@@ -380,4 +451,16 @@ func TestProtectRuntimeAuthTurnRejectsUnsupportedRuntime(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "does not support runtime") {
 		t.Fatalf("protectRuntimeAuthTurn() error = %v, want unsupported runtime rejection", err)
 	}
+}
+
+func newRuntimeAuthLoopbackServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	listener, err := net.Listen("tcp4", runtimeAuthProxyLoopback+":0")
+	if err != nil {
+		t.Fatalf("listen on runtime-auth loopback: %v", err)
+	}
+	server := &httptest.Server{Listener: listener, Config: &http.Server{Handler: handler}}
+	server.Start()
+	t.Cleanup(server.Close)
+	return server
 }

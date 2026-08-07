@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -126,6 +128,86 @@ func TestResolveHarnessV1ExecutionCandidateMarksSpecViolationPermanent(t *testin
 	_, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent)
 	if err == nil || !isPermanentHarnessV1CandidateError(err) {
 		t.Fatalf("workspace violation error = %v, permanent=%v", err, isPermanentHarnessV1CandidateError(err))
+	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateFreezesRuntimeAuthOnly(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	credential := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: fixture.task.Namespace, Name: "runtime-auth-credentials",
+			UID: types.UID("runtime-auth-credentials-uid"),
+		},
+		Data: map[string][]byte{"OPENAI_API_KEY": []byte("runtime-auth-secret-value")},
+	}
+	if err := fixture.reconciler.Create(ctx, credential); err != nil {
+		t.Fatal(err)
+	}
+	fixture.agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: credential.Name}
+	task := fixture.task.DeepCopy()
+	task.Annotations = map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue}
+
+	candidate, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, task, fixture.agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body agentExecutionSnapshotBody
+	if err := json.Unmarshal(candidate.snapshotBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.HarnessV1 == nil || !body.HarnessV1.RuntimeAuthOnly {
+		t.Fatalf("frozen harness v1 metadata = %#v, want runtimeAuthOnly", body.HarnessV1)
+	}
+	if strings.Contains(string(candidate.snapshotBody), "runtime-auth-secret-value") {
+		t.Fatal("encrypted snapshot plaintext body retained a raw provider credential")
+	}
+
+	unprotectedTask := task.DeepCopy()
+	delete(unprotectedTask.Annotations, labels.AnnotationAgentRuntimeAuthOnly)
+	unprotected, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(ctx, unprotectedTask, fixture.agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unprotected.binding.Snapshot.Digest == candidate.binding.Snapshot.Digest {
+		t.Fatal("runtime-auth-only annotation did not change the immutable snapshot digest")
+	}
+}
+
+func TestValidateHarnessV1RuntimeAuthOnlyRejectsUnsupportedRoute(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Annotations: map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue},
+	}}
+	tests := []struct {
+		name       string
+		runtime    corev1alpha1.AgentRuntimeType
+		target     resolvedHarnessV1Target
+		wantReason string
+	}{
+		{
+			name: "external endpoint", runtime: corev1alpha1.AgentRuntimeCodex,
+			target: resolvedHarnessV1Target{
+				backend:    corev1alpha1.AgentExecutionBackendExternalEndpoint,
+				runtimeRef: &corev1alpha1.AgentRuntime{},
+			},
+			wantReason: "built-in wrapper",
+		},
+		{
+			name: "unsupported built-in runtime", runtime: corev1alpha1.AgentRuntimeCopilot,
+			target:     resolvedHarnessV1Target{backend: corev1alpha1.AgentExecutionBackendHarnessWrapper},
+			wantReason: "does not support runtime",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+				Runtime: &corev1alpha1.AgentCLIRuntime{Type: test.runtime},
+			}}
+			_, err := validateHarnessV1RuntimeAuthOnly(task, agent, test.target)
+			if err == nil || !isPermanentHarnessV1CandidateError(err) || !strings.Contains(err.Error(), test.wantReason) {
+				t.Fatalf("validate runtime-auth-only route error = %v, want permanent %q failure", err, test.wantReason)
+			}
+		})
 	}
 }
 

@@ -103,6 +103,7 @@ type agentExecutionSnapshotHarnessV1 struct {
 	Endpoint                  string                            `json:"endpoint"`
 	Backend                   string                            `json:"backend"`
 	RuntimeName               string                            `json:"runtimeName"`
+	RuntimeAuthOnly           bool                              `json:"runtimeAuthOnly,omitempty"`
 	AuthSecretNamespace       string                            `json:"authSecretNamespace"`
 	AuthSecretName            string                            `json:"authSecretName"`
 	AuthSecretKey             string                            `json:"authSecretKey"`
