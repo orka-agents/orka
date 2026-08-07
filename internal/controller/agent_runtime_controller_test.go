@@ -519,6 +519,23 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	}
 }
 
+func TestValidateHarnessV1AgentRuntimeEndpointSpecRequiresTLS(t *testing.T) {
+	for _, endpoint := range []string{
+		"http://runtime.default.svc:8080",
+		"http://runtime.default.svc.cluster.local:8080",
+		"http://runtime.example.invalid",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			if err := validateHarnessV1AgentRuntimeEndpointSpec(endpoint); err == nil || !strings.Contains(err.Error(), "must use https") {
+				t.Fatalf("validateHarnessV1AgentRuntimeEndpointSpec(%q) error = %v, want TLS rejection", endpoint, err)
+			}
+		})
+	}
+	if err := validateHarnessV1AgentRuntimeEndpointSpec("https://runtime.default.svc:8443"); err != nil {
+		t.Fatalf("TLS Service endpoint rejected: %v", err)
+	}
+}
+
 func TestAgentRuntimeProfilePreservesModelLimits(t *testing.T) {
 	base, _, _ := testAgentRuntimeProfileClaimsAndLimits()
 	base.ProviderKind = runtimePoolProviderOpencode

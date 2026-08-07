@@ -2633,6 +2633,41 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 	}
 }
 
+func TestACPDispatcherReservedRetryReportsOnlyBoundedStage(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := runtimePoolReservationTestTask("session-retry", "session-retry-uid", "pool-uid")
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateReserved
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task).
+		Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient}
+
+	if err := dispatcher.requeueReservedTask(
+		context.Background(), task.DeepCopy(), acpReservedRetrySessionPreparation,
+		errors.New("sensitive provider diagnostic"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Execution == nil {
+		t.Fatal("reserved retry removed execution status")
+	}
+	if got, want := updated.Status.Execution.Message, "RuntimePool admission will be retried (stage: session-preparation)"; got != want {
+		t.Fatalf("retry message = %q, want %q", got, want)
+	}
+	if strings.Contains(updated.Status.Execution.Message, "sensitive provider diagnostic") {
+		t.Fatalf("retry message exposed the underlying cause: %q", updated.Status.Execution.Message)
+	}
+}
+
 func newRuntimePoolReservationTestFixture(t *testing.T, maxResident, maxPrompts int32) (*ACPDispatcher, client.Client, *corev1alpha1.RuntimePool, *corev1alpha1.Task, *corev1alpha1.Task) {
 	t.Helper()
 	scheme := runtime.NewScheme()

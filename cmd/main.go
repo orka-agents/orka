@@ -206,6 +206,7 @@ func main() {
 	var harnessV1PolicyName string
 	var harnessV1DispatchInterval time.Duration
 	var harnessV1DispatchWorkers int
+	var harnessV1RetirementUsername string
 	var acpRuntimeEnabled bool
 	var acpIdlePoolTTL time.Duration
 	var acpCodexRuntimeImage string
@@ -421,6 +422,9 @@ func main() {
 	flag.IntVar(&harnessV1DispatchWorkers, "harness-v1-dispatch-workers",
 		controller.DefaultHarnessV1DispatchWorkers,
 		"Maximum concurrent harness v1 attempt workers.")
+	flag.StringVar(&harnessV1RetirementUsername, "harness-v1-retirement-username",
+		os.Getenv("ORKA_HARNESS_V1_RETIREMENT_USERNAME"),
+		"Exact Kubernetes ServiceAccount username authorized to invoke the one-way harness v1 retirement barrier.")
 	flag.BoolVar(&acpRuntimeEnabled, "acp-runtime-enabled", envBool("ORKA_ACP_RUNTIME_ENABLED", true),
 		"Route built-in codex/claude/copilot/opencode agent Tasks through managed orka.harness.v2 RuntimePools.")
 	flag.DurationVar(&acpIdlePoolTTL, "acp-idle-pool-ttl", envDurationDefault("ORKA_ACP_IDLE_POOL_TTL", controller.DefaultACPIdlePoolTTL),
@@ -1750,6 +1754,12 @@ func main() {
 	tools.RegisterProxyPRTools(mgr.GetClient())
 
 	// Start REST API server
+	var harnessV1Retirement api.HarnessV1RetirementService
+	if harnessV1Enabled && strings.TrimSpace(harnessV1RetirementUsername) != "" {
+		harnessV1Retirement = &controller.HarnessV1RetirementCoordinator{
+			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Attempts: sqliteStore,
+		}
+	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:                      apiPort,
 		WatchNamespace:            watchNamespace,
@@ -1781,6 +1791,8 @@ func main() {
 		Clientset:                        kubeClient,
 		APIReader:                        mgr.GetAPIReader(),
 		AgentExecutionClassificationGate: classificationGate,
+		HarnessV1Retirement:              harnessV1Retirement,
+		HarnessV1RetirementUsername:      harnessV1RetirementUsername,
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,

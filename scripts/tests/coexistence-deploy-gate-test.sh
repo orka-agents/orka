@@ -28,25 +28,65 @@ if [[ "$1" == "get" && "$2" == "crd" && $# -ge 3 ]]; then
   if [[ "${FAKE_MISSING_CRD:-}" == "${crd}" ]]; then
     exit 1
   fi
-  if [[ "${crd}" != "agentruntimes.core.orka.ai" ]]; then
-    exit 0
-  fi
-  case "${FAKE_SCHEMA_MODE:-dual}" in
-    dual)
-      printf '%s\n' '{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"contractVersion":{"enum":["orka.harness.v2","orka.harness.v1"]}}}}}}}]}}'
+  case "${crd}" in
+    agentruntimes.core.orka.ai)
+      case "${FAKE_SCHEMA_MODE:-dual}" in
+        dual)
+          printf '%s\n' '{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"contractVersion":{"enum":["orka.harness.v2","orka.harness.v1"]}}}}}}}]}}'
+          ;;
+        v2-only)
+          printf '%s\n' '{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"contractVersion":{"enum":["orka.harness.v2"]}}}}}}}]}}'
+          ;;
+        no-served-version)
+          printf '%s\n' '{"spec":{"versions":[{"name":"v1alpha1","served":false,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"contractVersion":{"enum":["orka.harness.v1","orka.harness.v2"]}}}}}}}]}}'
+          ;;
+        missing-enum)
+          printf '%s\n' '{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{}}}}}}]}}'
+          ;;
+        *)
+          echo "unknown FAKE_SCHEMA_MODE: ${FAKE_SCHEMA_MODE}" >&2
+          exit 2
+          ;;
+      esac
       ;;
-    v2-only)
-      printf '%s\n' '{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"contractVersion":{"enum":["orka.harness.v2"]}}}}}}}]}}'
+    agents.core.orka.ai)
+      agent_schema='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"runtime":{"properties":{"contractVersion":{"enum":["orka.harness.v2","orka.harness.v1"]}},"x-kubernetes-validations":[{"message":"runtime.contractVersion is immutable once set"}]}}}}}}}]}}'
+      case "${FAKE_AGENT_SCHEMA_MODE:-dual}" in
+        dual)
+          printf '%s\n' "${agent_schema}"
+          ;;
+        v2-only)
+          jq '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.runtime.properties.contractVersion.enum = ["orka.harness.v2"]' <<<"${agent_schema}"
+          ;;
+        missing-immutability)
+          jq '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.runtime["x-kubernetes-validations"] = []' <<<"${agent_schema}"
+          ;;
+        *)
+          echo "unknown FAKE_AGENT_SCHEMA_MODE: ${FAKE_AGENT_SCHEMA_MODE}" >&2
+          exit 2
+          ;;
+      esac
       ;;
-    no-served-version)
-      printf '%s\n' '{"spec":{"versions":[{"name":"v1alpha1","served":false,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"contractVersion":{"enum":["orka.harness.v1","orka.harness.v2"]}}}}}}}]}}'
-      ;;
-    missing-enum)
-      printf '%s\n' '{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{}}}}}}]}}'
+    tasks.core.orka.ai)
+      task_schema='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"status":{"properties":{"agentExecutionBinding":{"type":"object","properties":{"contractVersion":{"enum":["orka.harness.v2","orka.harness.v1"]}}},"agentExecutionNoExecution":{"type":"object"},"agentExecutionQuarantine":{"type":"object"},"agentExecutionResolutionRef":{"type":"object"}},"x-kubernetes-validations":[{"message":"agentExecutionBinding is write-once and immutable"}]}},"x-kubernetes-validations":[{"message":"Task spec is immutable after execution authority or a migration disposition is recorded"}]}}}]}}'
+      case "${FAKE_TASK_SCHEMA_MODE:-dual}" in
+        dual)
+          printf '%s\n' "${task_schema}"
+          ;;
+        missing-authority)
+          jq 'del(.spec.versions[0].schema.openAPIV3Schema.properties.status.properties.agentExecutionBinding)' <<<"${task_schema}"
+          ;;
+        missing-immutability)
+          jq '.spec.versions[0].schema.openAPIV3Schema.properties.status["x-kubernetes-validations"] = []' <<<"${task_schema}"
+          ;;
+        *)
+          echo "unknown FAKE_TASK_SCHEMA_MODE: ${FAKE_TASK_SCHEMA_MODE}" >&2
+          exit 2
+          ;;
+      esac
       ;;
     *)
-      echo "unknown FAKE_SCHEMA_MODE: ${FAKE_SCHEMA_MODE}" >&2
-      exit 2
+      exit 0
       ;;
   esac
   exit 0
@@ -87,11 +127,21 @@ for crd in \
   runtimepools.core.orka.ai \
   agentexecutioncontrols.core.orka.ai \
   agentexecutionpolicies.core.orka.ai \
-  agentexecutionadjudications.core.orka.ai; do
+  agentexecutionadjudications.core.orka.ai \
+  agents.core.orka.ai \
+  tasks.core.orka.ai; do
   expect_gate_failure "missing coexistence CRD: ${crd}" FAKE_MISSING_CRD="${crd}"
 done
 for schema_mode in v2-only no-served-version missing-enum; do
   expect_gate_failure 'AgentRuntime CRD is not the dual orka.harness.v1/orka.harness.v2 bridge schema' FAKE_SCHEMA_MODE="${schema_mode}"
+done
+for schema_mode in v2-only missing-immutability; do
+  expect_gate_failure 'Agent CRD is missing the immutable dual-contract coexistence schema' \
+    FAKE_AGENT_SCHEMA_MODE="${schema_mode}"
+done
+for schema_mode in missing-authority missing-immutability; do
+  expect_gate_failure 'Task CRD is missing the immutable coexistence execution-authority schema' \
+    FAKE_TASK_SCHEMA_MODE="${schema_mode}"
 done
 expect_gate_failure 'coexistence CRD is not Established: agentexecutioncontrols.core.orka.ai' \
   FAKE_UNESTABLISHED_CRD=agentexecutioncontrols.core.orka.ai
@@ -122,4 +172,4 @@ if grep -Eq '^deploy: .*verify-acp-crd-cutover' "${root}/Makefile"; then
   exit 1
 fi
 
-printf '%s\n' 'ok - coexistence deployment requires Established dual CRDs, the exact AgentRuntime schema, and only durable Recreate-mode v1 wrappers'
+printf '%s\n' 'ok - coexistence deployment requires Established dual CRDs, the AgentRuntime/Agent/Task bridge schemas, and only durable Recreate-mode v1 wrappers'

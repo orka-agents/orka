@@ -39,6 +39,14 @@ type AgentExecutionClassificationGate interface {
 	Check(context.Context) error
 }
 
+// HarnessV1RetirementService closes controller-side v1 execution and proves
+// its durable attempt inventory empty before wrapper retirement.
+type HarnessV1RetirementService interface {
+	Retire(context.Context) error
+}
+
+const harnessV1RetirementPath = "/internal/v1/harness-v1/retirement"
+
 // ServerConfig holds configuration for the API server
 type ServerConfig struct {
 	Port                             int
@@ -67,6 +75,8 @@ type ServerConfig struct {
 	Clientset                        kubernetes.Interface
 	APIReader                        client.Reader
 	AgentExecutionClassificationGate AgentExecutionClassificationGate
+	HarnessV1Retirement              HarnessV1RetirementService
+	HarnessV1RetirementUsername      string
 }
 
 // Server is the REST API server
@@ -218,7 +228,8 @@ func (s *Server) setupMiddleware() {
 }
 
 func (s *Server) requireAgentExecutionClassification(c fiber.Ctx) error {
-	if requestMethodIsReadOnly(c.Method()) || s.config.AgentExecutionClassificationGate == nil {
+	if requestMethodIsReadOnly(c.Method()) || c.Path() == harnessV1RetirementPath ||
+		s.config.AgentExecutionClassificationGate == nil {
 		return c.Next()
 	}
 	if err := s.config.AgentExecutionClassificationGate.Check(c.Context()); err != nil {
@@ -457,6 +468,11 @@ func (s *Server) setupRoutes() {
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
 	// Internal API for worker communication
+	if s.config.HarnessV1Retirement != nil {
+		retirement := s.app.Group("/internal/v1")
+		retirement.Use(NewAuthMiddleware(s.client))
+		retirement.Post("/harness-v1/retirement", s.handleHarnessV1Retirement)
+	}
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
 			s.ResultStore,

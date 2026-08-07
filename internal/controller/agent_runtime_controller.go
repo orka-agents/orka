@@ -435,6 +435,16 @@ func validateHarnessV1AgentRuntimeEndpointSpec(endpoint string) error {
 	if _, err := harness.NewClient(endpoint); err != nil {
 		return fmt.Errorf("AgentRuntime endpoint is invalid: %w", err)
 	}
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return fmt.Errorf("AgentRuntime endpoint is invalid: %w", err)
+	}
+	if parsed.Scheme != urlSchemeHTTPS {
+		host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+		if !agentRuntimeAllowInsecureLoopbackForTests || !isLoopbackAgentRuntimeEndpoint(host) {
+			return fmt.Errorf("authenticated orka.harness.v1 AgentRuntime endpoints must use https")
+		}
+	}
 	return nil
 }
 

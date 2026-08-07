@@ -621,6 +621,52 @@ func TestResolveHarnessV1TargetRequiresObservedMode(t *testing.T) {
 	}
 }
 
+func TestResolveHarnessV1TargetRevalidatesTLSForReadyRuntime(t *testing.T) {
+	const (
+		endpoint   = "http://runtime.default.svc:8080"
+		runtimeKey = "token"
+	)
+	runtime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "stale-ready-v1", UID: types.UID("stale-ready-v1-uid"), Generation: 1,
+		},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
+			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
+				Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: endpoint,
+			},
+			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{
+				BearerAuthRef: &corev1alpha1.AgentRuntimeBearerAuthReference{Name: "stale-ready-v1-auth", Key: runtimeKey},
+			},
+		},
+		Status: corev1alpha1.AgentRuntimeStatus{
+			Ready: true, ObservedGeneration: 1, ObservedAuthRefResourceVersion: "1",
+			ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
+				ToolExecutionModes: []corev1alpha1.AgentRuntimeToolExecutionMode{
+					corev1alpha1.AgentRuntimeToolExecutionModeObserved,
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: runtime.Namespace, Name: runtime.Spec.ClientAuth.BearerAuthRef.Name,
+			UID: types.UID("stale-ready-v1-auth-uid"), ResourceVersion: "1",
+		},
+		Data: map[string][]byte{runtimeKey: []byte("runtime-auth-value")},
+	}
+	reconciler, _ := newBindingTestReconciler(t, runtime, secret)
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: runtime.Namespace}}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtime.Name},
+	}}}
+
+	target, err := reconciler.resolveHarnessV1Target(t.Context(), reconciler.Client, task, agent)
+	if err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("resolve target = %#v, error = %v, want stale Ready cleartext rejection", target, err)
+	}
+}
+
 func TestResolveHarnessV1ExecutionCandidateFreezesRuntimeAuthOnly(t *testing.T) {
 	ctx := context.Background()
 	fixture := newHarnessV1CandidateFixture(t, ctx)
@@ -706,13 +752,65 @@ func TestResolveHarnessV1CredentialRefsAllowlistsRuntimeProviderKeys(t *testing.
 			agent.Spec.Runtime.Type = tt.runtimeType
 			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secret.Name}
 			refs, err := resolveHarnessV1CredentialRefs(
-				ctx, fixture.reconciler.Client, agent, resolvedHarnessV1Target{},
+				ctx, fixture.reconciler.Client, agent, resolvedHarnessV1Target{}, false,
 			)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if len(refs) != 1 || !slices.Equal(refs[0].Keys, tt.wantKeys) {
 				t.Fatalf("credential refs = %#v, want keys %v", refs, tt.wantKeys)
+			}
+		})
+	}
+}
+
+func TestResolveHarnessV1CredentialRefsRejectsFoundryOnlyForRuntimeAuthOnly(t *testing.T) {
+	ctx := context.Background()
+	fixture := newHarnessV1CandidateFixture(t, ctx)
+	tests := []struct {
+		name string
+		data map[string][]byte
+	}{
+		{
+			name: "Foundry flag",
+			data: map[string][]byte{
+				"CLAUDE_CODE_USE_FOUNDRY": []byte("true"),
+				"ANTHROPIC_API_KEY":       []byte("direct-provider-key"),
+			},
+		},
+		{
+			name: "Foundry key",
+			data: map[string][]byte{
+				"ANTHROPIC_FOUNDRY_API_KEY": []byte("foundry-provider-key"),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: fixture.task.Namespace, Name: "provider-" + strings.ReplaceAll(strings.ToLower(test.name), " ", "-"),
+					UID: types.UID("provider-" + strings.ReplaceAll(strings.ToLower(test.name), " ", "-") + "-uid"),
+				},
+				Data: test.data,
+			}
+			if err := fixture.reconciler.Create(ctx, secret); err != nil {
+				t.Fatal(err)
+			}
+			agent := fixture.agent.DeepCopy()
+			agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
+			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secret.Name}
+
+			if _, err := resolveHarnessV1CredentialRefs(
+				ctx, fixture.reconciler.Client, agent, resolvedHarnessV1Target{}, true,
+			); err == nil || !isPermanentHarnessV1CandidateError(err) || !strings.Contains(err.Error(), "does not support Azure AI Foundry") {
+				t.Fatalf("runtime-auth-only Foundry error = %v, want permanent early rejection", err)
+			}
+			refs, err := resolveHarnessV1CredentialRefs(
+				ctx, fixture.reconciler.Client, agent, resolvedHarnessV1Target{}, false,
+			)
+			if err != nil || len(refs) != 1 {
+				t.Fatalf("non-proxied Foundry refs = %#v, error = %v, want preserved support", refs, err)
 			}
 		})
 	}
@@ -739,7 +837,7 @@ func TestResolveHarnessV1CredentialRefsRejectsUnrelatedKeys(t *testing.T) {
 			agent := fixture.agent.DeepCopy()
 			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secret.Name}
 			_, err := resolveHarnessV1CredentialRefs(
-				ctx, fixture.reconciler.Client, agent, resolvedHarnessV1Target{},
+				ctx, fixture.reconciler.Client, agent, resolvedHarnessV1Target{}, false,
 			)
 			if err == nil || !isPermanentHarnessV1CandidateError(err) || !strings.Contains(err.Error(), prohibitedKey) {
 				t.Fatalf("unrelated credential key error = %v, want permanent rejection mentioning %s", err, prohibitedKey)

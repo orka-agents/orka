@@ -39,6 +39,7 @@ const (
 	harnessV1SessionBootstrapMaxMessages     = 64
 	harnessV1SessionBootstrapMaxBytes        = 128 * 1024
 	harnessV1SessionBootstrapMaxMessageBytes = 32 * 1024
+	harnessV1CredentialFlagYes               = "yes"
 )
 
 type resolvedHarnessV1Target struct {
@@ -136,7 +137,7 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 		return nil, fmt.Errorf("resolve frozen harness v1 Session input: %w", err)
 	}
 
-	credentialRefs, err := resolveHarnessV1CredentialRefs(ctx, reader, agent, target)
+	credentialRefs, err := resolveHarnessV1CredentialRefs(ctx, reader, agent, target, runtimeAuthOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +458,7 @@ func (r *TaskReconciler) resolveHarnessV1Target(
 	if !supportsHarnessV1ObservedToolExecution(runtime) {
 		return resolvedHarnessV1Target{}, errors.New("harness v1 AgentRuntime does not advertise the required observed tool execution mode")
 	}
-	if _, err := harness.NewClient(runtime.Spec.Deployment.Endpoint); err != nil {
+	if err := validateHarnessV1AgentRuntimeEndpointSpec(runtime.Spec.Deployment.Endpoint); err != nil {
 		return resolvedHarnessV1Target{}, fmt.Errorf("validate harness v1 AgentRuntime endpoint: %w", err)
 	}
 	ref := runtime.Spec.ClientAuth.BearerAuthRef
@@ -499,6 +500,7 @@ func resolveHarnessV1CredentialRefs(
 	reader client.Reader,
 	agent *corev1alpha1.Agent,
 	target resolvedHarnessV1Target,
+	runtimeAuthOnly bool,
 ) ([]agentExecutionSnapshotSecretRef, error) {
 	if target.runtimeRef != nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
 		return nil, nil
@@ -509,6 +511,12 @@ func resolveHarnessV1CredentialRefs(
 	}
 	if secret.UID == "" || secret.ResourceVersion == "" {
 		return nil, errors.New("harness v1 provider credential Secret identity is incomplete")
+	}
+	if runtimeAuthOnly && agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeClaude &&
+		harnessV1ClaudeFoundryConfigured(secret.Data) {
+		return nil, permanentHarnessV1Candidate(errors.New(
+			"harness v1 runtime-auth-only Claude binding does not support Azure AI Foundry credentials",
+		))
 	}
 	allowedKeys, err := readOnlyAgentRuntimeSecretKeys(agent)
 	if err != nil {
@@ -540,6 +548,18 @@ func resolveHarnessV1CredentialRefs(
 		Role: "provider-runtime", Namespace: secret.Namespace, Name: secret.Name,
 		UID: string(secret.UID), ResourceVersion: secret.ResourceVersion, Keys: keys,
 	}}, nil
+}
+
+func harnessV1ClaudeFoundryConfigured(data map[string][]byte) bool {
+	if strings.TrimSpace(string(data["ANTHROPIC_FOUNDRY_API_KEY"])) != "" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(string(data["CLAUDE_CODE_USE_FOUNDRY"]))) {
+	case "1", scheduledRunLabelValue, harnessV1CredentialFlagYes, "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func harnessV1SessionName(task *corev1alpha1.Task) string {

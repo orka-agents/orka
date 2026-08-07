@@ -228,6 +228,24 @@ func harnessV1RenderedGeneration(t *testing.T, rendered string) string {
 	return match[1]
 }
 
+func requireRenderedDocument(t *testing.T, rendered string, markers ...string) string {
+	t.Helper()
+	for document := range strings.SplitSeq(rendered, "\n---\n") {
+		matched := true
+		for _, marker := range markers {
+			if !strings.Contains(document, marker) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return document
+		}
+	}
+	t.Fatalf("rendered chart has no document containing %q:\n%s", markers, rendered)
+	return ""
+}
+
 func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 	rendered := requireHelmRender(t,
 		"--set", "service.port=18080",
@@ -672,6 +690,25 @@ func TestStaticChartManagedHarnessV1PolicyCanBeCleanupOnly(t *testing.T) {
 	}
 }
 
+func TestStaticChartControllerRBACCoversExecutionAuthority(t *testing.T) {
+	rendered := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
+	controllerRBAC, _, ok := strings.Cut(rendered, "# Controller ClusterRoleBinding")
+	if !ok {
+		t.Fatalf("rendered RBAC is missing the controller ClusterRoleBinding boundary:\n%s", rendered)
+	}
+	for _, rule := range []string{
+		`resources: ["agentexecutionadjudications", "agentexecutioncontrols", "agentexecutionpolicies"]
+    verbs: ["get", "list", "watch"]`,
+		`resources: ["agentexecutionadjudications/status", "agentexecutioncontrols/status"]
+    verbs: ["get", "update", "patch"]`,
+	} {
+		if !strings.Contains(controllerRBAC, rule) {
+			t.Fatalf("controller RBAC is missing execution-authority rule %q:\n%s", rule, controllerRBAC)
+		}
+	}
+}
+
+//nolint:gocyclo // One render matrix verifies the coupled rollout, rollback, retirement, and uninstall invariants.
 func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("1", 64)
 	args := []string{
@@ -700,6 +737,7 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		`image: "ghcr.io/orka-agents/orka/agent-harness-wrapper@sha256:` + strings.Repeat("1", 64) + `"`,
 		`secretName: "harness-wrapper-auth"`,
 		`key: "token"`,
+		"--harness-v1-retirement-username=system:serviceaccount:orka-test:test-orka-agent-harness-wrapper",
 	} {
 		if !strings.Contains(fresh, marker) {
 			t.Fatalf("fresh enabled revision rollback hook is missing %q:\n%s", marker, fresh)
@@ -765,10 +803,14 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		`- "--endpoint=https://test-orka-agent-harness-wrapper.orka-test.svc:8080"`,
 		"- --bearer-token-file=/var/run/orka/harness-wrapper/token",
 		"- --ca-file=/var/run/orka/harness-wrapper/ca.crt",
+		`- "--controller-endpoint=http://test-orka.orka-test.svc:8080/internal/v1/harness-v1/retirement"`,
+		"- --controller-token-file=/var/run/orka/harness-v1-retirement/token",
 		`- "--timeout=9m"`,
 		`- "--poll-interval=3s"`,
 		`secretName: "harness-wrapper-auth"`,
 		`key: "token"`,
+		"serviceAccountToken:",
+		"expirationSeconds: 600",
 		"defaultMode: 0440",
 	} {
 		if !strings.Contains(hook, marker) {
@@ -783,6 +825,37 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 	}
 	if !regexp.MustCompile(`--next-generation=[a-f0-9]{64}`).MatchString(hook) {
 		t.Fatalf("rollover hook is missing its canonical replacement generation:\n%s", hook)
+	}
+	rolloverJob := requireRenderedDocument(t, hook,
+		"kind: Job",
+		"app.kubernetes.io/component: agent-harness-wrapper-rollover-drain",
+	)
+	if strings.Contains(rolloverJob, "--controller-endpoint=") ||
+		strings.Contains(rolloverJob, "--controller-token-file=") ||
+		strings.Contains(rolloverJob, "serviceAccountToken:") {
+		t.Fatalf("ordinary wrapper rollover unexpectedly retired controller-side v1 admission:\n%s", rolloverJob)
+	}
+	deleteJob := requireRenderedDocument(t, hook,
+		"kind: Job",
+		"app.kubernetes.io/component: agent-harness-wrapper-delete-drain",
+	)
+	for _, marker := range []string{
+		`- "--controller-endpoint=http://test-orka.orka-test.svc:8080/internal/v1/harness-v1/retirement"`,
+		"- --controller-token-file=/var/run/orka/harness-v1-retirement/token",
+		"serviceAccountToken:",
+		"expirationSeconds: 600",
+	} {
+		if !strings.Contains(deleteJob, marker) {
+			t.Fatalf("uninstall drain is missing controller retirement marker %q:\n%s", marker, deleteJob)
+		}
+	}
+	deleteEgress := requireRenderedDocument(t, hook,
+		"kind: NetworkPolicy",
+		"name: test-orka-agent-harness-wrapper-delete-egress",
+	)
+	if !strings.Contains(deleteEgress, "app.kubernetes.io/component: controller") ||
+		!strings.Contains(deleteEgress, "port: 8080") {
+		t.Fatalf("uninstall drain egress does not permit the controller retirement call:\n%s", deleteEgress)
 	}
 	for _, marker := range []string{
 		"app.kubernetes.io/component: agent-harness-wrapper-rollover-abort",
@@ -836,6 +909,31 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 	disabled := requireHarnessV1UpgradeDrainHookRender(t, true, disabledArgs...)
 	if !regexp.MustCompile(`--next-generation=retired:[a-f0-9]{64}`).MatchString(disabled) {
 		t.Fatalf("same-template retirement did not use a distinct tombstone generation:\n%s", disabled)
+	}
+	retirementJob := requireRenderedDocument(t, disabled,
+		"kind: Job",
+		"app.kubernetes.io/component: agent-harness-wrapper-rollover-drain",
+	)
+	for _, marker := range []string{
+		`- "--controller-endpoint=http://test-orka.orka-test.svc:8080/internal/v1/harness-v1/retirement"`,
+		"- --controller-token-file=/var/run/orka/harness-v1-retirement/token",
+		"serviceAccountToken:",
+		"expirationSeconds: 600",
+	} {
+		if !strings.Contains(retirementJob, marker) {
+			t.Fatalf("v1 retirement drain is missing controller barrier marker %q:\n%s", marker, retirementJob)
+		}
+	}
+	retirementEgress := requireRenderedDocument(t, disabled,
+		"kind: NetworkPolicy",
+		"name: test-orka-agent-harness-wrapper-drain-egress",
+	)
+	if !strings.Contains(retirementEgress, "app.kubernetes.io/component: controller") ||
+		!strings.Contains(retirementEgress, "port: 8080") {
+		t.Fatalf("v1 retirement drain egress does not permit the controller barrier call:\n%s", retirementEgress)
+	}
+	if strings.Contains(disabled, "agent-harness-wrapper-delete-drain") {
+		t.Fatalf("disabled release unexpectedly rendered a redundant uninstall drain hook:\n%s", disabled)
 	}
 }
 

@@ -100,6 +100,7 @@ spec:
             - --harness-v1-policy-name={{ .Values.harnessV1.policy.name }}
             - --harness-v1-dispatch-interval={{ .Values.harnessV1.dispatch.interval }}
             - --harness-v1-dispatch-workers={{ .Values.harnessV1.dispatch.workers }}
+            - --harness-v1-retirement-username=system:serviceaccount:{{ .Release.Namespace }}:{{ include "orka.harnessV1Name" . }}
             {{- end }}
             {{- if or .Values.controller.acpRuntime.enabled .Values.harnessV1.enabled }}
             - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
