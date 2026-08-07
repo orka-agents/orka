@@ -27,6 +27,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
@@ -87,6 +88,7 @@ type Handlers struct {
 	apiReader                 client.Reader
 	clientset                 kubernetes.Interface
 	watchNamespace            string
+	executionMode             executionmode.Mode
 	enforceNamespaceIsolation bool
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 	resultStore               store.ResultStore
@@ -113,6 +115,7 @@ type HandlersConfig struct {
 	Client                    client.Client
 	APIReader                 client.Reader
 	WatchNamespace            string
+	ExecutionMode             executionmode.Mode
 	EnforceNamespaceIsolation bool
 	ContextTokenAuthorization ContextTokenAuthorizationConfig
 	ResultStore               store.ResultStore
@@ -139,6 +142,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		apiReader:                 cfg.APIReader,
 		clientset:                 cfg.KubeClient,
 		watchNamespace:            cfg.WatchNamespace,
+		executionMode:             cfg.ExecutionMode,
 		enforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
 		contextTokenAuthorization: cfg.ContextTokenAuthorization,
 		resultStore:               cfg.ResultStore,
@@ -1273,6 +1277,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
 		Spec:       req.Spec,
+	}
+	if err := executionmode.DefaultBuiltInAgentContract(agent, h.executionMode); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "createAgent", agent.Namespace, agent.Name); err != nil {
 		return err

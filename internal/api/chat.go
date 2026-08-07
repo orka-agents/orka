@@ -33,6 +33,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
@@ -58,6 +59,7 @@ type ChatConfig struct {
 	MaxSessionSize         int // bytes
 	MaxPrematureEndRetries int // re-prompts when the model emits text without the GOAL_STATE sentinel
 	RuntimeAvailability    ACPRuntimeAvailability
+	ExecutionMode          executionmode.Mode
 }
 
 // ACPRuntimeAvailability identifies built-in profiles backed by configured,
@@ -372,6 +374,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Create tool executor (also creates the chat registry)
 	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore, ch.kubeClient)
+	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
 	executor.providerType = providerInfo.Type
 	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {

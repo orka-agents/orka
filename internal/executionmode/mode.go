@@ -49,6 +49,33 @@ func (m Mode) ContractVersion() corev1alpha1.AgentRuntimeContractVersion {
 	return ""
 }
 
+// DefaultBuiltInAgentContract stamps the installation's immutable harness
+// contract on a built-in Agent runtime when the trusted producer omitted it.
+// Explicit selectors are never rewritten, and an opposite-mode selector is
+// rejected before the object reaches admission.
+func DefaultBuiltInAgentContract(agent *corev1alpha1.Agent, mode Mode) error {
+	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Type == "" || agent.Spec.Runtime.RuntimeRef != nil {
+		return nil
+	}
+
+	expected := mode.ContractVersion()
+	if expected == "" {
+		return fmt.Errorf("cannot default built-in Agent contract without a valid execution mode")
+	}
+	if agent.Spec.Runtime.ContractVersion == nil {
+		agent.Spec.Runtime.ContractVersion = &expected
+		return nil
+	}
+	if *agent.Spec.Runtime.ContractVersion != expected {
+		return fmt.Errorf(
+			"agent runtime contractVersion %q does not match execution mode %q",
+			*agent.Spec.Runtime.ContractVersion,
+			mode,
+		)
+	}
+	return nil
+}
+
 // FromNamespace reads and validates a namespace's immutable mode claim.
 func FromNamespace(namespace *corev1.Namespace) (Mode, error) {
 	if namespace == nil {

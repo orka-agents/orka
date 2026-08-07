@@ -25,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
@@ -66,6 +67,7 @@ func (e *ToolExecutor) executeTool(ctx context.Context, name string, args map[st
 	tc := &tools.ToolContext{
 		Client:                    e.client,
 		Namespace:                 e.namespace,
+		ExecutionMode:             e.executionMode,
 		WatchNamespace:            e.watchNamespace,
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
 		ResultStore:               e.resultStore,
@@ -189,7 +191,9 @@ func newTestExecutor(objs ...runtime.Object) *ToolExecutor {
 	}
 	c := cb.Build()
 	sm := controller.NewSessionManager(&fakeSessionStore{})
-	return NewToolExecutor(c, sm, testDefaultNamespace, "sess-12345678", "", false, 5, 30*time.Second, &fakeResultStore{})
+	executor := NewToolExecutor(c, sm, testDefaultNamespace, "sess-12345678", "", false, 5, 30*time.Second, &fakeResultStore{})
+	executor.SetExecutionMode(executionmode.HarnessV2)
+	return executor
 }
 
 // fakeResultStore implements store.ResultStore for testing.

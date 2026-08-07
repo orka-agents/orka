@@ -4,13 +4,17 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 )
+
+const canonicalProductionControllerUsername = "system:serviceaccount:orka-system:orka-controller-manager"
 
 func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("3", 64)
@@ -87,6 +91,57 @@ func TestControllerServiceExposesWebhookPort(t *testing.T) {
 	t.Fatalf("controller Service has no webhook port: %#v", service.Spec.Ports)
 }
 
+func TestControllerDeploymentEnablesReleaseLocalAdmission(t *testing.T) {
+	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
+	deployment := appsv1.Deployment{}
+	if err := yaml.Unmarshal([]byte(rendered), &deployment); err != nil {
+		t.Fatalf("decode controller Deployment: %v", err)
+	}
+
+	var args []string
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		if container.Name == "controller" {
+			args = container.Args
+			break
+		}
+	}
+	for _, want := range []string{
+		"--task-provenance-admission-enabled=true",
+		"--workspace-class-use-admission-enabled=true",
+		"--webhook-cert-path=/var/run/orka/webhook/tls",
+	} {
+		if !containsString(args, want) {
+			t.Errorf("controller args do not contain %q: %#v", want, args)
+		}
+	}
+}
+
+func TestSharedAdmissionAuthorizesCanonicalProductionController(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "config", "orka-admission", "deployment.yaml")
+	manifest, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read standalone admission Deployment: %v", err)
+	}
+	deployment := appsv1.Deployment{}
+	if err := yaml.Unmarshal(manifest, &deployment); err != nil {
+		t.Fatalf("decode standalone admission Deployment: %v", err)
+	}
+
+	var args []string
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		if container.Name == "admission" {
+			args = container.Args
+			break
+		}
+	}
+	for _, prefix := range []string{"--controller-usernames=", "--task-provenance-trusted-users="} {
+		if !commaListArgumentContains(args, prefix, canonicalProductionControllerUsername) {
+			t.Errorf("admission args do not authorize %q in %s: %#v",
+				canonicalProductionControllerUsername, prefix, args)
+		}
+	}
+}
+
 func TestSharedTaskWebhooksBypassExactControllerCleanup(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml")
 	manifest, err := os.ReadFile(path)
@@ -118,7 +173,7 @@ func assertTaskWebhooksBypassExactControllerCleanup(t *testing.T, manifest []byt
 	}
 	condition := authority.MatchConditions[0]
 	for _, marker := range []string{
-		"request.userInfo.username ==",
+		"request.userInfo.username == '" + canonicalProductionControllerUsername + "'",
 		"request.operation == 'UPDATE'",
 		"has(oldObject.metadata.deletionTimestamp)",
 		"oldObject.metadata.?finalizers.orValue([]).exists(f, f == 'orka.ai/cleanup')",
@@ -146,4 +201,21 @@ func assertTaskWebhooksBypassExactControllerCleanup(t *testing.T, manifest []byt
 			t.Fatalf("%s cleanup-safe conditions = %#v, want %#v", name, webhook.MatchConditions, authority.MatchConditions)
 		}
 	}
+}
+
+func containsString(values []string, want string) bool {
+	return slices.Contains(values, want)
+}
+
+func commaListArgumentContains(args []string, prefix, want string) bool {
+	for _, arg := range args {
+		value, ok := strings.CutPrefix(arg, prefix)
+		if !ok {
+			continue
+		}
+		if slices.Contains(strings.Split(value, ","), want) {
+			return true
+		}
+	}
+	return false
 }

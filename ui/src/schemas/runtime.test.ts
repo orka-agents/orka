@@ -54,7 +54,7 @@ describe('runtimePoolSchema', () => {
 })
 
 describe('agentRuntimeSchema', () => {
-  it('parses only the v2 capability surface', () => {
+  it('parses the v2 capability surface', () => {
     const value = {
       metadata: { name: 'external-codex', namespace: 'default' },
       spec: {
@@ -102,17 +102,100 @@ describe('agentRuntimeSchema', () => {
       },
       status: { ready: true },
     }
-    const parsed = agentRuntimeSchema.parse({
-      ...value,
-      spec: { ...value.spec, capabilities: { ...value.spec.capabilities, supportsContinuation: true } },
-    })
+    const parsed = agentRuntimeSchema.parse(value)
     expect(parsed.spec.contractVersion).toBe('orka.harness.v2')
+    if (parsed.spec.contractVersion !== 'orka.harness.v2') throw new Error('expected v2 runtime')
     expect(parsed.spec.capabilities.profile.adapterName).toBe('codex-acp')
     expect(parsed.spec.capabilities.workspaceGovernance.mode).toBe('strict-governed')
-    expect((parsed.spec.capabilities as Record<string, unknown>).supportsContinuation).toBeUndefined()
+
+    expect(agentRuntimeSchema.safeParse({
+      ...value,
+      spec: { ...value.spec, capabilities: { ...value.spec.capabilities, supportsContinuation: true } },
+    }).success).toBe(false)
   })
 
-  it('rejects the v1 contract', () => {
-    expect(() => agentRuntimeSchema.parse({ metadata: { name: 'legacy' }, spec: { contractVersion: 'orka.harness.v1' } })).toThrow()
+  it('parses a minimal v1 registration without declared capabilities', () => {
+    const value = {
+      metadata: { name: 'legacy-minimal', namespace: 'default' },
+      spec: {
+        contractVersion: 'orka.harness.v1',
+        deployment: { mode: 'external-endpoint', endpoint: 'https://legacy.example.test' },
+        clientAuth: { bearerTokenSecretRef: { name: 'legacy-auth', key: 'token' } },
+      },
+    }
+
+    expect(agentRuntimeSchema.parse(value)).toEqual(value)
+  })
+
+  it('parses the full configured and observed v1 capability surface', () => {
+    const value = {
+      metadata: { name: 'legacy-full', namespace: 'default' },
+      spec: {
+        contractVersion: 'orka.harness.v1',
+        deployment: { mode: 'external-endpoint', endpoint: 'https://legacy.example.test' },
+        clientAuth: { bearerTokenSecretRef: { name: 'legacy-auth', key: 'token' } },
+        capabilities: {
+          toolExecutionModes: ['observed', 'brokered'],
+          brokeredToolClasses: ['read', 'write', 'coordination'],
+          supportsCancel: true,
+          supportsRuntimeSessions: true,
+          supportsContinuation: true,
+          supportsArtifacts: true,
+        },
+      },
+      status: {
+        ready: true,
+        observedGeneration: 3,
+        observedAuthRefResourceVersion: '12345',
+        lastValidated: '2026-08-07T12:00:00Z',
+        message: 'authenticated orka.harness.v1 conformance passed',
+        observedCapabilities: {
+          protocolVersion: 'orka.harness.v1',
+          transport: 'http+sse',
+          runtimeName: 'agentkit',
+          runtimeVersion: '1.4.2',
+          providerKind: 'generic',
+          toolExecutionModes: ['observed', 'brokered'],
+          brokeredToolClasses: ['read'],
+          supportsCancel: true,
+          supportsRuntimeSessions: true,
+          supportsContinuation: true,
+          supportsArtifacts: true,
+          supportsSuspend: true,
+          supportsWorkspaceSnapshot: true,
+          maxConcurrentTurns: 4,
+          maxTurnSeconds: 1800,
+          maxOutputBytes: 1048576,
+        },
+      },
+    }
+
+    expect(agentRuntimeSchema.parse(value)).toEqual(value)
+  })
+
+  it('rejects contract-specific auth and capability fields on the other contract', () => {
+    const v1Base = {
+      metadata: { name: 'legacy', namespace: 'default' },
+      spec: {
+        contractVersion: 'orka.harness.v1',
+        deployment: { mode: 'external-endpoint', endpoint: 'https://legacy.example.test' },
+        clientAuth: { bearerTokenSecretRef: { name: 'legacy-auth', key: 'token' } },
+      },
+    }
+
+    expect(agentRuntimeSchema.safeParse({
+      ...v1Base,
+      spec: { ...v1Base.spec, capabilities: { supportsDrain: true } },
+    }).success).toBe(false)
+    expect(agentRuntimeSchema.safeParse({
+      ...v1Base,
+      spec: {
+        ...v1Base.spec,
+        clientAuth: {
+          controllerBearerTokenSecretRef: { name: 'auth', key: 'controller-token' },
+          operationCapabilitySecretRef: { name: 'auth', key: 'capability-secret' },
+        },
+      },
+    }).success).toBe(false)
   })
 })

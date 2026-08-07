@@ -41,7 +41,8 @@ webhooks:
     matchConditions:
       - name: route-unless-controller-cleanup-safe
         expression: >-
-          !((request.userInfo.username == 'system:serviceaccount:orka-v1-system:orka-v1' ||
+          !((request.userInfo.username == 'system:serviceaccount:orka-system:orka-controller-manager' ||
+          request.userInfo.username == 'system:serviceaccount:orka-v1-system:orka-v1' ||
           request.userInfo.username == 'system:serviceaccount:orka-v2-system:orka-v2') &&
           request.operation == 'UPDATE' &&
           has(oldObject.metadata.deletionTimestamp) &&
@@ -81,7 +82,8 @@ webhooks:
     matchConditions:
       - name: route-unless-controller-cleanup-safe
         expression: >-
-          !((request.userInfo.username == 'system:serviceaccount:orka-v1-system:orka-v1' ||
+          !((request.userInfo.username == 'system:serviceaccount:orka-system:orka-controller-manager' ||
+          request.userInfo.username == 'system:serviceaccount:orka-v1-system:orka-v1' ||
           request.userInfo.username == 'system:serviceaccount:orka-v2-system:orka-v2') &&
           request.operation == 'UPDATE' &&
           has(oldObject.metadata.deletionTimestamp) &&
@@ -151,7 +153,8 @@ webhooks:
     matchConditions:
       - name: route-unless-controller-cleanup-safe
         expression: >-
-          !((request.userInfo.username == 'system:serviceaccount:orka-v1-system:orka-v1' ||
+          !((request.userInfo.username == 'system:serviceaccount:orka-system:orka-controller-manager' ||
+          request.userInfo.username == 'system:serviceaccount:orka-v1-system:orka-v1' ||
           request.userInfo.username == 'system:serviceaccount:orka-v2-system:orka-v2') &&
           request.operation == 'UPDATE' &&
           has(oldObject.metadata.deletionTimestamp) &&

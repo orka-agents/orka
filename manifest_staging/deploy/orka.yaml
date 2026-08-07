@@ -2044,7 +2044,7 @@ roleRef:
   name: orka-runtime-controller-role
 subjects:
 - kind: ServiceAccount
-  name: controller-manager
+  name: orka-controller-manager
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -2058,7 +2058,7 @@ roleRef:
   name: orka-ai-worker-role
 subjects:
 - kind: ServiceAccount
-  name: ai-worker
+  name: orka-ai-worker
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -2072,7 +2072,7 @@ roleRef:
   name: orka-container-worker-role
 subjects:
 - kind: ServiceAccount
-  name: container-worker
+  name: orka-container-worker
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -2089,7 +2089,7 @@ roleRef:
   name: orka-leader-election-role
 subjects:
 - kind: ServiceAccount
-  name: controller-manager
+  name: orka-controller-manager
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -2106,7 +2106,7 @@ roleRef:
   name: orka-manager-role
 subjects:
 - kind: ServiceAccount
-  name: controller-manager
+  name: orka-controller-manager
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -2120,7 +2120,7 @@ roleRef:
   name: orka-vendor-worker-role
 subjects:
 - kind: ServiceAccount
-  name: vendor-worker
+  name: orka-vendor-worker
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -2137,7 +2137,7 @@ roleRef:
   name: orka-workspace-parameter-reader
 subjects:
 - kind: ServiceAccount
-  name: controller-manager
+  name: orka-controller-manager
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -2167,7 +2167,7 @@ roleRef:
   name: orka-metrics-auth-role
 subjects:
 - kind: ServiceAccount
-  name: controller-manager
+  name: orka-controller-manager
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -2183,7 +2183,7 @@ roleRef:
   name: orka-static-controller-cluster-role
 subjects:
 - kind: ServiceAccount
-  name: controller-manager
+  name: orka-controller-manager
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -2199,7 +2199,7 @@ roleRef:
   name: orka-v2-controller-cluster-role
 subjects:
 - kind: ServiceAccount
-  name: controller-manager
+  name: orka-controller-manager
   namespace: orka-system
 ---
 apiVersion: v1
@@ -2395,8 +2395,8 @@ spec:
         - --webhook-cert-name=tls.crt
         - --webhook-cert-key=tls.key
         - --webhook-service-dns-name=orka-admission.orka-system.svc
-        - --controller-usernames=system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
-        - --task-provenance-trusted-users=system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
+        - --controller-usernames=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
+        - --task-provenance-trusted-users=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
         - --task-provenance-trusted-service-accounts=orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
         command:
         - /orka-admission

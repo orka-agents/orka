@@ -291,6 +291,7 @@ jobs:
             --name "${KIND_CLUSTER}" \
             --image "${KIND_IMAGE}" \
             --wait 90s
+          kubectl create namespace vekil-system
 
           shopt -s nullglob
           chart_packages=(cr-release-packages/orka-*.tgz)

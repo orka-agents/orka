@@ -561,6 +561,29 @@ func TestWorkspaceCleanupAPIsInstalled(t *testing.T) {
 	}
 }
 
+func TestManagerWebhookAdmissionEnabled(t *testing.T) {
+	tests := []struct {
+		name              string
+		taskProvenance    bool
+		workspaceClassUse bool
+		want              bool
+	}{
+		{name: "separate admission runtime", want: false},
+		{name: "task provenance", taskProvenance: true, want: true},
+		{name: "workspace class use", workspaceClassUse: true, want: true},
+		{name: "all manager admission", taskProvenance: true, workspaceClassUse: true, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := managerWebhookAdmissionEnabled(tt.taskProvenance, tt.workspaceClassUse); got != tt.want {
+				t.Fatalf("managerWebhookAdmissionEnabled(%t, %t) = %t, want %t",
+					tt.taskProvenance, tt.workspaceClassUse, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateWorkspaceProviderSecurityConfig(t *testing.T) {
 	if err := validateWorkspaceProviderSecurityConfig(false, false); err != nil {
 		t.Fatalf("disabled API validation: %v", err)

@@ -13,10 +13,11 @@ after:
 
 Trusted identities embedded in `validating_webhook.yaml` must exactly match the
 corresponding admission-runtime arguments. The checked-in example authorizes
-the exact controller identities for Helm releases `orka-v1` in
-`orka-v1-system` and `orka-v2` in `orka-v2-system`. If either identity differs,
-patch the shared runtime and all three `route-unless-controller-cleanup-safe`
-conditions as one reviewed platform change before enabling the webhooks.
+the canonical direct-Kustomize controller in `orka-system`, plus the exact
+controller identities for Helm releases `orka-v1` in `orka-v1-system` and
+`orka-v2` in `orka-v2-system`. If any identity differs, patch the shared runtime
+and all three `route-unless-controller-cleanup-safe` conditions as one reviewed
+platform change before enabling the webhooks.
 
 The namespace webhook permits the first valid `orka.ai/controller-mode` claim
 and then makes it immutable. The resource webhooks require contracts and new

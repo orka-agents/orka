@@ -72,6 +72,46 @@ function externalRuntime() {
   }
 }
 
+function externalV1Runtime() {
+  return {
+    metadata: { name: 'external-v1', namespace: 'default', uid: 'runtime-v1-uid' },
+    spec: {
+      contractVersion: 'orka.harness.v1',
+      deployment: { mode: 'external-endpoint', endpoint: 'https://legacy-runtime.example.test' },
+      clientAuth: { bearerTokenSecretRef: { name: 'legacy-auth', key: 'token' } },
+      capabilities: {
+        toolExecutionModes: ['observed', 'brokered'],
+        brokeredToolClasses: ['read'],
+        supportsCancel: true,
+        supportsRuntimeSessions: true,
+        supportsContinuation: true,
+        supportsArtifacts: false,
+      },
+    },
+    status: {
+      ready: true,
+      lastValidated: '2026-07-24T00:00:00Z',
+      message: 'authenticated orka.harness.v1 conformance passed',
+      observedCapabilities: {
+        protocolVersion: 'orka.harness.v1',
+        transport: 'http+sse',
+        runtimeName: 'agentkit',
+        runtimeVersion: '1.4.2',
+        providerKind: 'generic',
+        toolExecutionModes: ['observed', 'brokered'],
+        brokeredToolClasses: ['read', 'coordination'],
+        supportsCancel: true,
+        supportsRuntimeSessions: true,
+        supportsContinuation: true,
+        supportsArtifacts: false,
+        maxConcurrentTurns: 4,
+        maxTurnSeconds: 1800,
+        maxOutputBytes: 1048576,
+      },
+    },
+  }
+}
+
 describe('RuntimeRegistry', () => {
   beforeEach(() => {
     useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
@@ -101,5 +141,31 @@ describe('RuntimeRegistry', () => {
     expect(screen.getByText('strict-governed')).toBeInTheDocument()
     expect(screen.getByText('Exact-instance fencing')).toBeInTheDocument()
     expect(screen.queryByText(/continuation/i)).not.toBeInTheDocument()
+  })
+
+  it('renders the external v1 capability surface without v2 profile fields', async () => {
+    server.use(
+      http.get('/api/v1/agent-runtimes', () => HttpResponse.json({ items: [externalV1Runtime()], metadata: {} })),
+    )
+    const user = userEvent.setup()
+    render(<RuntimeRegistry />)
+    await user.click(screen.getByRole('tab', { name: 'External runtimes' }))
+
+    await waitFor(() => expect(screen.getByText('external-v1')).toBeInTheDocument())
+    expect(screen.getByText('orka.harness.v1')).toBeInTheDocument()
+    expect(screen.getByText('agentkit')).toBeInTheDocument()
+    expect(screen.getByText('1.4.2')).toBeInTheDocument()
+    expect(screen.getByText('observed, brokered')).toBeInTheDocument()
+    expect(screen.getByText('read, coordination')).toBeInTheDocument()
+    expect(screen.getByText('Cancel: Yes')).toBeInTheDocument()
+    expect(screen.getByText('Runtime sessions: Yes')).toBeInTheDocument()
+    expect(screen.getByText('Continuation: Yes')).toBeInTheDocument()
+    expect(screen.getByText('Artifacts: No')).toBeInTheDocument()
+    expect(screen.getByText('1800s')).toBeInTheDocument()
+    expect(screen.getByText('1048576 bytes')).toBeInTheDocument()
+    expect(screen.getByText('authenticated orka.harness.v1 conformance passed')).toBeInTheDocument()
+    expect(screen.queryByText('ACP profile')).not.toBeInTheDocument()
+    expect(screen.queryByText('Profile digest')).not.toBeInTheDocument()
+    expect(screen.queryByText('strict-governed')).not.toBeInTheDocument()
   })
 })

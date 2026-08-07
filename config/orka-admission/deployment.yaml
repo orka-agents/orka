@@ -58,8 +58,8 @@ spec:
             - --webhook-cert-name=tls.crt
             - --webhook-cert-key=tls.key
             - --webhook-service-dns-name=orka-admission.orka-system.svc
-            - --controller-usernames=system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
-            - --task-provenance-trusted-users=system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
+            - --controller-usernames=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
+            - --task-provenance-trusted-users=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
             - --task-provenance-trusted-service-accounts=orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
           ports:
             - name: webhook

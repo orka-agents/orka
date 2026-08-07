@@ -13,9 +13,10 @@ Before applying this base:
    `ca.crt`. When using cert-manager direct CA injection, annotate the Secret
    with `cert-manager.io/allow-direct-injection: "true"`.
 3. Patch any trusted controller or worker identities used by the execution
-   authority and provenance handlers. The checked-in example matches Helm
-   releases `orka-v1` in `orka-v1-system` and `orka-v2` in `orka-v2-system`.
-   If either release namespace, release name, or ServiceAccount name differs,
+   authority and provenance handlers. The checked-in example matches the
+   canonical direct-Kustomize controller in `orka-system`, plus Helm releases
+   `orka-v1` in `orka-v1-system` and `orka-v2` in `orka-v2-system`. If any
+   release namespace, release name, or ServiceAccount name differs,
    patch `--controller-usernames`, `--task-provenance-trusted-users`, and
    `--task-provenance-trusted-service-accounts`. Patch the exact same
    controller usernames in every `route-unless-controller-cleanup-safe`

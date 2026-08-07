@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
 )
 
 const testProviderOpenAI = "openai"
@@ -34,8 +35,9 @@ func TestChatCreateAgentTool_ParametersDescribeOpenCodeACP(t *testing.T) {
 func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	fc := newFakeClient()
 	ctx := WithToolContext(context.Background(), &ToolContext{
-		Client:    fc,
-		Namespace: defaultNamespace,
+		Client:        fc,
+		Namespace:     defaultNamespace,
+		ExecutionMode: executionmode.HarnessV2,
 	})
 
 	tool := &ChatCreateAgentTool{}
@@ -73,7 +75,7 @@ func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 
 func TestChatCreateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
 	fc := newFakeClient()
-	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
 	result, err := (&ChatCreateAgentTool{}).Execute(ctx, json.RawMessage(`{
 		"name":"opencode-prompt-agent",
 		"systemPrompt":"You write code",
@@ -98,7 +100,7 @@ func TestChatCreateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
 
 func TestChatCreateAgentTool_Execute_RejectsUnsupportedOpenCodeTemperature(t *testing.T) {
 	fc := newFakeClient()
-	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
 	result, err := (&ChatCreateAgentTool{}).Execute(ctx, json.RawMessage(`{
 		"name":"opencode-temperature-agent",
 		"model":{"name":"openai/gpt-5.4","temperature":1,"contextWindow":32768,"maxTokens":4096},
@@ -122,7 +124,7 @@ func TestChatCreateAgentTool_Execute_RejectsUnsupportedOpenCodeTemperature(t *te
 
 func TestChatCreateAgentTool_Execute_AcceptsLegacyOpenCodeTemperature(t *testing.T) {
 	fc := newFakeClient()
-	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
 	result, err := (&ChatCreateAgentTool{}).Execute(ctx, json.RawMessage(`{
 		"name":"opencode-legacy-temperature-agent",
 		"model":{"name":"openai/gpt-5.4","temperature":0.7,"contextWindow":32768,"maxTokens":4096},
@@ -177,7 +179,7 @@ func TestChatCreateAgentTool_Execute_RejectsFractionalOpenCodeModelLimits(t *tes
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fc := newFakeClient()
-			ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+			ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
 			result, err := (&ChatCreateAgentTool{}).Execute(ctx, tc.args)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -250,7 +252,7 @@ func TestParseChatPositiveAgentModelInt32(t *testing.T) {
 
 func TestChatCreateAgentTool_Execute_RejectsOpenCodeLegacySecret(t *testing.T) {
 	fc := newFakeClient()
-	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
 	result, err := (&ChatCreateAgentTool{}).Execute(ctx, json.RawMessage(`{
 		"name": "legacy-runtime-agent",
 		"model": "openai/gpt-5.4",
@@ -274,7 +276,7 @@ func TestChatCreateAgentTool_Execute_RejectsOpenCodeLegacySecret(t *testing.T) {
 
 func TestChatCreateAgentTool_Execute_UsesBuiltInOpenCode(t *testing.T) {
 	fc := newFakeClient()
-	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
 	result, err := (&ChatCreateAgentTool{}).Execute(ctx, json.RawMessage(`{
 		"name":"opencode-agent",
 		"model":{"name":"moonshotai/Kimi-K2-Instruct-0905","contextWindow":32768,"maxTokens":4096},
@@ -298,6 +300,9 @@ func TestChatCreateAgentTool_Execute_UsesBuiltInOpenCode(t *testing.T) {
 	if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode || !slices.Equal(agent.Spec.Runtime.DefaultAllowedTools, wantTools) {
 		t.Fatalf("runtime = %#v, want OpenCode defaults %#v", agent.Spec.Runtime, wantTools)
 	}
+	if got := agent.BuiltInContractVersion(); got != corev1alpha1.AgentRuntimeContractHarnessV2 {
+		t.Fatalf("contractVersion = %q, want %q", got, corev1alpha1.AgentRuntimeContractHarnessV2)
+	}
 	if agent.Spec.Model == nil || agent.Spec.Model.Name != "moonshotai/Kimi-K2-Instruct-0905" || agent.Spec.Model.Provider != "" {
 		t.Fatalf("model = %#v, want provider-qualified OpenCode model", agent.Spec.Model)
 	}
@@ -306,12 +311,43 @@ func TestChatCreateAgentTool_Execute_UsesBuiltInOpenCode(t *testing.T) {
 	}
 }
 
+func TestChatCreateAgentTool_Execute_DefaultsHarnessV1Contract(t *testing.T) {
+	fc := newFakeClient()
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:        fc,
+		Namespace:     defaultNamespace,
+		ExecutionMode: executionmode.HarnessV1,
+	})
+	result, err := (&ChatCreateAgentTool{}).Execute(ctx, json.RawMessage(`{
+		"name":"v1-runtime-agent",
+		"runtime":{"type":"codex"}
+	}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !response.Success {
+		t.Fatalf("response = %#v, want success", response)
+	}
+	created := &corev1alpha1.Agent{}
+	if err := fc.Get(context.Background(), client.ObjectKey{Name: "v1-runtime-agent", Namespace: defaultNamespace}, created); err != nil {
+		t.Fatalf("failed to get Agent: %v", err)
+	}
+	if got := created.BuiltInContractVersion(); got != corev1alpha1.AgentRuntimeContractHarnessV1 {
+		t.Fatalf("contractVersion = %q, want %q", got, corev1alpha1.AgentRuntimeContractHarnessV1)
+	}
+}
+
 func TestChatCreateAgentTool_Execute_RollsBackAgentWhenInitialTaskAuthorizationFails(t *testing.T) {
 	fc := newFakeClient()
 	ctx := WithToolContext(context.Background(), &ToolContext{
-		Client:     fc,
-		Namespace:  defaultNamespace,
-		TaskLabels: func() map[string]string { return map[string]string{} },
+		Client:        fc,
+		Namespace:     defaultNamespace,
+		ExecutionMode: executionmode.HarnessV2,
+		TaskLabels:    func() map[string]string { return map[string]string{} },
 		CheckTaskLimit: func() *ChatToolError {
 			return nil
 		},
@@ -348,8 +384,9 @@ func TestChatCreateAgentTool_Execute_RollsBackAgentWhenInitialTaskAuthorizationF
 func TestChatCreateAgentTool_Execute_AuthorizesAgentBeforeCreate(t *testing.T) {
 	fc := newFakeClient()
 	ctx := WithToolContext(context.Background(), &ToolContext{
-		Client:    fc,
-		Namespace: defaultNamespace,
+		Client:        fc,
+		Namespace:     defaultNamespace,
+		ExecutionMode: executionmode.HarnessV2,
 		AuthorizeAgentCreate: func(context.Context, *corev1alpha1.Agent) *ChatToolError {
 			return &ChatToolError{Type: "authorization_failed", Message: "agent blocked by context token"}
 		},

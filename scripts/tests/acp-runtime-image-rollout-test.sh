@@ -128,8 +128,15 @@ rendered_inventory="${test_root}/rendered-inventory.json"
 yaml_to_json <"${rendered_manifest}" \
   | jq -sc '[.[] | if .kind == "List" then .items[] else . end]' >"${rendered_inventory}"
 jq -e '
+  ([.[] | select(.kind == "ServiceAccount" and .metadata.namespace == "orka-system") |
+    .metadata.name] | unique) as $service_accounts |
+  ([.[] | select((.kind == "RoleBinding" or .kind == "ClusterRoleBinding")) |
+    .subjects[]? | select(.kind == "ServiceAccount" and .namespace == "orka-system") |
+    .name] | unique) as $bound_service_accounts |
   ([.[] | select(.kind == "Namespace" and .metadata.name == "orka-system" and
     .metadata.labels["orka.ai/controller-mode"] == "harness-v2")] | length) == 1 and
+  ($bound_service_accounts | length) > 0 and
+  ([$bound_service_accounts[] as $name | $service_accounts | index($name) != null] | all) and
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager" and
     .metadata.namespace == "orka-system") |
     .spec.template.spec.containers[] | select(.name == "manager") | .args] | length) == 1 and
@@ -141,6 +148,10 @@ jq -e '
     select(. == "--watch-namespace=orka-system")] | length) == 1 and
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
     .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
+    select(. == "--task-provenance-admission-enabled=true" or
+           . == "--workspace-class-use-admission-enabled=true")] | length) == 0 and
+  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
+    .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
     select(startswith("--harness-v1-"))] | length) == 0 and
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-admission" and
     .metadata.namespace == "orka-system" and .spec.replicas == 2 and
@@ -150,6 +161,45 @@ jq -e '
   ([.[] | select(.kind == "PodDisruptionBudget" and .metadata.name == "orka-admission" and .spec.minAvailable == 1)] | length) == 1 and
   ([.[] | select(.kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission")] | length) == 0
 ' "${rendered_inventory}" >/dev/null
+
+canonical_controller_username="$(jq -er '
+  [.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager" and
+    .metadata.namespace == "orka-system")] |
+  if length == 1 then
+    .[0] |
+    select(.spec.template.spec.serviceAccountName | type == "string" and length > 0) |
+    "system:serviceaccount:\(.metadata.namespace):\(.spec.template.spec.serviceAccountName)"
+  else
+    error("expected exactly one canonical production controller Deployment")
+  end
+' "${rendered_inventory}")"
+
+jq -e --arg username "${canonical_controller_username}" '
+  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-admission") |
+    .spec.template.spec.containers[] | select(.name == "admission") | .args[] |
+    select(startswith("--controller-usernames=")) |
+    ltrimstr("--controller-usernames=") | split(",")]) as $controller_users |
+  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-admission") |
+    .spec.template.spec.containers[] | select(.name == "admission") | .args[] |
+    select(startswith("--task-provenance-trusted-users=")) |
+    ltrimstr("--task-provenance-trusted-users=") | split(",")]) as $provenance_users |
+  ($controller_users | length) == 1 and
+  ($provenance_users | length) == 1 and
+  ($controller_users[0] | index($username) != null) and
+  ($provenance_users[0] | index($username) != null)
+' "${rendered_inventory}" >/dev/null
+
+shared_webhooks_inventory="${test_root}/shared-webhooks-inventory.json"
+"${kustomize}" build "${test_root}/config/orka-admission-webhooks" \
+  | yaml_to_json \
+  | jq -sc '[.[] | if .kind == "List" then .items[] else . end]' >"${shared_webhooks_inventory}"
+jq -e --arg username "${canonical_controller_username}" '
+  ([.[] | select(.kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission") |
+    .webhooks[].matchConditions[]? |
+    select(.name == "route-unless-controller-cleanup-safe") | .expression]) as $conditions |
+  ($conditions | length) == 3 and
+  ([$conditions[] | contains("\u0027" + $username + "\u0027")] | all)
+' "${shared_webhooks_inventory}" >/dev/null
 grep -F 'scripts/render-acp-runtime-images.sh' "${root}/Makefile" >/dev/null
 grep -F 'controller=${IMG}' "${root}/Makefile" >/dev/null
 grep -F 'docker-build-acp-copilot-runtime' "${root}/Makefile" >/dev/null

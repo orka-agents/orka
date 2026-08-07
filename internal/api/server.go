@@ -25,6 +25,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	"github.com/orka-agents/orka/internal/store"
@@ -38,6 +39,7 @@ type ServerConfig struct {
 	Port                      int
 	MetricsPort               int
 	WatchNamespace            string
+	ExecutionMode             executionmode.Mode
 	EnforceNamespaceIsolation bool
 	OIDC                      OIDCConfig
 	ContextTokens             ContextTokenConfig
@@ -90,6 +92,7 @@ type Server struct {
 
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
+	config.Chat.ExecutionMode = config.ExecutionMode
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
@@ -122,6 +125,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		Client:                    c,
 		APIReader:                 config.APIReader,
 		WatchNamespace:            config.WatchNamespace,
+		ExecutionMode:             config.ExecutionMode,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
 		ContextTokenAuthorization: config.ContextTokenAuthorization,
 		ResultStore:               config.ResultStore,

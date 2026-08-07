@@ -17,6 +17,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -60,6 +61,7 @@ type ToolContext struct {
 	Tenant                    string
 	Provider                  string
 	ProviderType              string
+	ExecutionMode             executionmode.Mode
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	// Brokered marks an authenticated controller-side MCP broker execution.
@@ -595,7 +597,7 @@ func RegisterBuiltinTools() {
 }
 
 // RegisterCoordinationTools registers coordination tools that require a K8s client
-func RegisterCoordinationTools(k8sClient client.Client) {
+func RegisterCoordinationTools(k8sClient client.Client, mode executionmode.Mode) {
 	DefaultRegistry.Register(NewDelegateTaskTool(k8sClient))
 	DefaultRegistry.Register(NewWaitForTasksTool(k8sClient))
 	DefaultRegistry.Register(NewCreateContainerTaskTool(k8sClient))
@@ -613,7 +615,7 @@ func RegisterCoordinationTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewListPullRequestsTool(k8sClient))
 	DefaultRegistry.Register(NewGetIssueTool(k8sClient))
 	DefaultRegistry.Register(NewCommentOnIssueTool(k8sClient))
-	DefaultRegistry.Register(NewCreateAgentTool(k8sClient))
+	DefaultRegistry.Register(NewCreateAgentTool(k8sClient, mode))
 	DefaultRegistry.Register(NewDeleteAgentTool(k8sClient))
 	DefaultRegistry.Register(NewUpdatePlanTool())
 	DefaultRegistry.Register(NewRecallMemoryTool())

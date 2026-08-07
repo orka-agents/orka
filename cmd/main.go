@@ -164,6 +164,10 @@ func workspaceCleanupAPIsInstalled(mapper meta.RESTMapper) (bool, error) {
 	return true, nil
 }
 
+func managerWebhookAdmissionEnabled(taskProvenanceEnabled, workspaceClassUseEnabled bool) bool {
+	return taskProvenanceEnabled || workspaceClassUseEnabled
+}
+
 // nolint:gocyclo
 func main() {
 	acpUpgradeDrainOptions := controller.DefaultACPUpgradeDrainOptions()
@@ -890,6 +894,10 @@ func main() {
 		setupLog.Error(err, "invalid workspace provider security configuration")
 		os.Exit(1)
 	}
+	managerAdmissionEnabled := managerWebhookAdmissionEnabled(
+		taskProvenanceAdmissionEnabled,
+		workspaceClassUseAdmissionEnabled,
+	)
 
 	// Initialize OpenTelemetry tracing (noop when disabled)
 	tracingShutdown, err := tracing.Init("orka-controller", enableTracing)
@@ -1040,15 +1048,17 @@ func main() {
 			"trustedServiceAccounts", strings.Join(admissionConfig.TrustedServiceAccountNames, ","),
 		)
 	}
-	orkaadmission.RegisterExecutionModeWebhooks(
-		mgr.GetWebhookServer(),
-		mgr.GetScheme(),
-		mgr.GetAPIReader(),
-		orkaadmission.ExecutionModeConfig{
-			ControllerUsernames: splitCommaList(executionModeControllerUsernames),
-		},
-	)
-	setupLog.Info("registered immutable namespace mode and execution-authority admission")
+	if managerAdmissionEnabled {
+		orkaadmission.RegisterExecutionModeWebhooks(
+			mgr.GetWebhookServer(),
+			mgr.GetScheme(),
+			mgr.GetAPIReader(),
+			orkaadmission.ExecutionModeConfig{
+				ControllerUsernames: splitCommaList(executionModeControllerUsernames),
+			},
+		)
+		setupLog.Info("registered immutable namespace mode and execution-authority admission")
+	}
 
 	// The clientset is reused for pod log and broker operations.
 	outboundAccessResolver := &outboundaccess.KubernetesResolver{
@@ -1261,6 +1271,7 @@ func main() {
 	webhookNotifier := controller.NewWebhookNotifier()
 	webhookNotifier.SetKubeClient(mgr.GetClient())
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
+	jobBuilder.ControllerMode = mode
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
 	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
@@ -1688,9 +1699,11 @@ func main() {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
-		setupLog.Error(err, "unable to set up webhook ready check")
-		os.Exit(1)
+	if managerAdmissionEnabled {
+		if err := mgr.AddReadyzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+			setupLog.Error(err, "unable to set up webhook ready check")
+			os.Exit(1)
+		}
 	}
 	// Register coordination tools the Anthropic/OpenAI proxy advertises but that
 	// RegisterChatToolsDefault does not provide. Without these the proxy lists the
@@ -1703,6 +1716,7 @@ func main() {
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:                      apiPort,
 		WatchNamespace:            watchNamespace,
+		ExecutionMode:             mode,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 		OIDC: api.OIDCConfig{
 			Issuer:          oidcIssuer,

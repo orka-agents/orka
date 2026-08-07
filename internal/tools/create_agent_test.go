@@ -17,25 +17,26 @@ import (
 	apitypes "k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
 func TestCreateAgentTool_Name(t *testing.T) {
-	tool := NewCreateAgentTool(newFakeClient())
+	tool := NewCreateAgentTool(newFakeClient(), executionmode.HarnessV2)
 	if got := tool.Name(); got != createAgentToolName {
 		t.Errorf("Name() = %v, want %v", got, createAgentToolName)
 	}
 }
 
 func TestCreateAgentTool_Description(t *testing.T) {
-	tool := NewCreateAgentTool(newFakeClient())
+	tool := NewCreateAgentTool(newFakeClient(), executionmode.HarnessV2)
 	if got := tool.Description(); got == "" {
 		t.Error("Description() returned empty string")
 	}
 }
 
 func TestCreateAgentTool_Parameters(t *testing.T) {
-	tool := NewCreateAgentTool(newFakeClient())
+	tool := NewCreateAgentTool(newFakeClient(), executionmode.HarnessV2)
 	params := tool.Parameters()
 	if params == nil {
 		t.Fatal("Parameters() returned nil")
@@ -152,7 +153,7 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 			}
 
 			k8sClient := newFakeClient(parentTask())
-			tool := NewCreateAgentTool(k8sClient)
+			tool := NewCreateAgentTool(k8sClient, executionmode.HarnessV2)
 
 			result, err := tool.Execute(context.Background(), tt.args)
 
@@ -192,7 +193,7 @@ func TestCreateAgentTool_Execute_OwnerReference(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	k8sClient := newFakeClient(parentTask())
-	tool := NewCreateAgentTool(k8sClient)
+	tool := NewCreateAgentTool(k8sClient, executionmode.HarnessV2)
 
 	args := json.RawMessage(`{"role": "coder", "systemPrompt": "You code things"}`)
 	result, err := tool.Execute(context.Background(), args)
@@ -240,7 +241,7 @@ func TestCreateAgentTool_Execute_AutoNaming(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	k8sClient := newFakeClient(parentTask())
-	tool := NewCreateAgentTool(k8sClient)
+	tool := NewCreateAgentTool(k8sClient, executionmode.HarnessV2)
 
 	args := json.RawMessage(`{"role": "reviewer", "systemPrompt": "You review code"}`)
 	result, err := tool.Execute(context.Background(), args)
@@ -274,7 +275,7 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	k8sClient := newFakeClient(parentTask())
-	tool := NewCreateAgentTool(k8sClient)
+	tool := NewCreateAgentTool(k8sClient, executionmode.HarnessV2)
 
 	args := json.RawMessage(`{
 		"role": "coder",
@@ -394,7 +395,7 @@ func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
 	t.Setenv("ORKA_AI_MODEL", testGPT4OModel)
 
 	k8sClient := newFakeClient(parentTask())
-	tool := NewCreateAgentTool(k8sClient)
+	tool := NewCreateAgentTool(k8sClient, executionmode.HarnessV2)
 
 	args := json.RawMessage(`{"role": "analyst", "systemPrompt": "You analyze data"}`)
 	result, err := tool.Execute(context.Background(), args)
@@ -470,7 +471,7 @@ func TestCreateAgentTool_Execute_BuiltInRuntimesAreCredentialFree(t *testing.T) 
 			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 			k8sClient := newFakeClient(parentTask())
-			tool := NewCreateAgentTool(k8sClient)
+			tool := NewCreateAgentTool(k8sClient, executionmode.HarnessV2)
 			args := json.RawMessage(`{"role":"coder","systemPrompt":"You write code","runtime":` + tt.runtimeArgs + `}`)
 
 			result, err := tool.Execute(context.Background(), args)
@@ -494,6 +495,9 @@ func TestCreateAgentTool_Execute_BuiltInRuntimesAreCredentialFree(t *testing.T) 
 			if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != tt.runtimeType {
 				t.Fatalf("runtime = %#v, want type %q", agent.Spec.Runtime, tt.runtimeType)
 			}
+			if got := agent.BuiltInContractVersion(); got != corev1alpha1.AgentRuntimeContractHarnessV2 {
+				t.Fatalf("contractVersion = %q, want %q", got, corev1alpha1.AgentRuntimeContractHarnessV2)
+			}
 			if agent.Spec.ProviderRef != nil {
 				t.Fatalf("providerRef = %#v, want nil for runtime agent", agent.Spec.ProviderRef)
 			}
@@ -501,6 +505,34 @@ func TestCreateAgentTool_Execute_BuiltInRuntimesAreCredentialFree(t *testing.T) 
 				t.Fatalf("secretRef = %#v, want nil for built-in ACP runtime", agent.Spec.SecretRef)
 			}
 		})
+	}
+}
+
+func TestCreateAgentTool_Execute_DefaultsHarnessV1Contract(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+	k8sClient := newFakeClient(parentTask())
+	result, err := NewCreateAgentTool(k8sClient, executionmode.HarnessV1).Execute(
+		context.Background(),
+		json.RawMessage(`{"role":"coder","systemPrompt":"You write code","runtime":{"type":"codex"}}`),
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var createdResult CreateAgentResult
+	if err := json.Unmarshal([]byte(result), &createdResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	created := &corev1alpha1.Agent{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: createdResult.AgentName, Namespace: createdResult.Namespace,
+	}, created); err != nil {
+		t.Fatalf("failed to get Agent: %v", err)
+	}
+	if got := created.BuiltInContractVersion(); got != corev1alpha1.AgentRuntimeContractHarnessV1 {
+		t.Fatalf("contractVersion = %q, want %q", got, corev1alpha1.AgentRuntimeContractHarnessV1)
 	}
 }
 
@@ -518,7 +550,7 @@ func TestCreateAgentTool_Execute_RejectsModelLimitsForNonOpenCodeBuiltIns(t *tes
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(envOrkaTaskName, parentTaskName)
 			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-			_, err := NewCreateAgentTool(newFakeClient(parentTask())).Execute(context.Background(), json.RawMessage(
+			_, err := NewCreateAgentTool(newFakeClient(parentTask()), executionmode.HarnessV2).Execute(context.Background(), json.RawMessage(
 				`{"role":"coder","systemPrompt":"You write code","model":`+tt.modelJSON+`,"runtime":{"type":"`+tt.runtime+`"}}`,
 			))
 			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
@@ -547,7 +579,7 @@ func TestCreateAgentTool_Execute_UsesBuiltInOpenCode(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	k8sClient := newFakeClient(parentTask())
-	tool := NewCreateAgentTool(k8sClient)
+	tool := NewCreateAgentTool(k8sClient, executionmode.HarnessV2)
 
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{
 		"role":"coder",
@@ -590,7 +622,7 @@ func TestCreateAgentTool_Execute_PreservesExplicitEmptyOpenCodeTools(t *testing.
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	k8sClient := newFakeClient(parentTask())
-	result, err := NewCreateAgentTool(k8sClient).Execute(context.Background(), json.RawMessage(`{
+	result, err := NewCreateAgentTool(k8sClient, executionmode.HarnessV2).Execute(context.Background(), json.RawMessage(`{
 		"role":"coder","model":{"name":"openai/gpt-5.4","contextWindow":32768,"maxTokens":4096},
 		"runtime":{"type":"opencode","defaultAllowedTools":[],"defaultAllowBash":false}
 	}`))
@@ -613,7 +645,7 @@ func TestCreateAgentTool_Execute_PreservesExplicitEmptyOpenCodeTools(t *testing.
 func TestCreateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-	_, err := NewCreateAgentTool(newFakeClient(parentTask())).Execute(context.Background(), json.RawMessage(`{
+	_, err := NewCreateAgentTool(newFakeClient(parentTask()), executionmode.HarnessV2).Execute(context.Background(), json.RawMessage(`{
 		"role":"coder",
 		"systemPrompt":"You write code",
 		"model":{"name":"openai/gpt-5.4","contextWindow":32768,"maxTokens":4096},
@@ -638,7 +670,7 @@ func TestCreateAgentTool_Execute_RejectsInvalidOpenCodeConfiguration(t *testing.
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(envOrkaTaskName, parentTaskName)
 			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-			_, err := NewCreateAgentTool(newFakeClient(parentTask())).Execute(context.Background(), json.RawMessage(args))
+			_, err := NewCreateAgentTool(newFakeClient(parentTask()), executionmode.HarnessV2).Execute(context.Background(), json.RawMessage(args))
 			if err == nil {
 				t.Fatal("Execute() accepted invalid OpenCode configuration")
 			}
@@ -656,7 +688,7 @@ func TestCreateAgentTool_Execute_RejectsUnsupportedRuntime(t *testing.T) {
 			t.Setenv(envOrkaTaskName, parentTaskName)
 			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 			k8sClient := newFakeClient(parentTask())
-			tool := NewCreateAgentTool(k8sClient)
+			tool := NewCreateAgentTool(k8sClient, executionmode.HarnessV2)
 			args := json.RawMessage(`{"role":"coder","systemPrompt":"You write code","runtime":` + runtimeArgs + `}`)
 			_, err := tool.Execute(context.Background(), args)
 			if err == nil || (!strings.Contains(err.Error(), "unsupported runtime type") && !strings.Contains(err.Error(), "runtime.type is required")) {
@@ -683,7 +715,7 @@ func TestCreateAgentTool_Execute_DefaultNamespace(t *testing.T) {
 	}
 
 	k8sClient := newFakeClient(parent)
-	tool := NewCreateAgentTool(k8sClient)
+	tool := NewCreateAgentTool(k8sClient, executionmode.HarnessV2)
 
 	args := json.RawMessage(`{"role": "coder", "systemPrompt": "Code stuff"}`)
 	result, err := tool.Execute(context.Background(), args)

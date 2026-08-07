@@ -36,6 +36,7 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
@@ -3490,6 +3491,76 @@ func TestHandlers_CreateAgent_Success(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+func TestHandlers_CreateAgent_DefaultsBuiltInContractFromExecutionMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       executionmode.Mode
+		explicit   corev1alpha1.AgentRuntimeContractVersion
+		want       corev1alpha1.AgentRuntimeContractVersion
+		wantStatus int
+	}{
+		{
+			name:       "harness v1",
+			mode:       executionmode.HarnessV1,
+			want:       corev1alpha1.AgentRuntimeContractHarnessV1,
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name:       "harness v2",
+			mode:       executionmode.HarnessV2,
+			want:       corev1alpha1.AgentRuntimeContractHarnessV2,
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name:       "opposite explicit contract",
+			mode:       executionmode.HarnessV1,
+			explicit:   corev1alpha1.AgentRuntimeContractHarnessV2,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			handlers := NewHandlers(HandlersConfig{Client: fakeClient, ExecutionMode: test.mode})
+			app := fiber.New()
+			app.Post("/agents", handlers.CreateAgent)
+
+			var explicit *corev1alpha1.AgentRuntimeContractVersion
+			if test.explicit != "" {
+				value := test.explicit
+				explicit = &value
+			}
+			bodyBytes, err := json.Marshal(CreateAgentRequest{
+				Name:      "runtime-agent",
+				Namespace: "default",
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					Type:            corev1alpha1.AgentRuntimeCodex,
+					ContractVersion: explicit,
+				}},
+			})
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodPost, "/agents", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, test.wantStatus, resp.StatusCode)
+
+			created := &corev1alpha1.Agent{}
+			err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "runtime-agent", Namespace: "default"}, created)
+			if test.wantStatus != http.StatusCreated {
+				require.True(t, apierrors.IsNotFound(err), "rejected Agent should not be created")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, test.want, created.BuiltInContractVersion())
+		})
+	}
 }
 
 func TestHandlers_CreateAgent_MetadataStyle(t *testing.T) {

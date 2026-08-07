@@ -110,6 +110,25 @@ function agentRuntime(name: string) {
   }
 }
 
+function agentRuntimeV1(name: string) {
+  return {
+    metadata: { name, namespace: 'default', uid: `${name}-uid` },
+    spec: {
+      contractVersion: 'orka.harness.v1',
+      deployment: { mode: 'external-endpoint', endpoint: 'https://legacy-runtime.example.test' },
+      clientAuth: { bearerTokenSecretRef: { name: 'legacy-auth', key: 'token' } },
+    },
+    status: {
+      ready: true,
+      observedCapabilities: {
+        protocolVersion: 'orka.harness.v1',
+        runtimeName: 'agentkit',
+        runtimeVersion: '1.4.2',
+      },
+    },
+  }
+}
+
 beforeEach(() => {
   useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
 })
@@ -182,7 +201,7 @@ describe('useAgentRuntimes', () => {
         })
         if (!token) {
           return HttpResponse.json({
-            items: [agentRuntime('runtime-first')],
+            items: [agentRuntimeV1('runtime-first')],
             metadata: { continue: 'runtime-next' },
           })
         }
@@ -196,6 +215,10 @@ describe('useAgentRuntimes', () => {
     expect(result.current.data?.items.map((item) => item.metadata.name)).toEqual([
       'runtime-first',
       'runtime-second',
+    ])
+    expect(result.current.data?.items.map((item) => item.spec.contractVersion)).toEqual([
+      'orka.harness.v1',
+      'orka.harness.v2',
     ])
     expect(seen).toEqual([
       { namespace: 'default', limit: '100', token: null },
