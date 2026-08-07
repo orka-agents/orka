@@ -330,7 +330,7 @@ build-all: build build-cli ## Build all binaries.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go --leader-elect=true --agent-execution-host-mode=true \
+	go run ./cmd --leader-elect=true --agent-execution-host-mode=true \
 		--agent-execution-legacy-fence-namespace="$(RUN_LEGACY_FENCE_NAMESPACE)"
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
