@@ -106,6 +106,41 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.MaxTurns != 50 {
 		t.Errorf("expected MaxTurns 50, got %d", cfg.MaxTurns)
 	}
+	if !cfg.AllowedToolsSet || len(cfg.AllowedTools) != 0 {
+		t.Errorf("AllowedTools = %#v (set=%t), want explicit empty allowlist", cfg.AllowedTools, cfg.AllowedToolsSet)
+	}
+}
+
+func TestLoadConfig_DistinguishesOmittedAndEmptyAllowedTools(t *testing.T) {
+	t.Setenv(workerenv.Prompt, "hello")
+	t.Setenv(workerenv.MaxTurns, "")
+	t.Setenv(workerenv.AllowedTools, "temporary")
+	t.Setenv(workerenv.DisallowedTools, "")
+	t.Setenv(workerenv.TimeoutSeconds, "")
+	if err := os.Unsetenv(workerenv.AllowedTools); err != nil {
+		t.Fatal(err)
+	}
+
+	omitted, err := LoadConfig(50)
+	if err != nil {
+		t.Fatalf("LoadConfig with omitted allowed tools: %v", err)
+	}
+	if omitted.AllowedToolsSet || omitted.AllowedTools != nil {
+		t.Fatalf("omitted AllowedTools = %#v (set=%t), want nil and unset", omitted.AllowedTools, omitted.AllowedToolsSet)
+	}
+
+	t.Setenv(workerenv.AllowedTools, "")
+	empty, err := LoadConfig(50)
+	if err != nil {
+		t.Fatalf("LoadConfig with empty allowed tools: %v", err)
+	}
+	if !empty.AllowedToolsSet || len(empty.AllowedTools) != 0 {
+		t.Fatalf(
+			"empty AllowedTools = %#v (set=%t), want explicit empty allowlist",
+			empty.AllowedTools,
+			empty.AllowedToolsSet,
+		)
+	}
 }
 
 func TestLoadConfig_AllFields(t *testing.T) {

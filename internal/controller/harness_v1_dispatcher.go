@@ -32,8 +32,11 @@ import (
 
 const (
 	DefaultHarnessV1DispatchInterval = time.Second
-	DefaultHarnessV1DispatchWorkers  = 4
-	defaultHarnessV1TurnTimeout      = 30 * time.Minute
+	// The shipped harness v1 wrapper advertises and enforces one concurrent
+	// turn. Keep the default dispatcher capacity aligned so wrapper capacity is
+	// controller backpressure rather than a terminal Task rejection.
+	DefaultHarnessV1DispatchWorkers = 1
+	defaultHarnessV1TurnTimeout     = 30 * time.Minute
 
 	harnessV1ReasonRejected           = "PromptNotAccepted"
 	harnessV1ReasonFailed             = "PromptFailed"
@@ -472,6 +475,7 @@ func buildHarnessV1StartTurnRequest(
 			harness.MetadataAttempt:             strconv.FormatInt(int64(attempt.Attempt), 10),
 			harness.MetadataBindingDigest:       attempt.BindingDigest,
 			harness.MetadataSnapshotDigest:      attempt.SnapshotDigest,
+			"runtime":                           verified.body.HarnessV1.RuntimeName,
 			"orka.runtimeName":                  verified.body.HarnessV1.RuntimeName,
 			harness.MetadataRuntimePolicyFrozen: booleanTrueValue,
 			"model":                             verified.body.Configuration.Model,
@@ -491,6 +495,10 @@ func buildHarnessV1StartTurnRequest(
 	request.Metadata["allowedTools"] = strings.Join(allowedTools, ",")
 	request.Metadata["disallowedTools"] = strings.Join(disallowedTools, ",")
 	request.Metadata["allowBash"] = strconv.FormatBool(*allowBash)
+	if strings.EqualFold(strings.TrimSpace(verified.body.HarnessV1.RuntimeName), string(corev1alpha1.AgentRuntimeCodex)) &&
+		len(allowedTools) == 0 && !*allowBash {
+		request.Metadata["readOnly"] = booleanTrueValue
+	}
 	if attempt.RequestDigest != "" {
 		request.Metadata[harness.MetadataRequestDigest] = attempt.RequestDigest
 	}

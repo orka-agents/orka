@@ -185,6 +185,10 @@ func main() {
 		setupLog.Error(err, "unable to create admission manager")
 		os.Exit(1)
 	}
+	// GetWebhookServer lazily adds the configured server to the manager's
+	// runnable set. Registering directly on the pre-manager value leaves the
+	// server configured but never started.
+	webhookServer = mgr.GetWebhookServer()
 
 	adjudicationUsername := strings.TrimSpace(opts.adjudicationControllerUsername)
 	if adjudicationUsername == "" {

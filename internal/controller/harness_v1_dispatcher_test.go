@@ -49,7 +49,7 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 				AllowedTools: []string{}, DisallowedTools: []string{"Bash"}, AllowBash: new(false),
 			},
 			HarnessV1: &agentExecutionSnapshotHarnessV1{
-				SessionName: "session-a", RuntimeName: "runtime-a", RuntimeAuthOnly: true,
+				SessionName: "session-a", RuntimeName: string(corev1alpha1.AgentRuntimeCodex), RuntimeAuthOnly: true,
 			},
 		},
 	}
@@ -74,6 +74,8 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 	for key, want := range map[string]string{
 		harness.MetadataRuntimePolicyFrozen: "true",
 		harness.MetadataAllowedToolsSet:     "true",
+		"runtime":                           string(corev1alpha1.AgentRuntimeCodex),
+		"orka.runtimeName":                  string(corev1alpha1.AgentRuntimeCodex),
 		"model":                             "frozen-model",
 		"systemPrompt":                      "frozen system prompt",
 		"maxTurns":                          "7",
@@ -81,6 +83,7 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 		"allowedTools":                      "",
 		"disallowedTools":                   "Bash",
 		"allowBash":                         "false",
+		"readOnly":                          "true",
 	} {
 		if got := request.Metadata[key]; got != want {
 			t.Fatalf("metadata[%q] = %q, want %q", key, got, want)
@@ -123,6 +126,12 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 	if _, err := buildHarnessV1StartTurnRequest(task, &mutated, attempt, env); err == nil ||
 		!strings.Contains(err.Error(), "does not match the durable attempt") {
 		t.Fatalf("mutated request error = %v, want durable digest mismatch", err)
+	}
+}
+
+func TestDefaultHarnessV1DispatchWorkersMatchesShippedWrapperCapacity(t *testing.T) {
+	if DefaultHarnessV1DispatchWorkers != 1 {
+		t.Fatalf("default harness v1 dispatch workers = %d, want 1", DefaultHarnessV1DispatchWorkers)
 	}
 }
 
