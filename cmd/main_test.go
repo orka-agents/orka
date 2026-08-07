@@ -86,6 +86,24 @@ func TestInClusterControllerIdentityDetectedFromKubernetesEnvironment(t *testing
 	}
 }
 
+func TestControllerHolderIDIsProcessIncarnationUnique(t *testing.T) {
+	first := controllerHolderIDForIncarnation("workstation", "first-process")
+	second := controllerHolderIDForIncarnation("workstation", "second-process")
+	if first == second {
+		t.Fatalf("holder IDs for distinct process incarnations match: %q", first)
+	}
+	if first == "workstation" || second == "workstation" {
+		t.Fatal("holder ID omitted its process incarnation")
+	}
+}
+
+func TestCurrentControllerHolderIDPreservesExplicitOverride(t *testing.T) {
+	t.Setenv("ORKA_CONTROLLER_HOLDER_ID", " explicit-controller ")
+	if got := currentControllerHolderID(); got != "explicit-controller" {
+		t.Fatalf("currentControllerHolderID() = %q, want explicit-controller", got)
+	}
+}
+
 func TestBrokeredDelegateTaskSubjectTokenResolverRejectsUnownedIncomingSecret(t *testing.T) {
 	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 		Name: "parent", Namespace: "team-a", UID: types.UID("parent-uid"),

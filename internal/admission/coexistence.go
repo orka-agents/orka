@@ -138,8 +138,8 @@ func (v *AgentContractValidator) Handle(_ context.Context, req ctrladmission.Req
 		if err := v.decoder.DecodeRaw(req.OldObject, oldObject); err != nil {
 			return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old agent: %w", err))
 		}
-		if agentUsesBuiltInRuntime(oldObject) && object.Spec.Runtime != nil && object.Spec.Runtime.RuntimeRef != nil {
-			return ctrladmission.Denied("a built-in Agent cannot switch to an external runtimeRef")
+		if agentUsesBuiltInRuntime(oldObject) && !agentUsesBuiltInRuntime(object) {
+			return ctrladmission.Denied("a built-in Agent cannot switch to an external runtimeRef or remove its runtime configuration")
 		}
 	}
 	if !agentUsesBuiltInRuntime(object) {

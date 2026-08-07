@@ -2,7 +2,17 @@
 {{- $wrapperName := include "orka.harnessV1Name" . }}
 {{- $desiredGeneration := include "orka.harnessV1PodTemplateGeneration" . }}
 {{- $existingWrapper := lookup "apps/v1" "Deployment" .Release.Namespace $wrapperName }}
+{{- $controllerName := include "orka.controllerName" . }}
+{{- $existingController := lookup "apps/v1" "Deployment" .Release.Namespace $controllerName }}
+{{- $existingControllerState := "" }}
+{{- if $existingController }}
+{{- $existingControllerState = include "orka.harnessV1ExistingControllerState" $existingController | trim }}
+{{- end }}
+{{- if and .Release.IsUpgrade (not $existingWrapper) (empty $existingControllerState) }}
+{{- fail "cannot determine the previously deployed harness v1 state during upgrade; restore the release controller or wrapper Deployment before upgrading" }}
+{{- end }}
 {{- $needsRollover := false }}
+{{- $existingRouteEnabled := false }}
 {{- $existingImage := "" }}
 {{- $existingPullPolicy := "" }}
 {{- $existingAuthSecret := "" }}
@@ -10,31 +20,36 @@
 {{- $desiredAuthSecret := .Values.harnessV1.auth.existingSecret | default (include "orka.harnessV1AuthSecretName" .) }}
 {{- $desiredAuthKey := .Values.harnessV1.auth.tokenKey }}
 {{- if $existingWrapper }}
+{{- $existingRouteEnabled = true }}
 {{- $existingGeneration := include "orka.harnessV1ExistingGeneration" $existingWrapper | trim }}
 {{- $needsRollover = or (not .Values.harnessV1.enabled) (ne $existingGeneration $desiredGeneration) }}
 {{- $existingImage = include "orka.harnessV1ExistingImage" $existingWrapper }}
 {{- $existingPullPolicy = include "orka.harnessV1ExistingImagePullPolicy" $existingWrapper }}
 {{- $existingAuthSecret = include "orka.harnessV1ExistingAuthSecretName" $existingWrapper }}
 {{- $existingAuthKey = include "orka.harnessV1ExistingAuthSecretKey" $existingWrapper }}
-{{- if .Values.harnessV1.enabled }}
+{{- else if eq $existingControllerState "enabled" }}
+{{- $existingRouteEnabled = true }}
+{{- $existingAuthSecret = include "orka.harnessV1ExistingControllerAuthSecretName" $existingController }}
+{{- $existingAuthKey = include "orka.harnessV1ExistingControllerAuthSecretKey" $existingController }}
+{{- end }}
+{{- if and $existingRouteEnabled .Values.harnessV1.enabled }}
 {{- if ne $existingAuthSecret $desiredAuthSecret }}
-{{- fail "harnessV1.auth.existingSecret cannot change while an enabled harness v1 wrapper Deployment exists; retire harness v1 before rotating wrapper auth" }}
+{{- fail "harnessV1.auth.existingSecret cannot change while the previously deployed harness v1 route remains enabled; retire harness v1 before rotating wrapper auth" }}
 {{- end }}
 {{- if ne $existingAuthKey $desiredAuthKey }}
-{{- fail "harnessV1.auth.tokenKey cannot change while an enabled harness v1 wrapper Deployment exists; retire harness v1 before rotating wrapper auth" }}
+{{- fail "harnessV1.auth.tokenKey cannot change while the previously deployed harness v1 route remains enabled; retire harness v1 before rotating wrapper auth" }}
 {{- end }}
 {{- if not .Values.harnessV1.auth.existingSecret }}
 {{- $existingManagedAuth := lookup "v1" "Secret" .Release.Namespace $desiredAuthSecret }}
 {{- if not $existingManagedAuth }}
-{{- fail "the live chart-managed harness v1 auth Secret must exist while an enabled harness v1 wrapper Deployment exists" }}
+{{- fail "the live chart-managed harness v1 auth Secret must exist while the previously deployed harness v1 route remains enabled" }}
 {{- end }}
 {{- $existingManagedAuthData := $existingManagedAuth.data | default (dict) }}
 {{- if or (not (hasKey $existingManagedAuthData $desiredAuthKey)) (empty (index $existingManagedAuthData $desiredAuthKey)) }}
-{{- fail "the live chart-managed harness v1 auth Secret must contain the configured nonempty token key" }}
+{{- fail "the live chart-managed harness v1 auth Secret must contain the configured nonempty token key while the previously deployed harness v1 route remains enabled" }}
 {{- end }}
 {{- if and .Values.harnessV1.auth.token (ne (index $existingManagedAuthData $desiredAuthKey) (.Values.harnessV1.auth.token | b64enc)) }}
-{{- fail "harnessV1.auth.token cannot change while an enabled harness v1 wrapper Deployment exists; retire harness v1 before rotating wrapper auth" }}
-{{- end }}
+{{- fail "harnessV1.auth.token cannot change while the previously deployed harness v1 route remains enabled; retire harness v1 before rotating wrapper auth" }}
 {{- end }}
 {{- end }}
 {{- end }}

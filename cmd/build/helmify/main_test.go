@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -122,6 +123,8 @@ func requireHarnessV1UpgradeDrainHookRender(t *testing.T, matchesDesiredGenerati
 
 type harnessV1UpgradeState struct {
 	matchesDesiredGeneration bool
+	wrapperMissing           bool
+	controllerState          string
 	authSecret               string
 	authKey                  string
 	managedToken             string
@@ -153,21 +156,56 @@ func helmTemplateHarnessV1UpgradeDrainHook(
 		existingGeneration = `$desiredGeneration`
 	}
 	currentImage := "registry.example/current-wrapper@sha256:" + strings.Repeat("2", 64)
-	forcedLookup := strings.Join([]string{
-		`{{- $existingWrapper := dict`,
-		`"metadata" (dict "name" $wrapperName)`,
-		`"spec" (dict "template" (dict "spec" (dict`,
-		`"containers" (list (dict "name" "wrapper"`,
-		`"image" "` + currentImage + `" "imagePullPolicy" "Always"`,
-		`"env" (list (dict "name" "ORKA_HARNESS_WRAPPER_LEDGER_GENERATION"`,
-		`"value" ` + existingGeneration + `))))`,
-		`"volumes" (list (dict "name" "auth" "secret"`,
-		`(dict "secretName" "` + state.authSecret + `" "items"`,
-		`(list (dict "key" "` + state.authKey + `" "path" "token")))))))) }}`,
-	}, " ")
+	forcedLookup := `{{- $existingWrapper := dict }}`
+	if !state.wrapperMissing {
+		forcedLookup = strings.Join([]string{
+			`{{- $existingWrapper := dict`,
+			`"metadata" (dict "name" $wrapperName)`,
+			`"spec" (dict "template" (dict "spec" (dict`,
+			`"containers" (list (dict "name" "wrapper"`,
+			`"image" "` + currentImage + `" "imagePullPolicy" "Always"`,
+			`"env" (list (dict "name" "ORKA_HARNESS_WRAPPER_LEDGER_GENERATION"`,
+			`"value" ` + existingGeneration + `))))`,
+			`"volumes" (list (dict "name" "auth" "secret"`,
+			`(dict "secretName" "` + state.authSecret + `" "items"`,
+			`(list (dict "key" "` + state.authKey + `" "path" "token")))))))) }}`,
+		}, " ")
+	}
 	forced := strings.Replace(string(hook), lookup, forcedLookup, 1)
 	if forced == string(hook) {
 		t.Fatalf("wrapper drain hook is not gated by the exact existing Deployment lookup")
+	}
+	if state.controllerState != "" {
+		var controllerArgs []string
+		switch state.controllerState {
+		case "enabled", "disabled":
+			enabled := state.controllerState == "enabled"
+			controllerArgs = []string{fmt.Sprintf(`"--harness-v1-enabled=%t"`, enabled)}
+			if enabled {
+				controllerArgs = append(controllerArgs,
+					`"--harness-v1-auth-secret-name=`+state.authSecret+`"`,
+					`"--harness-v1-auth-secret-key=`+state.authKey+`"`,
+				)
+			}
+		case "legacy-v2-disabled":
+			controllerArgs = []string{`"--acp-runtime-enabled=true"`}
+		case "damaged-dual":
+			controllerArgs = []string{
+				`"--acp-runtime-enabled=true"`,
+				`"--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key"`,
+			}
+		default:
+			t.Fatalf("unsupported forced controller state %q", state.controllerState)
+		}
+		controllerLookup := `{{- $existingController := lookup "apps/v1" "Deployment" .Release.Namespace $controllerName }}`
+		forcedControllerLookup := `{{- $existingController := dict "spec" (dict "template" (dict "spec" ` +
+			`(dict "containers" (list (dict "name" "controller" "args" (list ` +
+			strings.Join(controllerArgs, " ") + `)))))) }}`
+		withController := strings.Replace(forced, controllerLookup, forcedControllerLookup, 1)
+		if withController == forced {
+			t.Fatalf("wrapper drain hook is not gated by the exact existing controller Deployment lookup")
+		}
+		forced = withController
 	}
 	if state.managedToken != "" {
 		managedAuthLookup := `{{- $existingManagedAuth := lookup "v1" "Secret" .Release.Namespace $desiredAuthSecret }}`
@@ -644,11 +682,10 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
 
-	// Client-only Helm rendering has no live Deployment for lookup, so an
-	// upgrade render must not emit a drain hook on a fresh installation. The
-	// enabled revision must still persist its post-rollback abort hook because
+	// A fresh installation has no live Deployment and must not emit a drain
+	// hook. The enabled revision must still persist its post-rollback abort hook because
 	// Helm executes hooks recorded in the historical rollback target.
-	fresh := requireHelmRender(t, append(append([]string{}, args...), "--is-upgrade")...)
+	fresh := requireHelmRender(t, args...)
 	if strings.Contains(fresh, "app.kubernetes.io/component: agent-harness-wrapper-drain") ||
 		strings.Contains(fresh, "helm.sh/hook: pre-upgrade") {
 		t.Fatalf("fresh harness v1 render unexpectedly contains an upgrade drain hook:\n%s", fresh)
@@ -667,6 +704,36 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 	}
 	if got := strings.Count(fresh, "helm.sh/hook: post-rollback"); got != 3 {
 		t.Fatalf("fresh enabled rollback hook annotation count = %d, want 3:\n%s", got, fresh)
+	}
+
+	unknown, err := helmTemplateStaticChart(t, append(append([]string{}, args...), "--is-upgrade")...)
+	if err == nil {
+		t.Fatalf("upgrade without live controller or wrapper state rendered successfully:\n%s", unknown)
+	}
+	if !strings.Contains(unknown, "cannot determine the previously deployed harness v1 state during upgrade") {
+		t.Fatalf("unknown-state upgrade did not fail closed:\n%s", unknown)
+	}
+
+	legacyV2, err := helmTemplateHarnessV1UpgradeDrainHook(t, harnessV1UpgradeState{
+		wrapperMissing:  true,
+		controllerState: "legacy-v2-disabled",
+	}, args...)
+	if err != nil {
+		t.Fatalf("active legacy v2 route could not upgrade to dual mode: %v\n%s", err, legacyV2)
+	}
+	if strings.Contains(legacyV2, "agent-harness-wrapper-rollover-drain") {
+		t.Fatalf("legacy v2-only route unexpectedly triggered a v1 rollover drain:\n%s", legacyV2)
+	}
+
+	damagedDual, err := helmTemplateHarnessV1UpgradeDrainHook(t, harnessV1UpgradeState{
+		wrapperMissing:  true,
+		controllerState: "damaged-dual",
+	}, args...)
+	if err == nil {
+		t.Fatalf("dual-era controller missing its v1 state rendered successfully:\n%s", damagedDual)
+	}
+	if !strings.Contains(damagedDual, "cannot determine the previously deployed harness v1 state during upgrade") {
+		t.Fatalf("damaged dual state did not fail closed:\n%s", damagedDual)
 	}
 
 	// Render the unchanged hook body from a copied chart with only lookup's
@@ -788,7 +855,8 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 			args: []string{
 				"--set-string", "harnessV1.auth.existingSecret=next-wrapper-auth",
 			},
-			wantError: "harnessV1.auth.existingSecret cannot change while an enabled harness v1 wrapper Deployment exists",
+			wantError: "harnessV1.auth.existingSecret cannot change while the previously deployed " +
+				"harness v1 route remains enabled",
 		},
 		{
 			name: "Secret key",
@@ -800,7 +868,7 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
 				"--set-string", "harnessV1.auth.tokenKey=next-token",
 			},
-			wantError: "harnessV1.auth.tokenKey cannot change while an enabled harness v1 wrapper Deployment exists",
+			wantError: "harnessV1.auth.tokenKey cannot change while the previously deployed harness v1 route remains enabled",
 		},
 		{
 			name: "managed token",
@@ -812,7 +880,7 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 			args: []string{
 				"--set-string", "harnessV1.auth.token=" + newToken,
 			},
-			wantError: "harnessV1.auth.token cannot change while an enabled harness v1 wrapper Deployment exists",
+			wantError: "harnessV1.auth.token cannot change while the previously deployed harness v1 route remains enabled",
 		},
 		{
 			name: "missing managed Secret",
@@ -824,7 +892,49 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 				"--set-string", "harnessV1.auth.token=" + oldToken,
 			},
 			wantError: "the live chart-managed harness v1 auth Secret must exist while " +
-				"an enabled harness v1 wrapper Deployment exists",
+				"the previously deployed harness v1 route remains enabled",
+		},
+		{
+			name: "missing wrapper Secret source",
+			state: harnessV1UpgradeState{
+				wrapperMissing:  true,
+				controllerState: "enabled",
+				authSecret:      "current-wrapper-auth",
+				authKey:         "token",
+			},
+			args: []string{
+				"--set-string", "harnessV1.auth.existingSecret=next-wrapper-auth",
+			},
+			wantError: "harnessV1.auth.existingSecret cannot change while the previously deployed " +
+				"harness v1 route remains enabled",
+		},
+		{
+			name: "missing wrapper Secret key",
+			state: harnessV1UpgradeState{
+				wrapperMissing:  true,
+				controllerState: "enabled",
+				authSecret:      "harness-wrapper-auth",
+				authKey:         "current-token",
+			},
+			args: []string{
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.auth.tokenKey=next-token",
+			},
+			wantError: "harnessV1.auth.tokenKey cannot change while the previously deployed harness v1 route remains enabled",
+		},
+		{
+			name: "missing wrapper managed token",
+			state: harnessV1UpgradeState{
+				wrapperMissing:  true,
+				controllerState: "enabled",
+				authSecret:      managedSecretName,
+				authKey:         "token",
+				managedToken:    oldToken,
+			},
+			args: []string{
+				"--set-string", "harnessV1.auth.token=" + newToken,
+			},
+			wantError: "harnessV1.auth.token cannot change while the previously deployed harness v1 route remains enabled",
 		},
 	}
 
@@ -853,6 +963,16 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 	}
 	if !strings.Contains(unchanged, "app.kubernetes.io/component: agent-harness-wrapper-rollover-drain") {
 		t.Fatalf("unchanged managed auth lost image-only wrapper rollover drain:\n%s", unchanged)
+	}
+
+	firstEnableArgs := append(append([]string{}, baseArgs...),
+		"--set-string", "harnessV1.auth.existingSecret=first-enable-auth")
+	firstEnable, err := helmTemplateHarnessV1UpgradeDrainHook(t, harnessV1UpgradeState{
+		wrapperMissing:  true,
+		controllerState: "disabled",
+	}, firstEnableArgs...)
+	if err != nil {
+		t.Fatalf("recorded disabled route blocked first enablement: %v\n%s", err, firstEnable)
 	}
 }
 

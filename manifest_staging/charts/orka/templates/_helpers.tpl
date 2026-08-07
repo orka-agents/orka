@@ -287,6 +287,78 @@ spec:
 {{- required "existing harness v1 wrapper Deployment is missing the auth Secret token key" $secretKey -}}
 {{- end }}
 
+{{/* Read the live controller inputs used when the wrapper Deployment is absent. */}}
+{{- define "orka.harnessV1ExistingControllerState" -}}
+{{- $state := "" -}}
+{{- $harnessMarker := false -}}
+{{- $harnessEnabled := false -}}
+{{- $harnessDisabled := false -}}
+{{- $acpEnabled := false -}}
+{{- $acpDisabled := false -}}
+{{- $dualMarker := false -}}
+{{- range (dig "spec" "template" "spec" "containers" (list) .) -}}
+{{- if eq (default "" .name) "controller" -}}
+{{- range (default (list) .args) -}}
+{{- $arg := toString . -}}
+{{- if hasPrefix "--harness-v1-enabled=" $arg -}}
+{{- $harnessMarker = true -}}
+{{- end -}}
+{{- if eq $arg "--harness-v1-enabled=true" -}}
+{{- $harnessEnabled = true -}}
+{{- else if eq $arg "--harness-v1-enabled=false" -}}
+{{- $harnessDisabled = true -}}
+{{- else if eq $arg "--acp-runtime-enabled=true" -}}
+{{- $acpEnabled = true -}}
+{{- else if eq $arg "--acp-runtime-enabled=false" -}}
+{{- $acpDisabled = true -}}
+{{- else if hasPrefix "--agent-execution-" $arg -}}
+{{- $dualMarker = true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and $harnessEnabled (not $harnessDisabled) -}}
+{{- $state = "enabled" -}}
+{{- else if and $harnessDisabled (not $harnessEnabled) -}}
+{{- $state = "disabled" -}}
+{{- else if and (not $harnessMarker) (not $dualMarker) (ne $acpEnabled $acpDisabled) -}}
+{{- $state = "legacy-v2-disabled" -}}
+{{- end -}}
+{{- $state -}}
+{{- end }}
+
+{{- define "orka.harnessV1ExistingControllerAuthSecretName" -}}
+{{- $secretName := "" -}}
+{{- $prefix := "--harness-v1-auth-secret-name=" -}}
+{{- range (dig "spec" "template" "spec" "containers" (list) .) -}}
+{{- if eq (default "" .name) "controller" -}}
+{{- range (default (list) .args) -}}
+{{- $arg := toString . -}}
+{{- if hasPrefix $prefix $arg -}}
+{{- $secretName = trimPrefix $prefix $arg -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- required "existing harness v1 controller Deployment is missing the auth Secret name" $secretName -}}
+{{- end }}
+
+{{- define "orka.harnessV1ExistingControllerAuthSecretKey" -}}
+{{- $secretKey := "" -}}
+{{- $prefix := "--harness-v1-auth-secret-key=" -}}
+{{- range (dig "spec" "template" "spec" "containers" (list) .) -}}
+{{- if eq (default "" .name) "controller" -}}
+{{- range (default (list) .args) -}}
+{{- $arg := toString . -}}
+{{- if hasPrefix $prefix $arg -}}
+{{- $secretKey = trimPrefix $prefix $arg -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- required "existing harness v1 controller Deployment is missing the auth Secret token key" $secretKey -}}
+{{- end }}
+
 {{- define "orka.harnessV1PolicyNamespace" -}}
 {{- if .Values.harnessV1.policy.namespace -}}
 {{- .Values.harnessV1.policy.namespace -}}

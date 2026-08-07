@@ -80,6 +80,14 @@ func TestAgentContractValidatorRequiresAndFreezesExplicitContract(t *testing.T) 
 		))
 		require.False(t, response.Allowed)
 		require.Contains(t, response.Result.Message, "cannot switch to an external runtimeRef")
+
+		withoutRuntime := unclassified.DeepCopy()
+		withoutRuntime.Spec.Runtime = nil
+		response = validator.Handle(context.Background(), coexistenceRequest(
+			t, admissionv1.Update, username, withoutRuntime, unclassified, "",
+		))
+		require.False(t, response.Allowed)
+		require.Contains(t, response.Result.Message, "remove its runtime configuration")
 	}
 
 	updatedExternal := external.DeepCopy()

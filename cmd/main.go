@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -84,8 +85,9 @@ const (
 )
 
 var (
-	scheme   = runtime.NewScheme()
-	setupLog = ctrl.Log.WithName("setup")
+	scheme                       = runtime.NewScheme()
+	setupLog                     = ctrl.Log.WithName("setup")
+	controllerProcessIncarnation = uuid.NewString()
 )
 
 func init() {
@@ -2078,10 +2080,18 @@ func currentControllerHolderID() string {
 		return holder
 	}
 	hostname, err := os.Hostname()
-	if err == nil && strings.TrimSpace(hostname) != "" {
-		return strings.TrimSpace(hostname)
+	if err != nil {
+		hostname = ""
 	}
-	return fmt.Sprintf("controller-%d", os.Getpid())
+	return controllerHolderIDForIncarnation(hostname, controllerProcessIncarnation)
+}
+
+func controllerHolderIDForIncarnation(hostname, incarnation string) string {
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		hostname = "controller"
+	}
+	return hostname + "-" + strings.TrimSpace(incarnation)
 }
 
 func currentPodName() string {
