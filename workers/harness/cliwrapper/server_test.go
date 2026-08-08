@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -448,6 +450,65 @@ func TestServerArtifactUploadFailureFailsTurnAndRetainsEvidence(t *testing.T) {
 	}
 	if string(retained) != artifactBody {
 		t.Fatalf("retained artifact = %q, want %q", retained, artifactBody)
+	}
+}
+
+func TestRetainFailedTurnArtifactsBoundsConcurrentRetentions(t *testing.T) {
+	retentionParent := t.TempDir()
+	sourceParent := t.TempDir()
+	if err := os.Mkdir(filepath.Join(retentionParent, "unrelated"), 0o700); err != nil {
+		t.Fatalf("create unrelated directory: %v", err)
+	}
+
+	const extraRetentions = 5
+	total := maxFailedArtifactRetentions + extraRetentions
+	errorsCh := make(chan error, total)
+	var wg sync.WaitGroup
+	for i := range total {
+		artifactDir := filepath.Join(sourceParent, fmt.Sprintf("turn-%02d", i), "artifacts")
+		if err := os.MkdirAll(artifactDir, 0o700); err != nil {
+			t.Fatalf("create source artifact directory: %v", err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(artifactDir, "evidence.txt"),
+			[]byte(strconv.Itoa(i)),
+			0o600,
+		); err != nil {
+			t.Fatalf("write source artifact: %v", err)
+		}
+		wg.Go(func() {
+			_, err := retainFailedTurnArtifactsIn(artifactDir, retentionParent)
+			errorsCh <- err
+		})
+	}
+	wg.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatalf("retain failed turn artifacts: %v", err)
+		}
+	}
+
+	entries, err := os.ReadDir(retentionParent)
+	if err != nil {
+		t.Fatalf("list retained artifacts: %v", err)
+	}
+	retained := 0
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), failedArtifactRetentionPrefix) {
+			continue
+		}
+		retained++
+		artifactPath := filepath.Join(retentionParent, entry.Name(), "artifacts", "evidence.txt")
+		if _, err := os.ReadFile(artifactPath); err != nil {
+			t.Fatalf("read retained evidence %q: %v", artifactPath, err)
+		}
+	}
+	if retained != maxFailedArtifactRetentions {
+		t.Fatalf("retained failure directories = %d, want %d", retained, maxFailedArtifactRetentions)
+	}
+	if _, err := os.Stat(filepath.Join(retentionParent, "unrelated")); err != nil {
+		t.Fatalf("unrelated directory was removed: %v", err)
 	}
 }
 
@@ -1064,6 +1125,54 @@ func TestServerPreservesCompletedResultBytes(t *testing.T) {
 
 func TestServerRedactsCommandOutputFrames(t *testing.T) {
 	assertCommandFramesRedacted(t, "printf '"+testBearerHeaderValue()+"'", "frames")
+}
+
+func TestServerRedactsConfiguredCommandEnvironment(t *testing.T) {
+	const (
+		privateName  = "WRAPPER_PRIVATE_VALUE"
+		privateValue = "wrapper-config-value-4f739d28b61c"
+		publicValue  = "https://public-provider.example.test/v1"
+	)
+	configuredEnv := []string{
+		privateName + "=" + privateValue,
+		workerenv.OpenAIBaseURL + "=" + publicValue,
+	}
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.CommandEnv = append([]string(nil), configuredEnv...)
+	cfg.Generic = GenericAdapterConfig{
+		Command: wrapperTestShellPath,
+		Args: []string{"-c", fmt.Sprintf(
+			"printf '%%s %%s' \"$%s\" \"$%s\"; printf '%%s' \"$%s\" >&2; exit 7",
+			privateName,
+			workerenv.OpenAIBaseURL,
+			privateName,
+		)},
+		Env:        append([]string(nil), configuredEnv...),
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeStdout,
+	}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	encoded, err := json.Marshal(frames)
+	if err != nil {
+		t.Fatalf("marshal frames: %v", err)
+	}
+	if strings.Contains(string(encoded), privateValue) || !strings.Contains(string(encoded), "[REDACTED]") {
+		t.Fatalf("configured private environment leaked or was not redacted: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), publicValue) {
+		t.Fatalf("known public configuration was redacted: %s", encoded)
+	}
 }
 
 func assertCommandFramesRedacted(t *testing.T, script, label string) {

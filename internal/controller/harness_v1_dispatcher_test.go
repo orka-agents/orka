@@ -1914,6 +1914,56 @@ func TestHarnessV1DispatcherRetriesSettlementAcknowledgementBeforeProjection(t *
 	}
 }
 
+func TestHarnessV1DispatcherPersistsInlineFailedResultBeforeSettlement(t *testing.T) {
+	fixture := newHarnessV1DispatcherStateFixture(t)
+	frame := harness.HarnessEventFrame{
+		Version: harness.ProtocolVersion, Type: harness.FrameTurnFailed,
+		RuntimeSessionID: fixture.request.RuntimeSessionID, TurnID: fixture.request.TurnID,
+		CorrelationID: fixture.request.CorrelationID, Seq: 1,
+		Failed: &harness.TurnFailed{Reason: "provider_failed", Result: "partial result"},
+	}
+	saveErr := errors.New("result persistence unavailable")
+	fixture.dispatcher.ResultStore = &failingOnceHarnessV1ResultStore{
+		ResultStore: fixture.durable,
+		err:         saveErr,
+	}
+	protocolClient := &recordingHarnessV1RecoveryClient{}
+
+	err := fixture.dispatcher.settleTerminalFrame(
+		fixture.ctx, fixture.task, protocolClient, fixture.request, fixture.attempt, fixture.fence, frame,
+	)
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("settleTerminalFrame first error = %v, want %v", err, saveErr)
+	}
+	fixture.attempt = assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptSettling)
+	if protocolClient.settleCalls != 0 {
+		t.Fatalf("settlement calls before result persistence = %d, want zero", protocolClient.settleCalls)
+	}
+	if _, err := fixture.durable.GetResult(fixture.ctx, fixture.task.Namespace, fixture.task.Name); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetResult() before persistence error = %v, want ErrNotFound", err)
+	}
+
+	if err := fixture.dispatcher.settleTerminalFrame(
+		fixture.ctx, fixture.task, protocolClient, fixture.request, fixture.attempt, fixture.fence, frame,
+	); err != nil {
+		t.Fatalf("settleTerminalFrame retry: %v", err)
+	}
+	fixture.attempt = assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptFailed)
+	result, err := fixture.durable.GetResult(fixture.ctx, fixture.task.Namespace, fixture.task.Name)
+	if err != nil {
+		t.Fatalf("GetResult() after settlement: %v", err)
+	}
+	if string(result) != frame.Failed.Result {
+		t.Fatalf("result = %q, want %q", result, frame.Failed.Result)
+	}
+	if protocolClient.fetchCalls != 0 || protocolClient.ackCalls != 0 || protocolClient.settleCalls != 1 {
+		t.Fatalf(
+			"inline failure settlement calls: fetch=%d outputAck=%d settlementAck=%d, want 0/0/1",
+			protocolClient.fetchCalls, protocolClient.ackCalls, protocolClient.settleCalls,
+		)
+	}
+}
+
 func TestHarnessV1DispatcherSettlementAcknowledgementDoesNotResolveProviderCredentials(t *testing.T) {
 	fixture := newHarnessV1DispatcherStateFixture(t)
 	receipt, err := harness.DurableTurnTerminalReceiptFromFrame(

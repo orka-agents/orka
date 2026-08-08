@@ -1338,6 +1338,14 @@ func TestClientRejectsInvalidBaseURL(t *testing.T) {
 			name: "percent-encoded userinfo", baseURL: "https://" + "%6fperator" + ":" + "p%40ss" + "@adapter.example",
 			wantError: "must not include userinfo", notInError: []string{"%6fperator", "p%40ss", "operator", "p@ss"},
 		},
+		{
+			name: "query", baseURL: "https://adapter.example?" + "access_token=sensitive-query-value",
+			wantError: "must not include a query", notInError: []string{"access_token", "sensitive-query-value"},
+		},
+		{
+			name: "fragment", baseURL: "https://adapter.example#" + "sensitive-fragment-value",
+			wantError: "must not include a fragment", notInError: []string{"sensitive-fragment-value"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1347,7 +1355,7 @@ func TestClientRejectsInvalidBaseURL(t *testing.T) {
 			}
 			for _, forbidden := range tt.notInError {
 				if strings.Contains(err.Error(), forbidden) {
-					t.Fatalf("NewClient() error disclosed URL userinfo: %q", err)
+					t.Fatalf("NewClient() error disclosed rejected URL component: %q", err)
 				}
 			}
 		})

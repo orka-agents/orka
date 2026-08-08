@@ -78,6 +78,12 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 	if parsed.User != nil {
 		return nil, fmt.Errorf("harness base url must not include userinfo")
 	}
+	if parsed.RawQuery != "" {
+		return nil, fmt.Errorf("harness base url must not include a query")
+	}
+	if parsed.Fragment != "" {
+		return nil, fmt.Errorf("harness base url must not include a fragment")
+	}
 	c := &Client{baseURL: parsed, httpClient: &http.Client{}, controlTimeout: 30 * time.Second}
 	for _, opt := range opts {
 		if opt != nil {

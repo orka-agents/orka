@@ -1497,6 +1497,11 @@ func (d *HarnessV1Dispatcher) settleTerminalFrameWithReceiptDigest(
 				store.HarnessV1AttemptFailed, reason, receiptDigest, frame.Failed.OutputRef,
 			)
 		}
+		if frame.Failed != nil && frame.Failed.Result != "" {
+			if err := d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, []byte(frame.Failed.Result)); err != nil {
+				return err
+			}
+		}
 		return d.finishAttemptWithProtocol(
 			ctx, task, protocolClient, request, attempt, fence,
 			store.HarnessV1AttemptFailed, reason, receiptDigest,

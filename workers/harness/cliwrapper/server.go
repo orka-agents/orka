@@ -43,13 +43,18 @@ const (
 	durableLedgerReclaimBatch        = 128
 	durableAcceptanceRejectionReason = "wrapper-durable-acceptance-failed"
 	durableLocalRejectionReason      = "wrapper-local-admission-rejected"
+	failedArtifactRetentionPrefix    = "orka-harness-artifact-upload-failed-"
+	maxFailedArtifactRetentions      = 8
 )
 
+var failedArtifactRetentionMu sync.Mutex
+
 type Server struct {
-	config  Config
-	adapter RuntimeAdapter
-	runner  commandRunner
-	now     func() time.Time
+	config                         Config
+	adapter                        RuntimeAdapter
+	runner                         commandRunner
+	now                            func() time.Time
+	configuredExactRedactionValues []string
 
 	turnRegistry *turnRegistry
 	ledger       *ledger.Ledger
@@ -97,11 +102,12 @@ func NewServer(cfg Config, adapter RuntimeAdapter, opts ...ServerOption) (*Serve
 		}
 	}
 	s := &Server{
-		config:       cfg,
-		adapter:      adapter,
-		runner:       NewCommandRunner(cfg),
-		now:          time.Now,
-		turnRegistry: newTurnRegistry(),
+		config:                         cfg,
+		adapter:                        adapter,
+		runner:                         NewCommandRunner(cfg),
+		now:                            time.Now,
+		configuredExactRedactionValues: exactConfiguredEnvValues(cfg.CommandEnv),
+		turnRegistry:                   newTurnRegistry(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -849,6 +855,9 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	for _, value := range s.configuredExactRedactionValues {
+		state.addExactRedactionValue(value)
+	}
 	if s.ledger != nil {
 		if err := s.markDurableTurnAccepted(r.Context(), state); err != nil {
 			writeSafeError(w, http.StatusServiceUnavailable, "durable turn acceptance failed")
@@ -1528,6 +1537,13 @@ func turnArtifactDir(workspace preparedWorkspace) string {
 }
 
 func retainFailedTurnArtifacts(artifactDir string) (string, error) {
+	return retainFailedTurnArtifactsIn(artifactDir, os.TempDir())
+}
+
+func retainFailedTurnArtifactsIn(artifactDir, retentionParent string) (string, error) {
+	failedArtifactRetentionMu.Lock()
+	defer failedArtifactRetentionMu.Unlock()
+
 	artifactDir = strings.TrimSpace(artifactDir)
 	if artifactDir == "" {
 		return "", errors.New("artifact directory is empty")
@@ -1540,7 +1556,21 @@ func retainFailedTurnArtifacts(artifactDir string) (string, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return "", fmt.Errorf("artifact path is not a regular directory")
 	}
-	retentionRoot, err := os.MkdirTemp(os.TempDir(), "orka-harness-artifact-upload-failed-*")
+	retentionParent = strings.TrimSpace(retentionParent)
+	if retentionParent == "" {
+		return "", errors.New("artifact retention parent is empty")
+	}
+	retentionParent = filepath.Clean(retentionParent)
+	// Prune before moving the current artifacts so a successful retention never
+	// takes the cross-turn on-disk set above the configured bound. Scanning the
+	// parent also reclaims directories left by an earlier wrapper process.
+	if err := pruneFailedTurnArtifactRetentionsLocked(
+		retentionParent,
+		maxFailedArtifactRetentions-1,
+	); err != nil {
+		return "", err
+	}
+	retentionRoot, err := os.MkdirTemp(retentionParent, failedArtifactRetentionPrefix+"*")
 	if err != nil {
 		return "", fmt.Errorf("create artifact retention directory: %w", err)
 	}
@@ -1550,6 +1580,51 @@ func retainFailedTurnArtifacts(artifactDir string) (string, error) {
 		return "", fmt.Errorf("move artifacts to retention directory: %w", err)
 	}
 	return retainedArtifactsDir, nil
+}
+
+func pruneFailedTurnArtifactRetentionsLocked(retentionParent string, keep int) error {
+	entries, err := os.ReadDir(retentionParent)
+	if err != nil {
+		return fmt.Errorf("list artifact retention directories: %w", err)
+	}
+	type retainedEntry struct {
+		name    string
+		path    string
+		modTime time.Time
+	}
+	retained := make([]retainedEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), failedArtifactRetentionPrefix) {
+			continue
+		}
+		entryPath := filepath.Join(retentionParent, entry.Name())
+		info, infoErr := os.Lstat(entryPath)
+		if errors.Is(infoErr, os.ErrNotExist) {
+			continue
+		}
+		if infoErr != nil {
+			return fmt.Errorf("inspect artifact retention directory: %w", infoErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			continue
+		}
+		retained = append(retained, retainedEntry{
+			name: entry.Name(), path: entryPath, modTime: info.ModTime(),
+		})
+	}
+	sort.Slice(retained, func(i, j int) bool {
+		if retained[i].modTime.Equal(retained[j].modTime) {
+			return retained[i].name < retained[j].name
+		}
+		return retained[i].modTime.Before(retained[j].modTime)
+	})
+	removeCount := len(retained) - max(keep, 0)
+	for i := range removeCount {
+		if err := os.RemoveAll(retained[i].path); err != nil {
+			return fmt.Errorf("remove old artifact retention directory: %w", err)
+		}
+	}
+	return nil
 }
 
 // prepareTurnArtifactsDirForWrapper creates the per-turn artifact directory for
@@ -1937,6 +2012,18 @@ func exactTurnInputValues(env []harness.TurnEnvVar) []string {
 	}
 	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
 	return values
+}
+
+func exactConfiguredEnvValues(env []string) []string {
+	configured := make([]harness.TurnEnvVar, 0, len(env))
+	for _, entry := range env {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		configured = append(configured, harness.TurnEnvVar{Name: name, Value: value})
+	}
+	return exactTurnInputValues(configured)
 }
 
 func isKnownNonCredentialTurnEnv(name string) bool {
