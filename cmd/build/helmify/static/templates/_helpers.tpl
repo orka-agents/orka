@@ -339,6 +339,51 @@ spec:
 {{- end -}}
 {{- end }}
 
+{{/* Read the exact chart fullname from the live controller's in-cluster URL. */}}
+{{- define "orka.existingControllerFullname" -}}
+{{- $fullnames := list -}}
+{{- $namespaceSuffix := printf ".%s.svc" .namespace -}}
+{{- range (dig "spec" "template" "spec" "containers" (list) .controller) -}}
+{{- if eq (default "" .name) "controller" -}}
+{{- range (default (list) .args) -}}
+{{- $arg := toString . -}}
+{{- if hasPrefix "--controller-url=http://" $arg -}}
+{{- $endpoint := trimPrefix "--controller-url=http://" $arg -}}
+{{- $hostPort := first (splitList "/" $endpoint) -}}
+{{- $host := first (splitList ":" $hostPort) -}}
+{{- if hasSuffix $namespaceSuffix $host -}}
+{{- $fullname := trimSuffix $namespaceSuffix $host -}}
+{{- if and $fullname (not (contains "." $fullname)) -}}
+{{- $fullnames = append $fullnames $fullname -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (len $fullnames) 1 -}}
+{{- index $fullnames 0 -}}
+{{- end -}}
+{{- end }}
+
+{{/* Read the live controller's exact ACP runtime namespace. */}}
+{{- define "orka.existingControllerACPRuntimeNamespace" -}}
+{{- $runtimeNamespaces := list -}}
+{{- range (dig "spec" "template" "spec" "containers" (list) .) -}}
+{{- if eq (default "" .name) "controller" -}}
+{{- range (default (list) .args) -}}
+{{- $arg := toString . -}}
+{{- if hasPrefix "--acp-runtime-namespace=" $arg -}}
+{{- $runtimeNamespaces = append $runtimeNamespaces (trimPrefix "--acp-runtime-namespace=" $arg) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (len $runtimeNamespaces) 1 -}}
+{{- index $runtimeNamespaces 0 -}}
+{{- end -}}
+{{- end }}
+
 {{/* Read the live controller's exact static mode. Legacy controllers return empty. */}}
 {{- define "orka.existingControllerMode" -}}
 {{- $modes := list -}}
@@ -579,7 +624,22 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- if ne $existingNamespaceMode .Values.controller.mode -}}
 {{- fail (printf "controller mode identity is missing or incompatible; namespace %q must already claim orka.ai/controller-mode=%s before this release can be upgraded" .Release.Namespace .Values.controller.mode) -}}
 {{- end -}}
-{{- $existingController := lookup "apps/v1" "Deployment" .Release.Namespace (include "orka.controllerName" .) -}}
+{{- $root := . -}}
+{{- $existingControllerList := lookup "apps/v1" "Deployment" .Release.Namespace "" -}}
+{{- $existingControllers := list -}}
+{{- range (dig "items" (list) (default (dict) $existingControllerList)) -}}
+{{- $labels := dig "metadata" "labels" (dict) . -}}
+{{- if and (eq (get $labels "app.kubernetes.io/instance") $root.Release.Name) (eq (get $labels "app.kubernetes.io/component") "controller") (eq (get $labels "app.kubernetes.io/managed-by") $root.Release.Service) -}}
+{{- $existingControllers = append $existingControllers . -}}
+{{- end -}}
+{{- end -}}
+{{- if gt (len $existingControllers) 1 -}}
+{{- fail (printf "multiple controller Deployments are owned by Helm release %q in namespace %q; restore a single controller before upgrading" .Release.Name .Release.Namespace) -}}
+{{- end -}}
+{{- $existingController := dict -}}
+{{- if eq (len $existingControllers) 1 -}}
+{{- $existingController = index $existingControllers 0 -}}
+{{- end -}}
 {{- if $existingController -}}
 {{- $existingWatchNamespace := include "orka.existingControllerWatchNamespace" $existingController | trim -}}
 {{- if ne $existingWatchNamespace .Values.controller.watchNamespace -}}
@@ -595,6 +655,23 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- fail "implicit or legacy harness-v2 installations cannot upgrade in place; settle or retire the existing installation and install harness-v2 as a new release and namespace" -}}
 {{- else if ne $existingState "enabled" -}}
 {{- fail "controller.mode is immutable; install harness-v1 as a new release and namespace" -}}
+{{- end -}}
+{{- if eq .Values.controller.mode "harness-v2" -}}
+{{- $existingFullname := include "orka.existingControllerFullname" (dict "controller" $existingController "namespace" .Release.Namespace) | trim -}}
+{{- if not $existingFullname -}}
+{{- fail "cannot determine the existing harness-v2 chart fullname from the live controller; restore its exact --controller-url argument before upgrading" -}}
+{{- end -}}
+{{- $desiredFullname := include "orka.fullname" . -}}
+{{- if ne $existingFullname $desiredFullname -}}
+{{- fail (printf "the effective chart fullname is immutable for harness-v2 upgrades; the existing controller uses %q, but this upgrade would use %q" $existingFullname $desiredFullname) -}}
+{{- end -}}
+{{- $existingRuntimeNamespace := include "orka.existingControllerACPRuntimeNamespace" $existingController | trim -}}
+{{- if not $existingRuntimeNamespace -}}
+{{- fail "cannot determine the existing harness-v2 ACP runtime namespace; restore its exact --acp-runtime-namespace argument before upgrading" -}}
+{{- end -}}
+{{- if ne $existingRuntimeNamespace .Values.controller.acpRuntime.namespace -}}
+{{- fail (printf "controller.acpRuntime.namespace is immutable; the existing controller uses namespace %q" $existingRuntimeNamespace) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

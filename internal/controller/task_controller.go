@@ -658,18 +658,18 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Schedule != "" {
 		return r.handleScheduledTask(ctx, task)
 	}
-	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.Execution == nil {
-		now := time.Now().UTC()
-		if deadline, ok := acpTaskDeadline(task, now); ok && !now.Before(deadline) {
-			return r.cancelACPTaskBeforeDurableAttempt(ctx, task, "task deadline exceeded before runtime admission")
-		}
-	}
 
 	// A persisted execution binding is the sole routing and recovery authority.
 	// Do not resolve mutable Agent/configuration state, or acquire the legacy
 	// SQLite Session lock, after a Task has been bound to either harness plane.
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.AgentExecutionBinding != nil {
 		return r.handleBoundAgentTaskPending(ctx, task)
+	}
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.Execution == nil {
+		now := time.Now().UTC()
+		if deadline, ok := acpTaskDeadline(task, now); ok && !now.Before(deadline) {
+			return r.cancelACPTaskBeforeDurableAttempt(ctx, task, "task deadline exceeded before runtime admission")
+		}
 	}
 
 	// Non-agent workers retain the legacy Session lock lifecycle. Agent Tasks

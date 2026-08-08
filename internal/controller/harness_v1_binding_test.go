@@ -21,6 +21,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
 type harnessV1CandidateErrorReader struct {
@@ -1125,6 +1126,68 @@ func TestValidateHarnessV1RuntimeAuthOnlyRejectsUnsupportedRoute(t *testing.T) {
 				t.Fatalf("validate runtime-auth-only route error = %v, want permanent %q failure", err, test.wantReason)
 			}
 		})
+	}
+}
+
+func TestHandlePendingRoutesExpiredHarnessV1BindingBeforeACPTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fixture := newHarnessV1CandidateFixture(t)
+
+	current := &corev1alpha1.Task{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.task), current); err != nil {
+		t.Fatal(err)
+	}
+	timeout := metav1.Duration{Duration: time.Minute}
+	current.Spec.Timeout = &timeout
+	current.CreationTimestamp = metav1.NewTime(time.Now().UTC().Add(-2 * time.Minute))
+	if err := fixture.reconciler.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Phase = corev1alpha1.TaskPhasePending
+	if err := fixture.reconciler.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.task), current); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task = current.DeepCopy()
+	if result, err, handled := fixture.reconciler.ensureHarnessV1ExecutionBinding(
+		ctx, current, fixture.agent,
+	); err != nil || handled {
+		t.Fatalf("establish harness v1 binding: result=%#v handled=%v err=%v", result, handled, err)
+	}
+	bound := &corev1alpha1.Task{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(fixture.task), bound); err != nil {
+		t.Fatal(err)
+	}
+
+	attempts, ok := fixture.reconciler.AgentExecutionSnapshots.(*sqlite.Store)
+	if !ok {
+		t.Fatalf("snapshot store type = %T, want *sqlite.Store", fixture.reconciler.AgentExecutionSnapshots)
+	}
+	epochs, stopEpochs := startACPRecoveryEpochManager(t, ctx, attempts, "harness-v1-expired-routing")
+	defer stopEpochs()
+	fixture.reconciler.HarnessV1Attempts = attempts
+	fixture.reconciler.ControllerEpochManager = epochs
+
+	result, err := fixture.reconciler.handlePending(ctx, bound)
+	if err != nil {
+		t.Fatalf("handlePending: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("handlePending result = %#v, want one-second harness v1 dispatch requeue", result)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(bound), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Execution != nil {
+		t.Fatalf("expired bound harness v1 Task received ACP execution status: %#v", updated.Status.Execution)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseRunning || updated.Status.HarnessRuntime == nil ||
+		updated.Status.HarnessRuntime.State != corev1alpha1.TaskExecutionStateQueued {
+		t.Fatalf("expired bound harness v1 Task was not routed to its immutable plane: %#v", updated.Status)
 	}
 }
 

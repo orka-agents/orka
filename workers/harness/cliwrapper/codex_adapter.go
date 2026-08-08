@@ -283,11 +283,6 @@ func buildCodexEnv(extra []string, baseURL string, readOnly bool, readOnlyHome s
 	if baseURL != "" {
 		env = setEnv(env, workerenv.OpenAIBaseURL, baseURL)
 	}
-	if envEntryValue(env, workerenv.CodexAPIKey) == "" {
-		if apiKey := strings.TrimSpace(os.Getenv(workerenv.OpenAIAPIKey)); apiKey != "" {
-			env = setEnv(env, workerenv.CodexAPIKey, apiKey)
-		}
-	}
 	return env
 }
 

@@ -47,7 +47,10 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 
 	cmd := exec.Command(spec.Path, spec.Args...)
 	cmd.Dir = spec.Dir
-	baseEnv := sanitizedProcessEnv(os.Environ())
+	// The wrapper Pod can carry controller-only credentials through envFrom or
+	// secretKeyRef. Agent-controlled children receive only a fixed process
+	// baseline plus the environment explicitly frozen for this turn.
+	baseEnv := baselineChildProcessEnv()
 	if spec.ClearEnv {
 		baseEnv = nil
 	}
@@ -203,6 +206,13 @@ func sanitizedProcessEnv(env []string) []string {
 		out = append(out, entry)
 	}
 	return out
+}
+
+func baselineChildProcessEnv() []string {
+	return []string{
+		"PATH=" + wrapperSafeCommandPath,
+		"TMPDIR=/tmp",
+	}
 }
 
 func mergeCommandEnv(base, overrides []string) []string {

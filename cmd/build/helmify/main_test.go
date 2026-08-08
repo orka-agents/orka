@@ -164,21 +164,23 @@ func helmTemplateStaticChartWithExistingController(
 	if err != nil {
 		t.Fatalf("read static chart helpers: %v", err)
 	}
-	lookup := `{{- $existingController := lookup "apps/v1" "Deployment" ` +
-		`.Release.Namespace (include "orka.controllerName" .) -}}`
-	forcedLookup := `{{- $existingController := dict -}}`
+	lookup := `{{- $existingControllerList := lookup "apps/v1" "Deployment" .Release.Namespace "" -}}`
+	forcedLookup := `{{- $existingControllerList := dict "items" (list) -}}`
 	if existingControllerArgs != nil {
 		quotedControllerArgs := make([]string, 0, len(existingControllerArgs))
 		for _, arg := range existingControllerArgs {
 			quotedControllerArgs = append(quotedControllerArgs, strconv.Quote(arg))
 		}
-		forcedLookup = `{{- $existingController := dict "spec" (dict "template" (dict "spec" ` +
-			`(dict "containers" (list (dict "name" "controller" "args" (list ` +
-			strings.Join(quotedControllerArgs, " ") + `)))))) -}}`
+		forcedLookup = `{{- $existingControllerList := dict "items" (list (dict ` +
+			`"metadata" (dict "name" "test-orka-controller" "labels" (dict ` +
+			`"app.kubernetes.io/instance" "test" "app.kubernetes.io/component" "controller" ` +
+			`"app.kubernetes.io/managed-by" "Helm")) ` +
+			`"spec" (dict "template" (dict "spec" (dict "containers" (list ` +
+			`(dict "name" "controller" "args" (list ` + strings.Join(quotedControllerArgs, " ") + `)))))))) -}}`
 	}
 	withController := strings.Replace(string(helpers), lookup, forcedLookup, 1)
 	if withController == string(helpers) {
-		t.Fatalf("controller mode validation is not gated by the exact existing Deployment lookup")
+		t.Fatalf("controller mode validation is not gated by the release-owned Deployment list lookup")
 	}
 	if err := os.WriteFile(helpersPath, []byte(withController), 0o600); err != nil {
 		t.Fatalf("force existing controller lookup in copied chart: %v", err)
@@ -708,6 +710,8 @@ func TestStaticChartRejectsControllerWatchScopeChangesOnUpgrade(t *testing.T) {
 			existingControllerArgs: []string{
 				"--controller-mode=harness-v2",
 				"--watch-namespace=orka-test",
+				"--controller-url=http://test-orka.orka-test.svc:8080",
+				"--acp-runtime-namespace=orka-runtimes",
 			},
 		},
 		{
@@ -727,6 +731,45 @@ func TestStaticChartRejectsControllerWatchScopeChangesOnUpgrade(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(output, tt.wantError) {
 				t.Fatalf("helm render error = %v, want watch-scope rejection:\n%s", err, output)
+			}
+		})
+	}
+}
+
+func TestStaticChartRejectsHarnessV2IdentityChangesOnUpgrade(t *testing.T) {
+	staticControllerArgs := []string{
+		"--controller-mode=harness-v2",
+		"--watch-namespace=orka-test",
+		"--controller-url=http://test-orka.orka-test.svc:8080",
+		"--acp-runtime-namespace=orka-runtimes",
+	}
+	tests := []struct {
+		name      string
+		args      []string
+		wantError string
+	}{
+		{
+			name:      "fullname override",
+			args:      []string{"--set-string", "fullnameOverride=renamed"},
+			wantError: "the effective chart fullname is immutable for harness-v2 upgrades",
+		},
+		{
+			name:      "effective name override",
+			args:      []string{"--set-string", "nameOverride=renamed"},
+			wantError: "the effective chart fullname is immutable for harness-v2 upgrades",
+		},
+		{
+			name:      "ACP runtime namespace",
+			args:      []string{"--set-string", "controller.acpRuntime.namespace=other-runtimes"},
+			wantError: "controller.acpRuntime.namespace is immutable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, err := helmTemplateStaticChartWithExistingController(t, staticControllerArgs, tt.args...)
+			if err == nil || !strings.Contains(output, tt.wantError) {
+				t.Fatalf("helm render error = %v, want immutable identity rejection %q:\n%s", err, tt.wantError, output)
 			}
 		})
 	}

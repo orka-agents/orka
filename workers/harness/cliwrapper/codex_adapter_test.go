@@ -262,8 +262,9 @@ if [ "${ORKA_PROMPT+x}" = "x" ]; then
   exit 64
 fi
 printf 'unset' > "$CODEX_PROMPT_ENV_CAPTURE"
-if [ "${CODEX_INHERITED_ENV:-}" != "inherited-value" ]; then exit 65; fi
+if [ -n "${CODEX_INHERITED_ENV:-}" ]; then exit 65; fi
 if [ "${CODEX_SPEC_ENV:-}" != "spec-value" ]; then exit 66; fi
+if [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${CODEX_API_KEY:-}" ]; then exit 67; fi
 cat > "$CODEX_STDIN_CAPTURE"
 printf 'large prompt received' > "$out"
 `), 0o700); err != nil {
@@ -272,6 +273,8 @@ printf 'large prompt received' > "$out"
 	t.Setenv(workerenv.AllowBash, "true")
 	t.Setenv(workerenv.Prompt, "inherited-parent-value")
 	t.Setenv("CODEX_INHERITED_ENV", "inherited-value")
+	t.Setenv(workerenv.OpenAIAPIKey, "operator-openai-key")
+	t.Setenv(workerenv.CodexAPIKey, "operator-codex-key")
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	cfg.Runtime = RuntimeCodex
@@ -486,6 +489,21 @@ func TestCodexAdapterPreservesExplicitCodexAPIKey(t *testing.T) {
 	}
 	if containsEnv(spec.Env, workerenv.CodexAPIKey+"=operator-openai-key") {
 		t.Fatalf("env = %#v, want OpenAI fallback not to overwrite explicit Codex key", spec.Env)
+	}
+}
+
+func TestCodexAdapterDoesNotImportAmbientOpenAIAPIKey(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.OpenAIAPIKey, "operator-openai-key")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{Prompt: "do work"})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	if containsEnv(spec.Env, workerenv.OpenAIAPIKey+"=operator-openai-key") ||
+		containsEnv(spec.Env, workerenv.CodexAPIKey+"=operator-openai-key") {
+		t.Fatalf("env = %#v, want ambient OpenAI API key withheld", spec.Env)
 	}
 }
 

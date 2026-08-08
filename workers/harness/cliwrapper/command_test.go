@@ -80,7 +80,7 @@ func TestCommandRunnerPreservesFullStdoutWhenLogPreviewTruncates(t *testing.T) {
 	}
 }
 
-func TestCommandRunnerUnsetsEnvAfterMerge(t *testing.T) {
+func TestCommandRunnerDoesNotInheritParentEnvAndUnsetsAfterMerge(t *testing.T) {
 	t.Setenv(envCommandRunnerDrop, "inherited-value")
 	t.Setenv(envCommandRunnerKeepParent, "parent-value")
 	runner := CommandRunner{StdoutLimitBytes: 64, StderrLimitBytes: 64, CancelGrace: 10 * time.Millisecond}
@@ -96,8 +96,8 @@ func TestCommandRunnerUnsetsEnvAfterMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := result.ExactStdout(); got != "parent-value|spec-value" {
-		t.Fatalf("ExactStdout = %q, want preserved inherited and spec env", got)
+	if got := result.ExactStdout(); got != "|spec-value" {
+		t.Fatalf("ExactStdout = %q, want parent env withheld and explicit spec env preserved", got)
 	}
 }
 

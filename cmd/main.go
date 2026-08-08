@@ -1474,6 +1474,17 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if harnessV1Enabled || acpRuntimeEnabled {
+		// Session settlement in both harness planes commits terminal Task status
+		// through the shared Kubernetes outbox.
+		agentOutboxProjector := &controller.ACPOutboxProjector{
+			Client: mgr.GetClient(), Store: kubeControlStore, Epochs: controllerEpochManager, WorkerID: controllerHolderID + "-outbox",
+		}
+		if err := mgr.Add(agentOutboxProjector); err != nil {
+			setupLog.Error(err, "unable to add agent outbox projector")
+			os.Exit(1)
+		}
+	}
 	if acpRuntimeEnabled {
 		acpDispatcher := &controller.ACPDispatcher{
 			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: durableControlStore, ResultStore: sqliteStore,
@@ -1487,13 +1498,6 @@ func main() {
 		}
 		if err := mgr.Add(acpDispatcher); err != nil {
 			setupLog.Error(err, "unable to add ACP dispatcher")
-			os.Exit(1)
-		}
-		acpOutboxProjector := &controller.ACPOutboxProjector{
-			Client: mgr.GetClient(), Store: durableControlStore, Epochs: controllerEpochManager, WorkerID: controllerHolderID + "-outbox",
-		}
-		if err := mgr.Add(acpOutboxProjector); err != nil {
-			setupLog.Error(err, "unable to add ACP outbox projector")
 			os.Exit(1)
 		}
 		if strings.TrimSpace(acpUpgradeDrainOptions.MarkerNamespace) == "" {
