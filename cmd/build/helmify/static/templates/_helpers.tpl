@@ -293,6 +293,24 @@ spec:
 {{- required "existing harness v1 wrapper Deployment is missing the auth Secret token key" $secretKey -}}
 {{- end }}
 
+{{/* Read the live controller's exact namespace watch scope. */}}
+{{- define "orka.existingControllerWatchNamespace" -}}
+{{- $watchNamespaces := list -}}
+{{- range (dig "spec" "template" "spec" "containers" (list) .) -}}
+{{- if eq (default "" .name) "controller" -}}
+{{- range (default (list) .args) -}}
+{{- $arg := toString . -}}
+{{- if hasPrefix "--watch-namespace=" $arg -}}
+{{- $watchNamespaces = append $watchNamespaces (trimPrefix "--watch-namespace=" $arg) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (len $watchNamespaces) 1 -}}
+{{- index $watchNamespaces 0 -}}
+{{- end -}}
+{{- end }}
+
 {{/* Read the live controller inputs used when the wrapper Deployment is absent. */}}
 {{- define "orka.harnessV1ExistingControllerState" -}}
 {{- $state := "" -}}
@@ -491,6 +509,10 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- if .Release.IsUpgrade -}}
 {{- $existingController := lookup "apps/v1" "Deployment" .Release.Namespace (include "orka.controllerName" .) -}}
 {{- if $existingController -}}
+{{- $existingWatchNamespace := include "orka.existingControllerWatchNamespace" $existingController | trim -}}
+{{- if ne $existingWatchNamespace .Values.controller.watchNamespace -}}
+{{- fail (printf "controller.watchNamespace is immutable; the existing controller must already watch namespace %q; install cluster-wide or differently scoped controllers as a new release and namespace" .Values.controller.watchNamespace) -}}
+{{- end -}}
 {{- $existingState := include "orka.harnessV1ExistingControllerState" $existingController | trim -}}
 {{- if not $existingState -}}
 {{- fail "cannot determine the existing controller mode; restore a valid static controller before upgrading" -}}

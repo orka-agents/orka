@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -111,6 +112,50 @@ func staticChartDefaultArgs() []string {
 		"--set-string", "publisher.image.digest=" + digest,
 		"--set", "providerProxy.enabled=true",
 	}
+}
+
+func helmTemplateStaticChartWithExistingController(
+	t *testing.T,
+	existingControllerArgs []string,
+	args ...string,
+) (string, error) {
+	t.Helper()
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm is required for static chart render tests")
+	}
+
+	chartDir := filepath.Join(t.TempDir(), "static")
+	if err := os.CopyFS(chartDir, os.DirFS("static")); err != nil {
+		t.Fatalf("copy static chart: %v", err)
+	}
+	helpersPath := filepath.Join(chartDir, "templates", "_helpers.tpl")
+	helpers, err := os.ReadFile(helpersPath)
+	if err != nil {
+		t.Fatalf("read static chart helpers: %v", err)
+	}
+	lookup := `{{- $existingController := lookup "apps/v1" "Deployment" ` +
+		`.Release.Namespace (include "orka.controllerName" .) -}}`
+	quotedControllerArgs := make([]string, 0, len(existingControllerArgs))
+	for _, arg := range existingControllerArgs {
+		quotedControllerArgs = append(quotedControllerArgs, strconv.Quote(arg))
+	}
+	forcedLookup := `{{- $existingController := dict "spec" (dict "template" (dict "spec" ` +
+		`(dict "containers" (list (dict "name" "controller" "args" (list ` +
+		strings.Join(quotedControllerArgs, " ") + `)))))) -}}`
+	forced := strings.Replace(string(helpers), lookup, forcedLookup, 1)
+	if forced == string(helpers) {
+		t.Fatalf("controller mode validation is not gated by the exact existing Deployment lookup")
+	}
+	if err := os.WriteFile(helpersPath, []byte(forced), 0o600); err != nil {
+		t.Fatalf("force existing controller lookup in copied chart: %v", err)
+	}
+
+	commandArgs := []string{"template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade"}
+	commandArgs = append(commandArgs, staticChartDefaultArgs()...)
+	commandArgs = append(commandArgs, args...)
+	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
+	return string(output), err
 }
 
 func requireHelmRender(t *testing.T, args ...string) string {
@@ -493,6 +538,52 @@ func TestStaticChartRejectsNonStaticControllerModes(t *testing.T) {
 			output, err := helmTemplateStaticChart(t, "--set-string", "controller.mode="+mode)
 			if err == nil || !strings.Contains(output, "controller.mode must be harness-v1 or harness-v2") {
 				t.Fatalf("helm render error = %v, want static-mode rejection:\n%s", err, output)
+			}
+		})
+	}
+}
+
+func TestStaticChartRejectsControllerWatchScopeChangesOnUpgrade(t *testing.T) {
+	const watchScopeError = `controller.watchNamespace is immutable; ` +
+		`the existing controller must already watch namespace "orka-test"`
+	tests := []struct {
+		name                   string
+		existingControllerArgs []string
+		wantError              string
+	}{
+		{
+			name:                   "legacy cluster-wide controller",
+			existingControllerArgs: []string{"--acp-runtime-enabled=true"},
+			wantError:              watchScopeError,
+		},
+		{
+			name: "legacy controller in another namespace",
+			existingControllerArgs: []string{
+				"--watch-namespace=other-namespace",
+				"--acp-runtime-enabled=true",
+			},
+			wantError: watchScopeError,
+		},
+		{
+			name: "legacy controller in the release namespace",
+			existingControllerArgs: []string{
+				"--watch-namespace=orka-test",
+				"--acp-runtime-enabled=true",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, err := helmTemplateStaticChartWithExistingController(t, tt.existingControllerArgs)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("same-scope legacy controller upgrade failed: %v\n%s", err, output)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(output, tt.wantError) {
+				t.Fatalf("helm render error = %v, want watch-scope rejection:\n%s", err, output)
 			}
 		})
 	}
