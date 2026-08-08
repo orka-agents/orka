@@ -240,6 +240,7 @@ controller_apply_line="$(grep -nF '"${ROOT_DIR}/bin/kustomize" build "${tmp_conf
 (( namespace_apply_line < namespace_label_line && namespace_label_line < controller_apply_line )) || \
   fail 'Substrate deploy must claim the namespace before the harness-v2 controller workload'
 for required_arg in \
+  '"--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key"' \
   '"--controller-mode=harness-v2"' \
   '"--watch-namespace=orka-system"' \
   '"--enforce-namespace-isolation=true"' \
@@ -250,9 +251,9 @@ if grep -Fq -- '"--acp-runtime-enabled=false"' "${e2e}"; then
   fail 'Substrate deploy still passes the removed dynamic ACP mode flag'
 fi
 
-# The controller Deployment mounts the encrypted execution-snapshot key even
-# when ACP dispatch is disabled. Provision it before applying the workload so
-# the Substrate-only rollout cannot stall in ContainerCreating.
+# The harness-v2 ACP dispatcher requires the encrypted execution-snapshot key.
+# Provision it before applying the workload so the Substrate-only rollout can
+# activate its immutable snapshot store.
 grep -F 'dd if=/dev/urandom bs=32 count=1' "${e2e}" | \
   grep -F '>"${capability_dir}/snapshot-key"' >/dev/null || \
   fail 'Substrate deploy does not generate a 32-byte execution-snapshot key'
