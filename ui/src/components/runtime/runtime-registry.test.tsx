@@ -112,6 +112,23 @@ function externalV1Runtime() {
   }
 }
 
+function unclassifiedRuntime() {
+  return {
+    metadata: { name: 'legacy-unclassified', namespace: 'default', uid: 'runtime-unclassified-uid' },
+    spec: {
+      deployment: { mode: 'external-endpoint', endpoint: 'https://unclassified.example.test' },
+      clientAuth: {
+        controllerBearerTokenSecretRef: { name: 'auth', key: 'controller-token' },
+        operationCapabilitySecretRef: { name: 'auth', key: 'capability-secret' },
+      },
+    },
+    status: {
+      ready: false,
+      message: 'AgentRuntime contractVersion is unclassified; explicit classification is required',
+    },
+  }
+}
+
 describe('RuntimeRegistry', () => {
   beforeEach(() => {
     useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
@@ -167,5 +184,22 @@ describe('RuntimeRegistry', () => {
     expect(screen.queryByText('ACP profile')).not.toBeInTheDocument()
     expect(screen.queryByText('Profile digest')).not.toBeInTheDocument()
     expect(screen.queryByText('strict-governed')).not.toBeInTheDocument()
+  })
+
+  it('renders an unclassified runtime as non-executable without inferring v1 or v2', async () => {
+    server.use(
+      http.get('/api/v1/agent-runtimes', () => HttpResponse.json({ items: [unclassifiedRuntime()], metadata: {} })),
+    )
+    const user = userEvent.setup()
+    render(<RuntimeRegistry />)
+    await user.click(screen.getByRole('tab', { name: 'External runtimes' }))
+
+    await waitFor(() => expect(screen.getByText('legacy-unclassified')).toBeInTheDocument())
+    expect(screen.getByText('Unclassified')).toBeInTheDocument()
+    expect(screen.getByText('Not ready')).toBeInTheDocument()
+    expect(screen.getByText('Disabled until contractVersion is set')).toBeInTheDocument()
+    expect(screen.getByText(/explicit classification is required/)).toBeInTheDocument()
+    expect(screen.queryByText('ACP profile')).not.toBeInTheDocument()
+    expect(screen.queryByText('Tool modes')).not.toBeInTheDocument()
   })
 })

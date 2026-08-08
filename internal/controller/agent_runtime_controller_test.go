@@ -432,6 +432,36 @@ func TestAgentRuntimeReconcilerHarnessV1AuthRotationForcesConformance(t *testing
 	}
 }
 
+func TestAgentRuntimeReconcilerHarnessV1ShallowProbeRejectsRuntimeBearerDrift(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{
+		RuntimeName: "external-v1", AuthToken: strings.Repeat("r", agentRuntimeMinBearerBytes),
+	})
+	defer server.Close()
+	runtimeObject, secret := testHarnessV1AgentRuntimeAndSecret(server.URL())
+	runtimeObject.Status = corev1alpha1.AgentRuntimeStatus{
+		Ready:                          true,
+		ObservedGeneration:             runtimeObject.Generation,
+		ObservedAuthRefResourceVersion: secret.ResourceVersion,
+		ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
+			ProtocolVersion: harness.ProtocolVersion,
+			Transport:       harness.HTTPTransport,
+			RuntimeName:     "external-v1",
+		},
+	}
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "configured bearer was rejected") {
+		t.Fatalf("runtime-side bearer drift did not fail the shallow probe: %#v", updated.Status)
+	}
+	if strings.Contains(updated.Status.Message, agentRuntimeV1TestBearer) {
+		t.Fatal("shallow probe status leaked the configured bearer")
+	}
+}
+
 func TestAgentRuntimeReconcilerHarnessV1UsesConfiguredTLSClient(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{
 		AuthToken: agentRuntimeV1TestBearer,

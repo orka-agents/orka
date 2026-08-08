@@ -2040,13 +2040,20 @@ func harnessV1RetryDelay(policy *corev1alpha1.RetryPolicy, completedAttempt int3
 	if policy == nil || policy.InitialDelay == nil || policy.InitialDelay.Duration <= 0 {
 		return 0
 	}
+	const maxDelay = 5 * time.Minute
 	delay := float64(policy.InitialDelay.Duration)
+	if delay >= float64(maxDelay) {
+		return maxDelay
+	}
 	multiplier := policy.BackoffMultiplier
 	if multiplier <= 0 {
 		multiplier = 1
 	}
 	for i := int32(1); i < completedAttempt; i++ {
 		delay *= multiplier
+		if delay >= float64(maxDelay) {
+			return maxDelay
+		}
 	}
 	return time.Duration(delay)
 }

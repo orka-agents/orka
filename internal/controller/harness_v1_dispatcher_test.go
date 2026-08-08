@@ -26,6 +26,17 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
+func TestHarnessV1RetryDelayCapsBeforeDurationOverflow(t *testing.T) {
+	policy := &corev1alpha1.RetryPolicy{
+		MaxRetries:        20,
+		BackoffMultiplier: 10,
+		InitialDelay:      &metav1.Duration{Duration: time.Minute},
+	}
+	if delay := harnessV1RetryDelay(policy, 20); delay != 5*time.Minute {
+		t.Fatalf("harnessV1RetryDelay() = %s, want 5m cap", delay)
+	}
+}
+
 func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 	boundAt := time.Date(2026, 8, 5, 18, 0, 0, 123000000, time.UTC)
 	bindingDigest := "sha256:" + strings.Repeat("a", 64)

@@ -180,9 +180,17 @@ const agentRuntimeV2SpecSchema = z.object({
   }).strict(),
 }).strict()
 
-export const agentRuntimeSpecSchema = z.discriminatedUnion('contractVersion', [
+const agentRuntimeUnclassifiedSpecSchema = z.object({
+  contractVersion: z.undefined().optional(),
+  deployment: agentRuntimeDeploymentSchema,
+  clientAuth: z.record(z.string(), z.unknown()),
+  capabilities: z.record(z.string(), z.unknown()).optional(),
+}).strict()
+
+export const agentRuntimeSpecSchema = z.union([
   agentRuntimeV1SpecSchema,
   agentRuntimeV2SpecSchema,
+  agentRuntimeUnclassifiedSpecSchema,
 ])
 
 const agentRuntimeObservedCapabilitiesSchema = z.object({

@@ -54,6 +54,25 @@ describe('runtimePoolSchema', () => {
 })
 
 describe('agentRuntimeSchema', () => {
+  it('preserves a stored unclassified runtime without inferring a contract', () => {
+    const value = {
+      metadata: { name: 'legacy-unclassified', namespace: 'default' },
+      spec: {
+        deployment: { mode: 'external-endpoint', endpoint: 'https://legacy.example.test' },
+        clientAuth: {
+          controllerBearerTokenSecretRef: { name: 'runtime-auth', key: 'controller-token' },
+          operationCapabilitySecretRef: { name: 'runtime-auth', key: 'capability-secret' },
+        },
+        capabilities: { runtimeInstanceID: 'legacy-instance' },
+      },
+      status: { ready: false, message: 'AgentRuntime contractVersion is unclassified' },
+    }
+
+    const parsed = agentRuntimeSchema.parse(value)
+    expect(parsed).toEqual(value)
+    expect(parsed.spec.contractVersion).toBeUndefined()
+  })
+
   it('parses the v2 capability surface', () => {
     const value = {
       metadata: { name: 'external-codex', namespace: 'default' },

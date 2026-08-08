@@ -129,6 +129,20 @@ function agentRuntimeV1(name: string) {
   }
 }
 
+function unclassifiedAgentRuntime(name: string) {
+  return {
+    metadata: { name, namespace: 'default', uid: `${name}-uid` },
+    spec: {
+      deployment: { mode: 'external-endpoint', endpoint: 'https://unclassified.example.test' },
+      clientAuth: {
+        controllerBearerTokenSecretRef: { name: 'auth', key: 'controller-token' },
+        operationCapabilitySecretRef: { name: 'auth', key: 'capability-secret' },
+      },
+    },
+    status: { ready: false, message: 'AgentRuntime contractVersion is unclassified' },
+  }
+}
+
 beforeEach(() => {
   useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
 })
@@ -201,7 +215,7 @@ describe('useAgentRuntimes', () => {
         })
         if (!token) {
           return HttpResponse.json({
-            items: [agentRuntimeV1('runtime-first')],
+            items: [unclassifiedAgentRuntime('runtime-unclassified'), agentRuntimeV1('runtime-first')],
             metadata: { continue: 'runtime-next' },
           })
         }
@@ -213,10 +227,12 @@ describe('useAgentRuntimes', () => {
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     expect(result.current.data?.items.map((item) => item.metadata.name)).toEqual([
+      'runtime-unclassified',
       'runtime-first',
       'runtime-second',
     ])
     expect(result.current.data?.items.map((item) => item.spec.contractVersion)).toEqual([
+      undefined,
       'orka.harness.v1',
       'orka.harness.v2',
     ])

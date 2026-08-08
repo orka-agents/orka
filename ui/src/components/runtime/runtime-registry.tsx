@@ -116,6 +116,32 @@ function RuntimePoolCard({ pool }: { pool: RuntimePool }) {
 function AgentRuntimeCard({ runtime }: { runtime: AgentRuntime }) {
   const observed = runtime.status?.observedCapabilities
 
+  if (runtime.spec.contractVersion === undefined) {
+    return (
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <ExternalLink className="h-4 w-4 text-primary" />
+                {runtime.metadata.name}
+              </CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">{runtime.spec.deployment.endpoint}</p>
+            </div>
+            <Badge variant="secondary" className={stateClass('Degraded')}>Not ready</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 text-sm sm:grid-cols-2">
+            <div><span className="text-muted-foreground">Contract</span><div className="font-mono">Unclassified</div></div>
+            <div><span className="text-muted-foreground">Execution</span><div>Disabled until contractVersion is set</div></div>
+          </div>
+          {runtime.status?.message && <p className="text-sm text-muted-foreground">{runtime.status.message}</p>}
+        </CardContent>
+      </Card>
+    )
+  }
+
   if (runtime.spec.contractVersion === 'orka.harness.v1') {
     const configured = runtime.spec.capabilities
     const hasObservedCapabilities = observed !== undefined
