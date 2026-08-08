@@ -14,6 +14,15 @@ grep -Fq 'for ns in ate-demo "${ORKA_NAMESPACE}"; do' "${substrate_script}"
 grep -Fq 'ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE="${orka_namespace}"' "${label_script}"
 grep -Fq 'namespace: ${orka_namespace}' "${label_script}"
 
+substrate_resource_setup="$(awk '/^create_substrate_resources\(\) {/,/^}/' "${substrate_script}")"
+namespace_create_line="$(grep -nF 'kubectl create namespace "${ORKA_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -' <<<"${substrate_resource_setup}" | cut -d: -f1 || true)"
+secret_loop_line="$(grep -nF 'for ns in ate-demo "${ORKA_NAMESPACE}"; do' <<<"${substrate_resource_setup}" | cut -d: -f1 || true)"
+if [[ ! "${namespace_create_line}" =~ ^[0-9]+$ || ! "${secret_loop_line}" =~ ^[0-9]+$ ]] ||
+  ((namespace_create_line >= secret_loop_line)); then
+  echo 'agent-substrate E2E must create the isolated Orka namespace before writing bootstrap Secrets' >&2
+  exit 1
+fi
+
 for script in "${security_script}" "${substrate_script}" "${label_script}"; do
   if grep -Eq '(^|[[:space:]])-n[[:space:]]+default([[:space:]]|$)|^[[:space:]]*namespace:[[:space:]]+default([[:space:]]|$)|^[[:space:]]*value:[[:space:]]+default([[:space:]]|$)' "${script}"; then
     echo "${script#"${root}/"} still places controller-owned resources in the pre-isolation default namespace" >&2

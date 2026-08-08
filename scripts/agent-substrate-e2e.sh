@@ -781,6 +781,7 @@ create_substrate_resources() {
 
   log "Creating Substrate WorkerPool and ActorTemplate"
   kubectl create namespace ate-demo --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create namespace "${ORKA_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
   for ns in ate-demo "${ORKA_NAMESPACE}"; do
     kubectl -n "${ns}" create secret generic "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}" \
       "--from-literal=${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}=${SUBSTRATE_BOOTSTRAP_TOKEN}" \
