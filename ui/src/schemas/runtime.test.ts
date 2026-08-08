@@ -59,11 +59,8 @@ describe('agentRuntimeSchema', () => {
       metadata: { name: 'legacy-unclassified', namespace: 'default' },
       spec: {
         deployment: { mode: 'external-endpoint', endpoint: 'https://legacy.example.test' },
-        clientAuth: {
-          controllerBearerTokenSecretRef: { name: 'runtime-auth', key: 'controller-token' },
-          operationCapabilitySecretRef: { name: 'runtime-auth', key: 'capability-secret' },
-        },
-        capabilities: { runtimeInstanceID: 'legacy-instance' },
+        clientAuth: { bearerTokenSecretRef: { name: 'legacy-auth', key: 'token' } },
+        capabilities: { toolExecutionModes: ['observed'], supportsCancel: true },
       },
       status: { ready: false, message: 'AgentRuntime contractVersion is unclassified' },
     }

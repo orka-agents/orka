@@ -132,10 +132,7 @@ function AgentRuntimeCard({ runtime }: { runtime: AgentRuntime }) {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-3 text-sm sm:grid-cols-2">
-            <div><span className="text-muted-foreground">Contract</span><div className="font-mono">Unclassified</div></div>
-            <div><span className="text-muted-foreground">Execution</span><div>Disabled until contractVersion is set</div></div>
-          </div>
+          <div className="text-sm"><span className="text-muted-foreground">Contract</span><div className="font-mono">Unclassified</div></div>
           {runtime.status?.message && <p className="text-sm text-muted-foreground">{runtime.status.message}</p>}
         </CardContent>
       </Card>
