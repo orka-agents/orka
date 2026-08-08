@@ -81,6 +81,20 @@ func WithAPIReader(reader client.Reader) Option {
 	}
 }
 
+// WithWatchNamespace confines namespaced control-record lookups to the static
+// controller installation's immutable watch namespace. Cluster-scoped control
+// records, such as BranchClaims, remain unaffected.
+func WithWatchNamespace(namespace string) Option {
+	return func(s *Store) error {
+		namespace = strings.TrimSpace(namespace)
+		if err := validateKubernetesNamespace(namespace); err != nil {
+			return err
+		}
+		s.watchNamespace = namespace
+		return nil
+	}
+}
+
 // WithoutClusterScopedBranchClaims configures the publication-free harness v1
 // control-store path. Session continuity remains Kubernetes-authoritative, but
 // Session cleanup cannot list or mutate the cluster-scoped BranchClaim kind.
@@ -120,6 +134,7 @@ type Store struct {
 	client              client.Client
 	reader              client.Reader
 	controlNamespace    string
+	watchNamespace      string
 	sessionTurns        store.SessionTurnPersistenceStore
 	harnessV1Attempts   store.HarnessV1AttemptStore
 	outbox              store.OutboxPersistenceStore
@@ -194,6 +209,13 @@ func (s *Store) readClient() client.Reader {
 		return nil
 	}
 	return s.client
+}
+
+func (s *Store) namespacedListOptions(options ...client.ListOption) []client.ListOption {
+	if s == nil || s.watchNamespace == "" {
+		return options
+	}
+	return append(options, client.InNamespace(s.watchNamespace))
 }
 
 func (s *Store) requireClient() error {

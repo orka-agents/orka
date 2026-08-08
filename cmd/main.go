@@ -1173,7 +1173,10 @@ func main() {
 	var acpSessionContinuity *controller.ACPSessionContinuity
 	var kubeControlStore *storekube.Store
 	if controlNamespace != "" {
-		controlStoreOptions := []storekube.Option{storekube.WithAPIReader(mgr.GetAPIReader())}
+		controlStoreOptions := []storekube.Option{
+			storekube.WithAPIReader(mgr.GetAPIReader()),
+			storekube.WithWatchNamespace(watchNamespace),
+		}
 		if harnessV1Enabled {
 			controlStoreOptions = append(controlStoreOptions, storekube.WithoutClusterScopedBranchClaims())
 		}

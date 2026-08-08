@@ -315,6 +315,75 @@ func TestGetPromptAttemptUsesConfiguredAPIReader(t *testing.T) {
 	}
 }
 
+func TestNamespacedControlRecordLookupsUseWatchNamespace(t *testing.T) {
+	ctx := context.Background()
+	_, rawClient := newTestStore(t)
+	withWatch, ok := rawClient.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	const watchNamespace = "tenant-a"
+	reader := interceptor.NewClient(withWatch, interceptor.Funcs{
+		List: func(ctx context.Context, delegate client.WithWatch, list client.ObjectList, options ...client.ListOption) error {
+			applied := (&client.ListOptions{}).ApplyOptions(options)
+			if applied.Namespace != watchNamespace {
+				t.Fatalf("%T list namespace = %q, want %q", list, applied.Namespace, watchNamespace)
+			}
+			return delegate.List(ctx, list, options...)
+		},
+	})
+	scopedStore, err := New(
+		rawClient,
+		testControlNamespace,
+		WithAPIReader(reader),
+		WithWatchNamespace(watchNamespace),
+	)
+	if err != nil {
+		t.Fatalf("construct namespaced control store: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		lookup func() error
+	}{
+		{
+			name: "PromptAttempt",
+			lookup: func() error {
+				_, err := scopedStore.findPromptAttemptByID(ctx, "missing-prompt-attempt")
+				return err
+			},
+		},
+		{
+			name: "Publication",
+			lookup: func() error {
+				_, err := scopedStore.findPublicationByID(ctx, "missing-publication")
+				return err
+			},
+		},
+		{
+			name: "ExternalEffect",
+			lookup: func() error {
+				_, err := scopedStore.findExternalEffectByID(ctx, "missing-external-effect")
+				return err
+			},
+		},
+		{
+			name: "RuntimeSessionControl",
+			lookup: func() error {
+				_, err := scopedStore.findSessionControlByUID(ctx, "missing-session")
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.lookup(); !errors.Is(err, controlstore.ErrNotFound) {
+				t.Fatalf("lookup error = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
 func TestGetPromptAttemptReadsLegacySpecWithoutBindingDigests(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, _ := newTestStoreWithEpoch(t)

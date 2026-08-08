@@ -156,7 +156,7 @@ func (s *Store) findPromptAttemptOwnerTask(ctx context.Context, namespace, taskU
 	return found, nil
 }
 
-// GetPromptAttempt returns a PromptAttempt by canonical ID across namespaces.
+// GetPromptAttempt returns a PromptAttempt by canonical ID within the configured watch scope.
 func (s *Store) GetPromptAttempt(ctx context.Context, id string) (*store.PromptAttempt, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -1221,7 +1221,9 @@ func (s *Store) completePromptAttemptCreation(ctx context.Context, object *corev
 
 func (s *Store) findPromptAttemptByID(ctx context.Context, id string) (*corev1alpha1.PromptAttempt, error) {
 	list := &corev1alpha1.PromptAttemptList{}
-	if err := s.readClient().List(ctx, list, client.MatchingLabels{corev1alpha1.ControlRecordIDHashLabel: dnsDigest(id)}); err != nil {
+	if err := s.readClient().List(ctx, list, s.namespacedListOptions(
+		client.MatchingLabels{corev1alpha1.ControlRecordIDHashLabel: dnsDigest(id)},
+	)...); err != nil {
 		return nil, mapKubernetesError("list prompt attempts", err)
 	}
 	var match *corev1alpha1.PromptAttempt

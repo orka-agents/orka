@@ -613,7 +613,7 @@ func (s *Store) releaseFinalizedSessionLease(ctx context.Context, object *corev1
 
 func (s *Store) findSessionControlByUID(ctx context.Context, sessionUID string) (*corev1alpha1.RuntimeSessionControl, error) {
 	list := &corev1alpha1.RuntimeSessionControlList{}
-	if err := s.readClient().List(ctx, list); err != nil {
+	if err := s.readClient().List(ctx, list, s.namespacedListOptions()...); err != nil {
 		return nil, mapKubernetesError("list runtime session controls", err)
 	}
 	var match *corev1alpha1.RuntimeSessionControl

@@ -306,7 +306,9 @@ func (s *Store) completePublicationCreation(ctx context.Context, object *corev1a
 
 func (s *Store) findPublicationByID(ctx context.Context, id string) (*corev1alpha1.Publication, error) {
 	list := &corev1alpha1.PublicationList{}
-	if err := s.readClient().List(ctx, list, client.MatchingLabels{corev1alpha1.ControlRecordIDHashLabel: dnsDigest(id)}); err != nil {
+	if err := s.readClient().List(ctx, list, s.namespacedListOptions(
+		client.MatchingLabels{corev1alpha1.ControlRecordIDHashLabel: dnsDigest(id)},
+	)...); err != nil {
 		return nil, mapKubernetesError("list publications", err)
 	}
 	var match *corev1alpha1.Publication
