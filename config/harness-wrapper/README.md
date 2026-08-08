@@ -35,10 +35,12 @@ Before applying the base:
    fi
    ```
 
-The wrapper has a dedicated ServiceAccount with token automount disabled, a
-PVC-backed admission ledger, controller-only ingress, and egress limited to DNS
-and public HTTPS provider/read-only SCM endpoints. Do not mount Git, forge,
-publisher, provider-proxy, or other publication credentials into this Pod.
+The wrapper has a dedicated ServiceAccount with broad token automount disabled,
+a short-lived projected token used only to authenticate artifact uploads to its
+controller, a PVC-backed admission ledger, controller-only ingress, and egress
+limited to that controller, DNS, and public HTTPS provider/read-only SCM
+endpoints. Do not mount Git, forge, publisher, provider-proxy, or other
+publication credentials into this Pod.
 Terminal and rejected ledger rows become reclaimable only after the controller
 acknowledges their exact durable settlement. The shipped 720-hour retention
 window preserves duplicate-suppression and audit/backup evidence before bounded

@@ -1925,6 +1925,9 @@ func TestHarnessV1DispatcherRetriesSettlementAcknowledgementBeforeProjection(t *
 	if !harnessV1AttemptProjectionMatches(latest, fixture.attempt) {
 		t.Fatalf("terminal attempt was not projected after settlement acknowledgement: %+v", latest.Status.HarnessRuntime)
 	}
+	if latest.Status.ResultRef == nil || !latest.Status.ResultRef.Available {
+		t.Fatalf("terminal result reference = %#v, want available", latest.Status.ResultRef)
+	}
 	if protocolClient.settleCalls != 2 || protocolClient.startCalls != 0 || protocolClient.statusCalls != 0 {
 		t.Fatalf(
 			"settlement recovery calls: settlementAck=%d start=%d status=%d, want 2/0/0",
@@ -1961,6 +1964,14 @@ func TestHarnessV1DispatcherPersistsInlineFailedResultBeforeSettlement(t *testin
 	if _, err := fixture.durable.GetResult(fixture.ctx, fixture.task.Namespace, fixture.task.Name); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetResult() before persistence error = %v, want ErrNotFound", err)
 	}
+	latest := &corev1alpha1.Task{}
+	key := types.NamespacedName{Namespace: fixture.task.Namespace, Name: fixture.task.Name}
+	if err := fixture.dispatcher.Client.Get(fixture.ctx, key, latest); err != nil {
+		t.Fatal(err)
+	}
+	if latest.Status.ResultRef != nil {
+		t.Fatalf("result reference before persistence = %#v, want nil", latest.Status.ResultRef)
+	}
 
 	if err := fixture.dispatcher.settleTerminalFrame(
 		fixture.ctx, fixture.task, protocolClient, fixture.request, fixture.attempt, fixture.fence, frame,
@@ -1974,6 +1985,12 @@ func TestHarnessV1DispatcherPersistsInlineFailedResultBeforeSettlement(t *testin
 	}
 	if string(result) != frame.Failed.Result {
 		t.Fatalf("result = %q, want %q", result, frame.Failed.Result)
+	}
+	if err := fixture.dispatcher.Client.Get(fixture.ctx, key, latest); err != nil {
+		t.Fatal(err)
+	}
+	if latest.Status.ResultRef == nil || !latest.Status.ResultRef.Available {
+		t.Fatalf("inline failure result reference = %#v, want available", latest.Status.ResultRef)
 	}
 	if protocolClient.fetchCalls != 0 || protocolClient.ackCalls != 0 || protocolClient.settleCalls != 1 {
 		t.Fatalf(

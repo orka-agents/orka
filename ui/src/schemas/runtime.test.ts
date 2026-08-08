@@ -101,7 +101,6 @@ describe('agentRuntimeSchema', () => {
             maxPendingPermissions: 4,
             maxWorkspaceDeltaBytes: 100000,
           },
-          supportsDrain: true,
           supportsPublicationFinalization: true,
           workspaceGovernance: {
             mode: 'strict-governed',
@@ -121,6 +120,7 @@ describe('agentRuntimeSchema', () => {
     const parsed = agentRuntimeSchema.parse(value)
     expect(parsed.spec.contractVersion).toBe('orka.harness.v2')
     if (parsed.spec.contractVersion !== 'orka.harness.v2') throw new Error('expected v2 runtime')
+    expect(parsed.spec.capabilities.supportsDrain).toBe(false)
     expect(parsed.spec.capabilities.profile.adapterName).toBe('codex-acp')
     expect(parsed.spec.capabilities.workspaceGovernance.mode).toBe('strict-governed')
 

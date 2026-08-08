@@ -93,7 +93,6 @@ function agentRuntime(name: string) {
           maxPendingPermissions: 4,
           maxWorkspaceDeltaBytes: 100000,
         },
-        supportsDrain: true,
         workspaceGovernance: {
           mode: 'strict-governed',
           trusted: false,
@@ -236,6 +235,10 @@ describe('useAgentRuntimes', () => {
       'orka.harness.v1',
       'orka.harness.v2',
     ])
+    expect(result.current.data?.items.at(-1)?.spec).toMatchObject({
+      contractVersion: 'orka.harness.v2',
+      capabilities: { supportsDrain: false },
+    })
     expect(seen).toEqual([
       { namespace: 'default', limit: '100', token: null },
       { namespace: 'default', limit: '100', token: 'runtime-next' },

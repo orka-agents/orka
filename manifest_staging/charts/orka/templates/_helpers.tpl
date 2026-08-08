@@ -152,6 +152,8 @@ spec:
           value: multi
         - name: ORKA_HARNESS_WRAPPER_LISTEN_ADDR
           value: :8080
+        - name: ORKA_CONTROLLER_URL
+          value: http://{{ include "orka.fullname" $root }}.{{ $root.Release.Namespace }}.svc:{{ $root.Values.service.port }}
         - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
           value: /var/run/orka/harness-wrapper-auth/token
         - name: ORKA_HARNESS_WRAPPER_TLS_CERT_FILE
@@ -178,6 +180,9 @@ spec:
           readOnly: true
         - name: tls
           mountPath: /var/run/orka/harness-wrapper-tls
+          readOnly: true
+        - name: controller-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
           readOnly: true
         - name: ledger
           mountPath: /var/lib/orka/harness-v1
@@ -234,6 +239,13 @@ spec:
             path: tls.key
           - key: ca.crt
             path: ca.crt
+    - name: controller-api-token
+      projected:
+        defaultMode: 0400
+        sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
     - name: ledger
       persistentVolumeClaim:
         claimName: {{ include "orka.harnessV1LedgerName" $root }}

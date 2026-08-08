@@ -1390,6 +1390,8 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 		"--set-string", "harnessV1.tls.rolloutNonce=certificate-1",
 		"--set-string", "harnessV1.ledger.retention=168h",
+		"--set-string", "service.port=18080",
+		"--set-string", "controller.apiPort=18081",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
@@ -1416,6 +1418,8 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"serviceAccountName: test-orka-agent-harness-wrapper",
 		"automountServiceAccountToken: false",
 		"name: https",
+		"name: ORKA_CONTROLLER_URL",
+		"value: http://test-orka.orka-test.svc:18080",
 		"name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE",
 		"value: /var/run/orka/harness-wrapper-auth/token",
 		"name: ORKA_HARNESS_WRAPPER_TLS_CERT_FILE",
@@ -1432,6 +1436,13 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"claimName: test-orka-harness-v1-ledger",
 		`secretName: "harness-wrapper-auth"`,
 		`secretName: "harness-wrapper-tls"`,
+		"name: controller-api-token",
+		"mountPath: /var/run/secrets/kubernetes.io/serviceaccount",
+		"projected:",
+		"defaultMode: 0400",
+		"serviceAccountToken:",
+		"path: token",
+		"expirationSeconds: 3600",
 		`orka.ai/harness-v1-tls-rollout-nonce: "certificate-1"`,
 		"key: tls.crt",
 		"key: tls.key",
@@ -1475,7 +1486,16 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"templates/harness-wrapper-networkpolicy.yaml": {
 			"kind: NetworkPolicy",
 			"policyTypes: [Ingress, Egress]",
-			"app.kubernetes.io/component: controller",
+			"egress:\n" +
+				"    - to:\n" +
+				"        - podSelector:\n" +
+				"            matchLabels:\n" +
+				"              app.kubernetes.io/name: orka\n" +
+				"              app.kubernetes.io/instance: test\n" +
+				"              app.kubernetes.io/component: controller\n" +
+				"      ports:\n" +
+				"        - protocol: TCP\n" +
+				"          port: 18081",
 			"kubernetes.io/metadata.name: kube-system",
 			"cidr: 0.0.0.0/0",
 			"cidr: ::/0",

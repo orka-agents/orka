@@ -212,6 +212,7 @@ type taskTerminalProjection struct {
 	Message        string                             `json:"message,omitempty"`
 	BindingDigest  string                             `json:"bindingDigest,omitempty"`
 	HarnessRuntime *corev1alpha1.HarnessRuntimeStatus `json:"harnessRuntime,omitempty"`
+	ResultRef      *corev1alpha1.ResultReference      `json:"resultRef,omitempty"`
 	Execution      corev1alpha1.TaskExecutionStatus   `json:"execution"`
 	Delivery       *corev1alpha1.TaskDeliveryStatus   `json:"delivery,omitempty"`
 }
@@ -278,6 +279,9 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			task.Status.Phase = payload.Phase
 			task.Status.Message = payload.Message
 			task.Status.Attempts = payload.Attempt
+			if payload.ResultRef != nil {
+				task.Status.ResultRef = payload.ResultRef.DeepCopy()
+			}
 			harnessRuntime := payload.HarnessRuntime.DeepCopy()
 			harnessRuntime.LastTransitionTime = &now
 			task.Status.HarnessRuntime = harnessRuntime

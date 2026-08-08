@@ -417,7 +417,7 @@ func (d *HarnessV1Dispatcher) finalizeHarnessV1TaskSession(
 	payload, err := json.Marshal(taskTerminalProjection{
 		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: attempt.Attempt,
 		Phase: phase, Message: message, BindingDigest: attempt.BindingDigest,
-		HarnessRuntime: harnessV1RuntimeProjection(task, attempt, message),
+		HarnessRuntime: harnessV1RuntimeProjection(task, attempt, message), ResultRef: task.Status.ResultRef.DeepCopy(),
 	})
 	if err != nil {
 		return false, err

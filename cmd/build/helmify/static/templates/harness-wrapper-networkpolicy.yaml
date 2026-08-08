@@ -22,10 +22,19 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-  # V1 compatibility workloads may reach public HTTPS provider and read-only
-  # SCM endpoints. Private, local, link-local, multicast, and documentation
-  # networks remain denied, and no in-cluster publisher/proxy egress is granted.
+  # V1 compatibility workloads may reach their release-local controller plus
+  # public HTTPS provider and read-only SCM endpoints. Private, local,
+  # link-local, multicast, and documentation networks remain denied, and no
+  # in-cluster publisher/proxy egress is granted.
   egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "orka.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: controller
+      ports:
+        - protocol: TCP
+          port: {{ .Values.controller.apiPort }}
     - to:
         - namespaceSelector:
             matchLabels:

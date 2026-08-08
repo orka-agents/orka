@@ -1478,7 +1478,7 @@ func (d *HarnessV1Dispatcher) settleTerminalFrameWithReceiptDigest(
 				return fmt.Errorf("fetch harness v1 terminal output: %w", err)
 			}
 		}
-		if err := d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
+		if err := d.saveTaskResult(ctx, task, result); err != nil {
 			return err
 		}
 		if frame.Completed.OutputRef != "" {
@@ -1501,7 +1501,7 @@ func (d *HarnessV1Dispatcher) settleTerminalFrameWithReceiptDigest(
 			if err != nil {
 				return fmt.Errorf("fetch harness v1 failed-turn output: %w", err)
 			}
-			if err := d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
+			if err := d.saveTaskResult(ctx, task, result); err != nil {
 				return err
 			}
 			return d.finishAttemptWithOutputAcknowledgement(
@@ -1510,7 +1510,7 @@ func (d *HarnessV1Dispatcher) settleTerminalFrameWithReceiptDigest(
 			)
 		}
 		if frame.Failed != nil && frame.Failed.Result != "" {
-			if err := d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, []byte(frame.Failed.Result)); err != nil {
+			if err := d.saveTaskResult(ctx, task, []byte(frame.Failed.Result)); err != nil {
 				return err
 			}
 		}
@@ -2160,6 +2160,37 @@ func (d *HarnessV1Dispatcher) projectAttemptState(
 			latest.Status.CompletionTime = &now
 		}
 		return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+	})
+}
+
+func (d *HarnessV1Dispatcher) saveTaskResult(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	result []byte,
+) error {
+	if err := d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
+		return err
+	}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := d.Client.Get(ctx, key, latest); err != nil {
+			return err
+		}
+		if latest.UID != task.UID {
+			return errors.New("task UID changed before harness v1 result projection")
+		}
+		if latest.Status.ResultRef != nil && latest.Status.ResultRef.Available {
+			task.Status = latest.Status
+			return nil
+		}
+		base := latest.DeepCopy()
+		latest.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+		if err := d.Client.Status().Patch(ctx, latest, client.MergeFrom(base)); err != nil {
+			return err
+		}
+		task.Status = latest.Status
+		return nil
 	})
 }
 

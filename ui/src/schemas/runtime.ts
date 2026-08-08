@@ -174,7 +174,7 @@ const agentRuntimeV2SpecSchema = z.object({
     runtimeInstanceID: z.string(),
     profile: agentRuntimeProfileSchema,
     limits: agentRuntimeLimitsSchema,
-    supportsDrain: z.boolean(),
+    supportsDrain: z.boolean().default(false),
     supportsPublicationFinalization: z.boolean().optional(),
     workspaceGovernance: workspaceGovernanceSchema,
   }).strict(),

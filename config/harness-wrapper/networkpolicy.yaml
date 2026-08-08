@@ -27,9 +27,18 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-  # Permit only DNS plus public HTTPS for provider APIs and credential-free,
-  # read-only SCM access. Private and local destination ranges remain denied.
+  # Permit only the dedicated controller, DNS, and public HTTPS for provider
+  # APIs and credential-free, read-only SCM access. Private and local
+  # destination ranges remain denied.
   egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orka
+              control-plane: controller-manager
+      ports:
+        - protocol: TCP
+          port: 8080
     - to:
         - namespaceSelector:
             matchLabels:
