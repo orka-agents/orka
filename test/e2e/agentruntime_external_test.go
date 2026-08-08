@@ -56,9 +56,10 @@ var _ = Describe("AgentRuntime external dispatch", func() {
 		cmd := exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
 		cmd.Stdin = stringReader(manifest)
 		_, err := utils.Run(cmd)
-		Expect(err).To(MatchError(ContainSubstring(
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(
 			`AgentRuntime contractVersion must match namespace execution mode "harness-v2"`,
-		)))
+		))
 	})
 
 	It("fails closed at the external Task dispatch support boundary", func() {

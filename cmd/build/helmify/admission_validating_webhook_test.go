@@ -184,6 +184,11 @@ func TestSharedAdmissionAuthorizesCanonicalProductionController(t *testing.T) {
 				canonicalProductionControllerUsername, prefix, args)
 		}
 	}
+	for _, serviceAccount := range []string{"orka-ai-worker", "orka-vendor-worker"} {
+		if !commaListArgumentContains(args, "--task-provenance-trusted-service-accounts=", serviceAccount) {
+			t.Errorf("admission args do not authorize canonical worker %q: %#v", serviceAccount, args)
+		}
+	}
 }
 
 func TestSharedTaskWebhooksBypassExactControllerCleanup(t *testing.T) {
