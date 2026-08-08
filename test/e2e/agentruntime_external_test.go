@@ -55,9 +55,9 @@ var _ = Describe("AgentRuntime external dispatch", func() {
 		}`, namespace)
 		cmd := exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
 		cmd.Stdin = stringReader(manifest)
-		_, err := utils.Run(cmd)
+		output, err := utils.Run(cmd)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring(
+		Expect(output).To(ContainSubstring(
 			`AgentRuntime contractVersion must match namespace execution mode "harness-v2"`,
 		))
 	})
