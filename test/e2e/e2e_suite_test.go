@@ -145,9 +145,11 @@ var _ = BeforeSuite(func() {
 		"COPILOT_PROXY_BASE_URL",
 	)
 
-	By("creating manager namespace")
-	cmd = exec.Command("kubectl", "create", "ns", namespace)
-	_, _ = utils.Run(cmd) // ignore if already exists
+	By("bootstrapping manager namespace identity")
+	cmd = exec.Command("bash", filepath.Join(projectDir, "scripts", "lib", "ensure-static-mode-namespace.sh"),
+		"kubectl", namespace, "harness-v2")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to bootstrap manager namespace identity")
 
 	By("labeling the namespace to enforce the restricted security policy")
 	cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
@@ -219,6 +221,11 @@ var _ = BeforeSuite(func() {
 			g.Expect(err).NotTo(HaveOccurred(), "CRD %s not established", crd)
 		}
 	}, 60*time.Second, time.Second).Should(Succeed())
+
+	By("bootstrapping test-only admission TLS")
+	cmd = exec.Command("bash", filepath.Join(projectDir, "scripts", "lib", "e2e-admission-tls.sh"))
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to bootstrap admission TLS")
 
 	By("deploying the controller-manager")
 	cmd = exec.Command("make", "deploy",

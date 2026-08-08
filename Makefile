@@ -7,11 +7,16 @@ VERSION := v0.1.1
 IMG ?= controller:latest
 AI_WORKER_IMG ?= ghcr.io/orka-agents/orka/ai-worker:latest
 GENERAL_WORKER_IMG ?= ghcr.io/orka-agents/orka/general-worker:latest
+HARNESS_WRAPPER_IMG ?= ghcr.io/orka-agents/orka/agent-harness-wrapper:latest
 ACP_CODEX_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-codex-runtime:latest
 ACP_CLAUDE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-claude-runtime:latest
 ACP_COPILOT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-copilot-runtime:latest
 ACP_OPENCODE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-opencode-runtime:latest
 WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
+RUN_CONTROLLER_MODE ?= harness-v2
+RUN_WATCH_NAMESPACE ?= orka-system
+RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE ?=
+RUN_EXECUTION_MODE_CONTROLLER_USERNAMES ?= $(shell "$(KUBECTL)" auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -129,6 +134,10 @@ verify-helm-crds: ## Verify generated and promoted Helm chart CRDs are identical
 test-helm-crd-sync: ## Test Helm CRD synchronization and drift detection.
 	bash scripts/tests/sync-helm-crds-test.sh
 
+.PHONY: test-static-mode-deploy-gate
+test-static-mode-deploy-gate: ## Test the static harness-mode CRD deployment gate.
+	bash scripts/tests/static-mode-deploy-gate-test.sh
+
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -205,6 +214,7 @@ test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and 
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(AI_WORKER_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(GENERAL_WORKER_IMG) --name $(KIND_CLUSTER)
+	$(KIND) load docker-image $(HARNESS_WRAPPER_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(ACP_CODEX_RUNTIME_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(ACP_CLAUDE_RUNTIME_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(ACP_COPILOT_RUNTIME_IMG) --name $(KIND_CLUSTER)
@@ -297,8 +307,13 @@ ui-test-coverage: ## Run UI unit tests with coverage.
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ui-build ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+build: manifests generate fmt vet ui-build ## Build manager and admission binaries.
+	go build -o bin/manager ./cmd
+	go build -o bin/orka-admission ./cmd/orka-admission
+
+.PHONY: build-admission
+build-admission: ## Build the stateless admission binary.
+	go build -o bin/orka-admission ./cmd/orka-admission
 
 
 .PHONY: docs-cli
@@ -318,7 +333,12 @@ build-all: build build-cli ## Build all binaries.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+	POD_NAMESPACE="$(RUN_WATCH_NAMESPACE)" go run ./cmd --leader-elect=true \
+		--controller-mode="$(RUN_CONTROLLER_MODE)" \
+		--watch-namespace="$(RUN_WATCH_NAMESPACE)" \
+		--agent-execution-snapshot-key-file="$(RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE)" \
+		--enforce-namespace-isolation=true \
+		--execution-mode-controller-usernames="$(RUN_EXECUTION_MODE_CONTROLLER_USERNAMES)"
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
@@ -338,6 +358,10 @@ docker-build-ai-worker: ## Build docker image for the AI worker.
 .PHONY: docker-build-general-worker
 docker-build-general-worker: ## Build docker image for the general worker.
 	$(CONTAINER_TOOL) build -t ${GENERAL_WORKER_IMG} -f workers/general/Dockerfile .
+
+.PHONY: docker-build-harness-wrapper
+docker-build-harness-wrapper: ## Build the opt-in harness v1 compatibility wrapper image.
+	$(CONTAINER_TOOL) build -t ${HARNESS_WRAPPER_IMG} -f workers/harness/Dockerfile .
 
 .PHONY: docker-build-acp-codex-runtime
 docker-build-acp-codex-runtime: ## Build the immutable Codex ACP runtime image.
@@ -367,6 +391,10 @@ docker-push-ai-worker: ## Push docker image for the AI worker.
 docker-push-general-worker: ## Push docker image for the general worker.
 	$(CONTAINER_TOOL) push ${GENERAL_WORKER_IMG}
 
+.PHONY: docker-push-harness-wrapper
+docker-push-harness-wrapper: ## Push the opt-in harness v1 compatibility wrapper image.
+	$(CONTAINER_TOOL) push ${HARNESS_WRAPPER_IMG}
+
 .PHONY: docker-push-acp-codex-runtime
 docker-push-acp-codex-runtime: ## Push the immutable Codex ACP runtime image.
 	$(CONTAINER_TOOL) push ${ACP_CODEX_RUNTIME_IMG}
@@ -388,10 +416,10 @@ docker-push-workspace-publisher: ## Push the clean-room workspace publisher imag
 	$(CONTAINER_TOOL) push ${WORKSPACE_PUBLISHER_IMG}
 
 .PHONY: docker-build-all
-docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-acp-codex-runtime docker-build-acp-claude-runtime docker-build-acp-copilot-runtime docker-build-acp-opencode-runtime docker-build-workspace-publisher ## Build all docker images.
+docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-harness-wrapper docker-build-acp-codex-runtime docker-build-acp-claude-runtime docker-build-acp-copilot-runtime docker-build-acp-opencode-runtime docker-build-workspace-publisher ## Build all docker images.
 
 .PHONY: docker-push-all
-docker-push-all: docker-push docker-push-ai-worker docker-push-general-worker docker-push-acp-codex-runtime docker-push-acp-claude-runtime docker-push-acp-copilot-runtime docker-push-acp-opencode-runtime docker-push-workspace-publisher ## Push all docker images.
+docker-push-all: docker-push docker-push-ai-worker docker-push-general-worker docker-push-harness-wrapper docker-push-acp-codex-runtime docker-push-acp-claude-runtime docker-push-acp-copilot-runtime docker-push-acp-opencode-runtime docker-push-workspace-publisher ## Push all docker images.
 
 ##@ Deployment
 
@@ -425,22 +453,57 @@ verify-acp-runtime-images: ## Require digest-pinned ACP runtime images for suppo
 		fi; \
 	done
 
-.PHONY: verify-acp-crd-cutover
-verify-acp-crd-cutover: ## Refuse workload deployment until the ACP v2 hard cutover is complete.
-	@for crd in runtimepools promptattempts runtimesessioncontrols branchclaims publications controllerepochs externaleffects; do \
-		"$(KUBECTL)" get crd "$$crd.core.orka.ai" >/dev/null || { echo "missing ACP control CRD: $$crd.core.orka.ai; run scripts/upgrade-orka-crds.sh first" >&2; exit 1; }; \
+.PHONY: verify-static-mode-crds
+verify-static-mode-crds: ## Refuse workload deployment until the platform-owned shared CRD bundle is ready.
+	@for crd in \
+		agentruntimes.core.orka.ai \
+		agents.core.orka.ai \
+		branchclaims.core.orka.ai \
+		controllerepochs.core.orka.ai \
+		executionworkspaceclasses.workspace.orka.ai \
+		executionworkspacepools.workspace.orka.ai \
+		executionworkspaceproviders.workspace.orka.ai \
+		executionworkspaces.workspace.orka.ai \
+		externaleffects.core.orka.ai \
+		fakepoolparameters.fake.workspace.orka.ai \
+		fakeproviderconfigs.fake.workspace.orka.ai \
+		gatewaybindings.gateway.orka.ai \
+		gatewayclasses.gateway.orka.ai \
+		gateways.gateway.orka.ai \
+		outboundaccesspolicies.core.orka.ai \
+		promptattempts.core.orka.ai \
+		providers.core.orka.ai \
+		publications.core.orka.ai \
+		repositorymonitors.core.orka.ai \
+		repositoryscans.core.orka.ai \
+		runtimepools.core.orka.ai \
+		runtimesessioncontrols.core.orka.ai \
+		skills.core.orka.ai \
+		substrateactorpools.core.orka.ai \
+		tasks.core.orka.ai \
+		tools.core.orka.ai; do \
+		"$(KUBECTL)" get crd "$$crd" >/dev/null || { echo "missing shared CRD: $$crd; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }; \
+		"$(KUBECTL)" wait --for=condition=Established --timeout=60s "crd/$$crd" >/dev/null || { echo "shared CRD is not Established: $$crd" >&2; exit 1; }; \
+	done
+	@for crd in agentexecutioncontrols.core.orka.ai agentexecutionpolicies.core.orka.ai agentexecutionadjudications.core.orka.ai; do \
+		if "$(KUBECTL)" get crd "$$crd" >/dev/null 2>&1; then \
+			echo "unsupported superseded coexistence CRD remains installed: $$crd" >&2; \
+			exit 1; \
+		fi; \
 	done
 	@"$(KUBECTL)" get crd agentruntimes.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] | all(. == ["orka.harness.v2"])' >/dev/null || \
-		{ echo "AgentRuntime CRD is not the ACP v2-only schema; run scripts/upgrade-orka-crds.sh" >&2; exit 1; }
-	@if "$(KUBECTL)" get agentruntimes.core.orka.ai -A -o json | jq -e 'any(.items[]?; .spec.contractVersion == "orka.harness.v1")' >/dev/null; then \
-		echo "legacy orka.harness.v1 AgentRuntime objects remain" >&2; exit 1; \
-	fi
-	@KUBECTL="$(KUBECTL)" scripts/check-legacy-wrapper-resources.sh
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] as $$enums | ($$enums | length) > 0 and ($$enums | all(sort == ["orka.harness.v1","orka.harness.v2"]))' >/dev/null || \
+		{ echo "AgentRuntime CRD is not the shared orka.harness.v1/orka.harness.v2 schema; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
+	@"$(KUBECTL)" get crd agents.core.orka.ai -o json | jq -e \
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.runtime as $$runtime | (((($$runtime.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and ((($$runtime["x-kubernetes-validations"] // []) | map(.message) | index("runtime.contractVersion is immutable once set")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
+		{ echo "Agent CRD is missing the immutable shared contract selector; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
+	@"$(KUBECTL)" get crd tasks.core.orka.ai -o json | jq -e \
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema as $$schema | $$schema.properties.status as $$status | ((($$status.properties.agentExecutionBinding.type // "") == "object") and ((($$status.properties.agentExecutionBinding.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and (($$status.properties | has("agentExecutionNoExecution")) | not) and (($$status.properties | has("agentExecutionQuarantine")) | not) and (($$status.properties | has("agentExecutionResolutionRef")) | not) and ((($$status["x-kubernetes-validations"] // []) | map(.message) | index("agentExecutionBinding is write-once and immutable")) != null) and ((($$schema["x-kubernetes-validations"] // []) | map(.message) | index("Task spec is immutable after execution authority is recorded")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
+		{ echo "Task CRD is missing the static-mode execution-authority schema; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
 
 .PHONY: deploy
-deploy: verify-acp-runtime-images verify-acp-crd-cutover manifests kustomize ## Deploy ACP workloads after verified CRD hard cutover.
-	@"$(KUBECTL)" create namespace orka-system --dry-run=client -o yaml | "$(KUBECTL)" apply -f -
+deploy: verify-acp-runtime-images verify-static-mode-crds manifests kustomize ## Deploy the static harness-v2 installation after the shared CRD wave.
+	@bash "$(CURDIR)/scripts/lib/ensure-static-mode-namespace.sh" "$(KUBECTL)" orka-system harness-v2
 	@if ! "$(KUBECTL)" -n orka-system get secret acp-artifact-capability >/dev/null 2>&1; then \
 		secret="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
 		"$(KUBECTL)" -n orka-system create secret generic acp-artifact-capability --from-literal=capability-secret="$$secret"; \
@@ -466,6 +529,7 @@ deploy: verify-acp-runtime-images verify-acp-crd-cutover manifests kustomize ## 
 			"${ACP_CODEX_RUNTIME_IMG}" "${ACP_CLAUDE_RUNTIME_IMG}" "${ACP_COPILOT_RUNTIME_IMG}" "${ACP_OPENCODE_RUNTIME_IMG}"; \
 		cd "$$tmp/config/acp-production"; \
 		"$(KUSTOMIZE)" edit set image \
+			controller=${IMG} \
 			ghcr.io/orka-agents/orka=${IMG} \
 			docker.io/sozercan/orka-workspace-publisher=${WORKSPACE_PUBLISHER_IMG}; \
 		"$(CURDIR)/scripts/apply-acp-production.sh" "$$PWD" "$(KUSTOMIZE)" "$(KUBECTL)"

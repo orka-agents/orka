@@ -54,6 +54,8 @@ type SessionCleanupBranchClaim struct {
 	ExpectedOwnerUID      string                  `json:"expectedOwnerUid"`
 	ExpectedLastVerified  RemoteRefState          `json:"expectedLastVerified"`
 	ExpectedAvailability  BranchClaimAvailability `json:"expectedAvailability"`
+	ExpectedBlockedReason string                  `json:"expectedBlockedReason,omitempty"`
+	ExpectedPublicationID string                  `json:"expectedPublicationId,omitempty"`
 	ExpectedRequestDigest string                  `json:"expectedRequestDigest"`
 }
 

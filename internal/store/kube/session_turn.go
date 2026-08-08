@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -49,12 +51,15 @@ func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessi
 	if err := s.verifyMirroredSessionLease(ctx, sessionObject, *control.Lease); err != nil {
 		return nil, err
 	}
-	attempt, err := s.GetPromptAttempt(ctx, normalized.PromptAttemptID)
+	evidence, err := s.loadSessionTurnExecutionEvidence(ctx, control, normalized)
 	if err != nil {
-		return nil, fmt.Errorf("session turn prompt attempt: %w", err)
-	}
-	if err := validateSessionTurnPromptBinding(*attempt, normalized.Key); err != nil {
 		return nil, err
+	}
+	if evidence.harnessV1 != nil && evidence.harnessV1.State != store.HarnessV1AttemptPrepared {
+		return nil, controlConflict(
+			"new harness v1 SessionTurn must be opened while attempt %q is Prepared, got %s",
+			normalized.PromptAttemptID, evidence.harnessV1.State,
+		)
 	}
 	return s.sessionTurns.CreateSessionTurnRecord(ctx, store.CreateSessionTurnRecordRequest{
 		Turn:        normalized,
@@ -116,14 +121,14 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	if err := s.verifyMirroredSessionLease(ctx, sessionObject, *control.Lease); err != nil {
 		return nil, err
 	}
-	attempt, err := s.GetPromptAttempt(ctx, turn.PromptAttemptID)
+	evidence, err := s.loadSessionTurnExecutionEvidence(ctx, control, *turn)
 	if err != nil {
-		return nil, fmt.Errorf("finalize prompt attempt: %w", err)
-	}
-	if err := validatePromptAttemptForCrossStoreFinalization(*attempt, normalized); err != nil {
 		return nil, err
 	}
-	plan, err := s.buildCrossStoreFinalizationPlan(ctx, control, *turn, *attempt, normalized)
+	if err := validateSessionTurnExecutionForFinalization(evidence, normalized); err != nil {
+		return nil, err
+	}
+	plan, err := s.buildCrossStoreFinalizationPlan(ctx, control, *turn, evidence, normalized)
 	if err != nil {
 		return nil, err
 	}
@@ -210,22 +215,21 @@ func (s *Store) completePersistedSessionTurnFinalization(
 		!projection.InitialAvailableAt.Equal(turn.ProjectionAvailableAt) {
 		return nil, controlConflict("outbox projection %q does not match persisted session turn %q", projection.ID, turn.ID)
 	}
-	attempt, err := s.GetPromptAttempt(ctx, turn.PromptAttemptID)
-	if err != nil {
-		return nil, fmt.Errorf("resume finalized prompt attempt: %w", err)
-	}
-	expectedLeaseRequestDigest, err := store.SessionMutationLeaseRequestDigest(
-		turn.Key.SessionUID, turn.Key.LeaseGeneration, turn.Key.TaskUID, turn.Key.Attempt, turn.Key.PromptID, attempt.RequestDigest,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("derive finalized Session Lease request digest: %w", err)
-	}
-
 	sessionObject, err := s.findSessionControlByUID(ctx, turn.Key.SessionUID)
 	if err != nil {
 		return nil, err
 	}
 	control := sessionControlFromObject(sessionObject)
+	evidence, err := s.loadSessionTurnExecutionEvidence(ctx, control, turn)
+	if err != nil {
+		return nil, err
+	}
+	expectedLeaseRequestDigest, err := store.SessionMutationLeaseRequestDigest(
+		turn.Key.SessionUID, turn.Key.LeaseGeneration, turn.Key.TaskUID, turn.Key.Attempt, turn.Key.PromptID, evidence.requestDigest,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("derive finalized Session Lease request digest: %w", err)
+	}
 	if control.LeaseGeneration > turn.Key.LeaseGeneration {
 		if err := s.activatePersistedSessionTurnProjection(ctx, turn, projection, fence); err != nil {
 			return nil, err
@@ -254,12 +258,12 @@ func (s *Store) completePersistedSessionTurnFinalization(
 		Projection:             *projection,
 		FinalizedAt:            turn.FinalizedAt.UTC(),
 	}
-	if err := validatePromptAttemptForCrossStoreFinalization(*attempt, request); err != nil {
+	if err := validateSessionTurnExecutionForFinalization(evidence, request); err != nil {
 		return nil, err
 	}
 	plan := crossStoreFinalizationPlan{}
 	if precomputedPlan == nil {
-		plan, err = s.buildCrossStoreFinalizationPlan(ctx, control, turn, *attempt, request)
+		plan, err = s.buildCrossStoreFinalizationPlan(ctx, control, turn, evidence, request)
 		if err != nil {
 			return nil, err
 		}
@@ -314,6 +318,90 @@ func (s *Store) activatePersistedSessionTurnProjection(
 
 const sessionTurnAggregateKind = "SessionTurn"
 
+type sessionTurnExecutionEvidence struct {
+	prompt        *store.PromptAttempt
+	harnessV1     *store.HarnessV1Attempt
+	requestDigest string
+}
+
+func (s *Store) loadSessionTurnExecutionEvidence(
+	ctx context.Context,
+	control store.SessionControl,
+	turn store.SessionTurn,
+) (sessionTurnExecutionEvidence, error) {
+	prompt, promptErr := s.GetPromptAttempt(ctx, turn.PromptAttemptID)
+	if promptErr == nil {
+		if err := validateSessionTurnPromptBinding(*prompt, turn.Key); err != nil {
+			return sessionTurnExecutionEvidence{}, err
+		}
+		return sessionTurnExecutionEvidence{prompt: prompt, requestDigest: prompt.RequestDigest}, nil
+	}
+	if !errors.Is(promptErr, store.ErrNotFound) {
+		return sessionTurnExecutionEvidence{}, fmt.Errorf("session turn prompt attempt: %w", promptErr)
+	}
+	if s.harnessV1Attempts == nil || turn.Key.Attempt > int64(^uint32(0)>>1) {
+		return sessionTurnExecutionEvidence{}, fmt.Errorf("session turn execution attempt: %w", promptErr)
+	}
+	key := store.HarnessV1AttemptKey{
+		Namespace: control.Namespace,
+		TaskUID:   turn.Key.TaskUID,
+		Attempt:   int32(turn.Key.Attempt),
+	}
+	attempt, err := s.harnessV1Attempts.GetHarnessV1Attempt(ctx, key)
+	if err != nil {
+		return sessionTurnExecutionEvidence{}, fmt.Errorf("session turn harness v1 attempt: %w", err)
+	}
+	if turn.PromptAttemptID != key.SessionReferenceID() || attempt.TurnID != turn.Key.PromptID ||
+		attempt.TaskUID != turn.Key.TaskUID || int64(attempt.Attempt) != turn.Key.Attempt {
+		return sessionTurnExecutionEvidence{}, controlConflict(
+			"session turn harness v1 attempt does not match the fenced SessionTurn identity",
+		)
+	}
+	task := &corev1alpha1.Task{}
+	if err := s.readClient().Get(ctx, types.NamespacedName{Namespace: control.Namespace, Name: attempt.TaskName}, task); err != nil {
+		return sessionTurnExecutionEvidence{}, mapKubernetesError("read harness v1 SessionTurn Task", err)
+	}
+	binding := task.Status.AgentExecutionBinding
+	if string(task.UID) != attempt.TaskUID || task.Spec.Type != corev1alpha1.TaskTypeAgent || binding == nil ||
+		binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 ||
+		binding.BindingDigest != attempt.BindingDigest || binding.Snapshot.Digest != attempt.SnapshotDigest {
+		return sessionTurnExecutionEvidence{}, controlConflict(
+			"session turn harness v1 attempt does not match the immutable Kubernetes Task binding",
+		)
+	}
+	if err := store.ValidateCanonicalDigest("harness v1 SessionTurn request digest", attempt.RequestDigest); err != nil {
+		return sessionTurnExecutionEvidence{}, err
+	}
+	return sessionTurnExecutionEvidence{harnessV1: attempt, requestDigest: attempt.RequestDigest}, nil
+}
+
+func validateSessionTurnExecutionForFinalization(
+	evidence sessionTurnExecutionEvidence,
+	request store.FinalizeSessionTurnRequest,
+) error {
+	if evidence.prompt != nil {
+		return validatePromptAttemptForCrossStoreFinalization(*evidence.prompt, request)
+	}
+	if evidence.harnessV1 == nil {
+		return controlConflict("session turn has no route-specific execution receipt")
+	}
+	attempt := evidence.harnessV1
+	if !store.IsTerminalHarnessV1AttemptState(attempt.State) {
+		key := store.HarnessV1AttemptKey{Namespace: attempt.Namespace, TaskUID: attempt.TaskUID, Attempt: attempt.Attempt}
+		return controlConflict("harness v1 attempt %q is not terminal: %s", key.CanonicalID(), attempt.State)
+	}
+	if request.PublicationID != "" || request.VerifiedBaseline != nil {
+		return store.ValidationErrorf("harness v1 SessionTurn cannot carry v2 publication state")
+	}
+	if request.TerminalKind == store.SessionTurnAssistantResult && attempt.State != store.HarnessV1AttemptSucceeded {
+		return store.ValidationErrorf("assistant-result finalization requires succeeded harness v1 execution, got %s", attempt.State)
+	}
+	if attempt.State == store.HarnessV1AttemptSucceeded && attempt.TerminalReceiptDigest == "" {
+		return controlConflict("succeeded harness v1 attempt has no authoritative terminal receipt")
+	}
+	return nil
+}
+
 type crossStoreFinalizationPlan struct {
 	publication      *store.Publication
 	receipt          *store.PublicationReceipt
@@ -322,12 +410,43 @@ type crossStoreFinalizationPlan struct {
 	blockReason      string
 }
 
-func (s *Store) buildCrossStoreFinalizationPlan(ctx context.Context, control store.SessionControl, turn store.SessionTurn, attempt store.PromptAttempt, request store.FinalizeSessionTurnRequest) (crossStoreFinalizationPlan, error) {
+//nolint:gocyclo // Finalization keeps v1/v2 evidence and publication blocking decisions in one atomic plan.
+func (s *Store) buildCrossStoreFinalizationPlan(
+	ctx context.Context,
+	control store.SessionControl,
+	turn store.SessionTurn,
+	evidence sessionTurnExecutionEvidence,
+	request store.FinalizeSessionTurnRequest,
+) (crossStoreFinalizationPlan, error) {
 	plan := crossStoreFinalizationPlan{availability: store.SessionAvailable, blockReason: request.BlockReason}
 	if control.VerifiedBaseline != nil {
 		copyValue := *control.VerifiedBaseline
 		plan.verifiedBaseline = &copyValue
 	}
+	if evidence.harnessV1 != nil {
+		if request.PublicationID != "" || request.VerifiedBaseline != nil {
+			return crossStoreFinalizationPlan{}, store.ValidationErrorf("harness v1 SessionTurn cannot finalize publication state")
+		}
+		if evidence.harnessV1.State == store.HarnessV1AttemptOutcomeUnknown {
+			expected := strings.TrimSpace(evidence.harnessV1.TerminalReason)
+			if expected == "" {
+				expected = "harness v1 outcome cannot be proven"
+			}
+			if plan.blockReason == "" {
+				plan.blockReason = expected
+			} else if plan.blockReason != expected {
+				return crossStoreFinalizationPlan{}, controlConflict("session block reason does not match the harness v1 terminal receipt")
+			}
+			plan.availability = store.SessionReconciliationBlocked
+		} else if plan.blockReason != "" {
+			return crossStoreFinalizationPlan{}, store.ValidationErrorf("only OutcomeUnknown harness v1 execution may block a Session")
+		}
+		return plan, nil
+	}
+	if evidence.prompt == nil {
+		return crossStoreFinalizationPlan{}, controlConflict("session turn has no route-specific execution evidence")
+	}
+	attempt := *evidence.prompt
 	if request.PublicationID == "" {
 		if request.VerifiedBaseline != nil {
 			return crossStoreFinalizationPlan{}, store.ValidationErrorf("verified baseline advancement requires a publication receipt")
@@ -482,7 +601,7 @@ func (s *Store) releaseFinalizedSessionLease(ctx context.Context, object *corev1
 		return controlConflict("finalized Session Lease has unexpected empty-state generation")
 	}
 	if state.Mode != leaseModeMutation || state.Generation != key.LeaseGeneration || state.TaskUID != key.TaskUID || state.Attempt != key.Attempt || state.PromptID != key.PromptID || state.RequestDigest != requestDigest {
-		return controlConflict("Session mutation Lease no longer matches finalized turn")
+		return controlConflict("session mutation Lease no longer matches finalized turn")
 	}
 	updated := lease.DeepCopy()
 	clearSessionLease(updated, state.Generation)
@@ -494,7 +613,7 @@ func (s *Store) releaseFinalizedSessionLease(ctx context.Context, object *corev1
 
 func (s *Store) findSessionControlByUID(ctx context.Context, sessionUID string) (*corev1alpha1.RuntimeSessionControl, error) {
 	list := &corev1alpha1.RuntimeSessionControlList{}
-	if err := s.readClient().List(ctx, list); err != nil {
+	if err := s.readClient().List(ctx, list, s.namespacedListOptions()...); err != nil {
 		return nil, mapKubernetesError("list runtime session controls", err)
 	}
 	var match *corev1alpha1.RuntimeSessionControl

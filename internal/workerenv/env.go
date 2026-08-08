@@ -71,6 +71,7 @@ const (
 	AIAzureAPIVersion = "ORKA_AI_AZURE_API_VERSION"
 	AITools           = "ORKA_AI_TOOLS"
 	AIFallbackCount   = "ORKA_AI_FALLBACK_COUNT"
+	ControllerMode    = "ORKA_CONTROLLER_MODE"
 
 	// Telemetry env vars.
 	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
@@ -457,6 +458,7 @@ type AIWorkerEnv struct {
 	TraceParent                      string
 	TraceState                       string
 	TraceBaggage                     string
+	ControllerMode                   string
 }
 
 // EnvVars renders AI worker env vars. Fallback API keys are included only when
@@ -489,6 +491,7 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	envVars = AppendIfSet(envVars, TraceParent, e.TraceParent)
 	envVars = AppendIfSet(envVars, TraceState, e.TraceState)
 	envVars = AppendIfSet(envVars, TraceBaggage, e.TraceBaggage)
+	envVars = AppendIfSet(envVars, ControllerMode, e.ControllerMode)
 	if len(e.Fallbacks) > 0 {
 		envVars = append(envVars, Env(AIFallbackCount, strconv.Itoa(len(e.Fallbacks))))
 		for i, fallback := range e.Fallbacks {
@@ -516,6 +519,7 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		TraceParent:                      getenv(TraceParent),
 		TraceState:                       getenv(TraceState),
 		TraceBaggage:                     getenv(TraceBaggage),
+		ControllerMode:                   getenv(ControllerMode),
 	}
 }
 

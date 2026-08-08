@@ -30,6 +30,7 @@ var _ = Describe("AgentRuntime v2 broker boundary", func() {
 		for _, resource := range []struct{ kind, name string }{
 			{"task", taskName},
 			{"agent", agentName},
+			{"agentruntime", externalV2RuntimeName},
 		} {
 			cmd := exec.Command("kubectl", "delete", resource.kind, resource.name,
 				"-n", namespace, "--ignore-not-found")
@@ -38,12 +39,16 @@ var _ = Describe("AgentRuntime v2 broker boundary", func() {
 	})
 
 	It("rejects strict read tasks before any external v2 tool or prompt dispatch", func() {
+		runtimeManifest, manifestErr := externalV2RuntimeManifest()
+		Expect(manifestErr).NotTo(HaveOccurred())
+		Expect(applyManifestJSON(runtimeManifest)).To(Succeed())
+
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",
 			"metadata": {"name": %q, "namespace": %q},
-			"spec": {"runtime": {"runtimeRef": {"name": "external-v2-runtime"}}}
-		}`, agentName, namespace)
+			"spec": {"runtime": {"runtimeRef": {"name": %q}}}
+		}`, agentName, namespace, externalV2RuntimeName)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(agentManifest)
 		_, err := utils.Run(cmd)
@@ -71,7 +76,7 @@ var _ = Describe("AgentRuntime v2 broker boundary", func() {
 				"-o", "jsonpath={.status.message}")
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(ContainSubstring(`external AgentRuntime "external-v2-runtime" Task dispatch is not supported`))
+			g.Expect(output).To(ContainSubstring(fmt.Sprintf("external AgentRuntime %q Task dispatch is not supported", externalV2RuntimeName)))
 		}, 2*time.Minute, time.Second).Should(Succeed())
 		waitForTaskPhase(taskName, "Failed", 2*time.Minute)
 		verifyNoJobForTask(taskName, 5*time.Second)

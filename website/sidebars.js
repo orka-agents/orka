@@ -43,6 +43,7 @@ const sidebars = {
       label: 'Operations',
       collapsed: false,
       items: [
+        'operations/harness-modes',
         'operations/agent-runtime-security',
         'operations/gateways',
       ],

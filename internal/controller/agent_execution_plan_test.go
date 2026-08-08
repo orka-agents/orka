@@ -7,6 +7,8 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"k8s.io/utils/ptr"
+
 	"context"
 	"strings"
 	"testing"
@@ -74,6 +76,24 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			},
 			acpRuntimeEnabled: true,
 			wantPath:          agentExecutionPathACP,
+		},
+		{
+			name: "built-in agent without contractVersion is rejected as unclassified",
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.ContractVersion = nil
+			},
+			acpRuntimeEnabled: true,
+			wantPath:          agentExecutionPathRejected,
+			wantReason:        "unclassified",
+		},
+		{
+			name: "built-in agent classified orka.harness.v1 is rejected",
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.ContractVersion = ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1)
+			},
+			acpRuntimeEnabled: true,
+			wantPath:          agentExecutionPathRejected,
+			wantReason:        "orka.harness.v1",
 		},
 		{
 			name: "priorTaskRef continuation is rejected",
@@ -218,11 +238,11 @@ func plannerExternalRuntime() *corev1alpha1.AgentRuntime {
 	return &corev1alpha1.AgentRuntime{
 		ObjectMeta: metav1.ObjectMeta{Name: "external-v2", Namespace: defaultNS, UID: "external-runtime-uid", Generation: 1},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
-			Capabilities:    &corev1alpha1.AgentRuntimeCapabilitiesSpec{RuntimeInstanceID: "external-instance", Profile: profile, WorkspaceGovernance: governance},
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			Capabilities:    &corev1alpha1.AgentRuntimeCapabilitiesSpec{RuntimeInstanceID: "external-instance", Profile: &profile, WorkspaceGovernance: &governance},
 		},
 		Status: corev1alpha1.AgentRuntimeStatus{Ready: true, ObservedGeneration: 1, ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
-			RuntimeInstanceID: "external-instance", RuntimeProfileDigest: profile.Digest, WorkspaceGovernance: governance,
+			RuntimeInstanceID: "external-instance", RuntimeProfileDigest: profile.Digest, WorkspaceGovernance: &governance,
 		}},
 	}
 }
@@ -241,7 +261,10 @@ func validPlannerAgent() *corev1alpha1.Agent {
 	return &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeCodex,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 }

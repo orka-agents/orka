@@ -39,6 +39,7 @@ func TestPrepareTaskSessionSkipsBootstrapForLiveRuntimeSessionReuse(t *testing.T
 
 	session, err := dispatcher.prepareTaskSession(
 		ctx, task, fence, profileDigest, mcpDigest, runtimeInstanceID, supervisorBootID,
+		acpSessionLineageIdentity{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -80,6 +81,7 @@ func TestPrepareTaskSessionRetainsBootstrapWhenRuntimeSessionRecreationIsRequire
 
 	session, err := dispatcher.prepareTaskSession(
 		ctx, task, fence, profileDigest, mcpDigest, "replacement-runtime", "replacement-boot",
+		acpSessionLineageIdentity{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -186,12 +188,12 @@ func newBootstrapSessionTaskForTest(
 			RequestDigest: requestDigest, ControllerEpoch: fence.Epoch,
 		}},
 	}
-	attempt, err := controlStore.CreatePromptAttempt(context.Background(), &store.PromptAttempt{
+	attempt, err := controlStore.CreatePromptAttempt(context.Background(), boundPromptAttemptForTest(&store.PromptAttempt{
 		Key: store.PromptAttemptKey{
 			Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID,
 		},
 		RequestDigest: requestDigest,
-	}, fence)
+	}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}

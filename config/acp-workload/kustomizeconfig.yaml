@@ -1,6 +1,24 @@
 nameReference:
+- kind: ServiceAccount
+  version: v1
+  fieldSpecs:
+  - kind: RoleBinding
+    group: rbac.authorization.k8s.io
+    version: v1
+    path: subjects/name
+  - kind: ClusterRoleBinding
+    group: rbac.authorization.k8s.io
+    version: v1
+    path: subjects/name
 - kind: ClusterRole
   group: rbac.authorization.k8s.io
+  version: v1
+  fieldSpecs:
+  - kind: ClusterRole
+    group: rbac.authorization.k8s.io
+    version: v1
+    path: rules/resourceNames
+- kind: Namespace
   version: v1
   fieldSpecs:
   - kind: ClusterRole

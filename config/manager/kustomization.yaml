@@ -4,6 +4,7 @@ resources:
 
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+namespace: system
 images:
 - newName: ghcr.io/orka-agents/orka
   newTag: 0.1.1

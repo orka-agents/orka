@@ -7,6 +7,7 @@ import { PageHeader } from '@/components/layout/page-header'
 import { ArrowLeft, Trash2 } from 'lucide-react'
 import { TranscriptViewer } from './transcript-viewer'
 import { SessionEventTimeline } from './session-event-timeline'
+import { SessionExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useSession, useDeleteSession } from '@/hooks/use-sessions'
 
 export function SessionDetail({ sessionId }: { sessionId: string }) {
@@ -49,6 +50,8 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
           }
         />
       </div>
+
+      <SessionExecutionRouteLedger session={session} />
 
       <Tabs defaultValue="overview">
         <TabsList>

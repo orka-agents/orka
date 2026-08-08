@@ -227,6 +227,39 @@ grep -Fq 'name: "ORKA_WORKSPACE_PUBLISHER_URL",' <<<"${publisher_disable_patch}"
 grep -Fq '"$patch": "delete"' <<<"${publisher_disable_patch}" || \
   fail 'Substrate controller patch does not disable the omitted Publisher client'
 
+# Substrate is a harness-v2 workspace-provider evaluation, not a third
+# controller mode. Claim the namespace before applying the statically configured
+# v2 workload and keep every required controller identity flag in the final
+# strategic patch.
+namespace_identity_line="$(grep -nF 'scripts/lib/ensure-static-mode-namespace.sh' "${e2e}" | head -n1 | cut -d: -f1 || true)"
+controller_apply_line="$(grep -nF '"${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -' "${e2e}" | head -n1 | cut -d: -f1 || true)"
+[[ "${namespace_identity_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not establish the fail-closed Orka namespace identity'
+[[ "${controller_apply_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not apply the controller workload'
+(( namespace_identity_line < controller_apply_line )) || \
+  fail 'Substrate deploy must establish the namespace identity before the harness-v2 controller workload'
+for required_arg in \
+  '"--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key"' \
+  '"--controller-mode=harness-v2"' \
+  '"--watch-namespace=orka-system"' \
+  '"--enforce-namespace-isolation=true"' \
+  '"--execution-mode-controller-usernames=system:serviceaccount:orka-system:orka-controller-manager"'; do
+  grep -Fq -- "${required_arg}" "${e2e}" || fail "Substrate controller patch omits ${required_arg}"
+done
+if grep -Fq -- '"--acp-runtime-enabled=false"' "${e2e}"; then
+  fail 'Substrate deploy still passes the removed dynamic ACP mode flag'
+fi
+
+# The harness-v2 ACP dispatcher requires the encrypted execution-snapshot key.
+# Provision it before applying the workload so the Substrate-only rollout can
+# activate its immutable snapshot store.
+grep -F 'dd if=/dev/urandom bs=32 count=1' "${e2e}" | \
+  grep -F '>"${capability_dir}/snapshot-key"' >/dev/null || \
+  fail 'Substrate deploy does not generate a 32-byte execution-snapshot key'
+grep -F 'create secret generic agent-execution-snapshot-key' "${e2e}" >/dev/null || \
+  fail 'Substrate deploy does not provision the execution-snapshot Secret'
+grep -F -- '--from-file="${snapshot_key_field}=${capability_dir}/snapshot-key"' "${e2e}" >/dev/null || \
+  fail 'Substrate execution-snapshot Secret does not use the required key field'
+
 # The extended path now installs a fail-once executable on the assigned worker,
 # requires the patched verified-presence retry log, and restores the real runsc.
 grep -F 'install_runsc_delete_failure_injector "${worker_name}"' "${e2e}" >/dev/null

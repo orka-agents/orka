@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
@@ -90,8 +91,8 @@ const (
 	// has not observed the Job immediately after create.
 	jobCreationVisibilityGracePeriod = 30 * time.Second
 
-	workerClusterRoleBindingRecreateInterval = 100 * time.Millisecond
-	workerClusterRoleBindingRecreateTimeout  = 5 * time.Second
+	workerRoleBindingRecreateInterval = 100 * time.Millisecond
+	workerRoleBindingRecreateTimeout  = 5 * time.Second
 
 	booleanTrueValue       = "true"
 	scheduledRunLabelValue = booleanTrueValue
@@ -103,49 +104,58 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
-	APIReader                          client.Reader
-	Scheme                             *runtime.Scheme
-	JobBuilder                         *JobBuilder
-	SessionManager                     *SessionManager
-	WebhookNotifier                    *WebhookNotifier
-	Recorder                           record.EventRecorder
-	KubeClient                         kubernetes.Interface
-	OutboundAccessResolver             outboundaccess.Resolver
-	BrokeredTransactionExchange        *workerpkg.TransactionExchangeConfig
-	ResultStore                        store.ResultStore
-	PlanStore                          store.PlanStore
-	MessageStore                       store.MessageStore
-	ArtifactStore                      store.ArtifactStore
-	ExecutionEventStore                store.ExecutionEventStore
-	DurableControlStore                store.DurableControlStore
-	ACPArtifactRetirer                 artifactcap.IdentityRetirer
-	ACPPublicationReclaimer            ACPPublicationReclaimer
-	ControllerEpochManager             *ControllerEpochManager
-	ACPAdmissionGate                   *ACPAdmissionGate
-	ACPRuntimeEnabled                  bool
-	ACPRuntimeImages                   ACPRuntimeImages
-	ACPRuntimeNamespace                string
-	EnforceNamespaceIsolation          bool
-	MaxTasksPerNamespace               int32
-	ExecutionWorkspaceDefaultProvider  corev1alpha1.WorkspaceProvider
-	WorkspaceProviderAPIEnabled        bool
-	AgentSandboxEnabled                bool
-	AgentSandboxConfig                 AgentSandboxConfig
-	SubstrateEnabled                   bool
-	SubstrateConfig                    SubstrateConfig
-	SubstrateExecutorFactory           func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
-	AIWorkerServiceAccountName         string
-	VendorWorkerServiceAccountName     string
-	ContainerWorkerServiceAccountName  string
-	AIWorkerClusterRoleName            string
-	VendorWorkerClusterRoleName        string
-	ContainerWorkerClusterRoleName     string
-	WorkerClusterRoleBindingNamePrefix string
-	EnforceTransactionCredentialAuth   bool
-	TransactionCredentialReadScopes    []string
-	OutboundAccessTrust                outboundaccess.TrustConfig
-	trustedServiceCleanupMu            sync.RWMutex
-	trustedServiceCleanupDone          bool
+	APIReader                         client.Reader
+	Scheme                            *runtime.Scheme
+	JobBuilder                        *JobBuilder
+	SessionManager                    *SessionManager
+	WebhookNotifier                   *WebhookNotifier
+	Recorder                          record.EventRecorder
+	KubeClient                        kubernetes.Interface
+	OutboundAccessResolver            outboundaccess.Resolver
+	BrokeredTransactionExchange       *workerpkg.TransactionExchangeConfig
+	ResultStore                       store.ResultStore
+	PlanStore                         store.PlanStore
+	MessageStore                      store.MessageStore
+	ArtifactStore                     store.ArtifactStore
+	ExecutionEventStore               store.ExecutionEventStore
+	DurableControlStore               store.DurableControlStore
+	AgentExecutionSnapshots           store.AgentExecutionSnapshotStore
+	MCPRegistry                       *tools.Registry
+	ACPArtifactRetirer                artifactcap.IdentityRetirer
+	ACPPublicationReclaimer           ACPPublicationReclaimer
+	ControllerEpochManager            *ControllerEpochManager
+	ACPAdmissionGate                  *ACPAdmissionGate
+	HarnessV1Enabled                  bool
+	HarnessV1Endpoint                 string
+	HarnessV1AuthSecretNamespace      string
+	HarnessV1AuthSecretName           string
+	HarnessV1AuthSecretKey            string
+	HarnessV1Attempts                 store.HarnessV1AttemptStore
+	HarnessV1SettlementAcknowledger   HarnessV1SettlementAcknowledger
+	ACPRuntimeEnabled                 bool
+	ACPRuntimeImages                  ACPRuntimeImages
+	ACPRuntimeNamespace               string
+	EnforceNamespaceIsolation         bool
+	MaxTasksPerNamespace              int32
+	ExecutionWorkspaceDefaultProvider corev1alpha1.WorkspaceProvider
+	WorkspaceProviderAPIEnabled       bool
+	AgentSandboxEnabled               bool
+	AgentSandboxConfig                AgentSandboxConfig
+	SubstrateEnabled                  bool
+	SubstrateConfig                   SubstrateConfig
+	SubstrateExecutorFactory          func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
+	AIWorkerServiceAccountName        string
+	VendorWorkerServiceAccountName    string
+	ContainerWorkerServiceAccountName string
+	AIWorkerClusterRoleName           string
+	VendorWorkerClusterRoleName       string
+	ContainerWorkerClusterRoleName    string
+	WorkerRoleBindingNamePrefix       string
+	EnforceTransactionCredentialAuth  bool
+	TransactionCredentialReadScopes   []string
+	OutboundAccessTrust               outboundaccess.TrustConfig
+	trustedServiceCleanupMu           sync.RWMutex
+	trustedServiceCleanupDone         bool
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -179,7 +189,6 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;roles;rolebindings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;update;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
@@ -277,7 +286,6 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		log.Error(err, "unable to fetch Task")
 		return ctrl.Result{}, err
 	}
-
 	if tx := task.Spec.Transaction; tx != nil {
 		values := []any{}
 		if tx.ID != "" {
@@ -501,31 +509,43 @@ func executionEventTypeForTaskPhase(phase corev1alpha1.TaskPhase) string {
 	}
 }
 
-// handleDeletion handles Task cleanup when deleted
-func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:unparam // Result is always nil but kept for interface consistency
+// handleDeletion handles Task cleanup when deleted.
+//
+//nolint:gocyclo,unparam // Cleanup ordering is intentionally kept in one auditable flow; Result is retained for consistency.
+func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
-		ready, err := r.acpTaskDeletionReady(ctx, task)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if !ready {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-		}
-		reclaimed, err := r.reclaimACPTaskPublicationBundles(ctx, task)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if !reclaimed {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-		}
-		retired, err := r.retireACPArtifactIdentities(ctx, task)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if !retired {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		if taskManagedByHarnessV1(task) {
+			ready, err := r.harnessV1TaskDeletionReady(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !ready {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+		} else {
+			ready, err := r.acpTaskDeletionReady(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !ready {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			reclaimed, err := r.reclaimACPTaskPublicationBundles(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !reclaimed {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			retired, err := r.retireACPArtifactIdentities(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !retired {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
 		}
 		// Clean up result data from store
 		if r.ResultStore != nil {
@@ -614,7 +634,9 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	return ctrl.Result{}, nil
 }
 
-// handlePending handles Tasks in Pending phase
+// handlePending handles Tasks in Pending phase.
+//
+//nolint:gocyclo // Pending routing keeps every mutually exclusive execution path in one auditable state machine.
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -622,7 +644,6 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		log.Info("refusing to replay task with immutable execution outcome", "outcome", outcome.Phase)
 		return r.completeTask(ctx, task, outcome.Phase, outcome.Message)
 	}
-
 	if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
 		log.Error(err, "failed to clear durable approval decision nudge")
 		return ctrl.Result{}, err
@@ -637,6 +658,13 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Schedule != "" {
 		return r.handleScheduledTask(ctx, task)
 	}
+
+	// A persisted execution binding is the sole routing and recovery authority.
+	// Do not resolve mutable Agent/configuration state, or acquire the legacy
+	// SQLite Session lock, after a Task has been bound to either harness plane.
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.AgentExecutionBinding != nil {
+		return r.handleBoundAgentTaskPending(ctx, task)
+	}
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.Execution == nil {
 		now := time.Now().UTC()
 		if deadline, ok := acpTaskDeadline(task, now); ok && !now.Before(deadline) {
@@ -644,8 +672,10 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
-	// Check session lock if session is referenced
-	if task.Spec.SessionRef != nil {
+	// Non-agent workers retain the legacy Session lock lifecycle. Agent Tasks
+	// claim protocol lineage and a fenced SessionTurn in their dispatcher only
+	// after the immutable execution binding has selected v1 or v2.
+	if task.Spec.SessionRef != nil && task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		if result, err, locked := r.acquireSessionLock(ctx, task); locked {
 			return result, err
 		}
@@ -716,7 +746,15 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		case agentExecutionPathRejected:
 			return r.rejectPlannedAgentExecution(ctx, task, plan)
 		case agentExecutionPathACP:
+			if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
+				return result, err
+			}
 			return r.queueACPRuntimeTask(ctx, task, agent)
+		case agentExecutionPathHarnessV1:
+			if result, err, handled := r.ensureHarnessV1ExecutionBinding(ctx, task, agent); handled {
+				return result, err
+			}
+			return r.queueHarnessV1Task(ctx, task)
 		case agentExecutionPathExternal:
 			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(
 				externalAgentRuntimeDispatchUnsupportedReason(plan.externalRuntimeName),
@@ -727,6 +765,32 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	return r.createTaskJob(ctx, task, agent, provider)
+}
+
+func (r *TaskReconciler) handleBoundAgentTaskPending(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (ctrl.Result, error) {
+	binding := task.Status.AgentExecutionBinding
+	if binding == nil {
+		return ctrl.Result{}, errors.New("bound agent Task is missing its execution binding")
+	}
+	switch binding.ContractVersion {
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		if result, err, handled := r.ensureHarnessV1ExecutionBinding(ctx, task, nil); handled {
+			return result, err
+		}
+		return r.queueHarnessV1Task(ctx, task)
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, nil); handled {
+			return result, err
+		}
+		return r.queueACPRuntimeTask(ctx, task, nil)
+	default:
+		return r.failTask(ctx, task, fmt.Sprintf(
+			"immutable execution binding has unsupported contract %q", binding.ContractVersion,
+		))
+	}
 }
 
 func taskTransactionTokenPending(task *corev1alpha1.Task) bool {
@@ -1689,6 +1753,11 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		// lease renewal, cancellation barrier, and terminal status projection.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
+	if taskManagedByHarnessV1(task) {
+		// HarnessV1Dispatcher owns submission, stream recovery, cancellation,
+		// terminal settlement, and Task projection for binding-gated v1 work.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 
 	// Check timeout
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
@@ -1889,6 +1958,12 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func taskManagedByHarnessV1(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent &&
+		task.Status.AgentExecutionBinding != nil &&
+		task.Status.AgentExecutionBinding.ContractVersion == corev1alpha1.AgentRuntimeContractHarnessV1
 }
 
 func podWaitingForMountInitialization(pod *corev1.Pod) bool {
@@ -2163,8 +2238,8 @@ func (r *TaskReconciler) handleFinalizing(
 		if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
 			return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 		}
-		manager := WorkspaceAttachmentManager{Client: r.Client}
-		if err := manager.BeginRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch); err != nil {
+		attachmentManager := WorkspaceAttachmentManager{Client: r.Client}
+		if err := attachmentManager.BeginRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
@@ -2177,8 +2252,8 @@ func (r *TaskReconciler) handleFinalizing(
 			if workspaceStatus.WorkspaceRef.UID != "" && string(workspaceObject.UID) != workspaceStatus.WorkspaceRef.UID {
 				return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 			}
-			manager := WorkspaceAttachmentManager{Client: r.Client}
-			if err := manager.FinalizeRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch, attachmentSecretName(workspaceObject.Name, workspaceStatus.AttachedEpoch)); err != nil {
+			attachmentManager := WorkspaceAttachmentManager{Client: r.Client}
+			if err := attachmentManager.FinalizeRevocation(ctx, workspaceObject, workspaceStatus.AttachedEpoch, attachmentSecretName(workspaceObject.Name, workspaceStatus.AttachedEpoch)); err != nil {
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
 		} else if !apierrors.IsNotFound(err) {
@@ -3572,8 +3647,11 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
-	if err := mgr.Add(&trustedServiceReadCleanupRunnable{reconciler: r}); err != nil {
-		return fmt.Errorf("register trusted Service RBAC startup cleanup: %w", err)
+	if !r.EnforceNamespaceIsolation {
+		var cleanup manager.Runnable = &trustedServiceReadCleanupRunnable{reconciler: r}
+		if err := mgr.Add(cleanup); err != nil {
+			return fmt.Errorf("register trusted Service RBAC startup cleanup: %w", err)
+		}
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex); err != nil {
 		return err
@@ -3594,8 +3672,8 @@ const (
 	DefaultVendorWorkerClusterRoleName    = "orka-vendor-worker-role"
 	DefaultContainerWorkerClusterRoleName = "orka-container-worker-role"
 
-	maxWorkerClusterRoleBindingNameLength = 253
-	workerClusterRoleBindingHashLength    = 10
+	maxWorkerRoleBindingNameLength = 253
+	workerRoleBindingHashLength    = 10
 
 	managedByLabelKey                         = "app.kubernetes.io/managed-by"
 	managedByLabelValue                       = "orka"
@@ -3606,9 +3684,9 @@ const (
 )
 
 type workerRBACSpec struct {
-	serviceAccountName     string
-	clusterRoleName        string
-	clusterRoleBindingName string
+	serviceAccountName string
+	clusterRoleName    string
+	roleBindingName    string
 }
 
 // workerRBACSpecs binds cluster-scoped worker roles into each task namespace.
@@ -3623,19 +3701,19 @@ func (r *TaskReconciler) aiWorkerServiceAccountName() string {
 func (r *TaskReconciler) workerRBACSpecs(namespace string) []workerRBACSpec {
 	return []workerRBACSpec{
 		{
-			serviceAccountName:     r.aiWorkerServiceAccountName(),
-			clusterRoleName:        workerClusterRoleName(r.AIWorkerClusterRoleName, DefaultAIWorkerClusterRoleName),
-			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "ai", namespace),
+			serviceAccountName: r.aiWorkerServiceAccountName(),
+			clusterRoleName:    workerClusterRoleName(r.AIWorkerClusterRoleName, DefaultAIWorkerClusterRoleName),
+			roleBindingName:    workerRoleBindingName(r.WorkerRoleBindingNamePrefix, "ai", namespace),
 		},
 		{
-			serviceAccountName:     workerServiceAccountName(r.VendorWorkerServiceAccountName, VendorWorkerServiceAccount),
-			clusterRoleName:        workerClusterRoleName(r.VendorWorkerClusterRoleName, DefaultVendorWorkerClusterRoleName),
-			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "vendor", namespace),
+			serviceAccountName: workerServiceAccountName(r.VendorWorkerServiceAccountName, VendorWorkerServiceAccount),
+			clusterRoleName:    workerClusterRoleName(r.VendorWorkerClusterRoleName, DefaultVendorWorkerClusterRoleName),
+			roleBindingName:    workerRoleBindingName(r.WorkerRoleBindingNamePrefix, "vendor", namespace),
 		},
 		{
-			serviceAccountName:     workerServiceAccountName(r.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount),
-			clusterRoleName:        workerClusterRoleName(r.ContainerWorkerClusterRoleName, DefaultContainerWorkerClusterRoleName),
-			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "container", namespace),
+			serviceAccountName: workerServiceAccountName(r.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount),
+			clusterRoleName:    workerClusterRoleName(r.ContainerWorkerClusterRoleName, DefaultContainerWorkerClusterRoleName),
+			roleBindingName:    workerRoleBindingName(r.WorkerRoleBindingNamePrefix, "container", namespace),
 		},
 	}
 }
@@ -3647,18 +3725,18 @@ func workerClusterRoleName(configured, fallback string) string {
 	return fallback
 }
 
-func workerClusterRoleBindingName(prefix, tier, namespace string) string {
+func workerRoleBindingName(prefix, tier, namespace string) string {
 	if prefix == "" {
 		prefix = managedByLabelValue
 	}
 	name := fmt.Sprintf("%s-%s-worker-%s", prefix, tier, namespace)
-	if len(name) <= maxWorkerClusterRoleBindingNameLength {
+	if len(name) <= maxWorkerRoleBindingNameLength {
 		return name
 	}
 
 	sum := sha256.Sum256([]byte(name))
-	suffix := hex.EncodeToString(sum[:])[:workerClusterRoleBindingHashLength]
-	prefixLength := maxWorkerClusterRoleBindingNameLength - workerClusterRoleBindingHashLength - 1
+	suffix := hex.EncodeToString(sum[:])[:workerRoleBindingHashLength]
+	prefixLength := maxWorkerRoleBindingNameLength - workerRoleBindingHashLength - 1
 	return fmt.Sprintf("%s-%s", name[:prefixLength], suffix)
 }
 
@@ -3672,17 +3750,7 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string)
 		if err := r.ensureWorkerServiceAccount(ctx, namespace, spec.serviceAccountName); err != nil {
 			return err
 		}
-		if r.EnforceNamespaceIsolation {
-			if err := r.ensureWorkerRoleBinding(ctx, namespace, spec); err != nil {
-				return err
-			}
-			if err := r.deleteLegacyWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
-				return err
-			}
-			continue
-		}
-
-		if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+		if err := r.ensureWorkerRoleBinding(ctx, namespace, spec); err != nil {
 			return err
 		}
 	}
@@ -3739,6 +3807,11 @@ func (r *TaskReconciler) ensureTrustedServiceReadBindings(ctx context.Context, t
 		if err := r.createOrUpdateTrustedServiceRoleBinding(ctx, binding); err != nil {
 			return err
 		}
+	}
+	if r.EnforceNamespaceIsolation {
+		// Static installations reject cross-namespace trusted Service references
+		// at startup, so they never discover or mutate legacy grants here.
+		return nil
 	}
 	return r.pruneTrustedServiceReadBindings(ctx, taskNamespace, desired)
 }
@@ -3882,6 +3955,9 @@ func (r *TaskReconciler) cleanupTrustedServiceReadBindingsAfterTaskRemoval(
 	ctx context.Context,
 	taskNamespace string,
 ) error {
+	if r.EnforceNamespaceIsolation {
+		return nil
+	}
 	taskNamespace = strings.TrimSpace(taskNamespace)
 	if taskNamespace == "" {
 		return nil
@@ -4179,21 +4255,21 @@ func (r *TaskReconciler) ensureWorkerRoleBinding(ctx context.Context, namespace 
 	desired := workerRoleBinding(namespace, spec)
 
 	rb := &rbacv1.RoleBinding{}
-	err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, rb)
+	err := r.Get(ctx, types.NamespacedName{Name: spec.roleBindingName, Namespace: namespace}, rb)
 	if apierrors.IsNotFound(err) {
 		if err := r.Create(ctx, desired); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
-				return fmt.Errorf("creating worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+				return fmt.Errorf("creating worker RoleBinding %s/%s: %w", namespace, spec.roleBindingName, err)
 			}
-			if err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, rb); err != nil {
-				return fmt.Errorf("getting worker RoleBinding %s/%s after create conflict: %w", namespace, spec.clusterRoleBindingName, err)
+			if err := r.Get(ctx, types.NamespacedName{Name: spec.roleBindingName, Namespace: namespace}, rb); err != nil {
+				return fmt.Errorf("getting worker RoleBinding %s/%s after create conflict: %w", namespace, spec.roleBindingName, err)
 			}
 		} else {
-			log.Info("Created worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+			log.Info("Created worker RoleBinding", "namespace", namespace, "binding", spec.roleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
 			return nil
 		}
 	} else if err != nil {
-		return fmt.Errorf("getting worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+		return fmt.Errorf("getting worker RoleBinding %s/%s: %w", namespace, spec.roleBindingName, err)
 	}
 
 	if rb.RoleRef != desired.RoleRef {
@@ -4219,9 +4295,9 @@ func (r *TaskReconciler) ensureWorkerRoleBinding(ctx context.Context, namespace 
 
 	if changed {
 		if err := r.Update(ctx, rb); err != nil {
-			return fmt.Errorf("updating worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+			return fmt.Errorf("updating worker RoleBinding %s/%s: %w", namespace, spec.roleBindingName, err)
 		}
-		log.Info("Updated worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+		log.Info("Updated worker RoleBinding", "namespace", namespace, "binding", spec.roleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
 	}
 
 	return nil
@@ -4229,18 +4305,18 @@ func (r *TaskReconciler) ensureWorkerRoleBinding(ctx context.Context, namespace 
 
 func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec, current, desired *rbacv1.RoleBinding) (*rbacv1.RoleBinding, error) {
 	log := logf.FromContext(ctx)
-	log.Info("Recreating worker RoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.clusterRoleBindingName, "currentKind", current.RoleRef.Kind, "currentName", current.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
+	log.Info("Recreating worker RoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.roleBindingName, "currentKind", current.RoleRef.Kind, "currentName", current.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
 
 	if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
+		return nil, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s: %w", namespace, spec.roleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
 	}
 
 	var recreated *rbacv1.RoleBinding
-	err := wait.PollUntilContextTimeout(ctx, workerClusterRoleBindingRecreateInterval, workerClusterRoleBindingRecreateTimeout, true, func(ctx context.Context) (bool, error) {
+	err := wait.PollUntilContextTimeout(ctx, workerRoleBindingRecreateInterval, workerRoleBindingRecreateTimeout, true, func(ctx context.Context) (bool, error) {
 		latest := &rbacv1.RoleBinding{}
-		err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, latest)
+		err := r.Get(ctx, types.NamespacedName{Name: spec.roleBindingName, Namespace: namespace}, latest)
 		if err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("getting worker RoleBinding %s/%s while waiting for stale RoleRef deletion: %w", namespace, spec.clusterRoleBindingName, err)
+			return false, fmt.Errorf("getting worker RoleBinding %s/%s while waiting for stale RoleRef deletion: %w", namespace, spec.roleBindingName, err)
 		}
 
 		if err == nil {
@@ -4253,7 +4329,7 @@ func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespac
 			// propagating, or another actor may have recreated it with the stale
 			// immutable RoleRef. Keep deleting/retrying until the name is available.
 			if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
-				return false, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s during retry: %w", namespace, spec.clusterRoleBindingName, latest.RoleRef.Kind, latest.RoleRef.Name, err)
+				return false, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s during retry: %w", namespace, spec.roleBindingName, latest.RoleRef.Kind, latest.RoleRef.Name, err)
 			}
 			return false, nil
 		}
@@ -4263,153 +4339,24 @@ func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespac
 			if apierrors.IsAlreadyExists(err) {
 				return false, nil
 			}
-			return false, fmt.Errorf("recreating worker RoleBinding %s/%s with RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, desired.RoleRef.Kind, desired.RoleRef.Name, err)
+			return false, fmt.Errorf("recreating worker RoleBinding %s/%s with RoleRef %s/%s: %w", namespace, spec.roleBindingName, desired.RoleRef.Kind, desired.RoleRef.Name, err)
 		}
 
 		recreated = create
 		return true, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("recreating worker RoleBinding %s/%s after stale RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
+		return nil, fmt.Errorf("recreating worker RoleBinding %s/%s after stale RoleRef %s/%s: %w", namespace, spec.roleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
 	}
 
-	log.Info("Recreated worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
-	return recreated, nil
-}
-
-func (r *TaskReconciler) deleteLegacyWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
-	log := logf.FromContext(ctx)
-	legacy := &rbacv1.ClusterRoleBinding{}
-	err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, legacy)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("getting legacy worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
-	}
-
-	desiredLegacy := workerClusterRoleBinding(namespace, spec)
-	managed := legacy.Labels[managedByLabelKey] == managedByLabelValue
-	bindsWorkerServiceAccount := len(desiredLegacy.Subjects) == 1 && subjectsContain(legacy.Subjects, desiredLegacy.Subjects[0])
-	if !managed && !bindsWorkerServiceAccount {
-		log.Info("Skipping unmanaged legacy worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName)
-		return nil
-	}
-
-	if err := r.Delete(ctx, legacy); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("deleting legacy worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
-	}
-	log.Info("Deleted legacy worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
-	return nil
-}
-
-func (r *TaskReconciler) ensureWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
-	log := logf.FromContext(ctx)
-	desired := workerClusterRoleBinding(namespace, spec)
-
-	crb := &rbacv1.ClusterRoleBinding{}
-	err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, crb)
-	if apierrors.IsNotFound(err) {
-		if err := r.Create(ctx, desired); err != nil {
-			if !apierrors.IsAlreadyExists(err) {
-				return fmt.Errorf("creating worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
-			}
-			if err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, crb); err != nil {
-				return fmt.Errorf("getting worker ClusterRoleBinding %s after create conflict: %w", spec.clusterRoleBindingName, err)
-			}
-		} else {
-			log.Info("Created worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
-			return nil
-		}
-	} else if err != nil {
-		return fmt.Errorf("getting worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
-	}
-
-	if crb.RoleRef != desired.RoleRef {
-		recreated, err := r.recreateWorkerClusterRoleBinding(ctx, namespace, spec, crb, desired)
-		if err != nil {
-			return err
-		}
-		crb = recreated
-	}
-
-	changed := false
-	if crb.Labels == nil {
-		crb.Labels = map[string]string{}
-	}
-	if crb.Labels[managedByLabelKey] != managedByLabelValue {
-		crb.Labels[managedByLabelKey] = managedByLabelValue
-		changed = true
-	}
-	if !subjectsEqual(crb.Subjects, desired.Subjects) {
-		crb.Subjects = desired.Subjects
-		changed = true
-	}
-
-	if changed {
-		if err := r.Update(ctx, crb); err != nil {
-			return fmt.Errorf("updating worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
-		}
-		log.Info("Updated worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
-	}
-
-	return nil
-}
-
-func (r *TaskReconciler) recreateWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec, current, desired *rbacv1.ClusterRoleBinding) (*rbacv1.ClusterRoleBinding, error) {
-	log := logf.FromContext(ctx)
-	log.Info("Recreating worker ClusterRoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.clusterRoleBindingName, "currentKind", current.RoleRef.Kind, "currentName", current.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
-
-	if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("deleting worker ClusterRoleBinding %s with stale RoleRef %s/%s: %w", spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
-	}
-
-	var recreated *rbacv1.ClusterRoleBinding
-	err := wait.PollUntilContextTimeout(ctx, workerClusterRoleBindingRecreateInterval, workerClusterRoleBindingRecreateTimeout, true, func(ctx context.Context) (bool, error) {
-		latest := &rbacv1.ClusterRoleBinding{}
-		err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, latest)
-		if err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("getting worker ClusterRoleBinding %s while waiting for stale RoleRef deletion: %w", spec.clusterRoleBindingName, err)
-		}
-
-		if err == nil {
-			if latest.RoleRef == desired.RoleRef {
-				recreated = latest
-				return true, nil
-			}
-
-			// The API server may still be serving the stale object while deletion is
-			// propagating, or another actor may have recreated it with the stale
-			// immutable RoleRef. Keep deleting/retrying until the name is available.
-			if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
-				return false, fmt.Errorf("deleting worker ClusterRoleBinding %s with stale RoleRef %s/%s during retry: %w", spec.clusterRoleBindingName, latest.RoleRef.Kind, latest.RoleRef.Name, err)
-			}
-			return false, nil
-		}
-
-		create := desired.DeepCopy()
-		if err := r.Create(ctx, create); err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				return false, nil
-			}
-			return false, fmt.Errorf("recreating worker ClusterRoleBinding %s with RoleRef %s/%s: %w", spec.clusterRoleBindingName, desired.RoleRef.Kind, desired.RoleRef.Name, err)
-		}
-
-		recreated = create
-		return true, nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("recreating worker ClusterRoleBinding %s after stale RoleRef %s/%s: %w", spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
-	}
-
-	log.Info("Recreated worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+	log.Info("Recreated worker RoleBinding", "namespace", namespace, "binding", spec.roleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
 	return recreated, nil
 }
 
 func workerRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.RoleBinding {
 	return &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      spec.clusterRoleBindingName,
+			Name:      spec.roleBindingName,
 			Namespace: namespace,
 			Labels: map[string]string{
 				managedByLabelKey: managedByLabelValue,
@@ -4428,33 +4375,6 @@ func workerRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.RoleBindin
 			},
 		},
 	}
-}
-
-func workerClusterRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.ClusterRoleBinding {
-	return &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: spec.clusterRoleBindingName,
-			Labels: map[string]string{
-				managedByLabelKey: managedByLabelValue,
-			},
-		},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: rbacv1.GroupName,
-			Kind:     "ClusterRole",
-			Name:     spec.clusterRoleName,
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      rbacv1.ServiceAccountKind,
-				Name:      spec.serviceAccountName,
-				Namespace: namespace,
-			},
-		},
-	}
-}
-
-func subjectsContain(subjects []rbacv1.Subject, want rbacv1.Subject) bool {
-	return slices.Contains(subjects, want)
 }
 
 // subjectsEqual is intentionally order-sensitive; desired worker bindings

@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
@@ -35,8 +36,10 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -250,6 +253,83 @@ func TestHandlers_Readyz(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+func TestHandlers_Readyz_UsesUncachedNamedNamespaceRead(t *testing.T) {
+	tests := []struct {
+		name       string
+		apiObjects []client.Object
+		wantStatus int
+	}{
+		{
+			name: "namespace exists",
+			apiObjects: []client.Object{&corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: testWatchNamespace},
+			}},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "namespace read fails",
+			wantStatus: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+
+			cachedReads := 0
+			cachedClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testWatchNamespace}}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						cachedReads++
+						return c.Get(ctx, key, obj, opts...)
+					},
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						cachedReads++
+						return c.List(ctx, list, opts...)
+					},
+				}).
+				Build()
+
+			apiGets := 0
+			apiLists := 0
+			apiReader := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.apiObjects...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						apiGets++
+						require.Equal(t, client.ObjectKey{Name: testWatchNamespace}, key)
+						require.IsType(t, &corev1.Namespace{}, obj)
+						return c.Get(ctx, key, obj, opts...)
+					},
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						apiLists++
+						return c.List(ctx, list, opts...)
+					},
+				}).
+				Build()
+
+			handlers := NewHandlers(HandlersConfig{
+				Client:         cachedClient,
+				APIReader:      apiReader,
+				WatchNamespace: testWatchNamespace,
+			})
+			app := fiber.New()
+			app.Get("/readyz", handlers.Readyz)
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			require.NoError(t, err)
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+			require.Zero(t, cachedReads)
+			require.Equal(t, 1, apiGets)
+			require.Zero(t, apiLists)
+		})
 	}
 }
 
@@ -2651,6 +2731,71 @@ func TestHandlers_GetSession_Success(t *testing.T) {
 	}
 }
 
+func TestHandlers_GetSessionProjectsSafeExecutionControl(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	const sessionName = "lineage-session"
+	control := &corev1alpha1.RuntimeSessionControl{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            storekube.RuntimeSessionControlObjectName(sessionName),
+			Namespace:       "default",
+			ResourceVersion: "42",
+		},
+		Spec: corev1alpha1.RuntimeSessionControlSpec{
+			SessionName:          sessionName,
+			SessionUID:           "session-uid",
+			RuntimePoolRef:       "opencode-read",
+			RuntimeProfileDigest: "sha256:" + strings.Repeat("a", 64),
+		},
+		Status: corev1alpha1.RuntimeSessionControlStatus{
+			Generation:              3,
+			Lifecycle:               corev1alpha1.RuntimeSessionControlLifecycle("Finalizing"),
+			Availability:            corev1alpha1.RuntimeSessionControlAvailability("ReconciliationBlocked"),
+			MutationLeaseGeneration: 8,
+			BlockedReason:           "publication outcome unknown",
+			RelatedPublicationID:    "publication-1",
+			Lineage: &corev1alpha1.RuntimeSessionLineageStatus{
+				NamespaceUID:    "namespace-uid",
+				SessionUID:      "session-uid",
+				ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+				Generation:      1,
+				RuntimeIdentity: "opencode",
+				ConfigDigest:    "sha256:" + strings.Repeat("b", 64),
+				EstablishedAt:   metav1.NewTime(time.Date(2026, time.August, 6, 0, 0, 0, 0, time.UTC)),
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(control).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: "default", Name: sessionName, SessionType: "task",
+	}))
+
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: fakeClient, SessionStore: ss})
+	app := fiber.New()
+	app.Get("/sessions/:id", handlers.GetSession)
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions/"+sessionName, nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	projected := result["executionControl"].(map[string]any)
+	require.Equal(t, "session-uid", projected["sessionUID"])
+	require.Equal(t, "ReconciliationBlocked", projected["availability"])
+	require.Equal(t, "publication outcome unknown", projected["blockedReason"])
+	lineage := projected["lineage"].(map[string]any)
+	require.Equal(t, "orka.harness.v2", lineage["contractVersion"])
+	require.Equal(t, "opencode", lineage["runtimeIdentity"])
+	require.NotContains(t, projected, "mutationLease")
+	require.NotContains(t, projected, "controllerEpoch")
+}
+
 func TestHandlers_GetSession_HidesGatewaySession(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
 	ctx := context.Background()
@@ -3423,6 +3568,76 @@ func TestHandlers_CreateAgent_Success(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+func TestHandlers_CreateAgent_DefaultsBuiltInContractFromExecutionMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       executionmode.Mode
+		explicit   corev1alpha1.AgentRuntimeContractVersion
+		want       corev1alpha1.AgentRuntimeContractVersion
+		wantStatus int
+	}{
+		{
+			name:       "harness v1",
+			mode:       executionmode.HarnessV1,
+			want:       corev1alpha1.AgentRuntimeContractHarnessV1,
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name:       "harness v2",
+			mode:       executionmode.HarnessV2,
+			want:       corev1alpha1.AgentRuntimeContractHarnessV2,
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name:       "opposite explicit contract",
+			mode:       executionmode.HarnessV1,
+			explicit:   corev1alpha1.AgentRuntimeContractHarnessV2,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			handlers := NewHandlers(HandlersConfig{Client: fakeClient, ExecutionMode: test.mode})
+			app := fiber.New()
+			app.Post("/agents", handlers.CreateAgent)
+
+			var explicit *corev1alpha1.AgentRuntimeContractVersion
+			if test.explicit != "" {
+				value := test.explicit
+				explicit = &value
+			}
+			bodyBytes, err := json.Marshal(CreateAgentRequest{
+				Name:      "runtime-agent",
+				Namespace: "default",
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					Type:            corev1alpha1.AgentRuntimeCodex,
+					ContractVersion: explicit,
+				}},
+			})
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodPost, "/agents", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, test.wantStatus, resp.StatusCode)
+
+			created := &corev1alpha1.Agent{}
+			err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "runtime-agent", Namespace: "default"}, created)
+			if test.wantStatus != http.StatusCreated {
+				require.True(t, apierrors.IsNotFound(err), "rejected Agent should not be created")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, test.want, created.BuiltInContractVersion())
+		})
+	}
 }
 
 func TestHandlers_CreateAgent_MetadataStyle(t *testing.T) {

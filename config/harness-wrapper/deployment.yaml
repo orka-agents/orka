@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-harness-wrapper
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: agent-harness-wrapper
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orka
+      app.kubernetes.io/component: agent-harness-wrapper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orka
+        app.kubernetes.io/component: agent-harness-wrapper
+        orka.ai/network-role: harness-v1
+    spec:
+      serviceAccountName: agent-harness-wrapper
+      automountServiceAccountToken: false
+      securityContext:
+        # The wrapper starts as root only to isolate each runtime subprocess
+        # under the dedicated unprivileged child UID/GID.
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wrapper
+          # Fail-closed placeholder. An operator overlay must replace this with
+          # the reviewed wrapper image digest before enabling harness v1.
+          image: ghcr.io/orka-agents/orka/agent-harness-wrapper@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: https
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: ORKA_HARNESS_WRAPPER_RUNTIME
+              value: multi
+            - name: ORKA_HARNESS_WRAPPER_LISTEN_ADDR
+              value: :8080
+            - name: ORKA_CONTROLLER_URL
+              value: http://orka-api.orka-system.svc:8080
+            - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
+              value: /var/run/orka/harness-wrapper-auth/token
+            - name: ORKA_HARNESS_WRAPPER_TLS_CERT_FILE
+              value: /var/run/orka/harness-wrapper-tls/tls.crt
+            - name: ORKA_HARNESS_WRAPPER_TLS_KEY_FILE
+              value: /var/run/orka/harness-wrapper-tls/tls.key
+            - name: ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH
+              value: /var/lib/orka/harness-v1/admission-ledger.db
+            - name: ORKA_HARNESS_WRAPPER_LEDGER_GENERATION
+              value: "1"
+            - name: ORKA_HARNESS_WRAPPER_LEDGER_RETENTION
+              value: 720h
+            - name: ORKA_ALLOW_BASH
+              value: "true"
+            - name: ORKA_HARNESS_WRAPPER_CHILD_UID
+              value: "1000"
+            - name: ORKA_HARNESS_WRAPPER_CHILD_GID
+              value: "1000"
+            - name: ORKA_CODEX_SANDBOX_MODE
+              value: workspace-write
+          volumeMounts:
+            - name: auth
+              mountPath: /var/run/orka/harness-wrapper-auth
+              readOnly: true
+            - name: tls
+              mountPath: /var/run/orka/harness-wrapper-tls
+              readOnly: true
+            - name: controller-api-token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+            - name: ledger
+              mountPath: /var/lib/orka/harness-v1
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - SETUID
+                - SETGID
+                - CHOWN
+                - KILL
+                - FOWNER
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /v1/ready
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+              ephemeral-storage: 2Gi
+      volumes:
+        - name: auth
+          secret:
+            secretName: harness-wrapper-auth
+            defaultMode: 0400
+            items:
+              - key: token
+                path: token
+        - name: tls
+          secret:
+            secretName: harness-wrapper-tls
+            defaultMode: 0400
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+              - key: ca.crt
+                path: ca.crt
+        - name: controller-api-token
+          projected:
+            defaultMode: 0400
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+        - name: ledger
+          persistentVolumeClaim:
+            claimName: harness-wrapper-ledger
+        - name: tmp
+          emptyDir: {}

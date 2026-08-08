@@ -109,6 +109,14 @@ func acpSessionTranscriptAppendPolicyForTask(task *corev1alpha1.Task) acpSession
 	return acpSessionTranscriptAppendPolicy{skipUserPromptAppend: task.Spec.SessionRef.PromptIncluded}
 }
 
+// acpSessionLineageIdentity carries the protocol/runtime lineage identity
+// claimed atomically with the Session mutation lease.
+type acpSessionLineageIdentity struct {
+	NamespaceUID    string
+	RuntimeIdentity string
+	ConfigDigest    string
+}
+
 func (d *ACPDispatcher) prepareTaskSession(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -117,6 +125,7 @@ func (d *ACPDispatcher) prepareTaskSession(
 	mcpBindingDigest string,
 	runtimeInstanceID harnessv2.RuntimeInstanceID,
 	supervisorBootID harnessv2.SupervisorBootID,
+	lineage acpSessionLineageIdentity,
 ) (*acpTaskSession, error) {
 	if task.Spec.SessionRef == nil {
 		return nil, nil
@@ -124,13 +133,16 @@ func (d *ACPDispatcher) prepareTaskSession(
 	if d.Sessions == nil {
 		return nil, fmt.Errorf("ACP Session continuity is not configured")
 	}
+	if lineage.ConfigDigest == "" {
+		lineage.ConfigDigest = string(profileDigest)
+	}
 	preparation, err := d.planTaskSession(ctx, task, fence, profileDigest, mcpBindingDigest, runtimeInstanceID, supervisorBootID)
 	if err != nil {
 		return nil, err
 	}
 	lease, turn, err := d.bindAndOpenTaskSessionTurn(
 		ctx, task, fence, runtimeInstanceID, preparation.control, preparation.userPrompt,
-		acpSessionTranscriptAppendPolicyForTask(task),
+		acpSessionTranscriptAppendPolicyForTask(task), lineage,
 	)
 	if err != nil {
 		return nil, err
@@ -388,12 +400,13 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 	control *store.SessionControl,
 	userPrompt string,
 	appendPolicy acpSessionTranscriptAppendPolicy,
+	lineage acpSessionLineageIdentity,
 ) (*ACPSessionLease, *ACPSessionTurn, error) {
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
 		return nil, nil, err
 	}
-	existingLease, expectedExistingLeaseDigest, err := matchingTaskSessionLease(control, task)
+	existingLease, _, err := matchingTaskSessionLease(control, task)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -407,18 +420,18 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 		return nil, nil, err
 	}
 
-	lease := existingACPSessionLease(control, existingLease, expectedExistingLeaseDigest, task)
-	if lease == nil {
-		lease, err = d.acquireTaskSessionLease(ctx, task, fence, control)
-		if err != nil {
-			_ = d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
-			return nil, nil, err
-		}
+	// Re-enter exact lease acquisition even when the Lease already exists. This
+	// is idempotent and completes a lineage payload projection that may have
+	// failed after the Kubernetes-authoritative status CAS.
+	lease, err := d.acquireTaskSessionLease(ctx, task, fence, control, lineage)
+	if err != nil {
+		requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+		return nil, nil, errors.Join(err, requeueErr)
 	}
 	if lease.Key.LeaseGeneration != leaseGeneration {
 		err := fmt.Errorf("%w: acquired ACP Session lease generation changed after PromptAttempt binding", store.ErrConflict)
-		_ = d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
-		return nil, nil, err
+		requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+		return nil, nil, errors.Join(err, requeueErr)
 	}
 	turn, err := d.Sessions.OpenTurn(ctx, ACPOpenSessionTurnRequest{
 		Lease: *lease, Fence: fence, PromptAttemptID: attemptID,
@@ -575,26 +588,12 @@ func matchingTaskSessionLease(control *store.SessionControl, task *corev1alpha1.
 	return existing, expectedDigest, nil
 }
 
-func existingACPSessionLease(
-	control *store.SessionControl,
-	existing *store.SessionMutationLease,
-	expectedDigest string,
-	task *corev1alpha1.Task,
-) *ACPSessionLease {
-	if existing == nil || existing.RequestDigest != expectedDigest {
-		return nil
-	}
-	return &ACPSessionLease{Session: *control, Key: store.SessionTurnKey{
-		SessionUID: control.SessionUID, LeaseGeneration: existing.Generation,
-		TaskUID: string(task.UID), Attempt: int64(task.Status.Execution.Attempt), PromptID: task.Status.Execution.PromptID,
-	}}
-}
-
 func (d *ACPDispatcher) acquireTaskSessionLease(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	fence store.ControllerEpochFence,
 	control *store.SessionControl,
+	lineage acpSessionLineageIdentity,
 ) (*ACPSessionLease, error) {
 	expires := time.Now().UTC().Add(30 * time.Minute)
 	if task.Spec.Timeout != nil && task.Spec.Timeout.Duration > 0 {
@@ -604,6 +603,7 @@ func (d *ACPDispatcher) acquireTaskSessionLease(
 		Session: *control, Fence: fence, TaskUID: string(task.UID), Attempt: int64(task.Status.Execution.Attempt),
 		PromptID: task.Status.Execution.PromptID, PromptRequestDigest: task.Status.Execution.RequestDigest,
 		AcquiredAt: time.Now().UTC(), ExpiresAt: &expires,
+		NamespaceUID: lineage.NamespaceUID, RuntimeIdentity: lineage.RuntimeIdentity, ConfigDigest: lineage.ConfigDigest,
 	})
 }
 

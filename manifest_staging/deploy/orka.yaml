@@ -2,13 +2,37 @@ apiVersion: v1
 kind: Namespace
 metadata:
   labels:
+    app.kubernetes.io/component: acp-runtime
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+  name: orka-runtimes
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
     control-plane: controller-manager
+    orka.ai/controller-mode: harness-v2
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/warn: restricted
   name: orka-system
+---
+apiVersion: v1
+automountServiceAccountToken: true
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+  namespace: orka-system
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -73,6 +97,67 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+  name: orka-runtime-controller-role
+  namespace: orka-runtimes
+rules:
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - replicasets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - secrets
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - policy
+  resources:
+  - poddisruptionbudgets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
   name: orka-leader-election-role
   namespace: orka-system
 rules:
@@ -107,6 +192,28 @@ rules:
   verbs:
   - create
   - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+rules:
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -1086,19 +1193,6 @@ rules:
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
-  - clusterrolebindings
-  - rolebindings
-  - roles
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - update
-  - watch
-- apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
   - clusterroles
   verbs:
   - get
@@ -1114,6 +1208,18 @@ rules:
   - clusterroles
   verbs:
   - bind
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  - roles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
 - apiGroups:
   - storage.k8s.io
   resources:
@@ -1213,6 +1319,33 @@ rules:
   - /metrics
   verbs:
   - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-static-controller-cluster-role
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - orka-system
+  resources:
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resourceNames:
+  - orka-ai-worker-role
+  - orka-vendor-worker-role
+  - orka-container-worker-role
+  resources:
+  - clusterroles
+  verbs:
+  - bind
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -1355,6 +1488,110 @@ rules:
   - tools/status
   verbs:
   - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-v2-controller-cluster-role
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - orka-runtimes
+  resources:
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
+  - apiextensions.k8s.io
+  resourceNames:
+  - tasks.core.orka.ai
+  - gatewayclasses.gateway.orka.ai
+  - gateways.gateway.orka.ai
+  - gatewaybindings.gateway.orka.ai
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - branchclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - branchclaims/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - branchclaims/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewayclasses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewayclasses/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewayclasses/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders/finalizers
+  verbs:
+  - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -1799,6 +2036,51 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+  name: orka-runtime-controller-rolebinding
+  namespace: orka-runtimes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orka-runtime-controller-role
+subjects:
+- kind: ServiceAccount
+  name: orka-controller-manager
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orka-ai-worker-rolebinding
+  namespace: orka-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-ai-worker-role
+subjects:
+- kind: ServiceAccount
+  name: orka-ai-worker
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orka-container-worker-rolebinding
+  namespace: orka-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-container-worker-role
+subjects:
+- kind: ServiceAccount
+  name: orka-container-worker
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
   name: orka-leader-election-rolebinding
   namespace: orka-system
 roleRef:
@@ -1811,38 +2093,13 @@ subjects:
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: orka-ai-worker-rolebinding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: orka-ai-worker-role
-subjects:
-- kind: ServiceAccount
-  name: orka-ai-worker
-  namespace: orka-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: orka-container-worker-rolebinding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: orka-container-worker-role
-subjects:
-- kind: ServiceAccount
-  name: orka-container-worker
-  namespace: orka-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
   name: orka-manager-rolebinding
+  namespace: orka-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -1850,6 +2107,54 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: orka-controller-manager
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orka-vendor-worker-rolebinding
+  namespace: orka-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-vendor-worker-role
+subjects:
+- kind: ServiceAccount
+  name: orka-vendor-worker
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-parameter-reader-rolebinding
+  namespace: orka-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-workspace-parameter-reader
+subjects:
+- kind: ServiceAccount
+  name: orka-controller-manager
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-admission
+subjects:
+- kind: ServiceAccount
+  name: orka-admission
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1868,14 +2173,17 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: orka-vendor-worker-rolebinding
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-static-controller-cluster-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: orka-vendor-worker-role
+  name: orka-static-controller-cluster-role
 subjects:
 - kind: ServiceAccount
-  name: orka-vendor-worker
+  name: orka-controller-manager
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1884,11 +2192,11 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
-  name: orka-workspace-parameter-reader-rolebinding
+  name: orka-v2-controller-cluster-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: orka-workspace-parameter-reader
+  name: orka-v2-controller-cluster-role
 subjects:
 - kind: ServiceAccount
   name: orka-controller-manager
@@ -1906,6 +2214,25 @@ metadata:
     orka.ai/acp-runtime-images: "true"
   name: acp-runtime-images-2cc58tc8m7
   namespace: orka-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+  namespace: orka-system
+spec:
+  ports:
+  - name: https
+    port: 443
+    protocol: TCP
+    targetPort: webhook
+  selector:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/name: orka
 ---
 apiVersion: v1
 kind: Service
@@ -2027,6 +2354,119 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+  namespace: orka-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: admission
+      app.kubernetes.io/name: orka
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: admission
+        app.kubernetes.io/name: orka
+        orka.ai/network-role: admission
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/component: admission
+                  app.kubernetes.io/name: orka
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+      automountServiceAccountToken: true
+      containers:
+      - args:
+        - --health-probe-bind-address=:8081
+        - --webhook-cert-path=/var/run/orka/admission/tls
+        - --webhook-cert-name=tls.crt
+        - --webhook-cert-key=tls.key
+        - --webhook-service-dns-name=orka-admission.orka-system.svc
+        - --controller-usernames=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
+        - --task-provenance-trusted-users=system:serviceaccount:orka-system:orka-controller-manager,system:serviceaccount:orka-v1-system:orka-v1,system:serviceaccount:orka-v2-system:orka-v2
+        - --task-provenance-trusted-service-accounts=orka-ai-worker,orka-vendor-worker,orka-v1-ai-worker,orka-v1-vendor-worker,orka-v2-ai-worker,orka-v2-vendor-worker
+        command:
+        - /orka-admission
+        image: docker.io/sozercan/orka@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: health
+          periodSeconds: 10
+        name: admission
+        ports:
+        - containerPort: 9443
+          name: webhook
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /readyz
+            port: health
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 500m
+            ephemeral-storage: 128Mi
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            ephemeral-storage: 32Mi
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+        volumeMounts:
+        - mountPath: /var/run/orka/admission/tls
+          name: tls
+          readOnly: true
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: orka-admission
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: tls
+        secret:
+          items:
+          - key: tls.crt
+            path: tls.crt
+          - key: tls.key
+            path: tls.key
+          optional: false
+          secretName: orka-admission-tls
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
     control-plane: controller-manager
@@ -2056,8 +2496,14 @@ spec:
         - --health-probe-bind-address=:8081
         - --store-backend=sqlite
         - --store-path=/data/orka.db
+        - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
+        - --agent-execution-snapshot-retention=720h
+        - --agent-execution-snapshot-retention-interval=1h
         - --controller-url=http://orka-api.orka-system.svc:8080
-        - --acp-runtime-enabled=true
+        - --controller-mode=harness-v2
+        - --watch-namespace=orka-system
+        - --enforce-namespace-isolation=true
+        - --execution-mode-controller-usernames=system:serviceaccount:orka-system:orka-controller-manager
         - --acp-upgrade-drain-bind-address=127.0.0.1:8083
         - --acp-upgrade-drain-timeout=5m
         - --acp-upgrade-drain-poll-interval=1s
@@ -2174,6 +2620,9 @@ spec:
         - mountPath: /var/run/orka/provider-auth
           name: provider-auth-proxy
           readOnly: true
+        - mountPath: /var/run/orka/agent-execution-snapshot
+          name: agent-execution-snapshot-key
+          readOnly: true
       securityContext:
         fsGroup: 65532
         runAsNonRoot: true
@@ -2205,6 +2654,13 @@ spec:
           - key: token
             path: token
           secretName: provider-auth-proxy
+      - name: agent-execution-snapshot-key
+        secret:
+          defaultMode: 256
+          items:
+          - key: snapshot-key
+            path: key
+          secretName: agent-execution-snapshot-key
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -2528,11 +2984,26 @@ spec:
             path: operation-capability-secret
           secretName: workspace-publisher-auth
 ---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+  namespace: orka-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: admission
+      app.kubernetes.io/name: orka
+---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
   name: orka-executionworkspace-core-admission.orka.ai
-  namespace: orka-system
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -2567,64 +3038,6 @@ spec:
         .check('admit').allowed()
     message: only the Orka core controller may establish or advance ExecutionWorkspace
       core admission
-    reason: Forbidden
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicy
-metadata:
-  name: orka-task-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  failurePolicy: Fail
-  matchConstraints:
-    resourceRules:
-    - apiGroups:
-      - core.orka.ai
-      apiVersions:
-      - v1alpha1
-      operations:
-      - CREATE
-      - UPDATE
-      resources:
-      - tasks
-  validations:
-  - expression: |-
-      !has(object.spec.execution) || !has(object.spec.execution.workspace) || !has(object.spec.execution.workspace.classRef) || authorizer.group('workspace.orka.ai')
-
-        .resource('executionworkspaceclasses')
-        .namespace(request.namespace)
-        .name(object.spec.execution.workspace.classRef.name)
-        .check('use').allowed()
-    message: caller is not authorized to use the selected ExecutionWorkspaceClass
-    reason: Forbidden
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicy
-metadata:
-  name: orka-tool-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  failurePolicy: Fail
-  matchConstraints:
-    resourceRules:
-    - apiGroups:
-      - core.orka.ai
-      apiVersions:
-      - v1alpha1
-      operations:
-      - CREATE
-      - UPDATE
-      resources:
-      - tools
-  validations:
-  - expression: |-
-      !has(object.spec.mcp) || !has(object.spec.mcp.workspace) || authorizer.group('workspace.orka.ai')
-
-        .resource('executionworkspaceclasses')
-        .namespace(request.namespace)
-        .name(object.spec.mcp.workspace.classRef.name)
-        .check('use').allowed()
-    message: caller is not authorized to use the selected ExecutionWorkspaceClass
     reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -2681,32 +3094,67 @@ spec:
     name: containerWorkerServiceAccount
 ---
 apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-task-workspace-class-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - tasks
+  validations:
+  - expression: |-
+      !has(object.spec.execution) || !has(object.spec.execution.workspace) || !has(object.spec.execution.workspace.classRef) || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.spec.execution.workspace.classRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected ExecutionWorkspaceClass
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-tool-workspace-class-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - tools
+  validations:
+  - expression: |-
+      !has(object.spec.mcp) || !has(object.spec.mcp.workspace) || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.spec.mcp.workspace.classRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected ExecutionWorkspaceClass
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
   name: orka-executionworkspace-core-admission.orka.ai
-  namespace: orka-system
 spec:
   policyName: orka-executionworkspace-core-admission.orka.ai
-  validationActions:
-  - Deny
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicyBinding
-metadata:
-  name: orka-task-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  policyName: orka-task-workspace-class-use.orka.ai
-  validationActions:
-  - Deny
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicyBinding
-metadata:
-  name: orka-tool-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  policyName: orka-tool-workspace-class-use.orka.ai
   validationActions:
   - Deny
 ---
@@ -2718,6 +3166,54 @@ spec:
   policyName: orka-gateway-task-protection
   validationActions:
   - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-task-workspace-class-use.orka.ai
+spec:
+  policyName: orka-task-workspace-class-use.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-tool-workspace-class-use.orka.ai
+spec:
+  policyName: orka-tool-workspace-class-use.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-admission
+  namespace: orka-system
+spec:
+  egress:
+  - ports:
+    - port: 443
+      protocol: TCP
+    - port: 6443
+      protocol: TCP
+  ingress:
+  - ports:
+    - port: 9443
+      protocol: TCP
+    - port: 8081
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: admission
+      app.kubernetes.io/name: orka
+  policyTypes:
+  - Ingress
+  - Egress
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

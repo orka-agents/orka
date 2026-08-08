@@ -16,6 +16,8 @@ on:
       - "hack/**"
       - "internal/**"
       - "pkg/**"
+      - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/security-scan-e2e.sh"
       - "workers/**"
   push:
@@ -32,6 +34,8 @@ on:
       - "hack/**"
       - "internal/**"
       - "pkg/**"
+      - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/security-scan-e2e.sh"
       - "workers/**"
 

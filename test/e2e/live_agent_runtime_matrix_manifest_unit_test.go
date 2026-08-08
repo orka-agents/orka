@@ -9,7 +9,27 @@ MIT License - see LICENSE file for details.
 
 package e2e
 
-import "testing"
+import (
+	"testing"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+)
+
+func TestLiveRuntimeAgentManifestsPinHarnessV2Contract(t *testing.T) {
+	t.Parallel()
+
+	for _, runtimeType := range []string{"codex", "claude", "copilot", "opencode"} {
+		runtimeType := runtimeType
+		t.Run(runtimeType, func(t *testing.T) {
+			t.Parallel()
+			agent := runtimeAgentManifest(runtimeType+"-agent", runtimeType, "test-model", 5, nil)
+			runtime := manifestNestedMap(t, agent, "spec", "runtime")
+			if got := runtime["contractVersion"]; got != corev1alpha1.AgentRuntimeContractHarnessV2 {
+				t.Fatalf("contractVersion = %#v, want %q", got, corev1alpha1.AgentRuntimeContractHarnessV2)
+			}
+		})
+	}
+}
 
 func TestLiveRuntimeManifestsOmitCodexBashPolicy(t *testing.T) {
 	t.Parallel()

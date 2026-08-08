@@ -55,6 +55,7 @@ var _ = Describe("Agent Task", Ordered, func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 5,
 					"defaultAllowBash": false

@@ -74,6 +74,7 @@ var _ = Describe("Agent Advanced Features", func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false
@@ -161,6 +162,7 @@ var _ = Describe("Agent Advanced Features", func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false

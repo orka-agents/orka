@@ -92,6 +92,14 @@ const secretKeyRefSchema = z.object({
   key: z.string(),
 })
 
+const agentRuntimeDeploymentSchema = z.object({
+  mode: z.literal('external-endpoint'),
+  endpoint: z.string(),
+})
+
+const agentRuntimeToolExecutionModeSchema = z.enum(['observed', 'brokered'])
+const agentRuntimeBrokeredToolClassSchema = z.enum(['read', 'write', 'coordination'])
+
 export const agentRuntimeLimitsSchema = z.object({
   maxResidentSessions: z.number(),
   maxConcurrentPrompts: z.number(),
@@ -137,56 +145,102 @@ export const agentRuntimeProfileSchema = z.object({
   resourceClass: z.string(),
 })
 
+const agentRuntimeV1CapabilitiesSchema = z.object({
+  toolExecutionModes: z.array(agentRuntimeToolExecutionModeSchema).optional(),
+  brokeredToolClasses: z.array(agentRuntimeBrokeredToolClassSchema).optional(),
+  supportsCancel: z.boolean().optional(),
+  supportsRuntimeSessions: z.boolean().optional(),
+  supportsContinuation: z.boolean().optional(),
+  supportsArtifacts: z.boolean().optional(),
+}).strict()
+
+const agentRuntimeV1SpecSchema = z.object({
+  contractVersion: z.literal('orka.harness.v1'),
+  deployment: agentRuntimeDeploymentSchema,
+  clientAuth: z.object({
+    bearerTokenSecretRef: secretKeyRefSchema,
+  }).strict(),
+  capabilities: agentRuntimeV1CapabilitiesSchema.optional(),
+}).strict()
+
+const agentRuntimeV2SpecSchema = z.object({
+  contractVersion: z.literal('orka.harness.v2'),
+  deployment: agentRuntimeDeploymentSchema,
+  clientAuth: z.object({
+    controllerBearerTokenSecretRef: secretKeyRefSchema,
+    operationCapabilitySecretRef: secretKeyRefSchema,
+  }).strict(),
+  capabilities: z.object({
+    runtimeInstanceID: z.string(),
+    profile: agentRuntimeProfileSchema,
+    limits: agentRuntimeLimitsSchema,
+    supportsDrain: z.boolean().default(false),
+    supportsPublicationFinalization: z.boolean().optional(),
+    workspaceGovernance: workspaceGovernanceSchema,
+  }).strict(),
+}).strict()
+
+const agentRuntimeUnclassifiedSpecSchema = z.object({
+  contractVersion: z.undefined().optional(),
+  deployment: agentRuntimeDeploymentSchema,
+  clientAuth: z.record(z.string(), z.unknown()),
+  capabilities: z.record(z.string(), z.unknown()).optional(),
+}).strict()
+
+export const agentRuntimeSpecSchema = z.union([
+  agentRuntimeV1SpecSchema,
+  agentRuntimeV2SpecSchema,
+  agentRuntimeUnclassifiedSpecSchema,
+])
+
+const agentRuntimeObservedCapabilitiesSchema = z.object({
+  protocolVersion: z.string().optional(),
+  transport: z.string().optional(),
+  acpVersion: z.string().optional(),
+  runtimeInstanceID: z.string().optional(),
+  supervisorBootID: z.string().optional(),
+  controllerEpoch: z.number().optional(),
+  runtimePoolUID: z.string().optional(),
+  runtimePoolGeneration: z.number().optional(),
+  runtimeProfileDigest: z.string().optional(),
+  profileDigestSchemaVersion: z.number().optional(),
+  adapterName: z.string().optional(),
+  adapterDigest: z.string().optional(),
+  providerKind: z.string().optional(),
+  model: z.string().optional(),
+  limits: agentRuntimeLimitsSchema.partial().optional(),
+  supportsDrain: z.boolean().optional(),
+  supportsPublicationFinalization: z.boolean().optional(),
+  workspaceGovernance: workspaceGovernanceSchema.partial().optional(),
+  lifecycle: z.string().optional(),
+  runtimeName: z.string().optional(),
+  runtimeVersion: z.string().optional(),
+  toolExecutionModes: z.array(agentRuntimeToolExecutionModeSchema).optional(),
+  brokeredToolClasses: z.array(agentRuntimeBrokeredToolClassSchema).optional(),
+  supportsCancel: z.boolean().optional(),
+  supportsRuntimeSessions: z.boolean().optional(),
+  supportsContinuation: z.boolean().optional(),
+  supportsArtifacts: z.boolean().optional(),
+  supportsSuspend: z.boolean().optional(),
+  supportsWorkspaceSnapshot: z.boolean().optional(),
+  maxConcurrentTurns: z.number().optional(),
+  maxTurnSeconds: z.number().optional(),
+  maxOutputBytes: z.number().optional(),
+})
+
 export const agentRuntimeSchema = z.object({
   apiVersion: z.string().optional(),
   kind: z.string().optional(),
   metadata: k8sMetadataSchema,
-  spec: z.object({
-    contractVersion: z.literal('orka.harness.v2'),
-    deployment: z.object({
-      mode: z.literal('external-endpoint'),
-      endpoint: z.string(),
-    }),
-    clientAuth: z.object({
-      controllerBearerTokenSecretRef: secretKeyRefSchema,
-      operationCapabilitySecretRef: secretKeyRefSchema,
-    }),
-    capabilities: z.object({
-      runtimeInstanceID: z.string(),
-      profile: agentRuntimeProfileSchema,
-      limits: agentRuntimeLimitsSchema,
-      supportsDrain: z.boolean(),
-      supportsPublicationFinalization: z.boolean().optional(),
-      workspaceGovernance: workspaceGovernanceSchema,
-    }),
-  }),
+  spec: agentRuntimeSpecSchema,
   status: z.object({
     ready: z.boolean().optional(),
     observedGeneration: z.number().optional(),
-    observedCapabilities: z.object({
-      protocolVersion: z.string().optional(),
-      transport: z.string().optional(),
-      acpVersion: z.string().optional(),
-      runtimeInstanceID: z.string().optional(),
-      supervisorBootID: z.string().optional(),
-      controllerEpoch: z.number().optional(),
-      runtimePoolUID: z.string().optional(),
-      runtimePoolGeneration: z.number().optional(),
-      runtimeProfileDigest: z.string().optional(),
-      profileDigestSchemaVersion: z.number().optional(),
-      adapterName: z.string().optional(),
-      adapterDigest: z.string().optional(),
-      providerKind: z.string().optional(),
-      model: z.string().optional(),
-      limits: agentRuntimeLimitsSchema.partial().optional(),
-      supportsDrain: z.boolean().optional(),
-      supportsPublicationFinalization: z.boolean().optional(),
-      workspaceGovernance: workspaceGovernanceSchema.partial().optional(),
-      lifecycle: z.string().optional(),
-    }).optional(),
+    observedCapabilities: agentRuntimeObservedCapabilitiesSchema.optional(),
     lastValidated: z.string().optional(),
     observedControllerAuthRefResourceVersion: z.string().optional(),
     observedOperationCapabilityRefResourceVersion: z.string().optional(),
+    observedAuthRefResourceVersion: z.string().optional(),
     message: z.string().optional(),
     conditions: z.array(conditionSchema).optional(),
   }).optional(),

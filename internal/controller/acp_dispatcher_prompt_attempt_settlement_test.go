@@ -408,10 +408,10 @@ func createPromptAttemptInStateForSettlementTest(
 		Attempt:   1,
 		PromptID:  "prompt-" + taskUID + "-1",
 	}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		Key:           key,
 		RequestDigest: testControlDigestForDispatcher("prompt-attempt-settlement"),
-	}, fence)
+	}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}

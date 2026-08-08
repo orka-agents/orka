@@ -13,9 +13,17 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// ValidateOpenCodeAgentSpec validates the reviewed OpenCode runtime configuration.
+// ValidateOpenCodeAgentSpec validates the reviewed managed OpenCode v2
+// runtime configuration. It is contract-aware: runtime.type: opencode exists
+// in both harness protocols and is never protocol evidence, so the v2 rules
+// apply only to an Agent explicitly classified orka.harness.v2. V1-selected
+// and still-unclassified stored legacy OpenCode Agents are preserved
+// unchanged; execution admission for them fails closed elsewhere.
 func ValidateOpenCodeAgentSpec(agent *corev1alpha1.Agent) error {
 	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode {
+		return nil
+	}
+	if agent.BuiltInContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
 		return nil
 	}
 	if strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort) != "" {

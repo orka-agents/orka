@@ -10,6 +10,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -34,6 +35,7 @@ func TestBuildRuntimeSessionMCPConfigurationInjectsJournaledChildMessagingTools(
 			Model: &corev1alpha1.ModelConfig{Name: "model"},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:                corev1alpha1.AgentRuntimeClaude,
+				ContractVersion:     ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
 				DefaultAllowedTools: []string{providerNativeToolRead},
 			},
 		},
@@ -124,7 +126,8 @@ func TestBuildRuntimeSessionMCPConfigurationSynthesizesDenyOnlyProviderNativeToo
 				Spec: corev1alpha1.AgentSpec{
 					Model: &corev1alpha1.ModelConfig{Name: "model"},
 					Runtime: &corev1alpha1.AgentCLIRuntime{
-						Type: test.provider,
+						Type:            test.provider,
+						ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
 					},
 				},
 			}
@@ -180,8 +183,11 @@ func TestBuildRuntimeSessionMCPConfigurationTranslatesReadOnlyOpenCodeTools(t *t
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: "default", UID: "agent-uid", Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   testOpenCodeModelConfig(),
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	plan, err := PlanACPRuntime(task, agent, ACPRuntimeImages{Opencode: image})
@@ -271,8 +277,11 @@ func TestBuildRuntimeSessionMCPConfigurationDeliversCanonicalToolDescriptors(t *
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:        &corev1alpha1.ModelConfig{Name: "model"},
-			Runtime:      &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+			Model: &corev1alpha1.ModelConfig{Name: "model"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeClaude,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 			Coordination: &corev1alpha1.CoordinationConfig{ApprovalRequiredTools: []string{"dispatch_work"}},
 		},
 	}
@@ -330,8 +339,11 @@ func TestBuildRuntimeSessionMCPConfigurationRejectsControllerLocalTools(t *testi
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: "model"},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+			Model: &corev1alpha1.ModelConfig{Name: "model"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeClaude,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	_, err := PlanACPRuntime(task, agent, ACPRuntimeImages{Claude: "docker.io/example/claude@sha256:" + strings.Repeat("a", 64)})
@@ -355,8 +367,11 @@ func TestBuildRuntimeSessionMCPConfigurationClassifiesOpenCodeNativeTools(t *tes
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   testOpenCodeModelConfig(),
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	plan, err := PlanACPRuntime(task, agent, ACPRuntimeImages{
@@ -403,8 +418,11 @@ func TestBuildRuntimeSessionMCPConfigurationNormalizesOpenCodeMutationAliases(t 
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   testOpenCodeModelConfig(),
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	task := &corev1alpha1.Task{
@@ -460,6 +478,7 @@ func TestBuildRuntimeSessionMCPConfigurationDefaultsOpenCodeToolsOnlyWhenOmitted
 					Model: testOpenCodeModelConfig(),
 					Runtime: &corev1alpha1.AgentCLIRuntime{
 						Type:                corev1alpha1.AgentRuntimeOpencode,
+						ContractVersion:     ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
 						DefaultAllowedTools: tt.allowedTools,
 					},
 				},
@@ -494,6 +513,7 @@ func TestBuildRuntimeSessionMCPConfigurationOpenCodeReadIntentClosesConsequentia
 			Model: testOpenCodeModelConfig(),
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:                corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion:     ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
 				DefaultAllowedTools: []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep"},
 				DefaultAllowBash:    new(true),
 			},
@@ -537,6 +557,7 @@ func TestBuildRuntimeSessionMCPConfigurationOpenCodeDenyIsCaseInsensitive(t *tes
 			Model: testOpenCodeModelConfig(),
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type: corev1alpha1.AgentRuntimeOpencode, DefaultAllowedTools: []string{"Read", "Bash"},
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -571,8 +592,11 @@ func TestBuildRuntimeSessionMCPConfigurationRejectsUngovernedOpenCodeNativeTools
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   testOpenCodeModelConfig(),
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	for _, toolName := range []string{"task", "skill", "question", "todowrite", "WebSearch", "WebFetch"} {
@@ -611,8 +635,11 @@ func TestBuildRuntimeSessionMCPConfigurationRejectsUnknownOrUngovernedTools(t *t
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: "model"},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+			Model: &corev1alpha1.ModelConfig{Name: "model"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeClaude,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	plan, err := PlanACPRuntime(task, agent, ACPRuntimeImages{Claude: "docker.io/example/claude@sha256:" + strings.Repeat("a", 64)})
@@ -639,8 +666,11 @@ func TestBuildRuntimeSessionMCPConfigurationHonorsExplicitEmptyTaskOpenCodeTools
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   testOpenCodeModelConfig(),
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	task := &corev1alpha1.Task{

@@ -110,8 +110,9 @@ func TestQueueACPRuntimeTaskRejectsAgentSkillsBeforePoolDemand(t *testing.T) {
 		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
-	if _, err := reconciler.queueACPRuntimeTask(ctx, task.DeepCopy(), agent); err != nil {
-		t.Fatalf("queueACPRuntimeTask() error = %v, want terminal InvalidRuntimeProfile status", err)
+	current := configureAgentExecutionBindingTest(t, ctx, reconciler, task)
+	if result, err, handled := reconciler.ensureAgentExecutionBinding(ctx, current, agent); err != nil || !handled {
+		t.Fatalf("invalid skills binding result=%#v handled=%v err=%v", result, handled, err)
 	}
 
 	var pools corev1alpha1.RuntimePoolList

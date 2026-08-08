@@ -305,6 +305,8 @@ type PromptAttempt struct {
 	SessionLeaseGeneration int64                     `json:"sessionLeaseGeneration,omitempty"`
 	RuntimeInstanceID      string                    `json:"runtimeInstanceId,omitempty"`
 	RequestDigest          string                    `json:"requestDigest"`
+	BindingDigest          string                    `json:"bindingDigest,omitempty"`
+	SnapshotDigest         string                    `json:"snapshotDigest,omitempty"`
 	CredentialBindings     []PromptCredentialBinding `json:"credentialBindings,omitempty"`
 	ExecutionState         PromptExecutionState      `json:"executionState"`
 	DeliveryState          PromptDeliveryState       `json:"deliveryState"`
@@ -436,6 +438,7 @@ type SessionControl struct {
 	RelatedPromptAttemptID string                  `json:"relatedPromptAttemptId,omitempty"`
 	RelatedPublicationID   string                  `json:"relatedPublicationId,omitempty"`
 	VerifiedBaseline       *VerifiedBranchBaseline `json:"verifiedBaseline,omitempty"`
+	Lineage                *SessionLineage         `json:"lineage,omitempty"`
 	ControllerEpochName    string                  `json:"controllerEpochName"`
 	ControllerEpoch        int64                   `json:"controllerEpoch"`
 	LastOperationID        string                  `json:"lastOperationId,omitempty"`
@@ -460,6 +463,10 @@ type AcquireSessionMutationLeaseRequest struct {
 	RequestDigest           string               `json:"requestDigest"`
 	AcquiredAt              time.Time            `json:"acquiredAt"`
 	ExpiresAt               *time.Time           `json:"expiresAt,omitempty"`
+	// Lineage is established or verified in the same Kubernetes
+	// RuntimeSessionControl status CAS that records the acquired Lease. It is
+	// required by the Kubernetes-authoritative store.
+	Lineage *ClaimSessionLineageRequest `json:"lineage,omitempty"`
 }
 
 // ReleaseSessionMutationLeaseRequest aborts a pre-prompt lease only while the

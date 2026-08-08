@@ -470,11 +470,18 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 		claim.ExpectedRef = strings.TrimSpace(claim.ExpectedRef)
 		claim.ExpectedOwnerUID = strings.TrimSpace(claim.ExpectedOwnerUID)
 		claim.ExpectedRequestDigest = strings.TrimSpace(claim.ExpectedRequestDigest)
+		claim.ExpectedBlockedReason = strings.TrimSpace(claim.ExpectedBlockedReason)
+		claim.ExpectedPublicationID = strings.TrimSpace(claim.ExpectedPublicationID)
 		if claim.ExpectedOwnerUID != intent.SessionUID {
 			return store.ValidationErrorf("session cleanup branch claim owner does not match Session UID")
 		}
-		if claim.ExpectedAvailability != store.BranchClaimAvailable {
-			return store.ValidationErrorf("session cleanup may only reclaim available branch claims")
+		switch claim.ExpectedAvailability {
+		case store.BranchClaimAvailable:
+			if claim.ExpectedBlockedReason != "" || claim.ExpectedPublicationID != "" {
+				return store.ValidationErrorf("available session cleanup branch claim carries blocked state")
+			}
+		default:
+			return store.ValidationErrorf("session cleanup branch claim has unsupported availability %q", claim.ExpectedAvailability)
 		}
 		if claim.ExpectedVersion < 1 || claim.ExpectedGeneration < 1 {
 			return store.ValidationErrorf("session cleanup branch claim version and generation must be at least one")

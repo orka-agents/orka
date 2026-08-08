@@ -34,6 +34,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/test/utils"
 )
@@ -174,7 +175,12 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		Expect(applyManifestJSON(gatewayE2EAdapterManifest())).To(Succeed())
 		Expect(gatewayE2EWaitForDeployment(gatewayE2EAdapterName, 2*time.Minute)).To(Succeed())
 
-		By("creating an Agent that references an unavailable external v2 runtime")
+		By("registering an external v2 runtime")
+		runtimeManifest, err := gatewayE2ERuntimeManifest()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applyManifestJSON(runtimeManifest)).To(Succeed())
+
+		By("creating an Agent that references the external v2 runtime")
 		Expect(applyManifestJSON(gatewayE2EAgentManifest())).To(Succeed())
 
 		By("creating the GatewayClass, Gateway, and GatewayBinding")
@@ -548,6 +554,105 @@ func gatewayE2EAdapterManifest() map[string]any {
 			},
 		},
 	}
+}
+
+func gatewayE2ERuntimeManifest() (map[string]any, error) {
+	zeroDigest := "sha256:" + strings.Repeat("0", 64)
+	profile := harnessv2.RuntimeProfile{
+		ACPProfile:               harnessv2.ACPProfileV1,
+		AdapterDigests:           map[string]string{gatewayE2ERuntimeName: zeroDigest},
+		ProviderKind:             "external",
+		Model:                    "gateway-e2e",
+		AgentConfigurationDigest: zeroDigest,
+		ToolPolicyDigest:         zeroDigest,
+		ApprovalPolicyDigest:     zeroDigest,
+		MCPConfigurationDigest:   zeroDigest,
+		WorkspaceIntent:          harnessv2.WorkspaceIntentRead,
+		ProxyCredentialRole:      "provider-inference",
+		ProxyCredentialScope:     "model:gateway-e2e",
+		ResourceClass:            "standard",
+	}
+	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize Gateway E2E runtime profile: %w", err)
+	}
+
+	return map[string]any{
+		"apiVersion": "core.orka.ai/v1alpha1",
+		"kind":       "AgentRuntime",
+		"metadata": map[string]any{
+			"name":      gatewayE2ERuntimeName,
+			"namespace": namespace,
+		},
+		"spec": map[string]any{
+			"contractVersion": "orka.harness.v2",
+			"deployment": map[string]any{
+				"mode": "external-endpoint",
+				"endpoint": fmt.Sprintf(
+					"http://%s.%s.svc.cluster.local:%d",
+					gatewayE2ERuntimeServiceName,
+					namespace,
+					gatewayE2ERuntimePort,
+				),
+			},
+			"clientAuth": map[string]any{
+				"controllerBearerTokenSecretRef": map[string]any{
+					"name": gatewayE2ERuntimeAuthResourceName,
+					"key":  "controller-token",
+				},
+				"operationCapabilitySecretRef": map[string]any{
+					"name": gatewayE2ERuntimeAuthResourceName,
+					"key":  "capability-secret",
+				},
+			},
+			"capabilities": map[string]any{
+				"runtimeInstanceID": gatewayE2ERuntimeName,
+				"profile": map[string]any{
+					"digest":                   string(profileDigest),
+					"digestSchemaVersion":      int32(harnessv2.ProfileDigestSchemaVersion),
+					"acpProfile":               profile.ACPProfile,
+					"adapterName":              gatewayE2ERuntimeName,
+					"adapterDigest":            zeroDigest,
+					"providerKind":             profile.ProviderKind,
+					"model":                    profile.Model,
+					"agentConfigurationDigest": profile.AgentConfigurationDigest,
+					"toolPolicyDigest":         profile.ToolPolicyDigest,
+					"approvalPolicyDigest":     profile.ApprovalPolicyDigest,
+					"mcpConfigurationDigest":   profile.MCPConfigurationDigest,
+					"workspaceIntent":          string(profile.WorkspaceIntent),
+					"proxyCredentialRole":      profile.ProxyCredentialRole,
+					"proxyCredentialScope":     profile.ProxyCredentialScope,
+					"resourceClass":            profile.ResourceClass,
+				},
+				"limits": map[string]any{
+					"maxResidentSessions":      10,
+					"maxConcurrentPrompts":     4,
+					"maxRequestBytes":          1048576,
+					"maxEventLineBytes":        262144,
+					"maxTerminalResultBytes":   1048576,
+					"maxBufferedEvents":        4096,
+					"maxUpdateEventsPerSecond": 100,
+					"minPromptLeaseMillis":     5000,
+					"maxPromptLeaseMillis":     120000,
+					"maxPendingPermissions":    32,
+					"maxWorkspaceDeltaBytes":   104857600,
+				},
+				"supportsDrain":                   false,
+				"supportsPublicationFinalization": false,
+				"workspaceGovernance": map[string]any{
+					"mode":                            "strict-governed",
+					"trusted":                         false,
+					"orkaOwnedWorkspaceDeltas":        true,
+					"promptScopedBrokerAuthorization": true,
+					"noDirectSCMPublication":          true,
+					"orkaOwnedCleanRoomPublication":   true,
+					"exactInstanceFencing":            true,
+					"duplicateSafeMutations":          true,
+					"cancellationSettlement":          true,
+				},
+			},
+		},
+	}, nil
 }
 
 func gatewayE2EAgentManifest() map[string]any {

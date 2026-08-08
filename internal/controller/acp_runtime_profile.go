@@ -29,6 +29,19 @@ type ACPRuntimePlan struct {
 	Digest   harnessv2.ProfileDigest
 }
 
+// validateACPRuntimePlanningAgent gates ACP planning on a complete built-in
+// runtime with an explicit orka.harness.v2 classification and a valid v2
+// OpenCode shape. A missing selector is never protocol evidence.
+func validateACPRuntimePlanningAgent(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if task == nil || agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Type == "" {
+		return fmt.Errorf("built-in agent runtime is required")
+	}
+	if agent.BuiltInContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
+		return fmt.Errorf("ACP runtime planning requires an Agent explicitly classified %s; a missing runtime.contractVersion selector is never protocol evidence", corev1alpha1.AgentRuntimeContractHarnessV2)
+	}
+	return ValidateOpenCodeAgentSpec(agent)
+}
+
 func PlanACPRuntime(task *corev1alpha1.Task, agent *corev1alpha1.Agent, images ACPRuntimeImages) (ACPRuntimePlan, error) {
 	if err := ValidateOpenCodeAgentSpec(agent); err != nil {
 		return ACPRuntimePlan{}, err
@@ -53,10 +66,7 @@ func PlanACPRuntimeWithConfiguration(
 	images ACPRuntimeImages,
 	configuration harnessv2.AgentSessionConfiguration,
 ) (ACPRuntimePlan, error) {
-	if task == nil || agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Type == "" {
-		return ACPRuntimePlan{}, fmt.Errorf("built-in agent runtime is required")
-	}
-	if err := ValidateOpenCodeAgentSpec(agent); err != nil {
+	if err := validateACPRuntimePlanningAgent(task, agent); err != nil {
 		return ACPRuntimePlan{}, err
 	}
 	provider := string(agent.Spec.Runtime.Type)
@@ -176,23 +186,6 @@ func acpRuntimePoolBindingMatches(status *corev1alpha1.TaskExecutionStatus, pool
 	return status != nil && pool != nil && pool.UID != "" &&
 		strings.TrimSpace(status.RuntimePoolName) == pool.Name &&
 		strings.TrimSpace(status.RuntimePoolUID) == string(pool.UID)
-}
-
-func acpQueuedTaskRequestMatchesPlan(
-	task *corev1alpha1.Task,
-	agent *corev1alpha1.Agent,
-	plan ACPRuntimePlan,
-	status *corev1alpha1.TaskExecutionStatus,
-) (bool, error) {
-	if task == nil || agent == nil || status == nil || status.Attempt < 1 || strings.TrimSpace(status.PromptID) == "" ||
-		strings.TrimSpace(status.RequestDigest) == "" {
-		return false, nil
-	}
-	digest, err := acpTaskRequestDigest(task, agent, plan, status.Attempt, status.PromptID)
-	if err != nil {
-		return false, err
-	}
-	return digest == status.RequestDigest, nil
 }
 
 func effectiveACPWorkspaceIntent(task *corev1alpha1.Task) corev1alpha1.WorkspaceIntent {

@@ -7,8 +7,10 @@ require (
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/distribution/reference v0.6.0
+	github.com/github/copilot-sdk/go v0.1.25
 	github.com/go-logr/logr v1.4.4
 	github.com/gofiber/fiber/v3 v3.4.0
+	github.com/google/jsonschema-go v0.4.2
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/jwx/v3 v3.1.1
 	github.com/onsi/ginkgo/v2 v2.32.0

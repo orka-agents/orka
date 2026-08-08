@@ -16,6 +16,7 @@ spec:
   # a controller-owned, digest-pinned orka.harness.v2 RuntimePool. There is no
   # per-Task Job/image or legacy harness fallback.
   runtime:
+    contractVersion: orka.harness.v2
     type: codex
     defaultMaxTurns: 50
     defaultAllowBash: true

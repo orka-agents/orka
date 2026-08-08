@@ -27,10 +27,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${script_dir}/lib/kind-local-registry.sh"
+# shellcheck source=scripts/lib/e2e-admission-tls.sh
+. "${script_dir}/lib/e2e-admission-tls.sh"
 
 kind_cluster="${KIND_CLUSTER:-orka-security-scan-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
-test_namespace="${ORKA_SECURITY_SCAN_E2E_NAMESPACE:-default}"
+test_namespace="${ORKA_SECURITY_SCAN_E2E_NAMESPACE:-${orka_namespace}}"
 orka_controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
 wait_timeout="${ORKA_SECURITY_SCAN_WAIT_TIMEOUT:-25m}"
 target_repo="${ORKA_SECURITY_SCAN_TARGET_REPO:-https://github.com/sozercan/nodejs-goof}"
@@ -249,6 +251,7 @@ metadata:
   namespace: ${test_namespace}
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: codex
     defaultMaxTurns: 1
     defaultAllowBash: false
@@ -306,6 +309,10 @@ main() {
   require_cmd kind
   require_cmd kubectl
   require_cmd jq
+  require_cmd openssl
+
+  [[ "${orka_namespace}" == "orka-system" ]] || die "ORKA_NAMESPACE must be orka-system for the canonical make deploy path"
+  [[ "${test_namespace}" == "${orka_namespace}" ]] || die "ORKA_SECURITY_SCAN_E2E_NAMESPACE must match ORKA_NAMESPACE for an isolated controller"
 
   cd "${repo_root}"
   [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
@@ -336,6 +343,9 @@ main() {
   local manager_ref publisher_ref
   manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
   publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+
+  log "Bootstrapping test-only admission TLS"
+  orka_e2e_bootstrap_admission_tls
 
   log "Deploying Orka manager with inert digest-pinned ACP images for the deferred RepositoryScan agent path"
   local placeholder_digest

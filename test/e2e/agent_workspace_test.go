@@ -52,6 +52,7 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 5,
 					"defaultAllowBash": false

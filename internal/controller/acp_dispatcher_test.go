@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,10 +18,12 @@ import (
 	"testing"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -31,27 +34,94 @@ import (
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
+	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-func bindDispatcherProfileToAgent(
+func prepareBoundACPDispatcherTaskForTest(
 	t *testing.T,
-	profile *harnessv2.RuntimeProfile,
+	ctx context.Context,
+	kubeClient client.Client,
+	scheme *runtime.Scheme,
+	controlStore *sqlite.Store,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
-) {
+	images ACPRuntimeImages,
+) *corev1alpha1.Task {
+	return prepareBoundACPDispatcherTaskWithStoresForTest(
+		t, ctx, kubeClient, scheme, controlStore, controlStore, task, agent, images,
+	)
+}
+
+func prepareBoundACPDispatcherTaskWithStoresForTest(
+	t *testing.T,
+	ctx context.Context,
+	kubeClient client.Client,
+	scheme *runtime.Scheme,
+	controlStore store.DurableControlStore,
+	persistence *sqlite.Store,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	images ACPRuntimeImages,
+) *corev1alpha1.Task {
+	t.Helper()
+	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x61}, sqlite.AgentExecutionSnapshotKeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := persistence.SetAgentExecutionSnapshotCipher(cipher); err != nil {
+		t.Fatal(err)
+	}
+	binder := &TaskReconciler{
+		Client:                  kubeClient,
+		APIReader:               kubeClient,
+		Scheme:                  scheme,
+		DurableControlStore:     controlStore,
+		AgentExecutionSnapshots: persistence,
+		ACPRuntimeEnabled:       true,
+		ACPRuntimeImages:        images,
+	}
+	bound := bindACPQueueTaskForTest(t, ctx, binder, task, agent)
+	verified, err := binder.loadVerifiedBoundExecution(ctx, bound, bound.Status.AgentExecutionBinding)
+	if err != nil {
+		t.Fatalf("load frozen dispatcher test execution: %v", err)
+	}
+	requestDigest, err := acpBoundTaskRequestDigest(
+		verified, bound.Status.Execution.Attempt, bound.Status.Execution.PromptID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(bound), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Execution.RequestDigest = requestDigest
+	if err := kubeClient.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(bound), current); err != nil {
+		t.Fatal(err)
+	}
+	return current
+}
+
+func frozenACPDispatcherPlanForTest(
+	t *testing.T,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	images ACPRuntimeImages,
+) ACPRuntimePlan {
 	t.Helper()
 	configuration, err := buildACPAgentSessionConfiguration(task, agent, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest, err := harnessv2.CanonicalAgentConfigurationDigest(configuration)
+	plan, err := PlanACPRuntimeWithConfiguration(task, agent, images, configuration)
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile.ProviderKind = configuration.ProviderKind
-	profile.Model = configuration.Model
-	profile.AgentConfigurationDigest = digest
+	return plan
 }
 
 func TestRuntimeSessionCreateTimeoutCoversColdAdapterInitialization(t *testing.T) {
@@ -362,7 +432,7 @@ func TestACPDispatcherExplicitRuntimeRPCFailureIsPromptFailed(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,6 +493,9 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	taskUID := types.UID("11111111-1111-1111-1111-111111111111")
 	promptID := "prompt-" + string(taskUID) + "-1"
 	task := &corev1alpha1.Task{
@@ -440,32 +513,18 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
-	profile := harnessProfileForTest()
-	profile.Model = acpTestModel
-	bindDispatcherProfileToAgent(t, &profile, task, agent)
-	var err error
-	allowedTools := effectiveACPAllowedTools(task, agent)
-	disallowedTools := sortedUnique(task.Spec.AgentRuntime.DisallowedTools)
-	profile.ToolPolicyDigest, err = harnessv2.CanonicalRuntimeToolPolicyDigest(allowedTools, disallowedTools, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.ApprovalPolicyDigest, err = harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.MCPConfigurationDigest, err = harnessv2.CanonicalMCPConfigurationDigest(allowedTools)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
+	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
+	profile := plan.Profile
+	profileDigest := plan.Digest
+	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
+	task.Status.Execution.RuntimePoolName = plan.PoolName
 	server := newDispatcherRuntimeServer(t, profile, profileDigest)
 	defer server.Close()
 	parsed, err := url.Parse(server.URL)
@@ -473,11 +532,10 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool := &corev1alpha1.RuntimePool{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: types.UID("pool-uid"), Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: plan.PoolName, UID: types.UID("pool-uid"), Generation: 1},
 		Spec: corev1alpha1.RuntimePoolSpec{
 			RuntimeNamespace: "orka-runtimes", Runtime: corev1alpha1.RuntimePoolRuntimeSpec{
-				Image:   "docker.io/example/acp@sha256:" + strings.Repeat("a", 64),
-				Profile: RuntimePoolProfileFromPlan(ACPRuntimePlan{Profile: profile, Digest: profileDigest}),
+				Image: plan.Image, Profile: RuntimePoolProfileFromPlan(plan),
 			}, DesiredReplicas: 1,
 		},
 		Status: corev1alpha1.RuntimePoolStatus{
@@ -495,14 +553,25 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		}},
 		Data: map[string][]byte{runtimePoolControllerTokenKey: []byte(strings.Repeat("t", 32)), runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32))},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task, pool, secret, agent).Build()
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: task.Namespace, UID: types.UID("default-namespace-uid"),
+	}}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(
+		&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}, &corev1alpha1.ControllerEpoch{},
+		&corev1alpha1.PromptAttempt{}, &corev1alpha1.RuntimeSessionControl{},
+		&corev1alpha1.BranchClaim{}, &corev1alpha1.Publication{}, &corev1alpha1.ExternalEffect{},
+	).WithObjects(task, pool, secret, agent, namespace).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
-	epochs := NewControllerEpochManager(controlStore, "controller-test")
+	persistence := sqlite.NewStore(db, "test")
+	controlStore, err := kubestore.NewComposite(kubeClient, "orka-system", persistence, kubestore.WithAPIReader(kubeClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	epochs := NewControllerEpochManager(controlStore, "controller-test").WithMirror(persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()
@@ -512,24 +581,32 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	task = prepareBoundACPDispatcherTaskWithStoresForTest(
+		t, ctx, kubeClient, scheme, controlStore, persistence, task, agent, images,
+	)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		BindingDigest: task.Status.AgentExecutionBinding.BindingDigest, SnapshotDigest: task.Status.AgentExecutionBinding.Snapshot.Digest,
 		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence); err != nil {
+	}), fence); err != nil {
 		t.Fatal(err)
 	}
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
-		SessionControls: controlStore, Transcripts: controlStore, Publications: controlStore, BranchClaims: controlStore,
+		SessionControls: controlStore, Transcripts: persistence, Publications: controlStore, BranchClaims: controlStore,
+		Lineages: persistence,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs, Sessions: continuity}
+	dispatcher := &ACPDispatcher{
+		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
+		Snapshots: persistence, Epochs: epochs, Sessions: continuity,
+	}
 	if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
 		t.Fatal(err)
 	}
@@ -542,14 +619,14 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		completed.Status.ResultRef == nil || !completed.Status.ResultRef.Available {
 		t.Fatalf("unexpected completed status: %#v", completed.Status)
 	}
-	result, err := controlStore.GetResult(ctx, task.Namespace, task.Name)
+	result, err := persistence.GetResult(ctx, task.Namespace, task.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(result) != "hello from runtime" {
 		t.Fatalf("result = %q", result)
 	}
-	transcript, err := controlStore.LoadTranscript(ctx, "default", "session", 10)
+	transcript, err := persistence.LoadTranscript(ctx, "default", "session", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,6 +650,221 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(context.Context, client.Client, *corev1alpha1.Agent, *corev1alpha1.Tool) error
+	}{
+		{
+			name: "mutated",
+			change: func(ctx context.Context, kubeClient client.Client, agent *corev1alpha1.Agent, tool *corev1alpha1.Tool) error {
+				currentAgent := &corev1alpha1.Agent{}
+				if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(agent), currentAgent); err != nil {
+					return err
+				}
+				currentAgent.Generation++
+				currentAgent.Spec.Model.Name = "mutated-model"
+				currentAgent.Spec.Runtime.DefaultAllowedTools = []string{"different-tool"}
+				if err := kubeClient.Update(ctx, currentAgent); err != nil {
+					return err
+				}
+				currentTool := &corev1alpha1.Tool{}
+				if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(tool), currentTool); err != nil {
+					return err
+				}
+				currentTool.Generation++
+				currentTool.Spec.Description = "mutated tool description"
+				currentTool.Status.Endpoint = "https://mutated.example.test/tool"
+				return kubeClient.Update(ctx, currentTool)
+			},
+		},
+		{
+			name: "deleted",
+			change: func(ctx context.Context, kubeClient client.Client, agent *corev1alpha1.Agent, tool *corev1alpha1.Tool) error {
+				if err := kubeClient.Delete(ctx, agent.DeepCopy()); err != nil {
+					return err
+				}
+				return kubeClient.Delete(ctx, tool.DeepCopy())
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+
+			const toolName = "frozen-custom-tool"
+			taskUID := types.UID("frozen-" + test.name + "-task-uid")
+			promptID := "prompt-" + string(taskUID) + "-1"
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: "frozen-" + test.name, UID: taskUID,
+					Labels: map[string]string{acpRuntimeTaskPoolLabel: "pending"},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent, Prompt: "use the frozen configuration",
+					AgentRef: &corev1alpha1.AgentReference{Name: "frozen-agent"},
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhasePending, Attempts: 1,
+					Execution: &corev1alpha1.TaskExecutionStatus{
+						State: corev1alpha1.TaskExecutionStateQueued, Attempt: 1, PromptID: promptID,
+						RuntimePoolName: "pending", RuntimePoolUID: "frozen-pool-uid",
+						RequestDigest: testControlDigestForDispatcher("pre-binding-request"), ControllerEpoch: 1,
+					},
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: "frozen-agent", UID: types.UID("frozen-agent-uid"), Generation: 1,
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+					Runtime: &corev1alpha1.AgentCLIRuntime{
+						Type: corev1alpha1.AgentRuntimeClaude, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+						DefaultAllowedTools: []string{toolName},
+					},
+				},
+			}
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: toolName, UID: types.UID("frozen-tool-uid"), Generation: 1,
+				},
+				Spec: corev1alpha1.ToolSpec{
+					Description:       "original frozen tool description",
+					BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+					HTTP:              &corev1alpha1.HTTPExecution{URL: "https://original.example.test/tool", Method: http.MethodPost},
+				},
+				Status: corev1alpha1.ToolStatus{Available: true, Endpoint: "https://original.example.test/tool"},
+			}
+			images := ACPRuntimeImages{Claude: "docker.io/example/claude@sha256:" + strings.Repeat("a", 64)}
+			plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
+			task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
+			task.Status.Execution.RuntimePoolName = plan.PoolName
+
+			createRequests := make(chan harnessv2.CreateRuntimeSessionRequest, 1)
+			server := newDispatcherRuntimeServer(t, plan.Profile, plan.Digest, func(request harnessv2.CreateRuntimeSessionRequest) {
+				createRequests <- request
+			})
+			defer server.Close()
+			parsed, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool := &corev1alpha1.RuntimePool{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default", Name: plan.PoolName, UID: types.UID("frozen-pool-uid"), Generation: 1,
+				},
+				Spec: corev1alpha1.RuntimePoolSpec{
+					RuntimeNamespace: "orka-runtimes",
+					Runtime:          corev1alpha1.RuntimePoolRuntimeSpec{Image: plan.Image, Profile: RuntimePoolProfileFromPlan(plan)},
+					DesiredReplicas:  1,
+				},
+				Status: corev1alpha1.RuntimePoolStatus{
+					Lifecycle:      corev1alpha1.RuntimePoolLifecycleServing,
+					AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
+					ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
+						PodNamespace: "orka-runtimes", PodName: "runtime-pod", PodAddress: parsed.Host,
+						PodUID: "pod-uid", BootID: "boot-id", RuntimeInstanceID: "pod-uid.boot-id", ControllerEpoch: 1,
+						ProtocolVersion:            corev1alpha1.RuntimePoolProtocolHarnessV2,
+						ProfileDigest:              string(plan.Digest),
+						ProfileDigestSchemaVersion: strconv.FormatUint(uint64(harnessv2.ProfileDigestSchemaVersion), 10),
+					},
+				},
+			}
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "orka-runtimes", Name: "frozen-pool-auth",
+					Labels: map[string]string{runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID)},
+				},
+				Data: map[string][]byte{
+					runtimePoolControllerTokenKey:  []byte(strings.Repeat("t", 32)),
+					runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32)),
+				},
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).
+				WithObjects(task, pool, secret, agent, tool).Build()
+			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "frozen-dispatch.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close() //nolint:errcheck
+			controlStore := sqlite.NewStore(db, "frozen-dispatch-test")
+			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "frozen-"+test.name)
+			defer stopEpoch()
+			fence, err := epochs.CurrentFence(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
+			verifier := TaskReconciler{
+				Client: kubeClient, APIReader: kubeClient,
+				AgentExecutionSnapshots: controlStore,
+			}
+			frozen, err := verifier.loadVerifiedBoundExecution(ctx, task, task.Status.AgentExecutionBinding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantAgentConfiguration := frozen.configuration
+			wantMCPConfiguration := frozen.mcpConfiguration
+			wantDescriptor, ok := wantMCPConfiguration.ToolPolicy.Descriptor(toolName)
+			if !ok || wantDescriptor.Description != tool.Spec.Description || wantDescriptor.DefinitionDigest == "" {
+				t.Fatalf("frozen custom Tool descriptor = %#v", wantDescriptor)
+			}
+			attemptKey := store.PromptAttemptKey{
+				Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID,
+			}
+			attemptID, err := attemptKey.CanonicalID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+				ID: attemptID, Key: attemptKey, RequestDigest: task.Status.Execution.RequestDigest,
+				BindingDigest:  task.Status.AgentExecutionBinding.BindingDigest,
+				SnapshotDigest: task.Status.AgentExecutionBinding.Snapshot.Digest,
+				ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+			}), fence); err != nil {
+				t.Fatal(err)
+			}
+			if err := test.change(ctx, kubeClient, agent, tool); err != nil {
+				t.Fatal(err)
+			}
+
+			dispatcher := &ACPDispatcher{
+				Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore,
+				Snapshots: controlStore, Epochs: epochs,
+			}
+			if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
+				t.Fatal(err)
+			}
+			var got harnessv2.CreateRuntimeSessionRequest
+			select {
+			case got = <-createRequests:
+			default:
+				t.Fatal("runtime did not receive CreateRuntimeSession")
+			}
+			if got.AgentConfiguration == nil || *got.AgentConfiguration != wantAgentConfiguration {
+				t.Fatalf("runtime Agent configuration = %#v, want frozen %#v", got.AgentConfiguration, wantAgentConfiguration)
+			}
+			if !got.MCPConfiguration.Matches(wantMCPConfiguration) {
+				t.Fatalf("runtime MCP configuration drifted from frozen snapshot: got=%#v want=%#v", got.MCPConfiguration, wantMCPConfiguration)
+			}
+			gotDescriptor, ok := got.MCPConfiguration.ToolPolicy.Descriptor(toolName)
+			if !ok || gotDescriptor.Description != wantDescriptor.Description ||
+				gotDescriptor.DefinitionDigest != wantDescriptor.DefinitionDigest {
+				t.Fatalf("runtime custom Tool descriptor = %#v, want frozen %#v", gotDescriptor, wantDescriptor)
+			}
+		})
 	}
 }
 
@@ -612,33 +904,18 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
-	profile := harnessProfileForTest()
-	profile.Model = acpTestModel
-	bindDispatcherProfileToAgent(t, &profile, task, agent)
-	profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
-	var err error
-	allowedTools := effectiveACPAllowedTools(task, agent)
-	disallowedTools := sortedUnique(task.Spec.AgentRuntime.DisallowedTools)
-	profile.ToolPolicyDigest, err = harnessv2.CanonicalRuntimeToolPolicyDigest(allowedTools, disallowedTools, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.ApprovalPolicyDigest, err = harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.MCPConfigurationDigest, err = harnessv2.CanonicalMCPConfigurationDigest(allowedTools)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
+	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
+	profile := plan.Profile
+	profileDigest := plan.Digest
+	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
+	task.Status.Execution.RuntimePoolName = plan.PoolName
 	var operationMu sync.Mutex
 	operations := make([]string, 0, 2)
 	var finalizationRequest harnessv2.FinalizeRuntimeSessionPublicationRequest
@@ -662,11 +939,10 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 		t.Fatal(err)
 	}
 	pool := &corev1alpha1.RuntimePool{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: types.UID("pool-uid"), Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: plan.PoolName, UID: types.UID("pool-uid"), Generation: 1},
 		Spec: corev1alpha1.RuntimePoolSpec{
 			RuntimeNamespace: "orka-runtimes", Runtime: corev1alpha1.RuntimePoolRuntimeSpec{
-				Image:   "docker.io/example/acp@sha256:" + strings.Repeat("a", 64),
-				Profile: RuntimePoolProfileFromPlan(ACPRuntimePlan{Profile: profile, Digest: profileDigest}),
+				Image: plan.Image, Profile: RuntimePoolProfileFromPlan(plan),
 			}, DesiredReplicas: 1,
 		},
 		Status: corev1alpha1.RuntimePoolStatus{
@@ -711,6 +987,7 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	if err != nil {
 		t.Fatal(err)
 	}
+	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
 	if err != nil {
@@ -727,15 +1004,24 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 			ResourceVersion: workspaceCredential.ResourceVersion,
 		})
 	}
-	if _, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		BindingDigest: task.Status.AgentExecutionBinding.BindingDigest, SnapshotDigest: task.Status.AgentExecutionBinding.Snapshot.Digest,
 		CredentialBindings: credentialBindings,
 		ExecutionState:     store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence); err != nil {
+	}), fence); err != nil {
 		t.Fatal(err)
 	}
+	recordingControls := &orderedSessionControlStore{
+		SessionControlStore: controlStore,
+		onFinalized: func() {
+			operationMu.Lock()
+			defer operationMu.Unlock()
+			operations = append(operations, "settle")
+		},
+	}
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
-		SessionControls: controlStore, Transcripts: controlStore, Publications: controlStore, BranchClaims: controlStore,
+		SessionControls: recordingControls, Transcripts: controlStore, Publications: controlStore, BranchClaims: controlStore,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -755,7 +1041,8 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
-		Sessions: continuity, Publisher: publisherClient, ArtifactCapabilitySecret: []byte(strings.Repeat("d", 32)),
+		Snapshots: controlStore,
+		Sessions:  continuity, Publisher: publisherClient, ArtifactCapabilitySecret: []byte(strings.Repeat("d", 32)),
 		ArtifactReservations: acceptingArtifactReservations{},
 	}
 	if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
@@ -791,8 +1078,8 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	gotOperations := append([]string(nil), operations...)
 	gotFinalization := finalizationRequest
 	operationMu.Unlock()
-	if fmt.Sprint(gotOperations) != "[finalize delete]" {
-		t.Fatalf("runtime cleanup operations = %v, want publication finalization before deletion", gotOperations)
+	if fmt.Sprint(gotOperations) != "[finalize settle delete]" {
+		t.Fatalf("runtime cleanup operations = %v, want publication finalization, Session settlement, then deletion", gotOperations)
 	}
 	if gotFinalization.WorkspaceDeltaID != harnessv2.WorkspaceDeltaID("delta-"+promptID) ||
 		gotFinalization.PublicationID != publicationIDForTask(completed) ||
@@ -829,32 +1116,18 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
-	profile := harnessProfileForTest()
-	profile.Model = acpTestModel
-	bindDispatcherProfileToAgent(t, &profile, task, agent)
-	allowedTools := effectiveACPAllowedTools(task, agent)
-	disallowedTools := sortedUnique(task.Spec.AgentRuntime.DisallowedTools)
-	var err error
-	profile.ToolPolicyDigest, err = harnessv2.CanonicalRuntimeToolPolicyDigest(allowedTools, disallowedTools, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.ApprovalPolicyDigest, err = harnessv2.CanonicalMCPApprovalPolicyDigest(harnessv2.MCPApprovalPolicy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile.MCPConfigurationDigest, err = harnessv2.CanonicalMCPConfigurationDigest(allowedTools)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
+	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
+	profile := plan.Profile
+	profileDigest := plan.Digest
+	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
+	task.Status.Execution.RuntimePoolName = plan.PoolName
 	var deleteCalls atomic.Int32
 	deadlineCancels := make(chan context.CancelCauseFunc, 1)
 	server := newDispatcherTimeoutRuntimeServer(t, profile, profileDigest, &deleteCalls, func() {
@@ -866,11 +1139,10 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 		t.Fatal(err)
 	}
 	pool := &corev1alpha1.RuntimePool{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: types.UID("pool-uid"), Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: plan.PoolName, UID: types.UID("pool-uid"), Generation: 1},
 		Spec: corev1alpha1.RuntimePoolSpec{
 			RuntimeNamespace: "orka-runtimes", Runtime: corev1alpha1.RuntimePoolRuntimeSpec{
-				Image:   "docker.io/example/acp@sha256:" + strings.Repeat("a", 64),
-				Profile: RuntimePoolProfileFromPlan(ACPRuntimePlan{Profile: profile, Digest: profileDigest}),
+				Image: plan.Image, Profile: RuntimePoolProfileFromPlan(plan),
 			}, DesiredReplicas: 1,
 		},
 		Status: corev1alpha1.RuntimePoolStatus{
@@ -905,19 +1177,22 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		BindingDigest: task.Status.AgentExecutionBinding.BindingDigest, SnapshotDigest: task.Status.AgentExecutionBinding.Snapshot.Digest,
 		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence); err != nil {
+	}), fence); err != nil {
 		t.Fatal(err)
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
+		Snapshots: controlStore,
 		runtimeContextFactory: func(parent context.Context, _ *corev1alpha1.Task) (context.Context, context.CancelFunc) {
 			runtimeCtx, cancelCause := context.WithCancelCause(parent)
 			deadlineCancels <- cancelCause
@@ -969,7 +1244,7 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 		}},
 	}
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -986,6 +1261,7 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-pre-prompt")),
 		testControlDigestForDispatcher("mcp-pre-prompt"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
+		acpSessionLineageIdentity{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1012,6 +1288,7 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-pre-prompt")),
 		testControlDigestForDispatcher("mcp-pre-prompt"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
+		acpSessionLineageIdentity{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1108,10 +1385,10 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
 		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence)
+	}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1692,7 +1969,12 @@ func newDispatcherWriteRuntimeServer(
 	return httptest.NewServer(mux)
 }
 
-func newDispatcherRuntimeServer(t *testing.T, profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest) *httptest.Server {
+func newDispatcherRuntimeServer(
+	t *testing.T,
+	profile harnessv2.RuntimeProfile,
+	digest harnessv2.ProfileDigest,
+	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
+) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	limits := harnessv2.DefaultProtocolLimits()
@@ -1721,6 +2003,11 @@ func newDispatcherRuntimeServer(t *testing.T, profile harnessv2.RuntimeProfile, 
 			t.Errorf("decode create: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
+		}
+		for _, inspect := range onCreate {
+			if inspect != nil {
+				inspect(request)
+			}
 		}
 		now := time.Now().UTC()
 		created := harnessv2.RuntimeSessionDescriptor{
@@ -1850,6 +2137,31 @@ func testControlDigestForDispatcher(value string) string {
 	return digest
 }
 
+func boundPromptAttemptForTest(attempt *store.PromptAttempt) *store.PromptAttempt {
+	if attempt == nil {
+		return nil
+	}
+	if attempt.BindingDigest == "" {
+		attempt.BindingDigest = testControlDigestForDispatcher("test-v2-binding")
+	}
+	if attempt.SnapshotDigest == "" {
+		attempt.SnapshotDigest = testControlDigestForDispatcher("test-v2-snapshot")
+	}
+	return attempt
+}
+
+func testACPExecuteBindingForDispatcher() *corev1alpha1.AgentExecutionBinding {
+	return &corev1alpha1.AgentExecutionBinding{
+		SchemaVersion:   1,
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+		Backend:         corev1alpha1.AgentExecutionBackendRuntimePool,
+		BindingDigest:   testControlDigestForDispatcher("test-v2-binding"),
+		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{
+			Digest: testControlDigestForDispatcher("test-v2-snapshot"),
+		},
+	}
+}
+
 func TestACPDispatcherRejectsPersistedExternalRuntimeAttemptsWithoutExecution(t *testing.T) {
 	for _, state := range []corev1alpha1.TaskExecutionState{
 		corev1alpha1.TaskExecutionStateQueued,
@@ -1891,6 +2203,7 @@ func TestACPDispatcherRejectsPersistedExternalRuntimeAttemptsWithoutExecution(t 
 				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do not dispatch"},
 				Status: corev1alpha1.TaskStatus{
 					Phase: corev1alpha1.TaskPhasePending, Attempts: 1,
+					AgentExecutionBinding: testACPExecuteBindingForDispatcher(),
 					Execution: &corev1alpha1.TaskExecutionStatus{
 						State: state, Attempt: 1, PromptID: promptID, RequestDigest: requestDigest,
 						AgentRuntimeName: runtimeRegistration.Name, AgentRuntimeUID: string(runtimeRegistration.UID), ControllerEpoch: fence.Epoch,
@@ -1908,9 +2221,9 @@ func TestACPDispatcherRejectsPersistedExternalRuntimeAttemptsWithoutExecution(t 
 				WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.AgentRuntime{}).
 				WithObjects(task, runtimeRegistration).Build()
 			key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-			attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+			attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 				Key: key, RequestDigest: requestDigest, ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-			}, fence)
+			}), fence)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2010,7 +2323,7 @@ func TestACPDispatcherCapacityBackpressureRunsIdlePoolMaintenance(t *testing.T) 
 
 func TestACPDispatcherRuntimePoolReservationCASAndIdempotentRelease(t *testing.T) {
 	ctx := context.Background()
-	dispatcher, kubeClient, pool, first, second := newRuntimePoolReservationTestFixture(t, 1, 1)
+	dispatcher, kubeClient, pool, first, second := newRuntimePoolReservationTestFixture(t)
 	fence := store.ControllerEpochFence{Name: store.DefaultControllerEpochName, Epoch: 1}
 
 	claimed, firstIdentity, err := dispatcher.claimRuntimePoolReservation(ctx, first, pool.Name, fence, 1)
@@ -2052,7 +2365,7 @@ func TestACPDispatcherRuntimePoolReservationCASAndIdempotentRelease(t *testing.T
 
 func TestACPDispatcherRuntimePoolConcurrentClaimsAreAtomic(t *testing.T) {
 	ctx := context.Background()
-	dispatcher, kubeClient, pool, first, second := newRuntimePoolReservationTestFixture(t, 1, 1)
+	dispatcher, kubeClient, pool, first, second := newRuntimePoolReservationTestFixture(t)
 	fence := store.ControllerEpochFence{Name: store.DefaultControllerEpochName, Epoch: 1}
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -2139,6 +2452,7 @@ func runACPDispatcherPreAdmissionSettlementTest(
 		t.Fatal(err)
 	}
 	task := runtimePoolReservationTestTask("pre-admission", "pre-admission-uid", "pool-uid")
+	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
 	mutateTask(task)
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: "pool", UID: types.UID("pool-uid"), Generation: 1},
@@ -2177,10 +2491,10 @@ func runACPDispatcherPreAdmissionSettlementTest(
 		cancelEpoch()
 		t.Fatal(err)
 	}
-	if _, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
 		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence); err != nil {
+	}), fence); err != nil {
 		cancelEpoch()
 		t.Fatal(err)
 	}
@@ -2249,7 +2563,7 @@ func runACPDispatcherPreAdmissionSettlementTest(
 
 func TestACPDispatcherRuntimePoolReservationReclaimsExpiredAndReplacedInstance(t *testing.T) {
 	ctx := context.Background()
-	dispatcher, kubeClient, pool, first, _ := newRuntimePoolReservationTestFixture(t, 1, 1)
+	dispatcher, kubeClient, pool, first, _ := newRuntimePoolReservationTestFixture(t)
 	now := time.Now().UTC()
 	pool.Status.Capacity.Reservations = []corev1alpha1.RuntimePoolCapacityReservationStatus{
 		{
@@ -2310,10 +2624,10 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
 		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}, fence); err != nil {
+	}), fence); err != nil {
 		t.Fatal(err)
 	}
 	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore, Epochs: epochs}
@@ -2352,8 +2666,191 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 	}
 }
 
-func newRuntimePoolReservationTestFixture(t *testing.T, maxResident, maxPrompts int32) (*ACPDispatcher, client.Client, *corev1alpha1.RuntimePool, *corev1alpha1.Task, *corev1alpha1.Task) {
+func TestACPDispatcherReservedRetryReportsOnlyBoundedStage(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := runtimePoolReservationTestTask("session-retry", "session-retry-uid", "pool-uid")
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateReserved
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task).
+		Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient}
+
+	if err := dispatcher.requeueReservedTask(
+		context.Background(), task.DeepCopy(), acpReservedRetrySessionPreparation,
+		errors.New("sensitive provider diagnostic"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Execution == nil {
+		t.Fatal("reserved retry removed execution status")
+	}
+	if got, want := updated.Status.Execution.Message, "RuntimePool admission will be retried (stage: session-preparation)"; got != want {
+		t.Fatalf("retry message = %q, want %q", got, want)
+	}
+	if strings.Contains(updated.Status.Execution.Message, "sensitive provider diagnostic") {
+		t.Fatalf("retry message exposed the underlying cause: %q", updated.Status.Execution.Message)
+	}
+}
+
+//nolint:gocyclo // The recovery proof keeps the cross-store state transitions visible in one test.
+func TestACPDispatcherReserveTaskRecoversIncompletePreSubmissionRollback(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	task := runtimePoolReservationTestTask("session-rollback", "session-rollback-uid", "pool-uid")
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateReserved
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-rollback", Create: true, Append: true}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: "pool", UID: types.UID("pool-uid"), Generation: 1},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			DesiredReplicas: 1,
+			Capacity: &corev1alpha1.RuntimePoolCapacitySpec{
+				MaxResidentSessions: 1,
+				MaxRunningPrompts:   1,
+			},
+		},
+		Status: corev1alpha1.RuntimePoolStatus{
+			Lifecycle:      corev1alpha1.RuntimePoolLifecycleServing,
+			AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
+			ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
+				RuntimeInstanceID: "pod-uid.boot-id",
+				ControllerEpoch:   1,
+			},
+			Capacity: corev1alpha1.RuntimePoolCapacityStatus{
+				MaxResidentSessions: 1,
+				MaxRunningPrompts:   1,
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(
+			&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{},
+			&corev1alpha1.ControllerEpoch{}, &corev1alpha1.PromptAttempt{},
+		).
+		WithObjects(task.DeepCopy(), pool.DeepCopy()).
+		Build()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "session-rollback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	sqliteStore := sqlite.NewStore(db, "session-rollback-test")
+	controlStore, err := kubestore.NewComposite(kubeClient, "orka-system", sqliteStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epochs := NewControllerEpochManager(controlStore, "session-rollback-controller")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fence, err := epochs.CurrentFence(ctx)
+	if err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if fence.Epoch != pool.Status.ActiveInstance.ControllerEpoch {
+		cancelEpoch()
+		t.Fatalf("controller epoch = %d, want %d", fence.Epoch, pool.Status.ActiveInstance.ControllerEpoch)
+	}
+
+	key := store.PromptAttemptKey{
+		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID,
+	}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+	}), fence)
+	if err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	dispatcher := &ACPDispatcher{
+		Client: kubeClient, APIReader: kubeClient, Store: controlStore, Epochs: epochs,
+		ReservationTTL: time.Minute,
+	}
+	if err := dispatcher.transitionAttempt(
+		ctx, attempt.ID, fence, store.PromptExecutionQueued, store.PromptExecutionReserved, "reserve-session-rollback", nil,
+	); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if err := dispatcher.transitionAttempt(
+		ctx, attempt.ID, fence, store.PromptExecutionReserved, store.PromptExecutionSessionStarting,
+		"session-starting-session-rollback", &attemptRuntimeBinding{
+			RuntimeInstanceID: "pod-uid.boot-id", SessionUID: "session-uid", SessionGeneration: 1,
+		},
+	); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+
+	reserved, target, err := dispatcher.reserveTask(ctx, task.DeepCopy())
+	if err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if reserved == nil || target.pool == nil || target.reservation == nil {
+		cancelEpoch()
+		t.Fatalf("reserveTask() = task %#v, target %#v; want recovered reservation", reserved, target)
+	}
+	reservedPool := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), reservedPool); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if len(reservedPool.Status.Capacity.Reservations) != 1 ||
+		reservedPool.Status.Capacity.Reservations[0].ResidentSlots != 0 ||
+		reservedPool.Status.Capacity.Reservations[0].PromptSlots != 1 ||
+		reservedPool.Status.Capacity.ReservedSessions != 0 ||
+		reservedPool.Status.Capacity.ReservedPrompts != 1 {
+		cancelEpoch()
+		t.Fatalf("Session-backed reservation = %#v, want prompt-only capacity", reservedPool.Status.Capacity)
+	}
+	recovered, err := controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	if recovered.ExecutionState != store.PromptExecutionReserved || recovered.SessionUID != "" || recovered.SessionLeaseGeneration != 0 {
+		cancelEpoch()
+		t.Fatalf("recovered PromptAttempt = %#v, want unbound Reserved", recovered)
+	}
+	if reserved.Status.Execution == nil || reserved.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		reserved.Status.Execution.Reason != "" || reserved.Status.Execution.Message != "" {
+		cancelEpoch()
+		t.Fatalf("recovered Task execution = %#v, want clean Reserved", reserved.Status.Execution)
+	}
+	if err := dispatcher.releaseRuntimePoolReservation(ctx, *target.reservation); err != nil {
+		cancelEpoch()
+		t.Fatal(err)
+	}
+	cancelEpoch()
+	if err := <-epochDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newRuntimePoolReservationTestFixture(t *testing.T) (*ACPDispatcher, client.Client, *corev1alpha1.RuntimePool, *corev1alpha1.Task, *corev1alpha1.Task) {
 	t.Helper()
+	const maxResident, maxPrompts int32 = 1, 1
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -2371,6 +2868,56 @@ func newRuntimePoolReservationTestFixture(t *testing.T, maxResident, maxPrompts 
 	second := runtimePoolReservationTestTask("second", "second-uid", string(pool.UID))
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RuntimePool{}).WithObjects(pool).Build()
 	return &ACPDispatcher{Client: kubeClient, ReservationTTL: time.Minute}, kubeClient, pool.DeepCopy(), first, second
+}
+
+func TestACPDispatcherRuntimePoolReservationResidentUpgradeChecksCapacity(t *testing.T) {
+	dispatcher, kubeClient, pool, task, _ := newRuntimePoolReservationTestFixture(t)
+	ctx := context.Background()
+	current := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Capacity.ResidentSessions = 1
+	if err := kubeClient.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+
+	_, identity, err := dispatcher.claimRuntimePoolReservation(
+		ctx, task, pool.Name, store.ControllerEpochFence{Epoch: 1}, 0,
+	)
+	if err != nil {
+		t.Fatalf("claim prompt-only reservation: %v", err)
+	}
+	lease := newACPRuntimePoolReservationLease(dispatcher, identity)
+	if err := lease.setSlots(ctx, 1); !errors.Is(err, errACPRuntimePoolAtCapacity) {
+		t.Fatalf("resident upgrade error = %v, want RuntimePool capacity", err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Status.Capacity.Reservations) != 1 ||
+		current.Status.Capacity.Reservations[0].ResidentSlots != 0 ||
+		current.Status.Capacity.Reservations[0].PromptSlots != 1 ||
+		current.Status.Capacity.ReservedSessions != 0 || current.Status.Capacity.ReservedPrompts != 1 {
+		t.Fatalf("capacity-denied upgrade mutated reservation: %#v", current.Status.Capacity)
+	}
+
+	current.Status.Capacity.ResidentSessions = 0
+	if err := kubeClient.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.setSlots(ctx, 1); err != nil {
+		t.Fatalf("upgrade reservation after capacity release: %v", err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Status.Capacity.Reservations) != 1 ||
+		current.Status.Capacity.Reservations[0].ResidentSlots != 1 ||
+		current.Status.Capacity.Reservations[0].PromptSlots != 1 ||
+		current.Status.Capacity.ReservedSessions != 1 || current.Status.Capacity.ReservedPrompts != 1 {
+		t.Fatalf("resident upgrade was not committed atomically: %#v", current.Status.Capacity)
+	}
 }
 
 func runtimePoolReservationTestTask(name, uid, poolUID string) *corev1alpha1.Task {
@@ -2414,7 +2961,7 @@ func TestACPDispatcherQuiescesInterruptedSessionPreparation(t *testing.T) {
 			}
 			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task.DeepCopy()).Build()
 			key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-			attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+			attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2437,6 +2984,7 @@ func TestACPDispatcherQuiescesInterruptedSessionPreparation(t *testing.T) {
 					ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-"+name)),
 					testControlDigestForDispatcher("mcp-"+name),
 					harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
+					acpSessionLineageIdentity{},
 				)
 				if err != nil {
 					t.Fatal(err)
@@ -2453,7 +3001,7 @@ func TestACPDispatcherQuiescesInterruptedSessionPreparation(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := dispatcher.acquireTaskSessionLease(ctx, task, fence, control); err != nil {
+				if _, err := dispatcher.acquireTaskSessionLease(ctx, task, fence, control, acpSessionLineageIdentity{}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -2530,7 +3078,7 @@ func TestACPDispatcherAbortsLeaseWhenSessionTurnOpenFails(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task.DeepCopy()).Build()
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := baseStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+	attempt, err := baseStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2545,6 +3093,7 @@ func TestACPDispatcherAbortsLeaseWhenSessionTurnOpenFails(t *testing.T) {
 	if _, err := dispatcher.prepareTaskSession(
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-open-failure")),
 		testControlDigestForDispatcher("mcp-open-failure"), "runtime", "boot",
+		acpSessionLineageIdentity{},
 	); err == nil {
 		t.Fatal("prepareTaskSession unexpectedly succeeded")
 	}
@@ -2571,6 +3120,22 @@ func (s *failSessionTurnOpenStore) CreateSessionTurn(context.Context, store.Crea
 }
 func (s *failSessionTurnOpenStore) GetSessionTurn(context.Context, string) (*store.SessionTurn, error) {
 	return nil, store.ErrNotFound
+}
+
+type orderedSessionControlStore struct {
+	store.SessionControlStore
+	onFinalized func()
+}
+
+func (s *orderedSessionControlStore) FinalizeSessionTurn(
+	ctx context.Context,
+	request store.FinalizeSessionTurnRequest,
+) (*store.SessionTurn, error) {
+	turn, err := s.SessionControlStore.FinalizeSessionTurn(ctx, request)
+	if err == nil && s.onFinalized != nil {
+		s.onFinalized()
+	}
+	return turn, err
 }
 
 func TestACPWorkspaceDeltaLimitsFromTaskPolicy(t *testing.T) {
@@ -2634,7 +3199,7 @@ func TestACPDispatcherGatewaySessionUsesTranscriptBackedPrompt(t *testing.T) {
 		}},
 	}
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2651,6 +3216,7 @@ func TestACPDispatcherGatewaySessionUsesTranscriptBackedPrompt(t *testing.T) {
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-gateway-transcript")),
 		testControlDigestForDispatcher("mcp-gateway-transcript"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
+		acpSessionLineageIdentity{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2823,7 +3389,7 @@ func TestACPDispatcherPromptIncludedSessionAppendsAssistantOnly(t *testing.T) {
 		}},
 	}
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-	attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}, fence)
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2840,6 +3406,7 @@ func TestACPDispatcherPromptIncludedSessionAppendsAssistantOnly(t *testing.T) {
 	session, err := dispatcher.prepareTaskSession(
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-prompt-included-append")),
 		testControlDigestForDispatcher("mcp-prompt-included-append"), "runtime", "boot",
+		acpSessionLineageIdentity{},
 	)
 	if err != nil {
 		t.Fatal(err)

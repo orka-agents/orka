@@ -326,6 +326,7 @@ type runtimeWorkspaceConfig struct {
 func runtimeAgentManifest(name, runtimeType, modelName string, defaultMaxTurns int, defaultAllowBash *bool) map[string]any {
 	runtime := map[string]any{
 		"type":            runtimeType,
+		"contractVersion": corev1alpha1.AgentRuntimeContractHarnessV2,
 		"defaultMaxTurns": defaultMaxTurns,
 	}
 	if defaultAllowBash != nil {

@@ -468,7 +468,8 @@ func (r KubernetesACPMCPBrokerCredentialResolver) resolveExternalRuntimeCredenti
 	}
 	observed := runtime.Status.ObservedCapabilities
 	if string(runtime.UID) != execution.AgentRuntimeUID || !runtime.Status.Ready || runtime.Status.ObservedGeneration != runtime.Generation ||
-		runtime.Spec.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2 || runtime.Spec.Capabilities == nil ||
+		runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 || runtime.Spec.Capabilities == nil ||
+		runtime.Spec.Capabilities.WorkspaceGovernance == nil || runtime.Spec.Capabilities.Profile == nil ||
 		!runtime.Spec.Capabilities.WorkspaceGovernance.Strict() || observed == nil {
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime is not ready for MCP brokering")
 	}
@@ -476,7 +477,7 @@ func (r KubernetesACPMCPBrokerCredentialResolver) resolveExternalRuntimeCredenti
 		observed.ProtocolVersion != string(corev1alpha1.RuntimePoolProtocolHarnessV2) {
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime observation is stale")
 	}
-	profile, err := agentRuntimeProfile(runtime.Spec.Capabilities.Profile)
+	profile, err := agentRuntimeProfile(*runtime.Spec.Capabilities.Profile)
 	if err != nil {
 		return ACPMCPBrokerCredentials{}, err
 	}
@@ -497,11 +498,14 @@ func (r KubernetesACPMCPBrokerCredentialResolver) resolveExternalRuntimeCredenti
 	if mismatch := harnessv2.CompareFence(expected, request.Metadata.Fence, true); mismatch != harnessv2.FenceMatch {
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime fence does not match MCP request")
 	}
-	bearerSecret, err := readAgentRuntimeMCPSecret(ctx, r.Reader, runtime.Namespace, runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef)
+	if runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef == nil || runtime.Spec.ClientAuth.OperationCapabilitySecretRef == nil {
+		return ACPMCPBrokerCredentials{}, fmt.Errorf("external AgentRuntime v2 client auth references are required")
+	}
+	bearerSecret, err := readAgentRuntimeMCPSecret(ctx, r.Reader, runtime.Namespace, *runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef)
 	if err != nil {
 		return ACPMCPBrokerCredentials{}, err
 	}
-	capabilitySecret, err := readAgentRuntimeMCPSecret(ctx, r.Reader, runtime.Namespace, runtime.Spec.ClientAuth.OperationCapabilitySecretRef)
+	capabilitySecret, err := readAgentRuntimeMCPSecret(ctx, r.Reader, runtime.Namespace, *runtime.Spec.ClientAuth.OperationCapabilitySecretRef)
 	if err != nil {
 		return ACPMCPBrokerCredentials{}, err
 	}

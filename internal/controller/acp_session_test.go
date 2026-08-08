@@ -579,10 +579,10 @@ func openACPSessionTurnForTest(
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt, err := s.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	attempt, err := s.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, SessionUID: control.SessionUID, SessionLeaseGeneration: lease.Key.LeaseGeneration,
 		RequestDigest: requestDigest, CreatedAt: time.Date(2026, 7, 24, 16, 41, 0, 0, time.UTC),
-	}, fence)
+	}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,6 +17,7 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
   push:
     paths:
@@ -33,6 +34,7 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/agent-substrate-e2e.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "workers/**"
 
 permissions:

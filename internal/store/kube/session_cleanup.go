@@ -62,6 +62,9 @@ func (s *Store) ReclaimSession(ctx context.Context, request store.ReclaimSession
 	if intent.OperationID != request.OperationID || intent.OperationDigest != request.OperationDigest {
 		return controlConflict("session cleanup for %s/%s belongs to a different operation", request.Namespace, request.SessionName)
 	}
+	if err := s.validateSessionCleanupBranchClaimScope(*intent); err != nil {
+		return err
+	}
 	if err := s.reclaimSessionBranchClaims(ctx, *intent); err != nil {
 		return err
 	}
@@ -212,7 +215,13 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 	return s.sessionCleanup.PrepareSessionCleanup(ctx, intent)
 }
 
-func (s *Store) sessionBranchClaimCleanupPlan(ctx context.Context, sessionUID string) ([]store.SessionCleanupBranchClaim, error) {
+func (s *Store) sessionBranchClaimCleanupPlan(
+	ctx context.Context,
+	sessionUID string,
+) ([]store.SessionCleanupBranchClaim, error) {
+	if !s.branchClaimsEnabled {
+		return nil, nil
+	}
 	list := &corev1alpha1.BranchClaimList{}
 	if err := s.readClient().List(ctx, list); err != nil {
 		return nil, mapKubernetesError("list Session-owned branch claims", err)
@@ -224,7 +233,9 @@ func (s *Store) sessionBranchClaimCleanupPlan(ctx context.Context, sessionUID st
 			continue
 		}
 		claim := branchClaimFromObject(object)
-		if claim.Availability != store.BranchClaimAvailable || claim.BlockedReason != "" || claim.RelatedPublicationID != "" {
+		available := claim.Availability == store.BranchClaimAvailable &&
+			claim.BlockedReason == "" && claim.RelatedPublicationID == ""
+		if !available {
 			return nil, controlConflict("Session-owned branch claim %q is reconciliation-blocked", claim.ID)
 		}
 		claims = append(claims, store.SessionCleanupBranchClaim{
@@ -233,6 +244,7 @@ func (s *Store) sessionBranchClaimCleanupPlan(ctx context.Context, sessionUID st
 			ExpectedRepositoryID: claim.RepositoryID, ExpectedRef: claim.Ref,
 			ExpectedOwnerUID: claim.OwnerUID, ExpectedLastVerified: claim.LastVerified,
 			ExpectedAvailability: claim.Availability, ExpectedRequestDigest: claim.RequestDigest,
+			ExpectedBlockedReason: claim.BlockedReason, ExpectedPublicationID: claim.RelatedPublicationID,
 		})
 	}
 	sort.Slice(claims, func(i, j int) bool { return claims[i].ID < claims[j].ID })
@@ -240,6 +252,9 @@ func (s *Store) sessionBranchClaimCleanupPlan(ctx context.Context, sessionUID st
 }
 
 func (s *Store) reclaimSessionBranchClaims(ctx context.Context, intent store.SessionCleanupIntent) error {
+	if !s.branchClaimsEnabled {
+		return s.validateSessionCleanupBranchClaimScope(intent)
+	}
 	for _, expected := range intent.BranchClaims {
 		object, err := s.getBranchClaimObject(ctx, expected.ID)
 		if errors.Is(err, store.ErrNotFound) {
@@ -258,7 +273,8 @@ func (s *Store) reclaimSessionBranchClaims(ctx context.Context, intent store.Ses
 		if claim.Version != expected.ExpectedVersion || claim.Generation != expected.ExpectedGeneration ||
 			claim.RepositoryID != expected.ExpectedRepositoryID || claim.Ref != expected.ExpectedRef ||
 			!claim.LastVerified.Equal(expected.ExpectedLastVerified) || claim.Availability != expected.ExpectedAvailability ||
-			claim.BlockedReason != "" || claim.RelatedPublicationID != "" {
+			claim.BlockedReason != expected.ExpectedBlockedReason ||
+			claim.RelatedPublicationID != expected.ExpectedPublicationID {
 			return controlConflict("Session-owned branch claim %q no longer matches its cleanup fence", expected.ID)
 		}
 		if err := deleteObjectWithExactPreconditions(ctx, s.client, object); err != nil && !apierrors.IsNotFound(err) {
@@ -284,6 +300,9 @@ func (s *Store) ensureNoSessionBranchClaims(ctx context.Context, sessionUID stri
 	if sessionUID == "" {
 		return nil
 	}
+	if !s.branchClaimsEnabled {
+		return nil
+	}
 	list := &corev1alpha1.BranchClaimList{}
 	if err := s.readClient().List(ctx, list); err != nil {
 		return mapKubernetesError("verify Session-owned branch claim cleanup", err)
@@ -293,6 +312,16 @@ func (s *Store) ensureNoSessionBranchClaims(ctx context.Context, sessionUID stri
 		if store.BranchClaimOwnerKind(claim.Spec.OwnerKind) == store.BranchClaimOwnerSession && claim.Spec.OwnerUID == sessionUID {
 			return controlConflict("Session UID %q still owns branch claim %q after cleanup", sessionUID, claim.Spec.ID)
 		}
+	}
+	return nil
+}
+
+func (s *Store) validateSessionCleanupBranchClaimScope(intent store.SessionCleanupIntent) error {
+	if s.branchClaimsEnabled {
+		return nil
+	}
+	if len(intent.BranchClaims) != 0 || intent.ExpectedVerifiedBaseline != nil {
+		return fmt.Errorf("%w: Session cleanup contains publication state", ErrBranchClaimAccessDisabled)
 	}
 	return nil
 }
@@ -351,10 +380,12 @@ func (s *Store) reclaimSessionControl(ctx context.Context, intent store.SessionC
 	control := sessionControlFromObject(object)
 	if control.SessionUID != intent.SessionUID || control.RequestDigest != intent.ControlRequestDigest ||
 		control.Version != intent.ExpectedControlVersion || control.LeaseGeneration != intent.ExpectedLeaseGeneration ||
-		control.Availability != store.SessionAvailable || control.Lease != nil || control.BlockedReason != "" ||
-		control.RelatedPromptAttemptID != "" || control.RelatedPublicationID != "" ||
 		control.LastOperationID != intent.ExpectedControlLastOperationID || control.LastOperationDigest != intent.ExpectedControlLastDigest ||
 		!reflect.DeepEqual(control.VerifiedBaseline, intent.ExpectedVerifiedBaseline) {
+		return controlConflict("session %s/%s control no longer matches its cleanup fence", intent.Namespace, intent.SessionName)
+	}
+	if control.Availability != store.SessionAvailable || control.Lease != nil || control.BlockedReason != "" ||
+		control.RelatedPromptAttemptID != "" || control.RelatedPublicationID != "" {
 		return controlConflict("session %s/%s control no longer matches its cleanup fence", intent.Namespace, intent.SessionName)
 	}
 	if err := deleteObjectWithExactPreconditions(ctx, s.client, object); err != nil && !apierrors.IsNotFound(err) {

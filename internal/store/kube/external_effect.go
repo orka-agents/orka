@@ -73,7 +73,7 @@ func (s *Store) ReserveExternalEffect(ctx context.Context, request store.Reserve
 	return s.completeExternalEffectCreation(ctx, object, request, id, fence, snapshot)
 }
 
-// GetExternalEffect returns an effect by canonical ID across namespaces.
+// GetExternalEffect returns an effect by canonical ID within the configured watch scope.
 func (s *Store) GetExternalEffect(ctx context.Context, id string) (*store.ExternalEffect, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -170,7 +170,9 @@ func (s *Store) completeExternalEffectCreation(ctx context.Context, object *core
 
 func (s *Store) findExternalEffectByID(ctx context.Context, id string) (*corev1alpha1.ExternalEffect, error) {
 	list := &corev1alpha1.ExternalEffectList{}
-	if err := s.readClient().List(ctx, list, client.MatchingLabels{corev1alpha1.ControlRecordIDHashLabel: dnsDigest(id)}); err != nil {
+	if err := s.readClient().List(ctx, list, s.namespacedListOptions(
+		client.MatchingLabels{corev1alpha1.ControlRecordIDHashLabel: dnsDigest(id)},
+	)...); err != nil {
 		return nil, mapKubernetesError("list external effects", err)
 	}
 	var match *corev1alpha1.ExternalEffect

@@ -1,0 +1,20 @@
+{{- include "orka.validateHarnessV1" . }}
+{{- if eq .Values.controller.mode "harness-v1" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orka.harnessV1Name" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-harness-wrapper
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "orka.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent-harness-wrapper
+  template:
+    {{- include "orka.harnessV1PodTemplate" (dict "root" . "generation" (include "orka.harnessV1PodTemplateGeneration" .)) | nindent 4 }}
+{{- end }}

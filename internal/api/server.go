@@ -25,6 +25,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	"github.com/orka-agents/orka/internal/store"
@@ -38,6 +39,7 @@ type ServerConfig struct {
 	Port                      int
 	MetricsPort               int
 	WatchNamespace            string
+	ExecutionMode             executionmode.Mode
 	EnforceNamespaceIsolation bool
 	OIDC                      OIDCConfig
 	ContextTokens             ContextTokenConfig
@@ -90,6 +92,7 @@ type Server struct {
 
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
+	config.Chat.ExecutionMode = config.ExecutionMode
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
@@ -122,6 +125,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		Client:                    c,
 		APIReader:                 config.APIReader,
 		WatchNamespace:            config.WatchNamespace,
+		ExecutionMode:             config.ExecutionMode,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
 		ContextTokenAuthorization: config.ContextTokenAuthorization,
 		ResultStore:               config.ResultStore,
@@ -150,7 +154,6 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
-
 	return server
 }
 
@@ -202,6 +205,7 @@ func (s *Server) setupMiddleware() {
 
 	// Metrics middleware
 	s.app.Use(NewMetricsMiddleware())
+
 }
 
 func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
@@ -422,7 +426,8 @@ func (s *Server) setupRoutes() {
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
-	// Internal API for worker communication
+	// Internal API for worker communication. Harness v1 retirement is served
+	// only by the dedicated audience-bound TLS listener configured below.
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
 			s.ResultStore,
@@ -490,7 +495,6 @@ func (s *Server) Start(ctx context.Context) error {
 			errCh <- err
 		}
 	}()
-
 	// Wait for shutdown signal or error
 	select {
 	case <-ctx.Done():

@@ -1871,6 +1871,22 @@ func dumpDebugInfo(taskNames ...string) {
 			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Task %s ===\n%s\n", name, output)
 		}
 
+		// Tool execution failures are persisted as task timeline events rather
+		// than Kubernetes Events. Read them through the in-cluster API service so
+		// delegation failures retain their exact, already-sanitized cause in CI.
+		eventPath := fmt.Sprintf(
+			"/api/v1/namespaces/%s/services/http:%s:8080/proxy/api/v1/tasks/%s/events?namespace=%s&type=ToolCallFailed",
+			url.PathEscape(namespace),
+			controllerAPIService,
+			url.PathEscape(name),
+			url.QueryEscape(namespace),
+		)
+		cmd = exec.Command("kubectl", "get", "--raw", eventPath)
+		output, err = utils.Run(cmd)
+		if err == nil && strings.TrimSpace(output) != "" {
+			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== ToolCallFailed Events for task %s ===\n%s\n", name, output)
+		}
+
 		// ACP runtime-pool details (agent Tasks do not have per-Task Pods).
 		cmd = exec.Command("kubectl", "get", "task", name, "-n", namespace,
 			"-o", "jsonpath={.status.execution.runtimePoolName}")

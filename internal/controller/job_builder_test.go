@@ -24,6 +24,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
@@ -111,6 +112,7 @@ func setupJobBuilder() *JobBuilder {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	b := NewJobBuilder(fakeClient)
 	b.ControllerURL = testControllerURL
+	b.ControllerMode = executionmode.HarnessV2
 	return b
 }
 
@@ -1467,6 +1469,7 @@ func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
 		{"ORKA_COORDINATION_MAX_CHILDREN", "5"},
 		{"ORKA_COORDINATION_ALLOWED_AGENTS", "backend-dev,frontend-dev"},
 		{"ORKA_COORDINATION_DEPTH", "0"},
+		{workerenv.ControllerMode, string(executionmode.HarnessV2)},
 	}
 	for _, tt := range tests {
 		env, found := findEnvVar(envVars, tt.name)

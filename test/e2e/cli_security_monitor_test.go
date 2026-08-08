@@ -75,6 +75,7 @@ metadata:
   name: %s
 spec:
   runtime:
+    contractVersion: orka.harness.v2
     type: claude
     defaultMaxTurns: 1
   secretRef:

@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -222,8 +223,11 @@ func TestACPAgentConfigurationAndNativePolicyRotateOrReject(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
-			Model:        &corev1alpha1.ModelConfig{Name: "model"},
-			Runtime:      &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+			Model: &corev1alpha1.ModelConfig{Name: "model"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeClaude,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 			SystemPrompt: &corev1alpha1.PromptSource{ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{Name: "prompt", Key: "text"}},
 		},
 	}
@@ -309,8 +313,12 @@ func TestResolvedACPAgentConfigurationDigestMatchesProfile(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: types.UID("agent-uid"), Generation: 2},
 		Spec: corev1alpha1.AgentSpec{
-			Model:        &corev1alpha1.ModelConfig{Name: "model"},
-			Runtime:      &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude, DefaultMaxTurns: &maxTurns},
+			Model: &corev1alpha1.ModelConfig{Name: "model"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeClaude,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				DefaultMaxTurns: &maxTurns,
+			},
 			SystemPrompt: &corev1alpha1.PromptSource{Inline: "system"},
 		},
 	}

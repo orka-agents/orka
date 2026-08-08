@@ -160,9 +160,9 @@ func TestControllerEpochMutationReleaseUsesAcquiredLeaseVersion(t *testing.T) {
 		Namespace: "tenant-a", TaskUID: "task-stale-release", Attempt: 1, PromptID: "prompt-stale-release",
 	}
 	ensureActiveAgentTask(t, ctx, rawClient, key.Namespace, key.TaskUID, key.TaskUID)
-	if _, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{
+	if _, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{
 		Key: key, RequestDigest: testDigest("stale-release"),
-	}, fence); err != nil {
+	}), fence); err != nil {
 		t.Fatalf("create prompt attempt: %v", err)
 	}
 
@@ -217,7 +217,7 @@ func TestControllerEpochMutationWaitsForShortContention(t *testing.T) {
 	}()
 	key := controlstore.PromptAttemptKey{Namespace: "tenant-a", TaskUID: "task-contention", Attempt: 1, PromptID: "prompt-contention"}
 	ensureActiveAgentTask(t, ctx, rawClient, key.Namespace, key.TaskUID, key.TaskUID)
-	attempt, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{Key: key, RequestDigest: testDigest("contention")}, fence)
+	attempt, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{Key: key, RequestDigest: testDigest("contention")}), fence)
 	if err != nil {
 		t.Fatalf("create prompt attempt after short contention: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestGetPromptAttemptUsesConfiguredAPIReader(t *testing.T) {
 	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
 	key := controlstore.PromptAttemptKey{Namespace: "tenant-a", TaskUID: "task-reader", Attempt: 1, PromptID: "prompt-reader"}
 	ensureActiveAgentTask(t, ctx, rawClient, key.Namespace, key.TaskUID, key.TaskUID)
-	attempt, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{Key: key, RequestDigest: testDigest("reader")}, fence)
+	attempt, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{Key: key, RequestDigest: testDigest("reader")}), fence)
 	if err != nil {
 		t.Fatalf("create prompt attempt: %v", err)
 	}
@@ -315,21 +315,135 @@ func TestGetPromptAttemptUsesConfiguredAPIReader(t *testing.T) {
 	}
 }
 
+func TestNamespacedControlRecordLookupsUseWatchNamespace(t *testing.T) {
+	ctx := context.Background()
+	_, rawClient := newTestStore(t)
+	withWatch, ok := rawClient.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	const watchNamespace = "tenant-a"
+	reader := interceptor.NewClient(withWatch, interceptor.Funcs{
+		List: func(ctx context.Context, delegate client.WithWatch, list client.ObjectList, options ...client.ListOption) error {
+			applied := (&client.ListOptions{}).ApplyOptions(options)
+			if applied.Namespace != watchNamespace {
+				t.Fatalf("%T list namespace = %q, want %q", list, applied.Namespace, watchNamespace)
+			}
+			return delegate.List(ctx, list, options...)
+		},
+	})
+	scopedStore, err := New(
+		rawClient,
+		testControlNamespace,
+		WithAPIReader(reader),
+		WithWatchNamespace(watchNamespace),
+	)
+	if err != nil {
+		t.Fatalf("construct namespaced control store: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		lookup func() error
+	}{
+		{
+			name: "PromptAttempt",
+			lookup: func() error {
+				_, err := scopedStore.findPromptAttemptByID(ctx, "missing-prompt-attempt")
+				return err
+			},
+		},
+		{
+			name: "Publication",
+			lookup: func() error {
+				_, err := scopedStore.findPublicationByID(ctx, "missing-publication")
+				return err
+			},
+		},
+		{
+			name: "ExternalEffect",
+			lookup: func() error {
+				_, err := scopedStore.findExternalEffectByID(ctx, "missing-external-effect")
+				return err
+			},
+		},
+		{
+			name: "RuntimeSessionControl",
+			lookup: func() error {
+				_, err := scopedStore.findSessionControlByUID(ctx, "missing-session")
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.lookup(); !errors.Is(err, controlstore.ErrNotFound) {
+				t.Fatalf("lookup error = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+func TestGetPromptAttemptReadsLegacySpecWithoutBindingDigests(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, kubeClient, _ := newTestStoreWithEpoch(t)
+	key := controlstore.PromptAttemptKey{
+		Namespace: "tenant-a", TaskUID: "legacy-task-uid", Attempt: 1, PromptID: "legacy-prompt",
+	}
+	id, err := key.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := &corev1alpha1.PromptAttempt{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: key.Namespace, Name: objectName(promptAttemptNamePrefix, id), Labels: controlLabels(id),
+		},
+		Spec: corev1alpha1.PromptAttemptSpec{
+			ID: id, TaskUID: key.TaskUID, Attempt: key.Attempt, PromptID: key.PromptID,
+			RequestDigest: testDigest("legacy-request"),
+		},
+	}
+	if err := kubeClient.Create(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	got, err := kubeStore.GetPromptAttempt(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BindingDigest != "" || got.SnapshotDigest != "" || got.RequestDigest != legacy.Spec.RequestDigest {
+		t.Fatalf("legacy PromptAttempt = %#v", got)
+	}
+}
+
 func TestPromptAttemptStatusCASAndIdempotency(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, fence := newTestStoreWithEpoch(t)
 	key := controlstore.PromptAttemptKey{Namespace: "tenant-a", TaskUID: "task-uid", Attempt: 1, PromptID: "prompt-1"}
 	ensureActiveAgentTask(t, ctx, kubeClient, key.Namespace, key.TaskUID, key.TaskUID)
-	attempt, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{Key: key, RequestDigest: testDigest("prompt")}, fence)
+	attempt, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{Key: key, RequestDigest: testDigest("prompt")}), fence)
 	if err != nil {
 		t.Fatalf("create prompt attempt: %v", err)
 	}
 	if attempt.Version != 1 || attempt.ExecutionState != controlstore.PromptExecutionQueued || attempt.DeliveryState != controlstore.PromptDeliveryNotRequested {
 		t.Fatalf("created attempt = %#v", attempt)
 	}
-	idempotent, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{Key: key, RequestDigest: testDigest("prompt")}, fence)
+	if attempt.BindingDigest != testDigest("test-v2-binding") || attempt.SnapshotDigest != testDigest("test-v2-snapshot") {
+		t.Fatalf("created PromptAttempt binding = %q/%q", attempt.BindingDigest, attempt.SnapshotDigest)
+	}
+	idempotent, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{Key: key, RequestDigest: testDigest("prompt")}), fence)
 	if err != nil || idempotent.ID != attempt.ID || idempotent.Version != 1 {
 		t.Fatalf("idempotent create = %#v, %v", idempotent, err)
+	}
+	mismatchedBinding := boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{Key: key, RequestDigest: testDigest("prompt")})
+	mismatchedBinding.BindingDigest = testDigest("different-binding")
+	if _, err := kubeStore.CreatePromptAttempt(ctx, mismatchedBinding, fence); !errors.Is(err, controlstore.ErrConflict) {
+		t.Fatalf("binding digest mismatch error = %v, want conflict", err)
+	}
+	unboundKey := controlstore.PromptAttemptKey{Namespace: key.Namespace, TaskUID: key.TaskUID, Attempt: 2, PromptID: "prompt-unbound"}
+	if _, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{
+		Key: unboundKey, RequestDigest: testDigest("prompt-unbound"),
+	}, fence); !errors.Is(err, controlstore.ErrValidation) {
+		t.Fatalf("unbound PromptAttempt error = %v, want validation", err)
 	}
 
 	operationDigest := testDigest("reserve")
@@ -383,6 +497,9 @@ func TestPromptAttemptStatusCASAndIdempotency(t *testing.T) {
 	if object.Status.ControllerEpochLeaseResourceVersion == "" || object.Status.Version != 2 {
 		t.Fatalf("PromptAttempt status lacks epoch/resourceVersion fence: %#v", object.Status)
 	}
+	if object.Spec.BindingDigest != attempt.BindingDigest || object.Spec.SnapshotDigest != attempt.SnapshotDigest {
+		t.Fatalf("PromptAttempt spec binding = %q/%q", object.Spec.BindingDigest, object.Spec.SnapshotDigest)
+	}
 }
 
 func TestStatusUpdateConflictMapsToStoreConflict(t *testing.T) {
@@ -390,7 +507,7 @@ func TestStatusUpdateConflictMapsToStoreConflict(t *testing.T) {
 	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
 	key := controlstore.PromptAttemptKey{Namespace: "tenant-a", TaskUID: "task-conflict", Attempt: 1, PromptID: "prompt"}
 	ensureActiveAgentTask(t, ctx, rawClient, key.Namespace, key.TaskUID, key.TaskUID)
-	attempt, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{Key: key, RequestDigest: testDigest("prompt-conflict")}, fence)
+	attempt, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{Key: key, RequestDigest: testDigest("prompt-conflict")}), fence)
 	if err != nil {
 		t.Fatalf("create prompt attempt: %v", err)
 	}
@@ -417,6 +534,7 @@ func TestStatusUpdateConflictMapsToStoreConflict(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // The integration test intentionally exercises the complete lease/reconciliation state machine.
 func TestSessionMutationLeaseAndReconciliation(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, fence := newTestStoreWithEpoch(t)
@@ -432,7 +550,7 @@ func TestSessionMutationLeaseAndReconciliation(t *testing.T) {
 		Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
 		Fence: fence, ExpectedVersion: control.Version, ExpectedLeaseGeneration: control.LeaseGeneration,
 		TaskUID: "task-session", Attempt: 1, PromptID: "prompt-session", RequestDigest: testDigest("session-lease"),
-		AcquiredAt: testNow, ExpiresAt: &expires,
+		AcquiredAt: testNow, ExpiresAt: &expires, Lineage: testSessionLineageClaim(control),
 	}
 	leased, err := kubeStore.AcquireSessionMutationLease(ctx, request)
 	if err != nil {
@@ -444,6 +562,13 @@ func TestSessionMutationLeaseAndReconciliation(t *testing.T) {
 	retry, err := kubeStore.AcquireSessionMutationLease(ctx, request)
 	if err != nil || retry.Version != leased.Version {
 		t.Fatalf("idempotent lease retry = %#v, %v", retry, err)
+	}
+	crossProtocol := request
+	crossProtocolLineage := *request.Lineage
+	crossProtocolLineage.ContractVersion = "orka.harness.v1"
+	crossProtocol.Lineage = &crossProtocolLineage
+	if _, err := kubeStore.AcquireSessionMutationLease(ctx, crossProtocol); !errors.Is(err, controlstore.ErrConflict) {
+		t.Fatalf("cross-protocol continuation error = %v, want conflict", err)
 	}
 	competitor := request
 	competitor.TaskUID = "task-other"
@@ -514,6 +639,79 @@ func TestSessionMutationLeaseAndReconciliation(t *testing.T) {
 	}
 	if retry, err := kubeStore.ReconcileSessionControl(ctx, reconcile); err != nil || retry.Version != reconciled.Version {
 		t.Fatalf("idempotent reconciliation retry = %#v, %v", retry, err)
+	}
+}
+
+func TestSessionLineageStatusCASRecoversAfterLeaseWrite(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
+	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
+		Namespace: "tenant-a", SessionName: "lineage-status-retry", SessionUID: "lineage-status-retry-uid",
+		RequestDigest: testDigest("lineage-status-retry"),
+	}, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := controlstore.AcquireSessionMutationLeaseRequest{
+		Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
+		Fence: fence, ExpectedVersion: control.Version, ExpectedLeaseGeneration: control.LeaseGeneration,
+		TaskUID: "task-lineage-retry", Attempt: 1, PromptID: "prompt-lineage-retry",
+		RequestDigest: testDigest("lease-lineage-retry"), AcquiredAt: testNow,
+		Lineage: testSessionLineageClaim(control),
+	}
+	withWatch, ok := rawClient.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	failStatusOnce := true
+	kubeStore.client = interceptor.NewClient(withWatch, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if session, ok := obj.(*corev1alpha1.RuntimeSessionControl); ok && failStatusOnce && session.Status.Lineage != nil {
+				failStatusOnce = false
+				return apierrors.NewConflict(schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "runtimesessioncontrols"}, obj.GetName(), errors.New("simulated crash after Lease write"))
+			}
+			return c.SubResource(subresource).Update(ctx, obj, opts...)
+		},
+	})
+	if _, err := kubeStore.AcquireSessionMutationLease(ctx, request); !errors.Is(err, controlstore.ErrConflict) {
+		t.Fatalf("first acquisition error = %v, want conflict", err)
+	}
+
+	var partial corev1alpha1.RuntimeSessionControl
+	if err := rawClient.Get(ctx, client.ObjectKey{Namespace: control.Namespace, Name: runtimeSessionObjectName(control.SessionName)}, &partial); err != nil {
+		t.Fatal(err)
+	}
+	if partial.Status.Lineage != nil || partial.Status.MutationLease != nil {
+		t.Fatalf("status exposed a partial lineage/Lease commit: %+v", partial.Status)
+	}
+	var held coordinationv1.Lease
+	if err := rawClient.Get(ctx, client.ObjectKey{Namespace: control.Namespace, Name: runtimeSessionLeaseName(control.SessionUID)}, &held); err != nil {
+		t.Fatal(err)
+	}
+	if held.Spec.HolderIdentity == nil || *held.Spec.HolderIdentity == "" {
+		t.Fatal("coordination Lease was not retained across the simulated crash")
+	}
+	altered := request
+	alteredLineage := *request.Lineage
+	alteredLineage.ConfigDigest = testDigest("different-lineage-config")
+	altered.Lineage = &alteredLineage
+	if _, err := kubeStore.AcquireSessionMutationLease(ctx, altered); !errors.Is(err, controlstore.ErrConflict) {
+		t.Fatalf("altered lineage completed pending Lease: %v", err)
+	}
+	if err := rawClient.Get(ctx, client.ObjectKey{Namespace: control.Namespace, Name: runtimeSessionObjectName(control.SessionName)}, &partial); err != nil {
+		t.Fatal(err)
+	}
+	if partial.Status.Lineage != nil || partial.Status.MutationLease != nil {
+		t.Fatalf("altered retry committed pending Session status: %+v", partial.Status)
+	}
+
+	kubeStore.client = rawClient
+	recovered, err := kubeStore.AcquireSessionMutationLease(ctx, request)
+	if err != nil {
+		t.Fatalf("retry exact acquisition: %v", err)
+	}
+	if recovered.Lineage == nil || recovered.Lease == nil || recovered.Version != 2 || recovered.LeaseGeneration != 1 {
+		t.Fatalf("retry did not atomically expose lineage and Lease: %+v", recovered)
 	}
 }
 
@@ -762,13 +960,14 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 		Fence: fence, ExpectedVersion: control.Version, ExpectedLeaseGeneration: control.LeaseGeneration,
 		TaskUID: "task-finalize", Attempt: 1, PromptID: "prompt-finalize",
 		RequestDigest: leaseRequestDigest, AcquiredAt: testNow, ExpiresAt: &leaseExpires,
+		Lineage: testSessionLineageClaim(control),
 	})
 	if err != nil {
 		t.Fatalf("AcquireSessionMutationLease: %v", err)
 	}
 	attemptKey := controlstore.PromptAttemptKey{Namespace: "tenant-a", TaskUID: "task-finalize", Attempt: 1, PromptID: "prompt-finalize"}
 	ensureActiveAgentTask(t, ctx, rawClient, attemptKey.Namespace, attemptKey.TaskUID, attemptKey.TaskUID)
-	attempt, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{Key: attemptKey, RequestDigest: promptRequestDigest}, fence)
+	attempt, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{Key: attemptKey, RequestDigest: promptRequestDigest}), fence)
 	if err != nil {
 		t.Fatalf("CreatePromptAttempt: %v", err)
 	}
@@ -975,6 +1174,7 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 		Fence: fence, ExpectedVersion: updatedControl.Version, ExpectedLeaseGeneration: updatedControl.LeaseGeneration,
 		TaskUID: "task-later", Attempt: 1, PromptID: "prompt-later", RequestDigest: testDigest("lease-later"),
 		AcquiredAt: finalize.FinalizedAt.Add(3 * time.Second), ExpiresAt: &laterExpires,
+		Lineage: testSessionLineageClaim(updatedControl),
 	})
 	if err != nil {
 		t.Fatalf("AcquireSessionMutationLease after finalization: %v", err)
@@ -1053,13 +1253,14 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 		Fence: fence, ExpectedVersion: control.Version, ExpectedLeaseGeneration: control.LeaseGeneration,
 		TaskUID: "task-publication", Attempt: 1, PromptID: "prompt-publication",
 		RequestDigest: leaseRequestDigest, AcquiredAt: testNow, ExpiresAt: &leaseExpires,
+		Lineage: testSessionLineageClaim(control),
 	})
 	if err != nil {
 		t.Fatalf("AcquireSessionMutationLease: %v", err)
 	}
 	attemptKey := controlstore.PromptAttemptKey{Namespace: "tenant-a", TaskUID: "task-publication", Attempt: 1, PromptID: "prompt-publication"}
 	ensureActiveAgentTask(t, ctx, rawClient, attemptKey.Namespace, attemptKey.TaskUID, attemptKey.TaskUID)
-	attempt, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{Key: attemptKey, RequestDigest: promptRequestDigest}, fence)
+	attempt, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{Key: attemptKey, RequestDigest: promptRequestDigest}), fence)
 	if err != nil {
 		t.Fatalf("CreatePromptAttempt: %v", err)
 	}
@@ -1359,6 +1560,29 @@ func testDigest(value string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+func boundPromptAttemptForKubeTest(attempt *controlstore.PromptAttempt) *controlstore.PromptAttempt {
+	if attempt == nil {
+		return nil
+	}
+	if attempt.BindingDigest == "" {
+		attempt.BindingDigest = testDigest("test-v2-binding")
+	}
+	if attempt.SnapshotDigest == "" {
+		attempt.SnapshotDigest = testDigest("test-v2-snapshot")
+	}
+	return attempt
+}
+
+func testSessionLineageClaim(control *controlstore.SessionControl) *controlstore.ClaimSessionLineageRequest {
+	return &controlstore.ClaimSessionLineageRequest{
+		Namespace: control.Namespace, SessionName: control.SessionName,
+		NamespaceUID: "namespace-uid-" + control.Namespace, SessionUID: control.SessionUID,
+		ContractVersion: "orka.harness.v2", LineageGeneration: 1, RuntimeIdentity: "codex",
+		ConfigDigest:      testDigest("lineage-config-" + control.SessionUID),
+		EstablishIfAbsent: true,
+	}
+}
+
 func testBytesDigest(value []byte) string {
 	sum := sha256.Sum256(value)
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -1373,9 +1597,9 @@ func TestPromptAttemptFreezesRoleSeparatedCredentialBindings(t *testing.T) {
 		Role: controlstore.PromptCredentialTargetWrite, Namespace: key.Namespace,
 		SecretName: "publish-token", SecretKey: "token", SecretUID: "secret-uid", ResourceVersion: "17",
 	}
-	created, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{
+	created, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{
 		Key: key, RequestDigest: testDigest("prompt-credential"), CredentialBindings: []controlstore.PromptCredentialBinding{binding},
-	}, fence)
+	}), fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1384,9 +1608,9 @@ func TestPromptAttemptFreezesRoleSeparatedCredentialBindings(t *testing.T) {
 	}
 	changed := binding
 	changed.ResourceVersion = "18"
-	if _, err := kubeStore.CreatePromptAttempt(ctx, &controlstore.PromptAttempt{
+	if _, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{
 		Key: key, RequestDigest: testDigest("prompt-credential"), CredentialBindings: []controlstore.PromptCredentialBinding{changed},
-	}, fence); !errors.Is(err, controlstore.ErrConflict) {
+	}), fence); !errors.Is(err, controlstore.ErrConflict) {
 		t.Fatalf("changed credential binding error = %v, want conflict", err)
 	}
 }
@@ -1461,6 +1685,7 @@ func TestPrePromptLeaseReleaseResumesAfterStatusCommit(t *testing.T) {
 		Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
 		Fence: fence, ExpectedVersion: control.Version, ExpectedLeaseGeneration: control.LeaseGeneration,
 		TaskUID: "task-abort", Attempt: 1, PromptID: "prompt-abort", RequestDigest: testDigest("lease-abort"), AcquiredAt: testNow,
+		Lineage: testSessionLineageClaim(control),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1521,6 +1746,7 @@ func TestPrePromptLeaseReleaseResumesAfterStatusCommit(t *testing.T) {
 		Namespace: committed.Namespace, SessionName: committed.SessionName, SessionUID: committed.SessionUID,
 		Fence: fence, ExpectedVersion: committed.Version, ExpectedLeaseGeneration: committed.LeaseGeneration,
 		TaskUID: "task-next", Attempt: 1, PromptID: "prompt-next", RequestDigest: testDigest("lease-next"), AcquiredAt: testNow.Add(2 * time.Minute),
+		Lineage: testSessionLineageClaim(committed),
 	}
 	if _, err := kubeStore.AcquireSessionMutationLease(ctx, acquireNext); !errors.Is(err, controlstore.ErrConflict) {
 		t.Fatalf("acquire with mismatched held Lease digest = %v, want conflict", err)

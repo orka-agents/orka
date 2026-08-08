@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -20,8 +21,8 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-//nolint:gocyclo // The table verifies first settlement, replay, and durable identity preservation together.
-func TestQueueACPRuntimeTaskSettlesExistingAttemptBeforePermanentPlanningFailure(t *testing.T) {
+//nolint:gocyclo // The table verifies immutable snapshot behavior in queued and reserved states.
+func TestQueueACPRuntimeTaskIgnoresLiveAgentMutationAfterBinding(t *testing.T) {
 	for _, state := range []struct {
 		name       string
 		taskState  corev1alpha1.TaskExecutionState
@@ -62,69 +63,24 @@ func TestQueueACPRuntimeTaskSettlesExistingAttemptBeforePermanentPlanningFailure
 			invalidAgent := fixture.agent.DeepCopy()
 			invalidAgent.Spec.Skills = []corev1alpha1.SkillReference{{Name: "added-after-queue"}}
 			if _, err := fixture.reconciler.queueACPRuntimeTask(ctx, queued.DeepCopy(), invalidAgent); err != nil {
-				t.Fatalf("queue after permanent Agent configuration failure: %v", err)
+				t.Fatalf("queue after live Agent mutation: %v", err)
 			}
 
-			failed := &corev1alpha1.Task{}
-			if err := fixture.kubeClient.Get(ctx, types.NamespacedName{Namespace: queued.Namespace, Name: queued.Name}, failed); err != nil {
+			current := &corev1alpha1.Task{}
+			if err := fixture.kubeClient.Get(ctx, types.NamespacedName{Namespace: queued.Namespace, Name: queued.Name}, current); err != nil {
 				t.Fatal(err)
 			}
-			if failed.Status.Phase != corev1alpha1.TaskPhaseFailed || failed.Status.Execution == nil {
-				t.Fatalf("planning failure status = %#v", failed.Status)
-			}
-			wantExecution := beforeExecution.DeepCopy()
-			wantExecution.State = corev1alpha1.TaskExecutionStateFailed
-			wantExecution.Outcome = corev1alpha1.TaskExecutionOutcomeFailed
-			wantExecution.Reason = corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile")
-			wantExecution.Message = unsupportedACPAgentSkillsMessage
-			wantExecution.LastTransitionTime = failed.Status.Execution.LastTransitionTime
-			if !reflect.DeepEqual(failed.Status.Execution, wantExecution) {
-				t.Fatalf("terminal projection did not preserve attempt identity/fences:\n got: %#v\nwant: %#v", failed.Status.Execution, wantExecution)
-			}
-			if failed.Status.Attempts != queued.Status.Attempts {
-				t.Fatalf("Task attempts changed from %d to %d", queued.Status.Attempts, failed.Status.Attempts)
-			}
-			if failed.Status.Delivery == nil || failed.Status.Delivery.State != corev1alpha1.TaskDeliveryStateNotRequested ||
-				failed.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeNotRequested {
-				t.Fatalf("planning failure delivery status = %#v", failed.Status.Delivery)
+			if current.Status.Phase != queued.Status.Phase || !reflect.DeepEqual(current.Status.Execution, beforeExecution) ||
+				current.Status.Attempts != queued.Status.Attempts {
+				t.Fatalf("live Agent mutation changed frozen execution: before=%#v after=%#v", queued.Status, current.Status)
 			}
 
-			terminalAttempt, err := fixture.controlStore.GetPromptAttempt(ctx, attempt.ID)
+			persistedAttempt, err := fixture.controlStore.GetPromptAttempt(ctx, attempt.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if terminalAttempt.ExecutionState != store.PromptExecutionFailed ||
-				terminalAttempt.TerminalReason != "InvalidRuntimeProfile" ||
-				terminalAttempt.ID != beforeAttempt.ID || terminalAttempt.Key != beforeAttempt.Key ||
-				terminalAttempt.RequestDigest != beforeAttempt.RequestDigest ||
-				!reflect.DeepEqual(terminalAttempt.CredentialBindings, beforeAttempt.CredentialBindings) ||
-				terminalAttempt.RuntimeInstanceID != beforeAttempt.RuntimeInstanceID ||
-				terminalAttempt.SessionUID != beforeAttempt.SessionUID ||
-				terminalAttempt.SessionLeaseGeneration != beforeAttempt.SessionLeaseGeneration ||
-				terminalAttempt.DeliveryState != beforeAttempt.DeliveryState ||
-				terminalAttempt.Version != beforeAttempt.Version+1 {
-				t.Fatalf("durable planning failure settlement did not preserve the attempt: before=%#v after=%#v", beforeAttempt, terminalAttempt)
-			}
-
-			if _, err := fixture.reconciler.queueACPRuntimeTask(ctx, failed.DeepCopy(), invalidAgent); err != nil {
-				t.Fatalf("replayed planning failure reconciliation: %v", err)
-			}
-			projection, err := fixture.controlStore.GetOutboxProjection(
-				ctx, standaloneTaskTerminalProjectionID(failed, failed.Status.Execution.Attempt),
-			)
-			if err != nil {
-				t.Fatalf("get durable planning failure projection: %v", err)
-			}
-			if projection.State != store.OutboxProjectionPending || projection.AggregateID != string(failed.UID) {
-				t.Fatalf("planning failure projection = %#v", projection)
-			}
-
-			replayedAttempt, err := fixture.controlStore.GetPromptAttempt(ctx, attempt.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if replayedAttempt.Version != terminalAttempt.Version || replayedAttempt.ExecutionState != store.PromptExecutionFailed {
-				t.Fatalf("planning failure replay changed durable attempt: before=%#v after=%#v", terminalAttempt, replayedAttempt)
+			if !reflect.DeepEqual(persistedAttempt, &beforeAttempt) {
+				t.Fatalf("live Agent mutation changed durable attempt: before=%#v after=%#v", beforeAttempt, persistedAttempt)
 			}
 		})
 	}
@@ -146,7 +102,7 @@ func (s *failingPlanningFailureTransitionStore) TransitionPromptAttemptExecution
 	return s.DurableControlStore.TransitionPromptAttemptExecution(ctx, transition)
 }
 
-func TestQueueACPRuntimeTaskDoesNotProjectPlanningFailureBeforeAttemptSettlement(t *testing.T) {
+func TestQueueACPRuntimeTaskDoesNotSettleAttemptFromLiveAgentDrift(t *testing.T) {
 	fixture := newACPQueuePlanningFailureFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -156,8 +112,8 @@ func TestQueueACPRuntimeTaskDoesNotProjectPlanningFailureBeforeAttemptSettlement
 	invalidAgent := fixture.agent.DeepCopy()
 	invalidAgent.Spec.Skills = []corev1alpha1.SkillReference{{Name: "added-after-queue"}}
 	_, err := fixture.reconciler.queueACPRuntimeTask(ctx, queued.DeepCopy(), invalidAgent)
-	if !errors.Is(err, errPlanningFailureTransition) {
-		t.Fatalf("queue error = %v, want injected durable transition error", err)
+	if err != nil {
+		t.Fatalf("queue after live Agent drift: %v", err)
 	}
 
 	current := &corev1alpha1.Task{}
@@ -172,7 +128,7 @@ func TestQueueACPRuntimeTaskDoesNotProjectPlanningFailureBeforeAttemptSettlement
 		t.Fatal(err)
 	}
 	if persisted.ExecutionState != store.PromptExecutionQueued || persisted.Version != attempt.Version {
-		t.Fatalf("durable attempt changed after failed settlement: before=%#v after=%#v", attempt, persisted)
+		t.Fatalf("durable attempt changed from live Agent drift: before=%#v after=%#v", attempt, persisted)
 	}
 }
 
@@ -210,8 +166,11 @@ func newACPQueuePlanningFailureFixture(t *testing.T) *acpQueuePlanningFailureFix
 			UID: types.UID("4fba4a25-3c83-465c-9105-ded0b9c8029a"), Generation: 1,
 		},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeCodex,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	runtimeImage := "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)
@@ -264,7 +223,8 @@ func newACPQueuePlanningFailureFixture(t *testing.T) *acpQueuePlanningFailureFix
 
 func (f *acpQueuePlanningFailureFixture) queueValidTask(t *testing.T, ctx context.Context) (*corev1alpha1.Task, *store.PromptAttempt) {
 	t.Helper()
-	if _, err := f.reconciler.queueACPRuntimeTask(ctx, f.task.DeepCopy(), f.agent.DeepCopy()); err != nil {
+	bound := bindACPQueueTaskForTest(t, ctx, f.reconciler, f.task, f.agent)
+	if _, err := f.reconciler.queueACPRuntimeTask(ctx, bound, f.agent.DeepCopy()); err != nil {
 		t.Fatalf("initial queue: %v", err)
 	}
 	queued := &corev1alpha1.Task{}
@@ -344,7 +304,7 @@ func (s *failingPlanningFailureProjectionStore) EnqueueOutboxProjection(
 	return s.DurableControlStore.EnqueueOutboxProjection(ctx, projection, fence)
 }
 
-func TestQueueACPRuntimeTaskRecoversPlanningFailureAfterProjectionEnqueueError(t *testing.T) {
+func TestQueueACPRuntimeTaskDoesNotEnqueuePlanningFailureFromLiveAgentDrift(t *testing.T) {
 	fixture := newACPQueuePlanningFailureFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -355,40 +315,24 @@ func TestQueueACPRuntimeTaskRecoversPlanningFailureAfterProjectionEnqueueError(t
 	invalidAgent := fixture.agent.DeepCopy()
 	invalidAgent.Spec.Skills = []corev1alpha1.SkillReference{{Name: "added-after-queue"}}
 	_, err := fixture.reconciler.queueACPRuntimeTask(ctx, queued.DeepCopy(), invalidAgent)
-	if !errors.Is(err, errPlanningFailureProjectionEnqueue) {
-		t.Fatalf("queue planning failure error = %v, want injected projection error", err)
+	if err != nil {
+		t.Fatalf("queue after live Agent drift: %v", err)
 	}
-	settled, err := fixture.controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if failingStore.failed {
+		t.Fatal("live Agent drift reached terminal outbox projection")
+	}
+	persisted, err := fixture.controlStore.GetPromptAttempt(ctx, attempt.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settled.ExecutionState != store.PromptExecutionFailed || settled.OutcomeMarker != unsupportedACPAgentSkillsMessage {
-		t.Fatalf("settled planning failure attempt = %#v", settled)
+	if !reflect.DeepEqual(persisted, attempt) {
+		t.Fatalf("live Agent drift changed durable attempt: before=%#v after=%#v", attempt, persisted)
 	}
-	stillQueued := &corev1alpha1.Task{}
-	if err := fixture.kubeClient.Get(ctx, client.ObjectKeyFromObject(queued), stillQueued); err != nil {
+	current := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(ctx, client.ObjectKeyFromObject(queued), current); err != nil {
 		t.Fatal(err)
 	}
-	if stillQueued.Status.Execution == nil || stillQueued.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued {
-		t.Fatalf("Task projected terminal despite failed outbox enqueue: %#v", stillQueued.Status)
-	}
-
-	fixture.reconciler.DurableControlStore = fixture.controlStore
-	if _, err := fixture.reconciler.queueACPRuntimeTask(ctx, stillQueued.DeepCopy(), fixture.agent.DeepCopy()); err != nil {
-		t.Fatalf("recover durable planning failure after configuration correction: %v", err)
-	}
-	failed := &corev1alpha1.Task{}
-	if err := fixture.kubeClient.Get(ctx, client.ObjectKeyFromObject(queued), failed); err != nil {
-		t.Fatal(err)
-	}
-	if failed.Status.Phase != corev1alpha1.TaskPhaseFailed || failed.Status.Execution == nil ||
-		failed.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed ||
-		failed.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile") {
-		t.Fatalf("recovered planning failure Task status = %#v", failed.Status)
-	}
-	if _, err := fixture.controlStore.GetOutboxProjection(
-		ctx, standaloneTaskTerminalProjectionID(failed, failed.Status.Execution.Attempt),
-	); err != nil {
-		t.Fatalf("get recovered planning failure projection: %v", err)
+	if !reflect.DeepEqual(current.Status.Execution, queued.Status.Execution) || current.Status.Phase != queued.Status.Phase {
+		t.Fatalf("live Agent drift changed Task projection: before=%#v after=%#v", queued.Status, current.Status)
 	}
 }

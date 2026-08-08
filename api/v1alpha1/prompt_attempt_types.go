@@ -46,6 +46,7 @@ type PromptCredentialBinding struct {
 // PromptAttemptSpec is the immutable identity and request binding for one
 // Task prompt attempt.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="prompt attempt spec is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.bindingDigest) == has(self.snapshotDigest)",message="bindingDigest and snapshotDigest must be recorded together"
 type PromptAttemptSpec struct {
 	// ID is the canonical DurableControlStore prompt-attempt ID.
 	// +kubebuilder:validation:MinLength=1
@@ -69,6 +70,20 @@ type PromptAttemptSpec struct {
 	// RequestDigest binds the prompt identity to exact canonical input.
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	RequestDigest string `json:"requestDigest"`
+
+	// BindingDigest identifies the immutable Task-lifetime v2 execution
+	// binding. It is optional only so pre-coexistence records remain readable;
+	// all PromptAttempts newly created through DurableControlStore require it.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	BindingDigest string `json:"bindingDigest,omitempty"`
+
+	// SnapshotDigest identifies the immutable encrypted execution snapshot.
+	// It is optional only so pre-coexistence records remain readable; all
+	// PromptAttempts newly created through DurableControlStore require it.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	SnapshotDigest string `json:"snapshotDigest,omitempty"`
 
 	// CredentialBindings is the immutable, role-separated Secret identity set.
 	// +optional

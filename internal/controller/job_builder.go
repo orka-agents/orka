@@ -32,6 +32,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/taskmeta"
@@ -100,6 +101,7 @@ type JobBuilder struct {
 	VendorWorkerServiceAccountName             string
 	ContainerWorkerServiceAccountName          string
 	ControllerURL                              string // e.g. http://orka-controller.orka-system.svc:8080
+	ControllerMode                             executionmode.Mode
 	ContextTokenTTSEndpoint                    string
 	ContextTokenTTSAudience                    string
 	ContextTokenTTSTimeout                     string
@@ -1071,6 +1073,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		SystemPrompt:    cfg.systemPrompt,
 		BaseURL:         cfg.baseURL,
 		AzureAPIVersion: cfg.azureAPIVersion,
+		ControllerMode:  string(b.ControllerMode),
 	}.EnvVars()...)
 
 	disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue

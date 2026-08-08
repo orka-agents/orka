@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -19,9 +20,10 @@ import (
 type agentExecutionPath string
 
 const (
-	agentExecutionPathACP      agentExecutionPath = "acp-runtime-pool"
-	agentExecutionPathExternal agentExecutionPath = "acp-external-runtime"
-	agentExecutionPathRejected agentExecutionPath = "rejected"
+	agentExecutionPathACP       agentExecutionPath = "acp-runtime-pool"
+	agentExecutionPathHarnessV1 agentExecutionPath = "harness-v1"
+	agentExecutionPathExternal  agentExecutionPath = "acp-external-runtime"
+	agentExecutionPathRejected  agentExecutionPath = "rejected"
 )
 
 type agentExecutionPlan struct {
@@ -33,6 +35,10 @@ type agentExecutionPlan struct {
 
 func agentACPPlan() agentExecutionPlan {
 	return agentExecutionPlan{path: agentExecutionPathACP}
+}
+
+func agentHarnessV1Plan(runtimeName string) agentExecutionPlan {
+	return agentExecutionPlan{path: agentExecutionPathHarnessV1, externalRuntimeName: strings.TrimSpace(runtimeName)}
 }
 
 func rejectAgentExecutionPlan(reason string) agentExecutionPlan {
@@ -72,24 +78,59 @@ func (r *TaskReconciler) planAgentExecution(
 	}
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
 		name := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
-		return rejectAgentExecutionPlan(externalAgentRuntimeDispatchUnsupportedReason(name))
-	}
-	if !r.ACPRuntimeEnabled {
-		return rejectAgentExecutionPlan("ACP core runtime is disabled; built-in agent runtimes have no fallback execution path")
-	}
-
-	if reason := agentACPRuntimeUnsupportedReason(task, agent); reason != "" {
-		return rejectAgentExecutionPlan(reason)
-	}
-	if task.Spec.PriorTaskRef != nil {
-		return rejectAgentExecutionPlan("priorTaskRef continuation is not supported by the ACP core runtime; use sessionRef")
+		reader := r.APIReader
+		if reader == nil {
+			reader = r.Client
+		}
+		runtime := &corev1alpha1.AgentRuntime{}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, runtime); err != nil {
+			return rejectAgentExecutionPlan(fmt.Sprintf("resolve AgentRuntime %q: %v", name, err))
+		}
+		switch runtime.RegisteredContractVersion() {
+		case corev1alpha1.AgentRuntimeContractHarnessV1:
+			if !r.HarnessV1Enabled {
+				return rejectAgentExecutionPlan("AgentRuntime is classified orka.harness.v1, but harness v1 admission is disabled; v2 execution never substitutes for it")
+			}
+			return agentHarnessV1Plan(name)
+		case corev1alpha1.AgentRuntimeContractHarnessV2:
+			return rejectAgentExecutionPlan(externalAgentRuntimeDispatchUnsupportedReason(name))
+		default:
+			return rejectAgentExecutionPlan(fmt.Sprintf("AgentRuntime %q is unclassified; a missing selector is never protocol evidence", name))
+		}
 	}
 
 	switch agent.Spec.Runtime.Type {
 	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode:
-		return agentACPPlan()
 	default:
 		return rejectAgentExecutionPlan(fmt.Sprintf("agent runtime %q is not supported by the ACP core runtime", agent.Spec.Runtime.Type))
+	}
+
+	contract := agent.BuiltInContractVersion()
+	switch contract {
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		if reason := agentACPRuntimeUnsupportedReason(task, agent); reason != "" {
+			return rejectAgentExecutionPlan(reason)
+		}
+		if task.Spec.PriorTaskRef != nil {
+			return rejectAgentExecutionPlan("priorTaskRef continuation is not supported by the ACP core runtime; use sessionRef")
+		}
+		if !r.ACPRuntimeEnabled {
+			return rejectAgentExecutionPlan("ACP core runtime is disabled; built-in v2 agent runtimes have no fallback execution path")
+		}
+		return agentACPPlan()
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		if !r.HarnessV1Enabled {
+			return rejectAgentExecutionPlan("agent is classified orka.harness.v1, but harness v1 admission is disabled; v2 execution never substitutes for it")
+		}
+		if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+			return rejectAgentExecutionPlan("new harness v1 OpenCode bindings are prohibited; only sealed-inventory legacy adoption may use the v1 OpenCode path")
+		}
+		if reason := agentHarnessV1InheritedAuthorityUnsupportedReason(agent); reason != "" {
+			return rejectAgentExecutionPlan(reason)
+		}
+		return agentHarnessV1Plan("")
+	default:
+		return rejectAgentExecutionPlan("agent runtime.contractVersion is unclassified; a missing selector is never interpreted as either protocol and execution admission fails closed")
 	}
 }
 
@@ -98,13 +139,14 @@ func externalAgentRuntimeDispatchUnsupportedReason(name string) string {
 }
 
 func externalAgentRuntimeReadinessReason(task *corev1alpha1.Task, runtime *corev1alpha1.AgentRuntime) string {
-	if runtime == nil || runtime.Spec.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2 {
+	if runtime == nil || runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
 		return "external AgentRuntime must use orka.harness.v2"
 	}
 	if !runtime.Status.Ready || runtime.Status.ObservedGeneration != runtime.Generation || runtime.Status.ObservedCapabilities == nil {
 		return fmt.Sprintf("external AgentRuntime %q has not passed current-generation v2 conformance", runtime.Name)
 	}
-	if runtime.Spec.Capabilities == nil || runtime.Status.ObservedCapabilities.RuntimeInstanceID == "" ||
+	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.Profile == nil ||
+		runtime.Status.ObservedCapabilities.RuntimeInstanceID == "" ||
 		runtime.Status.ObservedCapabilities.RuntimeProfileDigest != runtime.Spec.Capabilities.Profile.Digest {
 		return fmt.Sprintf("external AgentRuntime %q does not have an exact observed runtime identity/profile", runtime.Name)
 	}
@@ -114,7 +156,10 @@ func externalAgentRuntimeReadinessReason(task *corev1alpha1.Task, runtime *corev
 			return fmt.Sprintf("external AgentRuntime %q profile workspace intent %q does not match Task intent %q", runtime.Name, runtime.Spec.Capabilities.Profile.WorkspaceIntent, intent)
 		}
 	}
-	if !runtime.Spec.Capabilities.WorkspaceGovernance.Strict() || !runtime.Status.ObservedCapabilities.WorkspaceGovernance.Strict() {
+	if runtime.Spec.Capabilities.WorkspaceGovernance == nil ||
+		runtime.Status.ObservedCapabilities.WorkspaceGovernance == nil ||
+		!runtime.Spec.Capabilities.WorkspaceGovernance.Strict() ||
+		!runtime.Status.ObservedCapabilities.WorkspaceGovernance.Strict() {
 		return fmt.Sprintf("external AgentRuntime %q does not provide strict workspace governance", runtime.Name)
 	}
 	return ""
@@ -158,4 +203,15 @@ func effectiveAgentResources(task *corev1alpha1.Task, agent *corev1alpha1.Agent)
 		return true
 	}
 	return agent != nil && (len(agent.Spec.Resources.Requests) > 0 || len(agent.Spec.Resources.Limits) > 0)
+}
+
+func agentHarnessV1InheritedAuthorityUnsupportedReason(agent *corev1alpha1.Agent) string {
+	switch {
+	case effectiveAgentResources(nil, agent):
+		return "harness v1 built-in runtimes do not support inherited Agent.spec.resources"
+	case resolveExecution(nil, agent) != nil:
+		return "harness v1 built-in runtimes do not support inherited Agent.spec.execution placement"
+	default:
+		return ""
+	}
 }

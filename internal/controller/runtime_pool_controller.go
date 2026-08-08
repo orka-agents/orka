@@ -321,7 +321,6 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{}, err
 	}
-
 	if !pool.DeletionTimestamp.IsZero() {
 		return r.finalizeRuntimePool(ctx, pool)
 	}
@@ -1247,8 +1246,12 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 }
 
 func (r *RuntimePoolReconciler) ensureRuntimePoolNamespace(ctx context.Context, cfg runtimePoolConfig) error {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	namespace := &corev1.Namespace{}
-	err := r.Get(ctx, types.NamespacedName{Name: cfg.namespace}, namespace)
+	err := reader.Get(ctx, types.NamespacedName{Name: cfg.namespace}, namespace)
 	if err == nil {
 		return nil
 	}

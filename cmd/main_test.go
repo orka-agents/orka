@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +30,9 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
@@ -56,6 +60,45 @@ func TestBrokeredDelegateTaskSubjectTokenResolverUsesOwnedIncomingSecret(t *test
 	}
 	if token != "request-scoped-token" {
 		t.Fatalf("resolved token = %q, want request-scoped token", token)
+	}
+}
+
+func TestControllerHolderIDIsProcessIncarnationUnique(t *testing.T) {
+	first := controllerHolderIDForIncarnation("workstation", "first-process")
+	second := controllerHolderIDForIncarnation("workstation", "second-process")
+	if first == second {
+		t.Fatalf("holder IDs for distinct process incarnations match: %q", first)
+	}
+	if first == "workstation" || second == "workstation" {
+		t.Fatal("holder ID omitted its process incarnation")
+	}
+}
+
+func TestValidateStaticTrustedServiceReferences(t *testing.T) {
+	sameNamespace, err := outboundaccess.ParseTrustedServiceReferences("team-a/gateway:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossNamespace, err := outboundaccess.ParseTrustedServiceReferences("shared/gateway:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateStaticTrustedServiceReferences("team-a", outboundaccess.TrustConfig{
+		Gateways: sameNamespace,
+	}); err != nil {
+		t.Fatalf("same-namespace trust rejected: %v", err)
+	}
+	if err := validateStaticTrustedServiceReferences("team-a", outboundaccess.TrustConfig{
+		TokenEndpoints: crossNamespace,
+	}); err == nil || !strings.Contains(err.Error(), `must be in controller watch namespace "team-a"`) {
+		t.Fatalf("cross-namespace trust error = %v", err)
+	}
+}
+
+func TestCurrentControllerHolderIDPreservesExplicitOverride(t *testing.T) {
+	t.Setenv("ORKA_CONTROLLER_HOLDER_ID", " explicit-controller ")
+	if got := currentControllerHolderID(); got != "explicit-controller" {
+		t.Fatalf("currentControllerHolderID() = %q, want explicit-controller", got)
 	}
 }
 
@@ -245,14 +288,16 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 	tests := []struct {
 		name                    string
 		runtimeEnabled          bool
+		wantCollector           bool
 		wantRuntimeReservations bool
 	}{
 		{
-			name: "disabled runtime retains cleanup collector only",
+			name: "harness v1 has no ACP artifact wiring",
 		},
 		{
 			name:                    "enabled runtime exposes reservation recorder",
 			runtimeEnabled:          true,
+			wantCollector:           true,
 			wantRuntimeReservations: true,
 		},
 	}
@@ -266,8 +311,14 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 			if err != nil {
 				t.Fatalf("newACPArtifactRetentionWiring() error = %v", err)
 			}
+			if got := wiring.collector != nil; got != tt.wantCollector {
+				t.Fatalf("collector present = %t, want %t", got, tt.wantCollector)
+			}
 			if wiring.collector == nil {
-				t.Fatal("collector is nil")
+				if wiring.taskCleanup != nil || wiring.runtimeReservations != nil {
+					t.Fatal("disabled ACP artifact wiring retained active components")
+				}
+				return
 			}
 			if wiring.taskCleanup != wiring.collector {
 				t.Fatal("Task cleanup retirer does not preserve the collector")
@@ -285,8 +336,8 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 	}
 }
 
-func TestACPArtifactRetentionWiringFailsClosedInCleanupOnlyMode(t *testing.T) {
-	if _, err := newACPArtifactRetentionWiring(false, "relative/artifacts"); err == nil {
+func TestACPArtifactRetentionWiringFailsClosedForUnsafeV2Root(t *testing.T) {
+	if _, err := newACPArtifactRetentionWiring(true, "relative/artifacts"); err == nil {
 		t.Fatal("newACPArtifactRetentionWiring() error = nil, want unsafe-root error")
 	}
 }
@@ -304,9 +355,8 @@ func TestACPControlStoreWiring(t *testing.T) {
 			name: "disabled runtime without controller namespace has no control store",
 		},
 		{
-			name:            "disabled runtime retains Task cleanup store only",
-			withStore:       true,
-			wantTaskCleanup: true,
+			name:      "harness v1 does not receive ACP cleanup wiring",
+			withStore: true,
 		},
 		{
 			name:            "enabled runtime shares store with Task cleanup",
@@ -389,7 +439,7 @@ func TestManagerCacheOptions(t *testing.T) {
 			wantChildOverrides: true,
 		},
 		{
-			name:               "runtime cleanup watches remain active when admission is disabled",
+			name:               "v2 runtime children use the isolated runtime namespace",
 			watchNamespace:     "tenant-a",
 			runtimeNamespace:   "orka-runtimes",
 			wantDefault:        []string{"tenant-a"},
@@ -421,10 +471,12 @@ func TestManagerCacheOptions(t *testing.T) {
 				assertCacheNamespaces(t, effectiveCacheNamespaces(options, object), tt.wantDefault)
 			}
 
-			if got := len(options.ByObject); tt.wantChildOverrides && got != len(childTypes) {
-				t.Fatalf("ByObject override count = %d, want %d", got, len(childTypes))
-			} else if !tt.wantChildOverrides && got != 0 {
-				t.Fatalf("ByObject override count = %d, want 0", got)
+			wantOverrides := 0
+			if tt.wantChildOverrides {
+				wantOverrides += len(childTypes)
+			}
+			if got := len(options.ByObject); got != wantOverrides {
+				t.Fatalf("ByObject override count = %d, want %d", got, wantOverrides)
 			}
 			for _, object := range childTypes {
 				_, overridden := cacheByObjectForType(options, object)
@@ -510,6 +562,29 @@ func TestWorkspaceCleanupAPIsInstalled(t *testing.T) {
 	}
 }
 
+func TestManagerWebhookAdmissionEnabled(t *testing.T) {
+	tests := []struct {
+		name              string
+		taskProvenance    bool
+		workspaceClassUse bool
+		want              bool
+	}{
+		{name: "separate admission runtime", want: false},
+		{name: "task provenance", taskProvenance: true, want: true},
+		{name: "workspace class use", workspaceClassUse: true, want: true},
+		{name: "all manager admission", taskProvenance: true, workspaceClassUse: true, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := managerWebhookAdmissionEnabled(tt.taskProvenance, tt.workspaceClassUse); got != tt.want {
+				t.Fatalf("managerWebhookAdmissionEnabled(%t, %t) = %t, want %t",
+					tt.taskProvenance, tt.workspaceClassUse, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateWorkspaceProviderSecurityConfig(t *testing.T) {
 	if err := validateWorkspaceProviderSecurityConfig(false, false); err != nil {
 		t.Fatalf("disabled API validation: %v", err)
@@ -519,5 +594,94 @@ func TestValidateWorkspaceProviderSecurityConfig(t *testing.T) {
 	}
 	if err := validateWorkspaceProviderSecurityConfig(true, false); err == nil {
 		t.Fatal("workspace API enabled without class-use admission")
+	}
+}
+
+func TestValidateAgentExecutionSnapshotOptions(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      executionmode.Mode
+		keyFile   string
+		retention time.Duration
+		interval  time.Duration
+		wantError bool
+	}{
+		{
+			name: "harness v1 requires key", mode: executionmode.HarnessV1,
+			retention: time.Hour, interval: time.Minute, wantError: true,
+		},
+		{
+			name: "harness v2 requires key", mode: executionmode.HarnessV2,
+			retention: time.Hour, interval: time.Minute, wantError: true,
+		},
+		{
+			name: "harness v1 enabled", mode: executionmode.HarnessV1,
+			keyFile: "/var/run/orka/snapshot/key", retention: 30 * 24 * time.Hour, interval: time.Hour,
+		},
+		{
+			name: "harness v2 enabled", mode: executionmode.HarnessV2,
+			keyFile: "/var/run/orka/snapshot/key", retention: 30 * 24 * time.Hour, interval: time.Hour,
+		},
+		{
+			name: "zero retention", mode: executionmode.HarnessV2,
+			keyFile: "/var/run/orka/snapshot/key", retention: 0, interval: time.Hour, wantError: true,
+		},
+		{
+			name: "negative retention", mode: executionmode.HarnessV2, keyFile: "/var/run/orka/snapshot/key",
+			retention: -time.Hour, interval: time.Hour, wantError: true,
+		},
+		{
+			name: "zero interval", mode: executionmode.HarnessV2,
+			keyFile: "/var/run/orka/snapshot/key", retention: time.Hour, interval: 0, wantError: true,
+		},
+		{
+			name: "negative interval", mode: executionmode.HarnessV2, keyFile: "/var/run/orka/snapshot/key",
+			retention: time.Hour, interval: -time.Minute, wantError: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAgentExecutionSnapshotOptions(tt.mode, tt.keyFile, tt.retention, tt.interval)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("validation error = %v, wantError = %t", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestLoadAgentExecutionSnapshotCipherAcceptsDeploymentKeyFormats(t *testing.T) {
+	raw := []byte(strings.Repeat("k", 32))
+	rawWithWhitespaceEdges := append([]byte{' '}, []byte(strings.Repeat("r", 30))...)
+	rawWithWhitespaceEdges = append(rawWithWhitespaceEdges, '\n')
+	encoded := base64.StdEncoding.EncodeToString(raw)
+
+	tests := []struct {
+		name      string
+		contents  []byte
+		wantError bool
+	}{
+		{name: "exact raw bytes", contents: raw},
+		{name: "exact raw bytes with whitespace edges", contents: rawWithWhitespaceEdges},
+		{name: "base64", contents: []byte(encoded)},
+		{name: "base64 with normal trailing newline", contents: []byte(encoded + "\n")},
+		{name: "base64 with surrounding whitespace", contents: []byte(" \t" + encoded + "\r\n")},
+		{
+			name:     "trimmed raw bytes are not silently accepted",
+			contents: []byte(" " + strings.Repeat("x", 31) + " "), wantError: true,
+		},
+		{name: "malformed", contents: []byte("not-a-snapshot-key"), wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "snapshot-key")
+			if err := os.WriteFile(path, tt.contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := loadAgentExecutionSnapshotCipher(path)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("loadAgentExecutionSnapshotCipher() error = %v, wantError = %t", err, tt.wantError)
+			}
+		})
 	}
 }

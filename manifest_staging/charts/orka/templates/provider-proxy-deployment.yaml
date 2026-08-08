@@ -1,5 +1,5 @@
 {{- include "orka.validateProviderProxyConfig" . }}
-{{- if .Values.providerProxy.enabled }}
+{{- if and (eq .Values.controller.mode "harness-v2") .Values.providerProxy.enabled }}
 {{- $secretName := .Values.providerProxy.auth.existingSecret | default (include "orka.providerProxyName" .) }}
 {{- $currentKey := .Values.providerProxy.auth.tokenKey | default "token" }}
 {{- $previousKey := .Values.providerProxy.auth.previousTokenKey | default "previous-token" }}

@@ -19,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tracing"
 )
@@ -165,6 +166,13 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 
 	if errResult, ok := parseRuntimeConfig(a, agent); !ok {
 		return errResult, nil
+	}
+	if err := executionmode.DefaultBuiltInAgentContract(agent, tc.ExecutionMode); err != nil {
+		return ChatToolErrorResult(
+			"invalid_arguments",
+			err.Error(),
+			"Use the built-in runtime contract selected by this Orka installation.",
+		)
 	}
 	parseCoordinationConfig(a, agent)
 

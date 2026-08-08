@@ -57,6 +57,29 @@ func TestACPUpgradeDrainOptionsBindManifestFlags(t *testing.T) {
 	}
 }
 
+func TestACPUpgradeDrainRequiresWatchNamespace(t *testing.T) {
+	scheme := upgradeDrainTestScheme(t)
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	options := testUpgradeDrainOptions()
+	options.WatchNamespace = ""
+	coordinator := NewACPUpgradeDrainCoordinator(
+		kubeClient,
+		kubeClient,
+		fixedUpgradeDrainEpochSource{},
+		&fakeUpgradeDrainEpochStore{},
+		ACPUpgradeDrainBarrierObserverFunc(func(context.Context) (ACPUpgradeDrainBarrierSnapshot, error) {
+			return ACPUpgradeDrainBarrierSnapshot{}, nil
+		}),
+		NewACPAdmissionGate(),
+		options,
+	)
+
+	err := coordinator.initialize()
+	if err == nil || !strings.Contains(err.Error(), "watch namespace is required") {
+		t.Fatalf("initialize() error = %v, want missing watch namespace", err)
+	}
+}
+
 func TestACPUpgradeDrainCoordinatorCompletesExactInstanceDrain(t *testing.T) {
 	scheme := upgradeDrainTestScheme(t)
 	pool, pod, auth, supervisor := upgradeDrainRuntimePoolFixture(t)
@@ -654,6 +677,7 @@ func testUpgradeDrainOptions() ACPUpgradeDrainOptions {
 		Timeout:         500 * time.Millisecond,
 		PollInterval:    5 * time.Millisecond,
 		MarkerNamespace: runtimePoolDefaultControllerNamespace,
+		WatchNamespace:  "tenant-a",
 		TriggerTimeout:  time.Second,
 	}
 }

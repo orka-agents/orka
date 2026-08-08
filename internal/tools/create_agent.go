@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/workerenv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,7 +29,8 @@ import (
 
 // CreateAgentTool implements dynamic Agent CRD creation
 type CreateAgentTool struct {
-	k8sClient client.Client
+	k8sClient     client.Client
+	executionMode executionmode.Mode
 }
 
 // CreateAgentArgs are the arguments for the create_agent tool
@@ -94,9 +96,10 @@ type CreateAgentResult struct {
 }
 
 // NewCreateAgentTool creates a new create_agent tool
-func NewCreateAgentTool(k8sClient client.Client) *CreateAgentTool {
+func NewCreateAgentTool(k8sClient client.Client, mode executionmode.Mode) *CreateAgentTool {
 	return &CreateAgentTool{
-		k8sClient: k8sClient,
+		k8sClient:     k8sClient,
+		executionMode: mode,
 	}
 }
 
@@ -458,18 +461,20 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	if err := configureCreatedAgentRuntime(agent, a.Runtime); err != nil {
 		return "", err
 	}
+	if err := executionmode.DefaultBuiltInAgentContract(agent, t.executionMode); err != nil {
+		return "", err
+	}
 
-	// Set owner reference to parent task for auto-cleanup
-	blockOwnerDeletion := true
+	// Set a non-blocking owner reference for auto-cleanup. Worker RBAC allows
+	// creating child resources but not updating the parent Task's finalizers.
 	isController := true
 	agent.OwnerReferences = []metav1.OwnerReference{
 		{
-			APIVersion:         corev1alpha1.GroupVersion.String(),
-			Kind:               taskKindString,
-			Name:               parentTask.Name,
-			UID:                parentTask.UID,
-			Controller:         &isController,
-			BlockOwnerDeletion: &blockOwnerDeletion,
+			APIVersion: corev1alpha1.GroupVersion.String(),
+			Kind:       taskKindString,
+			Name:       parentTask.Name,
+			UID:        parentTask.UID,
+			Controller: &isController,
 		},
 	}
 

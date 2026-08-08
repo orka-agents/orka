@@ -202,9 +202,9 @@ func TestReserveTaskSettlesFrozenWorkspaceCredentialBlocked(t *testing.T) {
 					SecretUID: "workspace-credential-uid", ResourceVersion: frozenResourceVersion,
 				}}
 			}
-			attempt, err := controlStore.CreatePromptAttempt(ctx, &store.PromptAttempt{
+			attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 				Key: key, RequestDigest: task.Status.Execution.RequestDigest, CredentialBindings: bindings,
-			}, fence)
+			}), fence)
 			if err != nil {
 				t.Fatal(err)
 			}

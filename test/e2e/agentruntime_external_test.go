@@ -12,7 +12,6 @@ package e2e
 import (
 	"fmt"
 	"os/exec"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -21,7 +20,9 @@ import (
 	"github.com/orka-agents/orka/test/utils"
 )
 
-var _ = Describe("AgentRuntime v2 hard cutover", func() {
+const externalV2RuntimeName = "external-v2-runtime"
+
+var _ = Describe("AgentRuntime external dispatch", func() {
 	const (
 		agentName = "e2e-external-v2-agent"
 		taskName  = "e2e-external-v2-task"
@@ -31,6 +32,7 @@ var _ = Describe("AgentRuntime v2 hard cutover", func() {
 		for _, resource := range []struct{ kind, name string }{
 			{"task", taskName},
 			{"agent", agentName},
+			{"agentruntime", externalV2RuntimeName},
 		} {
 			cmd := exec.Command("kubectl", "delete", resource.kind, resource.name,
 				"-n", namespace, "--ignore-not-found")
@@ -38,13 +40,16 @@ var _ = Describe("AgentRuntime v2 hard cutover", func() {
 		}
 	})
 
-	It("rejects orka.harness.v1 registrations at API validation", func() {
+	It("rejects orka.harness.v1 registrations in a harness-v2 namespace", func() {
 		manifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "AgentRuntime",
 			"metadata": {"name": "e2e-v1-rejected", "namespace": %q},
 			"spec": {
 				"contractVersion": "orka.harness.v1",
+				"clientAuth": {
+					"bearerTokenSecretRef": {"name": "runtime-auth", "key": "token"}
+				},
 				"deployment": {"mode": "external-endpoint", "endpoint": "https://runtime.example.com"}
 			}
 		}`, namespace)
@@ -52,20 +57,24 @@ var _ = Describe("AgentRuntime v2 hard cutover", func() {
 		cmd.Stdin = stringReader(manifest)
 		output, err := utils.Run(cmd)
 		Expect(err).To(HaveOccurred())
-		lower := strings.ToLower(output)
-		Expect(lower).To(ContainSubstring("unsupported value"))
-		Expect(lower).To(ContainSubstring("orka.harness.v2"))
+		Expect(output).To(ContainSubstring(
+			`AgentRuntime contractVersion must match namespace execution mode "harness-v2"`,
+		))
 	})
 
 	It("fails closed at the external Task dispatch support boundary", func() {
+		runtimeManifest, manifestErr := externalV2RuntimeManifest()
+		Expect(manifestErr).NotTo(HaveOccurred())
+		Expect(applyManifestJSON(runtimeManifest)).To(Succeed())
+
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",
 			"metadata": {"name": %q, "namespace": %q},
 			"spec": {
-				"runtime": {"runtimeRef": {"name": "external-v2-runtime"}}
+				"runtime": {"runtimeRef": {"name": %q}}
 			}
-		}`, agentName, namespace)
+		}`, agentName, namespace, externalV2RuntimeName)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(agentManifest)
 		_, err := utils.Run(cmd)
@@ -97,9 +106,18 @@ var _ = Describe("AgentRuntime v2 hard cutover", func() {
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(HavePrefix("Failed/"))
-			g.Expect(output).To(ContainSubstring("external AgentRuntime \"external-v2-runtime\" Task dispatch is not supported until the v2 dispatcher is wired"))
+			g.Expect(output).To(ContainSubstring(fmt.Sprintf("external AgentRuntime %q Task dispatch is not supported until the v2 dispatcher is wired", externalV2RuntimeName)))
 		}, 2*time.Minute, time.Second).Should(Succeed())
 
 		verifyNoJobForTask(taskName, 5*time.Second)
 	})
 })
+
+func externalV2RuntimeManifest() (map[string]any, error) {
+	manifest, err := gatewayE2ERuntimeManifest()
+	if err != nil {
+		return nil, err
+	}
+	manifest["metadata"].(map[string]any)["name"] = externalV2RuntimeName
+	return manifest, nil
+}

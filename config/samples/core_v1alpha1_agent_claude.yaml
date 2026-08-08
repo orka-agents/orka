@@ -19,6 +19,7 @@ spec:
   # per-Task Job/image or legacy harness fallback. It is mutually exclusive
   # with providerRef, which is for native type: ai tasks.
   runtime:
+    contractVersion: orka.harness.v2
     # type selects a supported ACP runtime profile.
     type: claude
     # defaultMaxTurns is the default max agent loop iterations per task

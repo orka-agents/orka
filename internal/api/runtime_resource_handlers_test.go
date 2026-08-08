@@ -1,6 +1,8 @@
 package api
 
 import (
+	"k8s.io/utils/ptr"
+
 	"bytes"
 	"context"
 	"encoding/json"
@@ -74,10 +76,10 @@ func TestRuntimeFabricResourceHandlers(t *testing.T) {
 	runtimeObject := corev1alpha1.AgentRuntime{
 		ObjectMeta: objectMetaFromRequest("external", "default", MetadataRequest{}),
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
 			Deployment:      corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: "https://runtime.example.com"},
-			ClientAuth:      corev1alpha1.AgentRuntimeClientAuth{ControllerBearerTokenSecretRef: corev1alpha1.AgentRuntimeSecretKeyReference{Name: "auth", Key: "controller"}, OperationCapabilitySecretRef: corev1alpha1.AgentRuntimeSecretKeyReference{Name: "auth", Key: "capability"}},
-			Capabilities:    &corev1alpha1.AgentRuntimeCapabilitiesSpec{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, SupportsDrain: true, WorkspaceGovernance: claims},
+			ClientAuth:      corev1alpha1.AgentRuntimeClientAuth{ControllerBearerTokenSecretRef: &corev1alpha1.AgentRuntimeSecretKeyReference{Name: "auth", Key: "controller"}, OperationCapabilitySecretRef: &corev1alpha1.AgentRuntimeSecretKeyReference{Name: "auth", Key: "capability"}},
+			Capabilities:    &corev1alpha1.AgentRuntimeCapabilitiesSpec{RuntimeInstanceID: "runtime-1", Profile: &profile, Limits: &limits, SupportsDrain: true, WorkspaceGovernance: &claims},
 		},
 	}
 	body, _ := json.Marshal(runtimeObject)

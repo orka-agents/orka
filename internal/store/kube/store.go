@@ -24,6 +24,11 @@ var ErrSessionTurnStoreNotConfigured = errors.New("session turn persistence is n
 // persistence adapter was not configured.
 var ErrOutboxStoreNotConfigured = errors.New("outbox persistence is not configured")
 
+// ErrBranchClaimAccessDisabled is returned when a static harness v1
+// installation reaches a publication-only BranchClaim path. Harness v1 must
+// never observe or mutate the cluster-scoped claims owned by harness v2.
+var ErrBranchClaimAccessDisabled = errors.New("cluster-scoped branch claim access is disabled")
+
 // SQLitePersistence is the complete SQLite-owned half of the hard-cutover
 // control store. The concrete sqlite.Store satisfies this interface without
 // treating any SQLite control row as authoritative.
@@ -48,6 +53,21 @@ func WithSessionTurnPersistence(turns store.SessionTurnPersistenceStore) Option 
 	}
 }
 
+// WithHarnessV1Attempts supplies the route-specific receipt store used when a
+// protocol-neutral SessionTurn references a harness v1 attempt rather than a
+// v2 PromptAttempt. Kubernetes SessionControl and Lease state remain the
+// mutation authority; this store is consulted only for immutable attempt
+// identity and terminal-receipt validation.
+func WithHarnessV1Attempts(attempts store.HarnessV1AttemptStore) Option {
+	return func(s *Store) error {
+		if attempts == nil {
+			return store.ValidationErrorf("harness v1 attempt store must not be nil")
+		}
+		s.harnessV1Attempts = attempts
+		return nil
+	}
+}
+
 // WithAPIReader configures the uncached reader used for authoritative control
 // records. Controller-runtime cached clients remain the writer, but must not be
 // trusted for immediate read-after-write recovery decisions.
@@ -57,6 +77,30 @@ func WithAPIReader(reader client.Reader) Option {
 			return store.ValidationErrorf("Kubernetes API reader must not be nil")
 		}
 		s.reader = reader
+		return nil
+	}
+}
+
+// WithWatchNamespace confines namespaced control-record lookups to the static
+// controller installation's immutable watch namespace. Cluster-scoped control
+// records, such as BranchClaims, remain unaffected.
+func WithWatchNamespace(namespace string) Option {
+	return func(s *Store) error {
+		namespace = strings.TrimSpace(namespace)
+		if err := validateKubernetesNamespace(namespace); err != nil {
+			return err
+		}
+		s.watchNamespace = namespace
+		return nil
+	}
+}
+
+// WithoutClusterScopedBranchClaims configures the publication-free harness v1
+// control-store path. Session continuity remains Kubernetes-authoritative, but
+// Session cleanup cannot list or mutate the cluster-scoped BranchClaim kind.
+func WithoutClusterScopedBranchClaims() Option {
+	return func(s *Store) error {
+		s.branchClaimsEnabled = false
 		return nil
 	}
 }
@@ -87,12 +131,15 @@ func WithSessionCleanupPersistence(cleanup store.SessionCleanupPersistenceStore)
 
 // Store maps ACP control-store interfaces to Kubernetes CR status and Leases.
 type Store struct {
-	client           client.Client
-	reader           client.Reader
-	controlNamespace string
-	sessionTurns     store.SessionTurnPersistenceStore
-	outbox           store.OutboxPersistenceStore
-	sessionCleanup   store.SessionCleanupPersistenceStore
+	client              client.Client
+	reader              client.Reader
+	controlNamespace    string
+	watchNamespace      string
+	sessionTurns        store.SessionTurnPersistenceStore
+	harnessV1Attempts   store.HarnessV1AttemptStore
+	outbox              store.OutboxPersistenceStore
+	sessionCleanup      store.SessionCleanupPersistenceStore
+	branchClaimsEnabled bool
 }
 
 // NewComposite constructs the hard-cutover DurableControlStore: Kubernetes is
@@ -104,6 +151,9 @@ func NewComposite(kubeClient client.Client, controlNamespace string, persistence
 	}
 	combined := make([]Option, 0, len(options)+3)
 	combined = append(combined, WithSessionTurnPersistence(persistence), WithOutboxPersistence(persistence), WithSessionCleanupPersistence(persistence))
+	if attempts, ok := persistence.(store.HarnessV1AttemptStore); ok {
+		combined = append(combined, WithHarnessV1Attempts(attempts))
+	}
 	combined = append(combined, options...)
 	return New(kubeClient, controlNamespace, combined...)
 }
@@ -119,7 +169,7 @@ func New(kubeClient client.Client, controlNamespace string, options ...Option) (
 	if err := validateKubernetesNamespace(controlNamespace); err != nil {
 		return nil, err
 	}
-	result := &Store{client: kubeClient, controlNamespace: controlNamespace}
+	result := &Store{client: kubeClient, controlNamespace: controlNamespace, branchClaimsEnabled: true}
 	for _, option := range options {
 		if option == nil {
 			return nil, store.ValidationErrorf("Kubernetes control-store option must not be nil")
@@ -129,6 +179,13 @@ func New(kubeClient client.Client, controlNamespace string, options ...Option) (
 		}
 	}
 	return result, nil
+}
+
+func (s *Store) requireBranchClaimAccess() error {
+	if s == nil || !s.branchClaimsEnabled {
+		return ErrBranchClaimAccessDisabled
+	}
+	return nil
 }
 
 // ControlNamespace returns the namespace containing the controller epoch Lease.
@@ -152,6 +209,13 @@ func (s *Store) readClient() client.Reader {
 		return nil
 	}
 	return s.client
+}
+
+func (s *Store) namespacedListOptions(options ...client.ListOption) []client.ListOption {
+	if s == nil || s.watchNamespace == "" {
+		return options
+	}
+	return append(options, client.InNamespace(s.watchNamespace))
 }
 
 func (s *Store) requireClient() error {

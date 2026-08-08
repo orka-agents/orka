@@ -1,4 +1,4 @@
-{{- if .Values.controller.acpRuntime.enabled }}
+{{- if eq .Values.controller.mode "harness-v2" }}
 apiVersion: v1
 kind: Namespace
 metadata:

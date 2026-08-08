@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -32,6 +33,21 @@ type ACPSessionContinuityConfig struct {
 	BranchClaims    store.BranchClaimStore
 	BootstrapLimits ACPBootstrapLimits
 	NewSessionUID   func() (string, error)
+
+	// Lineages receives an idempotent SQLite payload projection only after the
+	// Kubernetes SessionControl store has established or verified lineage in
+	// the same status CAS that records the mutation Lease.
+	Lineages store.SessionLineageStore
+}
+
+// HarnessV1SessionContinuityConfig supplies only the namespaced continuity
+// stores used by the publication-free harness v1 contract.
+type HarnessV1SessionContinuityConfig struct {
+	SessionControls store.SessionControlStore
+	Transcripts     store.SessionStore
+	BootstrapLimits ACPBootstrapLimits
+	NewSessionUID   func() (string, error)
+	Lineages        store.SessionLineageStore
 }
 
 // ACPSessionContinuity is the controller-side integration boundary for durable
@@ -44,6 +60,12 @@ type ACPSessionContinuity struct {
 	branchClaims    store.BranchClaimStore
 	bootstrapLimits ACPBootstrapLimits
 	newSessionUID   func() (string, error)
+	lineages        store.SessionLineageStore
+}
+
+// RecordsLineage reports whether Session lineage recording is configured.
+func (c *ACPSessionContinuity) RecordsLineage() bool {
+	return c != nil && c.lineages != nil
 }
 
 // NewACPSessionContinuity creates a continuity component. All stores are
@@ -53,6 +75,26 @@ func NewACPSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionCont
 	if config.SessionControls == nil || config.Transcripts == nil || config.Publications == nil || config.BranchClaims == nil {
 		return nil, fmt.Errorf("ACP session continuity requires session-control, transcript, publication, and branch-claim stores")
 	}
+	return newSessionContinuity(config)
+}
+
+// NewHarnessV1SessionContinuity creates the publication-free v1 continuity
+// boundary. A nonempty publication ID fails closed because no PublicationStore
+// or cluster-scoped BranchClaimStore is attached.
+func NewHarnessV1SessionContinuity(config HarnessV1SessionContinuityConfig) (*ACPSessionContinuity, error) {
+	if config.SessionControls == nil || config.Transcripts == nil {
+		return nil, fmt.Errorf("harness v1 session continuity requires session-control and transcript stores")
+	}
+	return newSessionContinuity(ACPSessionContinuityConfig{
+		SessionControls: config.SessionControls,
+		Transcripts:     config.Transcripts,
+		BootstrapLimits: config.BootstrapLimits,
+		NewSessionUID:   config.NewSessionUID,
+		Lineages:        config.Lineages,
+	})
+}
+
+func newSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionContinuity, error) {
 	limits, err := config.BootstrapLimits.withDefaults()
 	if err != nil {
 		return nil, err
@@ -66,6 +108,7 @@ func NewACPSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionCont
 		transcripts:     config.Transcripts,
 		publications:    config.Publications,
 		branchClaims:    config.BranchClaims,
+		lineages:        config.Lineages,
 		bootstrapLimits: limits,
 		newSessionUID:   newSessionUID,
 	}, nil
@@ -248,6 +291,15 @@ type ACPAcquireSessionLeaseRequest struct {
 	PromptRequestDigest string
 	AcquiredAt          time.Time
 	ExpiresAt           *time.Time
+
+	// NamespaceUID, RuntimeIdentity, and ConfigDigest establish or verify the
+	// Kubernetes-authoritative Session protocol/runtime lineage atomically with
+	// the lease status CAS when lineage projection is configured.
+	NamespaceUID      string
+	ContractVersion   corev1alpha1.AgentRuntimeContractVersion
+	LineageGeneration int64
+	RuntimeIdentity   string
+	ConfigDigest      string
 }
 
 // ACPSessionLease is the exact mutation fence that must be used when opening
@@ -271,29 +323,40 @@ func (c *ACPSessionContinuity) AcquireMutationLease(ctx context.Context, request
 		return nil, fmt.Errorf("%w: session %s/%s is reconciliation-blocked", store.ErrConflict,
 			request.Session.Namespace, request.Session.SessionName)
 	}
-	if request.Session.Lease != nil {
-		return nil, fmt.Errorf("%w: session %s/%s already has a mutation lease", store.ErrConflict,
-			request.Session.Namespace, request.Session.SessionName)
-	}
 	if err := store.ValidateCanonicalDigest("prompt request digest", request.PromptRequestDigest); err != nil {
 		return nil, err
 	}
+	leaseGeneration := request.Session.LeaseGeneration + 1
+	if request.Session.Lease != nil {
+		leaseGeneration = request.Session.Lease.Generation
+	}
 	leaseDigest, err := acpSessionMutationLeaseDigest(
-		request.Session.SessionUID, request.Session.LeaseGeneration+1,
+		request.Session.SessionUID, leaseGeneration,
 		request.TaskUID, request.Attempt, request.PromptID, request.PromptRequestDigest,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("digest ACP session mutation lease: %w", err)
 	}
+	if existing := request.Session.Lease; existing != nil &&
+		(existing.TaskUID != request.TaskUID || existing.Attempt != request.Attempt ||
+			existing.PromptID != request.PromptID || existing.RequestDigest != leaseDigest) {
+		return nil, fmt.Errorf("%w: session %s/%s is already leased by a different prompt operation",
+			store.ErrConflict, request.Session.Namespace, request.Session.SessionName)
+	}
 	acquiredAt := request.AcquiredAt.UTC()
 	if acquiredAt.IsZero() {
 		acquiredAt = time.Now().UTC()
+	}
+	lineageClaim, err := c.prepareSessionLineageClaim(ctx, request)
+	if err != nil {
+		return nil, err
 	}
 	control, err := c.controls.AcquireSessionMutationLease(ctx, store.AcquireSessionMutationLeaseRequest{
 		Namespace: request.Session.Namespace, SessionName: request.Session.SessionName, SessionUID: request.Session.SessionUID,
 		Fence: request.Fence, ExpectedVersion: request.Session.Version, ExpectedLeaseGeneration: request.Session.LeaseGeneration,
 		TaskUID: request.TaskUID, Attempt: request.Attempt, PromptID: request.PromptID,
 		RequestDigest: leaseDigest, AcquiredAt: acquiredAt, ExpiresAt: request.ExpiresAt,
+		Lineage: lineageClaim,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("acquire ACP session mutation lease: %w", err)
@@ -305,7 +368,62 @@ func (c *ACPSessionContinuity) AcquireMutationLease(ctx context.Context, request
 	if err := validateACPSessionLease(control, key); err != nil {
 		return nil, err
 	}
-	return &ACPSessionLease{Session: *control, Key: key}, nil
+	lease := &ACPSessionLease{Session: *control, Key: key}
+	if c.lineages != nil {
+		if control.Lineage == nil {
+			return nil, fmt.Errorf("kubernetes session lease committed without authoritative lineage")
+		}
+		if _, err := c.lineages.ProjectSessionLineage(ctx, *control.Lineage); err != nil {
+			// Retain the exact Kubernetes lease on projection failure. Releasing it
+			// would allow another owner to proceed before the payload projection is
+			// repaired; an idempotent retry completes the projection first.
+			return nil, fmt.Errorf("project Kubernetes-authoritative Session lineage: %w", err)
+		}
+	}
+	return lease, nil
+}
+
+// prepareSessionLineageClaim determines only whether an absent authoritative
+// lineage may be established. Kubernetes remains the decision point: a stale
+// caller that observes a nonempty transcript can still verify a lineage that a
+// concurrent first user already committed, but it cannot establish one.
+func (c *ACPSessionContinuity) prepareSessionLineageClaim(ctx context.Context, request ACPAcquireSessionLeaseRequest) (*store.ClaimSessionLineageRequest, error) {
+	if c.lineages == nil {
+		return nil, nil
+	}
+	contractVersion := request.ContractVersion
+	if contractVersion == "" {
+		contractVersion = corev1alpha1.AgentRuntimeContractHarnessV2
+	}
+	lineageGeneration := request.LineageGeneration
+	if lineageGeneration == 0 {
+		lineageGeneration = 1
+	}
+	claim := &store.ClaimSessionLineageRequest{
+		Namespace:         request.Session.Namespace,
+		SessionName:       request.Session.SessionName,
+		NamespaceUID:      request.NamespaceUID,
+		SessionUID:        request.Session.SessionUID,
+		ContractVersion:   string(contractVersion),
+		LineageGeneration: lineageGeneration,
+		RuntimeIdentity:   request.RuntimeIdentity,
+		ConfigDigest:      request.ConfigDigest,
+	}
+	if request.Session.Lineage != nil {
+		claim.LineageGeneration = request.Session.Lineage.LineageGeneration
+	} else {
+		record, err := c.transcripts.GetSession(ctx, request.Session.Namespace, request.Session.SessionName)
+		if err != nil {
+			return nil, fmt.Errorf("read session transcript for lineage classification: %w", err)
+		}
+		// A nonempty unclassified Session is never adopted implicitly. Static
+		// mode installations require it to be recreated with fresh lineage.
+		claim.EstablishIfAbsent = record.MessageCount == 0
+	}
+	if err := claim.Validate(); err != nil {
+		return nil, err
+	}
+	return claim, nil
 }
 
 func (c *ACPSessionContinuity) ReleaseMutationLease(ctx context.Context, request ACPReleaseSessionLeaseRequest) (*store.SessionControl, error) {
@@ -524,9 +642,6 @@ func (c *ACPSessionContinuity) ResumeSessionTurnFinalization(ctx context.Context
 // assistant result, snapshots any durable publication receipt, releases only
 // the matching lease, and derives baseline advancement inside the store.
 func (c *ACPSessionContinuity) FinalizeAssistantResult(ctx context.Context, request ACPFinalizeAssistantRequest) (*ACPSessionFinalization, error) {
-	if strings.TrimSpace(request.AssistantResult) == "" {
-		return nil, store.ValidationErrorf("assistant result is required")
-	}
 	if err := store.ValidateControlText("assistant result", request.AssistantResult); err != nil {
 		return nil, err
 	}
@@ -600,6 +715,9 @@ func (c *ACPSessionContinuity) finalizeTurn(
 		"turnID": sessionTurn.Turn.ID, "terminalKind": terminalKind, "terminalContent": terminalContent,
 		"publicationID": publicationID, "projectionID": projection.ID, "projectionPayloadDigest": projection.PayloadDigest,
 	}
+	if blockReason != "" {
+		finalizationIdentity["blockReason"] = blockReason
+	}
 	if sessionTurn.SkipTranscriptAppend {
 		finalizationIdentity["skipTranscriptAppend"] = true
 	}
@@ -641,6 +759,9 @@ func (c *ACPSessionContinuity) publicationBlockReason(ctx context.Context, publi
 	}
 	if err := store.ValidateControlIdentifier("publication ID", publicationID); err != nil {
 		return "", err
+	}
+	if c.publications == nil {
+		return "", fmt.Errorf("%w: harness v1 Session finalization cannot reference a publication", store.ErrConflict)
 	}
 	publication, err := c.publications.GetPublication(ctx, publicationID)
 	if err != nil {

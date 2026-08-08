@@ -114,7 +114,12 @@ The controller runs with:
 
 ## Namespace Scoping
 
-- Controller can be scoped to a single namespace with the `--watch-namespace` flag
+- Every controller requires one non-empty `--watch-namespace` and one static
+  `--controller-mode` (`harness-v1` or `harness-v2`)
+- The watched namespace must carry the matching
+  `orka.ai/controller-mode` label; missing or mismatched claims fail startup
+- Same-cluster v1/v2 installations use distinct namespaces, ServiceAccounts,
+  RBAC, Leases, stores, Services, Secrets, and execution data planes
 - Chat endpoint blocks operations in `kube-system` and `kube-public` namespaces
 - The embedded UI is served over the same port as the API (no separate attack surface)
 
@@ -154,18 +159,21 @@ For multi-tenant deployments, enable both isolation and limits:
 ```
 --enforce-namespace-isolation=true
 --max-tasks-per-namespace=50
---watch-namespace=""
+--controller-mode=harness-v2
+--watch-namespace=team-v2
 ```
 
 ### Data Isolation
 
-ACP control CRDs are namespace-scoped, and their status transitions use
+Most ACP control CRDs are namespace-scoped, and their status transitions use
 Kubernetes `resourceVersion` compare-and-swap. Controller-epoch and Session
 mutation Leases fence cross-controller writes. SQLite payload/read-model data
 (including transcripts, deferred outbox projections, and artifacts)
 is also keyed by namespace, and queries filter by namespace. The controller,
 API server, Publisher, brokers, and workers enforce namespace and exact-identity
-boundaries at their respective layers.
+boundaries at their respective layers. CRD schemas remain cluster-scoped and
+have one platform lifecycle owner; schema sharing does not grant either
+controller access to the other installation's resources.
 
 ### Audit Logging
 

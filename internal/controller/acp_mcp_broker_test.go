@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"k8s.io/utils/ptr"
+
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -389,15 +391,15 @@ func TestKubernetesACPMCPBrokerCredentialResolverSupportsExternalRuntime(t *test
 	external := &corev1alpha1.AgentRuntime{
 		ObjectMeta: metav1.ObjectMeta{Name: "external", Namespace: request.Namespace, UID: "external-uid", Generation: 1},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
 			Deployment:      corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: "https://runtime.example.invalid"},
 			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{
-				ControllerBearerTokenSecretRef: corev1alpha1.AgentRuntimeSecretKeyReference{Name: "external-bearer", Key: "token"},
-				OperationCapabilitySecretRef:   corev1alpha1.AgentRuntimeSecretKeyReference{Name: "external-capability", Key: "secret"},
+				ControllerBearerTokenSecretRef: &corev1alpha1.AgentRuntimeSecretKeyReference{Name: "external-bearer", Key: "token"},
+				OperationCapabilitySecretRef:   &corev1alpha1.AgentRuntimeSecretKeyReference{Name: "external-capability", Key: "secret"},
 			},
 			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
-				RuntimeInstanceID: "external-instance", Profile: profileSpec, SupportsDrain: true,
-				WorkspaceGovernance: governance,
+				RuntimeInstanceID: "external-instance", Profile: &profileSpec, SupportsDrain: true,
+				WorkspaceGovernance: &governance,
 			},
 		},
 		Status: corev1alpha1.AgentRuntimeStatus{

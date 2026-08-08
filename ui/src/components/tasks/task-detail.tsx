@@ -19,6 +19,7 @@ import { ForkProvenance } from './fork-provenance'
 import { ExecutionGraph } from './execution-graph'
 import { RunTimeline } from './run-timeline'
 import { TaskRuntimeView } from '@/components/runtime/task-runtime-view'
+import { TaskExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
 import { useTaskTrace, useTaskApprovals } from '@/hooks/use-execution-events'
 import { useTaskArtifacts } from '@/hooks/use-task-artifacts'
@@ -172,6 +173,8 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           )}
         </div>
       </div>
+
+      <TaskExecutionRouteLedger task={task} />
 
       <Tabs value={activeTab} onValueChange={setTab}>
         <TabsList>

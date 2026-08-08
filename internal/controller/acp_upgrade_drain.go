@@ -1232,6 +1232,10 @@ func (c *ACPUpgradeDrainCoordinator) initialize() error {
 		}
 		labels := cloneStringMap(defaults.RuntimePoolLabels)
 		c.Options.RuntimePoolLabels = mergeStringMap(labels, c.Options.RuntimePoolLabels)
+		if strings.TrimSpace(c.Options.WatchNamespace) == "" {
+			c.initErr = fmt.Errorf("ACP upgrade drain watch namespace is required")
+			return
+		}
 		if observer, ok := c.Barriers.(*KubernetesACPUpgradeDrainBarrierObserver); ok && strings.TrimSpace(observer.Namespace) == "" {
 			observer.Namespace = strings.TrimSpace(c.Options.WatchNamespace)
 		}

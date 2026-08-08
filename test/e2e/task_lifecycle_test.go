@@ -181,6 +181,7 @@ var _ = Describe("Task Lifecycle Advanced", Ordered, func() {
 			"--type=merge", "--subresource=status",
 			"-p", `{"status":{"phase":"Cancelled","message":"cancelled by e2e test"}}`,
 			"-n", namespace,
+			"--as=system:serviceaccount:orka-system:orka-controller-manager",
 		)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to cancel task")

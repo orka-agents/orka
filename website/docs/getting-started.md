@@ -36,9 +36,19 @@ For development, you also need:
 ### Using Helm
 
 ```bash
+kubectl create -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-system
+  labels:
+    orka.ai/controller-mode: harness-v2
+EOF
+
 helm install orka charts/orka \
   --namespace orka-system \
-  --create-namespace \
+  --set controller.mode=harness-v2 \
+  --set controller.watchNamespace=orka-system \
   --set controller.image.repository=docker.io/sozercan/orka \
   --set controller.image.digest=sha256:<controller-digest> \
   --set publisher.image.repository=docker.io/sozercan/orka-workspace-publisher \
@@ -64,6 +74,12 @@ and Orka custom resources on uninstall.
 Follow the complete commands and ownership guidance in
 [`charts/orka/README.md`](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md).
 
+This installs one static `harness-v2` control plane. To keep harness v1 on the
+same cluster, install it as a different release with a different controller
+namespace, labeled watch namespace, endpoint, RBAC, Lease, store, Secrets, and
+wrapper data plane. Existing Tasks and Sessions never move between releases.
+See [Operating harness v1 and v2 on one cluster](operations/harness-modes.md).
+
 ### Using kubectl
 
 The development target creates the required ACP artifact, publisher, provider-proxy, and SCM-proxy Secrets without replacing existing values:
@@ -71,6 +87,16 @@ The development target creates the required ACP artifact, publisher, provider-pr
 ```bash
 # Install CRDs
 make install
+
+# Claim the controller namespace for this immutable installation mode
+kubectl create -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-system
+  labels:
+    orka.ai/controller-mode: harness-v2
+EOF
 
 # Deploy controller
 make deploy \

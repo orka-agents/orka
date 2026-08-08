@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -15,6 +16,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -32,6 +34,7 @@ type sessionLeaseState struct {
 	Attempt       int64
 	PromptID      string
 	RequestDigest string
+	LineageDigest string
 	AcquiredAt    time.Time
 	ExpiresAt     *time.Time
 	OperationID   string
@@ -168,6 +171,9 @@ func (s *Store) AcquireSessionMutationLease(ctx context.Context, request store.A
 	if control.SessionUID != request.SessionUID {
 		return nil, controlConflict("session %s/%s UID does not match immutable control record", request.Namespace, request.SessionName)
 	}
+	if _, err := resolveSessionLineage(control.Lineage, *request.Lineage, request.AcquiredAt); err != nil {
+		return nil, err
+	}
 	if control.Lease != nil && control.Lease.TaskUID == request.TaskUID && control.Lease.Attempt == request.Attempt && control.Lease.PromptID == request.PromptID {
 		if control.Lease.RequestDigest != request.RequestDigest {
 			return nil, controlConflict("session lease identity was reused with a different request digest")
@@ -175,7 +181,7 @@ func (s *Store) AcquireSessionMutationLease(ctx context.Context, request store.A
 		if err := s.verifyMirroredSessionLease(ctx, object, *control.Lease); err != nil {
 			return nil, err
 		}
-		return &control, nil
+		return s.completeExistingSessionLineage(ctx, object, control, request, fence, snapshot)
 	}
 	if control.Version != request.ExpectedVersion || control.LeaseGeneration != request.ExpectedLeaseGeneration {
 		return nil, controlConflict("session %s/%s is version %d lease generation %d, expected version %d generation %d", request.Namespace, request.SessionName, control.Version, control.LeaseGeneration, request.ExpectedVersion, request.ExpectedLeaseGeneration)
@@ -195,14 +201,14 @@ func (s *Store) AcquireSessionMutationLease(ctx context.Context, request store.A
 	if err != nil {
 		return nil, err
 	}
-	if leaseState.Generation != request.ExpectedLeaseGeneration {
-		return nil, controlConflict("session %s/%s Lease generation %d does not match expected %d", request.Namespace, request.SessionName, leaseState.Generation, request.ExpectedLeaseGeneration)
-	}
 	if lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "" {
-		if sameSessionMutationLease(leaseState, request) {
+		if sameSessionMutationLease(leaseState, request) && leaseState.Generation == request.ExpectedLeaseGeneration+1 {
 			return s.completeSessionLeaseStatus(ctx, object, control, request, fence, snapshot, lease)
 		}
 		return nil, controlConflict("session %s/%s coordination Lease is already held", request.Namespace, request.SessionName)
+	}
+	if leaseState.Generation != request.ExpectedLeaseGeneration {
+		return nil, controlConflict("session %s/%s Lease generation %d does not match expected %d", request.Namespace, request.SessionName, leaseState.Generation, request.ExpectedLeaseGeneration)
 	}
 
 	updatedLease := lease.DeepCopy()
@@ -476,16 +482,21 @@ func (s *Store) completeSessionLeaseStatus(ctx context.Context, object *corev1al
 	freshControl := sessionControlFromObject(fresh)
 	if freshControl.Lease != nil {
 		if sameSessionMutationLeaseValue(*freshControl.Lease, request) && freshControl.LeaseGeneration == state.Generation {
-			return &freshControl, nil
+			return s.completeExistingSessionLineage(ctx, fresh, freshControl, request, fence, snapshot)
 		}
 		return nil, controlConflict("session %s/%s status is already leased by another operation", request.Namespace, request.SessionName)
 	}
 	if freshControl.Version != request.ExpectedVersion || freshControl.LeaseGeneration != request.ExpectedLeaseGeneration || freshControl.Availability != store.SessionAvailable {
 		return nil, controlConflict("session %s/%s changed before Lease status could be committed", request.Namespace, request.SessionName)
 	}
+	lineage, err := resolveSessionLineage(freshControl.Lineage, *request.Lineage, request.AcquiredAt)
+	if err != nil {
+		return nil, err
+	}
 	updated := fresh.DeepCopy()
 	updated.Status.MutationLeaseGeneration = state.Generation
 	updated.Status.MutationLease = sessionMutationLeaseToAPI(lease, state)
+	updated.Status.Lineage = sessionLineageToAPI(lineage)
 	setMutationStatus(&updated.Status.ControlRecordMutationStatus, fence, snapshot, freshControl.Version+1, freshControl.LastOperationID, freshControl.LastOperationDigest, freshControl.CreatedAt, request.AcquiredAt)
 	if err := s.client.Status().Update(ctx, updated); err != nil {
 		return nil, mapKubernetesError("commit Session mutation Lease status", err)
@@ -495,12 +506,35 @@ func (s *Store) completeSessionLeaseStatus(ctx context.Context, object *corev1al
 	return &result, nil
 }
 
+// completeExistingSessionLineage handles an idempotent retry whose exact
+// coordination Lease is already mirrored. Pre-coexistence controls may have a
+// mirrored Lease but no lineage; appending the lineage remains fenced by that
+// exact Lease and one RuntimeSessionControl status CAS.
+func (s *Store) completeExistingSessionLineage(ctx context.Context, object *corev1alpha1.RuntimeSessionControl, control store.SessionControl, request store.AcquireSessionMutationLeaseRequest, fence store.ControllerEpochFence, snapshot epochSnapshot) (*store.SessionControl, error) {
+	lineage, err := resolveSessionLineage(control.Lineage, *request.Lineage, request.AcquiredAt)
+	if err != nil {
+		return nil, err
+	}
+	if control.Lineage != nil {
+		return &control, nil
+	}
+	updated := object.DeepCopy()
+	updated.Status.Lineage = sessionLineageToAPI(lineage)
+	setMutationStatus(&updated.Status.ControlRecordMutationStatus, fence, snapshot, control.Version+1, control.LastOperationID, control.LastOperationDigest, control.CreatedAt, request.AcquiredAt)
+	if err := s.client.Status().Update(ctx, updated); err != nil {
+		return nil, mapKubernetesError("commit Session lineage under existing mutation Lease", err)
+	}
+	result := sessionControlFromObject(updated)
+	return &result, nil
+}
+
 func (s *Store) verifyMirroredSessionLease(ctx context.Context, object *corev1alpha1.RuntimeSessionControl, expected store.SessionMutationLease) error {
 	lease, state, err := s.getSessionLease(ctx, object.Namespace, object.Spec.SessionName, object.Spec.SessionUID)
 	if err != nil {
 		return err
 	}
-	if lease.ResourceVersion != object.Status.MutationLease.LeaseResourceVersion || state.Mode != leaseModeMutation || state.Generation != expected.Generation || state.TaskUID != expected.TaskUID || state.Attempt != expected.Attempt || state.PromptID != expected.PromptID || state.RequestDigest != expected.RequestDigest {
+	control := sessionControlFromObject(object)
+	if control.Lineage == nil || lease.ResourceVersion != object.Status.MutationLease.LeaseResourceVersion || state.Mode != leaseModeMutation || state.Generation != expected.Generation || state.TaskUID != expected.TaskUID || state.Attempt != expected.Attempt || state.PromptID != expected.PromptID || state.RequestDigest != expected.RequestDigest || state.LineageDigest != sessionLineageDigest(control.Lineage) {
 		return controlConflict("runtime session status does not match its authoritative mutation Lease")
 	}
 	return nil
@@ -641,6 +675,10 @@ func sessionLeaseFromObject(lease *coordinationv1.Lease, sessionName, sessionUID
 		state.TaskUID = annotations[annotationTaskUID]
 		state.PromptID = annotations[annotationPromptID]
 		state.RequestDigest = annotations[annotationRequestDigest]
+		state.LineageDigest = annotations[annotationSessionLineage]
+		if err := store.ValidateCanonicalDigest("Session Lease lineage digest", state.LineageDigest); err != nil {
+			return sessionLeaseState{}, err
+		}
 		state.Attempt, err = parsePositiveInt64("Session Lease attempt", annotations[annotationAttempt])
 		if err != nil {
 			return sessionLeaseState{}, err
@@ -689,6 +727,7 @@ func setSessionMutationLease(lease *coordinationv1.Lease, request store.AcquireS
 	lease.Annotations[annotationAttempt] = strconv.FormatInt(request.Attempt, 10)
 	lease.Annotations[annotationPromptID] = request.PromptID
 	lease.Annotations[annotationRequestDigest] = request.RequestDigest
+	lease.Annotations[annotationSessionLineage] = sessionLineageClaimDigest(*request.Lineage)
 	lease.Annotations[annotationAcquiredAt] = formatTime(request.AcquiredAt)
 	delete(lease.Annotations, annotationOperationID)
 	delete(lease.Annotations, annotationOperationDigest)
@@ -716,6 +755,7 @@ func setSessionReconciliationLease(lease *coordinationv1.Lease, request store.Re
 	delete(lease.Annotations, annotationAttempt)
 	delete(lease.Annotations, annotationPromptID)
 	delete(lease.Annotations, annotationRequestDigest)
+	delete(lease.Annotations, annotationSessionLineage)
 	delete(lease.Annotations, annotationAcquiredAt)
 	delete(lease.Annotations, annotationLeaseExpiresAt)
 	holder := sessionReconciliationLeaseHolder(request.OperationID)
@@ -729,7 +769,7 @@ func setSessionReconciliationLease(lease *coordinationv1.Lease, request store.Re
 func clearSessionLease(lease *coordinationv1.Lease, generation int64) {
 	lease.Annotations[annotationLeaseMode] = leaseModeEmpty
 	lease.Annotations[annotationLeaseGeneration] = strconv.FormatInt(generation, 10)
-	for _, key := range []string{annotationTaskUID, annotationAttempt, annotationPromptID, annotationRequestDigest, annotationAcquiredAt, annotationLeaseExpiresAt, annotationOperationID, annotationOperationDigest} {
+	for _, key := range []string{annotationTaskUID, annotationAttempt, annotationPromptID, annotationRequestDigest, annotationSessionLineage, annotationAcquiredAt, annotationLeaseExpiresAt, annotationOperationID, annotationOperationDigest} {
 		delete(lease.Annotations, key)
 	}
 	lease.Spec.HolderIdentity = nil
@@ -768,11 +808,40 @@ func sessionMutationLeaseToAPI(lease *coordinationv1.Lease, state sessionLeaseSt
 }
 
 func sameSessionMutationLease(state sessionLeaseState, request store.AcquireSessionMutationLeaseRequest) bool {
-	return state.Mode == leaseModeMutation && state.TaskUID == request.TaskUID && state.Attempt == request.Attempt && state.PromptID == request.PromptID && state.RequestDigest == request.RequestDigest
+	return state.Mode == leaseModeMutation && state.TaskUID == request.TaskUID && state.Attempt == request.Attempt && state.PromptID == request.PromptID && state.RequestDigest == request.RequestDigest && state.LineageDigest == sessionLineageClaimDigest(*request.Lineage)
 }
 
 func sameSessionMutationLeaseValue(value store.SessionMutationLease, request store.AcquireSessionMutationLeaseRequest) bool {
 	return value.TaskUID == request.TaskUID && value.Attempt == request.Attempt && value.PromptID == request.PromptID && value.RequestDigest == request.RequestDigest
+}
+
+func sessionLineageClaimDigest(claim store.ClaimSessionLineageRequest) string {
+	canonical, _ := json.Marshal(struct {
+		Namespace         string `json:"namespace"`
+		SessionName       string `json:"sessionName"`
+		NamespaceUID      string `json:"namespaceUID"`
+		SessionUID        string `json:"sessionUID"`
+		ContractVersion   string `json:"contractVersion"`
+		LineageGeneration int64  `json:"lineageGeneration"`
+		RuntimeIdentity   string `json:"runtimeIdentity"`
+		ConfigDigest      string `json:"configDigest"`
+	}{
+		Namespace: claim.Namespace, SessionName: claim.SessionName,
+		NamespaceUID: claim.NamespaceUID, SessionUID: claim.SessionUID,
+		ContractVersion: claim.ContractVersion, LineageGeneration: claim.LineageGeneration,
+		RuntimeIdentity: claim.RuntimeIdentity, ConfigDigest: claim.ConfigDigest,
+	})
+	return canonicalBytesDigest(append([]byte("orka.session-lineage.v2\x00"), canonical...))
+}
+
+func sessionLineageDigest(lineage *store.SessionLineage) string {
+	return sessionLineageClaimDigest(store.ClaimSessionLineageRequest{
+		Namespace: lineage.Namespace, SessionName: lineage.SessionName,
+		NamespaceUID: lineage.NamespaceUID, SessionUID: lineage.SessionUID,
+		ContractVersion: lineage.ContractVersion, RuntimeIdentity: lineage.RuntimeIdentity,
+		LineageGeneration: lineage.LineageGeneration,
+		ConfigDigest:      lineage.ConfigDigest,
+	})
 }
 
 func runtimeSessionObjectName(sessionName string) string {
@@ -803,6 +872,7 @@ func sessionControlFromObject(object *corev1alpha1.RuntimeSessionControl) store.
 		RelatedPromptAttemptID: object.Status.RelatedPromptAttemptID,
 		RelatedPublicationID:   object.Status.RelatedPublicationID,
 		VerifiedBaseline:       verifiedBaselineFromAPI(object.Status.VerifiedBaseline),
+		Lineage:                sessionLineageFromAPI(object),
 		ControllerEpochName:    object.Status.ControllerEpochName,
 		ControllerEpoch:        object.Status.ControllerEpoch,
 		LastOperationID:        object.Status.LastOperationID,
@@ -823,6 +893,74 @@ func sessionControlFromObject(object *corev1alpha1.RuntimeSessionControl) store.
 		}
 	}
 	return result
+}
+
+func sessionLineageFromAPI(object *corev1alpha1.RuntimeSessionControl) *store.SessionLineage {
+	if object == nil || object.Status.Lineage == nil {
+		return nil
+	}
+	lineage := object.Status.Lineage
+	establishedAt := lineage.EstablishedAt.UTC()
+	return &store.SessionLineage{
+		Namespace: object.Namespace, SessionName: object.Spec.SessionName,
+		NamespaceUID: string(lineage.NamespaceUID), SessionUID: lineage.SessionUID,
+		ContractVersion: string(lineage.ContractVersion), LineageGeneration: lineage.Generation,
+		RuntimeIdentity: lineage.RuntimeIdentity, ConfigDigest: lineage.ConfigDigest, Version: 1,
+		CreatedAt: establishedAt, UpdatedAt: establishedAt,
+	}
+}
+
+func sessionLineageToAPI(lineage *store.SessionLineage) *corev1alpha1.RuntimeSessionLineageStatus {
+	if lineage == nil {
+		return nil
+	}
+	return &corev1alpha1.RuntimeSessionLineageStatus{
+		NamespaceUID: types.UID(lineage.NamespaceUID), SessionUID: lineage.SessionUID,
+		ContractVersion: corev1alpha1.AgentRuntimeContractVersion(lineage.ContractVersion),
+		Generation:      lineage.LineageGeneration, RuntimeIdentity: lineage.RuntimeIdentity,
+		ConfigDigest:  lineage.ConfigDigest,
+		EstablishedAt: metav1.NewTime(lineage.CreatedAt.UTC()),
+	}
+}
+
+func resolveSessionLineage(existing *store.SessionLineage, claim store.ClaimSessionLineageRequest, establishedAt time.Time) (*store.SessionLineage, error) {
+	if existing == nil {
+		if !claim.EstablishIfAbsent {
+			return nil, controlConflict("session %s/%s is nonempty or otherwise unclassified and has no Kubernetes-authoritative lineage", claim.Namespace, claim.SessionName)
+		}
+		if claim.LineageGeneration != 1 {
+			return nil, controlConflict("new session %s/%s lineage must start at generation 1", claim.Namespace, claim.SessionName)
+		}
+		lineage := &store.SessionLineage{
+			Namespace: claim.Namespace, SessionName: claim.SessionName,
+			NamespaceUID: claim.NamespaceUID, SessionUID: claim.SessionUID,
+			ContractVersion: claim.ContractVersion, LineageGeneration: claim.LineageGeneration,
+			RuntimeIdentity: claim.RuntimeIdentity, ConfigDigest: claim.ConfigDigest, Version: 1,
+			CreatedAt: establishedAt.UTC(), UpdatedAt: establishedAt.UTC(),
+		}
+		if err := lineage.Validate(); err != nil {
+			return nil, err
+		}
+		return lineage, nil
+	}
+	switch {
+	case existing.Namespace != claim.Namespace || existing.SessionName != claim.SessionName:
+		return nil, controlConflict("session lineage belongs to a different namespace or Session name")
+	case existing.NamespaceUID != claim.NamespaceUID:
+		return nil, controlConflict("session %s/%s lineage belongs to a different namespace UID", claim.Namespace, claim.SessionName)
+	case existing.SessionUID != claim.SessionUID:
+		return nil, controlConflict("session %s/%s lineage belongs to a different Session UID", claim.Namespace, claim.SessionName)
+	case existing.ContractVersion != claim.ContractVersion:
+		return nil, controlConflict("session %s/%s lineage contract is %s, not %s", claim.Namespace, claim.SessionName, existing.ContractVersion, claim.ContractVersion)
+	case existing.RuntimeIdentity != claim.RuntimeIdentity:
+		return nil, controlConflict("session %s/%s lineage runtime identity is %q, not %q", claim.Namespace, claim.SessionName, existing.RuntimeIdentity, claim.RuntimeIdentity)
+	case existing.ConfigDigest != claim.ConfigDigest:
+		return nil, controlConflict("session %s/%s lineage configuration digest does not match", claim.Namespace, claim.SessionName)
+	case existing.LineageGeneration != claim.LineageGeneration:
+		return nil, controlConflict("session %s/%s lineage generation is %d, not %d", claim.Namespace, claim.SessionName, existing.LineageGeneration, claim.LineageGeneration)
+	default:
+		return existing, nil
+	}
 }
 
 func normalizeSessionControlForCreate(control *store.SessionControl, fence store.ControllerEpochFence) (store.SessionControl, store.ControllerEpochFence, error) {
@@ -853,6 +991,9 @@ func normalizeSessionControlForCreate(control *store.SessionControl, fence store
 	}
 	if normalized.Lease != nil {
 		return store.SessionControl{}, store.ControllerEpochFence{}, store.ValidationErrorf("new session control must not contain an active lease")
+	}
+	if normalized.Lineage != nil {
+		return store.SessionControl{}, store.ControllerEpochFence{}, store.ValidationErrorf("new session control lineage must be established with mutation Lease acquisition")
 	}
 	if normalized.LeaseGeneration < 0 {
 		return store.SessionControl{}, store.ControllerEpochFence{}, store.ValidationErrorf("session lease generation must not be negative")
@@ -919,6 +1060,24 @@ func normalizeAcquireSessionMutationLeaseRequest(request *store.AcquireSessionMu
 	if err := store.ValidateCanonicalDigest("session lease request digest", request.RequestDigest); err != nil {
 		return err
 	}
+	if request.Lineage == nil {
+		return store.ValidationErrorf("session lineage claim is required for Kubernetes mutation Lease acquisition")
+	}
+	lineage := *request.Lineage
+	lineage.Namespace = strings.TrimSpace(lineage.Namespace)
+	lineage.SessionName = strings.TrimSpace(lineage.SessionName)
+	lineage.NamespaceUID = strings.TrimSpace(lineage.NamespaceUID)
+	lineage.SessionUID = strings.TrimSpace(lineage.SessionUID)
+	lineage.ContractVersion = strings.TrimSpace(lineage.ContractVersion)
+	lineage.RuntimeIdentity = strings.TrimSpace(lineage.RuntimeIdentity)
+	lineage.ConfigDigest = strings.TrimSpace(lineage.ConfigDigest)
+	if err := lineage.Validate(); err != nil {
+		return err
+	}
+	if lineage.Namespace != request.Namespace || lineage.SessionName != request.SessionName || lineage.SessionUID != request.SessionUID {
+		return store.ValidationErrorf("session lineage namespace, name, and UID must match the mutation Lease request")
+	}
+	request.Lineage = &lineage
 	request.AcquiredAt = normalizeControlTime(request.AcquiredAt)
 	request.ExpiresAt = normalizeOptionalControlTime(request.ExpiresAt)
 	if request.ExpiresAt != nil && !request.ExpiresAt.After(request.AcquiredAt) {

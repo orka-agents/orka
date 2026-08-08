@@ -117,8 +117,8 @@ func expectInheritedTaskProvenance(t *testing.T, task *corev1alpha1.Task) {
 	if ownerRef.Controller == nil || !*ownerRef.Controller {
 		t.Fatalf("ownerRef.Controller = %#v, want true", ownerRef.Controller)
 	}
-	if ownerRef.BlockOwnerDeletion == nil || !*ownerRef.BlockOwnerDeletion {
-		t.Fatalf("ownerRef.BlockOwnerDeletion = %#v, want true", ownerRef.BlockOwnerDeletion)
+	if ownerRef.BlockOwnerDeletion != nil {
+		t.Fatalf("ownerRef.BlockOwnerDeletion = %#v, want nil", ownerRef.BlockOwnerDeletion)
 	}
 }
 
@@ -779,6 +779,9 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	if childTask.Spec.Prompt != "Investigate this" {
 		t.Errorf("spec.prompt = %q, want %q", childTask.Spec.Prompt, "Investigate this")
 	}
+	if childTask.Spec.AI == nil || childTask.Spec.AI.Prompt != childTask.Spec.Prompt {
+		t.Fatalf("spec.ai = %#v, want only delegated prompt %q", childTask.Spec.AI, childTask.Spec.Prompt)
+	}
 	expectInheritedTaskProvenance(t, childTask)
 
 	// Verify owner reference
@@ -795,8 +798,8 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	if ownerRef.Controller == nil || !*ownerRef.Controller {
 		t.Error("ownerRef.Controller should be true")
 	}
-	if ownerRef.BlockOwnerDeletion == nil || !*ownerRef.BlockOwnerDeletion {
-		t.Errorf("ownerRef.BlockOwnerDeletion = %#v, want true", ownerRef.BlockOwnerDeletion)
+	if ownerRef.BlockOwnerDeletion != nil {
+		t.Errorf("ownerRef.BlockOwnerDeletion = %#v, want nil", ownerRef.BlockOwnerDeletion)
 	}
 
 	// Verify priority inherited from parent
@@ -874,6 +877,9 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 	// Verify task type is agent
 	if childTask.Spec.Type != corev1alpha1.TaskTypeAgent {
 		t.Errorf("spec.type = %q, want %q", childTask.Spec.Type, corev1alpha1.TaskTypeAgent)
+	}
+	if childTask.Spec.AI != nil {
+		t.Fatalf("spec.ai = %#v, want nil for an explicit runtime Agent", childTask.Spec.AI)
 	}
 
 	// Verify agent runtime config
@@ -1054,6 +1060,21 @@ func TestDelegateTaskTool_Execute_AITypeNoRuntime(t *testing.T) {
 	if childTask.Spec.AgentRuntime != nil {
 		t.Error("spec.agentRuntime should be nil for AI-type tasks")
 	}
+	if childTask.Spec.AgentRef == nil || childTask.Spec.AgentRef.Name != testResearcherAgentName {
+		t.Fatalf("spec.agentRef = %#v, want %q", childTask.Spec.AgentRef, testResearcherAgentName)
+	}
+	if childTask.Spec.AI == nil {
+		t.Fatal("spec.ai is nil for a native AI child")
+	}
+	if childTask.Spec.AI.Prompt != "Research the topic" {
+		t.Fatalf("spec.ai.prompt = %q, want %q", childTask.Spec.AI.Prompt, "Research the topic")
+	}
+	if childTask.Spec.AI.ProviderRef != nil || childTask.Spec.AI.Provider != "" ||
+		childTask.Spec.AI.Model != "" || childTask.Spec.AI.SystemPrompt != "" ||
+		childTask.Spec.AI.Temperature != nil || childTask.Spec.AI.MaxTokens != nil ||
+		len(childTask.Spec.AI.Skills) != 0 || len(childTask.Spec.AI.Tools) != 0 {
+		t.Fatalf("spec.ai copied Agent configuration: %#v", childTask.Spec.AI)
+	}
 }
 
 func contains(s, substr string) bool {
@@ -1194,6 +1215,9 @@ func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
 
 	if !strings.Contains(childTask.Spec.Prompt, "FEEDBACK FROM REVIEW") {
 		t.Errorf("expected feedback in prompt, got %q", childTask.Spec.Prompt)
+	}
+	if childTask.Spec.AI == nil || childTask.Spec.AI.Prompt != childTask.Spec.Prompt {
+		t.Fatalf("spec.ai = %#v, want feedback-adjusted prompt %q", childTask.Spec.AI, childTask.Spec.Prompt)
 	}
 	// PriorTaskRef should NOT be set
 	if childTask.Spec.PriorTaskRef != nil {

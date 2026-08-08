@@ -1,4 +1,4 @@
-{{- if .Values.providerProxy.enabled }}
+{{- if and (eq .Values.controller.mode "harness-v2") .Values.providerProxy.enabled }}
 apiVersion: v1
 kind: Service
 metadata:

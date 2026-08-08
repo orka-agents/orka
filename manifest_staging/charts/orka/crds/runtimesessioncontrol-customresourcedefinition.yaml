@@ -198,6 +198,60 @@ spec:
                 - Deleting
                 - Deleted
                 type: string
+              lineage:
+                description: |-
+                  Lineage is established or verified in the same RuntimeSessionControl
+                  status CAS that mirrors the authoritative mutation Lease.
+                properties:
+                  configDigest:
+                    description: |-
+                      ConfigDigest freezes the configuration/execution-snapshot identity used
+                      when the lineage was established.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  contractVersion:
+                    description: |-
+                      AgentRuntimeContractVersion identifies the Orka-facing runtime contract.
+                      During harness coexistence both protocol values are schema-valid; omission is
+                      never protocol evidence and is tolerated only for stored objects awaiting the
+                      one-time bridge classification.
+                    enum:
+                    - orka.harness.v1
+                    - orka.harness.v2
+                    type: string
+                  establishedAt:
+                    format: date-time
+                    type: string
+                  generation:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  namespaceUID:
+                    description: |-
+                      NamespaceUID prevents a same-name recreated namespace from attaching to
+                      durable state owned by the previous namespace identity.
+                    type: string
+                  runtimeIdentity:
+                    description: RuntimeIdentity is the built-in runtime type or AgentRuntime
+                      UID.
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  sessionUid:
+                    description: SessionUID repeats the immutable control identity
+                      at the lineage fence.
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                required:
+                - configDigest
+                - contractVersion
+                - establishedAt
+                - generation
+                - namespaceUID
+                - runtimeIdentity
+                - sessionUid
+                type: object
               mutationLease:
                 description: |-
                   RuntimeSessionMutationLeaseStatus mirrors the namespaced Kubernetes Lease
@@ -300,9 +354,17 @@ spec:
             - message: reconciliation-blocked sessions require a reason
               rule: '!has(self.availability) || self.availability != ''ReconciliationBlocked''
                 || (has(self.blockedReason) && size(self.blockedReason) > 0)'
+            - message: runtime Session lineage is append-once and immutable
+              rule: '!has(oldSelf.lineage) || (has(self.lineage) && self.lineage ==
+                oldSelf.lineage)'
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: runtime Session lineage UID must match the immutable control Session
+            UID
+          rule: '!has(self.status) || !has(self.status.lineage) || self.status.lineage.sessionUid
+            == self.spec.sessionUid'
     served: true
     storage: true
     subresources:

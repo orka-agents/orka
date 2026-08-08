@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,6 +34,19 @@ const (
 func controlTestDigest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func boundPromptAttemptForSQLiteTest(attempt *store.PromptAttempt) *store.PromptAttempt {
+	if attempt == nil {
+		return nil
+	}
+	if attempt.BindingDigest == "" {
+		attempt.BindingDigest = controlTestDigest("test-v2-binding")
+	}
+	if attempt.SnapshotDigest == "" {
+		attempt.SnapshotDigest = controlTestDigest("test-v2-snapshot")
+	}
+	return attempt
 }
 
 func seedControlEpoch(t *testing.T, s *Store) store.ControllerEpochFence {
@@ -120,21 +134,36 @@ func TestPromptAttemptSubmittedUnknownBecomesTerminalOutcomeUnknown(t *testing.T
 	if err != nil {
 		t.Fatalf("canonical prompt attempt ID: %v", err)
 	}
-	created, err := s.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	created, err := s.CreatePromptAttempt(ctx, boundPromptAttemptForSQLiteTest(&store.PromptAttempt{
 		Key: key, RequestDigest: controlTestDigest("prompt-request"),
-	}, fence)
+	}), fence)
 	if err != nil {
 		t.Fatalf("CreatePromptAttempt: %v", err)
 	}
 	if created.ID != id || created.Version != 1 || created.ExecutionState != store.PromptExecutionQueued {
 		t.Fatalf("created prompt attempt = %#v", created)
 	}
-	retry, err := s.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: created.RequestDigest}, fence)
+	if created.BindingDigest != controlTestDigest("test-v2-binding") ||
+		created.SnapshotDigest != controlTestDigest("test-v2-snapshot") {
+		t.Fatalf("created prompt attempt binding = %q/%q", created.BindingDigest, created.SnapshotDigest)
+	}
+	retry, err := s.CreatePromptAttempt(ctx, boundPromptAttemptForSQLiteTest(&store.PromptAttempt{Key: key, RequestDigest: created.RequestDigest}), fence)
 	if err != nil || retry.Version != created.Version {
 		t.Fatalf("same-digest prompt retry = %#v, %v", retry, err)
 	}
-	if _, err := s.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: controlTestDigest("other-prompt")}, fence); !errors.Is(err, store.ErrConflict) {
+	if _, err := s.CreatePromptAttempt(ctx, boundPromptAttemptForSQLiteTest(&store.PromptAttempt{Key: key, RequestDigest: controlTestDigest("other-prompt")}), fence); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("prompt digest mismatch error = %v, want ErrConflict", err)
+	}
+	mismatchedBinding := boundPromptAttemptForSQLiteTest(&store.PromptAttempt{Key: key, RequestDigest: created.RequestDigest})
+	mismatchedBinding.BindingDigest = controlTestDigest("different-binding")
+	if _, err := s.CreatePromptAttempt(ctx, mismatchedBinding, fence); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("prompt binding digest mismatch error = %v, want ErrConflict", err)
+	}
+	unboundKey := store.PromptAttemptKey{Namespace: "ns", TaskUID: "task-uid-unbound", Attempt: 1, PromptID: "prompt-unbound"}
+	if _, err := s.CreatePromptAttempt(ctx, &store.PromptAttempt{
+		Key: unboundKey, RequestDigest: controlTestDigest("unbound-prompt"),
+	}, fence); !errors.Is(err, store.ErrValidation) {
+		t.Fatalf("unbound prompt attempt error = %v, want ErrValidation", err)
 	}
 
 	current := created
@@ -166,7 +195,7 @@ func TestPromptAttemptSubmittedUnknownBecomesTerminalOutcomeUnknown(t *testing.T
 	if current.ExecutionState != store.PromptExecutionOutcomeUnknown || current.OutcomeMarker == "" {
 		t.Fatalf("terminal ambiguous attempt = %#v", current)
 	}
-	afterMutationRetry, err := s.CreatePromptAttempt(ctx, &store.PromptAttempt{Key: key, RequestDigest: created.RequestDigest}, fence)
+	afterMutationRetry, err := s.CreatePromptAttempt(ctx, boundPromptAttemptForSQLiteTest(&store.PromptAttempt{Key: key, RequestDigest: created.RequestDigest}), fence)
 	if err != nil || afterMutationRetry.ExecutionState != store.PromptExecutionOutcomeUnknown {
 		t.Fatalf("post-transition create retry = %#v, %v", afterMutationRetry, err)
 	}
@@ -176,6 +205,64 @@ func TestPromptAttemptSubmittedUnknownBecomesTerminalOutcomeUnknown(t *testing.T
 		OperationID: "illegal-retry", OperationDigest: controlTestDigest("illegal-retry"),
 	}); !errors.Is(err, store.ErrValidation) {
 		t.Fatalf("OutcomeUnknown replay transition error = %v, want ErrValidation", err)
+	}
+}
+
+func TestPromptAttemptBindingDigestMigrationPreservesLegacyRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-prompt-attempt.db")
+	legacyDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacyDB.Exec(`CREATE TABLE prompt_attempts (
+		id TEXT PRIMARY KEY,
+		namespace TEXT NOT NULL,
+		task_uid TEXT NOT NULL,
+		attempt INTEGER NOT NULL,
+		prompt_id TEXT NOT NULL,
+		session_uid TEXT NOT NULL DEFAULT '',
+		session_lease_generation INTEGER NOT NULL DEFAULT 0,
+		runtime_instance_id TEXT NOT NULL DEFAULT '',
+		request_digest TEXT NOT NULL,
+		execution_state TEXT NOT NULL,
+		delivery_state TEXT NOT NULL,
+		terminal_reason TEXT NOT NULL DEFAULT '',
+		outcome_marker TEXT NOT NULL DEFAULT '',
+		controller_epoch_name TEXT NOT NULL,
+		controller_epoch INTEGER NOT NULL,
+		last_operation_id TEXT NOT NULL DEFAULT '',
+		last_operation_digest TEXT NOT NULL DEFAULT '',
+		version INTEGER NOT NULL,
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL,
+		UNIQUE(namespace, task_uid, attempt, prompt_id)
+	);
+	INSERT INTO prompt_attempts(
+		id, namespace, task_uid, attempt, prompt_id, request_digest, execution_state,
+		delivery_state, controller_epoch_name, controller_epoch, version, created_at, updated_at
+	) VALUES (?, 'legacy-ns', 'legacy-task-uid', 1, 'legacy-prompt', ?, 'Running',
+		'NotRequested', 'orka-controller', 1, 4, ?, ?)`,
+		"legacy-attempt", controlTestDigest("legacy-request"),
+		time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC), time.Date(2026, 7, 1, 10, 5, 0, 0, time.UTC))
+	if err != nil {
+		_ = legacyDB.Close()
+		t.Fatalf("seed legacy PromptAttempt: %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migratedDB, err := NewDB(path)
+	if err != nil {
+		t.Fatalf("migrate legacy PromptAttempt: %v", err)
+	}
+	defer migratedDB.Close() //nolint:errcheck
+	attempt, err := NewStore(migratedDB, path).GetPromptAttempt(context.Background(), "legacy-attempt")
+	if err != nil {
+		t.Fatalf("read migrated legacy PromptAttempt: %v", err)
+	}
+	if attempt.BindingDigest != "" || attempt.SnapshotDigest != "" || attempt.ExecutionState != store.PromptExecutionRunning {
+		t.Fatalf("migrated legacy PromptAttempt = %#v", attempt)
 	}
 }
 
@@ -350,10 +437,10 @@ func TestSessionTurnAtomicFinalizationPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("AcquireSessionMutationLease: %v", err)
 	}
 	attemptKey := store.PromptAttemptKey{Namespace: "ns", TaskUID: "task-uid-final", Attempt: 1, PromptID: "prompt-final"}
-	attempt, err := s.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	attempt, err := s.CreatePromptAttempt(ctx, boundPromptAttemptForSQLiteTest(&store.PromptAttempt{
 		Key: attemptKey, SessionUID: control.SessionUID, SessionLeaseGeneration: control.LeaseGeneration,
 		RequestDigest: controlTestDigest("prompt-final"), CreatedAt: now.Add(5 * time.Minute),
-	}, fence)
+	}), fence)
 	if err != nil {
 		t.Fatalf("CreatePromptAttempt: %v", err)
 	}
@@ -488,10 +575,10 @@ func TestPublicationOutcomeUnknownBlocksSessionAndBranch(t *testing.T) {
 		t.Fatalf("AcquireSessionMutationLease: %v", err)
 	}
 	attemptKey := store.PromptAttemptKey{Namespace: "ns", TaskUID: "task-uid-unknown", Attempt: 1, PromptID: "prompt-unknown"}
-	attempt, err := s.CreatePromptAttempt(ctx, &store.PromptAttempt{
+	attempt, err := s.CreatePromptAttempt(ctx, boundPromptAttemptForSQLiteTest(&store.PromptAttempt{
 		Key: attemptKey, SessionUID: control.SessionUID, SessionLeaseGeneration: control.LeaseGeneration,
 		RequestDigest: controlTestDigest("prompt-unknown"), CreatedAt: now.Add(5 * time.Minute),
-	}, fence)
+	}), fence)
 	if err != nil {
 		t.Fatalf("CreatePromptAttempt: %v", err)
 	}

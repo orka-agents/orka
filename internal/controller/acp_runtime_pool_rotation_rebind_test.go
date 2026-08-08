@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -17,8 +18,8 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-//nolint:gocyclo // The regression verifies rebind and no-replay invariants in one durable attempt lifecycle.
-func TestQueueACPRuntimeTaskRebindsQueuedAttemptAfterRuntimeImageRotation(t *testing.T) {
+//nolint:gocyclo // The regression verifies frozen binding and no-replay invariants in one durable attempt lifecycle.
+func TestQueueACPRuntimeTaskKeepsFrozenPoolAfterRuntimeImageRotation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -48,8 +49,11 @@ func TestQueueACPRuntimeTaskRebindsQueuedAttemptAfterRuntimeImageRotation(t *tes
 			Generation: 3,
 		},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   &corev1alpha1.ModelConfig{Name: acpTestModel},
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeCodex,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	oldImage := "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)
@@ -100,7 +104,8 @@ func TestQueueACPRuntimeTaskRebindsQueuedAttemptAfterRuntimeImageRotation(t *tes
 		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
 		ACPRuntimeImages: ACPRuntimeImages{Codex: oldImage},
 	}
-	if _, err := reconciler.queueACPRuntimeTask(ctx, task.DeepCopy(), agent); err != nil {
+	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
+	if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
 		t.Fatalf("initial queue: %v", err)
 	}
 
@@ -143,18 +148,18 @@ func TestQueueACPRuntimeTaskRebindsQueuedAttemptAfterRuntimeImageRotation(t *tes
 	if after.State != corev1alpha1.TaskExecutionStateQueued {
 		t.Fatalf("execution state = %s, want Queued", after.State)
 	}
-	if after.RuntimePoolName == before.RuntimePoolName || after.RuntimePoolUID == before.RuntimePoolUID {
-		t.Fatalf("queued Task remained bound to degraded pool %s/%s: %#v", before.RuntimePoolName, before.RuntimePoolUID, after)
+	if after.RuntimePoolName != before.RuntimePoolName || after.RuntimePoolUID != before.RuntimePoolUID {
+		t.Fatalf("queued Task escaped its frozen RuntimePool after live image rotation: before=%#v after=%#v", before, after)
 	}
 	if queuedAfter.Labels[acpRuntimeTaskPoolLabel] != after.RuntimePoolName {
 		t.Fatalf("pool label = %q, want %q", queuedAfter.Labels[acpRuntimeTaskPoolLabel], after.RuntimePoolName)
 	}
-	newPool := &corev1alpha1.RuntimePool{}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: after.RuntimePoolName}, newPool); err != nil {
+	frozenPool := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: after.RuntimePoolName}, frozenPool); err != nil {
 		t.Fatal(err)
 	}
-	if newPool.Spec.Runtime.Image != newImage || string(newPool.UID) != after.RuntimePoolUID {
-		t.Fatalf("replacement pool binding = image %q UID %q, status = %#v", newPool.Spec.Runtime.Image, newPool.UID, after)
+	if frozenPool.Spec.Runtime.Image != oldImage || string(frozenPool.UID) != after.RuntimePoolUID {
+		t.Fatalf("frozen pool binding = image %q UID %q, status = %#v", frozenPool.Spec.Runtime.Image, frozenPool.UID, after)
 	}
 	if queuedAfter.Status.Attempts != queuedBefore.Status.Attempts || after.Attempt != before.Attempt || after.PromptID != before.PromptID || after.RequestDigest != before.RequestDigest {
 		t.Fatalf("rebind changed durable attempt identity: before=%#v after=%#v attempts=%d/%d", before, after, queuedBefore.Status.Attempts, queuedAfter.Status.Attempts)

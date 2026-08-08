@@ -23,6 +23,8 @@ on:
       - "pkg/**"
       - "scripts/apply-acp-production.sh"
       - "scripts/check-acp-crd-cutover.sh"
+      - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/lib/kind-local-registry.sh"
       - "scripts/lib/live-acp-runtime-kind-bootstrap.sh"
       - "scripts/live-acp-runtime-e2e.sh"

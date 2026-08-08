@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -34,7 +35,10 @@ func TestQueueACPRuntimeTaskCreatesPoolAndDurableAttempt(t *testing.T) {
 	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("22222222-2222-2222-2222-222222222222"), Generation: 3},
-		Spec:       corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}},
+		Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type:            corev1alpha1.AgentRuntimeCodex,
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+		}},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
@@ -57,7 +61,8 @@ func TestQueueACPRuntimeTaskCreatesPoolAndDurableAttempt(t *testing.T) {
 		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
-	if _, err := reconciler.queueACPRuntimeTask(ctx, task.DeepCopy(), agent); err != nil {
+	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
+	if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
 		t.Fatal(err)
 	}
 	var pools corev1alpha1.RuntimePoolList
@@ -214,7 +219,9 @@ func TestQueueACPRuntimeTaskRejectsUnsafeRepositoryBeforePoolDemand(t *testing.T
 			}
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("77777777-7777-7777-7777-777777777777"), Generation: 1},
-				Spec:       corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}},
+				Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{
+					Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				}},
 			}
 			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task).Build()
 			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
@@ -237,7 +244,8 @@ func TestQueueACPRuntimeTaskRejectsUnsafeRepositoryBeforePoolDemand(t *testing.T
 				ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
 				ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 			}
-			if _, err := reconciler.queueACPRuntimeTask(ctx, task.DeepCopy(), agent); err != nil {
+			bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
+			if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
 				t.Fatal(err)
 			}
 			var pools corev1alpha1.RuntimePoolList
@@ -289,7 +297,10 @@ func TestQueueACPRuntimeTaskReportsInvalidWorkspaceWhenReadCredentialDoesNotExis
 	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), Generation: 1},
-		Spec:       corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}},
+		Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type:            corev1alpha1.AgentRuntimeCodex,
+			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+		}},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
@@ -312,7 +323,8 @@ func TestQueueACPRuntimeTaskReportsInvalidWorkspaceWhenReadCredentialDoesNotExis
 		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
-	if _, err := reconciler.queueACPRuntimeTask(ctx, task.DeepCopy(), agent); err != nil {
+	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
+	if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
 		t.Fatalf("queueACPRuntimeTask() error = %v, want terminal InvalidWorkspace status", err)
 	}
 	failed := &corev1alpha1.Task{}
@@ -414,8 +426,9 @@ func TestQueueACPRuntimeTaskReportsInvalidRuntimeProfile(t *testing.T) {
 		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
-	if _, err := reconciler.queueACPRuntimeTask(ctx, task.DeepCopy(), agent); err != nil {
-		t.Fatal(err)
+	current := configureAgentExecutionBindingTest(t, ctx, reconciler, task)
+	if result, err, handled := reconciler.ensureAgentExecutionBinding(ctx, current, agent); err != nil || !handled {
+		t.Fatalf("invalid profile binding result=%#v handled=%v err=%v", result, handled, err)
 	}
 	failed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, failed); err != nil {

@@ -92,7 +92,64 @@ spec:
                     maximum: 1000
                     minimum: 1
                     type: integer
+                  workspace:
+                    description: |-
+                      Workspace is the legacy harness v1 agent workspace configuration at its
+                      historical JSON path. It is a preserved compatibility read surface for
+                      stored v1 Tasks only: it can never be introduced or changed, and it is
+                      not an authority surface for new work.
+                    properties:
+                      branch:
+                        description: Branch is the git branch to checkout.
+                        type: string
+                      forkRepo:
+                        description: ForkRepo is the writable fork repository URL
+                          for pushing changes.
+                        type: string
+                      gitRepo:
+                        description: GitRepo is the repository URL to clone.
+                        type: string
+                      gitSecretRef:
+                        description: |-
+                          GitSecretRef references a Secret containing git credentials. Adopted
+                          legacy bindings freeze the exact Secret identity; new bindings reject it.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      prBaseBranch:
+                        description: PRBaseBranch is the upstream branch to target
+                          for pull requests.
+                        type: string
+                      pushBranch:
+                        description: |-
+                          PushBranch is the remote branch name to push changes to after the agent
+                          completes.
+                        type: string
+                      ref:
+                        description: Ref is a specific git ref (commit SHA, tag) to
+                          checkout.
+                        type: string
+                      subPath:
+                        description: SubPath is a subdirectory within the repo to
+                          use as workspace root.
+                        type: string
+                    type: object
                 type: object
+                x-kubernetes-validations:
+                - message: legacy agentRuntime.workspace is a preserved harness v1
+                    compatibility surface; new Tasks must use spec.workspace
+                  optionalOldSelf: true
+                  rule: '!has(self.workspace) || (oldSelf.hasValue() && has(oldSelf.value().workspace)
+                    && self.workspace == oldSelf.value().workspace)'
               ai:
                 description: AI contains AI-specific configuration (when type is "ai")
                 properties:
@@ -2067,6 +2124,171 @@ spec:
           status:
             description: TaskStatus defines the observed state of Task
             properties:
+              agentExecutionBinding:
+                description: |-
+                  AgentExecutionBinding is the authoritative, write-once, immutable
+                  execution route for this agent Task.
+                properties:
+                  agent:
+                    description: AgentExecutionAgentRef pins the exact Agent identity
+                      resolved at binding.
+                    properties:
+                      generation:
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      name:
+                        minLength: 1
+                        type: string
+                      namespace:
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - generation
+                    - name
+                    - namespace
+                    - uid
+                    type: object
+                  backend:
+                    description: AgentExecutionBackend identifies the isolated execution
+                      dispatcher backend.
+                    enum:
+                    - harness-wrapper
+                    - runtime-pool
+                    - external-endpoint
+                    type: string
+                  bindingDigest:
+                    description: |-
+                      BindingDigest is the canonical digest of this binding; every durable
+                      demand, attempt, turn, Session lease, publication, and cleanup record
+                      copies it.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  boundAt:
+                    format: date-time
+                    type: string
+                  contractVersion:
+                    description: ContractVersion is the frozen execution protocol
+                      for the Task lifetime.
+                    enum:
+                    - orka.harness.v1
+                    - orka.harness.v2
+                    type: string
+                  runtimeProfileDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  runtimeProfileDigestSchemaVersion:
+                    enum:
+                    - 1
+                    format: int32
+                    type: integer
+                  runtimeRef:
+                    description: AgentExecutionRuntimeRef pins a referenced AgentRuntime
+                      identity.
+                    properties:
+                      generation:
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      name:
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - generation
+                    - name
+                    - uid
+                    type: object
+                  runtimeType:
+                    description: RuntimeType is the built-in runtime type, empty for
+                      runtimeRef bindings.
+                    enum:
+                    - claude
+                    - codex
+                    - copilot
+                    - opencode
+                    type: string
+                  schemaVersion:
+                    enum:
+                    - 1
+                    format: int32
+                    type: integer
+                  snapshot:
+                    description: AgentExecutionSnapshotRef links the immutable non-secret
+                      execution snapshot.
+                    properties:
+                      digest:
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      id:
+                        description: ID is the snapshot identity in the form <task-uid>/sha256:<digest>.
+                        maxLength: 512
+                        minLength: 1
+                        type: string
+                      schemaVersion:
+                        enum:
+                        - 1
+                        format: int32
+                        type: integer
+                    required:
+                    - digest
+                    - id
+                    - schemaVersion
+                    type: object
+                  task:
+                    description: AgentExecutionBindingTaskRef pins the bound Task
+                      identity.
+                    properties:
+                      boundSpecGeneration:
+                        description: BoundSpecGeneration is the Task spec generation
+                          frozen into the snapshot.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      namespaceUID:
+                        description: |-
+                          NamespaceUID is the UID of the Task namespace, preventing same-name
+                          namespace recreation from satisfying old identities.
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - boundSpecGeneration
+                    - namespaceUID
+                    - uid
+                    type: object
+                required:
+                - backend
+                - bindingDigest
+                - boundAt
+                - contractVersion
+                - schemaVersion
+                - snapshot
+                - task
+                type: object
+                x-kubernetes-validations:
+                - message: the harness-wrapper backend requires an orka.harness.v1
+                    binding
+                  rule: self.backend != 'harness-wrapper' || self.contractVersion
+                    == 'orka.harness.v1'
+                - message: the runtime-pool backend requires an orka.harness.v2 binding
+                  rule: self.backend != 'runtime-pool' || self.contractVersion ==
+                    'orka.harness.v2'
               attempts:
                 description: Attempts is the number of attempts made
                 format: int32
@@ -2814,6 +3036,143 @@ spec:
                     - name
                     type: object
                 type: object
+              harnessRuntime:
+                description: |-
+                  HarnessRuntime records the controller-resolved harness v1 runtime target
+                  for an in-flight agent turn. It intentionally stores only non-secret
+                  routing metadata and Secret references, never bearer values. Compatibility
+                  surface for harness v1 bindings.
+                properties:
+                  attempt:
+                    description: Attempt is the durable harness v1 attempt number.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  authRefField:
+                    description: AuthRefField is the Secret data field selected when
+                      the turn started.
+                    type: string
+                  authRefName:
+                    description: AuthRefName is the Secret name selected when the
+                      turn started.
+                    type: string
+                  authRefResourceVersion:
+                    description: |-
+                      AuthRefResourceVersion is the auth Secret resourceVersion validated
+                      before starting the turn.
+                    type: string
+                  cancelRequestedAt:
+                    description: |-
+                      CancelRequestedAt records a durable cancellation request. Cancellation
+                      remains nonterminal until a terminal frame or ledger receipt is observed.
+                    format: date-time
+                    type: string
+                  contractVersion:
+                    description: ContractVersion is the Orka harness contract version
+                      used for the turn.
+                    type: string
+                  controllerEpoch:
+                    description: ControllerEpoch records the fenced controller epoch
+                      driving the attempt.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  endpoint:
+                    description: Endpoint is the non-secret harness base URL selected
+                      when the turn started.
+                    type: string
+                  lastEventSeq:
+                    description: LastEventSeq is the highest durably mapped harness
+                      frame sequence.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  lastTransitionTime:
+                    description: |-
+                      LastTransitionTime is the last durable v1 attempt transition projected to
+                      the Task.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is bounded, sanitized execution context.
+                    maxLength: 1024
+                    type: string
+                  outcome:
+                    description: Outcome is set only for a terminal harness v1 attempt.
+                    enum:
+                    - Succeeded
+                    - Failed
+                    - Cancelled
+                    - OutcomeUnknown
+                    type: string
+                  reason:
+                    description: Reason is a bounded machine-readable terminal reason
+                      code.
+                    maxLength: 256
+                    type: string
+                  requestDigest:
+                    description: |-
+                      RequestDigest binds the canonical StartTurn request admitted by the
+                      durable wrapper ledger.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  runtimeGeneration:
+                    description: RuntimeGeneration is the AgentRuntime generation
+                      selected when the turn started.
+                    format: int64
+                    type: integer
+                  runtimeName:
+                    description: |-
+                      RuntimeName is the runtime name advertised by the harness capabilities
+                      and sent in turn metadata.
+                    type: string
+                  runtimeRefName:
+                    description: |-
+                      RuntimeRefName is the AgentRuntime name for custom runtimeRef turns.
+                      Empty means built-in CLI wrapper.
+                    type: string
+                  runtimeSessionID:
+                    description: RuntimeSessionID is the deterministic, non-secret
+                      v1 runtime-session identity.
+                    type: string
+                  state:
+                    description: State is the durable harness v1 attempt state projected
+                      for operators.
+                    enum:
+                    - Queued
+                    - Reserved
+                    - SessionStarting
+                    - Planned
+                    - Submitting
+                    - SubmittedUnknown
+                    - Accepted
+                    - Running
+                    - Settling
+                    - Succeeded
+                    - Failed
+                    - Cancelled
+                    - OutcomeUnknown
+                    type: string
+                  terminalReceiptDigest:
+                    description: TerminalReceiptDigest identifies the authoritative
+                      terminal or unknown receipt.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  turnID:
+                    description: TurnID is the deterministic, non-secret harness turn
+                      identity.
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: terminal harness state requires an outcome
+                  rule: '!has(self.state) || !(self.state in [''Succeeded'', ''Failed'',
+                    ''Cancelled'', ''OutcomeUnknown'']) || has(self.outcome)'
+                - message: harness outcome requires a terminal state
+                  rule: '!has(self.outcome) || (has(self.state) && self.state in [''Succeeded'',
+                    ''Failed'', ''Cancelled'', ''OutcomeUnknown''])'
+                - message: OutcomeUnknown harness state requires OutcomeUnknown outcome
+                  rule: '!has(self.state) || self.state != ''OutcomeUnknown'' || (has(self.outcome)
+                    && self.outcome == ''OutcomeUnknown'')'
               iteration:
                 description: |-
                   Iteration is the current autonomous loop iteration (0-based).
@@ -2870,7 +3229,24 @@ spec:
             x-kubernetes-validations:
             - message: executionOutcome is immutable once recorded
               rule: '!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome'
+            - message: agentExecutionBinding is write-once and immutable
+              rule: '!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding)
+                && self.agentExecutionBinding == oldSelf.agentExecutionBinding)'
+            - message: a v1-bound Task cannot acquire new v2 execution or delivery
+                state
+              rule: '!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion
+                != ''orka.harness.v1'' || ((!has(self.execution) || (has(oldSelf.execution)
+                && self.execution == oldSelf.execution)) && (!has(self.delivery) ||
+                (has(oldSelf.delivery) && self.delivery == oldSelf.delivery)))'
+            - message: a v2-bound Task cannot acquire new v1 harness state
+              rule: '!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion
+                != ''orka.harness.v2'' || !has(self.harnessRuntime) || (has(oldSelf.harnessRuntime)
+                && self.harnessRuntime == oldSelf.harnessRuntime)'
         type: object
+        x-kubernetes-validations:
+        - message: Task spec is immutable after execution authority is recorded
+          rule: '!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding)
+            || self.spec == oldSelf.spec)'
     served: true
     storage: true
     subresources:

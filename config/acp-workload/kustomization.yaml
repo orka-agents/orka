@@ -1,6 +1,5 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-namespace: orka-system
 namePrefix: orka-
 configurations:
   - kustomizeconfig.yaml
@@ -12,6 +11,9 @@ resources:
   - ../scm-egress-proxy
   - ../admission
   - ../policy
+  - runtime_namespace.yaml
+  - runtime_rbac.yaml
+  - v2_controller_cluster_role.yaml
   - metrics_service.yaml
   - api_service.yaml
 patches:
@@ -19,6 +21,10 @@ patches:
     target:
       kind: Deployment
       name: controller-manager
+  - path: namespace_name_patch.yaml
+    target:
+      kind: Namespace
+      name: system
 replacements:
 - source:
     group: ""
@@ -27,6 +33,67 @@ replacements:
     name: system
     fieldPath: metadata.name
   targets:
+  - select:
+      group: ""
+      version: v1
+      kind: ServiceAccount
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: Role
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: RoleBinding
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: apps
+      version: v1
+      kind: Deployment
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: ""
+      version: v1
+      kind: PersistentVolumeClaim
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: ""
+      version: v1
+      kind: Service
+      namespace: system
+    fieldPaths:
+    - metadata.namespace
+  - select:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: RoleBinding
+    fieldPaths:
+    - subjects.0.namespace
+  - select:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: ClusterRoleBinding
+    fieldPaths:
+    - subjects.0.namespace
   - select:
       group: admissionregistration.k8s.io
       version: v1
@@ -105,7 +172,3 @@ replacements:
     options:
       delimiter: "'"
       index: 1
-
-transformers:
-- remove_admission_policy_namespace.yaml
-- remove_admission_policy_binding_namespace.yaml

@@ -465,18 +465,18 @@ func TestAgentRuntimeCRDSpecFields(t *testing.T) {
 	}
 	runtime := AgentRuntime{
 		Spec: AgentRuntimeRegistrySpec{
-			ContractVersion: AgentRuntimeContractHarnessV2,
+			ContractVersion: new(AgentRuntimeContractHarnessV2),
 			Deployment: AgentRuntimeDeploymentSpec{
 				Mode:     AgentRuntimeDeploymentModeExternalEndpoint,
 				Endpoint: "https://runtime.example.com",
 			},
 			ClientAuth: AgentRuntimeClientAuth{
-				ControllerBearerTokenSecretRef: AgentRuntimeSecretKeyReference{Name: testAgentRuntimeAuthSecretName, Key: testAgentRuntimeControllerKey},
-				OperationCapabilitySecretRef:   AgentRuntimeSecretKeyReference{Name: testAgentRuntimeAuthSecretName, Key: testAgentRuntimeCapabilityKey},
+				ControllerBearerTokenSecretRef: &AgentRuntimeSecretKeyReference{Name: testAgentRuntimeAuthSecretName, Key: testAgentRuntimeControllerKey},
+				OperationCapabilitySecretRef:   &AgentRuntimeSecretKeyReference{Name: testAgentRuntimeAuthSecretName, Key: testAgentRuntimeCapabilityKey},
 			},
 			Capabilities: &AgentRuntimeCapabilitiesSpec{
 				RuntimeInstanceID: testAgentRuntimeInstanceID,
-				Profile: AgentRuntimeProfileSpec{
+				Profile: &AgentRuntimeProfileSpec{
 					Digest: "sha256:" + strings.Repeat("a", 64), DigestSchemaVersion: 1,
 					ACPProfile: "acp.v1", AdapterName: "codex", AdapterDigest: "sha256:" + strings.Repeat("b", 64),
 					ProviderKind: "codex", Model: "gpt-test",
@@ -485,19 +485,19 @@ func TestAgentRuntimeCRDSpecFields(t *testing.T) {
 					MCPConfigurationDigest: "sha256:" + strings.Repeat("f", 64), WorkspaceIntent: WorkspaceIntentRead,
 					ProxyCredentialRole: "provider-proxy", ProxyCredentialScope: "session-and-prompt", ResourceClass: "standard",
 				},
-				Limits: AgentRuntimeProtocolLimits{
+				Limits: &AgentRuntimeProtocolLimits{
 					MaxResidentSessions: 10, MaxConcurrentPrompts: 4, MaxRequestBytes: 1 << 20,
 					MaxEventLineBytes: 1 << 20, MaxTerminalResultBytes: 1 << 20, MaxBufferedEvents: 256,
 					MaxUpdateEventsPerSecond: 100, MinPromptLeaseMillis: 5000, MaxPromptLeaseMillis: 120000,
 					MaxPendingPermissions: 32, MaxWorkspaceDeltaBytes: 512 << 20,
 				},
 				SupportsDrain:       true,
-				WorkspaceGovernance: strict,
+				WorkspaceGovernance: &strict,
 			},
 		},
 	}
-	if runtime.Spec.ContractVersion != AgentRuntimeContractHarnessV2 {
-		t.Fatalf("ContractVersion = %q", runtime.Spec.ContractVersion)
+	if runtime.RegisteredContractVersion() != AgentRuntimeContractHarnessV2 {
+		t.Fatalf("ContractVersion = %q", runtime.RegisteredContractVersion())
 	}
 	if runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef.Key != testAgentRuntimeControllerKey ||
 		runtime.Spec.ClientAuth.OperationCapabilitySecretRef.Key != testAgentRuntimeCapabilityKey {
@@ -513,8 +513,8 @@ func TestAgentRuntimeCRDSpecFields(t *testing.T) {
 
 func TestAgentRuntimeWriteIntentRequiresPublicationFinalization(t *testing.T) {
 	capabilities := AgentRuntimeCapabilitiesSpec{
-		Profile: AgentRuntimeProfileSpec{WorkspaceIntent: WorkspaceIntentWrite},
-		WorkspaceGovernance: AgentRuntimeWorkspaceGovernanceCapabilities{
+		Profile: &AgentRuntimeProfileSpec{WorkspaceIntent: WorkspaceIntentWrite},
+		WorkspaceGovernance: &AgentRuntimeWorkspaceGovernanceCapabilities{
 			Mode: AgentRuntimeWorkspaceGovernanceStrict, OrkaOwnedWorkspaceDeltas: true, PromptScopedBrokerAuthorization: true,
 			NoDirectSCMPublication: true, OrkaOwnedCleanRoomPublication: true, ExactInstanceFencing: true,
 			DuplicateSafeMutations: true, CancellationSettlement: true,
@@ -537,8 +537,8 @@ func TestAgentRuntimeWriteIntentRequiresPublicationFinalization(t *testing.T) {
 
 func TestAgentRuntimeTrustedNonGovernedIsNeverStrictEligible(t *testing.T) {
 	capabilities := AgentRuntimeCapabilitiesSpec{
-		Profile: AgentRuntimeProfileSpec{WorkspaceIntent: WorkspaceIntentRead},
-		WorkspaceGovernance: AgentRuntimeWorkspaceGovernanceCapabilities{
+		Profile: &AgentRuntimeProfileSpec{WorkspaceIntent: WorkspaceIntentRead},
+		WorkspaceGovernance: &AgentRuntimeWorkspaceGovernanceCapabilities{
 			Mode:    AgentRuntimeWorkspaceGovernanceTrusted,
 			Trusted: true,
 		},
@@ -572,12 +572,12 @@ func TestAgentRuntimeV1CapabilityFieldsAreAbsentFromSerializedCRDSurface(t *test
 		MinPromptLeaseMillis: 5000, MaxPromptLeaseMillis: 120000, MaxPendingPermissions: 32, MaxWorkspaceDeltaBytes: 100 << 20,
 	}
 	spec := AgentRuntimeRegistrySpec{
-		ContractVersion: AgentRuntimeContractHarnessV2,
+		ContractVersion: new(AgentRuntimeContractHarnessV2),
 		ClientAuth: AgentRuntimeClientAuth{
-			ControllerBearerTokenSecretRef: AgentRuntimeSecretKeyReference{Name: testAgentRuntimeAuthSecretName, Key: testAgentRuntimeControllerKey},
-			OperationCapabilitySecretRef:   AgentRuntimeSecretKeyReference{Name: testAgentRuntimeAuthSecretName, Key: testAgentRuntimeCapabilityKey},
+			ControllerBearerTokenSecretRef: &AgentRuntimeSecretKeyReference{Name: testAgentRuntimeAuthSecretName, Key: testAgentRuntimeControllerKey},
+			OperationCapabilitySecretRef:   &AgentRuntimeSecretKeyReference{Name: testAgentRuntimeAuthSecretName, Key: testAgentRuntimeCapabilityKey},
 		},
-		Capabilities: &AgentRuntimeCapabilitiesSpec{RuntimeInstanceID: testAgentRuntimeInstanceID, Profile: profile, Limits: limits, SupportsDrain: true, WorkspaceGovernance: claims},
+		Capabilities: &AgentRuntimeCapabilitiesSpec{RuntimeInstanceID: testAgentRuntimeInstanceID, Profile: &profile, Limits: &limits, SupportsDrain: true, WorkspaceGovernance: &claims},
 	}
 	encoded, err := json.Marshal(spec)
 	if err != nil {

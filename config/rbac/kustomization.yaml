@@ -7,6 +7,7 @@ resources:
 - service_account.yaml
 - role.yaml
 - role_binding.yaml
+- static_controller_cluster_role.yaml
 - workspace_parameter_reader_role.yaml
 - workspace_parameter_reader_role_binding.yaml
 - leader_election_role.yaml

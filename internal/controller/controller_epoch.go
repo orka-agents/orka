@@ -22,6 +22,7 @@ type ControllerEpochManager struct {
 	Store    store.ControllerEpochStore
 	Name     string
 	HolderID string
+	Mirrors  []store.ControllerEpochMirror
 
 	mu      sync.RWMutex
 	current *store.ControllerEpoch
@@ -33,6 +34,15 @@ func NewControllerEpochManager(epochStore store.ControllerEpochStore, holderID s
 	return &ControllerEpochManager{
 		Store: epochStore, Name: store.DefaultControllerEpochName, HolderID: strings.TrimSpace(holderID), ready: make(chan struct{}),
 	}
+}
+
+// WithMirror registers a subordinate epoch mirror that must synchronize before
+// CurrentFence becomes available. Call this only during startup wiring.
+func (m *ControllerEpochManager) WithMirror(mirror store.ControllerEpochMirror) *ControllerEpochManager {
+	if m != nil {
+		m.Mirrors = append(m.Mirrors, mirror)
+	}
+	return m
 }
 
 func (m *ControllerEpochManager) NeedLeaderElection() bool { return true }
@@ -78,6 +88,14 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 	}
 	if acquired == nil {
 		return fmt.Errorf("controller epoch CAS did not converge after %d attempts", defaultEpochCASRetries)
+	}
+	for i, mirror := range m.Mirrors {
+		if mirror == nil {
+			return fmt.Errorf("controller epoch mirror %d is nil", i)
+		}
+		if err := mirror.SyncControllerEpochMirror(ctx, *acquired); err != nil {
+			return fmt.Errorf("synchronize controller epoch mirror %d: %w", i, err)
+		}
 	}
 	m.mu.Lock()
 	m.current = acquired

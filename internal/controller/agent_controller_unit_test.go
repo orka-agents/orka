@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -127,7 +128,10 @@ func TestValidateAgent_OpenCodeRequirements(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			agent := baseAgent("opencode")
 			agent.Spec.ProviderRef = nil
-			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode}
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			}
 			agent.Spec.Model = &corev1alpha1.ModelConfig{Name: test.model, ContextWindow: test.contextWindow, MaxTokens: test.maxTokens}
 			if test.secret != "" {
 				agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: test.secret}
@@ -144,6 +148,34 @@ func TestValidateAgent_OpenCodeRequirements(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("validateAgent() error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+
+	// runtime.type: opencode exists in both harness protocols and is never
+	// protocol evidence: the v2 rules must not fire for v1-classified or
+	// still-unclassified stored legacy OpenCode Agents, even when they carry
+	// historically valid v1 shapes the v2 contract forbids.
+	for _, test := range []struct {
+		name            string
+		contractVersion *corev1alpha1.AgentRuntimeContractVersion
+	}{
+		{name: "unclassified legacy opencode agent is preserved", contractVersion: nil},
+		{name: "harness v1 opencode agent is preserved", contractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			agent := baseAgent("opencode-legacy")
+			agent.Spec.ProviderRef = nil
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: test.contractVersion,
+			}
+			agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "legacy prompt"}
+			agent.Spec.Model = &corev1alpha1.ModelConfig{Name: "gpt-5.4"}
+			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "legacy-provider-creds"}
+
+			if err := ValidateOpenCodeAgentSpec(agent); err != nil {
+				t.Fatalf("ValidateOpenCodeAgentSpec() error = %v, want nil for preserved legacy opencode agent", err)
 			}
 		})
 	}

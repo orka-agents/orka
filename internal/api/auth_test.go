@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -387,6 +388,50 @@ func TestValidateToken_CacheHit(t *testing.T) {
 	}
 	if userInfo.UID != "uid-cached" {
 		t.Errorf("UID = %s, want uid-cached", userInfo.UID)
+	}
+}
+
+func TestValidateToken_AudienceScopedCacheAndResponse(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	callCount := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				callCount++
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{
+						Username: "system:serviceaccount:ns:retirement-hook",
+						UID:      "uid-audience",
+					}
+					if slices.Equal(tr.Spec.Audiences, []string{"retirement"}) {
+						tr.Status.Audiences = []string{"retirement"}
+					}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	if _, err := validateToken(context.Background(), fakeClient, "shared-token"); err != nil {
+		t.Fatalf("unscoped validateToken failed: %v", err)
+	}
+	if _, err := validateToken(context.Background(), fakeClient, "shared-token", "retirement"); err != nil {
+		t.Fatalf("audience-scoped validateToken failed: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("TokenReview calls = %d, want 2 for isolated unscoped and scoped cache entries", callCount)
+	}
+	if _, err := validateToken(context.Background(), fakeClient, "shared-token", "wrong-audience"); err == nil {
+		t.Fatal("validateToken accepted a TokenReview response without the requested audience")
 	}
 }
 
