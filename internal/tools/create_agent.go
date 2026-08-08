@@ -465,17 +465,16 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return "", err
 	}
 
-	// Set owner reference to parent task for auto-cleanup
-	blockOwnerDeletion := true
+	// Set a non-blocking owner reference for auto-cleanup. Worker RBAC allows
+	// creating child resources but not updating the parent Task's finalizers.
 	isController := true
 	agent.OwnerReferences = []metav1.OwnerReference{
 		{
-			APIVersion:         corev1alpha1.GroupVersion.String(),
-			Kind:               taskKindString,
-			Name:               parentTask.Name,
-			UID:                parentTask.UID,
-			Controller:         &isController,
-			BlockOwnerDeletion: &blockOwnerDeletion,
+			APIVersion: corev1alpha1.GroupVersion.String(),
+			Kind:       taskKindString,
+			Name:       parentTask.Name,
+			UID:        parentTask.UID,
+			Controller: &isController,
 		},
 	}
 

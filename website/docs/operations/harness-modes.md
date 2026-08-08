@@ -90,6 +90,16 @@ wrapper values for each selected mode. Do not let both releases install or
 upgrade the CRDs independently. Helm does not update `crds/` during
 `helm upgrade`.
 
+An existing release is eligible for an in-place controller upgrade only when
+its namespace already carries the exact static mode claim and any live
+controller declares that mode and watch namespace. A deleted controller may be
+recreated only under that retained same-mode claim. A pre-static controller
+that implicitly enabled ACP is not a supported static-v2 upgrade source:
+accepted work may lack the immutable execution authority needed for safe
+recovery. Settle or retire it, preserve its existing state, and install
+`harness-v2` as a new release and namespace. The canonical Helm and
+direct-Kustomize paths enforce this before changing workloads.
+
 ## Route new work explicitly
 
 Producers choose an installation by its API endpoint and watched namespace.

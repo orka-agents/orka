@@ -756,8 +756,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "harness v1 requires --agent-execution-snapshot-key-file")
 			os.Exit(1)
 		}
-		if harnessV1DispatchInterval <= 0 || harnessV1DispatchWorkers <= 0 {
-			fmt.Fprintln(os.Stderr, "harness v1 dispatch interval and worker count must be positive")
+		if err := validateHarnessV1DispatchOptions(harnessV1DispatchInterval, harnessV1DispatchWorkers); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 	}
@@ -2114,6 +2114,13 @@ func validateAgentExecutionSnapshotRetentionOptions(
 		return errors.New("agent execution snapshot retention and retention interval must be positive")
 	}
 	return nil
+}
+
+func validateHarnessV1DispatchOptions(interval time.Duration, workers int) error {
+	if interval <= 0 {
+		return errors.New("harness v1 dispatch interval must be positive")
+	}
+	return controller.ValidateHarnessV1DispatchWorkers(workers)
 }
 
 // taskAgentExecutionSnapshotStore exposes the snapshot store to the Task

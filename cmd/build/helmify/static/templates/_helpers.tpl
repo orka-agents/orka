@@ -339,6 +339,27 @@ spec:
 {{- end -}}
 {{- end }}
 
+{{/* Read the live controller's exact static mode. Legacy controllers return empty. */}}
+{{- define "orka.existingControllerMode" -}}
+{{- $modes := list -}}
+{{- range (dig "spec" "template" "spec" "containers" (list) .) -}}
+{{- if eq (default "" .name) "controller" -}}
+{{- range (default (list) .args) -}}
+{{- $arg := toString . -}}
+{{- if hasPrefix "--controller-mode=" $arg -}}
+{{- $modes = append $modes (trimPrefix "--controller-mode=" $arg) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (len $modes) 1 -}}
+{{- $mode := index $modes 0 -}}
+{{- if has $mode (list "harness-v1" "harness-v2") -}}
+{{- $mode -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{/* Read the live controller inputs used when the wrapper Deployment is absent. */}}
 {{- define "orka.harnessV1ExistingControllerState" -}}
 {{- $state := "" -}}
@@ -535,21 +556,30 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- fail "controller.leaderElect must be true for an isolated controller installation" -}}
 {{- end -}}
 {{- if .Release.IsUpgrade -}}
+{{- $existingNamespace := lookup "v1" "Namespace" "" .Release.Namespace -}}
+{{- $existingNamespaceMode := "" -}}
+{{- if $existingNamespace -}}
+{{- $existingNamespaceMode = dig "metadata" "labels" "orka.ai/controller-mode" "" $existingNamespace -}}
+{{- end -}}
+{{- if ne $existingNamespaceMode .Values.controller.mode -}}
+{{- fail (printf "controller mode identity is missing or incompatible; namespace %q must already claim orka.ai/controller-mode=%s before this release can be upgraded" .Release.Namespace .Values.controller.mode) -}}
+{{- end -}}
 {{- $existingController := lookup "apps/v1" "Deployment" .Release.Namespace (include "orka.controllerName" .) -}}
 {{- if $existingController -}}
 {{- $existingWatchNamespace := include "orka.existingControllerWatchNamespace" $existingController | trim -}}
 {{- if ne $existingWatchNamespace .Values.controller.watchNamespace -}}
 {{- fail (printf "controller.watchNamespace is immutable; the existing controller must already watch namespace %q; install cluster-wide or differently scoped controllers as a new release and namespace" .Values.controller.watchNamespace) -}}
 {{- end -}}
+{{- $existingMode := include "orka.existingControllerMode" $existingController | trim -}}
 {{- $existingState := include "orka.harnessV1ExistingControllerState" $existingController | trim -}}
-{{- if not $existingState -}}
-{{- fail "cannot determine the existing controller mode; restore a valid static controller before upgrading" -}}
+{{- if $existingMode -}}
+{{- if ne $existingMode .Values.controller.mode -}}
+{{- fail (printf "controller.mode is immutable; install %s as a new release and namespace" .Values.controller.mode) -}}
 {{- end -}}
-{{- if and (eq .Values.controller.mode "harness-v1") (ne $existingState "enabled") -}}
+{{- else if eq .Values.controller.mode "harness-v2" -}}
+{{- fail "implicit or legacy harness-v2 installations cannot upgrade in place; settle or retire the existing installation and install harness-v2 as a new release and namespace" -}}
+{{- else if ne $existingState "enabled" -}}
 {{- fail "controller.mode is immutable; install harness-v1 as a new release and namespace" -}}
-{{- end -}}
-{{- if and (eq .Values.controller.mode "harness-v2") (eq $existingState "enabled") -}}
-{{- fail "controller.mode is immutable; install harness-v2 as a new release and namespace" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -649,8 +679,8 @@ remain outside rendered Helm manifests.
 {{- if not (trim (default "" .Values.harnessV1.dispatch.interval)) -}}
 {{- fail "harnessV1.dispatch.interval is required when controller.mode=harness-v1" -}}
 {{- end -}}
-{{- if lt (int .Values.harnessV1.dispatch.workers) 1 -}}
-{{- fail "harnessV1.dispatch.workers must be positive when controller.mode=harness-v1" -}}
+{{- if ne (int .Values.harnessV1.dispatch.workers) 1 -}}
+{{- fail "harnessV1.dispatch.workers must be exactly 1 when controller.mode=harness-v1" -}}
 {{- end -}}
 {{- if not (regexMatch "^([1-9][0-9]*(ns|us|µs|ms|s|m|h))+$" (trim (default "" .Values.harnessV1.upgradeDrain.timeout))) -}}
 {{- fail "harnessV1.upgradeDrain.timeout must be a positive Go duration when controller.mode=harness-v1" -}}

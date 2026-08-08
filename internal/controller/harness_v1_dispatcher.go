@@ -123,7 +123,22 @@ type HarnessV1Dispatcher struct {
 
 func (d *HarnessV1Dispatcher) NeedLeaderElection() bool { return true }
 
+// ValidateHarnessV1DispatchWorkers keeps controller admission aligned with the
+// shipped wrapper's MaxConcurrentTurns=1 capability.
+func ValidateHarnessV1DispatchWorkers(workers int) error {
+	if workers != DefaultHarnessV1DispatchWorkers {
+		return fmt.Errorf("harness v1 dispatch workers must be exactly %d", DefaultHarnessV1DispatchWorkers)
+	}
+	return nil
+}
+
 func (d *HarnessV1Dispatcher) Start(ctx context.Context) error {
+	if d.MaxConcurrent == 0 {
+		d.MaxConcurrent = DefaultHarnessV1DispatchWorkers
+	}
+	if err := ValidateHarnessV1DispatchWorkers(d.MaxConcurrent); err != nil {
+		return err
+	}
 	if d.Client == nil || d.Attempts == nil || d.Snapshots == nil || d.ResultStore == nil ||
 		d.EventStore == nil || d.Sessions == nil || d.Epochs == nil {
 		return errors.New("harness v1 dispatcher requires Kubernetes client, attempt/snapshot stores, result/event stores, Session continuity, and epoch manager")
@@ -133,9 +148,6 @@ func (d *HarnessV1Dispatcher) Start(ctx context.Context) error {
 	}
 	if d.Interval <= 0 {
 		d.Interval = DefaultHarnessV1DispatchInterval
-	}
-	if d.MaxConcurrent <= 0 {
-		d.MaxConcurrent = DefaultHarnessV1DispatchWorkers
 	}
 	d.mu.Lock()
 	if d.active == nil {

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1129,13 +1130,15 @@ func TestServerRedactsCommandOutputFrames(t *testing.T) {
 
 func TestServerRedactsConfiguredCommandEnvironment(t *testing.T) {
 	const (
-		privateName  = "WRAPPER_PRIVATE_VALUE"
+		privateName  = "WRAPPER_PRIVATE_SECRET"
 		privateValue = "wrapper-config-value-4f739d28b61c"
 		publicValue  = "https://public-provider.example.test/v1"
 	)
 	configuredEnv := []string{
 		privateName + "=" + privateValue,
 		workerenv.OpenAIBaseURL + "=" + publicValue,
+		"FEATURE=true",
+		"RETRY_COUNT=1",
 	}
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
@@ -1143,7 +1146,7 @@ func TestServerRedactsConfiguredCommandEnvironment(t *testing.T) {
 	cfg.Generic = GenericAdapterConfig{
 		Command: wrapperTestShellPath,
 		Args: []string{"-c", fmt.Sprintf(
-			"printf '%%s %%s' \"$%s\" \"$%s\"; printf '%%s' \"$%s\" >&2; exit 7",
+			"printf '%%s %%s %%s %%s' \"$%s\" \"$%s\" \"$FEATURE\" \"$RETRY_COUNT\"; printf '%%s' \"$%s\" >&2; exit 7",
 			privateName,
 			workerenv.OpenAIBaseURL,
 			privateName,
@@ -1172,6 +1175,24 @@ func TestServerRedactsConfiguredCommandEnvironment(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), publicValue) {
 		t.Fatalf("known public configuration was redacted: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), "true 1") {
+		t.Fatalf("ordinary short configuration values were corrupted: %s", encoded)
+	}
+}
+
+func TestExactConfiguredEnvValuesSelectsOnlyCredentialNames(t *testing.T) {
+	values := exactConfiguredEnvValues([]string{
+		"FEATURE=true",
+		"RETRY_COUNT=1",
+		"TOKENIZER_MODEL=tokenizer-v1",
+		"OPENAI_API_KEY=openai-secret",
+		"WRAPPER_PRIVATE_SECRET=private-secret",
+		"DB_PASSWORD=password-secret",
+	})
+	want := []string{"password-secret", "private-secret", "openai-secret"}
+	if !slices.Equal(values, want) {
+		t.Fatalf("configured exact redaction values = %v, want %v", values, want)
 	}
 }
 

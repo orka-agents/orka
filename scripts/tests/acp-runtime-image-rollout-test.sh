@@ -392,6 +392,67 @@ if [[ "$1" == "proxy" ]]; then
   done
 fi
 
+if [[ "$1" == "get" && "$2" == "namespace" && "$3" == "orka-system" ]]; then
+  case "${FAKE_EXISTING_NAMESPACE_MODE:-none}" in
+    none)
+      exit 0
+      ;;
+    unlabeled)
+      namespace_labels='{}'
+      ;;
+    harness-v1)
+      namespace_labels='{"orka.ai/controller-mode":"harness-v1"}'
+      ;;
+    harness-v2)
+      namespace_labels='{"orka.ai/controller-mode":"harness-v2"}'
+      ;;
+    *)
+      echo "unknown FAKE_EXISTING_NAMESPACE_MODE: ${FAKE_EXISTING_NAMESPACE_MODE}" >&2
+      exit 2
+      ;;
+  esac
+  jq -n --argjson labels "${namespace_labels}" '{
+    apiVersion:"v1",
+    kind:"Namespace",
+    metadata:{name:"orka-system",labels:$labels}
+  }'
+  exit 0
+fi
+
+if [[ "$1" == "-n" && "$2" == "orka-system" && "$3" == "get" && "$4" == "deployment" && "$5" == "orka-controller-manager" ]]; then
+  case "${FAKE_EXISTING_CONTROLLER_MODE:-none}" in
+    none)
+      exit 0
+      ;;
+    static-v2)
+      controller_args='["--controller-mode=harness-v2","--watch-namespace=orka-system"]'
+      ;;
+    legacy-v2)
+      controller_args='["--watch-namespace=orka-system","--acp-runtime-enabled=true"]'
+      ;;
+    static-v1)
+      controller_args='["--controller-mode=harness-v1","--watch-namespace=orka-system"]'
+      ;;
+    wrong-scope)
+      controller_args='["--controller-mode=harness-v2","--watch-namespace=other"]'
+      ;;
+    duplicate-mode)
+      controller_args='["--controller-mode=harness-v2","--controller-mode=harness-v2","--watch-namespace=orka-system"]'
+      ;;
+    *)
+      echo "unknown FAKE_EXISTING_CONTROLLER_MODE: ${FAKE_EXISTING_CONTROLLER_MODE}" >&2
+      exit 2
+      ;;
+  esac
+  jq -n --argjson args "${controller_args}" '{
+    apiVersion:"apps/v1",
+    kind:"Deployment",
+    metadata:{name:"orka-controller-manager",namespace:"orka-system"},
+    spec:{template:{spec:{containers:[{name:"manager",args:$args}]}}}
+  }'
+  exit 0
+fi
+
 if [[ "$1" == "create" ]]; then
   manifest_path=""
   args=("$@")
@@ -779,12 +840,62 @@ printf '%s' "${expected_existing_key}" >"${existing_state}/snapshot-key"
 cp "${existing_state}/snapshot-key" "${existing_state}/snapshot-key.before"
 : >"${existing_state}/apply.log"
 FAKE_KUBE_STATE="${existing_state}" FAKE_KUBE_LOG="${existing_state}/apply.log" FAKE_KUBE_FAIL_MODE="" \
+  FAKE_EXISTING_NAMESPACE_MODE="harness-v2" FAKE_EXISTING_CONTROLLER_MODE="static-v2" \
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
 cmp -s "${existing_state}/snapshot-key.before" "${existing_state}/snapshot-key"
 if grep -q '^secret:' "${existing_state}/apply.log"; then
   echo 'existing snapshot key was recreated' >&2
   exit 1
 fi
+
+for existing_controller_mode in legacy-v2 static-v1 wrong-scope duplicate-mode; do
+  controller_state="${test_root}/state-controller-${existing_controller_mode}"
+  mkdir -p "${controller_state}"
+  : >"${controller_state}/apply.log"
+  if controller_output="$(
+    FAKE_KUBE_STATE="${controller_state}" FAKE_KUBE_LOG="${controller_state}/apply.log" \
+      FAKE_KUBE_FAIL_MODE="" FAKE_EXISTING_NAMESPACE_MODE="harness-v2" \
+      FAKE_EXISTING_CONTROLLER_MODE="${existing_controller_mode}" \
+      "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" 2>&1
+  )"; then
+    echo "${existing_controller_mode} controller unexpectedly passed the static upgrade preflight" >&2
+    exit 1
+  fi
+  grep -F 'cannot be upgraded in place' <<<"${controller_output}" >/dev/null
+  if [[ -s "${controller_state}/apply.log" ]]; then
+    echo "${existing_controller_mode} controller caused writes before the upgrade preflight failed" >&2
+    exit 1
+  fi
+done
+
+for existing_namespace_mode in unlabeled harness-v1; do
+  namespace_state="${test_root}/state-namespace-${existing_namespace_mode}"
+  mkdir -p "${namespace_state}"
+  : >"${namespace_state}/apply.log"
+  if namespace_output="$(
+    FAKE_KUBE_STATE="${namespace_state}" FAKE_KUBE_LOG="${namespace_state}/apply.log" \
+      FAKE_KUBE_FAIL_MODE="" FAKE_EXISTING_NAMESPACE_MODE="${existing_namespace_mode}" \
+      FAKE_EXISTING_CONTROLLER_MODE="none" \
+      "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" 2>&1
+  )"; then
+    echo "${existing_namespace_mode} namespace unexpectedly passed the static adoption preflight" >&2
+    exit 1
+  fi
+  grep -F 'cannot be adopted in place' <<<"${namespace_output}" >/dev/null
+  if [[ -s "${namespace_state}/apply.log" ]]; then
+    echo "${existing_namespace_mode} namespace caused writes before the adoption preflight failed" >&2
+    exit 1
+  fi
+done
+
+deleted_controller_state="${test_root}/state-deleted-static-controller"
+mkdir -p "${deleted_controller_state}"
+: >"${deleted_controller_state}/apply.log"
+FAKE_KUBE_STATE="${deleted_controller_state}" FAKE_KUBE_LOG="${deleted_controller_state}/apply.log" \
+  FAKE_KUBE_FAIL_MODE="" FAKE_EXISTING_NAMESPACE_MODE="harness-v2" \
+  FAKE_EXISTING_CONTROLLER_MODE="none" \
+  "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
+assert_converged "${deleted_controller_state}"
 
 newline_key_state="${test_root}/state-base64-newline-key"
 mkdir -p "${newline_key_state}"

@@ -2018,12 +2018,32 @@ func exactConfiguredEnvValues(env []string) []string {
 	configured := make([]harness.TurnEnvVar, 0, len(env))
 	for _, entry := range env {
 		name, value, ok := strings.Cut(entry, "=")
-		if !ok {
+		if !ok || !isCredentialTurnEnvName(name) {
 			continue
 		}
 		configured = append(configured, harness.TurnEnvVar{Name: name, Value: value})
 	}
 	return exactTurnInputValues(configured)
+}
+
+func isCredentialTurnEnvName(name string) bool {
+	normalized := strings.NewReplacer("-", "_", ".", "_").Replace(strings.ToUpper(strings.TrimSpace(name)))
+	padded := "_" + normalized + "_"
+	for _, marker := range []string{
+		"_API_KEY_",
+		"_APIKEY_",
+		"_TOKEN_",
+		"_SECRET_",
+		"_PASSWORD_",
+		"_PASSWD_",
+		"_CREDENTIAL_",
+		"_PRIVATE_KEY_",
+	} {
+		if strings.Contains(padded, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isKnownNonCredentialTurnEnv(name string) bool {

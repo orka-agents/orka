@@ -182,6 +182,14 @@ if grep -Eq '^deploy: .*verify-(coexistence-crds|acp-crd-cutover)' "${root}/Make
   echo 'deploy still depends on a superseded coexistence or hard-cutover gate' >&2
   exit 1
 fi
+grep -F 'RUN_CONTROLLER_MODE ?= harness-v2' "${root}/Makefile" >/dev/null
+grep -F 'RUN_WATCH_NAMESPACE ?= orka-system' "${root}/Makefile" >/dev/null
+grep -F -- '--controller-mode="$(RUN_CONTROLLER_MODE)"' "${root}/Makefile" >/dev/null
+grep -F -- '--watch-namespace="$(RUN_WATCH_NAMESPACE)"' "${root}/Makefile" >/dev/null
+if grep -Eq 'RUN_LEGACY_FENCE_NAMESPACE|agent-execution-(host-mode|legacy-fence-namespace)' "${root}/Makefile"; then
+  echo 'run target still uses superseded execution-host flags' >&2
+  exit 1
+fi
 
 kustomize="${KUSTOMIZE:-${root}/bin/kustomize}"
 rendered_default="$("${kustomize}" build "${root}/config/default")"

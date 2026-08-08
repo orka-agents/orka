@@ -231,8 +231,8 @@ func TestCreateAgentTool_Execute_OwnerReference(t *testing.T) {
 	if ownerRef.Controller == nil || !*ownerRef.Controller {
 		t.Error("ownerRef.Controller should be true")
 	}
-	if ownerRef.BlockOwnerDeletion == nil || !*ownerRef.BlockOwnerDeletion {
-		t.Error("ownerRef.BlockOwnerDeletion should be true")
+	if ownerRef.BlockOwnerDeletion != nil {
+		t.Errorf("ownerRef.BlockOwnerDeletion = %#v, want nil", ownerRef.BlockOwnerDeletion)
 	}
 }
 

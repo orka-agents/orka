@@ -343,6 +343,14 @@ func TestDefaultHarnessV1DispatchWorkersMatchesShippedWrapperCapacity(t *testing
 	}
 }
 
+func TestHarnessV1DispatcherRejectsParallelWorkers(t *testing.T) {
+	dispatcher := &HarnessV1Dispatcher{MaxConcurrent: 2}
+	err := dispatcher.Start(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "harness v1 dispatch workers must be exactly 1") {
+		t.Fatalf("parallel worker startup error = %v, want exact-one rejection", err)
+	}
+}
+
 func TestSortHarnessV1DispatchCandidatesPrioritizesRecoveryAndQueueRank(t *testing.T) {
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	lowPriority, highPriority := int32(100), int32(900)

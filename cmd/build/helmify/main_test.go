@@ -114,6 +114,25 @@ func staticChartDefaultArgs() []string {
 	}
 }
 
+func forceStaticChartNamespaceMode(t *testing.T, chartDir, mode string) {
+	t.Helper()
+	helpersPath := filepath.Join(chartDir, "templates", "_helpers.tpl")
+	helpers, err := os.ReadFile(helpersPath)
+	if err != nil {
+		t.Fatalf("read static chart helpers: %v", err)
+	}
+	namespaceLookup := `{{- $existingNamespace := lookup "v1" "Namespace" "" .Release.Namespace -}}`
+	forcedNamespaceLookup := `{{- $existingNamespace := dict "metadata" (dict "labels" ` +
+		`(dict "orka.ai/controller-mode" ` + strconv.Quote(mode) + `)) -}}`
+	forced := strings.Replace(string(helpers), namespaceLookup, forcedNamespaceLookup, 1)
+	if forced == string(helpers) {
+		t.Fatalf("controller mode validation is not gated by the exact existing Namespace lookup")
+	}
+	if err := os.WriteFile(helpersPath, []byte(forced), 0o600); err != nil {
+		t.Fatalf("force existing namespace lookup in copied chart: %v", err)
+	}
+}
+
 func helmTemplateStaticChartWithExistingController(
 	t *testing.T,
 	existingControllerArgs []string,
@@ -129,6 +148,7 @@ func helmTemplateStaticChartWithExistingController(
 	if err := os.CopyFS(chartDir, os.DirFS("static")); err != nil {
 		t.Fatalf("copy static chart: %v", err)
 	}
+	forceStaticChartNamespaceMode(t, chartDir, "harness-v2")
 	helpersPath := filepath.Join(chartDir, "templates", "_helpers.tpl")
 	helpers, err := os.ReadFile(helpersPath)
 	if err != nil {
@@ -136,18 +156,21 @@ func helmTemplateStaticChartWithExistingController(
 	}
 	lookup := `{{- $existingController := lookup "apps/v1" "Deployment" ` +
 		`.Release.Namespace (include "orka.controllerName" .) -}}`
-	quotedControllerArgs := make([]string, 0, len(existingControllerArgs))
-	for _, arg := range existingControllerArgs {
-		quotedControllerArgs = append(quotedControllerArgs, strconv.Quote(arg))
+	forcedLookup := `{{- $existingController := dict -}}`
+	if existingControllerArgs != nil {
+		quotedControllerArgs := make([]string, 0, len(existingControllerArgs))
+		for _, arg := range existingControllerArgs {
+			quotedControllerArgs = append(quotedControllerArgs, strconv.Quote(arg))
+		}
+		forcedLookup = `{{- $existingController := dict "spec" (dict "template" (dict "spec" ` +
+			`(dict "containers" (list (dict "name" "controller" "args" (list ` +
+			strings.Join(quotedControllerArgs, " ") + `)))))) -}}`
 	}
-	forcedLookup := `{{- $existingController := dict "spec" (dict "template" (dict "spec" ` +
-		`(dict "containers" (list (dict "name" "controller" "args" (list ` +
-		strings.Join(quotedControllerArgs, " ") + `)))))) -}}`
-	forced := strings.Replace(string(helpers), lookup, forcedLookup, 1)
-	if forced == string(helpers) {
+	withController := strings.Replace(string(helpers), lookup, forcedLookup, 1)
+	if withController == string(helpers) {
 		t.Fatalf("controller mode validation is not gated by the exact existing Deployment lookup")
 	}
-	if err := os.WriteFile(helpersPath, []byte(forced), 0o600); err != nil {
+	if err := os.WriteFile(helpersPath, []byte(withController), 0o600); err != nil {
 		t.Fatalf("force existing controller lookup in copied chart: %v", err)
 	}
 
@@ -205,6 +228,7 @@ func helmTemplateHarnessV1UpgradeDrainHook(
 	if err := os.CopyFS(chartDir, os.DirFS("static")); err != nil {
 		t.Fatalf("copy static chart: %v", err)
 	}
+	forceStaticChartNamespaceMode(t, chartDir, "harness-v1")
 	hookPath := filepath.Join(chartDir, "templates", "harness-wrapper-drain-hook.yaml")
 	hook, err := os.ReadFile(hookPath)
 	if err != nil {
@@ -578,6 +602,18 @@ func TestStaticChartRejectsControllerWatchScopeChangesOnUpgrade(t *testing.T) {
 				"--watch-namespace=orka-test",
 				"--acp-runtime-enabled=true",
 			},
+			wantError: "implicit or legacy harness-v2 installations cannot upgrade in place",
+		},
+		{
+			name: "static harness v2 controller in the release namespace",
+			existingControllerArgs: []string{
+				"--controller-mode=harness-v2",
+				"--watch-namespace=orka-test",
+			},
+		},
+		{
+			name:                   "static harness v2 namespace with a deleted controller",
+			existingControllerArgs: nil,
 		},
 	}
 
@@ -586,7 +622,7 @@ func TestStaticChartRejectsControllerWatchScopeChangesOnUpgrade(t *testing.T) {
 			output, err := helmTemplateStaticChartWithExistingController(t, tt.existingControllerArgs)
 			if tt.wantError == "" {
 				if err != nil {
-					t.Fatalf("same-scope legacy controller upgrade failed: %v\n%s", err, output)
+					t.Fatalf("same-mode static controller upgrade failed: %v\n%s", err, output)
 				}
 				return
 			}
@@ -594,6 +630,13 @@ func TestStaticChartRejectsControllerWatchScopeChangesOnUpgrade(t *testing.T) {
 				t.Fatalf("helm render error = %v, want watch-scope rejection:\n%s", err, output)
 			}
 		})
+	}
+}
+
+func TestStaticChartRejectsUpgradeWithoutStaticNamespaceIdentity(t *testing.T) {
+	output, err := helmTemplateStaticChart(t, "--is-upgrade")
+	if err == nil || !strings.Contains(output, "controller mode identity is missing or incompatible") {
+		t.Fatalf("helm render error = %v, want missing static namespace identity rejection:\n%s", err, output)
 	}
 }
 
@@ -1057,6 +1100,17 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 				"--set-string", "harnessV1.ledger.retention=-1h",
 			},
 			wantError: "harnessV1.ledger.retention must be a positive Go duration",
+		},
+		{
+			name: "parallel dispatch workers",
+			args: []string{
+				"--set-string", "controller.mode=harness-v1",
+				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
+				"--set", "harnessV1.dispatch.workers=2",
+			},
+			wantError: "harnessV1.dispatch.workers must be exactly 1 when controller.mode=harness-v1",
 		},
 		{
 			name: "unsupported Codex sandbox",

@@ -5,7 +5,7 @@ Date: 2026-08-07
 ## Status
 
 Accepted. Supersedes ADR 0016 and ADR 0017. The normative rollout and
-verification contract is `docs/harness-v1-v2-coexistence-plan.md` Revision 5.
+verification contract is `docs/harness-v1-v2-coexistence-plan.md` Revision 8.
 
 ## Context
 
@@ -97,6 +97,9 @@ The controller does not acquire a third drain mode.
   namespace, and static mode.
 - Mode changes require a new namespace and installation. This deliberately
   trades in-place migration for a smaller safety surface.
+- Pre-static implicit-v2 installations likewise require a fresh static-v2
+  release because their in-flight attempts lack the new execution authority;
+  supported upgrades begin only after a release declares its static mode.
 - Operators temporarily manage two endpoints, stores, data planes, and backup
   sets.
 - Existing v1 Tasks and Sessions remain on v1 until they finish or are

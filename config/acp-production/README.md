@@ -25,6 +25,14 @@ ServiceAccount, API Service, Secrets, and runtime namespace belong only to this
 installation. Do not point it at a namespace watched by a `harness-v1`
 controller, reuse a v1 PVC, or change the namespace label in place.
 
+This overlay is also not an adoption path for a pre-static controller that
+implicitly enabled ACP. `scripts/apply-acp-production.sh` inspects the live
+namespace and any existing controller before its first write. An existing
+namespace must already claim static `harness-v2`; any live controller must also
+declare that mode and the `orka-system` watch namespace. A missing controller
+is recoverable only under that retained namespace claim. Settle or retire older
+installations and deploy this overlay as a fresh installation and namespace.
+
 This overlay deploys the replicated `orka-admission` runtime but not the
 cluster-scoped `ValidatingWebhookConfiguration`. Provision
 `orka-system/orka-admission-tls` first, wait for both admission endpoints, and

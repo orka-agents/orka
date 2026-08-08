@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestHarnessV1TLSHTTPClientAuthenticatesConfiguredCA(t *testing.T) {
@@ -37,5 +39,15 @@ func TestHarnessV1TLSHTTPClientAuthenticatesConfiguredCA(t *testing.T) {
 func TestValidateHarnessV1TLSEndpointRejectsPlaintext(t *testing.T) {
 	if err := validateHarnessV1TLSEndpoint("http://wrapper.default.svc:8080"); err == nil {
 		t.Fatal("plaintext harness v1 endpoint was accepted")
+	}
+}
+
+func TestValidateHarnessV1DispatchOptionsRejectsParallelWorkers(t *testing.T) {
+	if err := validateHarnessV1DispatchOptions(time.Second, 1); err != nil {
+		t.Fatalf("default dispatch options: %v", err)
+	}
+	if err := validateHarnessV1DispatchOptions(time.Second, 2); err == nil ||
+		!strings.Contains(err.Error(), "harness v1 dispatch workers must be exactly 1") {
+		t.Fatalf("parallel dispatch options error = %v, want exact-one rejection", err)
 	}
 }

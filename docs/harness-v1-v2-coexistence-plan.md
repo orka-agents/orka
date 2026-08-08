@@ -1,8 +1,8 @@
 # Orka Harness v1/v2 Isolated Coexistence Plan
 
-**Status:** Accepted — Revision 6
+**Status:** Accepted — Revision 8
 **Prepared:** August 7, 2026
-**Supersedes:** Revision 4 (full active coexistence)
+**Supersedes:** Revision 7
 
 ## 1. Decision
 
@@ -165,6 +165,12 @@ work with a new namespace, UID, Session lineage, attempt identity, and external
 effect history. Copying prompts or non-secret configuration does not preserve
 execution identity.
 
+The static `harness-v2` release also does not adopt a pre-static, implicit-v2
+controller installation in place. Those installations can have accepted ACP
+attempts without the immutable execution authority required by this design.
+Settle or retire that installation, preserve its state under its existing
+owner, and install static `harness-v2` as a new release and namespace.
+
 ### 3.5 Harness v1 recovery boundaries
 
 The v1 compatibility installation keeps request execution authority separate
@@ -189,6 +195,10 @@ Deterministic frame identity, sequence, approval, continuation, frozen-tool,
 and input-authority violations become `ProtocolViolation`/`OutcomeUnknown`.
 Transport, event-journal, Kubernetes-read, and external-effect-store errors
 remain retryable because they do not prove a permanent protocol violation.
+
+The built-in wrapper advertises and enforces `MaxConcurrentTurns=1`. Controller
+startup and Helm validation therefore require exactly one harness v1 dispatcher
+worker; parallel dispatch is rejected as an unsupported configuration.
 
 ## 4. Shared API and CRD contract
 
@@ -274,6 +284,12 @@ The v2 release is a fresh installation. It requires:
 New producers select the v2 endpoint and namespace explicitly. Existing v1
 objects are not copied or adopted.
 
+An older controller that implicitly enabled ACP but did not declare
+`--controller-mode=harness-v2` is not an upgrade source. Helm and the canonical
+direct-Kustomize deployment preflight reject that in-place transition before
+mutating workloads. Once a release already declares the exact static mode and
+watch namespace, ordinary same-mode upgrades remain supported.
+
 ### 5.4 Cross-plane references
 
 User-authored Task, Agent, AgentRuntime, Provider, Session, Tool, Skill, and
@@ -355,6 +371,8 @@ to resume UID-bound execution.
 - a missing or mismatched namespace mode label fails;
 - leader election is required and its Lease is in the watched namespace;
 - mode-incompatible wrapper or ACP configuration fails rendering or startup;
+- implicit or legacy v2 controllers are rejected as in-place static-v2 upgrade
+  sources;
 - changing the namespace claim does not cause a running installation to adopt
   opposite-mode work.
 
@@ -385,6 +403,7 @@ to resume UID-bound execution.
 - a v1 Task executes only through the wrapper;
 - a v2 Task executes only through ACP RuntimePools;
 - unavailable v2 capacity never falls back to v1;
+- the shipped v1 controller and wrapper both enforce a single concurrent turn;
 - a same-name object in the other namespace is unrelated and cannot continue
   the original Task or Session;
 - cross-plane cancellation, cleanup, publication, and Session continuation are

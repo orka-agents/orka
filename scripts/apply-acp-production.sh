@@ -48,6 +48,8 @@ trap cleanup EXIT
 manifest="${work_dir}/manifest.yaml"
 rendered_json="${work_dir}/rendered.json"
 namespace_resource="${work_dir}/namespace.json"
+existing_namespace="${work_dir}/existing-namespace.json"
+existing_controller="${work_dir}/existing-controller.json"
 runtime_config="${work_dir}/runtime-images-configmap.json"
 admission_runtime_manifest="${work_dir}/admission-runtime-manifest.json"
 workload_manifest="${work_dir}/workload-manifest.json"
@@ -145,6 +147,49 @@ jq -esc '
 ' "${rendered_json}" >/dev/null || {
   echo "production overlay must contain one digest-pinned static harness-v2 controller, no v1 wrapper path, and one digest-pinned, zero-unavailable, replicated orka-admission runtime and Service" >&2
   exit 1
+}
+
+validate_existing_controller_identity() {
+  : >"${existing_namespace}"
+  if ! "${kubectl}" get namespace orka-system --ignore-not-found -o json >"${existing_namespace}"; then
+    echo "unable to inspect the existing orka-system Namespace" >&2
+    return 1
+  fi
+  : >"${existing_controller}"
+  if ! "${kubectl}" -n orka-system get deployment orka-controller-manager \
+    --ignore-not-found -o json >"${existing_controller}"; then
+    echo "unable to inspect the existing orka-system/orka-controller-manager Deployment" >&2
+    return 1
+  fi
+
+  if [[ ! -s "${existing_namespace}" && ! -s "${existing_controller}" ]]; then
+    return 0
+  fi
+  if [[ ! -s "${existing_namespace}" ]] || ! jq -e '
+    .apiVersion == "v1" and
+    .kind == "Namespace" and
+    .metadata.name == "orka-system" and
+    .metadata.labels["orka.ai/controller-mode"] == "harness-v2"
+  ' "${existing_namespace}" >/dev/null; then
+    echo "existing namespace orka-system must already claim orka.ai/controller-mode=harness-v2; unlabeled, implicit, legacy, or opposite-mode namespaces cannot be adopted in place" >&2
+    return 1
+  fi
+  [[ -s "${existing_controller}" ]] || return 0
+
+  if ! jq -e '
+    .apiVersion == "apps/v1" and
+    .kind == "Deployment" and
+    .metadata.namespace == "orka-system" and
+    .metadata.name == "orka-controller-manager" and
+    ([.spec.template.spec.containers[] | select(.name == "manager")] | length) == 1 and
+    ([.spec.template.spec.containers[] | select(.name == "manager") | .args[]? |
+      select(startswith("--controller-mode="))] == ["--controller-mode=harness-v2"]) and
+    ([.spec.template.spec.containers[] | select(.name == "manager") | .args[]? |
+      select(startswith("--watch-namespace="))] == ["--watch-namespace=orka-system"])
+  ' "${existing_controller}" >/dev/null; then
+    echo "implicit, legacy, differently scoped, or opposite-mode controllers cannot be upgraded in place; settle or retire the existing installation and deploy harness-v2 in a fresh namespace" >&2
+    return 1
+  fi
 }
 
 validate_snapshot_secret() {
@@ -412,6 +457,7 @@ EOF_ADMISSION_HANDLERS
 # admission plane before rolling the static harness-v2 controller. Every retry repeats
 # these idempotent phases, so interruption after any apply still converges on the
 # desired generation without rotating an existing snapshot key.
+validate_existing_controller_identity
 "${kubectl}" apply -f "${namespace_resource}"
 validate_admission_tls_secret
 ensure_snapshot_secret

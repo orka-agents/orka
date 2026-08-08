@@ -599,6 +599,12 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 	if dc.args.Feedback != "" {
 		childTask.Spec.Prompt = fmt.Sprintf("FEEDBACK FROM REVIEW:\n%s\n\nTASK:\n%s", dc.args.Feedback, childTask.Spec.Prompt)
 	}
+	if taskType == corev1alpha1.TaskTypeAI {
+		// Native AI admission requires spec.ai. Keep Agent-owned provider,
+		// model, prompt defaults, skills, and tools authoritative; the child
+		// contributes only its task-specific prompt.
+		childTask.Spec.AI = &corev1alpha1.AISpec{Prompt: childTask.Spec.Prompt}
+	}
 
 	// Handle prior task reference for iterative workflows
 	if dc.args.PriorTask != "" {
@@ -609,18 +615,18 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 
 	// Set owner reference only for same-namespace children. Kubernetes treats
 	// cross-namespace owner references for namespaced objects as invalid and may
-	// garbage-collect the child; labels/annotations still preserve lineage.
+	// garbage-collect the child; labels/annotations still preserve lineage. Do
+	// not request foreground-deletion blocking: workers can create Tasks but do
+	// not have permission to update the parent Task's finalizers.
 	if dc.parentTask.UID != "" && dc.parentTask.Namespace == dc.namespace {
 		isController := true
-		blockOwnerDeletion := true
 		childTask.OwnerReferences = []metav1.OwnerReference{
 			{
-				APIVersion:         corev1alpha1.GroupVersion.String(),
-				Kind:               taskKindString,
-				Name:               dc.parentTask.Name,
-				UID:                dc.parentTask.UID,
-				Controller:         &isController,
-				BlockOwnerDeletion: &blockOwnerDeletion,
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				Kind:       taskKindString,
+				Name:       dc.parentTask.Name,
+				UID:        dc.parentTask.UID,
+				Controller: &isController,
 			},
 		}
 	}

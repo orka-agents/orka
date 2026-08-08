@@ -40,7 +40,7 @@ var _ = Describe("AgentRuntime external dispatch", func() {
 		}
 	})
 
-	It("accepts orka.harness.v1 registrations in the coexistence bridge schema", func() {
+	It("rejects orka.harness.v1 registrations in a harness-v2 namespace", func() {
 		manifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "AgentRuntime",
@@ -56,7 +56,9 @@ var _ = Describe("AgentRuntime external dispatch", func() {
 		cmd := exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
 		cmd.Stdin = stringReader(manifest)
 		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring(
+			`AgentRuntime contractVersion must match namespace execution mode "harness-v2"`,
+		)))
 	})
 
 	It("fails closed at the external Task dispatch support boundary", func() {

@@ -94,6 +94,16 @@ cluster-scoped gateway/workspace ownership belongs only to the v2 release.
 
 ## Upgrade
 
+An in-place controller upgrade is supported only when the release namespace
+already carries the same static mode claim and any live controller declares
+that mode and watch namespace. A deleted controller can be recreated only
+under that retained same-mode namespace claim. A pre-static controller that
+implicitly enabled ACP is not a supported `harness-v2` upgrade source because
+its accepted attempts may lack the immutable execution authority required for
+recovery. Settle or retire that installation and install static `harness-v2`
+as a new release and namespace. The chart rejects missing, opposite-mode, and
+legacy identity before rendering upgrade resources.
+
 Helm installs files from `crds/` only during installation. It does not create or
 update them during `helm upgrade`, including when upgrading from an older Orka
 chart that installed no CRDs.
