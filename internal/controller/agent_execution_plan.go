@@ -156,7 +156,10 @@ func externalAgentRuntimeReadinessReason(task *corev1alpha1.Task, runtime *corev
 			return fmt.Sprintf("external AgentRuntime %q profile workspace intent %q does not match Task intent %q", runtime.Name, runtime.Spec.Capabilities.Profile.WorkspaceIntent, intent)
 		}
 	}
-	if !runtime.Spec.Capabilities.WorkspaceGovernance.Strict() || !runtime.Status.ObservedCapabilities.WorkspaceGovernance.Strict() {
+	if runtime.Spec.Capabilities.WorkspaceGovernance == nil ||
+		runtime.Status.ObservedCapabilities.WorkspaceGovernance == nil ||
+		!runtime.Spec.Capabilities.WorkspaceGovernance.Strict() ||
+		!runtime.Status.ObservedCapabilities.WorkspaceGovernance.Strict() {
 		return fmt.Sprintf("external AgentRuntime %q does not provide strict workspace governance", runtime.Name)
 	}
 	return ""

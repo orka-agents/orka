@@ -43,6 +43,7 @@ const (
 	agentRuntimeReasonNotReady = "ConformanceFailed"
 	agentRuntimeProbeTimeout   = 60 * time.Second
 	agentRuntimeRequeue        = 30 * time.Second
+	agentRuntimeMinBearerBytes = 32
 
 	agentRuntimeAuthUseLabel           = "orka.ai/agent-runtime-auth"
 	agentRuntimeAuthRefNameLabel       = "orka.ai/agent-runtime-name"
@@ -370,9 +371,24 @@ func (r *AgentRuntimeReconciler) agentRuntimeV1BearerAuthMaterial(
 	if token == "" {
 		return agentRuntimeV1AuthMaterial{}, fmt.Errorf("AgentRuntime bearer token Secret %s/%s key %q is empty or missing", secret.Namespace, secret.Name, ref.Key)
 	}
+	if len(token) < agentRuntimeMinBearerBytes {
+		return agentRuntimeV1AuthMaterial{}, fmt.Errorf("AgentRuntime bearer token Secret %s/%s key %q must contain at least %d bytes", secret.Namespace, secret.Name, ref.Key, agentRuntimeMinBearerBytes)
+	}
+	if !agentRuntimeBearerTokenHeaderSafe(token) {
+		return agentRuntimeV1AuthMaterial{}, fmt.Errorf("AgentRuntime bearer token Secret %s/%s key %q contains invalid HTTP header bytes", secret.Namespace, secret.Name, ref.Key)
+	}
 	return agentRuntimeV1AuthMaterial{
 		bearerToken: token, secretUID: secret.UID, secretResourceVersion: resourceVersion,
 	}, nil
+}
+
+func agentRuntimeBearerTokenHeaderSafe(token string) bool {
+	for i := 0; i < len(token); i++ {
+		if token[i] <= 0x20 || token[i] >= 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *AgentRuntimeReconciler) requireCurrentAgentRuntimeV1BearerAuthMaterial(
@@ -772,10 +788,11 @@ func observedCapabilitiesFromConformance(probe v2conformance.Result) *corev1alph
 		observed.ACPVersion = sanitizeAgentRuntimeCapabilityValue(base.ACPVersion)
 		observed.RuntimeProfileDigest = sanitizeAgentRuntimeCapabilityValue(string(base.RuntimeProfileDigest))
 		observed.ProfileDigestSchemaVersion = int32(base.ProfileDigestSchemaVersion)
-		observed.Limits = agentRuntimeObservedProtocolLimits(base.Limits)
+		limits := agentRuntimeObservedProtocolLimits(base.Limits)
+		observed.Limits = &limits
 		observed.SupportsDrain = base.SupportsDrain
 		observed.SupportsPublicationFinalization = base.SupportsPublicationFinalization
-		observed.WorkspaceGovernance = corev1alpha1.AgentRuntimeWorkspaceGovernanceCapabilities{
+		observed.WorkspaceGovernance = &corev1alpha1.AgentRuntimeWorkspaceGovernanceCapabilities{
 			Mode:                            corev1alpha1.AgentRuntimeWorkspaceGovernanceMode(capabilities.WorkspaceGovernance.Mode),
 			Trusted:                         capabilities.WorkspaceGovernance.Trusted,
 			OrkaOwnedWorkspaceDeltas:        capabilities.WorkspaceGovernance.OrkaOwnedWorkspaceDeltas,

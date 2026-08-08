@@ -32,4 +32,32 @@ done
 
 grep -Fq 'namespace: ate-demo' "${substrate_script}"
 
+provider_access="$(awk '/^grant_substrate_provider_template_access\(\) {/,/^}/' "${substrate_script}")"
+for expected in \
+  'namespace: ate-demo' \
+  '- ate.dev' \
+  '- orka-mcp-ci' \
+  '- actortemplates' \
+  '- get' \
+  'name: orka-controller-manager' \
+  'namespace: ${ORKA_NAMESPACE}'; do
+  grep -Fq -- "${expected}" <<<"${provider_access}" || {
+    echo "agent-substrate E2E provider grant is missing ${expected}" >&2
+    exit 1
+  }
+done
+if grep -Eq -- '- (list|watch|create|update|patch|delete)|- secrets' <<<"${provider_access}"; then
+  echo 'agent-substrate E2E provider grant exceeds read access to its exact ActorTemplate' >&2
+  exit 1
+fi
+
+substrate_deploy="$(awk '/^deploy_orka\(\) {/,/^}/' "${substrate_script}")"
+provider_grant_line="$(grep -nF 'grant_substrate_provider_template_access' <<<"${substrate_deploy}" | cut -d: -f1 || true)"
+controller_apply_line="$(grep -nF '"${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -' <<<"${substrate_deploy}" | cut -d: -f1 || true)"
+if [[ ! "${provider_grant_line}" =~ ^[0-9]+$ || ! "${controller_apply_line}" =~ ^[0-9]+$ ]] ||
+  ((provider_grant_line >= controller_apply_line)); then
+  echo 'agent-substrate E2E must grant exact provider-template access before starting the isolated controller' >&2
+  exit 1
+fi
+
 printf '%s\n' 'ok - static-mode E2E controller-owned resources stay in the isolated installation namespace'

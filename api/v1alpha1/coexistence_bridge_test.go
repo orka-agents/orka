@@ -102,12 +102,21 @@ func TestBridgeStoredV1AgentRuntimeStatusRoundTrips(t *testing.T) {
 		status.ObservedCapabilities.MaxConcurrentTurns != 4 || status.ObservedCapabilities.MaxOutputBytes != 1048576 {
 		t.Fatalf("v1 observed capabilities = %+v", status.ObservedCapabilities)
 	}
+	if status.ObservedCapabilities.Limits != nil || status.ObservedCapabilities.WorkspaceGovernance != nil {
+		t.Fatalf("v1 observed capabilities gained v2-only fields: %+v", status.ObservedCapabilities)
+	}
 	statusJSON, err := json.Marshal(status)
 	if err != nil {
 		t.Fatalf("re-encode v1 status: %v", err)
 	}
-	if !strings.Contains(string(statusJSON), `"observedAuthRefResourceVersion":"12345"`) {
+	serialized := string(statusJSON)
+	if !strings.Contains(serialized, `"observedAuthRefResourceVersion":"12345"`) {
 		t.Fatalf("v1 status round trip lost observedAuthRefResourceVersion: %s", statusJSON)
+	}
+	for _, forbidden := range []string{`"limits"`, `"workspaceGovernance"`} {
+		if strings.Contains(serialized, forbidden) {
+			t.Fatalf("v1 status serialized schema-invalid v2 field %s: %s", forbidden, statusJSON)
+		}
 	}
 }
 

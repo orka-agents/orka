@@ -25,7 +25,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
 )
 
-const agentRuntimeV1TestBearer = "harness-v1-test-bearer"
+const agentRuntimeV1TestBearer = "0123456789abcdef0123456789abcdef"
 
 func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
@@ -66,10 +66,11 @@ func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 	if observed.RuntimeInstanceID != string(config.RuntimeInstanceID) || observed.SupervisorBootID != string(config.SupervisorBootID) {
 		t.Fatalf("observed exact instance = %#v", observed)
 	}
-	if observed.RuntimeProfileDigest != runtimeObject.Spec.Capabilities.Profile.Digest || observed.Limits.MaxConcurrentPrompts != int32(limits.MaxConcurrentPrompts) {
+	if observed.RuntimeProfileDigest != runtimeObject.Spec.Capabilities.Profile.Digest || observed.Limits == nil ||
+		observed.Limits.MaxConcurrentPrompts != int32(limits.MaxConcurrentPrompts) {
 		t.Fatalf("observed profile/limits = %#v", observed)
 	}
-	if !observed.WorkspaceGovernance.Strict() {
+	if observed.WorkspaceGovernance == nil || !observed.WorkspaceGovernance.Strict() {
 		t.Fatalf("observed strict governance = %#v", observed.WorkspaceGovernance)
 	}
 	if updated.Status.ObservedControllerAuthRefResourceVersion == "" || updated.Status.ObservedOperationCapabilityRefResourceVersion == "" {
@@ -279,6 +280,39 @@ func TestAgentRuntimeReconcilerMarksHarnessV1RuntimeReady(t *testing.T) {
 		updated.Status.ObservedCapabilities.RuntimeVersion
 	if strings.Contains(encodedStatus, agentRuntimeV1TestBearer) {
 		t.Fatal("harness v1 status leaked the bearer token")
+	}
+}
+
+func TestAgentRuntimeReconcilerHarnessV1RejectsWeakBearerToken(t *testing.T) {
+	tests := []struct {
+		name        string
+		token       string
+		wantMessage string
+	}{
+		{name: "short", token: strings.Repeat("t", agentRuntimeMinBearerBytes-1), wantMessage: "at least 32 bytes"},
+		{name: "space", token: strings.Repeat("t", 16) + " " + strings.Repeat("t", 16), wantMessage: "invalid HTTP header bytes"},
+		{name: "control", token: strings.Repeat("t", 16) + "\n" + strings.Repeat("t", 16), wantMessage: "invalid HTTP header bytes"},
+		{name: "non-ASCII", token: strings.Repeat("t", 31) + "é", wantMessage: "invalid HTTP header bytes"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeV1TestBearer})
+			defer server.Close()
+			runtimeObject, secret := testHarnessV1AgentRuntimeAndSecret(server.URL())
+			secret.Data["token"] = []byte(test.token)
+			reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+			allowAgentRuntimeLoopback(t)
+			if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+				t.Fatal(err)
+			}
+			updated := getAgentRuntime(t, reconciler, runtimeObject)
+			if updated.Status.Ready || !strings.Contains(updated.Status.Message, test.wantMessage) {
+				t.Fatalf("weak harness v1 bearer status = %#v, want message containing %q", updated.Status, test.wantMessage)
+			}
+			if strings.Contains(updated.Status.Message, test.token) {
+				t.Fatal("harness v1 status leaked the rejected bearer token")
+			}
+		})
 	}
 }
 
@@ -533,7 +567,9 @@ func TestAgentRuntimeTrustedNonGovernedRegistrationIsExplicitAndNotStrictEligibl
 		t.Fatal(err)
 	}
 	updated := getAgentRuntime(t, reconciler, runtimeObject)
-	if !updated.Status.Ready || updated.Status.ObservedCapabilities == nil || !updated.Status.ObservedCapabilities.WorkspaceGovernance.Trusted {
+	if !updated.Status.Ready || updated.Status.ObservedCapabilities == nil ||
+		updated.Status.ObservedCapabilities.WorkspaceGovernance == nil ||
+		!updated.Status.ObservedCapabilities.WorkspaceGovernance.Trusted {
 		t.Fatalf("trusted runtime registration = %#v", updated.Status)
 	}
 	if server.Counts().WorkspaceDeltas != 0 {

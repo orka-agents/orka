@@ -898,6 +898,40 @@ YAML
     900
 }
 
+grant_substrate_provider_template_access() {
+  log "Granting Orka access to the E2E Substrate ActorTemplate"
+  kubectl -n ate-demo apply -f - <<YAML
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orka-substrate-template-reader
+  namespace: ate-demo
+rules:
+  - apiGroups:
+      - ate.dev
+    resourceNames:
+      - orka-mcp-ci
+    resources:
+      - actortemplates
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orka-substrate-template-reader
+  namespace: ate-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orka-substrate-template-reader
+subjects:
+  - kind: ServiceAccount
+    name: orka-controller-manager
+    namespace: ${ORKA_NAMESPACE}
+YAML
+}
+
 deploy_orka() {
   local controller_image="$1"
   local tmp_config
@@ -922,6 +956,7 @@ deploy_orka() {
   )
   kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
   kubectl label namespace orka-system orka.ai/controller-mode=harness-v2 --overwrite
+  grant_substrate_provider_template_access
   local placeholder_digest
   placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
   kubectl -n orka-system create configmap acp-runtime-images \

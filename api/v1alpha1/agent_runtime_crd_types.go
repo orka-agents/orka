@@ -409,25 +409,29 @@ type AgentRuntimeRegistrySpec struct {
 // contracts. Variant-specific observed fields are written only by the matching
 // probe implementation.
 type AgentRuntimeObservedCapabilities struct {
-	ProtocolVersion                 string                                      `json:"protocolVersion,omitempty"`
-	Transport                       string                                      `json:"transport,omitempty"`
-	ACPVersion                      string                                      `json:"acpVersion,omitempty"`
-	RuntimeInstanceID               string                                      `json:"runtimeInstanceID,omitempty"`
-	SupervisorBootID                string                                      `json:"supervisorBootID,omitempty"`
-	ControllerEpoch                 int64                                       `json:"controllerEpoch,omitempty"`
-	RuntimePoolUID                  string                                      `json:"runtimePoolUID,omitempty"`
-	RuntimePoolGeneration           int64                                       `json:"runtimePoolGeneration,omitempty"`
-	RuntimeProfileDigest            string                                      `json:"runtimeProfileDigest,omitempty"`
-	ProfileDigestSchemaVersion      int32                                       `json:"profileDigestSchemaVersion,omitempty"`
-	AdapterName                     string                                      `json:"adapterName,omitempty"`
-	AdapterDigest                   string                                      `json:"adapterDigest,omitempty"`
-	ProviderKind                    string                                      `json:"providerKind,omitempty"`
-	Model                           string                                      `json:"model,omitempty"`
-	Limits                          AgentRuntimeProtocolLimits                  `json:"limits,omitempty"`
-	SupportsDrain                   bool                                        `json:"supportsDrain,omitempty"`
-	SupportsPublicationFinalization bool                                        `json:"supportsPublicationFinalization,omitempty"`
-	WorkspaceGovernance             AgentRuntimeWorkspaceGovernanceCapabilities `json:"workspaceGovernance,omitempty"`
-	Lifecycle                       string                                      `json:"lifecycle,omitempty"`
+	ProtocolVersion            string `json:"protocolVersion,omitempty"`
+	Transport                  string `json:"transport,omitempty"`
+	ACPVersion                 string `json:"acpVersion,omitempty"`
+	RuntimeInstanceID          string `json:"runtimeInstanceID,omitempty"`
+	SupervisorBootID           string `json:"supervisorBootID,omitempty"`
+	ControllerEpoch            int64  `json:"controllerEpoch,omitempty"`
+	RuntimePoolUID             string `json:"runtimePoolUID,omitempty"`
+	RuntimePoolGeneration      int64  `json:"runtimePoolGeneration,omitempty"`
+	RuntimeProfileDigest       string `json:"runtimeProfileDigest,omitempty"`
+	ProfileDigestSchemaVersion int32  `json:"profileDigestSchemaVersion,omitempty"`
+	AdapterName                string `json:"adapterName,omitempty"`
+	AdapterDigest              string `json:"adapterDigest,omitempty"`
+	ProviderKind               string `json:"providerKind,omitempty"`
+	Model                      string `json:"model,omitempty"`
+	// Limits records the v2 protocol bounds. It is absent for harness v1.
+	// +optional
+	Limits                          *AgentRuntimeProtocolLimits `json:"limits,omitempty"`
+	SupportsDrain                   bool                        `json:"supportsDrain,omitempty"`
+	SupportsPublicationFinalization bool                        `json:"supportsPublicationFinalization,omitempty"`
+	// WorkspaceGovernance records the v2 workspace guarantees. It is absent for harness v1.
+	// +optional
+	WorkspaceGovernance *AgentRuntimeWorkspaceGovernanceCapabilities `json:"workspaceGovernance,omitempty"`
+	Lifecycle           string                                       `json:"lifecycle,omitempty"`
 
 	// Harness v1 observed fields, written only by the v1 conformance probe.
 

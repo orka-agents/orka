@@ -242,7 +242,7 @@ func plannerExternalRuntime() *corev1alpha1.AgentRuntime {
 			Capabilities:    &corev1alpha1.AgentRuntimeCapabilitiesSpec{RuntimeInstanceID: "external-instance", Profile: &profile, WorkspaceGovernance: &governance},
 		},
 		Status: corev1alpha1.AgentRuntimeStatus{Ready: true, ObservedGeneration: 1, ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
-			RuntimeInstanceID: "external-instance", RuntimeProfileDigest: profile.Digest, WorkspaceGovernance: governance,
+			RuntimeInstanceID: "external-instance", RuntimeProfileDigest: profile.Digest, WorkspaceGovernance: &governance,
 		}},
 	}
 }
