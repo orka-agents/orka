@@ -14,6 +14,27 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+// permanentHarnessV1PreSubmitSessionError marks a Session identity conflict
+// that immutable control state proves cannot succeed on retry. Storage,
+// controller-epoch, and failed re-read conflicts intentionally remain untyped
+// so the Prepared attempt can be retried.
+type permanentHarnessV1PreSubmitSessionError struct{ err error }
+
+func (e *permanentHarnessV1PreSubmitSessionError) Error() string { return e.err.Error() }
+func (e *permanentHarnessV1PreSubmitSessionError) Unwrap() error { return e.err }
+
+func permanentHarnessV1PreSubmitSession(err error) error {
+	if err == nil || isPermanentHarnessV1PreSubmitSessionError(err) {
+		return err
+	}
+	return &permanentHarnessV1PreSubmitSessionError{err: err}
+}
+
+func isPermanentHarnessV1PreSubmitSessionError(err error) bool {
+	var permanent *permanentHarnessV1PreSubmitSessionError
+	return errors.As(err, &permanent)
+}
+
 func harnessV1SessionAttemptReference(attempt *store.HarnessV1Attempt) string {
 	if attempt == nil {
 		return ""
@@ -95,7 +116,9 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 		CreatedAt:                 time.Now().UTC(),
 	})
 	if err != nil {
-		return err
+		return d.classifyHarnessV1PreSubmitSessionConflict(
+			ctx, task.Namespace, name, bootstrap, task, attempt, err,
+		)
 	}
 	if err := validateFrozenHarnessV1SessionControl(bootstrap, control, task, attempt); err != nil {
 		return err
@@ -131,7 +154,9 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 		ConfigDigest:        lineageConfigDigest,
 	})
 	if err != nil {
-		return err
+		return d.classifyHarnessV1PreSubmitSessionConflict(
+			ctx, task.Namespace, name, bootstrap, task, attempt, err,
+		)
 	}
 	appendPolicy := acpSessionTranscriptAppendPolicyForTask(verified.frozenTask)
 	_, err = d.Sessions.OpenTurn(ctx, ACPOpenSessionTurnRequest{
@@ -147,6 +172,31 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 	return err
 }
 
+// classifyHarnessV1PreSubmitSessionConflict promotes only a conflict whose
+// current authoritative control proves that the frozen Session identity was
+// lost. In particular, an unchanged control after a lease-acquisition conflict
+// can be an API or controller-epoch race and must remain retryable.
+func (d *HarnessV1Dispatcher) classifyHarnessV1PreSubmitSessionConflict(
+	ctx context.Context,
+	namespace, name string,
+	bootstrap *agentExecutionSnapshotHarnessV1SessionBootstrap,
+	task *corev1alpha1.Task,
+	attempt *store.HarnessV1Attempt,
+	cause error,
+) error {
+	if cause == nil || !errors.Is(cause, store.ErrConflict) {
+		return cause
+	}
+	current, err := d.Sessions.controls.GetSessionControl(ctx, namespace, name)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("recheck harness v1 Session control after conflict: %w", err))
+	}
+	if err := validateFrozenHarnessV1SessionControl(bootstrap, current, task, attempt); err != nil {
+		return err
+	}
+	return cause
+}
+
 func validateFrozenHarnessV1SessionControl(
 	bootstrap *agentExecutionSnapshotHarnessV1SessionBootstrap,
 	control *store.SessionControl,
@@ -155,10 +205,14 @@ func validateFrozenHarnessV1SessionControl(
 ) error {
 	if bootstrap == nil || control == nil || task == nil || attempt == nil ||
 		control.SessionUID != bootstrap.SessionUID || control.Availability != store.SessionAvailable {
-		return fmt.Errorf("%w: current harness v1 Session control does not match the frozen available identity", store.ErrConflict)
+		return permanentHarnessV1PreSubmitSession(fmt.Errorf(
+			"%w: current harness v1 Session control does not match the frozen available identity", store.ErrConflict,
+		))
 	}
 	if attempt.Attempt < 1 {
-		return fmt.Errorf("%w: harness v1 Session attempt number must be positive", store.ErrConflict)
+		return permanentHarnessV1PreSubmitSession(fmt.Errorf(
+			"%w: harness v1 Session attempt number must be positive", store.ErrConflict,
+		))
 	}
 	initialVersion := bootstrap.ControlVersion
 	if bootstrap.ControlVersion == 0 {
@@ -179,14 +233,18 @@ func validateFrozenHarnessV1SessionControl(
 			return err
 		}
 		if control.LastOperationID != "finalize:"+priorTurnID {
-			return fmt.Errorf("%w: harness v1 Session retry does not follow its own finalized turn", store.ErrConflict)
+			return permanentHarnessV1PreSubmitSession(fmt.Errorf(
+				"%w: harness v1 Session retry does not follow its own finalized turn", store.ErrConflict,
+			))
 		}
 	}
 	if control.Lease == nil {
 		if control.Version == expectedVersion && control.LeaseGeneration == expectedGeneration {
 			return nil
 		}
-		return fmt.Errorf("%w: harness v1 Session control advanced after transcript freeze", store.ErrConflict)
+		return permanentHarnessV1PreSubmitSession(fmt.Errorf(
+			"%w: harness v1 Session control advanced after transcript freeze", store.ErrConflict,
+		))
 	}
 	expectedGeneration++
 	expectedDigest, err := acpSessionMutationLeaseDigest(
@@ -201,7 +259,9 @@ func validateFrozenHarnessV1SessionControl(
 		lease.Generation != expectedGeneration || lease.TaskUID != string(task.UID) ||
 		lease.Attempt != int64(attempt.Attempt) || lease.PromptID != attempt.TurnID ||
 		lease.RequestDigest != expectedDigest {
-		return fmt.Errorf("%w: harness v1 Session is leased by stale or foreign work", store.ErrConflict)
+		return permanentHarnessV1PreSubmitSession(fmt.Errorf(
+			"%w: harness v1 Session is leased by stale or foreign work", store.ErrConflict,
+		))
 	}
 	return nil
 }
@@ -274,7 +334,8 @@ func harnessV1SessionCanBeAbsent(attempt *store.HarnessV1Attempt) bool {
 		return false
 	}
 	switch attempt.TerminalReason {
-	case harnessV1ReasonBackendDisabled, harnessV1ReasonCredentialChanged, harnessV1ReasonInvalidBinding:
+	case harnessV1ReasonBackendDisabled, harnessV1ReasonCredentialChanged, harnessV1ReasonInvalidBinding,
+		harnessV1ReasonSessionConflict:
 		return true
 	default:
 		return false
@@ -320,6 +381,13 @@ func (d *HarnessV1Dispatcher) finalizeHarnessV1TaskSession(
 	retrying bool,
 ) (bool, error) {
 	if verified == nil || verified.frozenTask == nil || verified.frozenTask.Spec.SessionRef == nil {
+		return false, nil
+	}
+	// SessionConflict is emitted only when preparation proves the frozen
+	// identity was lost before this attempt acquired a lease or opened a turn.
+	// Recovery against the winning control would itself conflict, so skip it.
+	if attempt != nil && attempt.State == store.HarnessV1AttemptRejected &&
+		attempt.TerminalReason == harnessV1ReasonSessionConflict && attempt.TerminalReceiptDigest == "" {
 		return false, nil
 	}
 	sessionTurn, err := d.recoverHarnessV1TaskSession(ctx, task, verified, attempt)

@@ -1,6 +1,6 @@
 # Orka Harness v1/v2 Isolated Coexistence Plan
 
-**Status:** Accepted — Revision 5
+**Status:** Accepted — Revision 6
 **Prepared:** August 7, 2026
 **Supersedes:** Revision 4 (full active coexistence)
 
@@ -164,6 +164,31 @@ An operator may create a new object in the other installation, but it is new
 work with a new namespace, UID, Session lineage, attempt identity, and external
 effect history. Copying prompts or non-secret configuration does not preserve
 execution identity.
+
+### 3.5 Harness v1 recovery boundaries
+
+The v1 compatibility installation keeps request execution authority separate
+from terminal-settlement authority:
+
+- submitting, replaying, or recovering terminal output requires the frozen
+  provider `CredentialRefs` used by the original request;
+- acknowledging an already durable settlement reconstructs only the frozen
+  wrapper endpoint/authentication client and the stored turn, request-digest,
+  and terminal-receipt fences; it does not reread provider credentials;
+- wrapper authentication rotation still fails closed against the frozen
+  Secret UID, resourceVersion, and key.
+
+Frame polling is bounded by the immutable request deadline. Persisted or
+wrapper-ledger terminal evidence always wins first. Once the deadline passes,
+the controller durably enters `CancelRequested`, retries `CancelTurn`, and
+drains brokered tool-call reservations without starting new effects. If no
+authoritative terminal evidence appears within the bounded cancellation
+settlement window, the attempt becomes `OutcomeUnknown`; it is never replayed.
+
+Deterministic frame identity, sequence, approval, continuation, frozen-tool,
+and input-authority violations become `ProtocolViolation`/`OutcomeUnknown`.
+Transport, event-journal, Kubernetes-read, and external-effect-store errors
+remain retryable because they do not prove a permanent protocol violation.
 
 ## 4. Shared API and CRD contract
 
@@ -360,6 +385,12 @@ to resume UID-bound execution.
   rejected;
 - v1 wrapper and v2 controller restart tests preserve their own protocol's
   duplicate and unknown-outcome invariants.
+- v1 settlement acknowledgement survives provider-credential removal while
+  wrapper-auth rotation remains fail-closed;
+- v1 request deadlines durably request cancellation, stop new brokered effects,
+  and reach `OutcomeUnknown` only after the bounded settlement window;
+- deterministic v1 frame-authority violations terminalize as protocol
+  violations while transport and durable-store failures remain retryable.
 
 ### 9.5 Retirement
 

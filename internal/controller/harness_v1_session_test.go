@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -17,6 +18,8 @@ import (
 type harnessV1SessionFenceStore struct {
 	store.SessionControlStore
 	controls        []store.SessionControl
+	getErrors       map[int]error
+	acquireErr      error
 	getCalls        int
 	acquireCalls    int
 	createTurnCalls int
@@ -27,14 +30,18 @@ func (s *harnessV1SessionFenceStore) GetSessionControl(
 	string,
 	string,
 ) (*store.SessionControl, error) {
+	call := s.getCalls
+	s.getCalls++
+	if err := s.getErrors[call]; err != nil {
+		return nil, err
+	}
 	if len(s.controls) == 0 {
 		return nil, store.ErrNotFound
 	}
-	index := s.getCalls
+	index := call
 	if index >= len(s.controls) {
 		index = len(s.controls) - 1
 	}
-	s.getCalls++
 	return copyHarnessV1SessionControl(s.controls[index]), nil
 }
 
@@ -43,6 +50,9 @@ func (s *harnessV1SessionFenceStore) AcquireSessionMutationLease(
 	request store.AcquireSessionMutationLeaseRequest,
 ) (*store.SessionControl, error) {
 	s.acquireCalls++
+	if s.acquireErr != nil {
+		return nil, s.acquireErr
+	}
 	control := *copyHarnessV1SessionControl(s.controls[len(s.controls)-1])
 	if control.SessionUID != request.SessionUID {
 		return nil, store.ErrConflict
@@ -96,8 +106,8 @@ func TestPrepareHarnessV1TaskSessionRechecksFrozenControlBeforeAcquire(t *testin
 	defer closeStore()
 
 	err := dispatcher.prepareHarnessV1TaskSession(context.Background(), task, verified, attempt, fence)
-	if err == nil || !errors.Is(err, store.ErrConflict) {
-		t.Fatalf("stale frozen Session control error = %v, want ErrConflict", err)
+	if err == nil || !errors.Is(err, store.ErrConflict) || !isPermanentHarnessV1PreSubmitSessionError(err) {
+		t.Fatalf("stale frozen Session control error = %v, want permanent ErrConflict", err)
 	}
 	if bootstrap.ControlVersion != initial.Version || controls.acquireCalls != 0 {
 		t.Fatalf("frozen version=%d initial=%d acquire calls=%d, want no acquire", bootstrap.ControlVersion, initial.Version, controls.acquireCalls)
@@ -113,8 +123,8 @@ func TestPrepareHarnessV1TaskSessionRejectsRecreatedSessionUID(t *testing.T) {
 	defer closeStore()
 
 	err := dispatcher.prepareHarnessV1TaskSession(context.Background(), task, verified, attempt, fence)
-	if err == nil || !errors.Is(err, store.ErrConflict) {
-		t.Fatalf("recreated Session UID error = %v, want ErrConflict", err)
+	if err == nil || !errors.Is(err, store.ErrConflict) || !isPermanentHarnessV1PreSubmitSessionError(err) {
+		t.Fatalf("recreated Session UID error = %v, want permanent ErrConflict", err)
 	}
 	if controls.acquireCalls != 0 {
 		t.Fatalf("acquire calls after Session recreation = %d, want 0", controls.acquireCalls)
@@ -131,11 +141,70 @@ func TestPrepareHarnessV1TaskSessionNewUIDMustWinCreation(t *testing.T) {
 	defer closeStore()
 
 	err := dispatcher.prepareHarnessV1TaskSession(context.Background(), task, verified, attempt, fence)
-	if err == nil || !errors.Is(err, store.ErrConflict) {
-		t.Fatalf("competing new Session UID error = %v, want ErrConflict", err)
+	if err == nil || !errors.Is(err, store.ErrConflict) || !isPermanentHarnessV1PreSubmitSessionError(err) {
+		t.Fatalf("competing new Session UID error = %v, want permanent ErrConflict", err)
 	}
 	if controls.acquireCalls != 0 {
 		t.Fatalf("acquire calls after losing Session creation = %d, want 0", controls.acquireCalls)
+	}
+}
+
+func TestPrepareHarnessV1TaskSessionClassifiesAcquireWinnerAsPermanent(t *testing.T) {
+	_, initial, task, verified, attempt := harnessV1SessionFenceFixture(t, false)
+	advanced := initial
+	advanced.Version++
+	controls := &harnessV1SessionFenceStore{
+		controls:   []store.SessionControl{initial, initial, initial, advanced},
+		acquireErr: fmt.Errorf("lease compare-and-swap: %w", store.ErrConflict),
+	}
+	dispatcher, fence, closeStore := harnessV1SessionFenceDispatcher(t, controls, task)
+	defer closeStore()
+
+	err := dispatcher.prepareHarnessV1TaskSession(context.Background(), task, verified, attempt, fence)
+	if err == nil || !errors.Is(err, store.ErrConflict) || !isPermanentHarnessV1PreSubmitSessionError(err) {
+		t.Fatalf("acquire winner error = %v, want permanent ErrConflict", err)
+	}
+	if controls.acquireCalls != 1 || controls.createTurnCalls != 0 {
+		t.Fatalf("acquire winner calls acquire=%d createTurn=%d, want 1/0", controls.acquireCalls, controls.createTurnCalls)
+	}
+}
+
+func TestPrepareHarnessV1TaskSessionKeepsUnchangedAcquireConflictRetryable(t *testing.T) {
+	_, initial, task, verified, attempt := harnessV1SessionFenceFixture(t, false)
+	controls := &harnessV1SessionFenceStore{
+		controls:   []store.SessionControl{initial},
+		acquireErr: fmt.Errorf("stale controller epoch: %w", store.ErrConflict),
+	}
+	dispatcher, fence, closeStore := harnessV1SessionFenceDispatcher(t, controls, task)
+	defer closeStore()
+
+	err := dispatcher.prepareHarnessV1TaskSession(context.Background(), task, verified, attempt, fence)
+	if err == nil || !errors.Is(err, store.ErrConflict) || isPermanentHarnessV1PreSubmitSessionError(err) {
+		t.Fatalf("unchanged acquire conflict = %v, want retryable ErrConflict", err)
+	}
+	if controls.acquireCalls != 1 || controls.createTurnCalls != 0 {
+		t.Fatalf("unchanged conflict calls acquire=%d createTurn=%d, want 1/0", controls.acquireCalls, controls.createTurnCalls)
+	}
+}
+
+func TestPrepareHarnessV1TaskSessionKeepsFailedConflictRecheckRetryable(t *testing.T) {
+	_, initial, task, verified, attempt := harnessV1SessionFenceFixture(t, false)
+	recheckErr := errors.New("temporary Session API read failure")
+	controls := &harnessV1SessionFenceStore{
+		controls:   []store.SessionControl{initial},
+		getErrors:  map[int]error{3: recheckErr},
+		acquireErr: fmt.Errorf("lease compare-and-swap: %w", store.ErrConflict),
+	}
+	dispatcher, fence, closeStore := harnessV1SessionFenceDispatcher(t, controls, task)
+	defer closeStore()
+
+	err := dispatcher.prepareHarnessV1TaskSession(context.Background(), task, verified, attempt, fence)
+	if err == nil || !errors.Is(err, store.ErrConflict) || !errors.Is(err, recheckErr) ||
+		isPermanentHarnessV1PreSubmitSessionError(err) {
+		t.Fatalf("failed conflict recheck = %v, want retryable joined error", err)
+	}
+	if controls.acquireCalls != 1 || controls.createTurnCalls != 0 {
+		t.Fatalf("failed recheck calls acquire=%d createTurn=%d, want 1/0", controls.acquireCalls, controls.createTurnCalls)
 	}
 }
 
@@ -217,8 +286,21 @@ func TestValidateFrozenHarnessV1SessionControlRejectsForeignRetryAdvance(t *test
 		task,
 		attempt,
 	)
-	if err == nil || !errors.Is(err, store.ErrConflict) {
-		t.Fatalf("foreign retry advance error = %v, want ErrConflict", err)
+	if err == nil || !errors.Is(err, store.ErrConflict) || !isPermanentHarnessV1PreSubmitSessionError(err) {
+		t.Fatalf("foreign retry advance error = %v, want permanent ErrConflict", err)
+	}
+}
+
+func TestFinalizeHarnessV1TaskSessionDoesNotRequireTurnAfterSessionConflict(t *testing.T) {
+	_, _, task, verified, attempt := harnessV1SessionFenceFixture(t, false)
+	attempt.State = store.HarnessV1AttemptRejected
+	attempt.TerminalReason = harnessV1ReasonSessionConflict
+
+	settled, err := (&HarnessV1Dispatcher{}).finalizeHarnessV1TaskSession(
+		context.Background(), task, verified, attempt, store.ControllerEpochFence{}, false,
+	)
+	if err != nil || settled {
+		t.Fatalf("finalize pre-submit Session conflict = settled:%t err:%v, want false/nil", settled, err)
 	}
 }
 

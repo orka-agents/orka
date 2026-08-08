@@ -422,7 +422,7 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 	}
 	request, frozenTool, err := parseHarnessV1BrokeredToolCall(frame, turn, verified.body)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errHarnessV1FrameAuthorityViolation, err)
 	}
 	reader := d.APIReader
 	if reader == nil {
@@ -437,14 +437,14 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 	}
 	digest, err := harnessV1BrokeredToolDefinitionDigest(tool)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: brokered harness v1 Tool %q is invalid: %v", errHarnessV1FrameAuthorityViolation, request.ToolName, err)
 	}
 	if string(tool.UID) != frozenTool.UID || tool.Generation != frozenTool.Generation || digest != frozenTool.DefinitionDigest ||
 		tool.Spec.BrokeredToolClass != frozenTool.BrokeredClass || !tool.DeletionTimestamp.IsZero() {
-		return fmt.Errorf("brokered harness v1 Tool %q changed after binding", request.ToolName)
+		return fmt.Errorf("%w: brokered harness v1 Tool %q changed after binding", errHarnessV1FrameAuthorityViolation, request.ToolName)
 	}
 	if err := validateHarnessV1BrokeredToolInput(frozenTool.Parameters, request.Input); err != nil {
-		return fmt.Errorf("validate brokered harness v1 Tool %q input: %w", request.ToolName, err)
+		return fmt.Errorf("%w: validate brokered harness v1 Tool %q input: %v", errHarnessV1FrameAuthorityViolation, request.ToolName, err)
 	}
 	identity := harnessV1BrokeredToolEffectIdentity(task, turn, request.ToolCallID)
 	effectRequest := map[string]any{

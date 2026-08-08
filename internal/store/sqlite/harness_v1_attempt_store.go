@@ -241,7 +241,7 @@ func harnessV1AttemptHasNoSessionSideEffect(attempt store.HarnessV1Attempt) bool
 		return false
 	}
 	switch attempt.TerminalReason {
-	case "BackendDisabled", "CredentialChanged", "InvalidBinding":
+	case "BackendDisabled", "CredentialChanged", "InvalidBinding", "SessionConflict":
 		return true
 	default:
 		return false

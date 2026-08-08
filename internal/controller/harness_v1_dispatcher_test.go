@@ -1110,6 +1110,68 @@ func TestHarnessV1DispatcherRejectsNonIncreasingFrameSequences(t *testing.T) {
 	}
 }
 
+func TestHarnessV1DispatcherClassifiesDeterministicFrameAuthorityViolations(t *testing.T) {
+	tests := []struct {
+		name  string
+		frame func(harness.StartTurnRequest) harness.HarnessEventFrame
+	}{
+		{
+			name: "identity mismatch",
+			frame: func(request harness.StartTurnRequest) harness.HarnessEventFrame {
+				return harness.HarnessEventFrame{
+					Version: harness.ProtocolVersion, Type: harness.FrameRuntimeOutput,
+					RuntimeSessionID: request.RuntimeSessionID, TurnID: "different-turn",
+					CorrelationID: request.CorrelationID, Seq: 1, ContentText: "progress",
+				}
+			},
+		},
+		{
+			name: "approval request",
+			frame: func(request harness.StartTurnRequest) harness.HarnessEventFrame {
+				return harness.HarnessEventFrame{
+					Version: harness.ProtocolVersion, Type: harness.FrameApprovalRequested,
+					RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID,
+					CorrelationID: request.CorrelationID, Seq: 1,
+				}
+			},
+		},
+		{
+			name: "unauthorized continuation",
+			frame: func(request harness.StartTurnRequest) harness.HarnessEventFrame {
+				return harness.HarnessEventFrame{
+					Version: harness.ProtocolVersion, Type: harness.FrameToolCallRequested,
+					RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID,
+					CorrelationID: request.CorrelationID, Seq: 1,
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newHarnessV1DispatcherStateFixture(t)
+			protocolClient := &recordingHarnessV1RecoveryClient{stream: func(
+				_ context.Context,
+				_ harness.HarnessTurnID,
+				_ int64,
+				onFrame func(harness.HarnessEventFrame) error,
+			) error {
+				return onFrame(test.frame(fixture.request))
+			}}
+
+			if err := fixture.dispatcher.streamAcceptedAttempt(
+				fixture.ctx, fixture.task, fixture.verified, protocolClient,
+				fixture.request, fixture.attempt, fixture.fence,
+			); err != nil {
+				t.Fatalf("streamAcceptedAttempt: %v", err)
+			}
+			persisted := assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptOutcomeUnknown)
+			if persisted.TerminalReason != harnessV1ReasonProtocolViolation {
+				t.Fatalf("terminal reason = %q, want %q", persisted.TerminalReason, harnessV1ReasonProtocolViolation)
+			}
+		})
+	}
+}
+
 func TestHarnessV1DispatcherTerminalFrameWinsOverTrailingStreamError(t *testing.T) {
 	fixture := newHarnessV1DispatcherStateFixture(t)
 	trailingErr := errors.New("stream disconnected after terminal frame")
@@ -1262,6 +1324,104 @@ func TestHarnessV1DispatcherBoundedStreamPollAllowsCancellationFollowUp(t *testi
 				)
 			}
 		})
+	}
+}
+
+func TestHarnessV1DispatcherDeadlineDurablyRequestsAndRetriesCancellation(t *testing.T) {
+	fixture := newHarnessV1DispatcherStateFixture(t)
+	fixture.dispatcher.Interval = time.Second
+	fixture.request.Deadline = time.Now().UTC().Add(100 * time.Millisecond)
+	protocolClient := &recordingHarnessV1RecoveryClient{}
+	protocolClient.cancel = func(_ context.Context, request harness.CancelTurnRequest) (*harness.CancelTurnResponse, error) {
+		if request.Reason != "Task deadline exceeded" || request.TurnID != fixture.request.TurnID {
+			t.Fatalf("deadline cancellation = %#v", request)
+		}
+		return &harness.CancelTurnResponse{Accepted: true}, nil
+	}
+	protocolClient.stream = func(
+		ctx context.Context,
+		_ harness.HarnessTurnID,
+		_ int64,
+		onFrame func(harness.HarnessEventFrame) error,
+	) error {
+		if protocolClient.streamCalls == 1 {
+			deadline, ok := ctx.Deadline()
+			if !ok || deadline.After(fixture.request.Deadline.Add(10*time.Millisecond)) {
+				t.Fatalf("first stream deadline = %v, %t; want immutable request deadline %v", deadline, ok, fixture.request.Deadline)
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return onFrame(harness.HarnessEventFrame{
+			Version: harness.ProtocolVersion, Type: harness.FrameTurnCancelled,
+			RuntimeSessionID: fixture.request.RuntimeSessionID, TurnID: fixture.request.TurnID,
+			CorrelationID: fixture.request.CorrelationID, Seq: 1,
+		})
+	}
+
+	if err := fixture.dispatcher.streamAcceptedAttempt(
+		fixture.ctx, fixture.task, fixture.verified, protocolClient,
+		fixture.request, fixture.attempt, fixture.fence,
+	); err != nil {
+		t.Fatalf("deadline stream poll: %v", err)
+	}
+	fixture.attempt = assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptCancelRequested)
+	if fixture.attempt.CancelRequestedAt == nil || protocolClient.cancelCalls != 1 || protocolClient.streamCalls != 1 {
+		t.Fatalf("deadline boundary = attempt %+v cancel=%d stream=%d", fixture.attempt, protocolClient.cancelCalls, protocolClient.streamCalls)
+	}
+
+	if err := fixture.dispatcher.streamAcceptedAttempt(
+		fixture.ctx, fixture.task, fixture.verified, protocolClient,
+		fixture.request, fixture.attempt, fixture.fence,
+	); err != nil {
+		t.Fatalf("deadline cancellation retry: %v", err)
+	}
+	assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptCancelled)
+	if protocolClient.cancelCalls != 2 || protocolClient.streamCalls != 2 {
+		t.Fatalf("deadline cancellation calls = cancel=%d stream=%d, want 2/2", protocolClient.cancelCalls, protocolClient.streamCalls)
+	}
+}
+
+func TestHarnessV1DispatcherExpiredDeadlineCancellationWindowBecomesOutcomeUnknown(t *testing.T) {
+	fixture := newHarnessV1DispatcherStateFixture(t)
+	now := time.Now().UTC()
+	requestedAt := now.Add(-defaultHarnessV1CancellationSettlementTimeout - time.Second)
+	fixture.request.Deadline = requestedAt.Add(-time.Second)
+	var err error
+	fixture.attempt, err = fixture.dispatcher.transitionAttempt(
+		fixture.ctx, fixture.attempt, fixture.fence,
+		store.HarnessV1AttemptCancelRequested, "test-expired-deadline-cancellation",
+		store.HarnessV1AttemptUpdates{CancelRequestedAt: &requestedAt},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protocolClient := &recordingHarnessV1RecoveryClient{status: &harness.DurableTurnStatus{
+		TurnID: fixture.attempt.TurnID, TaskUID: fixture.attempt.TaskUID,
+		Attempt: fixture.attempt.Attempt, RequestDigest: fixture.attempt.RequestDigest,
+		State: harness.DurableTurnAccepted,
+	}}
+	protocolClient.cancel = func(context.Context, harness.CancelTurnRequest) (*harness.CancelTurnResponse, error) {
+		t.Fatal("CancelTurn was retried after the bounded settlement window")
+		return nil, nil
+	}
+	protocolClient.stream = func(context.Context, harness.HarnessTurnID, int64, func(harness.HarnessEventFrame) error) error {
+		t.Fatal("frames were streamed after the bounded settlement window")
+		return nil
+	}
+
+	if err := fixture.dispatcher.recoverActiveAttempt(
+		fixture.ctx, fixture.task, fixture.verified, protocolClient,
+		fixture.request, fixture.attempt, fixture.fence,
+	); err != nil {
+		t.Fatalf("recover expired deadline cancellation: %v", err)
+	}
+	persisted := assertHarnessV1AttemptState(t, fixture, store.HarnessV1AttemptOutcomeUnknown)
+	if persisted.TerminalReason != harnessV1ReasonOutcomeUnknown {
+		t.Fatalf("terminal reason = %q, want %q", persisted.TerminalReason, harnessV1ReasonOutcomeUnknown)
+	}
+	if protocolClient.statusCalls != 1 || protocolClient.cancelCalls != 0 || protocolClient.streamCalls != 0 {
+		t.Fatalf("expired cancellation calls = status=%d cancel=%d stream=%d, want 1/0/0", protocolClient.statusCalls, protocolClient.cancelCalls, protocolClient.streamCalls)
 	}
 }
 
@@ -1555,7 +1715,12 @@ func TestHarnessV1DispatcherCancellationSkipsPersistedAndLiveBrokeredToolCalls(t
 		executeCalls++
 		return json.RawMessage(`{"unexpected":true}`), nil
 	})
-	protocolClient := &recordingHarnessV1RecoveryClient{stream: func(
+	protocolClient := &recordingHarnessV1RecoveryClient{cancel: func(
+		context.Context,
+		harness.CancelTurnRequest,
+	) (*harness.CancelTurnResponse, error) {
+		return &harness.CancelTurnResponse{Accepted: true}, nil
+	}, stream: func(
 		_ context.Context,
 		_ harness.HarnessTurnID,
 		afterSeq int64,
@@ -1746,6 +1911,67 @@ func TestHarnessV1DispatcherRetriesSettlementAcknowledgementBeforeProjection(t *
 			"settlement recovery calls: settlementAck=%d start=%d status=%d, want 2/0/0",
 			protocolClient.settleCalls, protocolClient.startCalls, protocolClient.statusCalls,
 		)
+	}
+}
+
+func TestHarnessV1DispatcherSettlementAcknowledgementDoesNotResolveProviderCredentials(t *testing.T) {
+	fixture := newHarnessV1DispatcherStateFixture(t)
+	receipt, err := harness.DurableTurnTerminalReceiptFromFrame(
+		harnessV1CompletedFrame(fixture.request, "settled"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptDigest, err := harness.DurableTurnTerminalReceiptDigest(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := fixture.dispatcher.finishAttemptDurably(
+		fixture.ctx, fixture.attempt, fixture.fence,
+		store.HarnessV1AttemptSucceeded, "Succeeded", receiptDigest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.verified.body.HarnessV1.CredentialRefs = []agentExecutionSnapshotSecretRef{{
+		Role: "provider", Namespace: fixture.task.Namespace, Name: "deleted-provider-credentials",
+		UID: "deleted-provider-uid", ResourceVersion: "1", Keys: []string{"OPENAI_API_KEY"},
+	}}
+	protocolClient := &recordingHarnessV1RecoveryClient{settle: func(
+		_ context.Context,
+		request harness.TurnSettlementAcknowledgementRequest,
+	) error {
+		if request.TurnID != fixture.request.TurnID || request.RequestDigest != terminal.RequestDigest ||
+			request.TerminalReceiptDigest != terminal.TerminalReceiptDigest {
+			t.Fatalf("settlement acknowledgement = %+v, want durable attempt fences", request)
+		}
+		return nil
+	}}
+	fixture.dispatcher.clientFactory = func(endpoint, bearer string, _ *http.Client) (harnessV1ProtocolClient, error) {
+		if endpoint != fixture.verified.body.HarnessV1.Endpoint || strings.TrimSpace(bearer) == "" {
+			t.Fatalf("wrapper client transport = endpoint %q bearerPresent=%t", endpoint, strings.TrimSpace(bearer) != "")
+		}
+		return protocolClient, nil
+	}
+
+	if err := fixture.dispatcher.acknowledgeDurableHarnessV1Settlement(
+		fixture.ctx, fixture.task, fixture.verified, terminal, nil, nil,
+	); err != nil {
+		t.Fatalf("acknowledge without provider credentials: %v", err)
+	}
+	if protocolClient.settleCalls != 1 || protocolClient.startCalls != 0 || protocolClient.statusCalls != 0 {
+		t.Fatalf("settlement calls = settle=%d start=%d status=%d, want 1/0/0", protocolClient.settleCalls, protocolClient.startCalls, protocolClient.statusCalls)
+	}
+
+	fixture.verified.body.HarnessV1.AuthSecretResourceVersion = "rotated-wrapper-auth"
+	err = fixture.dispatcher.acknowledgeDurableHarnessV1Settlement(
+		fixture.ctx, fixture.task, fixture.verified, terminal, nil, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "frozen harness auth Secret identity changed") {
+		t.Fatalf("wrapper auth rotation error = %v, want frozen identity rejection", err)
+	}
+	if protocolClient.settleCalls != 1 {
+		t.Fatalf("settlement was attempted after wrapper auth rotation: %d calls", protocolClient.settleCalls)
 	}
 }
 
