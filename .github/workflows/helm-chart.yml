@@ -155,6 +155,7 @@ jobs:
             --set providerProxy.enabled=false
             --set-string "harnessV1.image.digest=${harness_v1_digest}"
             --set-string harnessV1.auth.existingSecret=harness-wrapper-auth
+            --set-string harnessV1.tls.existingSecret=harness-wrapper-tls
           )
           helm template harness-v1 manifest_staging/charts/orka "${harness_v1_args[@]}" > "${harness_v1_render}"
           helm template harness-v1 manifest_staging/charts/orka "${harness_v1_args[@]}" --show-only templates/harness-wrapper-deployment.yaml > "${harness_v1_deployment}"
