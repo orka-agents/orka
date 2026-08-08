@@ -20,6 +20,7 @@
 {{- $existingPullPolicy := "" }}
 {{- $existingAuthSecret := "" }}
 {{- $existingAuthKey := "" }}
+{{- $existingTLSSecret := "" }}
 {{- $desiredAuthSecret := .Values.harnessV1.auth.existingSecret }}
 {{- $desiredAuthKey := .Values.harnessV1.auth.tokenKey }}
 {{- if $existingWrapper }}
@@ -30,6 +31,7 @@
 {{- $existingPullPolicy = include "orka.harnessV1ExistingImagePullPolicy" $existingWrapper }}
 {{- $existingAuthSecret = include "orka.harnessV1ExistingAuthSecretName" $existingWrapper }}
 {{- $existingAuthKey = include "orka.harnessV1ExistingAuthSecretKey" $existingWrapper }}
+{{- $existingTLSSecret = include "orka.harnessV1ExistingTLSSecretName" $existingWrapper }}
 {{- else if eq $existingControllerState "enabled" }}
 {{- $existingRouteEnabled = true }}
 {{- $existingAuthSecret = include "orka.harnessV1ExistingControllerAuthSecretName" $existingController }}
@@ -146,14 +148,17 @@ spec:
           args:
             - drain
             - {{ printf "--endpoint=https://%s.%s.svc:8080" $wrapperName .Release.Namespace | quote }}
-            - --bearer-token-file=/var/run/orka/harness-wrapper/token
-            - --ca-file=/var/run/orka/harness-wrapper/ca.crt
+            - --bearer-token-file=/var/run/orka/harness-wrapper-auth/token
+            - --ca-file=/var/run/orka/harness-wrapper-tls/ca.crt
             - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
             - {{ printf "--poll-interval=%s" .Values.harnessV1.upgradeDrain.pollInterval | quote }}
             - {{ printf "--next-generation=%s" $rolloverGeneration | quote }}
           volumeMounts:
             - name: auth
-              mountPath: /var/run/orka/harness-wrapper
+              mountPath: /var/run/orka/harness-wrapper-auth
+              readOnly: true
+            - name: tls
+              mountPath: /var/run/orka/harness-wrapper-tls
               readOnly: true
             - name: tmp
               mountPath: /tmp
@@ -177,6 +182,11 @@ spec:
             items:
               - key: {{ $existingAuthKey | quote }}
                 path: token
+        - name: tls
+          secret:
+            secretName: {{ $existingTLSSecret | quote }}
+            defaultMode: 0440
+            items:
               - key: ca.crt
                 path: ca.crt
         - name: tmp
@@ -286,13 +296,16 @@ spec:
           args:
             - abort-rollover
             - {{ printf "--endpoint=https://%s.%s.svc:8080" $wrapperName .Release.Namespace | quote }}
-            - --bearer-token-file=/var/run/orka/harness-wrapper/token
-            - --ca-file=/var/run/orka/harness-wrapper/ca.crt
+            - --bearer-token-file=/var/run/orka/harness-wrapper-auth/token
+            - --ca-file=/var/run/orka/harness-wrapper-tls/ca.crt
             - {{ printf "--expected-generation=%s" $desiredGeneration | quote }}
             - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
           volumeMounts:
             - name: auth
-              mountPath: /var/run/orka/harness-wrapper
+              mountPath: /var/run/orka/harness-wrapper-auth
+              readOnly: true
+            - name: tls
+              mountPath: /var/run/orka/harness-wrapper-tls
               readOnly: true
             - name: tmp
               mountPath: /tmp
@@ -316,6 +329,11 @@ spec:
             items:
               - key: {{ .Values.harnessV1.auth.tokenKey | quote }}
                 path: token
+        - name: tls
+          secret:
+            secretName: {{ .Values.harnessV1.tls.existingSecret | quote }}
+            defaultMode: 0440
+            items:
               - key: ca.crt
                 path: ca.crt
         - name: tmp
@@ -425,14 +443,17 @@ spec:
           args:
             - drain
             - {{ printf "--endpoint=https://%s.%s.svc:8080" $wrapperName .Release.Namespace | quote }}
-            - --bearer-token-file=/var/run/orka/harness-wrapper/token
-            - --ca-file=/var/run/orka/harness-wrapper/ca.crt
+            - --bearer-token-file=/var/run/orka/harness-wrapper-auth/token
+            - --ca-file=/var/run/orka/harness-wrapper-tls/ca.crt
             - {{ printf "--timeout=%s" .Values.harnessV1.upgradeDrain.timeout | quote }}
             - {{ printf "--poll-interval=%s" .Values.harnessV1.upgradeDrain.pollInterval | quote }}
             - {{ printf "--next-generation=retired:%s" $desiredGeneration | quote }}
           volumeMounts:
             - name: auth
-              mountPath: /var/run/orka/harness-wrapper
+              mountPath: /var/run/orka/harness-wrapper-auth
+              readOnly: true
+            - name: tls
+              mountPath: /var/run/orka/harness-wrapper-tls
               readOnly: true
             - name: tmp
               mountPath: /tmp
@@ -456,6 +477,11 @@ spec:
             items:
               - key: {{ .Values.harnessV1.auth.tokenKey | quote }}
                 path: token
+        - name: tls
+          secret:
+            secretName: {{ .Values.harnessV1.tls.existingSecret | quote }}
+            defaultMode: 0440
+            items:
               - key: ca.crt
                 path: ca.crt
         - name: tmp

@@ -28,6 +28,7 @@ func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
 				args = append(args,
 					"--set-string", "harnessV1.image.digest="+digest,
 					"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+					"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 				)
 			}
 
@@ -61,6 +62,9 @@ func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
 				if selector == nil || selector.MatchLabels["orka.ai/controller-mode"] != mode {
 					t.Errorf("%s execution-mode selector = %#v, want %q", webhook.Name, selector, mode)
 				}
+				if selector == nil || selector.MatchLabels["kubernetes.io/metadata.name"] != "orka-test" {
+					t.Errorf("%s namespace selector = %#v, want orka-test", webhook.Name, selector)
+				}
 			}
 
 			_, hasTaskWorkspace := webhooks["task-workspace-class."+mode+".orka.ai"]
@@ -70,6 +74,46 @@ func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
 				t.Fatalf("workspace webhooks present = task:%t tool:%t, want %t", hasTaskWorkspace, hasToolWorkspace, wantWorkspace)
 			}
 		})
+	}
+}
+
+func TestControllerWebhooksDoNotOverlapSameModeReleasesInDifferentNamespaces(t *testing.T) {
+	const mode = "harness-v2"
+	selectorsByNamespace := make(map[string]map[string]map[string]string)
+	for _, namespace := range []string{"orka-one", "orka-two"} {
+		output := requireHelmRender(t,
+			"--namespace", namespace,
+			"--set-string", "controller.mode="+mode,
+			"--set-string", "controller.watchNamespace="+namespace,
+			"--show-only", "templates/controller-validating-webhook.yaml",
+		)
+
+		configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
+		if err := yaml.Unmarshal([]byte(output), &configuration); err != nil {
+			t.Fatalf("decode controller validating webhook configuration in namespace %q: %v", namespace, err)
+		}
+		selectorsByNamespace[namespace] = make(map[string]map[string]string, len(configuration.Webhooks))
+		for _, webhook := range configuration.Webhooks {
+			selector := webhook.NamespaceSelector
+			if strings.HasPrefix(webhook.Name, "namespace-mode.") {
+				selector = webhook.ObjectSelector
+			}
+			if selector == nil {
+				t.Fatalf("%s selector in namespace %q is nil", webhook.Name, namespace)
+			}
+			selectorsByNamespace[namespace][webhook.Name] = selector.MatchLabels
+			if selector.MatchLabels["orka.ai/controller-mode"] != mode ||
+				selector.MatchLabels["kubernetes.io/metadata.name"] != namespace {
+				t.Fatalf("%s selector in namespace %q = %#v", webhook.Name, namespace, selector.MatchLabels)
+			}
+		}
+	}
+
+	for webhookName, first := range selectorsByNamespace["orka-one"] {
+		second := selectorsByNamespace["orka-two"][webhookName]
+		if reflect.DeepEqual(first, second) {
+			t.Errorf("%s has overlapping selectors across namespaces: %#v", webhookName, selectorsByNamespace)
+		}
 	}
 }
 

@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -51,8 +52,9 @@ const (
 // AgentRuntimeReconciler reconciles external harness v1 and v2 registry entries.
 type AgentRuntimeReconciler struct {
 	client.Client
-	APIReader client.Reader
-	Scheme    *k8sruntime.Scheme
+	APIReader           client.Reader
+	Scheme              *k8sruntime.Scheme
+	HarnessV1HTTPClient *http.Client
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch;create;update;patch;delete
@@ -170,6 +172,7 @@ func (r *AgentRuntimeReconciler) probeHarnessV1AgentRuntime(
 	target := v1conformance.Target{
 		BaseURL:        runtime.Spec.Deployment.Endpoint,
 		BearerToken:    auth.bearerToken,
+		HTTPClient:     r.HarnessV1HTTPClient,
 		ControlTimeout: agentRuntimeProbeTimeout,
 		RequireAuth:    true,
 	}

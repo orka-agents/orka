@@ -243,13 +243,19 @@ The v1 release is an isolated compatibility installation. It requires:
   `--controller-mode=harness-v1`);
 - a dedicated, labeled, non-empty watch namespace;
 - the reviewed digest-pinned wrapper image and its private Service;
-- wrapper authentication/TLS material and a dedicated durable ledger;
+- separate wrapper bearer-auth and rotatable TLS Secrets, plus a dedicated
+  durable ledger;
 - its own controller store, backups, ServiceAccount, and API endpoint;
 - no ACP RuntimePool data plane.
 
 Wrapper upgrades still require a successful wrapper drain before changing its
 Pod template. That drain protects v1 turn state; it is not a third controller
 mode and does not open migration to v2.
+
+The bearer Secret is immutable while v1 work exists because bindings freeze
+its UID and resourceVersion. Certificate renewal changes only the separate TLS
+Secret and follows the same drained Pod-template rollover; it must never mutate
+the bearer authority as a side effect.
 
 ### 5.3 Harness v2 release
 

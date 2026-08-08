@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"slices"
 	"strconv"
@@ -425,7 +426,7 @@ func main() {
 	flag.StringVar(&harnessV1Endpoint, "harness-v1-endpoint", os.Getenv("ORKA_HARNESS_V1_ENDPOINT"),
 		"Base URL of the built-in harness v1 wrapper Service.")
 	flag.StringVar(&harnessV1CAFile, "harness-v1-ca-file", os.Getenv("ORKA_HARNESS_V1_CA_FILE"),
-		"CA bundle used to authenticate the built-in harness v1 wrapper Service.")
+		"CA bundle used to authenticate built-in and registered harness v1 Services.")
 	flag.StringVar(&harnessV1AuthSecretNamespace, "harness-v1-auth-secret-namespace",
 		os.Getenv("ORKA_HARNESS_V1_AUTH_SECRET_NAMESPACE"),
 		"Namespace of the dedicated harness v1 wrapper bearer-token Secret.")
@@ -1424,13 +1425,15 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
 	}
+	var harnessV1HTTPClient *http.Client
 	if harnessV1Enabled {
 		if controllerEpochManager == nil || agentExecutionSnapshotStore == nil {
 			setupLog.Error(errors.New("harness v1 requires controller epoch and encrypted snapshot stores"),
 				"unable to add harness v1 dispatcher")
 			os.Exit(1)
 		}
-		harnessV1HTTPClient, clientErr := newHarnessV1TLSHTTPClient(harnessV1CAFile)
+		var clientErr error
+		harnessV1HTTPClient, clientErr = newHarnessV1TLSHTTPClient(harnessV1CAFile)
 		if clientErr != nil {
 			setupLog.Error(clientErr, "unable to configure harness v1 TLS client")
 			os.Exit(1)
@@ -1625,9 +1628,10 @@ func main() {
 	}
 
 	if err := (&controller.AgentRuntimeReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Scheme:    mgr.GetScheme(),
+		Client:              mgr.GetClient(),
+		APIReader:           mgr.GetAPIReader(),
+		Scheme:              mgr.GetScheme(),
+		HarnessV1HTTPClient: harnessV1HTTPClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRuntime")
 		os.Exit(1)

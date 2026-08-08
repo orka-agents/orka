@@ -387,13 +387,19 @@ harnessV1:
   auth:
     # Use a dedicated operator-created Secret. Bearer credentials are never
     # accepted through Helm values or emitted into rendered release manifests.
-    # The Secret must also contain tls.crt, tls.key, and ca.crt. Its serving
-    # certificate must authenticate both release-scoped Service DNS names:
-    # <release>-orka-agent-harness-wrapper.<namespace>.svc.
     # The Secret source and key are immutable while a harness-v1 wrapper
     # Deployment exists because controller attempts pin its resourceVersion.
     existingSecret: ""
     tokenKey: token
+  tls:
+    # Use a different operator-created Secret containing tls.crt, tls.key, and
+    # ca.crt. Its serving certificate must authenticate the release-scoped
+    # Service DNS name: <release>-orka-agent-harness-wrapper.<namespace>.svc.
+    existingSecret: ""
+    # Bump this non-secret revision whenever certificate data changes without
+    # changing existingSecret. The chart drains the live wrapper before it
+    # restarts both the wrapper and controller onto the new TLS generation.
+    rolloutNonce: ""
   ledger:
     # The admission ledger is always PVC-backed when harness v1 is enabled.
     size: 1Gi

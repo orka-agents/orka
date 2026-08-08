@@ -63,13 +63,16 @@ spec:
         {{- include "orka.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: controller
         orka.ai/network-role: controller
-      {{- if or .Values.annotations (and $harnessV2 .Values.publisher.auth.rolloutNonce) }}
+      {{- if or .Values.annotations (and $harnessV2 .Values.publisher.auth.rolloutNonce) (and $harnessV1 .Values.harnessV1.tls.rolloutNonce) }}
       annotations:
         {{- with .Values.annotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- with .Values.publisher.auth.rolloutNonce }}
         orka.ai/publisher-auth-rollout-nonce: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.harnessV1.tls.rolloutNonce }}
+        orka.ai/harness-v1-tls-rollout-nonce: {{ . | quote }}
         {{- end }}
       {{- end }}
     spec:
@@ -545,15 +548,11 @@ spec:
         {{- if $harnessV1 }}
         - name: harness-v1-tls
           secret:
-            secretName: {{ .Values.harnessV1.auth.existingSecret | quote }}
+            secretName: {{ .Values.harnessV1.tls.existingSecret | quote }}
             defaultMode: 0400
             items:
               - key: ca.crt
                 path: ca.crt
-              - key: tls.crt
-                path: tls.crt
-              - key: tls.key
-                path: tls.key
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

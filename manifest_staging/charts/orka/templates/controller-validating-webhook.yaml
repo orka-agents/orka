@@ -36,6 +36,7 @@ webhooks:
     objectSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
   - name: task-provenance.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -60,6 +61,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
   {{- if eq .Values.controller.mode "harness-v2" }}
   - name: task-workspace-class.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
@@ -85,6 +87,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
   - name: tool-workspace-class.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -109,6 +112,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
   {{- end }}
   - name: agent-contract.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
@@ -134,6 +138,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
   - name: agentruntime-contract.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -158,6 +163,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
   - name: task-execution-authority.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -182,3 +188,4 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}

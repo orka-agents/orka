@@ -40,6 +40,17 @@ The Publisher and SCM egress proxy read their authentication material at process
 
 The nonce is a revision label, not a credential. Never put Secret content in it. A coordinated upgrade may briefly fail closed while Pods roll, but it avoids an indefinite split generation.
 
+The harness-v1 wrapper likewise keeps execution authority and transport
+material separate. `harnessV1.auth.existingSecret` contains only the bearer
+token and is immutable while v1 work exists. `harnessV1.tls.existingSecret`
+contains `tls.crt`, `tls.key`, and `ca.crt`. A TLS Secret name change is a
+wrapper Pod-template change and automatically uses the existing drained
+rollover. For same-name certificate renewal, update the TLS Secret and bump
+`harnessV1.tls.rolloutNonce` in the Helm upgrade; the hook drains the live
+wrapper before both wrapper and controller restart. Keep the updated `ca.crt`
+able to verify the certificate currently being served during that drain, or
+rotate to a versioned TLS Secret so the hook can mount the prior CA.
+
 CRDs are cluster-scoped and shared by every Orka release. Use `--skip-crds`
 only when a designated platform or GitOps workflow already manages compatible
 Orka CRDs for the cluster.

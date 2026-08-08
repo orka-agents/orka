@@ -173,6 +173,7 @@ func requireHarnessV1UpgradeDrainHookRender(t *testing.T, matchesDesiredGenerati
 		matchesDesiredGeneration: matchesDesiredGeneration,
 		authSecret:               "harness-wrapper-auth",
 		authKey:                  "token",
+		tlsSecret:                "harness-wrapper-tls",
 	}, args...)
 	if err != nil {
 		t.Fatalf("helm template forced wrapper upgrade hook failed: %v\n%s", err, output)
@@ -186,6 +187,7 @@ type harnessV1UpgradeState struct {
 	controllerState          string
 	authSecret               string
 	authKey                  string
+	tlsSecret                string
 }
 
 func helmTemplateHarnessV1UpgradeDrainHook(
@@ -214,6 +216,10 @@ func helmTemplateHarnessV1UpgradeDrainHook(
 		existingGeneration = `$desiredGeneration`
 	}
 	currentImage := "registry.example/current-wrapper@sha256:" + strings.Repeat("2", 64)
+	tlsSecret := state.tlsSecret
+	if tlsSecret == "" {
+		tlsSecret = "harness-wrapper-tls"
+	}
 	forcedLookup := `{{- $existingWrapper := dict }}`
 	if !state.wrapperMissing {
 		forcedLookup = strings.Join([]string{
@@ -226,7 +232,8 @@ func helmTemplateHarnessV1UpgradeDrainHook(
 			`"value" ` + existingGeneration + `))))`,
 			`"volumes" (list (dict "name" "auth" "secret"`,
 			`(dict "secretName" "` + state.authSecret + `" "items"`,
-			`(list (dict "key" "` + state.authKey + `" "path" "token")))))))) }}`,
+			`(list (dict "key" "` + state.authKey + `" "path" "token"))))`,
+			`(dict "name" "tls" "secret" (dict "secretName" "` + tlsSecret + `")))))) }}`,
 		}, " ")
 	}
 	forced := strings.Replace(string(hook), lookup, forcedLookup, 1)
@@ -511,6 +518,7 @@ func TestStaticChartRendersOneStaticHarnessMode(t *testing.T) {
 		"--set-string", "controller.mode=harness-v1",
 		"--set-string", "harnessV1.image.digest="+digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 	)
 	for _, marker := range []string{
 		"--controller-mode=harness-v1",
@@ -597,6 +605,7 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 		"--set-string", "harnessV1.upgradeDrain.timeout=9m",
 		"--set-string", "harnessV1.upgradeDrain.pollInterval=3s",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
@@ -658,8 +667,8 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		`command: ["/orka-agent-harness-wrapper"]`,
 		"- drain",
 		`- "--endpoint=https://test-orka-agent-harness-wrapper.orka-test.svc:8080"`,
-		"- --bearer-token-file=/var/run/orka/harness-wrapper/token",
-		"- --ca-file=/var/run/orka/harness-wrapper/ca.crt",
+		"- --bearer-token-file=/var/run/orka/harness-wrapper-auth/token",
+		"- --ca-file=/var/run/orka/harness-wrapper-tls/ca.crt",
 		`- "--timeout=9m"`,
 		`- "--poll-interval=3s"`,
 		`secretName: "harness-wrapper-auth"`,
@@ -726,9 +735,10 @@ func TestStaticChartHarnessV1UpgradeDrainHookIsExistingDeploymentGated(t *testin
 		"helm.sh/hook: post-rollback",
 		"- abort-rollover",
 		`- "--endpoint=https://test-orka-agent-harness-wrapper.orka-test.svc:8080"`,
-		"- --bearer-token-file=/var/run/orka/harness-wrapper/token",
-		"- --ca-file=/var/run/orka/harness-wrapper/ca.crt",
+		"- --bearer-token-file=/var/run/orka/harness-wrapper-auth/token",
+		"- --ca-file=/var/run/orka/harness-wrapper-tls/ca.crt",
 		`secretName: "harness-wrapper-auth"`,
+		`secretName: "harness-wrapper-tls"`,
 		`key: "token"`,
 	} {
 		if !strings.Contains(unchanged, marker) {
@@ -753,6 +763,7 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
@@ -830,6 +841,42 @@ func TestStaticChartHarnessV1RejectsLiveAuthRotation(t *testing.T) {
 	}
 }
 
+func TestStaticChartHarnessV1TLSRotationUsesDrainedRollover(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("1", 64)
+	args := []string{
+		"--set-string", "controller.mode=harness-v1",
+		"--set", "store.persistence.enabled=true",
+		"--set-string", "harnessV1.image.digest=" + digest,
+		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.tls.existingSecret=next-wrapper-tls",
+		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
+		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
+	}
+	rendered, err := helmTemplateHarnessV1UpgradeDrainHook(t, harnessV1UpgradeState{
+		authSecret: "harness-wrapper-auth",
+		authKey:    "token",
+		tlsSecret:  "current-wrapper-tls",
+	}, args...)
+	if err != nil {
+		t.Fatalf("TLS Secret rotation failed to render drained rollover: %v\n%s", err, rendered)
+	}
+	rollover := requireRenderedDocument(t, rendered,
+		"kind: Job",
+		"app.kubernetes.io/component: agent-harness-wrapper-rollover-drain",
+	)
+	if !strings.Contains(rollover, `secretName: "current-wrapper-tls"`) ||
+		strings.Contains(rollover, `secretName: "next-wrapper-tls"`) {
+		t.Fatalf("rollover drain did not retain the live wrapper TLS authority:\n%s", rollover)
+	}
+	abort := requireRenderedDocument(t, rendered,
+		"kind: Job",
+		"app.kubernetes.io/component: agent-harness-wrapper-rollover-abort",
+	)
+	if !strings.Contains(abort, `secretName: "next-wrapper-tls"`) {
+		t.Fatalf("rollback abort did not use the target revision TLS authority:\n%s", abort)
+	}
+}
+
 func TestStaticChartHarnessV1GenerationTracksOnlyPodTemplate(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("3", 64)
 	args := []string{
@@ -837,6 +884,7 @@ func TestStaticChartHarnessV1GenerationTracksOnlyPodTemplate(t *testing.T) {
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--show-only", "templates/harness-wrapper-deployment.yaml",
@@ -852,6 +900,11 @@ func TestStaticChartHarnessV1GenerationTracksOnlyPodTemplate(t *testing.T) {
 	if changedGeneration := harnessV1RenderedGeneration(t, changed); changedGeneration == firstGeneration {
 		t.Fatalf("wrapper Pod-template change preserved generation %s", changedGeneration)
 	}
+	rotated := requireHelmRender(t, append(append([]string{}, args...),
+		"--set-string", "harnessV1.tls.rolloutNonce=certificate-2")...)
+	if rotatedGeneration := harnessV1RenderedGeneration(t, rotated); rotatedGeneration == firstGeneration {
+		t.Fatalf("TLS rollout nonce preserved wrapper generation %s", rotatedGeneration)
+	}
 }
 
 func TestStaticChartHarnessV1UsesOnlyExistingSecretReferences(t *testing.T) {
@@ -861,6 +914,7 @@ func TestStaticChartHarnessV1UsesOnlyExistingSecretReferences(t *testing.T) {
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 	}
@@ -931,11 +985,31 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			wantError: "harnessV1.auth.existingSecret is required when controller.mode=harness-v1",
 		},
 		{
+			name: "missing existing TLS Secret",
+			args: []string{
+				"--set-string", "controller.mode=harness-v1",
+				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+			},
+			wantError: "harnessV1.tls.existingSecret is required when controller.mode=harness-v1",
+		},
+		{
+			name: "shared auth and TLS Secret",
+			args: []string{
+				"--set-string", "controller.mode=harness-v1",
+				"--set-string", "harnessV1.image.digest=" + digest,
+				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-auth",
+			},
+			wantError: "harnessV1.tls.existingSecret must differ from harnessV1.auth.existingSecret",
+		},
+		{
 			name: "missing ledger capacity",
 			args: []string{
 				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 				"--set-string", "harnessV1.ledger.size=",
 			},
 			wantError: "harnessV1.ledger.size is required when controller.mode=harness-v1",
@@ -946,6 +1020,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 				"--set-string", "harnessV1.ledger.retention=",
 			},
 			wantError: "harnessV1.ledger.retention is required when controller.mode=harness-v1",
@@ -956,6 +1031,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 				"--set-string", "harnessV1.ledger.retention=0s",
 			},
 			wantError: "harnessV1.ledger.retention must be a positive Go duration",
@@ -966,6 +1042,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 				"--set-string", "harnessV1.ledger.retention=immediate",
 			},
 			wantError: "harnessV1.ledger.retention must be a positive Go duration",
@@ -976,6 +1053,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 				"--set-string", "harnessV1.ledger.retention=-1h",
 			},
 			wantError: "harnessV1.ledger.retention must be a positive Go duration",
@@ -986,6 +1064,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 				"--set-string", "harnessV1.codexSandboxMode=unrestricted",
 			},
 			wantError: "harnessV1.codexSandboxMode must be read-only, workspace-write, or danger-full-access",
@@ -996,6 +1075,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 				"--set-string", "harnessV1.upgradeDrain.timeout=0s",
 			},
 			wantError: "harnessV1.upgradeDrain.timeout must be a positive Go duration",
@@ -1006,6 +1086,7 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 				"--set-string", "controller.mode=harness-v1",
 				"--set-string", "harnessV1.image.digest=" + digest,
 				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 				"--set-string", "harnessV1.upgradeDrain.pollInterval=immediate",
 			},
 			wantError: "harnessV1.upgradeDrain.pollInterval must be a positive Go duration",
@@ -1031,6 +1112,8 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"--set-string", "controller.mode=harness-v1",
 		"--set-string", "harnessV1.image.digest=" + digest,
 		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
+		"--set-string", "harnessV1.tls.rolloutNonce=certificate-1",
 		"--set-string", "harnessV1.ledger.retention=168h",
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
@@ -1041,8 +1124,9 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"--harness-v1-endpoint=https://test-orka-agent-harness-wrapper.orka-test.svc:8080",
 		"--harness-v1-ca-file=/var/run/orka/harness-v1-tls/ca.crt",
 		"mountPath: /var/run/orka/harness-v1-tls",
-		`secretName: "harness-wrapper-auth"`,
+		`secretName: "harness-wrapper-tls"`,
 		"key: ca.crt",
+		`orka.ai/harness-v1-tls-rollout-nonce: "certificate-1"`,
 	} {
 		if !strings.Contains(controllerDeployment, marker) {
 			t.Fatalf("controller Deployment is missing harness v1 TLS marker %q:\n%s", marker, controllerDeployment)
@@ -1057,10 +1141,12 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"serviceAccountName: test-orka-agent-harness-wrapper",
 		"automountServiceAccountToken: false",
 		"name: https",
+		"name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE",
+		"value: /var/run/orka/harness-wrapper-auth/token",
 		"name: ORKA_HARNESS_WRAPPER_TLS_CERT_FILE",
-		"value: /var/run/orka/harness-wrapper/tls.crt",
+		"value: /var/run/orka/harness-wrapper-tls/tls.crt",
 		"name: ORKA_HARNESS_WRAPPER_TLS_KEY_FILE",
-		"value: /var/run/orka/harness-wrapper/tls.key",
+		"value: /var/run/orka/harness-wrapper-tls/tls.key",
 		"scheme: HTTPS",
 		"name: ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH",
 		"value: /var/lib/orka/harness-v1/admission-ledger.db",
@@ -1070,6 +1156,8 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 		"mountPath: /var/lib/orka/harness-v1",
 		"claimName: test-orka-harness-v1-ledger",
 		`secretName: "harness-wrapper-auth"`,
+		`secretName: "harness-wrapper-tls"`,
+		`orka.ai/harness-v1-tls-rollout-nonce: "certificate-1"`,
 		"key: tls.crt",
 		"key: tls.key",
 		"key: ca.crt",

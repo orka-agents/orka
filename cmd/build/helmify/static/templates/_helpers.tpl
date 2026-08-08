@@ -127,6 +127,10 @@ metadata:
     {{- include "orka.labels" $root | nindent 4 }}
     app.kubernetes.io/component: agent-harness-wrapper
     orka.ai/network-role: harness-v1
+  {{- with $root.Values.harnessV1.tls.rolloutNonce }}
+  annotations:
+    orka.ai/harness-v1-tls-rollout-nonce: {{ . | quote }}
+  {{- end }}
 spec:
   serviceAccountName: {{ include "orka.harnessV1Name" $root }}
   automountServiceAccountToken: false
@@ -149,11 +153,11 @@ spec:
         - name: ORKA_HARNESS_WRAPPER_LISTEN_ADDR
           value: :8080
         - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
-          value: /var/run/orka/harness-wrapper/token
+          value: /var/run/orka/harness-wrapper-auth/token
         - name: ORKA_HARNESS_WRAPPER_TLS_CERT_FILE
-          value: /var/run/orka/harness-wrapper/tls.crt
+          value: /var/run/orka/harness-wrapper-tls/tls.crt
         - name: ORKA_HARNESS_WRAPPER_TLS_KEY_FILE
-          value: /var/run/orka/harness-wrapper/tls.key
+          value: /var/run/orka/harness-wrapper-tls/tls.key
         - name: ORKA_HARNESS_WRAPPER_ADMISSION_LEDGER_PATH
           value: /var/lib/orka/harness-v1/admission-ledger.db
         - name: ORKA_HARNESS_WRAPPER_LEDGER_GENERATION
@@ -170,7 +174,10 @@ spec:
           value: {{ $root.Values.harnessV1.codexSandboxMode | quote }}
       volumeMounts:
         - name: auth
-          mountPath: /var/run/orka/harness-wrapper
+          mountPath: /var/run/orka/harness-wrapper-auth
+          readOnly: true
+        - name: tls
+          mountPath: /var/run/orka/harness-wrapper-tls
           readOnly: true
         - name: ledger
           mountPath: /var/lib/orka/harness-v1
@@ -216,6 +223,11 @@ spec:
         items:
           - key: {{ $root.Values.harnessV1.auth.tokenKey | quote }}
             path: token
+    - name: tls
+      secret:
+        secretName: {{ $root.Values.harnessV1.tls.existingSecret | quote }}
+        defaultMode: 0400
+        items:
           - key: tls.crt
             path: tls.crt
           - key: tls.key
@@ -291,6 +303,22 @@ spec:
 {{- end -}}
 {{- end -}}
 {{- required "existing harness v1 wrapper Deployment is missing the auth Secret token key" $secretKey -}}
+{{- end }}
+
+{{- define "orka.harnessV1ExistingTLSSecretName" -}}
+{{- $secretName := "" -}}
+{{- $legacyAuthSecretName := "" -}}
+{{- range (dig "spec" "template" "spec" "volumes" (list) .) -}}
+{{- if eq (default "" .name) "tls" -}}
+{{- $secretName = dig "secret" "secretName" "" . -}}
+{{- else if eq (default "" .name) "auth" -}}
+{{- $legacyAuthSecretName = dig "secret" "secretName" "" . -}}
+{{- end -}}
+{{- end -}}
+{{- if not $secretName -}}
+{{- $secretName = $legacyAuthSecretName -}}
+{{- end -}}
+{{- required "existing harness v1 wrapper Deployment is missing the TLS Secret name" $secretName -}}
 {{- end }}
 
 {{/* Read the live controller's exact namespace watch scope. */}}
@@ -599,6 +627,12 @@ remain outside rendered Helm manifests.
 {{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.auth.tokenKey)) -}}
 {{- fail "harnessV1.auth.tokenKey is required when controller.mode=harness-v1" -}}
+{{- end -}}
+{{- if not (trim (default "" .Values.harnessV1.tls.existingSecret)) -}}
+{{- fail "harnessV1.tls.existingSecret is required when controller.mode=harness-v1" -}}
+{{- end -}}
+{{- if eq (trim .Values.harnessV1.auth.existingSecret) (trim .Values.harnessV1.tls.existingSecret) -}}
+{{- fail "harnessV1.tls.existingSecret must differ from harnessV1.auth.existingSecret" -}}
 {{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.ledger.size)) -}}
 {{- fail "harnessV1.ledger.size is required when controller.mode=harness-v1" -}}

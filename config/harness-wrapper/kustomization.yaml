@@ -6,7 +6,8 @@ kind: Kustomization
 # selecting a dedicated harness-v1 controller installation.
 namespace: orka-system
 
-# harness-wrapper-auth must be pre-created; see README.md.
+# The distinct harness-wrapper-auth and harness-wrapper-tls Secrets must be
+# pre-created; see README.md.
 resources:
   - serviceaccount.yaml
   - deployment.yaml

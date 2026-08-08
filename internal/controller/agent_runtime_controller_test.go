@@ -398,6 +398,25 @@ func TestAgentRuntimeReconcilerHarnessV1AuthRotationForcesConformance(t *testing
 	}
 }
 
+func TestAgentRuntimeReconcilerHarnessV1UsesConfiguredTLSClient(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{
+		AuthToken: agentRuntimeV1TestBearer,
+		TLS:       true,
+	})
+	defer server.Close()
+	runtimeObject, secret := testHarnessV1AgentRuntimeAndSecret(server.URL())
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, secret)
+	reconciler.HarnessV1HTTPClient = server.Client()
+	allowAgentRuntimeLoopback(t)
+	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
+		t.Fatal(err)
+	}
+	updated := getAgentRuntime(t, reconciler, runtimeObject)
+	if !updated.Status.Ready {
+		t.Fatalf("private-CA harness v1 readiness = %#v", updated.Status)
+	}
+}
+
 func TestAgentRuntimeReconcilerHarnessV1RejectsSecretIdentityChangeDuringConformance(t *testing.T) {
 	tests := []struct {
 		name        string
