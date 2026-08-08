@@ -11,10 +11,6 @@ spec:
       targetPort: api
       protocol: TCP
       name: api
-    - port: 443
-      targetPort: webhook
-      protocol: TCP
-      name: webhook
     - port: {{ .Values.controller.metricsPort }}
       targetPort: metrics
       protocol: TCP

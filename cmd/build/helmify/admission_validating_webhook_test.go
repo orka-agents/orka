@@ -14,7 +14,11 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const canonicalProductionControllerUsername = "system:serviceaccount:orka-system:orka-controller-manager"
+const (
+	canonicalProductionControllerUsername = "system:serviceaccount:orka-system:orka-controller-manager"
+	staticChartTestNamespace              = "orka-test"
+	webhookPortName                       = "webhook"
+)
 
 func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("3", 64)
@@ -51,9 +55,9 @@ func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
 					t.Errorf("%s failurePolicy = %v, want Fail", webhook.Name, webhook.FailurePolicy)
 				}
 				service := webhook.ClientConfig.Service
-				if service == nil || service.Name != "test-orka" || service.Namespace != "orka-test" ||
+				if service == nil || service.Name != "test-orka-webhook" || service.Namespace != staticChartTestNamespace ||
 					service.Port == nil || *service.Port != 443 {
-					t.Errorf("%s service = %#v, want test-orka:443 in orka-test", webhook.Name, service)
+					t.Errorf("%s service = %#v, want test-orka-webhook:443 in orka-test", webhook.Name, service)
 				}
 				selector := webhook.NamespaceSelector
 				if strings.HasPrefix(webhook.Name, "namespace-mode.") {
@@ -62,7 +66,7 @@ func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
 				if selector == nil || selector.MatchLabels["orka.ai/controller-mode"] != mode {
 					t.Errorf("%s execution-mode selector = %#v, want %q", webhook.Name, selector, mode)
 				}
-				if selector == nil || selector.MatchLabels["kubernetes.io/metadata.name"] != "orka-test" {
+				if selector == nil || selector.MatchLabels["kubernetes.io/metadata.name"] != staticChartTestNamespace {
 					t.Errorf("%s namespace selector = %#v, want orka-test", webhook.Name, selector)
 				}
 			}
@@ -117,22 +121,60 @@ func TestControllerWebhooksDoNotOverlapSameModeReleasesInDifferentNamespaces(t *
 	}
 }
 
-func TestControllerServiceExposesWebhookPort(t *testing.T) {
-	rendered := requireHelmRender(t, "--show-only", "templates/service.yaml")
-	service := corev1.Service{}
-	if err := yaml.Unmarshal([]byte(rendered), &service); err != nil {
+func TestControllerWebhookServiceIsIsolatedFromExternalService(t *testing.T) {
+	rendered := requireHelmRender(t,
+		"--set", "service.type=LoadBalancer",
+		"--show-only", "templates/service.yaml",
+	)
+	controllerService := corev1.Service{}
+	if err := yaml.Unmarshal([]byte(rendered), &controllerService); err != nil {
 		t.Fatalf("decode controller Service: %v", err)
 	}
-
-	for _, port := range service.Spec.Ports {
-		if port.Name == "webhook" {
-			if port.Port != 443 || port.TargetPort.String() != "webhook" {
-				t.Fatalf("webhook Service port = %#v, want 443 -> webhook", port)
-			}
-			return
+	if controllerService.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		t.Fatalf("controller Service type = %q, want LoadBalancer", controllerService.Spec.Type)
+	}
+	for _, port := range controllerService.Spec.Ports {
+		if port.Name == webhookPortName || port.TargetPort.String() == webhookPortName || port.Port == 443 {
+			t.Fatalf("external controller Service exposes webhook port: %#v", port)
 		}
 	}
-	t.Fatalf("controller Service has no webhook port: %#v", service.Spec.Ports)
+
+	rendered = requireHelmRender(t,
+		"--set", "service.type=LoadBalancer",
+		"--show-only", "templates/controller-webhook-service.yaml",
+	)
+	webhookService := corev1.Service{}
+	if err := yaml.Unmarshal([]byte(rendered), &webhookService); err != nil {
+		t.Fatalf("decode controller webhook Service: %v", err)
+	}
+	if webhookService.Name != "test-orka-webhook" {
+		t.Fatalf("controller webhook Service name = %q, want test-orka-webhook", webhookService.Name)
+	}
+	if webhookService.Spec.Type != corev1.ServiceTypeClusterIP {
+		t.Fatalf("controller webhook Service type = %q, want ClusterIP", webhookService.Spec.Type)
+	}
+	if len(webhookService.Spec.Ports) != 1 {
+		t.Fatalf("controller webhook Service ports = %#v, want one", webhookService.Spec.Ports)
+	}
+	port := webhookService.Spec.Ports[0]
+	if port.Name != webhookPortName || port.Port != 443 || port.TargetPort.String() != webhookPortName {
+		t.Fatalf("controller webhook Service port = %#v, want webhook 443 -> webhook", port)
+	}
+
+	rendered = requireHelmRender(t,
+		"--set", "service.type=LoadBalancer",
+		"--show-only", "templates/controller-validating-webhook.yaml",
+	)
+	configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
+	if err := yaml.Unmarshal([]byte(rendered), &configuration); err != nil {
+		t.Fatalf("decode controller validating webhook configuration: %v", err)
+	}
+	for _, webhook := range configuration.Webhooks {
+		service := webhook.ClientConfig.Service
+		if service == nil || service.Name != webhookService.Name || service.Namespace != staticChartTestNamespace {
+			t.Errorf("%s service = %#v, want %s in orka-test", webhook.Name, service, webhookService.Name)
+		}
+	}
 }
 
 func TestControllerDeploymentEnablesReleaseLocalAdmission(t *testing.T) {

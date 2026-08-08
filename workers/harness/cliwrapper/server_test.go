@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1181,13 +1182,91 @@ func TestServerRedactsConfiguredCommandEnvironment(t *testing.T) {
 	}
 }
 
+func TestServerRedactsConfiguredConnectionStringsFromFramesAndOutput(t *testing.T) {
+	postgresURL, redisURL, reportingDSN, _ := configuredConnectionStringFixtures()
+	const publicURL = "https://public-provider.example.test/v1"
+	configuredEnv := []string{
+		"DATABASE_URL=" + postgresURL,
+		"REDIS_URL=" + redisURL,
+		"REPORTING_DSN=" + reportingDSN,
+		workerenv.OpenAIBaseURL + "=" + publicURL,
+	}
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.CommandEnv = append([]string(nil), configuredEnv...)
+	cfg.Generic = GenericAdapterConfig{
+		Command: wrapperTestShellPath,
+		Args: []string{
+			"-c",
+			`printf '%s\n%s\n%s\n%s\n' "$DATABASE_URL" "$REDIS_URL" "$REPORTING_DSN" "$OPENAI_BASE_URL"`,
+		},
+		Env:        append([]string(nil), configuredEnv...),
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeStdout,
+	}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	encoded, err := json.Marshal(frames)
+	if err != nil {
+		t.Fatalf("marshal frames: %v", err)
+	}
+	for label, sensitive := range map[string]string{
+		"Postgres URL":  postgresURL,
+		"Redis URL":     redisURL,
+		"reporting DSN": reportingDSN,
+	} {
+		if strings.Contains(string(encoded), sensitive) {
+			t.Fatalf("frames leaked configured %s: %s", label, encoded)
+		}
+	}
+	if !strings.Contains(string(encoded), "[REDACTED]") || !strings.Contains(string(encoded), publicURL) {
+		t.Fatalf("frames missed redaction or corrupted public configuration: %s", encoded)
+	}
+
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil || last.Completed.OutputRef == "" {
+		t.Fatalf("last frame = %#v, want completed output reference", last)
+	}
+	output, err := client.FetchTurnOutput(context.Background(), request.TurnID, last.Completed.OutputRef)
+	if err != nil {
+		t.Fatalf("FetchTurnOutput: %v", err)
+	}
+	for label, sensitive := range map[string]string{
+		"Postgres URL":  postgresURL,
+		"Redis URL":     redisURL,
+		"reporting DSN": reportingDSN,
+	} {
+		if bytes.Contains(output, []byte(sensitive)) {
+			t.Fatalf("stored output leaked configured %s: %q", label, output)
+		}
+	}
+	if !bytes.Contains(output, []byte("[REDACTED]")) || !bytes.Contains(output, []byte(publicURL)) {
+		t.Fatalf("stored output missed redaction or corrupted public configuration: %q", output)
+	}
+}
+
 func TestExactConfiguredEnvValuesSelectsOnlyCredentialNames(t *testing.T) {
+	postgresURL, redisURL, reportingDSN, legacyConnectionString := configuredConnectionStringFixtures()
 	values := exactConfiguredEnvValues([]string{
 		"FEATURE=true",
 		"RETRY_COUNT=1",
 		"TOKENIZER_MODEL=tokenizer-v1",
 		"AUTH_URL=https://auth.example.test",
+		workerenv.OpenAIBaseURL + "=https://public-provider.example.test/v1",
 		"PATTERN=not-a-credential",
+		"DATABASE_URL=" + postgresURL,
+		"REDIS_URL=" + redisURL,
+		"REPORTING_DSN=" + reportingDSN,
+		"LEGACY_CONNECTION_STRING=" + legacyConnectionString,
 		"OPENAI_API_KEY=openai-secret",
 		"WRAPPER_PRIVATE_SECRET=private-secret",
 		"DB_PASSWORD=password-secret",
@@ -1202,10 +1281,48 @@ func TestExactConfiguredEnvValuesSelectsOnlyCredentialNames(t *testing.T) {
 		"password-secret",
 		"private-secret",
 		"openai-secret",
+		postgresURL,
+		redisURL,
+		reportingDSN,
+		legacyConnectionString,
 	}
-	if !slices.Equal(values, want) {
+	if len(values) != len(want) {
 		t.Fatalf("configured exact redaction values = %v, want %v", values, want)
 	}
+	for _, value := range want {
+		if !slices.Contains(values, value) {
+			t.Fatalf("configured exact redaction values = %v, missing %q", values, value)
+		}
+	}
+}
+
+func configuredConnectionStringFixtures() (string, string, string, string) {
+	fixtureValue := func(name string) string {
+		return "synthetic-" + name + "-fixture"
+	}
+	postgresURL := (&url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword("orka", fixtureValue("postgres")),
+		Host:   "postgres.example.test",
+		Path:   "/orka",
+	}).String()
+	redisURL := (&url.URL{
+		Scheme: "redis",
+		User:   url.UserPassword("", fixtureValue("redis")),
+		Host:   "redis.example.test",
+		Path:   "/0",
+	}).String()
+	reportingDSN := strings.Join([]string{
+		"host=reporting.example.test",
+		"user=orka",
+		"password=" + fixtureValue("reporting"),
+	}, " ")
+	legacyConnectionString := strings.Join([]string{
+		"Server=legacy.example.test",
+		"User=orka",
+		"Password=" + fixtureValue("legacy"),
+	}, ";")
+	return postgresURL, redisURL, reportingDSN, legacyConnectionString
 }
 
 func assertCommandFramesRedacted(t *testing.T, script, label string) {

@@ -444,6 +444,10 @@ spec:
 {{- printf "%s-controller" (include "orka.fullname" . | trunc 52 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "orka.controllerWebhookServiceName" -}}
+{{- printf "%s-webhook" (include "orka.fullname" . | trunc 55 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 {{/* Keep legacy short names, but hash any identity controllerName truncates. */}}
 {{- define "orka.controllerWebhookName" -}}
 {{- $fullname := include "orka.fullname" . -}}
@@ -651,6 +655,9 @@ remain outside rendered Helm manifests.
 */}}
 {{- define "orka.validateHarnessV1" -}}
 {{- if eq .Values.controller.mode "harness-v1" -}}
+{{- if .Values.controller.agentSandbox.enabled -}}
+{{- fail "controller.agentSandbox.enabled is unsupported when controller.mode=harness-v1; Agent Sandbox requires harness-v2" -}}
+{{- end -}}
 {{- if .Values.controller.substrate.enabled -}}
 {{- fail "controller.substrate.enabled is unsupported when controller.mode=harness-v1; Substrate requires harness-v2" -}}
 {{- end -}}

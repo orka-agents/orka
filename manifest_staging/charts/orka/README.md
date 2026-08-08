@@ -12,7 +12,7 @@ Secrets. Prepare:
 
 - a snapshot key file containing exactly 32 random bytes;
 - a webhook serving certificate and private key whose certificate is valid for
-  `orka.orka-system.svc`, plus its PEM CA certificate; and
+  `orka-webhook.orka-system.svc`, plus its PEM CA certificate; and
 - `CONTROLLER_DIGEST` and `PUBLISHER_DIGEST` values in
   `sha256:<64 lowercase hexadecimal characters>` form.
 

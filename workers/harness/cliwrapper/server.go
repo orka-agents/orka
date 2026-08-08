@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -2001,7 +2002,7 @@ func exactTurnInputValues(env []harness.TurnEnvVar) []string {
 	seen := make(map[string]struct{}, len(env))
 	values := make([]string, 0, len(env))
 	for _, item := range env {
-		if item.Value == "" || isKnownNonCredentialTurnEnv(item.Name) {
+		if item.Value == "" || (isKnownNonCredentialTurnEnv(item.Name) && !hasCredentialURLUserinfo(item.Value)) {
 			continue
 		}
 		if _, ok := seen[item.Value]; ok {
@@ -2018,7 +2019,7 @@ func exactConfiguredEnvValues(env []string) []string {
 	configured := make([]harness.TurnEnvVar, 0, len(env))
 	for _, entry := range env {
 		name, value, ok := strings.Cut(entry, "=")
-		if !ok || !isCredentialTurnEnvName(name) {
+		if !ok || (!isCredentialTurnEnvName(name) && !hasCredentialURLUserinfo(value)) {
 			continue
 		}
 		configured = append(configured, harness.TurnEnvVar{Name: name, Value: value})
@@ -2041,12 +2042,28 @@ func isCredentialTurnEnvName(name string) bool {
 		"_PASSWD_",
 		"_CREDENTIAL_",
 		"_PRIVATE_KEY_",
+		"_DSN_",
+		"_CONNECTION_STRING_",
+		"_CONNECTIONSTRING_",
+		"_CONN_STRING_",
 	} {
 		if strings.Contains(padded, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+func hasCredentialURLUserinfo(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User == nil {
+		return false
+	}
+	if parsed.User.Username() != "" {
+		return true
+	}
+	_, hasPassword := parsed.User.Password()
+	return hasPassword
 }
 
 func isKnownNonCredentialTurnEnv(name string) bool {

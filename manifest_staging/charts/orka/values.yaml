@@ -219,8 +219,8 @@ controller:
       childTokenTTL: ""
       toolTokenTTL: ""
 
-# Fail-closed admission served by this release's controller Service. The
-# certificate must authenticate <release>-orka.<namespace>.svc.
+# Fail-closed admission served by this release's internal webhook Service. The
+# certificate must authenticate <release>-orka-webhook.<namespace>.svc.
 webhooks:
   tls:
     # Required. The chart never generates webhook certificates.
