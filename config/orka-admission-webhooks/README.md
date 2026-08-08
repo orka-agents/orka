@@ -19,13 +19,14 @@ controller identities for Helm releases `orka-v1` in `orka-v1-system` and
 and all three `route-unless-controller-cleanup-safe` conditions as one reviewed
 platform change before enabling the webhooks.
 
-The namespace webhook permits the first valid `orka.ai/controller-mode` claim
-and then makes it immutable. The resource webhooks require contracts and new
-Task bindings to match that claim. The static harness architecture does not
-install admission policies for dynamic backend modes, cross-protocol binding,
-migration classification, or adjudication. Each controller accepts one
-startup mode and one labeled watch namespace; the two releases do not share a
-Task population.
+The namespace webhook permits a Namespace to be created with one valid
+`orka.ai/controller-mode` claim and then makes that claim immutable. It rejects
+adding a claim to an existing unlabeled Namespace. The resource webhooks require
+contracts and new Task bindings to match that claim. The static harness
+architecture does not install admission policies for dynamic backend modes,
+cross-protocol binding, migration classification, or adjudication. Each
+controller accepts one startup mode and one labeled watch namespace; the two
+releases do not share a Task population.
 
 All retained webhook entries use `failurePolicy: Fail`. Delete their
 configurations before removing the last admission endpoint or its TLS Secret.

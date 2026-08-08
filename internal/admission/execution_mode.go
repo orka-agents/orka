@@ -81,8 +81,8 @@ func RegisterExecutionModeWebhooks(
 	}})
 }
 
-// NamespaceExecutionModeValidator permits a namespace to acquire one valid
-// execution-mode label and then makes that claim immutable.
+// NamespaceExecutionModeValidator permits a namespace to be created with one
+// valid execution-mode label and then makes that claim immutable.
 type NamespaceExecutionModeValidator struct {
 	decoder ctrladmission.Decoder
 }
@@ -111,11 +111,14 @@ func (v *NamespaceExecutionModeValidator) Handle(_ context.Context, req ctrladmi
 		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old namespace: %w", err))
 	}
 	oldValue := strings.TrimSpace(oldObject.Labels[executionmode.NamespaceLabel])
-	if oldValue != "" && newValue != oldValue {
-		return ctrladmission.Denied("namespace execution-mode claim is immutable; recreate the installation in a different namespace")
+	if oldValue == "" {
+		if newValue == "" {
+			return ctrladmission.Allowed("namespace has no Orka execution-mode claim")
+		}
+		return ctrladmission.Denied("an existing namespace cannot acquire an execution-mode claim; create a new namespace for the installation")
 	}
-	if newValue == "" {
-		return ctrladmission.Allowed("namespace has no Orka execution-mode claim")
+	if newValue != oldValue {
+		return ctrladmission.Denied("namespace execution-mode claim is immutable; recreate the installation in a different namespace")
 	}
 	if _, err := executionmode.Parse(newValue); err != nil {
 		return ctrladmission.Denied(err.Error())

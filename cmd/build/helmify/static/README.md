@@ -6,23 +6,65 @@ packages all 26 canonical Orka CRDs under `crds/`.
 
 ## Fresh install
 
-A normal install creates the CRDs before the templated release resources:
+A normal `harness-v2` install requires Vekil to be running in `vekil-system`,
+immutable controller and Publisher image digests, and two operator-managed
+Secrets. Prepare:
+
+- a snapshot key file containing exactly 32 random bytes;
+- a webhook serving certificate and private key whose certificate is valid for
+  `orka.orka-system.svc`, plus its PEM CA certificate; and
+- `CONTROLLER_DIGEST` and `PUBLISHER_DIGEST` values in
+  `sha256:<64 lowercase hexadecimal characters>` form.
+
+The following creates the namespace and required Secrets without putting key
+material in Helm values or command-line arguments, then installs the CRDs and
+release resources. Replace the file paths and digest placeholders first:
 
 ```bash
-kubectl create namespace orka-system
-kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
+set -euo pipefail
+
+: "${SNAPSHOT_KEY_FILE:?set SNAPSHOT_KEY_FILE to the 32-byte key file}"
+: "${WEBHOOK_CERT_FILE:?set WEBHOOK_CERT_FILE to the serving certificate}"
+: "${WEBHOOK_PRIVATE_KEY_FILE:?set WEBHOOK_PRIVATE_KEY_FILE to the private key}"
+: "${WEBHOOK_CA_FILE:?set WEBHOOK_CA_FILE to the CA certificate}"
+: "${CONTROLLER_DIGEST:?set CONTROLLER_DIGEST to sha256:<64 lowercase hex>}"
+: "${PUBLISHER_DIGEST:?set PUBLISHER_DIGEST to sha256:<64 lowercase hex>}"
+
+kubectl create -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-system
+  labels:
+    orka.ai/controller-mode: harness-v2
+EOF
+kubectl -n orka-system create secret generic agent-execution-snapshot-key \
+  --from-file=snapshot-key="${SNAPSHOT_KEY_FILE}"
+kubectl -n orka-system create secret generic orka-webhook-tls \
+  --type=kubernetes.io/tls \
+  --from-file=tls.crt="${WEBHOOK_CERT_FILE}" \
+  --from-file=tls.key="${WEBHOOK_PRIVATE_KEY_FILE}" \
+  --from-file=ca.crt="${WEBHOOK_CA_FILE}"
+
+WEBHOOK_CA_BUNDLE="$(kubectl -n orka-system get secret orka-webhook-tls \
+  -o jsonpath='{.data.ca\.crt}')"
 
 helm install orka charts/orka \
   --namespace orka-system \
   --set controller.mode=harness-v2 \
   --set controller.watchNamespace=orka-system \
+  --set-string controller.image.digest="${CONTROLLER_DIGEST}" \
+  --set-string publisher.image.digest="${PUBLISHER_DIGEST}" \
+  --set-string controller.agentExecutionSnapshot.existingSecret=agent-execution-snapshot-key \
+  --set-string controller.agentExecutionSnapshot.key=snapshot-key \
+  --set-string webhooks.tls.existingSecret=orka-webhook-tls \
+  --set-string webhooks.caBundle="${WEBHOOK_CA_BUNDLE}" \
+  --set providerProxy.enabled=true \
   --wait
 ```
 
-The provider proxy is disabled by default. Before enabling it for a
-`harness-v2` release, install Vekil in `vekil-system`; the chart then installs
-the exact cross-namespace ingress policy there. The chart-managed provider
-proxy itself always runs in the Helm release namespace. Leave
+The chart installs the exact cross-namespace ingress policy for Vekil. The
+chart-managed provider proxy itself always runs in the Helm release namespace. Leave
 `controller.acpRuntime.providerProxyNamespace` empty or set it to that release
 namespace. The only supported upstream is
 `http://vekil.vekil-system.svc:1337` (an optional trailing slash is normalized);
@@ -63,8 +105,14 @@ also requires a distinct, non-empty `controller.watchNamespace` labeled with
 the matching mode:
 
 ```bash
-kubectl create namespace orka-v2-system
-kubectl label namespace orka-v2-system orka.ai/controller-mode=harness-v2
+kubectl create -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-v2-system
+  labels:
+    orka.ai/controller-mode: harness-v2
+EOF
 
 helm install orka-v2 charts/orka \
   --namespace orka-v2-system \

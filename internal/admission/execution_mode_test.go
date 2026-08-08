@@ -8,15 +8,87 @@ package admission
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
 )
+
+func TestNamespaceExecutionModeValidatorOnlyAcquiresClaimOnCreate(t *testing.T) {
+	validator := newTestNamespaceExecutionModeValidator(t)
+
+	tests := []struct {
+		name        string
+		operation   admissionv1.Operation
+		oldMode     string
+		newMode     string
+		allowed     bool
+		messagePart string
+	}{
+		{
+			name:      "create claimed namespace",
+			operation: admissionv1.Create,
+			newMode:   string(executionmode.HarnessV1),
+			allowed:   true,
+		},
+		{
+			name:      "preserve absent claim",
+			operation: admissionv1.Update,
+			allowed:   true,
+		},
+		{
+			name:        "reject claim on existing namespace",
+			operation:   admissionv1.Update,
+			newMode:     string(executionmode.HarnessV2),
+			messagePart: "existing namespace cannot acquire",
+		},
+		{
+			name:      "preserve existing claim",
+			operation: admissionv1.Update,
+			oldMode:   string(executionmode.HarnessV1),
+			newMode:   string(executionmode.HarnessV1),
+			allowed:   true,
+		},
+		{
+			name:        "reject changed claim",
+			operation:   admissionv1.Update,
+			oldMode:     string(executionmode.HarnessV1),
+			newMode:     string(executionmode.HarnessV2),
+			messagePart: "claim is immutable",
+		},
+		{
+			name:        "reject removed claim",
+			operation:   admissionv1.Update,
+			oldMode:     string(executionmode.HarnessV1),
+			messagePart: "claim is immutable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			object := admissionNamespace(tt.newMode)
+			var oldObject *corev1.Namespace
+			if tt.operation == admissionv1.Update {
+				oldObject = admissionNamespace(tt.oldMode)
+			}
+			response := validator.Handle(context.Background(), namespaceAdmissionRequest(
+				t, tt.operation, object, oldObject,
+			))
+			require.Equal(t, tt.allowed, response.Allowed, response.Result.Message)
+			if tt.messagePart != "" {
+				require.Contains(t, response.Result.Message, tt.messagePart)
+			}
+		})
+	}
+}
 
 func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
 	validator := newTestTaskExecutionAuthorityValidator(t)
@@ -114,4 +186,49 @@ func newTestTaskExecutionAuthorityValidator(t *testing.T) *TaskExecutionAuthorit
 		decoder: ctrladmission.NewDecoder(scheme),
 		config:  ExecutionModeConfig{ControllerUsernames: []string{trustedControllerUser}}.normalized(),
 	}
+}
+
+func newTestNamespaceExecutionModeValidator(t *testing.T) *NamespaceExecutionModeValidator {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	return &NamespaceExecutionModeValidator{decoder: ctrladmission.NewDecoder(scheme)}
+}
+
+func admissionNamespace(mode string) *corev1.Namespace {
+	labels := map[string]string{}
+	if mode != "" {
+		labels[executionmode.NamespaceLabel] = mode
+	}
+	return &corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "orka-test",
+			Labels: labels,
+		},
+	}
+}
+
+func namespaceAdmissionRequest(
+	t *testing.T,
+	operation admissionv1.Operation,
+	object *corev1.Namespace,
+	oldObject *corev1.Namespace,
+) ctrladmission.Request {
+	t.Helper()
+	request := ctrladmission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+		Operation: operation,
+		Object:    runtime.RawExtension{Raw: mustMarshalNamespace(t, object)},
+	}}
+	if oldObject != nil {
+		request.OldObject = runtime.RawExtension{Raw: mustMarshalNamespace(t, oldObject)}
+	}
+	return request
+}
+
+func mustMarshalNamespace(t *testing.T, namespace *corev1.Namespace) []byte {
+	t.Helper()
+	data, err := json.Marshal(namespace)
+	require.NoError(t, err)
+	return data
 }

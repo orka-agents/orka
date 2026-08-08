@@ -444,8 +444,19 @@ spec:
 {{- printf "%s-controller" (include "orka.fullname" . | trunc 52 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{/* Keep legacy short names, but hash any identity controllerName truncates. */}}
+{{- define "orka.controllerWebhookName" -}}
+{{- $fullname := include "orka.fullname" . -}}
+{{- if le (len $fullname) 52 -}}
+{{- include "orka.controllerName" . -}}
+{{- else -}}
+{{- $identity := printf "%s/%s/%s/%s/%s" .Release.Namespace .Release.Name (default "" .Values.fullnameOverride) (default "" .Values.nameOverride) .Chart.Name -}}
+{{- printf "%s-controller-%s" ($fullname | trunc 39 | trimSuffix "-") (sha256sum $identity | trunc 12) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end }}
+
 {{- define "orka.controllerClusterRoleName" -}}
-{{- printf "%s-cluster" (include "orka.controllerName" . | trunc 55 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- printf "%s-cluster" (include "orka.controllerWebhookName" .) -}}
 {{- end }}
 
 {{- define "orka.controllerUsername" -}}

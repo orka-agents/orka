@@ -3,7 +3,7 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
-  name: {{ include "orka.controllerName" . }}
+  name: {{ include "orka.controllerWebhookName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller

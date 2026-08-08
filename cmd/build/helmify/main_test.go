@@ -86,14 +86,24 @@ func TestObjectSetRejectsDuplicateCRDFilenames(t *testing.T) {
 }
 
 func helmTemplateStaticChart(t *testing.T, args ...string) (string, error) {
+	return helmTemplateStaticChartForRelease(t, "test", "orka-test", args...)
+}
+
+func helmTemplateStaticChartForRelease(
+	t *testing.T,
+	releaseName string,
+	namespace string,
+	args ...string,
+) (string, error) {
 	t.Helper()
 	helm, err := exec.LookPath("helm")
 	if err != nil {
 		t.Skip("helm is required for static chart render tests")
 	}
 
-	commandArgs := []string{"template", "test", "static", "--namespace", "orka-test"}
+	commandArgs := []string{"template", releaseName, "static", "--namespace", namespace}
 	commandArgs = append(commandArgs, staticChartDefaultArgs()...)
+	commandArgs = append(commandArgs, "--set-string", "controller.watchNamespace="+namespace)
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
 	return string(output), err
@@ -326,6 +336,95 @@ func requireRenderedDocument(t *testing.T, rendered string, markers ...string) s
 	}
 	t.Fatalf("rendered chart has no document containing %q:\n%s", markers, rendered)
 	return ""
+}
+
+func renderedResourceName(t *testing.T, rendered string, markers ...string) string {
+	t.Helper()
+	document := requireRenderedDocument(t, rendered, markers...)
+	match := regexp.MustCompile(`(?m)^metadata:\n  name: ([^\n]+)$`).FindStringSubmatch(document)
+	if len(match) != 2 {
+		t.Fatalf("rendered resource has no metadata.name:\n%s", document)
+	}
+	return strings.Trim(match[1], `"`)
+}
+
+func TestStaticChartLongReleaseNamesKeepClusterScopedResourcesDistinct(t *testing.T) {
+	prefix := strings.Repeat("a", 52)
+	fullNamePrefix := strings.Repeat("b", 62)
+	renderedA, err := helmTemplateStaticChartForRelease(
+		t, prefix+"x", "orka-test", "--set-string", "fullnameOverride="+fullNamePrefix+"x",
+	)
+	if err != nil {
+		t.Fatalf("helm template first long release failed: %v\n%s", err, renderedA)
+	}
+	renderedB, err := helmTemplateStaticChartForRelease(
+		t, prefix+"y", "orka-test", "--set-string", "fullnameOverride="+fullNamePrefix+"y",
+	)
+	if err != nil {
+		t.Fatalf("helm template second long release failed: %v\n%s", err, renderedB)
+	}
+
+	resources := []struct {
+		name      string
+		maxLength int
+		markers   []string
+	}{
+		{
+			name:      "validating webhook",
+			maxLength: 63,
+			markers:   []string{"kind: ValidatingWebhookConfiguration"},
+		},
+		{
+			name:      "controller cluster role",
+			maxLength: 253,
+			markers:   []string{"kind: ClusterRole", `resources: ["tokenreviews"]`},
+		},
+	}
+	for _, resource := range resources {
+		t.Run(resource.name, func(t *testing.T) {
+			nameA := renderedResourceName(t, renderedA, resource.markers...)
+			nameB := renderedResourceName(t, renderedB, resource.markers...)
+			if nameA == nameB {
+				t.Fatalf("long release names collapsed to cluster-scoped name %q", nameA)
+			}
+			if len(nameA) > resource.maxLength || len(nameB) > resource.maxLength {
+				t.Fatalf("cluster-scoped names exceed %d characters: %q, %q", resource.maxLength, nameA, nameB)
+			}
+		})
+	}
+
+	clusterRoleA := renderedResourceName(t, renderedA, "kind: ClusterRole", `resources: ["tokenreviews"]`)
+	bindingA := requireRenderedDocument(
+		t,
+		renderedA,
+		"kind: ClusterRoleBinding",
+		"kind: ClusterRole\n  name: "+clusterRoleA,
+	)
+	if bindingName := renderedResourceName(t, bindingA, "kind: ClusterRoleBinding"); bindingName != clusterRoleA {
+		t.Fatalf("controller ClusterRoleBinding name %q does not match ClusterRole %q", bindingName, clusterRoleA)
+	}
+
+	shortRender := requireHelmRender(t)
+	webhookName := renderedResourceName(t, shortRender, "kind: ValidatingWebhookConfiguration")
+	if webhookName != "test-orka-controller" {
+		t.Fatalf("short validating webhook name changed to %q", webhookName)
+	}
+	clusterRoleName := renderedResourceName(t, shortRender, "kind: ClusterRole", `resources: ["tokenreviews"]`)
+	if clusterRoleName != "test-orka-controller-cluster" {
+		t.Fatalf("short controller ClusterRole name changed to %q", clusterRoleName)
+	}
+
+	otherNamespaceRender, err := helmTemplateStaticChartForRelease(
+		t, prefix+"x", "orka-other", "--set-string", "fullnameOverride="+fullNamePrefix+"x",
+	)
+	if err != nil {
+		t.Fatalf("helm template other namespace failed: %v\n%s", err, otherNamespaceRender)
+	}
+	otherNamespaceWebhook := renderedResourceName(t, otherNamespaceRender, "kind: ValidatingWebhookConfiguration")
+	webhookA := renderedResourceName(t, renderedA, "kind: ValidatingWebhookConfiguration")
+	if webhookA == otherNamespaceWebhook {
+		t.Fatalf("namespaces collapsed to cluster-scoped validating webhook name %q", webhookA)
+	}
 }
 
 func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {

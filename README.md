@@ -83,8 +83,14 @@ credential broker. Artifact access is separately operation-scoped.
 ### Install
 
 ```bash
-kubectl create namespace orka-system
-kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
+kubectl create -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-system
+  labels:
+    orka.ai/controller-mode: harness-v2
+EOF
 
 helm install orka charts/orka \
   --namespace orka-system \
@@ -106,8 +112,14 @@ ingress policy that permits model traffic only through Orka's authenticated
 provider proxy:
 
 ```bash
-kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
-kubectl label namespace orka-system orka.ai/controller-mode=harness-v2 --overwrite
+kubectl create -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-system
+  labels:
+    orka.ai/controller-mode: harness-v2
+EOF
 kubectl apply -k config/acp-production
 ```
 

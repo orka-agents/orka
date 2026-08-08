@@ -36,8 +36,14 @@ For development, you also need:
 ### Using Helm
 
 ```bash
-kubectl create namespace orka-system
-kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
+kubectl create -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-system
+  labels:
+    orka.ai/controller-mode: harness-v2
+EOF
 
 helm install orka charts/orka \
   --namespace orka-system \
@@ -83,8 +89,14 @@ The development target creates the required ACP artifact, publisher, provider-pr
 make install
 
 # Claim the controller namespace for this immutable installation mode
-kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
-kubectl label namespace orka-system orka.ai/controller-mode=harness-v2 --overwrite
+kubectl create -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-system
+  labels:
+    orka.ai/controller-mode: harness-v2
+EOF
 
 # Deploy controller
 make deploy \

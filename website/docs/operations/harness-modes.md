@@ -21,15 +21,26 @@ The controller also requires a non-empty watched namespace labeled with the
 same mode:
 
 ```bash
-kubectl create namespace orka-v1-system
-kubectl label namespace orka-v1-system orka.ai/controller-mode=harness-v1
-
-kubectl create namespace orka-v2-system
-kubectl label namespace orka-v2-system orka.ai/controller-mode=harness-v2
+kubectl create -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-v1-system
+  labels:
+    orka.ai/controller-mode: harness-v1
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-v2-system
+  labels:
+    orka.ai/controller-mode: harness-v2
+EOF
 ```
 
-A missing or mismatched label fails startup. Do not relabel a namespace to
-move it between modes.
+A missing or mismatched label fails startup. The claim must be present when the
+namespace is created; do not adopt an unlabeled namespace or relabel one to move
+it between modes.
 
 ## Isolation checklist
 
@@ -71,14 +82,12 @@ scripts/apply-helm-crds.sh /absolute/path/to/orka-chart.tgz my-context
 
 helm install orka-v1 /absolute/path/to/orka-chart.tgz \
   --namespace orka-v1-system \
-  --create-namespace \
   --skip-crds \
   --set controller.mode=harness-v1 \
   --set controller.watchNamespace=orka-v1-system
 
 helm install orka-v2 /absolute/path/to/orka-chart.tgz \
   --namespace orka-v2-system \
-  --create-namespace \
   --skip-crds \
   --set controller.mode=harness-v2 \
   --set controller.watchNamespace=orka-v2-system \
