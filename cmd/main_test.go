@@ -30,6 +30,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
@@ -596,30 +597,51 @@ func TestValidateWorkspaceProviderSecurityConfig(t *testing.T) {
 	}
 }
 
-func TestValidateAgentExecutionSnapshotRetentionOptions(t *testing.T) {
+func TestValidateAgentExecutionSnapshotOptions(t *testing.T) {
 	tests := []struct {
 		name      string
+		mode      executionmode.Mode
 		keyFile   string
 		retention time.Duration
 		interval  time.Duration
 		wantError bool
 	}{
-		{name: "disabled", retention: -time.Hour, interval: 0},
-		{name: "enabled", keyFile: "/var/run/orka/snapshot/key", retention: 30 * 24 * time.Hour, interval: time.Hour},
-		{name: "zero retention", keyFile: "/var/run/orka/snapshot/key", retention: 0, interval: time.Hour, wantError: true},
 		{
-			name: "negative retention", keyFile: "/var/run/orka/snapshot/key",
+			name: "harness v1 requires key", mode: executionmode.HarnessV1,
+			retention: time.Hour, interval: time.Minute, wantError: true,
+		},
+		{
+			name: "harness v2 requires key", mode: executionmode.HarnessV2,
+			retention: time.Hour, interval: time.Minute, wantError: true,
+		},
+		{
+			name: "harness v1 enabled", mode: executionmode.HarnessV1,
+			keyFile: "/var/run/orka/snapshot/key", retention: 30 * 24 * time.Hour, interval: time.Hour,
+		},
+		{
+			name: "harness v2 enabled", mode: executionmode.HarnessV2,
+			keyFile: "/var/run/orka/snapshot/key", retention: 30 * 24 * time.Hour, interval: time.Hour,
+		},
+		{
+			name: "zero retention", mode: executionmode.HarnessV2,
+			keyFile: "/var/run/orka/snapshot/key", retention: 0, interval: time.Hour, wantError: true,
+		},
+		{
+			name: "negative retention", mode: executionmode.HarnessV2, keyFile: "/var/run/orka/snapshot/key",
 			retention: -time.Hour, interval: time.Hour, wantError: true,
 		},
-		{name: "zero interval", keyFile: "/var/run/orka/snapshot/key", retention: time.Hour, interval: 0, wantError: true},
 		{
-			name: "negative interval", keyFile: "/var/run/orka/snapshot/key",
+			name: "zero interval", mode: executionmode.HarnessV2,
+			keyFile: "/var/run/orka/snapshot/key", retention: time.Hour, interval: 0, wantError: true,
+		},
+		{
+			name: "negative interval", mode: executionmode.HarnessV2, keyFile: "/var/run/orka/snapshot/key",
 			retention: time.Hour, interval: -time.Minute, wantError: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAgentExecutionSnapshotRetentionOptions(tt.keyFile, tt.retention, tt.interval)
+			err := validateAgentExecutionSnapshotOptions(tt.mode, tt.keyFile, tt.retention, tt.interval)
 			if (err != nil) != tt.wantError {
 				t.Fatalf("validation error = %v, wantError = %t", err, tt.wantError)
 			}

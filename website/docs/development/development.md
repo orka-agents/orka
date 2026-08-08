@@ -25,8 +25,10 @@ make build
 # Build CLI only
 make build-cli
 
-# Run locally
-make run
+# Run locally with one persistent AES-256 snapshot key
+openssl rand 32 > /path/outside-the-repository/orka-snapshot-key
+chmod 600 /path/outside-the-repository/orka-snapshot-key
+make run RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE=/path/outside-the-repository/orka-snapshot-key
 ```
 
 ## Helm Chart Generation and Releases

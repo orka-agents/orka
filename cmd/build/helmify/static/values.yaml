@@ -57,7 +57,9 @@ controller:
   # Encryption key for immutable agent execution snapshots. When either agent
   # execution protocol is enabled, both fields must reference an existing
   # Secret. The selected value must contain exactly 32 raw bytes or its base64
-  # encoding.
+  # encoding. The Secret name, item key, and selected key material must remain
+  # unchanged for the lifetime of the release so retained snapshots stay
+  # decryptable.
   agentExecutionSnapshot:
     existingSecret: ""
     key: ""

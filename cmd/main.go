@@ -722,7 +722,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "--execution-mode-controller-usernames must contain at least one exact username")
 		os.Exit(1)
 	}
-	if err := validateAgentExecutionSnapshotRetentionOptions(
+	if err := validateAgentExecutionSnapshotOptions(
+		mode,
 		agentExecutionSnapshotKeyFile,
 		agentExecutionSnapshotRetention,
 		agentExecutionSnapshotRetentionInterval,
@@ -750,10 +751,6 @@ func main() {
 		}
 		if err := validateHarnessV1TLSEndpoint(harnessV1Endpoint); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		if strings.TrimSpace(agentExecutionSnapshotKeyFile) == "" {
-			fmt.Fprintln(os.Stderr, "harness v1 requires --agent-execution-snapshot-key-file")
 			os.Exit(1)
 		}
 		if err := validateHarnessV1DispatchOptions(harnessV1DispatchInterval, harnessV1DispatchWorkers); err != nil {
@@ -1123,37 +1120,29 @@ func main() {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
 		os.Exit(1)
 	}
-	agentExecutionBindingEnabled := false
-	if agentExecutionSnapshotKeyFile != "" {
-		snapshotCipher, cipherErr := loadAgentExecutionSnapshotCipher(agentExecutionSnapshotKeyFile)
-		if cipherErr != nil {
-			setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
-				"path", agentExecutionSnapshotKeyFile)
-			os.Exit(1)
-		}
-		if cipherErr := sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher); cipherErr != nil {
-			setupLog.Error(cipherErr, "unable to activate agent execution snapshot key; snapshot encryption fails closed",
-				"path", agentExecutionSnapshotKeyFile)
-			os.Exit(1)
-		}
-		agentExecutionBindingEnabled = true
-		setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
-	} else {
-		setupLog.Info("agent execution binding stage disabled: no --agent-execution-snapshot-key-file configured; harness-v1 requires it")
+	snapshotCipher, cipherErr := loadAgentExecutionSnapshotCipher(agentExecutionSnapshotKeyFile)
+	if cipherErr != nil {
+		setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
+			"path", agentExecutionSnapshotKeyFile)
+		os.Exit(1)
 	}
-	agentExecutionSnapshotStore := taskAgentExecutionSnapshotStore(agentExecutionBindingEnabled, sqliteStore)
-	if agentExecutionBindingEnabled {
-		snapshotRetentionManager := &controller.AgentExecutionSnapshotRetentionManager{
-			APIReader: mgr.GetAPIReader(),
-			Store:     sqliteStore,
-			Namespace: watchNamespace,
-			Retention: agentExecutionSnapshotRetention,
-			Interval:  agentExecutionSnapshotRetentionInterval,
-		}
-		if err := mgr.Add(snapshotRetentionManager); err != nil {
-			setupLog.Error(err, "unable to add agent execution snapshot retention manager")
-			os.Exit(1)
-		}
+	if cipherErr := sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher); cipherErr != nil {
+		setupLog.Error(cipherErr, "unable to activate agent execution snapshot key; snapshot encryption fails closed",
+			"path", agentExecutionSnapshotKeyFile)
+		os.Exit(1)
+	}
+	agentExecutionSnapshotStore := sqliteStore
+	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
+	snapshotRetentionManager := &controller.AgentExecutionSnapshotRetentionManager{
+		APIReader: mgr.GetAPIReader(),
+		Store:     sqliteStore,
+		Namespace: watchNamespace,
+		Retention: agentExecutionSnapshotRetention,
+		Interval:  agentExecutionSnapshotRetentionInterval,
+	}
+	if err := mgr.Add(snapshotRetentionManager); err != nil {
+		setupLog.Error(err, "unable to add agent execution snapshot retention manager")
+		os.Exit(1)
 	}
 	controlNamespace, err := acpControlNamespace(acpRuntimeEnabled || harnessV1Enabled, currentPodNamespace())
 	if err != nil {
@@ -2106,13 +2095,14 @@ func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapsh
 	return sqlite.NewAgentExecutionSnapshotCipher(key)
 }
 
-func validateAgentExecutionSnapshotRetentionOptions(
+func validateAgentExecutionSnapshotOptions(
+	mode executionmode.Mode,
 	keyFile string,
 	retention time.Duration,
 	interval time.Duration,
 ) error {
 	if strings.TrimSpace(keyFile) == "" {
-		return nil
+		return fmt.Errorf("%s requires --agent-execution-snapshot-key-file", mode)
 	}
 	if retention <= 0 || interval <= 0 {
 		return errors.New("agent execution snapshot retention and retention interval must be positive")
@@ -2125,14 +2115,4 @@ func validateHarnessV1DispatchOptions(interval time.Duration, workers int) error
 		return errors.New("harness v1 dispatch interval must be positive")
 	}
 	return controller.ValidateHarnessV1DispatchWorkers(workers)
-}
-
-// taskAgentExecutionSnapshotStore exposes the snapshot store to the Task
-// controller only when the binding stage is enabled, so a nil store keeps the
-// legacy direct-queue path.
-func taskAgentExecutionSnapshotStore(enabled bool, s *sqlite.Store) store.AgentExecutionSnapshotStore {
-	if !enabled {
-		return nil
-	}
-	return s
 }

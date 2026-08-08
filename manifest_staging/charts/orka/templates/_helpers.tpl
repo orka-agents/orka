@@ -405,6 +405,40 @@ spec:
 {{- end -}}
 {{- end }}
 
+{{/* Read the live controller's exact agent-execution snapshot Secret name. */}}
+{{- define "orka.existingControllerAgentExecutionSnapshotSecretName" -}}
+{{- $volumes := list -}}
+{{- range (dig "spec" "template" "spec" "volumes" (list) .) -}}
+{{- if eq (default "" .name) "agent-execution-snapshot-key" -}}
+{{- $volumes = append $volumes . -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (len $volumes) 1 -}}
+{{- dig "secret" "secretName" "" (index $volumes 0) -}}
+{{- end -}}
+{{- end }}
+
+{{/* Read the live controller's exact snapshot Secret item mounted as key. */}}
+{{- define "orka.existingControllerAgentExecutionSnapshotSecretKey" -}}
+{{- $volumes := list -}}
+{{- range (dig "spec" "template" "spec" "volumes" (list) .) -}}
+{{- if eq (default "" .name) "agent-execution-snapshot-key" -}}
+{{- $volumes = append $volumes . -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (len $volumes) 1 -}}
+{{- $keys := list -}}
+{{- range (dig "secret" "items" (list) (index $volumes 0)) -}}
+{{- if eq (default "" .path) "key" -}}
+{{- $keys = append $keys (default "" .key) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (len $keys) 1 -}}
+{{- index $keys 0 -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{/* Read the live controller inputs used when the wrapper Deployment is absent. */}}
 {{- define "orka.harnessV1ExistingControllerState" -}}
 {{- $state := "" -}}
@@ -655,6 +689,22 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- fail "implicit or legacy harness-v2 installations cannot upgrade in place; settle or retire the existing installation and install harness-v2 as a new release and namespace" -}}
 {{- else if ne $existingState "enabled" -}}
 {{- fail "controller.mode is immutable; install harness-v1 as a new release and namespace" -}}
+{{- end -}}
+{{- $existingSnapshotSecret := include "orka.existingControllerAgentExecutionSnapshotSecretName" $existingController | trim -}}
+{{- if not $existingSnapshotSecret -}}
+{{- fail "cannot determine the existing agent execution snapshot Secret name from the live controller; restore its exact agent-execution-snapshot-key volume before upgrading" -}}
+{{- end -}}
+{{- $desiredSnapshotSecret := trim (default "" .Values.controller.agentExecutionSnapshot.existingSecret) -}}
+{{- if ne $existingSnapshotSecret $desiredSnapshotSecret -}}
+{{- fail (printf "controller.agentExecutionSnapshot.existingSecret is immutable for in-place upgrades; preserve %q so retained encrypted execution snapshots remain decryptable" $existingSnapshotSecret) -}}
+{{- end -}}
+{{- $existingSnapshotKey := include "orka.existingControllerAgentExecutionSnapshotSecretKey" $existingController | trim -}}
+{{- if not $existingSnapshotKey -}}
+{{- fail "cannot determine the existing agent execution snapshot Secret key from the live controller; restore its exact item mounted at path key before upgrading" -}}
+{{- end -}}
+{{- $desiredSnapshotKey := trim (default "" .Values.controller.agentExecutionSnapshot.key) -}}
+{{- if ne $existingSnapshotKey $desiredSnapshotKey -}}
+{{- fail (printf "controller.agentExecutionSnapshot.key is immutable for in-place upgrades; preserve %q so retained encrypted execution snapshots remain decryptable" $existingSnapshotKey) -}}
 {{- end -}}
 {{- if eq .Values.controller.mode "harness-v2" -}}
 {{- $existingFullname := include "orka.existingControllerFullname" (dict "controller" $existingController "namespace" .Release.Namespace) | trim -}}

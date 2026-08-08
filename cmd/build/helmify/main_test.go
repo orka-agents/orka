@@ -149,6 +149,23 @@ func helmTemplateStaticChartWithExistingController(
 	args ...string,
 ) (string, error) {
 	t.Helper()
+	return helmTemplateStaticChartWithExistingControllerSnapshot(
+		t,
+		existingControllerArgs,
+		"snapshot-key",
+		"encryption-key",
+		args...,
+	)
+}
+
+func helmTemplateStaticChartWithExistingControllerSnapshot(
+	t *testing.T,
+	existingControllerArgs []string,
+	existingSnapshotSecret string,
+	existingSnapshotKey string,
+	args ...string,
+) (string, error) {
+	t.Helper()
 	helm, err := exec.LookPath("helm")
 	if err != nil {
 		t.Skip("helm is required for static chart render tests")
@@ -175,8 +192,12 @@ func helmTemplateStaticChartWithExistingController(
 			`"metadata" (dict "name" "test-orka-controller" "labels" (dict ` +
 			`"app.kubernetes.io/instance" "test" "app.kubernetes.io/component" "controller" ` +
 			`"app.kubernetes.io/managed-by" "Helm")) ` +
-			`"spec" (dict "template" (dict "spec" (dict "containers" (list ` +
-			`(dict "name" "controller" "args" (list ` + strings.Join(quotedControllerArgs, " ") + `)))))))) -}}`
+			`"spec" (dict "template" (dict "spec" (dict ` +
+			`"containers" (list (dict "name" "controller" "args" (list ` +
+			strings.Join(quotedControllerArgs, " ") + `))) ` +
+			`"volumes" (list (dict "name" "agent-execution-snapshot-key" "secret" (dict ` +
+			`"secretName" ` + strconv.Quote(existingSnapshotSecret) + ` "items" (list (dict ` +
+			`"key" ` + strconv.Quote(existingSnapshotKey) + ` "path" "key")))))))))) -}}`
 	}
 	withController := strings.Replace(string(helpers), lookup, forcedLookup, 1)
 	if withController == string(helpers) {
@@ -770,6 +791,64 @@ func TestStaticChartRejectsHarnessV2IdentityChangesOnUpgrade(t *testing.T) {
 			output, err := helmTemplateStaticChartWithExistingController(t, staticControllerArgs, tt.args...)
 			if err == nil || !strings.Contains(output, tt.wantError) {
 				t.Fatalf("helm render error = %v, want immutable identity rejection %q:\n%s", err, tt.wantError, output)
+			}
+		})
+	}
+}
+
+func TestStaticChartRejectsAgentExecutionSnapshotIdentityChangesOnUpgrade(t *testing.T) {
+	staticControllerArgs := []string{
+		"--controller-mode=harness-v2",
+		"--watch-namespace=orka-test",
+		"--controller-url=http://test-orka.orka-test.svc:8080",
+		"--acp-runtime-namespace=orka-runtimes",
+	}
+	tests := []struct {
+		name           string
+		existingSecret string
+		existingKey    string
+		args           []string
+		wantError      string
+	}{
+		{
+			name:           "Secret name changed",
+			existingSecret: "old-snapshot-key",
+			existingKey:    "encryption-key",
+			args:           []string{"--set-string", "controller.agentExecutionSnapshot.existingSecret=new-snapshot-key"},
+			wantError:      "controller.agentExecutionSnapshot.existingSecret is immutable for in-place upgrades",
+		},
+		{
+			name:           "Secret item key changed",
+			existingSecret: "snapshot-key",
+			existingKey:    "old-encryption-key",
+			args:           []string{"--set-string", "controller.agentExecutionSnapshot.key=new-encryption-key"},
+			wantError:      "controller.agentExecutionSnapshot.key is immutable for in-place upgrades",
+		},
+		{
+			name:           "live Secret name missing",
+			existingSecret: "",
+			existingKey:    "encryption-key",
+			wantError:      "cannot determine the existing agent execution snapshot Secret name",
+		},
+		{
+			name:           "live Secret item key missing",
+			existingSecret: "snapshot-key",
+			existingKey:    "",
+			wantError:      "cannot determine the existing agent execution snapshot Secret key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, err := helmTemplateStaticChartWithExistingControllerSnapshot(
+				t,
+				staticControllerArgs,
+				tt.existingSecret,
+				tt.existingKey,
+				tt.args...,
+			)
+			if err == nil || !strings.Contains(output, tt.wantError) {
+				t.Fatalf("helm render error = %v, want snapshot identity rejection %q:\n%s", err, tt.wantError, output)
 			}
 		})
 	}
