@@ -852,7 +852,7 @@ apiVersion: ate.dev/v1alpha1
 kind: ActorTemplate
 metadata:
   name: orka-mcp-ci
-  namespace: ate-demo
+  namespace: ${ORKA_NAMESPACE}
   labels:
     orka.ai/execution-workspace: "true"
     orka.ai/workspace-provider: substrate
@@ -893,43 +893,9 @@ YAML
 
   wait_jsonpath_equals \
     "actortemplate/orka-mcp-ci readiness" \
-    "kubectl -n ate-demo get actortemplate orka-mcp-ci -o jsonpath='{.status.phase}'" \
+    "kubectl -n ${ORKA_NAMESPACE} get actortemplate orka-mcp-ci -o jsonpath='{.status.phase}'" \
     "Ready" \
     900
-}
-
-grant_substrate_provider_template_access() {
-  log "Granting Orka access to the E2E Substrate ActorTemplate"
-  kubectl -n ate-demo apply -f - <<YAML
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: orka-substrate-template-reader
-  namespace: ate-demo
-rules:
-  - apiGroups:
-      - ate.dev
-    resourceNames:
-      - orka-mcp-ci
-    resources:
-      - actortemplates
-    verbs:
-      - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: orka-substrate-template-reader
-  namespace: ate-demo
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: orka-substrate-template-reader
-subjects:
-  - kind: ServiceAccount
-    name: orka-controller-manager
-    namespace: ${ORKA_NAMESPACE}
-YAML
 }
 
 deploy_orka() {
@@ -956,7 +922,6 @@ deploy_orka() {
   )
   kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
   kubectl label namespace orka-system orka.ai/controller-mode=harness-v2 --overwrite
-  grant_substrate_provider_template_access
   local placeholder_digest
   placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
   kubectl -n orka-system create configmap acp-runtime-images \
@@ -1081,7 +1046,6 @@ metadata:
 spec:
   templateRef:
     name: orka-mcp-ci
-    namespace: ate-demo
   workerPoolRef:
     name: orka-workers
     namespace: ate-demo
@@ -1123,7 +1087,6 @@ spec:
     substrateActor:
       templateRef:
         name: orka-mcp-ci
-        namespace: ate-demo
       poolRef:
         name: mcp-substrate-pool-ci
       boot: true

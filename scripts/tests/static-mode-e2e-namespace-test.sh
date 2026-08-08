@@ -32,31 +32,35 @@ done
 
 grep -Fq 'namespace: ate-demo' "${substrate_script}"
 
-provider_access="$(awk '/^grant_substrate_provider_template_access\(\) {/,/^}/' "${substrate_script}")"
-for expected in \
-  'namespace: ate-demo' \
-  '- ate.dev' \
-  '- orka-mcp-ci' \
-  '- actortemplates' \
-  '- get' \
-  'name: orka-controller-manager' \
-  'namespace: ${ORKA_NAMESPACE}'; do
-  grep -Fq -- "${expected}" <<<"${provider_access}" || {
-    echo "agent-substrate E2E provider grant is missing ${expected}" >&2
-    exit 1
-  }
-done
-if grep -Eq -- '- (list|watch|create|update|patch|delete)|- secrets' <<<"${provider_access}"; then
-  echo 'agent-substrate E2E provider grant exceeds read access to its exact ActorTemplate' >&2
+mcp_template_namespace="$(
+  awk '
+    $0 == "  name: orka-mcp-ci" { found = 1; next }
+    found && $1 == "namespace:" { print $2; exit }
+  ' "${substrate_script}"
+)"
+if [[ "${mcp_template_namespace}" != '${ORKA_NAMESPACE}' ]]; then
+  echo 'agent-substrate E2E must colocate the MCP ActorTemplate with its isolated Orka Tool' >&2
   exit 1
 fi
+grep -Fq 'kubectl -n ${ORKA_NAMESPACE} get actortemplate orka-mcp-ci' "${substrate_script}"
 
-substrate_deploy="$(awk '/^deploy_orka\(\) {/,/^}/' "${substrate_script}")"
-provider_grant_line="$(grep -nF 'grant_substrate_provider_template_access' <<<"${substrate_deploy}" | cut -d: -f1 || true)"
-controller_apply_line="$(grep -nF '"${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -' <<<"${substrate_deploy}" | cut -d: -f1 || true)"
-if [[ ! "${provider_grant_line}" =~ ^[0-9]+$ || ! "${controller_apply_line}" =~ ^[0-9]+$ ]] ||
-  ((provider_grant_line >= controller_apply_line)); then
-  echo 'agent-substrate E2E must grant exact provider-template access before starting the isolated controller' >&2
+for function_name in create_substrate_actor_pools create_mcp_tool; do
+  function_body="$(awk "/^${function_name}\\(\\) {/,/^}/" "${substrate_script}")"
+  template_namespace="$(
+    awk '
+      $0 ~ /^[[:space:]]+name: orka-mcp-ci$/ { found = 1; next }
+      found && $1 == "namespace:" { print $2; exit }
+      found { exit }
+    ' <<<"${function_body}"
+  )"
+  if [[ -n "${template_namespace}" ]]; then
+    echo "agent-substrate E2E ${function_name} must default the MCP ActorTemplate reference to its Orka namespace" >&2
+    exit 1
+  fi
+done
+
+if grep -Fq 'grant_substrate_provider_template_access' "${substrate_script}"; then
+  echo 'agent-substrate E2E must not grant cross-namespace ActorTemplate access' >&2
   exit 1
 fi
 
