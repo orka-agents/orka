@@ -12,6 +12,7 @@ import {
   agentRuntimeSpecSchema,
   taskExecutionStatusSchema,
   taskDeliveryStatusSchema,
+  harnessRuntimeStatusSchema,
   resultRefSchema,
   childTaskStatusSchema,
   taskSpecSchema,
@@ -273,6 +274,16 @@ describe('structured ACP task status', () => {
       state: 'OutcomeUnknown',
       outcome: 'OutcomeUnknown',
     })
+  })
+
+  it('preserves harness v1 reconciliation context', () => {
+    const status = {
+      state: 'OutcomeUnknown' as const,
+      outcome: 'OutcomeUnknown' as const,
+      reason: 'WrapperRestarted',
+      message: 'accepted turn could not be settled after restart',
+    }
+    expect(harnessRuntimeStatusSchema.parse(status)).toEqual(status)
   })
 })
 

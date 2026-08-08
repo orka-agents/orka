@@ -282,6 +282,8 @@ export const harnessRuntimeStatusSchema = z.object({
   authRefResourceVersion: z.string().optional(),
   state: taskExecutionStateSchema.optional(),
   outcome: taskExecutionOutcomeSchema.optional(),
+  reason: z.string().optional(),
+  message: z.string().optional(),
 })
 
 // The authoritative execution route. Snapshot metadata and abbreviated

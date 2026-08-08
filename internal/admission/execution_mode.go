@@ -247,8 +247,8 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 	}
 
 	oldBinding, newBinding := oldObject.Status.AgentExecutionBinding, object.Status.AgentExecutionBinding
-	if reflect.DeepEqual(oldBinding, newBinding) {
-		return ctrladmission.Allowed("Task execution binding is unchanged")
+	if response, handled := taskStatusWriteResponse(v.config, req.UserInfo.Username, oldObject, object); handled {
+		return response
 	}
 	if oldBinding != nil || newBinding == nil {
 		return ctrladmission.Denied("Task execution binding is write-once and cannot be removed or replaced")
@@ -283,6 +283,20 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 		return ctrladmission.Denied("execution binding Agent identity must be in the Task namespace")
 	}
 	return ctrladmission.Allowed("Task binding matches the immutable namespace mode")
+}
+
+func taskStatusWriteResponse(
+	config ExecutionModeConfig,
+	username string,
+	oldObject, object *corev1alpha1.Task,
+) (ctrladmission.Response, bool) {
+	if !reflect.DeepEqual(oldObject.Status, object.Status) && !config.controller(username) {
+		return ctrladmission.Denied("only an authorized controller identity may update Task status"), true
+	}
+	if reflect.DeepEqual(oldObject.Status.AgentExecutionBinding, object.Status.AgentExecutionBinding) {
+		return ctrladmission.Allowed("Task execution binding is unchanged"), true
+	}
+	return ctrladmission.Response{}, false
 }
 
 func namespaceExecutionMode(ctx context.Context, reader client.Reader, namespaceName string) (executionmode.Mode, ctrladmission.Response) {

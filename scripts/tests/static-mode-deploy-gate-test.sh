@@ -195,8 +195,11 @@ if grep -Fq 'create namespace orka-system --dry-run=client' "${root}/Makefile"; 
 fi
 grep -F 'RUN_CONTROLLER_MODE ?= harness-v2' "${root}/Makefile" >/dev/null
 grep -F 'RUN_WATCH_NAMESPACE ?= orka-system' "${root}/Makefile" >/dev/null
+grep -F 'RUN_EXECUTION_MODE_CONTROLLER_USERNAMES ?= $(shell "$(KUBECTL)" auth whoami' "${root}/Makefile" >/dev/null
 grep -F -- '--controller-mode="$(RUN_CONTROLLER_MODE)"' "${root}/Makefile" >/dev/null
 grep -F -- '--watch-namespace="$(RUN_WATCH_NAMESPACE)"' "${root}/Makefile" >/dev/null
+grep -F -- '--enforce-namespace-isolation=true' "${root}/Makefile" >/dev/null
+grep -F -- '--execution-mode-controller-usernames="$(RUN_EXECUTION_MODE_CONTROLLER_USERNAMES)"' "${root}/Makefile" >/dev/null
 if grep -Eq 'RUN_LEGACY_FENCE_NAMESPACE|agent-execution-(host-mode|legacy-fence-namespace)' "${root}/Makefile"; then
   echo 'run target still uses superseded execution-host flags' >&2
   exit 1

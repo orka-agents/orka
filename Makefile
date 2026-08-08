@@ -15,6 +15,7 @@ ACP_OPENCODE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-opencode-runtime:latest
 WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
 RUN_CONTROLLER_MODE ?= harness-v2
 RUN_WATCH_NAMESPACE ?= orka-system
+RUN_EXECUTION_MODE_CONTROLLER_USERNAMES ?= $(shell "$(KUBECTL)" auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -333,7 +334,9 @@ build-all: build build-cli ## Build all binaries.
 run: manifests generate fmt vet ## Run a controller from your host.
 	POD_NAMESPACE="$(RUN_WATCH_NAMESPACE)" go run ./cmd --leader-elect=true \
 		--controller-mode="$(RUN_CONTROLLER_MODE)" \
-		--watch-namespace="$(RUN_WATCH_NAMESPACE)"
+		--watch-namespace="$(RUN_WATCH_NAMESPACE)" \
+		--enforce-namespace-isolation=true \
+		--execution-mode-controller-usernames="$(RUN_EXECUTION_MODE_CONTROLLER_USERNAMES)"
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.

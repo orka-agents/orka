@@ -67,13 +67,19 @@ describe('TaskExecutionRouteLedger', () => {
         task={agentTask({
           phase: 'Failed',
           agentExecutionBinding: harnessV1Binding(),
-          harnessRuntime: { state: 'OutcomeUnknown', outcome: 'OutcomeUnknown' },
+          harnessRuntime: {
+            state: 'OutcomeUnknown',
+            outcome: 'OutcomeUnknown',
+            reason: 'WrapperRestarted',
+            message: 'accepted turn could not be settled after restart',
+          },
         })}
       />,
     )
 
     expect(screen.getByText('Outcome unknown')).toHaveClass('text-status-failed')
     expect(screen.getByText('Human reconciliation required')).toBeInTheDocument()
+    expect(screen.getByText('WrapperRestarted')).toBeInTheDocument()
   })
 
 })

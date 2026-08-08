@@ -2032,6 +2032,9 @@ func isCredentialTurnEnvName(name string) bool {
 	for _, marker := range []string{
 		"_API_KEY_",
 		"_APIKEY_",
+		"_ACCESS_KEY_",
+		"_PAT_",
+		"_BASIC_AUTH_",
 		"_TOKEN_",
 		"_SECRET_",
 		"_PASSWORD_",

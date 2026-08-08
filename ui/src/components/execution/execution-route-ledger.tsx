@@ -164,7 +164,10 @@ export function TaskExecutionRouteLedger({ task }: { task: Task }) {
           ? {
               label: 'Reconciliation',
               title: 'Human reconciliation required',
-              detail: status?.execution?.reason ?? status?.execution?.message,
+              detail: status?.execution?.reason
+                || status?.execution?.message
+                || status?.harnessRuntime?.reason
+                || status?.harnessRuntime?.message,
               icon: ShieldAlert,
               tone: 'danger',
             }

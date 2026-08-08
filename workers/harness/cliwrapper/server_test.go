@@ -1186,11 +1186,23 @@ func TestExactConfiguredEnvValuesSelectsOnlyCredentialNames(t *testing.T) {
 		"FEATURE=true",
 		"RETRY_COUNT=1",
 		"TOKENIZER_MODEL=tokenizer-v1",
+		"AUTH_URL=https://auth.example.test",
+		"PATTERN=not-a-credential",
 		"OPENAI_API_KEY=openai-secret",
 		"WRAPPER_PRIVATE_SECRET=private-secret",
 		"DB_PASSWORD=password-secret",
+		"AWS_ACCESS_KEY_ID=aws-access-key-id-secret",
+		"GITHUB_PAT=github-pat-secret",
+		"UPSTREAM_BASIC_AUTH=basic-auth-secret-value",
 	})
-	want := []string{"password-secret", "private-secret", "openai-secret"}
+	want := []string{
+		"aws-access-key-id-secret",
+		"basic-auth-secret-value",
+		"github-pat-secret",
+		"password-secret",
+		"private-secret",
+		"openai-secret",
+	}
 	if !slices.Equal(values, want) {
 		t.Fatalf("configured exact redaction values = %v, want %v", values, want)
 	}
