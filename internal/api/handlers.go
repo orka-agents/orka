@@ -378,10 +378,21 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 		checks["store"] = "ok"
 	}
 
-	// Verify Kubernetes API connectivity
-	if h.client != nil {
-		var ns corev1.NamespaceList
-		if err := h.client.List(ctx, &ns, client.Limit(1)); err != nil {
+	// Verify Kubernetes API connectivity without starting a cache informer. In
+	// namespace-isolated mode, use the exact read covered by the controller's
+	// narrow Namespace RBAC grant.
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
+	}
+	if reader != nil {
+		var err error
+		if h.watchNamespace != "" {
+			err = reader.Get(ctx, client.ObjectKey{Name: h.watchNamespace}, &corev1.Namespace{})
+		} else {
+			err = reader.List(ctx, &corev1.NamespaceList{}, client.Limit(1))
+		}
+		if err != nil {
 			checks["kubernetes"] = "unhealthy"
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 				"status": "not ready",

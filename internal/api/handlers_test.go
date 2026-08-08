@@ -256,6 +256,83 @@ func TestHandlers_Readyz(t *testing.T) {
 	}
 }
 
+func TestHandlers_Readyz_UsesUncachedNamedNamespaceRead(t *testing.T) {
+	tests := []struct {
+		name       string
+		apiObjects []client.Object
+		wantStatus int
+	}{
+		{
+			name: "namespace exists",
+			apiObjects: []client.Object{&corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: testWatchNamespace},
+			}},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "namespace read fails",
+			wantStatus: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+
+			cachedReads := 0
+			cachedClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testWatchNamespace}}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						cachedReads++
+						return c.Get(ctx, key, obj, opts...)
+					},
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						cachedReads++
+						return c.List(ctx, list, opts...)
+					},
+				}).
+				Build()
+
+			apiGets := 0
+			apiLists := 0
+			apiReader := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.apiObjects...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						apiGets++
+						require.Equal(t, client.ObjectKey{Name: testWatchNamespace}, key)
+						require.IsType(t, &corev1.Namespace{}, obj)
+						return c.Get(ctx, key, obj, opts...)
+					},
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						apiLists++
+						return c.List(ctx, list, opts...)
+					},
+				}).
+				Build()
+
+			handlers := NewHandlers(HandlersConfig{
+				Client:         cachedClient,
+				APIReader:      apiReader,
+				WatchNamespace: testWatchNamespace,
+			})
+			app := fiber.New()
+			app.Get("/readyz", handlers.Readyz)
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			require.NoError(t, err)
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+			require.Zero(t, cachedReads)
+			require.Equal(t, 1, apiGets)
+			require.Zero(t, apiLists)
+		})
+	}
+}
+
 func TestHandlers_CreateTask_Valid(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Post("/tasks", handlers.CreateTask)

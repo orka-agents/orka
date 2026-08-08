@@ -60,6 +60,27 @@ type runtimePoolPodDeleteRecordingClient struct {
 	podDeleteResourceVersion  string
 }
 
+type runtimePoolNamespaceReadClient struct {
+	client.Client
+	namespaceReads       int
+	rejectNamespaceReads bool
+}
+
+func (c *runtimePoolNamespaceReadClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	if _, ok := object.(*corev1.Namespace); ok {
+		c.namespaceReads++
+		if c.rejectNamespaceReads {
+			return errors.New("cached Namespace reads are forbidden")
+		}
+	}
+	return c.Client.Get(ctx, key, object, options...)
+}
+
 func (c *runtimePoolPodDeleteRecordingClient) Delete(ctx context.Context, object client.Object, options ...client.DeleteOption) error {
 	if _, ok := object.(*corev1.Pod); ok {
 		deleteOptions := (&client.DeleteOptions{}).ApplyOptions(options)
@@ -113,6 +134,29 @@ func TestRuntimePoolReconcilerScalesZeroToOneWithHardenedResources(t *testing.T)
 	gotPool := runtimePoolTestGetPool(t, r, pool)
 	if gotPool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || gotPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
 		t.Fatalf("status = %s/%s, want Starting/Closed", gotPool.Status.Lifecycle, gotPool.Status.AdmissionState)
+	}
+}
+
+func TestRuntimePoolReconcilerReadsRuntimeNamespaceUncached(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	runtimeNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "orka-runtimes"}}
+	cachedClient := &runtimePoolNamespaceReadClient{
+		Client:               fake.NewClientBuilder().WithScheme(scheme).Build(),
+		rejectNamespaceReads: true,
+	}
+	apiReader := &runtimePoolNamespaceReadClient{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeNamespace).Build(),
+	}
+	reconciler := &RuntimePoolReconciler{Client: cachedClient, APIReader: apiReader}
+
+	if err := reconciler.ensureRuntimePoolNamespace(context.Background(), runtimePoolConfig{namespace: runtimeNamespace.Name}); err != nil {
+		t.Fatalf("ensureRuntimePoolNamespace() error = %v", err)
+	}
+	if cachedClient.namespaceReads != 0 {
+		t.Fatalf("cached Namespace reads = %d, want 0", cachedClient.namespaceReads)
+	}
+	if apiReader.namespaceReads != 1 {
+		t.Fatalf("uncached Namespace reads = %d, want 1", apiReader.namespaceReads)
 	}
 }
 
