@@ -896,6 +896,14 @@ func TestStaticChartRejectsUnsafeHarnessV1Values(t *testing.T) {
 			wantError: "harnessV1.image.digest must be a sha256 digest when controller.mode=harness-v1",
 		},
 		{
+			name: "Substrate workspace provider",
+			args: []string{
+				"--set-string", "controller.mode=harness-v1",
+				"--set", "controller.substrate.enabled=true",
+			},
+			wantError: "controller.substrate.enabled is unsupported when controller.mode=harness-v1",
+		},
+		{
 			name: "inline bearer token",
 			args: []string{
 				"--set-string", "controller.mode=harness-v1",

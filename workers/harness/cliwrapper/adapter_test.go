@@ -328,6 +328,36 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+func TestConfigValidationRejectsWeakOrInvalidAuthToken(t *testing.T) {
+	validToken := strings.Repeat("a", minAuthValueBytes)
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{name: "missing", token: ""},
+		{name: "too short", token: strings.Repeat("a", minAuthValueBytes-1)},
+		{name: "embedded control byte", token: validToken[:16] + "\n" + validToken[16:]},
+		{name: "non ASCII byte", token: validToken[:16] + "é" + validToken[16:]},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.AuthValue = tt.token
+			cfg.AdmissionLedgerPath = "/tmp/wrapper-ledger.db"
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate() error = nil, want invalid auth token")
+			}
+		})
+	}
+
+	cfg := DefaultConfig()
+	cfg.AuthValue = validToken
+	cfg.AdmissionLedgerPath = "/tmp/wrapper-ledger.db"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() valid auth token error = %v", err)
+	}
+}
+
 func TestTurnContextFromRequestDoesNotDefaultWorkDirToRepo(t *testing.T) {
 	request := validWrapperStartTurnRequest()
 	turn := turnContextFromRequest(RuntimeGeneric, DefaultConfig(), request)
@@ -384,7 +414,7 @@ func containsEnv(env []string, want string) bool {
 	return slices.Contains(env, want)
 }
 
-func TestLoadConfigFromEnvUnvalidatedAllowsFlagOnlyAuth(t *testing.T) {
+func TestLoadConfigFromEnvUnvalidatedAllowsFlagOnlyUnauthenticatedMode(t *testing.T) {
 	t.Setenv(EnvRuntime, RuntimeGeneric)
 	t.Setenv(EnvCommand, testEchoCommand)
 	cfg, err := LoadConfigFromEnvUnvalidated()

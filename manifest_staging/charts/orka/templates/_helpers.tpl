@@ -582,6 +582,9 @@ remain outside rendered Helm manifests.
 */}}
 {{- define "orka.validateHarnessV1" -}}
 {{- if eq .Values.controller.mode "harness-v1" -}}
+{{- if .Values.controller.substrate.enabled -}}
+{{- fail "controller.substrate.enabled is unsupported when controller.mode=harness-v1; Substrate requires harness-v2" -}}
+{{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.image.repository)) -}}
 {{- fail "harnessV1.image.repository is required when controller.mode=harness-v1" -}}
 {{- end -}}

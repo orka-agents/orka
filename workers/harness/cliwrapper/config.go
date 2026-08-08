@@ -53,6 +53,7 @@ const (
 	DefaultPromptEnv        = "ORKA_TURN_PROMPT"
 	DefaultWrapperWorkDir   = "/workspace"
 	DefaultLedgerGeneration = "1"
+	minAuthValueBytes       = 32
 )
 
 type Config struct {
@@ -266,8 +267,10 @@ func (c Config) Validate() error {
 	if c.TurnRetention <= 0 {
 		return fmt.Errorf("turn retention must be positive")
 	}
-	if !c.AllowUnauthenticated && strings.TrimSpace(c.AuthValue) == "" {
-		return fmt.Errorf("auth token is required unless %s=true", EnvAllowUnauthenticated)
+	if !c.AllowUnauthenticated {
+		if err := validateAuthValue(c.AuthValue); err != nil {
+			return err
+		}
 	}
 	if !c.AllowUnauthenticated && strings.TrimSpace(c.AdmissionLedgerPath) == "" {
 		return fmt.Errorf("durable admission ledger path is required unless %s=true", EnvAllowUnauthenticated)
@@ -284,6 +287,19 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("unsupported runtime adapter %q", c.Runtime)
 	}
+}
+
+func validateAuthValue(value string) error {
+	value = strings.TrimSpace(value)
+	if len(value) < minAuthValueBytes {
+		return fmt.Errorf("auth token must be at least %d bytes unless %s=true", minAuthValueBytes, EnvAllowUnauthenticated)
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] <= 0x20 || value[i] >= 0x7f {
+			return fmt.Errorf("auth token contains invalid header bytes")
+		}
+	}
+	return nil
 }
 
 func parseStringListEnv(name, value string) ([]string, error) {

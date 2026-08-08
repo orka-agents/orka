@@ -13,7 +13,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness/ledger"
 )
 
-const durableAdmissionControllerToken = "controller-token"
+const durableAdmissionControllerToken = "controller-token-0123456789abcdef"
 
 func TestDurableAdmissionSurvivesWrapperRestart(t *testing.T) {
 	cfg := DefaultConfig()

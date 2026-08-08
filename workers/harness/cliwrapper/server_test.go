@@ -677,7 +677,8 @@ func TestServerLocalAdmissionReconcileFailureReturnsUnavailable(t *testing.T) {
 
 func TestServerRequiresBearerTokenForTurnEndpoints(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.AuthValue = "auth-value-123"
+	const authValue = "auth-value-0123456789abcdef012345"
+	cfg.AuthValue = authValue
 	cfg.Generic.Command = testEchoCommand
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewFakeAdapter(FakeBehaviorSuccess))
 	defer cleanup()
@@ -691,7 +692,7 @@ func TestServerRequiresBearerTokenForTurnEndpoints(t *testing.T) {
 		t.Fatalf("unauthenticated StartTurn error = %v, want 401", err)
 	}
 
-	authed, err := harness.NewClient(baseURL, harness.WithBearerToken("auth-value-123"))
+	authed, err := harness.NewClient(baseURL, harness.WithBearerToken(authValue))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -705,19 +706,23 @@ func TestServerRequiresBearerTokenForTurnEndpoints(t *testing.T) {
 }
 
 func TestServerReloadsBearerTokenFile(t *testing.T) {
+	const (
+		oldToken = "old-token-0123456789abcdef01234567"
+		newToken = "new-token-0123456789abcdef01234567"
+	)
 	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("old-token"), 0o600); err != nil {
+	if err := os.WriteFile(tokenFile, []byte(oldToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg := DefaultConfig()
 	cfg.AuthValueFile = tokenFile
-	cfg.AuthValue = "old-token"
+	cfg.AuthValue = oldToken
 	cfg.Generic.Command = testEchoCommand
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewFakeAdapter(FakeBehaviorSuccess))
 	defer cleanup()
 
 	request := validWrapperStartTurnRequest()
-	oldClient, err := harness.NewClient(baseURL, harness.WithBearerToken("old-token"))
+	oldClient, err := harness.NewClient(baseURL, harness.WithBearerToken(oldToken))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,16 +731,27 @@ func TestServerReloadsBearerTokenFile(t *testing.T) {
 	}
 	collectWrapperFrames(t, oldClient, request.TurnID, 0)
 
-	if err := os.WriteFile(tokenFile, []byte("new-token"), 0o600); err != nil {
+	if err := os.WriteFile(tokenFile, []byte("short-token"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stale := validWrapperStartTurnRequest()
 	stale.TurnID = harness.HarnessTurnID(string(stale.TurnID) + "-rotated")
 	stale = sealDurableWrapperRequest(stale)
+	shortClient, err := harness.NewClient(baseURL, harness.WithBearerToken("short-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := shortClient.StartTurn(context.Background(), stale); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("weak rotated token StartTurn error = %v, want 503", err)
+	}
+
+	if err := os.WriteFile(tokenFile, []byte(newToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := oldClient.StartTurn(context.Background(), stale); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("stale token StartTurn error = %v, want 401", err)
 	}
-	newClient, err := harness.NewClient(baseURL, harness.WithBearerToken("new-token"))
+	newClient, err := harness.NewClient(baseURL, harness.WithBearerToken(newToken))
 	if err != nil {
 		t.Fatal(err)
 	}

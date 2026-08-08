@@ -461,14 +461,24 @@ func (s *Server) healthResponse() harness.HealthResponse {
 }
 
 func (s *Server) currentAuthValue() (string, error) {
+	if s.config.AllowUnauthenticated {
+		return "", nil
+	}
+	var value string
 	if file := strings.TrimSpace(s.config.AuthValueFile); file != "" {
 		data, err := os.ReadFile(file)
 		if err != nil {
 			return "", err
 		}
-		return strings.TrimSpace(string(data)), nil
+		value = string(data)
+	} else {
+		value = s.config.AuthValue
 	}
-	return strings.TrimSpace(s.config.AuthValue), nil
+	value = strings.TrimSpace(value)
+	if err := validateAuthValue(value); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {

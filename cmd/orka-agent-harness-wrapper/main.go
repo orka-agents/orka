@@ -53,8 +53,6 @@ func run(args []string) error {
 		return err
 	}
 	_ = os.Unsetenv(cliwrapper.EnvAuthValue)
-	authValueFromEnv := cfg.AuthValue
-	cfg.AuthValue = ""
 	var extraArgs repeatedString
 	var extraEnv repeatedString
 	tlsCertFile := strings.TrimSpace(os.Getenv(envHarnessWrapperTLSCertFile))
@@ -103,7 +101,6 @@ func run(args []string) error {
 		cfg.Copilot.HelperPath,
 		"helper executable path for the copilot adapter",
 	)
-	fs.StringVar(&cfg.AuthValue, "bearer-token", cfg.AuthValue, "required bearer token for turn/event/cancel endpoints")
 	fs.BoolVar(
 		&cfg.AllowUnauthenticated,
 		"allow-unauthenticated",
@@ -120,9 +117,6 @@ func run(args []string) error {
 	}
 	if len(extraArgs) > 0 {
 		cfg.Generic.Args = append(cfg.Generic.Args, extraArgs...)
-	}
-	if cfg.AuthValue == "" {
-		cfg.AuthValue = authValueFromEnv
 	}
 	if len(extraEnv) > 0 {
 		cfg.Generic.Env = append(cfg.Generic.Env, extraEnv...)
