@@ -231,14 +231,12 @@ grep -Fq '"$patch": "delete"' <<<"${publisher_disable_patch}" || \
 # controller mode. Claim the namespace before applying the statically configured
 # v2 workload and keep every required controller identity flag in the final
 # strategic patch.
-namespace_apply_line="$(grep -nF 'kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -' "${e2e}" | head -n1 | cut -d: -f1 || true)"
-namespace_label_line="$(grep -nF 'kubectl label namespace orka-system orka.ai/controller-mode=harness-v2 --overwrite' "${e2e}" | head -n1 | cut -d: -f1 || true)"
+namespace_identity_line="$(grep -nF 'scripts/lib/ensure-static-mode-namespace.sh' "${e2e}" | head -n1 | cut -d: -f1 || true)"
 controller_apply_line="$(grep -nF '"${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -' "${e2e}" | head -n1 | cut -d: -f1 || true)"
-[[ "${namespace_apply_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not create the Orka namespace'
-[[ "${namespace_label_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not claim the Orka namespace for harness-v2'
+[[ "${namespace_identity_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not establish the fail-closed Orka namespace identity'
 [[ "${controller_apply_line}" =~ ^[0-9]+$ ]] || fail 'Substrate deploy does not apply the controller workload'
-(( namespace_apply_line < namespace_label_line && namespace_label_line < controller_apply_line )) || \
-  fail 'Substrate deploy must claim the namespace before the harness-v2 controller workload'
+(( namespace_identity_line < controller_apply_line )) || \
+  fail 'Substrate deploy must establish the namespace identity before the harness-v2 controller workload'
 for required_arg in \
   '"--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key"' \
   '"--controller-mode=harness-v2"' \

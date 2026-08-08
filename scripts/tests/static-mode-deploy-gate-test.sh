@@ -182,6 +182,17 @@ if grep -Eq '^deploy: .*verify-(coexistence-crds|acp-crd-cutover)' "${root}/Make
   echo 'deploy still depends on a superseded coexistence or hard-cutover gate' >&2
   exit 1
 fi
+namespace_helper_line="$(grep -nF 'scripts/lib/ensure-static-mode-namespace.sh' "${root}/Makefile" | head -n1 | cut -d: -f1 || true)"
+first_secret_line="$(grep -nF 'get secret acp-artifact-capability' "${root}/Makefile" | head -n1 | cut -d: -f1 || true)"
+if [[ ! "${namespace_helper_line}" =~ ^[0-9]+$ || ! "${first_secret_line}" =~ ^[0-9]+$ ]] ||
+  ((namespace_helper_line >= first_secret_line)); then
+  echo 'deploy must establish the static namespace identity before writing installation Secrets' >&2
+  exit 1
+fi
+if grep -Fq 'create namespace orka-system --dry-run=client' "${root}/Makefile"; then
+  echo 'deploy must not create or adopt an unlabeled orka-system namespace' >&2
+  exit 1
+fi
 grep -F 'RUN_CONTROLLER_MODE ?= harness-v2' "${root}/Makefile" >/dev/null
 grep -F 'RUN_WATCH_NAMESPACE ?= orka-system' "${root}/Makefile" >/dev/null
 grep -F -- '--controller-mode="$(RUN_CONTROLLER_MODE)"' "${root}/Makefile" >/dev/null

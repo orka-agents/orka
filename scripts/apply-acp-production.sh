@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
 usage() {
   echo "Usage: $0 OVERLAY_DIR KUSTOMIZE KUBECTL" >&2
 }
@@ -48,6 +50,7 @@ trap cleanup EXIT
 manifest="${work_dir}/manifest.yaml"
 rendered_json="${work_dir}/rendered.json"
 namespace_resource="${work_dir}/namespace.json"
+namespace_metadata_patch="${work_dir}/namespace-metadata-patch.json"
 existing_namespace="${work_dir}/existing-namespace.json"
 existing_controller="${work_dir}/existing-controller.json"
 runtime_config="${work_dir}/runtime-images-configmap.json"
@@ -85,6 +88,27 @@ jq -sc '
     else error("expected exactly one orka-system Namespace claimed by harness-v2")
     end
 ' "${rendered_json}" >"${namespace_resource}"
+jq -e '
+  def json_pointer_escape: gsub("~"; "~0") | gsub("/"; "~1");
+  .metadata.labels as $labels
+  | if ($labels | type) != "object" or $labels["orka.ai/controller-mode"] != "harness-v2"
+    then error("namespace metadata patch requires the harness-v2 mode claim")
+    else [
+      {
+        op: "test",
+        path: "/metadata/labels/orka.ai~1controller-mode",
+        value: "harness-v2"
+      },
+      ($labels | to_entries[]
+        | select(.key != "orka.ai/controller-mode")
+        | {
+            op: "add",
+            path: ("/metadata/labels/" + (.key | json_pointer_escape)),
+            value: .value
+          })
+    ]
+    end
+' "${namespace_resource}" >"${namespace_metadata_patch}"
 jq -sc '
   [.[] | if .kind == "List" then .items[] else . end]
   | map(select(.kind == "ConfigMap" and .metadata.labels["orka.ai/acp-runtime-images"] == "true"))
@@ -457,8 +481,12 @@ EOF_ADMISSION_HANDLERS
 # admission plane before rolling the static harness-v2 controller. Every retry repeats
 # these idempotent phases, so interruption after any apply still converges on the
 # desired generation without rotating an existing snapshot key.
+bash "${script_dir}/lib/ensure-static-mode-namespace.sh" "${kubectl}" orka-system harness-v2
 validate_existing_controller_identity
-"${kubectl}" apply -f "${namespace_resource}"
+# Preserve the immutable mode claim as an atomic precondition while converging
+# the remaining platform labels. This cannot relabel or adopt a namespace that
+# changes identity after the preflight.
+"${kubectl}" patch namespace orka-system --type=json --patch-file "${namespace_metadata_patch}" >/dev/null
 validate_admission_tls_secret
 ensure_snapshot_secret
 "${kubectl}" apply -f "${runtime_config}"

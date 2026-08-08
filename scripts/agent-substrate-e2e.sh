@@ -781,7 +781,8 @@ create_substrate_resources() {
 
   log "Creating Substrate WorkerPool and ActorTemplate"
   kubectl create namespace ate-demo --dry-run=client -o yaml | kubectl apply -f -
-  kubectl create namespace "${ORKA_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+  bash "${ROOT_DIR}/scripts/lib/ensure-static-mode-namespace.sh" \
+    kubectl "${ORKA_NAMESPACE}" harness-v2
   for ns in ate-demo "${ORKA_NAMESPACE}"; do
     kubectl -n "${ns}" create secret generic "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}" \
       "--from-literal=${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}=${SUBSTRATE_BOOTSTRAP_TOKEN}" \
@@ -920,8 +921,6 @@ deploy_orka() {
     "${ROOT_DIR}/bin/kustomize" edit remove resource ../provider-proxy
     "${ROOT_DIR}/bin/kustomize" edit remove resource ../scm-egress-proxy
   )
-  kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
-  kubectl label namespace orka-system orka.ai/controller-mode=harness-v2 --overwrite
   local placeholder_digest
   placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
   kubectl -n orka-system create configmap acp-runtime-images \

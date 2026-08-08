@@ -17,6 +17,7 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/security-scan-e2e.sh"
       - "workers/**"
   push:
@@ -34,6 +35,7 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/security-scan-e2e.sh"
       - "workers/**"
 

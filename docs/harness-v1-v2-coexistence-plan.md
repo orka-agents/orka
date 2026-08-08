@@ -85,6 +85,21 @@ A missing or mismatched label fails startup. The label is an installation
 identity, not a runtime switch. Changing it in place is unsupported; create a
 new namespace and installation instead.
 
+Namespace bootstrap is fail-closed and write-once with respect to that claim:
+
+- if the namespace is absent, create it with `orka.ai/controller-mode` in the
+  same Kubernetes API write, before creating Secrets or workloads;
+- if it already exists, proceed only when its exact name and mode claim match;
+  same-mode reuse preserves the claim and any unrelated labels;
+- never adopt or relabel an existing unlabeled or opposite-mode namespace;
+- if another installer wins the create race, reread the namespace and proceed
+  only when the resulting identity is an exact same-mode match.
+
+Canonical script-based installs enforce this contract through
+`scripts/lib/ensure-static-mode-namespace.sh`. Additional namespace metadata
+may converge only after an atomic test confirms that the mode claim is still
+unchanged.
+
 The ordinary leader-election ID may be the same in both installations because
 each Lease lives in its controller's distinct watched namespace. There is no
 cluster-global harness ownership Lease and no legacy-Lease acquisition bridge.
@@ -305,13 +320,15 @@ to the runtime namespace.
 
 1. Inventory the current v1 installation, including active wrapper turns,
    Tasks, Sessions, producers, stores, Secrets, and backups.
-2. Establish a dedicated v1 watch namespace and label it `harness-v1`.
+2. Atomically establish a dedicated v1 watch namespace with the `harness-v1`
+   claim; reject any preexisting namespace without that exact identity.
 3. Upgrade the v1 installation to the static-mode compatibility release
    without changing its protocol or object identities. Follow the v1 wrapper
    drain procedure for any wrapper Pod-template change.
 4. Apply the shared CRD bundle through the single platform owner.
-5. Create and label a distinct v2 watch namespace and a distinct v2 runtime
-   namespace.
+5. Atomically create a distinct v2 watch namespace with the `harness-v2` claim
+   and create a distinct v2 runtime namespace; never adopt or relabel an
+   existing unlabeled or opposite-mode watch namespace.
 6. Install the v2 release with a unique name, endpoint, RBAC, storage, and
    `harness-v2` mode.
 7. Prove with RBAC and runtime tests that neither controller can observe or
@@ -369,6 +386,13 @@ to resume UID-bound execution.
 - missing, empty, `dual`, `auto`, `harness-v1-drain`, and unknown modes fail;
 - an empty watch namespace fails;
 - a missing or mismatched namespace mode label fails;
+- fresh bootstrap creates the namespace and mode claim in one write before any
+  Secret or workload write;
+- exact same-mode namespace reuse is idempotent and does not rewrite the mode
+  claim;
+- unlabeled and opposite-mode namespaces are rejected without mutation;
+- a namespace create race succeeds only after rereading an exact same-mode
+  identity;
 - leader election is required and its Lease is in the watched namespace;
 - mode-incompatible wrapper or ACP configuration fails rendering or startup;
 - implicit or legacy v2 controllers are rejected as in-place static-v2 upgrade
@@ -428,8 +452,9 @@ to resume UID-bound execution.
 
 This replacement plan is complete when:
 
-1. the controller accepts exactly the two static modes and requires a matching
-   non-empty namespace claim;
+1. the controller accepts exactly the two static modes, requires a matching
+   non-empty namespace claim, and deployment paths establish that claim
+   atomically without adopting or relabeling an existing namespace;
 2. v1 and v2 run in disjoint namespaces with enforced RBAC, storage, Lease,
    Service, Secret, and network boundaries;
 3. mode-specific controller registration makes cross-dispatch impossible;

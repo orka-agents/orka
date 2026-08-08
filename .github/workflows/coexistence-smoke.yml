@@ -27,12 +27,14 @@ on:
       - "pkg/harness/**"
       - "scripts/check-legacy-wrapper-resources.sh"
       - "scripts/apply-acp-production.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/live-github-oidc-e2e.sh"
       - "scripts/security-scan-e2e.sh"
       - "scripts/agent-substrate-e2e.sh"
       - "scripts/live-github-label-trigger-e2e.sh"
       - "scripts/static-mode-crd-validate.sh"
       - "scripts/tests/acp-runtime-image-rollout-test.sh"
+      - "scripts/tests/ensure-static-mode-namespace-test.sh"
       - "scripts/tests/live-github-oidc-e2e-test.sh"
       - "scripts/tests/static-mode-e2e-namespace-test.sh"
       - "scripts/tests/static-mode-deploy-gate-test.sh"
@@ -63,12 +65,14 @@ on:
       - "pkg/harness/**"
       - "scripts/check-legacy-wrapper-resources.sh"
       - "scripts/apply-acp-production.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/live-github-oidc-e2e.sh"
       - "scripts/security-scan-e2e.sh"
       - "scripts/agent-substrate-e2e.sh"
       - "scripts/live-github-label-trigger-e2e.sh"
       - "scripts/static-mode-crd-validate.sh"
       - "scripts/tests/acp-runtime-image-rollout-test.sh"
+      - "scripts/tests/ensure-static-mode-namespace-test.sh"
       - "scripts/tests/live-github-oidc-e2e-test.sh"
       - "scripts/tests/static-mode-e2e-namespace-test.sh"
       - "scripts/tests/static-mode-deploy-gate-test.sh"
@@ -136,6 +140,7 @@ jobs:
           bash -n scripts/agent-substrate-e2e.sh
           bash -n scripts/live-github-label-trigger-e2e.sh
           bash -n scripts/tests/acp-runtime-image-rollout-test.sh
+          bash -n scripts/tests/ensure-static-mode-namespace-test.sh
           bash -n scripts/tests/live-github-oidc-e2e-test.sh
           bash -n scripts/tests/static-mode-e2e-namespace-test.sh
           bash -n scripts/tests/static-mode-deploy-gate-test.sh
@@ -146,6 +151,7 @@ jobs:
       - name: Run static-mode deployment tests
         run: |
           bash scripts/tests/static-mode-deploy-gate-test.sh
+          bash scripts/tests/ensure-static-mode-namespace-test.sh
           KUSTOMIZE="$PWD/bin/kustomize" bash scripts/tests/acp-runtime-image-rollout-test.sh
           bash scripts/tests/live-github-oidc-e2e-test.sh
           bash scripts/tests/static-mode-e2e-namespace-test.sh

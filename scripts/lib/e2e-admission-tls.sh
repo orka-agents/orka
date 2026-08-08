@@ -9,7 +9,9 @@ orka_e2e_bootstrap_admission_tls() (
   local namespace="orka-system"
   local secret_name="orka-admission-tls"
   local service_name="orka-admission.orka-system.svc"
-  local tls_dir
+  local library_dir tls_dir
+
+  library_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
   for command in openssl "${kubectl_bin}"; do
     command -v "${command}" >/dev/null 2>&1 || {
@@ -74,8 +76,8 @@ EOF_SERVING_CONFIG
     -out "${tls_dir}/tls.crt" >/dev/null 2>&1
   openssl verify -CAfile "${tls_dir}/ca.crt" "${tls_dir}/tls.crt" >/dev/null 2>&1
 
-  "${kubectl_bin}" create namespace "${namespace}" --dry-run=client -o yaml \
-    | "${kubectl_bin}" apply -f - >/dev/null
+  bash "${library_dir}/ensure-static-mode-namespace.sh" \
+    "${kubectl_bin}" "${namespace}" harness-v2
   "${kubectl_bin}" -n "${namespace}" create secret generic "${secret_name}" \
     --type=kubernetes.io/tls \
     --from-file="tls.crt=${tls_dir}/tls.crt" \

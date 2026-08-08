@@ -498,7 +498,7 @@ verify-static-mode-crds: ## Refuse workload deployment until the platform-owned 
 
 .PHONY: deploy
 deploy: verify-acp-runtime-images verify-static-mode-crds manifests kustomize ## Deploy the static harness-v2 installation after the shared CRD wave.
-	@"$(KUBECTL)" create namespace orka-system --dry-run=client -o yaml | "$(KUBECTL)" apply -f -
+	@bash "$(CURDIR)/scripts/lib/ensure-static-mode-namespace.sh" "$(KUBECTL)" orka-system harness-v2
 	@if ! "$(KUBECTL)" -n orka-system get secret acp-artifact-capability >/dev/null 2>&1; then \
 		secret="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
 		"$(KUBECTL)" -n orka-system create secret generic acp-artifact-capability --from-literal=capability-secret="$$secret"; \

@@ -5,6 +5,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 security_script="${root}/scripts/security-scan-e2e.sh"
 substrate_script="${root}/scripts/agent-substrate-e2e.sh"
 label_script="${root}/scripts/live-github-label-trigger-e2e.sh"
+e2e_suite="${root}/test/e2e/e2e_suite_test.go"
+tls_helper="${root}/scripts/lib/e2e-admission-tls.sh"
 
 grep -Fq 'test_namespace="${ORKA_SECURITY_SCAN_E2E_NAMESPACE:-${orka_namespace}}"' "${security_script}"
 grep -Fq '[[ "${test_namespace}" == "${orka_namespace}" ]]' "${security_script}"
@@ -13,13 +15,27 @@ grep -Fq 'kubectl -n "${ORKA_NAMESPACE}" apply -f -' "${substrate_script}"
 grep -Fq 'for ns in ate-demo "${ORKA_NAMESPACE}"; do' "${substrate_script}"
 grep -Fq 'ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE="${orka_namespace}"' "${label_script}"
 grep -Fq 'namespace: ${orka_namespace}' "${label_script}"
+grep -Fq 'scripts", "lib", "ensure-static-mode-namespace.sh"' "${e2e_suite}"
+if grep -Fq 'exec.Command("kubectl", "create", "ns", namespace)' "${e2e_suite}"; then
+  echo 'Go E2E must not pre-create an unlabeled controller namespace' >&2
+  exit 1
+fi
+
+tls_verify_line="$(grep -nF 'openssl verify -CAfile' "${tls_helper}" | cut -d: -f1 || true)"
+tls_identity_line="$(grep -nF 'ensure-static-mode-namespace.sh' "${tls_helper}" | cut -d: -f1 || true)"
+tls_secret_line="$(grep -nF 'create secret generic "${secret_name}"' "${tls_helper}" | cut -d: -f1 || true)"
+if [[ ! "${tls_verify_line}" =~ ^[0-9]+$ || ! "${tls_identity_line}" =~ ^[0-9]+$ || ! "${tls_secret_line}" =~ ^[0-9]+$ ]] ||
+  ((tls_verify_line >= tls_identity_line || tls_identity_line >= tls_secret_line)); then
+  echo 'E2E TLS bootstrap must verify its certificate, establish namespace identity, then write the Secret' >&2
+  exit 1
+fi
 
 substrate_resource_setup="$(awk '/^create_substrate_resources\(\) {/,/^}/' "${substrate_script}")"
-namespace_create_line="$(grep -nF 'kubectl create namespace "${ORKA_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -' <<<"${substrate_resource_setup}" | cut -d: -f1 || true)"
+namespace_create_line="$(grep -nF 'scripts/lib/ensure-static-mode-namespace.sh' <<<"${substrate_resource_setup}" | cut -d: -f1 || true)"
 secret_loop_line="$(grep -nF 'for ns in ate-demo "${ORKA_NAMESPACE}"; do' <<<"${substrate_resource_setup}" | cut -d: -f1 || true)"
 if [[ ! "${namespace_create_line}" =~ ^[0-9]+$ || ! "${secret_loop_line}" =~ ^[0-9]+$ ]] ||
   ((namespace_create_line >= secret_loop_line)); then
-  echo 'agent-substrate E2E must create the isolated Orka namespace before writing bootstrap Secrets' >&2
+  echo 'agent-substrate E2E must establish the fail-closed Orka namespace identity before writing bootstrap Secrets' >&2
   exit 1
 fi
 

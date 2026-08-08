@@ -393,7 +393,15 @@ if [[ "$1" == "proxy" ]]; then
 fi
 
 if [[ "$1" == "get" && "$2" == "namespace" && "$3" == "orka-system" ]]; then
-  case "${FAKE_EXISTING_NAMESPACE_MODE:-none}" in
+  namespace_mode="${FAKE_EXISTING_NAMESPACE_MODE:-}"
+  if [[ -z "${namespace_mode}" ]]; then
+    if [[ -e "${FAKE_KUBE_STATE}/namespace" ]]; then
+      namespace_mode="harness-v2"
+    else
+      namespace_mode="none"
+    fi
+  fi
+  case "${namespace_mode}" in
     none)
       exit 0
       ;;
@@ -466,7 +474,67 @@ if [[ "$1" == "create" ]]; then
     echo "unexpected fake kubectl create invocation: $*" >&2
     exit 2
   }
-  manifest_json "${manifest_path}"
+  if [[ " $* " == *" --dry-run=client "* ]]; then
+    manifest_json "${manifest_path}"
+    exit 0
+  fi
+
+  payload="$(manifest_json "${manifest_path}")"
+  if jq -e '
+    .apiVersion == "v1" and
+    .kind == "Namespace" and
+    .metadata.name == "orka-system" and
+    .metadata.labels["orka.ai/controller-mode"] == "harness-v2"
+  ' <<<"${payload}" >/dev/null; then
+    [[ ! -e "${FAKE_KUBE_STATE}/namespace" ]] || {
+      echo 'namespace already exists' >&2
+      exit 1
+    }
+    if [[ "${FAKE_KUBE_FAIL_MODE:-}" == "namespace" && ! -e "${FAKE_KUBE_STATE}/failed-namespace" ]]; then
+      : >"${FAKE_KUBE_STATE}/failed-namespace"
+      printf 'fail-namespace:orka-system\n' >>"${FAKE_KUBE_LOG}"
+      exit 18
+    fi
+    : >"${FAKE_KUBE_STATE}/namespace"
+    printf 'namespace:orka-system\n' >>"${FAKE_KUBE_LOG}"
+    printf '%s\n' "${payload}"
+    exit 0
+  fi
+  echo "unexpected non-dry-run fake kubectl create invocation: $*" >&2
+  exit 2
+fi
+
+if [[ "$1" == "patch" && "$2" == "namespace" && "$3" == "orka-system" ]]; then
+  patch_path=""
+  args=("$@")
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    if [[ "${args[$i]}" == "--patch-file" && $((i + 1)) -lt ${#args[@]} ]]; then
+      patch_path="${args[$((i + 1))]}"
+      break
+    fi
+  done
+  [[ " $* " == *" --type=json "* && -n "${patch_path}" && -f "${patch_path}" ]] || {
+    echo "namespace metadata update must use a JSON patch file: $*" >&2
+    exit 2
+  }
+  jq -e '
+    ([.[] | select(.path == "/metadata/labels/orka.ai~1controller-mode")] == [{
+      op: "test",
+      path: "/metadata/labels/orka.ai~1controller-mode",
+      value: "harness-v2"
+    }]) and
+    ([.[] | select(.op != "test" and .path == "/metadata/labels/orka.ai~1controller-mode")] | length) == 0 and
+    ([.[] | select(.op == "add" and .path == "/metadata/labels/control-plane" and .value == "controller-manager")] | length) == 1
+  ' "${patch_path}" >/dev/null || {
+    echo 'namespace metadata patch could overwrite the static mode identity' >&2
+    exit 2
+  }
+  if [[ "${FAKE_EXISTING_NAMESPACE_MODE:-}" != "harness-v2" && ! -e "${FAKE_KUBE_STATE}/namespace" ]]; then
+    echo 'namespace metadata patched before the claimed namespace existed' >&2
+    exit 2
+  fi
+  : >"${FAKE_KUBE_STATE}/namespace"
+  printf 'namespace-metadata:orka-system\n' >>"${FAKE_KUBE_LOG}"
   exit 0
 fi
 
