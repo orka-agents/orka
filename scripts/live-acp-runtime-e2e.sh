@@ -1515,6 +1515,10 @@ apply_agent() {
     }' | k -n "${namespace}" apply -f - >/dev/null
 }
 
+# Read tasks without Bash carry the restricted {Read,Glob,Grep} tool policy for
+# every provider, so codex exercises its native read-only agent mode live.
+# Codex cannot express restricted policies that include Bash, so the blocking
+# timeout/cancel tasks stay unrestricted for it.
 apply_read_task() {
   local name="$1"
   local agent="$2"
@@ -1549,10 +1553,11 @@ apply_read_task() {
         prompt:$prompt,
         workspace:({intent:"read",gitRepo:$repo,ref:$ref} +
           (if ($identity|length)>0 then {sourceRepository:{provider:"github",id:$identity}} else {} end)),
-        agentRuntime:({maxTurns:12} + (if $provider == "codex" then {} else {
-          allowBash:$allowBash,
-          allowedTools:(if $allowBash then ["Read","Glob","Grep","Bash"] else ["Read","Glob","Grep"] end)
-        } end)),
+        agentRuntime:({maxTurns:12} + (
+          if $provider == "codex" and $allowBash then {} else {
+            allowBash:$allowBash,
+            allowedTools:(if $allowBash then ["Read","Glob","Grep","Bash"] else ["Read","Glob","Grep"] end)
+          } end)),
         timeout:$timeout
       } + (if ($session|length)>0 then {sessionRef:{name:$session,create:$create,append:true}} else {} end))
     }' | k -n "${namespace}" apply -f - >/dev/null
