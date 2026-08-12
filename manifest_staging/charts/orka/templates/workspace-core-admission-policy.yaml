@@ -1,0 +1,44 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-executionworkspace-core-admission
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["workspace.orka.ai"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["executionworkspaces"]
+  validations:
+    - expression: >-
+        !has(object.spec.coreAdmission) ||
+        (oldObject != null && has(oldObject.spec.coreAdmission) &&
+             object.spec.coreAdmission.admittedGeneration == oldObject.spec.coreAdmission.admittedGeneration &&
+             has(object.spec.coreAdmission.poolBinding) == has(oldObject.spec.coreAdmission.poolBinding) &&
+             (!has(object.spec.coreAdmission.poolBinding) ||
+              (object.spec.coreAdmission.poolBinding.name == oldObject.spec.coreAdmission.poolBinding.name &&
+               object.spec.coreAdmission.poolBinding.uid == oldObject.spec.coreAdmission.poolBinding.uid &&
+               object.spec.coreAdmission.poolBinding.generation == oldObject.spec.coreAdmission.poolBinding.generation &&
+               has(object.spec.coreAdmission.poolBinding.profileHash) == has(oldObject.spec.coreAdmission.poolBinding.profileHash) &&
+               (!has(object.spec.coreAdmission.poolBinding.profileHash) ||
+                object.spec.coreAdmission.poolBinding.profileHash == oldObject.spec.coreAdmission.poolBinding.profileHash)))) ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaces')
+          .namespace(request.namespace)
+          .name(object.metadata.name)
+          .check('admit').allowed()
+      message: only the Orka core controller may establish or advance ExecutionWorkspace core admission
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-executionworkspace-core-admission
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "orka.fullname" . }}-executionworkspace-core-admission
+  validationActions: [Deny]

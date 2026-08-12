@@ -121,14 +121,19 @@ func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, string, func(), erro
 		})
 	}
 	localEndpoint := (&url.URL{Scheme: runtimeAuthProxyHTTP, Host: listener.Addr().String(), Path: upstream.Path}).String()
+	// Runtime-auth-only turns promise the child sees no raw provider
+	// credential, so scrub every known provider credential — not only the
+	// proxied provider's — before injecting the per-turn loopback values.
+	turn.Env = removeTurnEnv(turn.Env,
+		workerenv.OpenAIBaseURL, workerenv.OpenAIAPIKey, workerenv.CodexAPIKey,
+		workerenv.AnthropicBaseURL, workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY",
+	)
 	switch mode {
 	case runtimeAuthProxyOpenAI:
-		turn.Env = removeTurnEnv(turn.Env, workerenv.OpenAIBaseURL, workerenv.OpenAIAPIKey, workerenv.CodexAPIKey)
 		turn.Env = setEnv(turn.Env, workerenv.OpenAIBaseURL, localEndpoint)
 		turn.Env = setEnv(turn.Env, workerenv.OpenAIAPIKey, token)
 		turn.Env = setEnv(turn.Env, workerenv.CodexAPIKey, token)
 	case runtimeAuthProxyAnthropic:
-		turn.Env = removeTurnEnv(turn.Env, workerenv.AnthropicBaseURL, workerenv.AnthropicAPIKey)
 		turn.Env = setEnv(turn.Env, workerenv.AnthropicBaseURL, localEndpoint)
 		turn.Env = setEnv(turn.Env, workerenv.AnthropicAPIKey, token)
 	}

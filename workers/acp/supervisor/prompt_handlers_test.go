@@ -853,6 +853,41 @@ func TestWorkspaceDeltaPathPolicy(t *testing.T) {
 	}
 }
 
+func TestWorkspaceDeltaPathAllowedRecursiveGlobs(t *testing.T) {
+	allowed := []struct {
+		path     string
+		patterns []string
+	}{
+		// `**` must span multiple directory levels, gitignore-style.
+		{path: "src/pkg/util/helpers.go", patterns: []string{"src/**/*.go"}},
+		{path: "src/one.go", patterns: []string{"src/**/*.go"}},
+		{path: "main.go", patterns: []string{"**/*.go"}},
+		{path: "a/b/c/d.txt", patterns: []string{"a/**/d.txt"}},
+		{path: "a/d.txt", patterns: []string{"a/**/d.txt"}},
+		{path: "internal/deep/nested/file.go", patterns: []string{"internal/**"}},
+		{path: "docs/guide/intro.md", patterns: []string{"docs/*/intro.md"}},
+	}
+	for _, tt := range allowed {
+		if !workspaceDeltaPathAllowed(tt.path, tt.patterns) {
+			t.Errorf("expected %q to match %v", tt.path, tt.patterns)
+		}
+	}
+	denied := []struct {
+		path     string
+		patterns []string
+	}{
+		{path: "src/pkg/util/helpers.txt", patterns: []string{"src/**/*.go"}},
+		{path: "other/one.go", patterns: []string{"src/**/*.go"}},
+		{path: "docs/guide/deep/intro.md", patterns: []string{"docs/*/intro.md"}},
+		{path: "srcfile.go", patterns: []string{"src/**"}},
+	}
+	for _, tt := range denied {
+		if workspaceDeltaPathAllowed(tt.path, tt.patterns) {
+			t.Errorf("expected %q to not match %v", tt.path, tt.patterns)
+		}
+	}
+}
+
 func TestWorkspaceDeltaRejectsSessionCredentials(t *testing.T) {
 	state := &sessionState{
 		providerProxy: &providerProxySession{credential: []byte("provider-session-secret")},

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -140,6 +141,152 @@ func TestSCMEgressProxyAllowsAuthenticatedGitHubCONNECT(t *testing.T) {
 	if string(payload) != "github-connect-ok" {
 		t.Fatalf("tunnel payload = %q", payload)
 	}
+}
+
+func TestSCMEgressProxyCONNECTSurvivesQuietRequestDirection(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+	const (
+		chunkCount = 12
+		chunkGap   = 100 * time.Millisecond
+	)
+	chunk := bytes.Repeat([]byte("x"), 1024)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		request := make([]byte, 4)
+		if _, readErr := io.ReadFull(connection, request); readErr != nil {
+			return
+		}
+		for range chunkCount {
+			if _, writeErr := connection.Write(chunk); writeErr != nil {
+				return
+			}
+			time.Sleep(chunkGap)
+		}
+	}()
+	publicAddress := netip.MustParseAddr("1.1.1.1")
+	proxy := newTestSCMProxy(t, proxyConfig{
+		AllowedHosts: map[string]struct{}{"github.com": {}},
+		// The response stream outlives the idle timeout, so the quiet request
+		// direction hits its read deadline repeatedly while the response
+		// direction is still moving bytes.
+		IdleTimeout: 500 * time.Millisecond,
+		Resolver: resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{publicAddress}, nil
+		}),
+		Dialer: localTestDialer(t, listener.Addr().String(), publicAddress),
+	})
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	connection, reader := openTestCONNECTTunnel(t, server.URL)
+	if err := connection.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, err := connection.Write([]byte("ping")); err != nil {
+		t.Fatalf("write tunnel payload: %v", err)
+	}
+	payload := make([]byte, chunkCount*len(chunk))
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		t.Fatalf("read streamed payload: %v", err)
+	}
+}
+
+func TestSCMEgressProxyCONNECTHalfCloseKeepsResponseStreaming(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+	payload := bytes.Repeat([]byte("y"), 64<<10)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		// The upstream only responds after the request direction is fully
+		// drained to EOF, which requires the proxy to propagate the client
+		// half-close instead of tearing the tunnel down.
+		if _, copyErr := io.Copy(io.Discard, connection); copyErr != nil {
+			return
+		}
+		_, _ = connection.Write(payload)
+	}()
+	publicAddress := netip.MustParseAddr("1.1.1.1")
+	proxy := newTestSCMProxy(t, proxyConfig{
+		AllowedHosts: map[string]struct{}{"github.com": {}},
+		IdleTimeout:  2 * time.Second,
+		Resolver: resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{publicAddress}, nil
+		}),
+		Dialer: localTestDialer(t, listener.Addr().String(), publicAddress),
+	})
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	connection, reader := openTestCONNECTTunnel(t, server.URL)
+	if err := connection.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, err := connection.Write([]byte("ping")); err != nil {
+		t.Fatalf("write tunnel payload: %v", err)
+	}
+	tcpConnection, ok := connection.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("connection type = %T, want *net.TCPConn", connection)
+	}
+	if err := tcpConnection.CloseWrite(); err != nil {
+		t.Fatalf("half-close tunnel: %v", err)
+	}
+	received := make([]byte, len(payload))
+	if _, err := io.ReadFull(reader, received); err != nil {
+		t.Fatalf("read payload after half-close: %v", err)
+	}
+	if !bytes.Equal(received, payload) {
+		t.Fatal("payload mismatch after half-close")
+	}
+}
+
+func openTestCONNECTTunnel(t *testing.T, proxyURL string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	connection, err := net.DialTimeout("tcp", strings.TrimPrefix(proxyURL, "http://"), time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	if _, err := fmt.Fprintf(
+		connection,
+		"CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\nProxy-Authorization: %s\r\n\r\n",
+		proxyAuthorization(),
+	); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	reader := bufio.NewReader(connection)
+	status, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read CONNECT status: %v", err)
+	}
+	if status != "HTTP/1.1 200 Connection Established\r\n" {
+		t.Fatalf("CONNECT status = %q", status)
+	}
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("read CONNECT header: %v", readErr)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	return connection, reader
 }
 
 func TestSCMEgressProxyRejectsRedirect(t *testing.T) {
@@ -369,6 +516,13 @@ type remoteAddressConn struct {
 }
 
 func (connection *remoteAddressConn) RemoteAddr() net.Addr { return connection.remote }
+
+func (connection *remoteAddressConn) CloseWrite() error {
+	if half, ok := connection.Conn.(writeCloser); ok {
+		return half.CloseWrite()
+	}
+	return nil
+}
 
 func localTestDialer(t *testing.T, localAddress string, publicAddress netip.Addr) dialerFunc {
 	t.Helper()

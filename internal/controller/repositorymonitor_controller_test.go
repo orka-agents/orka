@@ -3902,8 +3902,11 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatalf("task AgentRuntime.Workspace is nil")
 	}
-	if task.Spec.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.Workspace.Ref != "sha1" || task.Spec.Workspace.PRBaseBranch != repositoryMonitorTestDefaultBranch {
+	if task.Spec.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.Workspace.Ref != "sha1" {
 		t.Fatalf("workspace = %#v, want repo with exact PR head sha1", task.Spec.Workspace)
+	}
+	if task.Spec.Workspace.PRBaseBranch != "" {
+		t.Fatalf("workspace prBaseBranch = %q, want empty because prBaseBranch requires write workspace intent", task.Spec.Workspace.PRBaseBranch)
 	}
 	if task.Spec.Workspace.ReadCredentialRef == nil || task.Spec.Workspace.ReadCredentialRef.Name != "github-token" {
 		t.Fatalf("workspace ReadCredentialRef = %#v, want github-token", task.Spec.Workspace.ReadCredentialRef)
@@ -4204,7 +4207,7 @@ func TestRepositoryMonitorReconcileRejectsInvalidReviewerAgentWithoutPersistingM
 	}
 }
 
-func TestRepositoryMonitorValidationAllowsCodexReviewer(t *testing.T) {
+func TestRepositoryMonitorValidationRejectsCodexReviewer(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -4228,9 +4231,17 @@ func TestRepositoryMonitorValidationAllowsCodexReviewer(t *testing.T) {
 	)
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
+	// Monitor review tasks are read-only, and read-only agent task validation
+	// rejects codex, so the reviewer must be rejected at monitor validation.
 	reason, message, err := reconciler.validateRepositoryMonitorReviewerAgent(ctx, monitor)
-	if err != nil || reason != "" || message != "" {
-		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
+	if err != nil {
+		t.Fatalf("validation error = %v", err)
+	}
+	if reason != repositoryMonitorReasonUnsupportedReviewerAgent {
+		t.Fatalf("reason = %q, want %q", reason, repositoryMonitorReasonUnsupportedReviewerAgent)
+	}
+	if !strings.Contains(message, "use claude or opencode") {
+		t.Fatalf("message = %q, want codex rejection guidance", message)
 	}
 }
 

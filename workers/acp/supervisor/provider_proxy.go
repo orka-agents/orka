@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/orka-agents/orka/internal/providerproxy"
 )
 
 const (
@@ -161,7 +163,7 @@ func (c ProviderProxyConfig) normalized() (ProviderProxyConfig, *url.URL, error)
 	if c.UpstreamBearerToken == "" || strings.IndexFunc(c.UpstreamBearerToken, func(value rune) bool { return value <= ' ' || value == 0x7f }) >= 0 {
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream bearer token is required")
 	}
-	if hasUnsafePathSegment(parsed.Path) {
+	if providerproxy.HasUnsafePathSegment(parsed.Path) {
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream URL is invalid")
 	}
 	if c.MaxRequestBytes <= 0 {
@@ -550,30 +552,30 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	authorization, ok := session.authorize(r, time.Now().UTC())
 	if !ok {
-		writeProviderProxyError(w, http.StatusForbidden, "provider access is not active")
+		providerproxy.WriteError(w, http.StatusForbidden, "provider access is not active")
 		return
 	}
 	defer authorization.release()
-	if !tryAcquireProviderSlot(session.requestSlots) {
-		writeProviderProxyError(w, http.StatusTooManyRequests, "provider session request capacity is exhausted")
+	if !providerproxy.TryAcquireSlot(session.requestSlots) {
+		providerproxy.WriteError(w, http.StatusTooManyRequests, "provider session request capacity is exhausted")
 		return
 	}
-	defer releaseProviderSlot(session.requestSlots)
-	if !tryAcquireProviderSlot(p.requestSlots) {
-		writeProviderProxyError(w, http.StatusTooManyRequests, "provider proxy request capacity is exhausted")
+	defer providerproxy.ReleaseSlot(session.requestSlots)
+	if !providerproxy.TryAcquireSlot(p.requestSlots) {
+		providerproxy.WriteError(w, http.StatusTooManyRequests, "provider proxy request capacity is exhausted")
 		return
 	}
-	defer releaseProviderSlot(p.requestSlots)
+	defer providerproxy.ReleaseSlot(p.requestSlots)
 	if r.Method == http.MethodConnect || r.Method == http.MethodTrace {
-		writeProviderProxyError(w, http.StatusMethodNotAllowed, "provider request method is not allowed")
+		providerproxy.WriteError(w, http.StatusMethodNotAllowed, "provider request method is not allowed")
 		return
 	}
-	if hasUnsafePathSegment(suffix) {
-		writeProviderProxyError(w, http.StatusBadRequest, "provider request path is invalid")
+	if providerproxy.HasUnsafePathSegment(suffix) {
+		providerproxy.WriteError(w, http.StatusBadRequest, "provider request path is invalid")
 		return
 	}
-	if encoding := strings.TrimSpace(r.Header.Get(providerContentEncodingHeader)); encoding != "" && !strings.EqualFold(encoding, "identity") {
-		writeProviderProxyError(w, http.StatusUnsupportedMediaType, "compressed provider requests are forbidden")
+	if providerproxy.HasDisallowedContentEncoding(r.Header) {
+		providerproxy.WriteError(w, http.StatusUnsupportedMediaType, "compressed provider requests are forbidden")
 		return
 	}
 
@@ -601,25 +603,25 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := readBoundedProviderBody(requestContext, r.Body, p.maxRequestBytes)
 	if err != nil {
 		if errors.Is(err, errProviderBodyTooLarge) {
-			writeProviderProxyError(w, http.StatusRequestEntityTooLarge, "provider request body exceeds limit")
+			providerproxy.WriteError(w, http.StatusRequestEntityTooLarge, "provider request body exceeds limit")
 		} else {
-			writeProviderProxyError(w, http.StatusForbidden, "provider request is no longer active")
+			providerproxy.WriteError(w, http.StatusForbidden, "provider request is no longer active")
 		}
 		return
 	}
 	requestClass, err := validateProviderRequest(p.providerKind, p.model, suffix, r.Method, body)
 	if err != nil {
-		writeProviderProxyError(w, http.StatusForbidden, "provider request is outside the immutable profile")
+		providerproxy.WriteError(w, http.StatusForbidden, "provider request is outside the immutable profile")
 		return
 	}
 	body, err = normalizeProviderRequestBody(p.providerKind, p.model, suffix, p.modelOutputLimit, body)
 	if err != nil {
-		writeProviderProxyError(w, http.StatusForbidden, "provider request is outside the immutable profile")
+		providerproxy.WriteError(w, http.StatusForbidden, "provider request is outside the immutable profile")
 		return
 	}
 	select {
 	case <-authorization.gateContext.Done():
-		writeProviderProxyError(w, http.StatusForbidden, "provider request is no longer active")
+		providerproxy.WriteError(w, http.StatusForbidden, "provider request is no longer active")
 		return
 	default:
 	}
@@ -627,7 +629,7 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errProviderTurnLimitExceeded) {
 			writeProviderTurnLimitError(w, p.providerKind)
 		} else {
-			writeProviderProxyError(w, http.StatusForbidden, "provider request is no longer active")
+			providerproxy.WriteError(w, http.StatusForbidden, "provider request is no longer active")
 		}
 		return
 	}
@@ -640,37 +642,40 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		connectionMu.Unlock()
 	}})
-	target := providerProxyTarget(authorization.upstreamBase, suffix, r.URL.RawQuery)
+	target := providerproxy.Target(authorization.upstreamBase, suffix, r.URL.RawQuery)
 	upstreamRequest, err := http.NewRequestWithContext(requestContext, r.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
-		writeProviderProxyError(w, http.StatusBadGateway, "provider request could not be prepared")
+		providerproxy.WriteError(w, http.StatusBadGateway, "provider request could not be prepared")
 		return
 	}
-	copyProviderRequestHeaders(upstreamRequest.Header, r.Header)
+	providerproxy.CopyRequestHeaders(upstreamRequest.Header, r.Header)
 	upstreamRequest.Header.Set(providerAuthorizationHeader, "Bearer "+string(p.upstreamToken))
 	upstreamRequest.Header.Set("Accept-Encoding", "identity")
 
 	response, err := p.client.Do(upstreamRequest)
 	if err != nil {
-		writeProviderProxyError(w, http.StatusBadGateway, "provider upstream request failed")
+		providerproxy.WriteError(w, http.StatusBadGateway, "provider upstream request failed")
 		return
 	}
 	defer response.Body.Close() //nolint:errcheck
 	if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
-		writeProviderProxyError(w, http.StatusBadGateway, "provider upstream redirects are forbidden")
+		providerproxy.WriteError(w, http.StatusBadGateway, "provider upstream redirects are forbidden")
 		return
 	}
-	if encoding := strings.TrimSpace(response.Header.Get(providerContentEncodingHeader)); encoding != "" && !strings.EqualFold(encoding, "identity") {
-		writeProviderProxyError(w, http.StatusBadGateway, "compressed provider responses are forbidden")
+	if providerproxy.HasDisallowedContentEncoding(response.Header) {
+		providerproxy.WriteError(w, http.StatusBadGateway, "compressed provider responses are forbidden")
 		return
 	}
 	if response.ContentLength > p.maxResponseBytes {
-		writeProviderProxyError(w, http.StatusBadGateway, "provider upstream response exceeds limit")
+		providerproxy.WriteError(w, http.StatusBadGateway, "provider upstream response exceeds limit")
 		return
 	}
-	copyProviderResponseHeaders(w.Header(), response.Header)
+	providerproxy.CopyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	if err := streamBoundedProviderResponse(w, response.Body, p.maxResponseBytes); err != nil {
+	// Flushing after every chunk keeps streamed provider responses (SSE)
+	// flowing to the ACP child without buffering delays.
+	flusher, _ := w.(http.Flusher)
+	if err := providerproxy.StreamBoundedResponse(w, response.Body, p.maxResponseBytes, flusher); err != nil {
 		panic(http.ErrAbortHandler)
 	}
 }
@@ -820,33 +825,6 @@ func readBoundedProviderBody(ctx context.Context, body io.ReadCloser, limit int6
 	return data, nil
 }
 
-func streamBoundedProviderResponse(w http.ResponseWriter, body io.Reader, limit int64) error {
-	buffer := make([]byte, 32<<10)
-	var written int64
-	flusher, _ := w.(http.Flusher)
-	for {
-		n, err := body.Read(buffer)
-		if n > 0 {
-			if written+int64(n) > limit {
-				return errProviderBodyTooLarge
-			}
-			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
-				return writeErr
-			}
-			written += int64(n)
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			return err
-		}
-	}
-}
-
 func splitProviderProxyRoute(path string) (route string, ok bool) {
 	if !strings.HasPrefix(path, providerProxyPathPrefix) {
 		return "", false
@@ -859,17 +837,6 @@ func splitProviderProxyRoute(path string) (route string, ok bool) {
 	return route, true
 }
 
-func tryAcquireProviderSlot(slots chan struct{}) bool {
-	select {
-	case slots <- struct{}{}:
-		return true
-	default:
-		return false
-	}
-}
-
-func releaseProviderSlot(slots chan struct{}) { <-slots }
-
 func (s *providerProxySession) requestSuffix(path string) (string, bool) {
 	if path == s.basePath {
 		return "/", true
@@ -878,106 +845,6 @@ func (s *providerProxySession) requestSuffix(path string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimPrefix(path, s.basePath), true
-}
-
-func hasUnsafePathSegment(path string) bool {
-	if strings.Contains(path, "\\") || strings.ContainsRune(path, '\x00') {
-		return true
-	}
-	for segment := range strings.SplitSeq(path, "/") {
-		if segment == "." || segment == ".." {
-			return true
-		}
-	}
-	return false
-}
-
-func providerProxyTarget(base *url.URL, suffix, rawQuery string) *url.URL {
-	target := *base
-	basePath := strings.TrimSuffix(target.Path, "/")
-	if suffix == "/" {
-		target.Path = basePath + "/"
-	} else {
-		target.Path = basePath + suffix
-	}
-	target.RawPath = ""
-	target.RawQuery = rawQuery
-	return &target
-}
-
-func copyProviderRequestHeaders(destination, source http.Header) {
-	blocked := providerBlockedHeaders(source)
-	for name, values := range source {
-		canonical := http.CanonicalHeaderKey(name)
-		if blocked[canonical] || isSensitiveProviderRequestHeader(canonical) {
-			continue
-		}
-		for _, value := range values {
-			destination.Add(canonical, value)
-		}
-	}
-}
-
-func copyProviderResponseHeaders(destination, source http.Header) {
-	blocked := providerBlockedHeaders(source)
-	for name, values := range source {
-		canonical := http.CanonicalHeaderKey(name)
-		if blocked[canonical] || isSensitiveProviderResponseHeader(canonical) {
-			continue
-		}
-		for _, value := range values {
-			destination.Add(canonical, value)
-		}
-	}
-}
-
-func providerBlockedHeaders(header http.Header) map[string]bool {
-	blocked := map[string]bool{
-		"Connection":                     true,
-		"Keep-Alive":                     true,
-		"Proxy-Authenticate":             true,
-		providerProxyAuthorizationHeader: true,
-		"Proxy-Connection":               true,
-		"Te":                             true,
-		"Trailer":                        true,
-		"Transfer-Encoding":              true,
-		"Upgrade":                        true,
-	}
-	for _, connection := range header.Values("Connection") {
-		for name := range strings.SplitSeq(connection, ",") {
-			name = http.CanonicalHeaderKey(strings.TrimSpace(name))
-			if name != "" {
-				blocked[name] = true
-			}
-		}
-	}
-	return blocked
-}
-
-func isSensitiveProviderRequestHeader(name string) bool {
-	switch name {
-	case providerAuthorizationHeader, providerProxyAuthorizationHeader, providerAPIKeyHeader, providerLegacyAPIKeyHeader,
-		providerCookieHeader, "Set-Cookie", "Forwarded", providerForwardedForHeader, "X-Forwarded-Host",
-		"X-Forwarded-Proto", "X-Real-Ip", "X-Forwarded-Prefix", "X-Original-Url", "X-Rewrite-Url",
-		"X-Envoy-Original-Path", "X-Http-Method-Override", "Txn-Token", "Origin", "Referer",
-		"Openai-Organization", "Openai-Project", "Anthropic-Organization-Id", "Traceparent", "Tracestate",
-		"Baggage", providerContentEncodingHeader, "Expect":
-		return true
-	default:
-		return strings.HasPrefix(name, "X-Orka-") || strings.HasPrefix(name, "X-Forwarded-") ||
-			strings.HasPrefix(name, "Sec-Fetch-")
-	}
-}
-
-func isSensitiveProviderResponseHeader(name string) bool {
-	switch name {
-	case providerAuthorizationHeader, providerProxyAuthorizationHeader, providerAPIKeyHeader, providerLegacyAPIKeyHeader,
-		"Set-Cookie", "Set-Cookie2", "Location", "Server", "Alt-Svc", "Www-Authenticate",
-		"Proxy-Authenticate", providerContentEncodingHeader:
-		return true
-	default:
-		return false
-	}
 }
 
 func writeProviderTurnLimitError(w http.ResponseWriter, providerKind string) {
@@ -989,13 +856,6 @@ func writeProviderTurnLimitError(w http.ResponseWriter, providerKind string) {
 		return
 	}
 	_, _ = io.WriteString(w, `{"error":{"message":"maximum provider inference requests reached for active prompt","type":"invalid_request_error","code":"max_turn_requests"}}`+"\n")
-}
-
-func writeProviderProxyError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	_, _ = io.WriteString(w, message+"\n")
 }
 
 func (p *providerProxy) close(ctx context.Context) error {

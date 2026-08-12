@@ -1174,7 +1174,7 @@ func workspaceDeltaPathAllowed(changedPath string, patterns []string) bool {
 		if strings.HasSuffix(patternValue, "/**") && strings.HasPrefix(changedPath, strings.TrimSuffix(patternValue, "**")) {
 			return true
 		}
-		if matched, err := path.Match(patternValue, changedPath); err == nil && matched {
+		if workspaceDeltaPatternMatches(patternValue, changedPath) {
 			return true
 		}
 		if strings.TrimSuffix(patternValue, "/") == strings.TrimSuffix(changedPath, "/") {
@@ -1182,6 +1182,44 @@ func workspaceDeltaPathAllowed(changedPath string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// workspaceDeltaPatternMatches applies gitignore-style glob semantics: a `**`
+// segment matches zero or more whole path segments, while every other segment
+// keeps path.Match single-segment semantics.
+func workspaceDeltaPatternMatches(patternValue, changedPath string) bool {
+	if !strings.Contains(patternValue, "**") {
+		matched, err := path.Match(patternValue, changedPath)
+		return err == nil && matched
+	}
+	return workspaceDeltaSegmentsMatch(strings.Split(patternValue, "/"), strings.Split(changedPath, "/"))
+}
+
+func workspaceDeltaSegmentsMatch(patternSegments, pathSegments []string) bool {
+	for len(patternSegments) > 0 {
+		segment := patternSegments[0]
+		if segment == "**" {
+			rest := patternSegments[1:]
+			if len(rest) == 0 {
+				return true
+			}
+			for skip := 0; skip <= len(pathSegments); skip++ {
+				if workspaceDeltaSegmentsMatch(rest, pathSegments[skip:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(pathSegments) == 0 {
+			return false
+		}
+		if matched, err := path.Match(segment, pathSegments[0]); err != nil || !matched {
+			return false
+		}
+		patternSegments = patternSegments[1:]
+		pathSegments = pathSegments[1:]
+	}
+	return len(pathSegments) == 0
 }
 
 func workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, changedPath string) bool {

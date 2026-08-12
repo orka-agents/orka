@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
@@ -418,9 +419,15 @@ func boundedMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	message := strings.TrimSpace(err.Error())
-	if len(message) > 1024 {
-		return message[:1024]
+	// Repair invalid sequences and truncate on a rune boundary so bounded
+	// messages always remain valid UTF-8.
+	message := strings.ToValidUTF8(strings.TrimSpace(err.Error()), "�")
+	if len(message) <= 1024 {
+		return message
 	}
-	return message
+	end := 1024
+	for end > 0 && !utf8.RuneStart(message[end]) {
+		end--
+	}
+	return message[:end]
 }

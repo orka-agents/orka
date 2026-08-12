@@ -16,22 +16,20 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/orka-agents/orka/internal/providerproxy"
 )
 
 const (
-	healthPath                    = "/healthz"
-	readinessPath                 = "/readyz"
-	defaultMaxRequestBytes        = 32 << 20
-	defaultMaxResponseBytes       = 64 << 20
-	defaultResponseHeaderTimeout  = 30 * time.Second
-	defaultReadHeaderTimeout      = 5 * time.Second
-	defaultIdleTimeout            = 30 * time.Second
-	defaultMaxConcurrentRequests  = 32
-	authorizationHeader           = "Authorization"
-	proxyAuthorizationHeader      = "Proxy-Authorization"
-	providerAPIKeyHeader          = "X-Api-Key"
-	providerLegacyAPIKeyHeader    = "Api-Key"
-	providerContentEncodingHeader = "Content-Encoding"
+	healthPath                   = "/healthz"
+	readinessPath                = "/readyz"
+	defaultMaxRequestBytes       = 32 << 20
+	defaultMaxResponseBytes      = 64 << 20
+	defaultResponseHeaderTimeout = 30 * time.Second
+	defaultReadHeaderTimeout     = 5 * time.Second
+	defaultIdleTimeout           = 30 * time.Second
+	defaultMaxConcurrentRequests = 32
+	authorizationHeader          = "Authorization"
 )
 
 var errRequestBodyTooLarge = errors.New("provider request body exceeds limit")
@@ -107,7 +105,7 @@ func normalizeProxyConfig(cfg proxyConfig) (proxyConfig, *url.URL, error) {
 	if parsed.Path == "" {
 		parsed.Path = "/"
 	}
-	if hasUnsafePathSegment(parsed.Path) {
+	if providerproxy.HasUnsafePathSegment(parsed.Path) {
 		return proxyConfig{}, nil, fmt.Errorf("provider upstream base URL is invalid")
 	}
 	if cfg.MaxRequestBytes <= 0 {
@@ -145,7 +143,7 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == readinessPath {
 		if !p.tokens.isReady() {
-			writeProxyError(w, http.StatusServiceUnavailable, "provider proxy authentication is unavailable")
+			providerproxy.WriteError(w, http.StatusServiceUnavailable, "provider proxy authentication is unavailable")
 			return
 		}
 		serveHealth(w, r)
@@ -153,67 +151,68 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !p.authorized(r.Header.Values(authorizationHeader)) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="orka-provider-auth-proxy"`)
-		writeProxyError(w, http.StatusUnauthorized, "provider proxy authentication required")
+		providerproxy.WriteError(w, http.StatusUnauthorized, "provider proxy authentication required")
 		return
 	}
-	if !tryAcquire(p.requestSlots) {
-		writeProxyError(w, http.StatusTooManyRequests, "provider proxy request capacity is exhausted")
+	if !providerproxy.TryAcquireSlot(p.requestSlots) {
+		providerproxy.WriteError(w, http.StatusTooManyRequests, "provider proxy request capacity is exhausted")
 		return
 	}
-	defer release(p.requestSlots)
+	defer providerproxy.ReleaseSlot(p.requestSlots)
 	if r.Method == http.MethodConnect || r.Method == http.MethodTrace {
-		writeProxyError(w, http.StatusMethodNotAllowed, "provider request method is not allowed")
+		providerproxy.WriteError(w, http.StatusMethodNotAllowed, "provider request method is not allowed")
 		return
 	}
-	if hasUnsafePathSegment(r.URL.Path) {
-		writeProxyError(w, http.StatusBadRequest, "provider request path is invalid")
+	if providerproxy.HasUnsafePathSegment(r.URL.Path) {
+		providerproxy.WriteError(w, http.StatusBadRequest, "provider request path is invalid")
 		return
 	}
-	if encoding := strings.TrimSpace(r.Header.Get(providerContentEncodingHeader)); encoding != "" && !strings.EqualFold(encoding, "identity") {
-		writeProxyError(w, http.StatusUnsupportedMediaType, "compressed provider requests are forbidden")
+	if providerproxy.HasDisallowedContentEncoding(r.Header) {
+		providerproxy.WriteError(w, http.StatusUnsupportedMediaType, "compressed provider requests are forbidden")
 		return
 	}
 	if r.ContentLength > p.maxRequestBytes {
-		writeProxyError(w, http.StatusRequestEntityTooLarge, "provider request body exceeds limit")
+		providerproxy.WriteError(w, http.StatusRequestEntityTooLarge, "provider request body exceeds limit")
 		return
 	}
 
-	target := providerTarget(p.upstreamBase, r.URL.Path, r.URL.RawQuery)
+	target := providerproxy.Target(p.upstreamBase, r.URL.Path, r.URL.RawQuery)
 	body := &boundedReadCloser{ReadCloser: r.Body, remaining: p.maxRequestBytes}
 	upstreamRequest, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), body)
 	if err != nil {
-		writeProxyError(w, http.StatusBadGateway, "provider request could not be prepared")
+		providerproxy.WriteError(w, http.StatusBadGateway, "provider request could not be prepared")
 		return
 	}
 	upstreamRequest.ContentLength = r.ContentLength
-	copyProviderRequestHeaders(upstreamRequest.Header, r.Header)
+	providerproxy.CopyRequestHeaders(upstreamRequest.Header, r.Header)
 	upstreamRequest.Header.Set("Accept-Encoding", "identity")
 
 	response, err := p.client.Do(upstreamRequest)
 	if err != nil {
 		if errors.Is(err, errRequestBodyTooLarge) {
-			writeProxyError(w, http.StatusRequestEntityTooLarge, "provider request body exceeds limit")
+			providerproxy.WriteError(w, http.StatusRequestEntityTooLarge, "provider request body exceeds limit")
 			return
 		}
-		writeProxyError(w, http.StatusBadGateway, "provider upstream request failed")
+		providerproxy.WriteError(w, http.StatusBadGateway, "provider upstream request failed")
 		return
 	}
 	defer response.Body.Close() //nolint:errcheck
 	if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
-		writeProxyError(w, http.StatusBadGateway, "provider upstream redirects are forbidden")
+		providerproxy.WriteError(w, http.StatusBadGateway, "provider upstream redirects are forbidden")
 		return
 	}
-	if encoding := strings.TrimSpace(response.Header.Get(providerContentEncodingHeader)); encoding != "" && !strings.EqualFold(encoding, "identity") {
-		writeProxyError(w, http.StatusBadGateway, "compressed provider responses are forbidden")
+	if providerproxy.HasDisallowedContentEncoding(response.Header) {
+		providerproxy.WriteError(w, http.StatusBadGateway, "compressed provider responses are forbidden")
 		return
 	}
 	if response.ContentLength > p.maxResponseBytes {
-		writeProxyError(w, http.StatusBadGateway, "provider upstream response exceeds limit")
+		providerproxy.WriteError(w, http.StatusBadGateway, "provider upstream response exceeds limit")
 		return
 	}
-	copyProviderResponseHeaders(w.Header(), response.Header)
+	providerproxy.CopyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	if err := streamBoundedResponse(w, response.Body, p.maxResponseBytes); err != nil {
+	// The nil flusher keeps this proxy's original buffered write behavior.
+	if err := providerproxy.StreamBoundedResponse(w, response.Body, p.maxResponseBytes, nil); err != nil {
 		panic(http.ErrAbortHandler)
 	}
 }
@@ -225,7 +224,7 @@ func (p *providerAuthProxy) authorized(values []string) bool {
 func serveHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
-		writeProxyError(w, http.StatusMethodNotAllowed, "health probe method is not allowed")
+		providerproxy.WriteError(w, http.StatusMethodNotAllowed, "health probe method is not allowed")
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -254,156 +253,6 @@ func (r *boundedReadCloser) Read(buffer []byte) (int, error) {
 	}
 	r.remaining -= int64(n)
 	return n, err
-}
-
-func streamBoundedResponse(destination io.Writer, source io.Reader, limit int64) error {
-	remaining := limit
-	buffer := make([]byte, 32<<10)
-	for {
-		readSize := len(buffer)
-		if int64(readSize) > remaining+1 {
-			readSize = int(remaining + 1)
-		}
-		n, readErr := source.Read(buffer[:readSize])
-		if int64(n) > remaining {
-			if remaining > 0 {
-				if _, writeErr := destination.Write(buffer[:remaining]); writeErr != nil {
-					return writeErr
-				}
-			}
-			return fmt.Errorf("provider upstream response exceeds limit")
-		}
-		if n > 0 {
-			written, writeErr := destination.Write(buffer[:n])
-			remaining -= int64(written)
-			if writeErr != nil {
-				return writeErr
-			}
-			if written != n {
-				return io.ErrShortWrite
-			}
-		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				return nil
-			}
-			return readErr
-		}
-	}
-}
-
-func providerTarget(base *url.URL, requestPath, rawQuery string) *url.URL {
-	target := *base
-	target.Path = strings.TrimSuffix(base.Path, "/") + "/" + strings.TrimPrefix(requestPath, "/")
-	target.RawPath = ""
-	target.RawQuery = rawQuery
-	return &target
-}
-
-func hasUnsafePathSegment(path string) bool {
-	decoded, err := url.PathUnescape(path)
-	if err != nil {
-		return true
-	}
-	for segment := range strings.SplitSeq(decoded, "/") {
-		if segment == "." || segment == ".." {
-			return true
-		}
-	}
-	return false
-}
-
-func copyProviderRequestHeaders(destination, source http.Header) {
-	blocked := blockedHeaders(source)
-	for name, values := range source {
-		canonical := http.CanonicalHeaderKey(name)
-		if blocked[canonical] || isSensitiveRequestHeader(canonical) {
-			continue
-		}
-		for _, value := range values {
-			destination.Add(canonical, value)
-		}
-	}
-}
-
-func copyProviderResponseHeaders(destination, source http.Header) {
-	blocked := blockedHeaders(source)
-	for name, values := range source {
-		canonical := http.CanonicalHeaderKey(name)
-		if blocked[canonical] || isSensitiveResponseHeader(canonical) {
-			continue
-		}
-		for _, value := range values {
-			destination.Add(canonical, value)
-		}
-	}
-}
-
-func blockedHeaders(header http.Header) map[string]bool {
-	blocked := map[string]bool{
-		"Connection":             true,
-		"Keep-Alive":             true,
-		"Proxy-Authenticate":     true,
-		proxyAuthorizationHeader: true,
-		"Proxy-Connection":       true,
-		"Te":                     true,
-		"Trailer":                true,
-		"Transfer-Encoding":      true,
-		"Upgrade":                true,
-	}
-	for _, connection := range header.Values("Connection") {
-		for name := range strings.SplitSeq(connection, ",") {
-			name = http.CanonicalHeaderKey(strings.TrimSpace(name))
-			if name != "" {
-				blocked[name] = true
-			}
-		}
-	}
-	return blocked
-}
-
-func isSensitiveRequestHeader(name string) bool {
-	switch name {
-	case authorizationHeader, proxyAuthorizationHeader, providerAPIKeyHeader, providerLegacyAPIKeyHeader,
-		"Cookie", "Set-Cookie", "Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
-		"X-Real-Ip", "X-Forwarded-Prefix", "X-Original-Url", "X-Rewrite-Url", "X-Envoy-Original-Path",
-		"X-Http-Method-Override", "Txn-Token", "Origin", "Referer", "Openai-Organization", "Openai-Project",
-		"Anthropic-Organization-Id", "Traceparent", "Tracestate", "Baggage", providerContentEncodingHeader, "Expect":
-		return true
-	default:
-		return strings.HasPrefix(name, "X-Orka-") || strings.HasPrefix(name, "X-Forwarded-") || strings.HasPrefix(name, "Sec-Fetch-")
-	}
-}
-
-func isSensitiveResponseHeader(name string) bool {
-	switch name {
-	case authorizationHeader, proxyAuthorizationHeader, providerAPIKeyHeader, providerLegacyAPIKeyHeader,
-		"Set-Cookie", "Set-Cookie2", "Location", "Server", "Alt-Svc", "Www-Authenticate", "Proxy-Authenticate",
-		providerContentEncodingHeader:
-		return true
-	default:
-		return false
-	}
-}
-
-func tryAcquire(slots chan struct{}) bool {
-	select {
-	case slots <- struct{}{}:
-		return true
-	default:
-		return false
-	}
-}
-
-func release(slots chan struct{}) {
-	<-slots
-}
-
-func writeProxyError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	_, _ = io.WriteString(w, message+"\n")
 }
 
 func newProxyHTTPServer(address string, handler http.Handler) *http.Server {

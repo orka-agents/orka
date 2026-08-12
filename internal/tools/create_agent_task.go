@@ -102,10 +102,14 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	var agentRuntime *corev1alpha1.AgentRuntimeSpec
 
 	if maxTurns, ok := a["maxTurns"]; ok {
+		turns, turnsErr := chatParseIntArg(maxTurns)
+		if turnsErr != nil {
+			return ChatToolErrorResult("invalid_arguments", "maxTurns must be an integer", "Provide maxTurns as a positive integer or omit it")
+		}
 		if agentRuntime == nil {
 			agentRuntime = &corev1alpha1.AgentRuntimeSpec{}
 		}
-		mt := int32(maxTurns.(float64))
+		mt := int32(turns)
 		agentRuntime.MaxTurns = &mt
 	}
 
@@ -130,7 +134,13 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		wsCfg.PublicationGitRepo = chatGetStringArg(wsMap, "publicationGitRepo")
 		wsCfg.PushBranch = chatGetStringArg(wsMap, "pushBranch")
 		wsCfg.PRBaseBranch = chatGetStringArg(wsMap, "prBaseBranch")
-		wsCfg.CreatePR, _ = wsMap["createPR"].(bool)
+		if rawCreatePR, ok := wsMap["createPR"]; ok {
+			createPR, createPRErr := chatParseBoolArg(rawCreatePR)
+			if createPRErr != nil {
+				return ChatToolErrorResult("invalid_arguments", "workspace.createPR must be a boolean", "Set createPR to true or false")
+			}
+			wsCfg.CreatePR = createPR
+		}
 		if wsCfg.PublicationGitRepo != "" || wsCfg.PushBranch != "" || wsCfg.PRBaseBranch != "" || wsCfg.CreatePR {
 			wsCfg.Intent = corev1alpha1.WorkspaceIntentWrite
 		}

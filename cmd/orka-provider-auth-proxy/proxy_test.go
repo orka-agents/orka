@@ -46,7 +46,7 @@ func TestProviderAuthProxyForwardsAuthorizedRequestWithoutSensitiveHeaders(t *te
 		if r.URL.Path != "/base/v1/responses" || r.URL.RawQuery != "stream=true" {
 			t.Fatalf("upstream URL = %s, want /base/v1/responses?stream=true", r.URL.String())
 		}
-		for _, name := range []string{authorizationHeader, providerAPIKeyHeader, "Cookie", "Txn-Token", "X-Orka-Internal"} {
+		for _, name := range []string{authorizationHeader, "X-Api-Key", "Cookie", "Txn-Token", "X-Orka-Internal"} {
 			if value := r.Header.Get(name); value != "" {
 				t.Fatalf("upstream received sensitive header %s", name)
 			}
@@ -72,7 +72,7 @@ func TestProviderAuthProxyForwardsAuthorizedRequestWithoutSensitiveHeaders(t *te
 	proxy := newTestProxy(t, upstream.URL+"/base", testSharedProviderToken)
 	request := httptest.NewRequest(http.MethodPost, "http://proxy/v1/responses?stream=true", strings.NewReader(`{"model":"test"}`))
 	request.Header.Set(authorizationHeader, "Bearer "+testSharedProviderToken)
-	request.Header.Set(providerAPIKeyHeader, "child-key")
+	request.Header.Set("X-Api-Key", "child-key")
 	request.Header.Set("Cookie", "child=cookie")
 	request.Header.Set("Txn-Token", "transaction")
 	request.Header.Set("X-Orka-Internal", "internal")
@@ -106,7 +106,7 @@ func TestProviderAuthProxyRejectsRedirectsAndCompressedResponses(t *testing.T) {
 			w.WriteHeader(http.StatusTemporaryRedirect)
 		},
 		"compressed": func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set(providerContentEncodingHeader, "gzip")
+			w.Header().Set("Content-Encoding", "gzip")
 			_, _ = io.WriteString(w, "compressed")
 		},
 	} {

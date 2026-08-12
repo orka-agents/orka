@@ -1306,19 +1306,17 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		if preparedWorkspace.rootDir != "" {
 			finalizeWorkDir = preparedWorkspace.rootDir
 		}
-		gitCtx, cancelGit := context.WithTimeout(ctx, wrapperGitPostTurnTimeout)
-		defer cancelGit()
 		shouldFinalize := false
 		if !envEntryIsTrue(turnCtx.Env, workerenv.ResultStdout) {
 			var shouldFinalizeErr error
-			shouldFinalize, shouldFinalizeErr = ShouldFinalizeWorkDir(gitCtx, finalizeWorkDir)
+			shouldFinalize, shouldFinalizeErr = ShouldFinalizeWorkDir(ctx, finalizeWorkDir)
 			if shouldFinalizeErr != nil {
 				turn.appendFrame(s.runtimeLogTextFrame(turn, "result-finalize", shouldFinalizeErr.Error()))
 			}
 		}
 		if shouldFinalize {
 			restoreTurnEnv := setTemporaryEnvEntries(turnCtx.Env)
-			if finalized, finalizeErr := FinalizeTurnResult(gitCtx, finalizeWorkDir, partial); finalizeErr != nil {
+			if finalized, finalizeErr := FinalizeTurnResult(ctx, finalizeWorkDir, partial); finalizeErr != nil {
 				turn.appendFrame(s.runtimeLogTextFrame(turn, "result-finalize", finalizeErr.Error()))
 			} else {
 				partial = string(finalized)
@@ -1334,7 +1332,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			))
 		}
 		if finalizedWorkDir != "" {
-			if cleanErr := CleanFinalizedWorkDir(gitCtx, finalizedWorkDir); cleanErr != nil {
+			if cleanErr := CleanFinalizedWorkDir(ctx, finalizedWorkDir); cleanErr != nil {
 				turn.appendFrame(s.runtimeLogTextFrame(turn, "workdir-cleanup", cleanErr.Error()))
 			}
 		}
@@ -1375,19 +1373,17 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		if preparedWorkspace.rootDir != "" {
 			finalizeWorkDir = preparedWorkspace.rootDir
 		}
-		gitCtx, cancelGit := context.WithTimeout(ctx, wrapperGitPostTurnTimeout)
-		defer cancelGit()
 		shouldFinalize := false
 		if !envEntryIsTrue(turnCtx.Env, workerenv.ResultStdout) {
 			var shouldFinalizeErr error
-			shouldFinalize, shouldFinalizeErr = ShouldFinalizeWorkDir(gitCtx, finalizeWorkDir)
+			shouldFinalize, shouldFinalizeErr = ShouldFinalizeWorkDir(ctx, finalizeWorkDir)
 			if shouldFinalizeErr != nil {
 				turn.appendFrame(s.failedFrame(turn, "result_finalize_failed", shouldFinalizeErr.Error(), false))
 				return
 			}
 		}
 		if shouldFinalize {
-			finalized, finalizeErr := FinalizeTurnResult(gitCtx, finalizeWorkDir, parsed.Result)
+			finalized, finalizeErr := FinalizeTurnResult(ctx, finalizeWorkDir, parsed.Result)
 			if finalizeErr != nil {
 				turn.appendFrame(s.failedFrame(turn, "result_finalize_failed", finalizeErr.Error(), false))
 				return
@@ -1427,7 +1423,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			return
 		}
 		if finalizedWorkDir != "" {
-			if cleanErr := CleanFinalizedWorkDir(gitCtx, finalizedWorkDir); cleanErr != nil {
+			if cleanErr := CleanFinalizedWorkDir(ctx, finalizedWorkDir); cleanErr != nil {
 				turn.appendFrame(s.runtimeLogTextFrame(
 					turn,
 					"workdir-cleanup",

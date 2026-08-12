@@ -32,7 +32,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
-	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -185,14 +184,8 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
 	}
-	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.AllowEmptyPushBranch); got != "true" {
-		t.Errorf("%s = %q, want true", workerenv.AllowEmptyPushBranch, got)
-	}
-	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.PRBaseRepo); got != githubWebhookTestVekilCloneURL {
-		t.Errorf("%s = %q, want base repo clone URL", workerenv.PRBaseRepo, got)
-	}
-	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.PRBaseSHA); got != "base-sha" {
-		t.Errorf("%s = %q, want base-sha", workerenv.PRBaseSHA, got)
+	if len(task.Spec.Env) != 0 {
+		t.Errorf("task env = %#v, want empty because agent tasks reject arbitrary task env", task.Spec.Env)
 	}
 	if !strings.Contains(task.Spec.Prompt, "Update the pull request branch") {
 		t.Errorf("prompt = %s", task.Spec.Prompt)
@@ -248,8 +241,8 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	if ws.ReadCredentialRef != nil {
 		t.Fatalf("readCredentialRef = %#v, want nil for fork PR", ws.ReadCredentialRef)
 	}
-	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
-		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
+	if ws.PRBaseBranch != "" {
+		t.Errorf("prBaseBranch = %q, want empty because prBaseBranch requires write workspace intent", ws.PRBaseBranch)
 	}
 	if !strings.Contains(task.Spec.Prompt, "Orka will not push them automatically") {
 		t.Errorf("prompt missing no-push guidance: %s", task.Spec.Prompt)
@@ -349,11 +342,11 @@ func TestGitHubWebhook_PullRequestReviewUsesInitOnlyGitSecret(t *testing.T) {
 	if task.Annotations[labels.AnnotationWorkspaceInitContainer] != queryTrue {
 		t.Fatalf("workspace init annotation = %q, want true", task.Annotations[labels.AnnotationWorkspaceInitContainer])
 	}
-	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.PRBaseRepo); got != githubWebhookTestVekilCloneURL {
-		t.Errorf("%s = %q, want base repo clone URL", workerenv.PRBaseRepo, got)
+	if ws.PRBaseBranch != "" {
+		t.Errorf("prBaseBranch = %q, want empty because prBaseBranch requires write workspace intent", ws.PRBaseBranch)
 	}
-	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.PRBaseSHA); got != "base-sha" {
-		t.Errorf("%s = %q, want base-sha", workerenv.PRBaseSHA, got)
+	if len(task.Spec.Env) != 0 {
+		t.Errorf("task env = %#v, want empty because agent tasks reject arbitrary task env", task.Spec.Env)
 	}
 }
 
@@ -1167,15 +1160,6 @@ func readRespBody(t *testing.T, resp *http.Response) string {
 	buf := new(bytes.Buffer)
 	_, _ = buf.ReadFrom(resp.Body)
 	return buf.String()
-}
-
-func githubWebhookTaskEnvValue(envVars []corev1.EnvVar, name string) string {
-	for _, envVar := range envVars {
-		if envVar.Name == name {
-			return envVar.Value
-		}
-	}
-	return ""
 }
 
 func assertNoTasks(t *testing.T, c client.Client) {

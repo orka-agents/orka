@@ -93,26 +93,21 @@ spec:
                     minimum: 1
                     type: integer
                   workspace:
-                    description: |-
-                      Workspace is the legacy harness v1 agent workspace configuration at its
-                      historical JSON path. It is a preserved compatibility read surface for
-                      stored v1 Tasks only: it can never be introduced or changed, and it is
-                      not an authority surface for new work.
+                    description: Workspace defines the working directory configuration
                     properties:
                       branch:
-                        description: Branch is the git branch to checkout.
+                        description: Branch is the git branch to checkout
                         type: string
                       forkRepo:
                         description: ForkRepo is the writable fork repository URL
-                          for pushing changes.
+                          for pushing changes
                         type: string
                       gitRepo:
-                        description: GitRepo is the repository URL to clone.
+                        description: GitRepo is the repository URL to clone
                         type: string
                       gitSecretRef:
-                        description: |-
-                          GitSecretRef references a Secret containing git credentials. Adopted
-                          legacy bindings freeze the exact Secret identity; new bindings reject it.
+                        description: GitSecretRef references a Secret containing git
+                          credentials
                         properties:
                           name:
                             default: ""
@@ -127,29 +122,23 @@ spec:
                         x-kubernetes-map-type: atomic
                       prBaseBranch:
                         description: PRBaseBranch is the upstream branch to target
-                          for pull requests.
+                          for pull requests
                         type: string
                       pushBranch:
                         description: |-
-                          PushBranch is the remote branch name to push changes to after the agent
-                          completes.
+                          PushBranch is the remote branch name to push changes to after the agent completes.
+                          When set, FinalizeResult will commit and push changes to this branch.
                         type: string
                       ref:
                         description: Ref is a specific git ref (commit SHA, tag) to
-                          checkout.
+                          checkout
                         type: string
                       subPath:
                         description: SubPath is a subdirectory within the repo to
-                          use as workspace root.
+                          use as workspace root
                         type: string
                     type: object
                 type: object
-                x-kubernetes-validations:
-                - message: legacy agentRuntime.workspace is a preserved harness v1
-                    compatibility surface; new Tasks must use spec.workspace
-                  optionalOldSelf: true
-                  rule: '!has(self.workspace) || (oldSelf.hasValue() && has(oldSelf.value().workspace)
-                    && self.workspace == oldSelf.value().workspace)'
               ai:
                 description: AI contains AI-specific configuration (when type is "ai")
                 properties:
@@ -1378,10 +1367,10 @@ spec:
                     type: array
                   workspace:
                     description: |-
-                      Workspace requests an execution workspace for worker-backed Task types.
-                      ACP core agent Tasks reject this field because their ephemeral workspace is
-                      owned by RuntimeSession lifecycle and clean-room publication. Actor-backed
-                      RuntimeSession support is a future integration behind the v2 lifecycle seam.
+                      Workspace requests an upstream agent-sandbox execution workspace for agent Tasks.
+                      When enabled, the Task controller validates the request and propagates the
+                      resolved sandbox settings to the agent worker Job. The worker wrapper then
+                      claims the sandbox workspace and runs the configured agent runtime inside it.
                     properties:
                       boot:
                         description: |-
@@ -1389,18 +1378,6 @@ spec:
                           instead of resuming from the provider's default snapshot. Currently supported
                           by the Substrate provider.
                         type: boolean
-                      classRef:
-                        description: |-
-                          ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
-                          classRef implicitly enables the controller-first workspace path.
-                        properties:
-                          name:
-                            description: Name is the class name.
-                            minLength: 1
-                            type: string
-                        required:
-                        - name
-                        type: object
                       cleanupPolicy:
                         description: |-
                           CleanupPolicy controls whether the workspace is deleted or retained after use.
@@ -1434,13 +1411,6 @@ spec:
                               worker derives a stable key from namespace, template, and reuse key.
                             type: string
                         type: object
-                      onDetach:
-                        description: OnDetach requests an action allowed by the selected
-                          class.
-                        enum:
-                        - Suspend
-                        - Delete
-                        type: string
                       poolRef:
                         description: |-
                           PoolRef references an operator-managed Substrate actor pool for placement,
@@ -1509,22 +1479,7 @@ spec:
                               It defaults to the Task namespace, or the controller namespace when configured.
                             type: string
                         type: object
-                      workspaceSlot:
-                        default: default
-                        description: WorkspaceSlot names one independently reusable
-                          workspace within a Session.
-                        maxLength: 63
-                        minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                        type: string
                     type: object
-                    x-kubernetes-validations:
-                    - message: classRef cannot be combined with legacy enabled, provider,
-                        template, pool, cleanup, boot, snapshot, or hibernation settings
-                      rule: '!has(self.classRef) || (!has(self.provider) && !has(self.templateRef)
-                        && !has(self.poolRef) && (!has(self.enabled) || !self.enabled)
-                        && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot)
-                        && !has(self.snapshot) && !has(self.hibernation))'
                 type: object
               failedRunsHistoryLimit:
                 default: 1
@@ -1814,258 +1769,51 @@ spec:
                 type: string
               workspace:
                 description: |-
-                  Workspace defines the canonical repository workspace, intent, credentials,
-                  and publication request. Agent Tasks that omit intent are interpreted as
-                  read by controller logic; an omitted intent preserves existing container behavior.
+                  Workspace defines repository checkout and push settings for tasks that need
+                  a git workspace. Agent tasks can continue to use agentRuntime.workspace for
+                  compatibility; this top-level field is used by container tasks as well.
                 properties:
-                  allowedPaths:
-                    description: |-
-                      AllowedPaths restricts publishable workspace changes to these path globs or
-                      directory prefixes ending in /**. Empty allows every otherwise-safe path.
-                      It is not supported for container Tasks.
-                    items:
-                      type: string
-                    maxItems: 256
-                    type: array
                   branch:
-                    description: Branch is the source branch to check out.
-                    maxLength: 255
+                    description: Branch is the git branch to checkout
                     type: string
-                  createPR:
-                    default: false
-                    description: |-
-                      CreatePR explicitly requests pull request reconciliation after branch publication.
-                      Branch push remains the minimum durable delivery when false. It is supported only
-                      for agent Tasks using the trusted ACP publisher boundary.
-                    type: boolean
-                  denyRepositoryControlPaths:
-                    description: |-
-                      DenyRepositoryControlPaths rejects workflow, RBAC, and chart-secret paths
-                      before publication even when AllowedPaths is empty or otherwise matches.
-                      It is not supported for container Tasks.
-                    type: boolean
-                  expectedRemoteSHA:
-                    description: |-
-                      ExpectedRemoteSHA requires the publication branch to exist at this exact
-                      commit before publication. Empty means the branch must be absent. It is
-                      supported only for agent Tasks using the trusted ACP publisher boundary.
-                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                  forkRepo:
+                    description: ForkRepo is the writable fork repository URL for
+                      pushing changes
                     type: string
-                  forgeCredentialRef:
-                    description: |-
-                      ForgeCredentialRef references the forge API credential used only for pull
-                      request reconciliation when createPR=true.
-                    properties:
-                      key:
-                        default: token
-                        description: |-
-                          Key is the Secret data key containing one bearer token or one complete
-                          Authorization header. It defaults to "token" when omitted.
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[A-Za-z0-9._-]+$
-                        type: string
-                      name:
-                        description: Name is the name of the Secret in the Task namespace.
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                        type: string
-                    required:
-                    - name
-                    type: object
                   gitRepo:
-                    description: |-
-                      GitRepo is the source repository URL cloned by the clean-room workspace boundary.
-                      Credentials must not be embedded in the URL.
-                    maxLength: 2048
+                    description: GitRepo is the repository URL to clone
                     type: string
-                  intent:
-                    description: |-
-                      Intent declares whether the verified workspace must remain unchanged or may
-                      produce a publication artifact. It is immutable for the lifetime of the Task.
-                      Agent Tasks that omit intent are interpreted as read by controller logic;
-                      omitted intent preserves the existing behavior of container Tasks.
-                    enum:
-                    - read
-                    - write
-                    type: string
-                  maxChangedFiles:
-                    description: |-
-                      MaxChangedFiles bounds the total changed, deleted, and symlink paths accepted
-                      from the trusted supervisor before publication. Zero uses the runtime limit.
-                      It is not supported for container Tasks.
-                    format: int32
-                    minimum: 1
-                    type: integer
+                  gitSecretRef:
+                    description: GitSecretRef references a Secret containing git credentials
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
                   prBaseBranch:
-                    description: PRBaseBranch is the upstream branch targeted when
-                      CreatePR is true.
-                    maxLength: 255
+                    description: PRBaseBranch is the upstream branch to target for
+                      pull requests
                     type: string
-                  publicationCredentialRef:
-                    description: |-
-                      PublicationCredentialRef references the target-repository write credential
-                      used only for the exact CAS push. It is never used to clone the source.
-                    properties:
-                      key:
-                        default: token
-                        description: |-
-                          Key is the Secret data key containing one bearer token or one complete
-                          Authorization header. It defaults to "token" when omitted.
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[A-Za-z0-9._-]+$
-                        type: string
-                      name:
-                        description: Name is the name of the Secret in the Task namespace.
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                        type: string
-                    required:
-                    - name
-                    type: object
-                  publicationGitRepo:
-                    description: |-
-                      PublicationGitRepo is the repository URL whose branch receives an exact CAS publication.
-                      Credentials must not be embedded in the URL.
-                    maxLength: 2048
-                    type: string
-                  publicationReadCredentialRef:
-                    description: |-
-                      PublicationReadCredentialRef references the target-repository read
-                      credential used only for preflight and independent post-push verification.
-                    properties:
-                      key:
-                        default: token
-                        description: |-
-                          Key is the Secret data key containing one bearer token or one complete
-                          Authorization header. It defaults to "token" when omitted.
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[A-Za-z0-9._-]+$
-                        type: string
-                      name:
-                        description: Name is the name of the Secret in the Task namespace.
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                        type: string
-                    required:
-                    - name
-                    type: object
-                  publicationRepository:
-                    description: |-
-                      PublicationRepository is the optional URL-derived identity for
-                      PublicationGitRepo. When set, it must match the normalized credential-free
-                      URL; for GitHub, use provider "github" and ID "github.com/owner/repo".
-                    properties:
-                      id:
-                        description: |-
-                          ID is the canonical credential-free URL identity and must match the
-                          corresponding repository URL after normalization. For GitHub, use
-                          "github.com/owner/repo"; GitHub GraphQL node IDs are not accepted.
-                        maxLength: 512
-                        minLength: 1
-                        type: string
-                      provider:
-                        description: Provider identifies the source-control provider
-                          or forge.
-                        maxLength: 63
-                        minLength: 1
-                        pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$
-                        type: string
-                    required:
-                    - id
-                    - provider
-                    type: object
                   pushBranch:
                     description: |-
-                      PushBranch is the publication branch. For write Tasks the controller derives
-                      a full-entropy Task- or Session-owned branch when this is omitted.
-                    maxLength: 255
+                      PushBranch is the remote branch name to push changes to after the agent completes.
+                      When set, FinalizeResult will commit and push changes to this branch.
                     type: string
-                  readCredentialRef:
-                    description: |-
-                      ReadCredentialRef references the one-operation clone/read credential Secret.
-                      The Secret is resolved only by the clean-room workspace boundary.
-                    properties:
-                      key:
-                        default: token
-                        description: |-
-                          Key is the Secret data key containing one bearer token or one complete
-                          Authorization header. It defaults to "token" when omitted.
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[A-Za-z0-9._-]+$
-                        type: string
-                      name:
-                        description: Name is the name of the Secret in the Task namespace.
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                        type: string
-                    required:
-                    - name
-                    type: object
                   ref:
-                    description: Ref is a specific source git ref, commit SHA, or
-                      tag to check out.
-                    maxLength: 512
+                    description: Ref is a specific git ref (commit SHA, tag) to checkout
                     type: string
-                  rejectBinaryFiles:
-                    description: |-
-                      RejectBinaryFiles rejects changed file content that is not valid text. It is
-                      not supported for container Tasks.
-                    type: boolean
-                  rejectSecretLikeContent:
-                    description: |-
-                      RejectSecretLikeContent applies Orka's generic secret detector to changed
-                      paths and file contents before publication. It is not supported for container Tasks.
-                    type: boolean
-                  sourceRepository:
-                    description: |-
-                      SourceRepository is the optional URL-derived identity for GitRepo. When set,
-                      it must match the normalized credential-free URL; for GitHub, use provider
-                      "github" and ID "github.com/owner/repo".
-                    properties:
-                      id:
-                        description: |-
-                          ID is the canonical credential-free URL identity and must match the
-                          corresponding repository URL after normalization. For GitHub, use
-                          "github.com/owner/repo"; GitHub GraphQL node IDs are not accepted.
-                        maxLength: 512
-                        minLength: 1
-                        type: string
-                      provider:
-                        description: Provider identifies the source-control provider
-                          or forge.
-                        maxLength: 63
-                        minLength: 1
-                        pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$
-                        type: string
-                    required:
-                    - id
-                    - provider
-                    type: object
                   subPath:
-                    description: SubPath is a subdirectory within the source repository
-                      used as workspace root.
-                    maxLength: 1024
+                    description: SubPath is a subdirectory within the repo to use
+                      as workspace root
                     type: string
                 type: object
-                x-kubernetes-validations:
-                - message: createPR requires write workspace intent
-                  rule: '!self.createPR || self.intent == ''write'''
-                - message: gitRepo must not contain embedded credentials, query parameters,
-                    or fragments
-                  rule: '!has(self.gitRepo) || (!self.gitRepo.matches(''(?i)^[A-Za-z][A-Za-z0-9+.-]*://[^/]*@'')
-                    && !self.gitRepo.contains(''?'') && !self.gitRepo.contains(''#''))'
-                - message: publicationGitRepo must not contain embedded credentials,
-                    query parameters, or fragments
-                  rule: '!has(self.publicationGitRepo) || (!self.publicationGitRepo.matches(''(?i)^[A-Za-z][A-Za-z0-9+.-]*://[^/]*@'')
-                    && !self.publicationGitRepo.contains(''?'') && !self.publicationGitRepo.contains(''#''))'
             required:
             - type
             type: object
@@ -2076,219 +1824,9 @@ spec:
             - message: transaction is immutable
               rule: has(self.transaction) == has(oldSelf.transaction) && (!has(self.transaction)
                 || self.transaction == oldSelf.transaction)
-            - message: type is immutable
-              rule: self.type == oldSelf.type
-            - message: effective workspace intent is immutable
-              rule: '(has(self.workspace) && has(self.workspace.intent) ? self.workspace.intent
-                : (self.type == ''agent'' ? ''read'' : self.type)) == (has(oldSelf.workspace)
-                && has(oldSelf.workspace.intent) ? oldSelf.workspace.intent : (oldSelf.type
-                == ''agent'' ? ''read'' : oldSelf.type))'
-            - message: agent prompt is immutable
-              rule: self.type != 'agent' || (has(self.prompt) == has(oldSelf.prompt)
-                && (!has(self.prompt) || self.prompt == oldSelf.prompt))
-            - message: agentRef is immutable for agent Tasks
-              rule: self.type != 'agent' || (has(self.agentRef) == has(oldSelf.agentRef)
-                && (!has(self.agentRef) || self.agentRef == oldSelf.agentRef))
-            - message: agentRuntime is immutable for agent Tasks
-              rule: self.type != 'agent' || (has(self.agentRuntime) == has(oldSelf.agentRuntime)
-                && (!has(self.agentRuntime) || self.agentRuntime == oldSelf.agentRuntime))
-            - message: sessionRef is immutable for agent Tasks
-              rule: self.type != 'agent' || (has(self.sessionRef) == has(oldSelf.sessionRef)
-                && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef))
-            - message: workspace is immutable for agent Tasks
-              rule: self.type != 'agent' || (has(self.workspace) == has(oldSelf.workspace)
-                && (!has(self.workspace) || self.workspace == oldSelf.workspace))
-            - message: timeout is immutable for agent Tasks
-              rule: self.type != 'agent' || (has(self.timeout) == has(oldSelf.timeout)
-                && (!has(self.timeout) || self.timeout == oldSelf.timeout))
-            - message: session workspace reuse requires spec.sessionRef
-              rule: '!has(self.execution) || !has(self.execution.workspace) || self.execution.workspace.reusePolicy
-                != ''session'' || has(self.sessionRef)'
-            - message: container Tasks do not support workspace.expectedRemoteSHA
-              rule: self.type != 'container' || !has(self.workspace) || !has(self.workspace.expectedRemoteSHA)
-            - message: container Tasks do not support workspace.createPR
-              rule: self.type != 'container' || !has(self.workspace) || (!has(self.workspace.createPR)
-                || !self.workspace.createPR)
-            - message: container Tasks do not support clean-room workspace publication
-                policies
-              rule: self.type != 'container' || !has(self.workspace) || (!has(self.workspace.maxChangedFiles)
-                && (!has(self.workspace.allowedPaths) || self.workspace.allowedPaths.size()
-                == 0) && (!has(self.workspace.denyRepositoryControlPaths) || !self.workspace.denyRepositoryControlPaths)
-                && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles)
-                && (!has(self.workspace.rejectSecretLikeContent) || !self.workspace.rejectSecretLikeContent))
-            - message: custom-image container Tasks do not support workspace.pushBranch
-                publication
-              rule: self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch)
-                || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size()
-                == 0
           status:
             description: TaskStatus defines the observed state of Task
             properties:
-              agentExecutionBinding:
-                description: |-
-                  AgentExecutionBinding is the authoritative, write-once, immutable
-                  execution route for this agent Task.
-                properties:
-                  agent:
-                    description: AgentExecutionAgentRef pins the exact Agent identity
-                      resolved at binding.
-                    properties:
-                      generation:
-                        format: int64
-                        minimum: 1
-                        type: integer
-                      name:
-                        minLength: 1
-                        type: string
-                      namespace:
-                        minLength: 1
-                        type: string
-                      uid:
-                        description: |-
-                          UID is a type that holds unique ID values, including UUIDs.  Because we
-                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                          intent and helps make sure that UIDs and names do not get conflated.
-                        type: string
-                    required:
-                    - generation
-                    - name
-                    - namespace
-                    - uid
-                    type: object
-                  backend:
-                    description: AgentExecutionBackend identifies the isolated execution
-                      dispatcher backend.
-                    enum:
-                    - harness-wrapper
-                    - runtime-pool
-                    - external-endpoint
-                    type: string
-                  bindingDigest:
-                    description: |-
-                      BindingDigest is the canonical digest of this binding; every durable
-                      demand, attempt, turn, Session lease, publication, and cleanup record
-                      copies it.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  boundAt:
-                    format: date-time
-                    type: string
-                  contractVersion:
-                    description: ContractVersion is the frozen execution protocol
-                      for the Task lifetime.
-                    enum:
-                    - orka.harness.v1
-                    - orka.harness.v2
-                    type: string
-                  runtimeProfileDigest:
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  runtimeProfileDigestSchemaVersion:
-                    enum:
-                    - 1
-                    format: int32
-                    type: integer
-                  runtimeRef:
-                    description: AgentExecutionRuntimeRef pins a referenced AgentRuntime
-                      identity.
-                    properties:
-                      generation:
-                        format: int64
-                        minimum: 1
-                        type: integer
-                      name:
-                        minLength: 1
-                        type: string
-                      uid:
-                        description: |-
-                          UID is a type that holds unique ID values, including UUIDs.  Because we
-                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                          intent and helps make sure that UIDs and names do not get conflated.
-                        type: string
-                    required:
-                    - generation
-                    - name
-                    - uid
-                    type: object
-                  runtimeType:
-                    description: RuntimeType is the built-in runtime type, empty for
-                      runtimeRef bindings.
-                    enum:
-                    - claude
-                    - codex
-                    - copilot
-                    - opencode
-                    type: string
-                  schemaVersion:
-                    enum:
-                    - 1
-                    format: int32
-                    type: integer
-                  snapshot:
-                    description: AgentExecutionSnapshotRef links the immutable non-secret
-                      execution snapshot.
-                    properties:
-                      digest:
-                        pattern: ^sha256:[a-f0-9]{64}$
-                        type: string
-                      id:
-                        description: ID is the snapshot identity in the form <task-uid>/sha256:<digest>.
-                        maxLength: 512
-                        minLength: 1
-                        type: string
-                      schemaVersion:
-                        enum:
-                        - 1
-                        format: int32
-                        type: integer
-                    required:
-                    - digest
-                    - id
-                    - schemaVersion
-                    type: object
-                  task:
-                    description: AgentExecutionBindingTaskRef pins the bound Task
-                      identity.
-                    properties:
-                      boundSpecGeneration:
-                        description: BoundSpecGeneration is the Task spec generation
-                          frozen into the snapshot.
-                        format: int64
-                        minimum: 1
-                        type: integer
-                      namespaceUID:
-                        description: |-
-                          NamespaceUID is the UID of the Task namespace, preventing same-name
-                          namespace recreation from satisfying old identities.
-                        type: string
-                      uid:
-                        description: |-
-                          UID is a type that holds unique ID values, including UUIDs.  Because we
-                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                          intent and helps make sure that UIDs and names do not get conflated.
-                        type: string
-                    required:
-                    - boundSpecGeneration
-                    - namespaceUID
-                    - uid
-                    type: object
-                required:
-                - backend
-                - bindingDigest
-                - boundAt
-                - contractVersion
-                - schemaVersion
-                - snapshot
-                - task
-                type: object
-                x-kubernetes-validations:
-                - message: the harness-wrapper backend requires an orka.harness.v1
-                    binding
-                  rule: self.backend != 'harness-wrapper' || self.contractVersion
-                    == 'orka.harness.v1'
-                - message: the runtime-pool backend requires an orka.harness.v2 binding
-                  rule: self.backend != 'runtime-pool' || self.contractVersion ==
-                    'orka.harness.v2'
               attempts:
                 description: Attempts is the number of attempts made
                 format: int32
@@ -2311,7 +1849,6 @@ spec:
                       enum:
                       - Pending
                       - Running
-                      - Finalizing
                       - Succeeded
                       - Failed
                       - Scheduled
@@ -2390,519 +1927,18 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              delivery:
-                description: Delivery reports trusted workspace validation and publication
-                  reconciliation.
-                properties:
-                  artifactDigest:
-                    description: ArtifactDigest is the durable content-addressed workspace
-                      delta digest.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  branch:
-                    description: Branch is the publication branch without a refs/heads/
-                      prefix.
-                    maxLength: 255
-                    type: string
-                  expectedCommitSHA:
-                    description: ExpectedCommitSHA is the exact Orka-owned commit
-                      prepared for publication.
-                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
-                    type: string
-                  lastTransitionTime:
-                    description: LastTransitionTime is the last durable delivery-state
-                      transition time.
-                    format: date-time
-                    type: string
-                  message:
-                    description: Message contains bounded, sanitized delivery context.
-                    maxLength: 1024
-                    type: string
-                  outcome:
-                    description: Outcome is set only after delivery reaches a terminal
-                      classification.
-                    enum:
-                    - NotRequested
-                    - VerifiedExact
-                    - DeliveredSuperseded
-                    - ReadValidated
-                    - NoChange
-                    - CancelledBeforePublish
-                    - ReadOnlyWorkspaceModified
-                    - DeliveryConflict
-                    - CredentialBlocked
-                    - PublicationOutcomeUnknown
-                    type: string
-                  prReceipt:
-                    description: PRReceipt is present only when createPR was explicitly
-                      requested and reconciled.
-                    properties:
-                      baseBranch:
-                        description: BaseBranch is the reconciled pull request base
-                          branch.
-                        maxLength: 255
-                        type: string
-                      headBranch:
-                        description: HeadBranch is the reconciled pull request head
-                          branch.
-                        maxLength: 255
-                        type: string
-                      headSHA:
-                        description: HeadSHA is the exact observed pull request head
-                          commit.
-                        pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
-                        type: string
-                      id:
-                        description: ID is the provider's durable pull request identifier.
-                        maxLength: 512
-                        minLength: 1
-                        type: string
-                      number:
-                        description: Number is the provider's numeric pull request
-                          number when available.
-                        format: int64
-                        minimum: 1
-                        type: integer
-                      state:
-                        description: State is the provider-observed pull request state.
-                        maxLength: 64
-                        type: string
-                      url:
-                        description: URL is the canonical user-facing pull request
-                          URL. It must not contain credentials.
-                        maxLength: 2048
-                        type: string
-                    required:
-                    - id
-                    type: object
-                  publicationID:
-                    description: PublicationID is the durable identity reused for
-                      reconciliation of the same artifact.
-                    maxLength: 253
-                    pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,252}$
-                    type: string
-                  publicationRepository:
-                    description: PublicationRepository is the canonical repository
-                      whose branch was reconciled.
-                    properties:
-                      id:
-                        description: |-
-                          ID is the canonical credential-free URL identity and must match the
-                          corresponding repository URL after normalization. For GitHub, use
-                          "github.com/owner/repo"; GitHub GraphQL node IDs are not accepted.
-                        maxLength: 512
-                        minLength: 1
-                        type: string
-                      provider:
-                        description: Provider identifies the source-control provider
-                          or forge.
-                        maxLength: 63
-                        minLength: 1
-                        pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$
-                        type: string
-                    required:
-                    - id
-                    - provider
-                    type: object
-                  reason:
-                    description: Reason is a stable machine-readable explanation for
-                      State or Outcome.
-                    maxLength: 128
-                    pattern: ^[A-Za-z][A-Za-z0-9._-]{0,127}$
-                    type: string
-                  remoteBeforeSHA:
-                    description: |-
-                      RemoteBeforeSHA is the exact publication ref observed before the CAS push.
-                      Nil means not yet observed; a pointer to the empty string records explicit
-                      absence; a non-empty value records the observed object ID.
-                    pattern: ^(|[a-f0-9]{40}|[a-f0-9]{64})$
-                    type: string
-                  sourceRepository:
-                    description: SourceRepository is the canonical repository from
-                      which the workspace baseline was created.
-                    properties:
-                      id:
-                        description: |-
-                          ID is the canonical credential-free URL identity and must match the
-                          corresponding repository URL after normalization. For GitHub, use
-                          "github.com/owner/repo"; GitHub GraphQL node IDs are not accepted.
-                        maxLength: 512
-                        minLength: 1
-                        type: string
-                      provider:
-                        description: Provider identifies the source-control provider
-                          or forge.
-                        maxLength: 63
-                        minLength: 1
-                        pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$
-                        type: string
-                    required:
-                    - id
-                    - provider
-                    type: object
-                  startingSHA:
-                    description: StartingSHA is the verified source baseline before
-                      prompt execution.
-                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
-                    type: string
-                  state:
-                    description: State is the current durable delivery state.
-                    enum:
-                    - NotRequested
-                    - Validating
-                    - Preparing
-                    - Prepared
-                    - Publishing
-                    - Verifying
-                    - VerifiedExact
-                    - DeliveredSuperseded
-                    - ReadValidated
-                    - NoChange
-                    - CancelledBeforePublish
-                    - ReadOnlyWorkspaceModified
-                    - DeliveryConflict
-                    - CredentialBlocked
-                    - PublicationOutcomeUnknown
-                    type: string
-                  supersedingRemoteSHA:
-                    description: SupersedingRemoteSHA is the verified descendant that
-                      superseded ExpectedCommitSHA.
-                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
-                    type: string
-                  treeSHA:
-                    description: TreeSHA is the deterministic clean-room tree written
-                      by the publisher.
-                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
-                    type: string
-                  verifiedRemoteSHA:
-                    description: VerifiedRemoteSHA is the independently observed remote
-                      branch head.
-                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
-                    type: string
-                type: object
-                x-kubernetes-validations:
-                - message: delivery outcome requires the matching terminal state
-                  rule: '!has(self.outcome) || (has(self.state) && self.state == self.outcome)'
-                - message: terminal delivery state requires an outcome
-                  rule: '!has(self.state) || !(self.state in [''NotRequested'', ''VerifiedExact'',
-                    ''DeliveredSuperseded'', ''ReadValidated'', ''NoChange'', ''CancelledBeforePublish'',
-                    ''ReadOnlyWorkspaceModified'', ''DeliveryConflict'', ''CredentialBlocked'',
-                    ''PublicationOutcomeUnknown'']) || has(self.outcome)'
-              execution:
-                description: |-
-                  Execution reports the durable execution state and terminal outcome for the
-                  current attempt. Phase remains the compatibility projection.
-                properties:
-                  agentRuntimeName:
-                    description: |-
-                      AgentRuntimeName is the namespaced external orka.harness.v2 registration
-                      selected for this attempt. It is mutually exclusive with RuntimePoolName.
-                    maxLength: 253
-                    type: string
-                  agentRuntimeUID:
-                    description: |-
-                      AgentRuntimeUID is the immutable external AgentRuntime UID fenced into the
-                      attempt selection.
-                    maxLength: 253
-                    type: string
-                  attempt:
-                    description: Attempt is the one-based Task execution attempt represented
-                      by this status.
-                    format: int32
-                    minimum: 1
-                    type: integer
-                  controllerEpoch:
-                    description: ControllerEpoch is the durable controller epoch fencing
-                      this attempt.
-                    format: int64
-                    minimum: 0
-                    type: integer
-                  forgeCredentialResourceVersion:
-                    description: |-
-                      ForgeCredentialResourceVersion freezes the forge-only Secret version used
-                      for pull request reconciliation.
-                    maxLength: 253
-                    type: string
-                  lastTransitionTime:
-                    description: LastTransitionTime is the last durable execution-state
-                      transition time.
-                    format: date-time
-                    type: string
-                  message:
-                    description: Message contains bounded, sanitized execution context.
-                    maxLength: 1024
-                    type: string
-                  outcome:
-                    description: Outcome is set only after execution reaches a terminal
-                      classification.
-                    enum:
-                    - Succeeded
-                    - Failed
-                    - Cancelled
-                    - OutcomeUnknown
-                    type: string
-                  promptID:
-                    description: PromptID is the durable prompt identity used for
-                      submission and settlement.
-                    maxLength: 253
-                    type: string
-                  publicationCredentialResourceVersion:
-                    description: |-
-                      PublicationCredentialResourceVersion freezes the target-write Secret
-                      version selected at reservation without exposing credential material.
-                    maxLength: 253
-                    type: string
-                  publicationReadCredentialResourceVersion:
-                    description: |-
-                      PublicationReadCredentialResourceVersion freezes the target-read Secret
-                      version used for preflight and independent verification.
-                    maxLength: 253
-                    type: string
-                  readCredentialResourceVersion:
-                    description: |-
-                      ReadCredentialResourceVersion freezes the read credential Secret version
-                      selected at reservation without exposing credential material.
-                    maxLength: 253
-                    type: string
-                  reason:
-                    description: Reason is a stable machine-readable explanation for
-                      State or Outcome.
-                    maxLength: 128
-                    pattern: ^[A-Za-z][A-Za-z0-9._-]{0,127}$
-                    type: string
-                  requestDigest:
-                    description: RequestDigest is the canonical immutable prompt request
-                      digest.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  runtimeInstanceID:
-                    description: RuntimeInstanceID is the exact selected supervisor
-                      Pod UID plus boot identity.
-                    maxLength: 512
-                    type: string
-                  runtimePoolName:
-                    description: RuntimePoolName is the namespaced logical pool selected
-                      for this attempt.
-                    maxLength: 253
-                    type: string
-                  runtimePoolUID:
-                    description: RuntimePoolUID is the immutable pool UID fenced into
-                      runtime requests.
-                    maxLength: 253
-                    type: string
-                  runtimeSessionCleanupDigest:
-                    description: |-
-                      RuntimeSessionCleanupDigest is the controller-owned proof that the exact
-                      RuntimeSession requiring retirement was deleted or its immutable runtime
-                      instance was replaced. Users may read but cannot mutate the Task status subresource.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  runtimeSessionGeneration:
-                    description: RuntimeSessionGeneration is the monotonic profile/session
-                      generation.
-                    format: int64
-                    minimum: 0
-                    type: integer
-                  runtimeSessionMCPDigest:
-                    description: |-
-                      RuntimeSessionMCPDigest binds the complete non-secret effective MCP policy
-                      and descriptor configuration to a pending or reusable Session generation.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  runtimeSessionProfileDigest:
-                    description: |-
-                      RuntimeSessionProfileDigest freezes the immutable runtime behavior bound to
-                      a pending or reusable Session generation.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  runtimeSessionRecreationPending:
-                    description: |-
-                      RuntimeSessionRecreationPending records that the exact generation is being
-                      created or replaced and must be reconciled before a different request may
-                      reuse that identity.
-                    type: boolean
-                  runtimeSessionSupervisorBootID:
-                    description: |-
-                      RuntimeSessionSupervisorBootID freezes the supervisor boot that owns a
-                      pending or reusable Session generation.
-                    maxLength: 512
-                    type: string
-                  runtimeSessionUID:
-                    description: RuntimeSessionUID is the stable controller-owned
-                      Session execution identity.
-                    maxLength: 253
-                    type: string
-                  runtimeSessionWorkspaceDigest:
-                    description: |-
-                      RuntimeSessionWorkspaceDigest binds a reusable Session generation to the
-                      exact repository, source ref, verified baseline, intent, and relative root.
-                      It contains no credential material.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  state:
-                    description: State is the current durable execution state.
-                    enum:
-                    - Queued
-                    - Reserved
-                    - SessionStarting
-                    - Planned
-                    - Submitting
-                    - SubmittedUnknown
-                    - Accepted
-                    - Running
-                    - Settling
-                    - Succeeded
-                    - Failed
-                    - Cancelled
-                    - OutcomeUnknown
-                    type: string
-                type: object
-                x-kubernetes-validations:
-                - message: execution outcome requires the matching terminal state
-                  rule: '!has(self.outcome) || (has(self.state) && self.state == self.outcome)'
-                - message: terminal execution state requires an outcome
-                  rule: '!has(self.state) || !(self.state in [''Succeeded'', ''Failed'',
-                    ''Cancelled'', ''OutcomeUnknown'']) || has(self.outcome)'
-              executionOutcome:
-                description: |-
-                  ExecutionOutcome records the immutable outcome of a non-ACP workload before
-                  provider-neutral execution-workspace finalization completes.
-                properties:
-                  attempt:
-                    description: Attempt is the Task attempt that produced this outcome.
-                    format: int32
-                    minimum: 1
-                    type: integer
-                  message:
-                    description: Message contains sanitized execution context.
-                    type: string
-                  phase:
-                    allOf:
-                    - enum:
-                      - Pending
-                      - Running
-                      - Finalizing
-                      - Succeeded
-                      - Failed
-                      - Scheduled
-                      - Cancelled
-                    - enum:
-                      - Succeeded
-                      - Failed
-                      - Cancelled
-                    description: Phase is the terminal workload execution phase.
-                    type: string
-                  recordedAt:
-                    description: RecordedAt is when Orka durably recorded the execution
-                      outcome.
-                    format: date-time
-                    type: string
-                  resultRef:
-                    description: ResultRef indicates whether the corresponding result
-                      was persisted.
-                    properties:
-                      available:
-                        description: Available indicates whether a result has been
-                          stored for this task
-                        type: boolean
-                    required:
-                    - available
-                    type: object
-                required:
-                - attempt
-                - phase
-                - recordedAt
-                type: object
               executionWorkspace:
                 description: |-
                   ExecutionWorkspace reports the provider-neutral lifecycle state for a
                   requested execution workspace. Provider-native identifiers and credentials
                   are intentionally omitted.
                 properties:
-                  attachedEpoch:
-                    description: AttachedEpoch is the attachment epoch enforced for
-                      this Task.
-                    format: int64
-                    type: integer
-                  classRef:
-                    description: ClassRef is the provider-neutral class selected for
-                      controller-first execution.
-                    properties:
-                      name:
-                        description: Name is the class name.
-                        minLength: 1
-                        type: string
-                    required:
-                    - name
-                    type: object
                   cleanupPolicy:
                     description: CleanupPolicy is the resolved cleanup policy.
                     enum:
                     - delete
                     - retain
                     type: string
-                  conditions:
-                    description: Conditions project generic workspace admission, readiness,
-                      attachment, and finalization state.
-                    items:
-                      description: Condition contains details for one aspect of the
-                        current state of this API Resource.
-                      properties:
-                        lastTransitionTime:
-                          description: |-
-                            lastTransitionTime is the last time the condition transitioned from one status to another.
-                            This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                          format: date-time
-                          type: string
-                        message:
-                          description: |-
-                            message is a human readable message indicating details about the transition.
-                            This may be an empty string.
-                          maxLength: 32768
-                          type: string
-                        observedGeneration:
-                          description: |-
-                            observedGeneration represents the .metadata.generation that the condition was set based upon.
-                            For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                            with respect to the current state of the instance.
-                          format: int64
-                          minimum: 0
-                          type: integer
-                        reason:
-                          description: |-
-                            reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                            Producers of specific condition types may define expected values and meanings for this field,
-                            and whether the values are considered a guaranteed API.
-                            The value should be a CamelCase string.
-                            This field may not be empty.
-                          maxLength: 1024
-                          minLength: 1
-                          pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                          type: string
-                        status:
-                          description: status of the condition, one of True, False,
-                            Unknown.
-                          enum:
-                          - "True"
-                          - "False"
-                          - Unknown
-                          type: string
-                        type:
-                          description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                          maxLength: 316
-                          pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                          type: string
-                      required:
-                      - lastTransitionTime
-                      - message
-                      - reason
-                      - status
-                      - type
-                      type: object
-                    type: array
-                    x-kubernetes-list-map-keys:
-                    - type
-                    x-kubernetes-list-type: map
                   density:
                     description: Density reports non-secret actor and worker counts
                       for the workspace provider.
@@ -2968,7 +2004,7 @@ spec:
                         type: string
                     type: object
                   provider:
-                    description: Provider is the resolved legacy workspace backend.
+                    description: Provider is the resolved workspace backend.
                     enum:
                     - agent-sandbox
                     - substrate
@@ -3006,10 +2042,6 @@ spec:
                     description: Reused reports whether an existing workspace was
                       reattached.
                     type: boolean
-                  state:
-                    description: State is the provider-neutral concrete workspace
-                      state.
-                    type: string
                   templateRef:
                     description: TemplateRef is the resolved workspace template.
                     properties:
@@ -3022,32 +2054,13 @@ spec:
                           It defaults to the Task namespace, or the controller namespace when configured.
                         type: string
                     type: object
-                  workspaceRef:
-                    description: WorkspaceRef identifies the concrete ExecutionWorkspace
-                      in the Task namespace.
-                    properties:
-                      name:
-                        description: Name is the ExecutionWorkspace name.
-                        type: string
-                      uid:
-                        description: UID is the immutable ExecutionWorkspace UID.
-                        type: string
-                    required:
-                    - name
-                    type: object
                 type: object
               harnessRuntime:
                 description: |-
-                  HarnessRuntime records the controller-resolved harness v1 runtime target
-                  for an in-flight agent turn. It intentionally stores only non-secret
-                  routing metadata and Secret references, never bearer values. Compatibility
-                  surface for harness v1 bindings.
+                  HarnessRuntime records the controller-resolved harness runtime target for an
+                  in-flight agent turn. It intentionally stores only non-secret routing metadata
+                  and Secret references, never bearer values.
                 properties:
-                  attempt:
-                    description: Attempt is the durable harness v1 attempt number.
-                    format: int32
-                    minimum: 1
-                    type: integer
                   authRefField:
                     description: AuthRefField is the Secret data field selected when
                       the turn started.
@@ -3057,64 +2070,16 @@ spec:
                       turn started.
                     type: string
                   authRefResourceVersion:
-                    description: |-
-                      AuthRefResourceVersion is the auth Secret resourceVersion validated
-                      before starting the turn.
-                    type: string
-                  cancelRequestedAt:
-                    description: |-
-                      CancelRequestedAt records a durable cancellation request. Cancellation
-                      remains nonterminal until a terminal frame or ledger receipt is observed.
-                    format: date-time
+                    description: AuthRefResourceVersion is the auth Secret resourceVersion
+                      validated before starting the turn.
                     type: string
                   contractVersion:
                     description: ContractVersion is the Orka harness contract version
                       used for the turn.
                     type: string
-                  controllerEpoch:
-                    description: ControllerEpoch records the fenced controller epoch
-                      driving the attempt.
-                    format: int64
-                    minimum: 0
-                    type: integer
                   endpoint:
                     description: Endpoint is the non-secret harness base URL selected
                       when the turn started.
-                    type: string
-                  lastEventSeq:
-                    description: LastEventSeq is the highest durably mapped harness
-                      frame sequence.
-                    format: int64
-                    minimum: 0
-                    type: integer
-                  lastTransitionTime:
-                    description: |-
-                      LastTransitionTime is the last durable v1 attempt transition projected to
-                      the Task.
-                    format: date-time
-                    type: string
-                  message:
-                    description: Message is bounded, sanitized execution context.
-                    maxLength: 1024
-                    type: string
-                  outcome:
-                    description: Outcome is set only for a terminal harness v1 attempt.
-                    enum:
-                    - Succeeded
-                    - Failed
-                    - Cancelled
-                    - OutcomeUnknown
-                    type: string
-                  reason:
-                    description: Reason is a bounded machine-readable terminal reason
-                      code.
-                    maxLength: 256
-                    type: string
-                  requestDigest:
-                    description: |-
-                      RequestDigest binds the canonical StartTurn request admitted by the
-                      durable wrapper ledger.
-                    pattern: ^sha256:[a-f0-9]{64}$
                     type: string
                   runtimeGeneration:
                     description: RuntimeGeneration is the AgentRuntime generation
@@ -3122,57 +2087,14 @@ spec:
                     format: int64
                     type: integer
                   runtimeName:
-                    description: |-
-                      RuntimeName is the runtime name advertised by the harness capabilities
-                      and sent in turn metadata.
+                    description: RuntimeName is the runtime name advertised by the
+                      harness capabilities and sent in turn metadata.
                     type: string
                   runtimeRefName:
-                    description: |-
-                      RuntimeRefName is the AgentRuntime name for custom runtimeRef turns.
-                      Empty means built-in CLI wrapper.
-                    type: string
-                  runtimeSessionID:
-                    description: RuntimeSessionID is the deterministic, non-secret
-                      v1 runtime-session identity.
-                    type: string
-                  state:
-                    description: State is the durable harness v1 attempt state projected
-                      for operators.
-                    enum:
-                    - Queued
-                    - Reserved
-                    - SessionStarting
-                    - Planned
-                    - Submitting
-                    - SubmittedUnknown
-                    - Accepted
-                    - Running
-                    - Settling
-                    - Succeeded
-                    - Failed
-                    - Cancelled
-                    - OutcomeUnknown
-                    type: string
-                  terminalReceiptDigest:
-                    description: TerminalReceiptDigest identifies the authoritative
-                      terminal or unknown receipt.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  turnID:
-                    description: TurnID is the deterministic, non-secret harness turn
-                      identity.
+                    description: RuntimeRefName is the AgentRuntime name for custom
+                      runtimeRef turns. Empty means built-in CLI wrapper.
                     type: string
                 type: object
-                x-kubernetes-validations:
-                - message: terminal harness state requires an outcome
-                  rule: '!has(self.state) || !(self.state in [''Succeeded'', ''Failed'',
-                    ''Cancelled'', ''OutcomeUnknown'']) || has(self.outcome)'
-                - message: harness outcome requires a terminal state
-                  rule: '!has(self.outcome) || (has(self.state) && self.state in [''Succeeded'',
-                    ''Failed'', ''Cancelled'', ''OutcomeUnknown''])'
-                - message: OutcomeUnknown harness state requires OutcomeUnknown outcome
-                  rule: '!has(self.state) || self.state != ''OutcomeUnknown'' || (has(self.outcome)
-                    && self.outcome == ''OutcomeUnknown'')'
               iteration:
                 description: |-
                   Iteration is the current autonomous loop iteration (0-based).
@@ -3201,7 +2123,6 @@ spec:
                 enum:
                 - Pending
                 - Running
-                - Finalizing
                 - Succeeded
                 - Failed
                 - Scheduled
@@ -3226,27 +2147,7 @@ spec:
                   called
                 type: boolean
             type: object
-            x-kubernetes-validations:
-            - message: executionOutcome is immutable once recorded
-              rule: '!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome'
-            - message: agentExecutionBinding is write-once and immutable
-              rule: '!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding)
-                && self.agentExecutionBinding == oldSelf.agentExecutionBinding)'
-            - message: a v1-bound Task cannot acquire new v2 execution or delivery
-                state
-              rule: '!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion
-                != ''orka.harness.v1'' || ((!has(self.execution) || (has(oldSelf.execution)
-                && self.execution == oldSelf.execution)) && (!has(self.delivery) ||
-                (has(oldSelf.delivery) && self.delivery == oldSelf.delivery)))'
-            - message: a v2-bound Task cannot acquire new v1 harness state
-              rule: '!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion
-                != ''orka.harness.v2'' || !has(self.harnessRuntime) || (has(oldSelf.harnessRuntime)
-                && self.harnessRuntime == oldSelf.harnessRuntime)'
         type: object
-        x-kubernetes-validations:
-        - message: Task spec is immutable after execution authority is recorded
-          rule: '!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding)
-            || self.spec == oldSelf.spec)'
     served: true
     storage: true
     subresources:

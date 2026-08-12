@@ -63,7 +63,7 @@ func unmarshalSecurityJSON(payload string, value any) error {
 
 // CreateScanRun inserts a new scan run.
 func (s *Store) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
-	now := time.Now()
+	now := time.Now().UTC()
 	if run.StartedAt.IsZero() {
 		run.StartedAt = now
 	}
@@ -246,7 +246,7 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 		return err
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	if slice.CreatedAt.IsZero() {
 		slice.CreatedAt = now
 	}
@@ -411,7 +411,7 @@ func (s *Store) GetReviewSlice(ctx context.Context, namespace, repositoryScan, i
 
 // UpdateReviewSliceStatus updates slice status and review timestamp.
 func (s *Store) UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, lastScanRunID, status string) error {
-	now := time.Now()
+	now := time.Now().UTC()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE security_review_slices
 		 SET status = ?, last_reviewed_at = CASE WHEN ? IN ('reviewed', 'completed') THEN ? ELSE last_reviewed_at END,
@@ -480,7 +480,7 @@ func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) e
 		model.Version = latestVersion + 1
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	if model.CreatedAt.IsZero() {
 		model.CreatedAt = now
 	}
@@ -539,7 +539,7 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		return err
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	if finding.CreatedAt.IsZero() {
 		finding.CreatedAt = now
 	}
@@ -843,7 +843,7 @@ func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchPr
 	if proposal.PublicationEvidence != nil {
 		return store.ValidationErrorf("patch proposal publication evidence must be bound with BindPatchProposalPublicationEvidence")
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	if proposal.CreatedAt.IsZero() {
 		proposal.CreatedAt = now
 	}
@@ -886,7 +886,7 @@ func (s *Store) BindPatchProposalPublicationEvidence(ctx context.Context, propos
 		return fmt.Errorf("%w: patch proposal %s/%s publication evidence already differs", store.ErrConflict, proposal.Namespace, proposal.ID)
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	result, err := tx.ExecContext(ctx,
 		`UPDATE security_patch_proposals
 		 SET branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, pr_number = ?, pr_url = ?,
@@ -1062,7 +1062,7 @@ func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchPr
 	if proposal.PublicationEvidence != nil {
 		return store.ValidationErrorf("patch proposal publication evidence must be bound with BindPatchProposalPublicationEvidence")
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE security_patch_proposals
 		 SET task_name = ?, branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, pr_number = ?, pr_url = ?, updated_at = ?
@@ -1148,11 +1148,11 @@ func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.Dropped
 			dropped.SliceID,
 			dropped.Reason,
 			dropped.SampleJSON,
-			time.Now().Format(time.RFC3339Nano),
+			time.Now().UTC().Format(time.RFC3339Nano),
 		}, "|"))
 	}
 	if dropped.CreatedAt.IsZero() {
-		dropped.CreatedAt = time.Now()
+		dropped.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO security_dropped_findings

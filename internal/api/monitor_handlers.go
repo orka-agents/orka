@@ -271,9 +271,6 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get %s agent %q: %v", role, ref.Name, err))
 	}
 	allowedRuntimes := "claude or opencode"
-	if role == "reviewer" {
-		allowedRuntimes = "claude, codex, or opencode"
-	}
 	if agent.Spec.Runtime == nil {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must use a built-in %s runtime for read-only repository monitor tasks", field, ref.Name, allowedRuntimes))
 	}
@@ -286,11 +283,10 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace
 			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q has an invalid OpenCode configuration: %v", field, ref.Name, err))
 		}
 	case corev1alpha1.AgentRuntimeClaude:
-	case corev1alpha1.AgentRuntimeCodex:
-		if role != "reviewer" {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use %s", field, ref.Name, agent.Spec.Runtime.Type, allowedRuntimes))
-		}
 	default:
+		// Codex is excluded on purpose: read-only agent task validation rejects
+		// it because Codex requires shell access while model credentials are
+		// exposed, so admitting it here would only produce failed tasks.
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use %s", field, ref.Name, agent.Spec.Runtime.Type, allowedRuntimes))
 	}
 	if agent.Spec.SecretRef != nil && strings.TrimSpace(agent.Spec.SecretRef.Name) != "" {

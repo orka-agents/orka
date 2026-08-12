@@ -901,18 +901,12 @@ func sanitizeAgentRuntimeEndpointForStatus(endpoint string) string {
 
 func sanitizeAgentRuntimeStatusMessage(message string) string {
 	message = events.RedactExecutionEventText(strings.TrimSpace(message))
-	if len(message) > 1024 {
-		return message[:1024]
-	}
-	return message
+	return truncateUTF8(strings.ToValidUTF8(message, "�"), 1024)
 }
 
 func sanitizeAgentRuntimeCapabilityValue(value string) string {
 	value = events.RedactExecutionEventText(strings.TrimSpace(value))
-	if len(value) > 512 {
-		return value[:512]
-	}
-	return value
+	return truncateUTF8(strings.ToValidUTF8(value, "�"), 512)
 }
 
 // SetupWithManager sets up the controller with the Manager.

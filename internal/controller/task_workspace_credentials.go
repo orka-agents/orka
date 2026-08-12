@@ -37,9 +37,11 @@ func repositoryScanTaskWorkspace(scan *corev1alpha1.RepositoryScan, intent corev
 		Ref:               security.EffectiveRef(scan),
 		ReadCredentialRef: workspaceCredentialReference(repositoryScanReadCredentialRef(scan)),
 		SubPath:           scan.Spec.SubPath,
-		PRBaseBranch:      scan.Spec.PRBaseBranch,
 	}
 	if intent == corev1alpha1.WorkspaceIntentWrite {
+		// prBaseBranch is a publication field: the ACP workspace preflight
+		// rejects it on non-write intents.
+		workspace.PRBaseBranch = scan.Spec.PRBaseBranch
 		workspace.PublicationGitRepo = strings.TrimSpace(scan.Spec.ForkRepo)
 		if workspace.PublicationGitRepo == "" {
 			workspace.PublicationGitRepo = scan.Spec.RepoURL

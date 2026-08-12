@@ -8,6 +8,7 @@ package tools
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,6 +83,36 @@ func chatGetIntArg(args map[string]any, key string, defaultVal int) int {
 		return int(n)
 	default:
 		return defaultVal
+	}
+}
+
+// chatParseBoolArg parses a bool tool argument that may arrive as a JSON
+// boolean or a string boolean.
+func chatParseBoolArg(value any) (bool, error) {
+	switch v := value.(type) {
+	case bool:
+		return v, nil
+	case string:
+		return strconv.ParseBool(strings.TrimSpace(v))
+	default:
+		return false, fmt.Errorf("value is not a boolean")
+	}
+}
+
+// chatParseIntArg parses an integer tool argument that may arrive as a JSON
+// number or a numeric string.
+func chatParseIntArg(value any) (int, error) {
+	switch v := value.(type) {
+	case float64:
+		return int(v), nil
+	case int:
+		return v, nil
+	case int64:
+		return int(v), nil
+	case string:
+		return strconv.Atoi(strings.TrimSpace(v))
+	default:
+		return 0, fmt.Errorf("value is not an integer")
 	}
 }
 

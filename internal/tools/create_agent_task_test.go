@@ -304,6 +304,82 @@ func TestCreateAgentTaskTool_Execute_RejectsNonObjectWorkspace(t *testing.T) {
 	}
 }
 
+func TestCreateAgentTaskTool_Execute_ParsesStringBooleanCreatePR(t *testing.T) {
+	fc := newFakeClient()
+	ctx := newCreateAgentTaskToolCtx(fc)
+	tool := &CreateAgentTaskTool{}
+	args := json.RawMessage(`{
+		"prompt":"Fix the bug",
+		"agentRef":"codex-agent",
+		"workspace":{
+			"gitRepo":"https://github.com/example/source.git",
+			"pushBranch":"orka/fix",
+			"prBaseBranch":"main",
+			"createPR":"true",
+			"readCredentialRef":"source-read",
+			"publicationCredentialRef":"target-write",
+			"forgeCredentialRef":"forge"
+		}
+	}`)
+
+	result, err := tool.Execute(ctx, args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Success {
+		t.Fatalf("response = %#v, want success", response)
+	}
+	task := &corev1alpha1.Task{}
+	if err := fc.Get(t.Context(), apitypes.NamespacedName{Name: testAgentTaskGeneratedName, Namespace: defaultNamespace}, task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Spec.Workspace == nil || !task.Spec.Workspace.CreatePR {
+		t.Fatalf("workspace = %#v, want createPR true from string boolean", task.Spec.Workspace)
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_RejectsInvalidCreatePRAndMaxTurns(t *testing.T) {
+	tests := []struct {
+		name string
+		args string
+		want string
+	}{
+		{
+			name: "createPR",
+			args: `{"prompt":"Fix","agentRef":"codex-agent","workspace":{"gitRepo":"https://github.com/example/repo","createPR":"yes-please"}}`,
+			want: "workspace.createPR must be a boolean",
+		},
+		{
+			name: "maxTurns",
+			args: `{"prompt":"Fix","agentRef":"codex-agent","maxTurns":"lots"}`,
+			want: "maxTurns must be an integer",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := newFakeClient()
+			ctx := newCreateAgentTaskToolCtx(fc)
+			tool := &CreateAgentTaskTool{}
+
+			result, err := tool.Execute(ctx, json.RawMessage(tt.args))
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, tt.want) {
+				t.Fatalf("response = %#v, want %q", response, tt.want)
+			}
+		})
+	}
+}
+
 func TestCreateAgentTaskTool_Execute_RequiresExplicitPublicationCredentialForWrite(t *testing.T) {
 	fc := newFakeClient()
 	ctx := newCreateAgentTaskToolCtx(fc)
