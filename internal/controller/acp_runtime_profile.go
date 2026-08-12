@@ -101,7 +101,7 @@ func PlanACPRuntimeWithConfiguration(
 	}
 	allowBash := effectiveACPAllowBash(task, agent)
 	allowed, disallowed, allowBash = normalizeACPRuntimeToolPolicy(provider, intent, allowed, disallowed, allowBash)
-	if err := validateACPProviderNativePolicy(provider, allowed, disallowed, allowBash); err != nil {
+	if err := validateACPProviderNativePolicy(provider, intent, allowed, disallowed, allowBash); err != nil {
 		return ACPRuntimePlan{}, err
 	}
 	if err := validateACPProviderSystemPrompt(provider, configuration); err != nil {
@@ -213,11 +213,23 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 		values = append([]string{}, task.Spec.AgentRuntime.AllowedTools...)
 	}
 	if taskRequestsReadOnlyAgent(task) && taskUsesReadOnlyAgentToolPreset(task) &&
-		agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
-		// Repository-monitor presets use Claude-style path-scoped names. OpenCode
-		// cannot project those descriptors; its read-intent policy safely exposes
-		// only native Read and Glob (Grep is intentionally disabled).
-		values = []string{providerNativeToolRead, providerNativeToolGlob}
+		agent != nil && agent.Spec.Runtime != nil {
+		// Repository-monitor presets use Claude-style path-scoped names, which
+		// are not canonical provider-native descriptors, so translate the
+		// preset into the exact read-only surface each runtime can enforce.
+		switch agent.Spec.Runtime.Type {
+		case corev1alpha1.AgentRuntimeOpencode:
+			// OpenCode's Grep permission cannot carry the path-specific
+			// secret-file exclusions applied to Read, so it stays disabled.
+			values = []string{providerNativeToolRead, providerNativeToolGlob}
+		case corev1alpha1.AgentRuntimeClaude:
+			values = []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
+		case corev1alpha1.AgentRuntimeCodex:
+			// Codex has no per-tool switches; this exact surface maps to its
+			// native read-only agent mode, whose kernel-enforced sandbox
+			// confines every command to reads with no network access.
+			values = []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
+		}
 	}
 	if task != nil {
 		_, delegatedChild := task.Labels[labels.LabelParentTask]

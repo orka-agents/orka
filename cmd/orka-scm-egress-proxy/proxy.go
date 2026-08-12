@@ -184,7 +184,13 @@ func (p *scmEgressProxy) runTunnel(client, upstream net.Conn, buffered *bufio.Re
 	p.copyTunnel(client, upstream, clientBudget, activity)
 }
 
-func copyBuffered(destination net.Conn, reader *bufio.Reader, limit int64, idleTimeout time.Duration, activity *tunnelActivity) (int64, error) {
+func copyBuffered(
+	destination net.Conn,
+	reader *bufio.Reader,
+	limit int64,
+	idleTimeout time.Duration,
+	activity *tunnelActivity,
+) (int64, error) {
 	buffered := reader.Buffered()
 	if int64(buffered) > limit {
 		return 0, errTunnelLimit

@@ -37,7 +37,7 @@ The first implementation is intentionally narrow:
 - `spec.review.requireGreenCI` gates review selection until CI is green.
 - GitHub webhook-driven exact runs are opt-in with `spec.review.exactEventEnabled`.
 - Repair, maintainer command routing, issue action workflows, implementation budgets (`maxActive`, `maxAttemptsPerIssue`, `maxChangedFiles`, `allowedPaths`), and optional head-bound automerge are active monitor-owned workflows. Automerge remains disabled by default and requires explicit configuration plus a one-shot command.
-- Built-in reviewer Agents may use `runtime.type: claude` or `opencode`. Codex is rejected because monitor review Tasks are read-only and the read-only agent task policy does not permit the codex runtime. Reviewer Agents must omit `spec.secretRef`; provider credentials come from the controller-managed runtime proxy and never enter the Task spec.
+- Built-in reviewer Agents may use `runtime.type: claude`, `codex`, or `opencode`. Codex reviewers run in Codex's native read-only agent mode: a kernel-enforced read-only sandbox with no network access, with elevation requests rejected by the controller. Reviewer Agents must omit `spec.secretRef`; provider credentials come from the controller-managed runtime proxy and never enter the Task spec.
 
 ## CI Coverage
 

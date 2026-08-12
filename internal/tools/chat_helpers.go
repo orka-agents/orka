@@ -13,6 +13,8 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 // classifyChatK8sErr returns a ChatToolResult for common K8s API errors.
@@ -152,6 +154,47 @@ func parseTimeoutArg(args map[string]any) (time.Duration, string, bool) {
 		return 0, r, false
 	}
 	return d, "", true
+}
+
+// parseMaxTurnsArg parses the optional maxTurns argument and returns an error
+// result if invalid.
+func parseMaxTurnsArg(args map[string]any) (*int32, string, bool) {
+	raw, ok := args["maxTurns"]
+	if !ok {
+		return nil, "", true
+	}
+	turns, err := chatParseIntArg(raw)
+	if err != nil {
+		r, _ := ChatToolErrorResult("invalid_arguments",
+			"maxTurns must be an integer",
+			"Provide maxTurns as a positive integer or omit it")
+		return nil, r, false
+	}
+	value := int32(turns)
+	return &value, "", true
+}
+
+// workspaceRequestsPublication reports whether any publication field upgrades
+// the workspace to write intent.
+func workspaceRequestsPublication(wsCfg *corev1alpha1.WorkspaceConfig) bool {
+	return wsCfg.PublicationGitRepo != "" || wsCfg.PushBranch != "" || wsCfg.PRBaseBranch != "" || wsCfg.CreatePR
+}
+
+// parseCreatePRArg parses the optional workspace.createPR argument and returns
+// an error result if invalid.
+func parseCreatePRArg(wsMap map[string]any) (bool, string, bool) {
+	raw, ok := wsMap["createPR"]
+	if !ok {
+		return false, "", true
+	}
+	createPR, err := chatParseBoolArg(raw)
+	if err != nil {
+		r, _ := ChatToolErrorResult("invalid_arguments",
+			"workspace.createPR must be a boolean",
+			"Set createPR to true or false")
+		return false, r, false
+	}
+	return createPR, "", true
 }
 
 // taskCreatedMsg returns the appropriate message for a created task.

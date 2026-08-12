@@ -304,21 +304,19 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorReviewerAgent(ctx
 		return "", "", err
 	}
 	if agent.Spec.Runtime == nil {
-		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q must use a built-in claude or opencode runtime for read-only repository monitor reviews", reviewer.Name), nil
+		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q must use a built-in claude, codex, or opencode runtime for read-only repository monitor reviews", reviewer.Name), nil
 	}
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
-		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude or opencode", reviewer.Name), nil
+		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude, codex, or opencode", reviewer.Name), nil
 	}
 	switch agent.Spec.Runtime.Type {
-	case corev1alpha1.AgentRuntimeClaude:
+	case corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCodex:
 	case corev1alpha1.AgentRuntimeOpencode:
 		if err := ValidateOpenCodeAgentSpec(&agent); err != nil {
 			return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q has an invalid OpenCode configuration: %v", reviewer.Name, err), nil
 		}
 	default:
-		// Codex is excluded on purpose: monitor review tasks are read-only and
-		// validateReadOnlyBuiltInAgentRuntime rejects codex for read-only tasks.
-		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude or opencode", reviewer.Name, agent.Spec.Runtime.Type), nil
+		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude, codex, or opencode", reviewer.Name, agent.Spec.Runtime.Type), nil
 	}
 	if err := validateBuiltInACPAgentCredentialSecretRef(&agent); err != nil {
 		return repositoryMonitorReasonReviewerCredentialsInvalid, fmt.Sprintf("spec.agents.reviewer %q must omit spec.secretRef; provider credentials are supplied by the controller-managed runtime proxy", reviewer.Name), nil

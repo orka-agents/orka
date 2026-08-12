@@ -367,7 +367,7 @@ func codexSessionProjection(
 	if err != nil {
 		return ProviderSessionProjection{}, err
 	}
-	if !policy.unrestricted {
+	if !policy.unrestricted && !codexReadOnlySessionPolicy(request, policy) {
 		return ProviderSessionProjection{}, fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	}
 	config := map[string]any{
@@ -387,7 +387,30 @@ func codexSessionProjection(
 	if len(encoded) > maxCodexConfigEnvironmentBytes {
 		return ProviderSessionProjection{}, fmt.Errorf("codex session configuration exceeds the safe environment limit")
 	}
-	return ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}, nil
+	environment := map[string]string{"CODEX_CONFIG": string(encoded)}
+	if !policy.unrestricted {
+		// The read-only surface maps onto Codex's upstream read-only agent
+		// mode: every command runs inside the kernel-enforced read-only
+		// sandbox with network access disabled, and elevation requests are
+		// rejected unconditionally by the controller. The projection
+		// environment is merged last, so this overrides the default
+		// orka-external mode.
+		environment["INITIAL_AGENT_MODE"] = "read-only"
+	}
+	return ProviderSessionProjection{Environment: environment}, nil
+}
+
+// codexReadOnlySessionPolicy reports whether the session's restricted tool
+// policy is exactly the read-intent {Glob, Grep, Read} surface, which is the
+// only restricted shape the codex read-only agent mode enforces.
+func codexReadOnlySessionPolicy(request harnessv2.CreateRuntimeSessionRequest, policy providerNativePolicy) bool {
+	if request.Profile.WorkspaceIntent != harnessv2.WorkspaceIntentRead {
+		return false
+	}
+	if len(policy.allowed) != 3 {
+		return false
+	}
+	return policy.allows(providerToolGlob) && policy.allows(providerToolGrep) && policy.allows(providerToolRead)
 }
 
 func claudeSessionProjection(

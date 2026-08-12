@@ -203,6 +203,112 @@ func TestBuildRuntimeSessionMCPConfigurationTranslatesReadOnlyOpenCodeTools(t *t
 	}
 }
 
+func TestBuildRuntimeSessionMCPConfigurationTranslatesReadOnlyPresetPerRuntime(t *testing.T) {
+	tests := []struct {
+		name        string
+		runtime     corev1alpha1.AgentRuntimeType
+		model       *corev1alpha1.ModelConfig
+		images      ACPRuntimeImages
+		wantAllowed []string
+	}{
+		{
+			name: "claude", runtime: corev1alpha1.AgentRuntimeClaude,
+			model:       &corev1alpha1.ModelConfig{Name: "model"},
+			images:      ACPRuntimeImages{Claude: "docker.io/example/claude@sha256:" + strings.Repeat("a", 64)},
+			wantAllowed: []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead},
+		},
+		{
+			name: "codex", runtime: corev1alpha1.AgentRuntimeCodex,
+			model:       &corev1alpha1.ModelConfig{Name: "model"},
+			images:      ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("b", 64)},
+			wantAllowed: []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "review", Namespace: "default", UID: "task-uid",
+					Annotations: map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:         corev1alpha1.TaskTypeAgent,
+					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: readOnlyAgentAllowedTools()},
+					Workspace:    &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead},
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: "default", UID: "agent-uid", Generation: 1},
+				Spec: corev1alpha1.AgentSpec{
+					Model: tt.model,
+					Runtime: &corev1alpha1.AgentCLIRuntime{
+						Type:            tt.runtime,
+						ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+					},
+				},
+			}
+			plan, err := PlanACPRuntime(task, agent, tt.images)
+			if err != nil {
+				t.Fatalf("PlanACPRuntime(read-only preset) error = %v", err)
+			}
+			configuration, err := buildRuntimeSessionMCPConfiguration(context.Background(), nil, task, agent, plan.Profile)
+			if err != nil {
+				t.Fatalf("buildRuntimeSessionMCPConfiguration(read-only preset) error = %v", err)
+			}
+			if !slices.Equal(configuration.ToolPolicy.AllowedToolNames, tt.wantAllowed) {
+				t.Fatalf("allowed tools = %v, want %v", configuration.ToolPolicy.AllowedToolNames, tt.wantAllowed)
+			}
+			for _, descriptor := range configuration.ToolPolicy.Tools {
+				if descriptor.Source != harnessv2.MCPToolSourceProviderNative {
+					t.Fatalf("descriptor %q source = %q, want provider_native", descriptor.Name, descriptor.Source)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateACPProviderNativePolicyCodexReadOnlySurface(t *testing.T) {
+	surface := []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
+	if err := validateACPProviderNativePolicy(
+		string(corev1alpha1.AgentRuntimeCodex), corev1alpha1.WorkspaceIntentRead, surface, nil, true,
+	); err != nil {
+		t.Fatalf("read-intent read-only surface rejected: %v", err)
+	}
+	// The same surface must stay rejected for write intent, and any other
+	// restricted shape must stay rejected for every intent.
+	if err := validateACPProviderNativePolicy(
+		string(corev1alpha1.AgentRuntimeCodex), corev1alpha1.WorkspaceIntentWrite, surface, nil, true,
+	); err == nil {
+		t.Fatal("write-intent restricted codex policy was accepted")
+	}
+	for _, allowed := range [][]string{
+		{providerNativeToolGlob, providerNativeToolRead},
+		{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead, providerNativeToolWrite},
+		{providerNativeToolBash},
+		{},
+	} {
+		if err := validateACPProviderNativePolicy(
+			string(corev1alpha1.AgentRuntimeCodex), corev1alpha1.WorkspaceIntentRead, allowed, nil, true,
+		); err == nil {
+			t.Fatalf("restricted codex policy %v was accepted", allowed)
+		}
+	}
+	// Brokered tool names are enforced by the MCP broker and must not break
+	// the codex read-only surface (delegated children add coordination tools).
+	withBrokered := append([]string{"check_messages"}, surface...)
+	withBrokered = append(withBrokered, "send_message")
+	if err := validateACPProviderNativePolicy(
+		string(corev1alpha1.AgentRuntimeCodex), corev1alpha1.WorkspaceIntentRead, withBrokered, nil, true,
+	); err != nil {
+		t.Fatalf("read-only surface with brokered tools rejected: %v", err)
+	}
+	if err := validateACPProviderNativePolicy(
+		string(corev1alpha1.AgentRuntimeCodex), corev1alpha1.WorkspaceIntentRead, nil, nil, true,
+	); err != nil {
+		t.Fatalf("unrestricted codex policy rejected: %v", err)
+	}
+}
+
 func TestEffectiveACPAllowedToolsOnlyTranslatesReadOnlyOpenCodePreset(t *testing.T) {
 	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
 		Type: corev1alpha1.AgentRuntimeOpencode,

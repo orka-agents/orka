@@ -193,13 +193,16 @@ func effectiveACPReasoningEffort(agent *corev1alpha1.Agent) string {
 	return strings.ToLower(strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort))
 }
 
-func validateACPProviderNativePolicy(provider string, allowed, disallowed []string, allowBash bool) error {
+func validateACPProviderNativePolicy(provider string, intent corev1alpha1.WorkspaceIntent, allowed, disallowed []string, allowBash bool) error {
 	unrestricted := allowed == nil && len(disallowed) == 0 && allowBash
 	switch provider {
 	case string(corev1alpha1.AgentRuntimeClaude):
 		return nil
 	case string(corev1alpha1.AgentRuntimeCodex):
 		if unrestricted {
+			return nil
+		}
+		if intent == corev1alpha1.WorkspaceIntentRead && codexReadOnlyNativePolicy(allowed) {
 			return nil
 		}
 		return fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
@@ -215,6 +218,30 @@ func validateACPProviderNativePolicy(provider string, allowed, disallowed []stri
 	default:
 		return fmt.Errorf("unsupported ACP provider %q", provider)
 	}
+}
+
+// codexReadOnlyNativePolicy reports whether the provider-native slice of the
+// allowed tools is exactly the {Glob, Grep, Read} read-only surface. That is
+// the single restricted policy codex can enforce: its native read-only agent
+// mode confines every command with a kernel-enforced read-only sandbox and no
+// network access instead of per-tool switches. Brokered and custom tool names
+// are ignored here because the MCP broker enforces them, not codex.
+func codexReadOnlyNativePolicy(allowed []string) bool {
+	native := providerNativeTools[strings.ToLower(string(corev1alpha1.AgentRuntimeCodex))]
+	surface := make(map[string]struct{}, 3)
+	for _, name := range allowed {
+		canonical, ok := native[strings.ToLower(strings.TrimSpace(name))]
+		if !ok {
+			continue
+		}
+		switch canonical {
+		case providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead:
+			surface[canonical] = struct{}{}
+		default:
+			return false
+		}
+	}
+	return len(surface) == 3
 }
 
 func validateACPProviderSystemPrompt(provider string, configuration harnessv2.AgentSessionConfiguration) error {

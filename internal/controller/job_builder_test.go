@@ -3595,20 +3595,24 @@ func TestAddSecretVolumes_RuntimeAuthOnlyRejectsFoundryCredentials(t *testing.T)
 	}
 }
 
-func TestValidateReadOnlyAgentRuntimeRejectsCodexBecauseCredentialsAndShellCannotShareReadOnlyProfile(t *testing.T) {
+func TestValidateReadOnlyAgentRuntimeAllowsCodexReadOnlyAgentMode(t *testing.T) {
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 		labels.AnnotationAgentReadOnly: scheduledRunLabelValue,
 	}}}
 	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
 		Type: corev1alpha1.AgentRuntimeCodex,
 	}}}
-	if err := validateReadOnlyBuiltInAgentRuntime(task, corev1alpha1.AgentRuntimeCodex); err == nil ||
-		!strings.Contains(err.Error(), "do not support codex runtime") {
-		t.Fatalf("validateReadOnlyBuiltInAgentRuntime() error = %v, want fail-closed Codex rejection", err)
+	// Codex read-only tasks run in the native read-only agent mode with a
+	// kernel-enforced read-only sandbox, so validation accepts them.
+	if err := validateReadOnlyBuiltInAgentRuntime(task, corev1alpha1.AgentRuntimeCodex); err != nil {
+		t.Fatalf("validateReadOnlyBuiltInAgentRuntime() error = %v, want codex accepted", err)
 	}
-	if err := validateReadOnlyAgentRuntime(task, agent); err == nil ||
-		!strings.Contains(err.Error(), "do not support codex runtime") {
-		t.Fatalf("validateReadOnlyAgentRuntime() error = %v, want fail-closed Codex rejection", err)
+	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
+		t.Fatalf("validateReadOnlyAgentRuntime() error = %v, want codex accepted", err)
+	}
+	if err := validateReadOnlyBuiltInAgentRuntime(task, corev1alpha1.AgentRuntimeCopilot); err == nil ||
+		!strings.Contains(err.Error(), "copilot runtime credentials") {
+		t.Fatalf("validateReadOnlyBuiltInAgentRuntime(copilot) error = %v, want fail-closed rejection", err)
 	}
 }
 func TestValidateReadOnlyAgentRuntimeRejectsExternalRuntimeRef(t *testing.T) {

@@ -362,7 +362,7 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedReviewerAgent(t *testing.T) {
 			name:     "missing runtime",
 			agent:    &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "no-runtime", Namespace: "demo"}},
 			reviewer: "no-runtime",
-			want:     "must use a built-in claude or opencode runtime",
+			want:     "must use a built-in claude, codex, or opencode runtime",
 		},
 		{
 			name:     "copilot runtime",
@@ -398,7 +398,7 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedReviewerAgent(t *testing.T) {
 	}
 }
 
-func TestCreateRepositoryMonitor_RejectsCodexReviewer(t *testing.T) {
+func TestCreateRepositoryMonitor_AllowsCodexReviewer(t *testing.T) {
 	reviewer := repositoryMonitorHandlerTestAgent("codex-reviewer", corev1alpha1.AgentRuntimeCodex)
 	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, reviewer)
 	body := fmt.Sprintf(`{
@@ -414,10 +414,9 @@ func TestCreateRepositoryMonitor_RejectsCodexReviewer(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
-	// Monitor review tasks are read-only, and read-only agent task validation
-	// rejects codex; admitting it here would only produce failed tasks.
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Contains(t, readRespBody(t, resp), "use claude or opencode")
+	// Codex reviewers run in the native read-only agent mode, so admission
+	// accepts them for the reviewer role.
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
 }
 
 func TestCreateRepositoryMonitor_AllowsOpenCodeReadOnlyAgents(t *testing.T) {
