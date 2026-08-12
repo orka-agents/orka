@@ -1195,31 +1195,38 @@ func workspaceDeltaPatternMatches(patternValue, changedPath string) bool {
 	return workspaceDeltaSegmentsMatch(strings.Split(patternValue, "/"), strings.Split(changedPath, "/"))
 }
 
+// workspaceDeltaSegmentsMatch uses the classic greedy wildcard algorithm at
+// segment granularity — backtracking only to the most recent `**` — so
+// matching stays O(pattern × path) even for agent-controlled paths against
+// patterns with many `**` segments.
 func workspaceDeltaSegmentsMatch(patternSegments, pathSegments []string) bool {
-	for len(patternSegments) > 0 {
-		segment := patternSegments[0]
-		if segment == "**" {
-			rest := patternSegments[1:]
-			if len(rest) == 0 {
-				return true
-			}
-			for skip := 0; skip <= len(pathSegments); skip++ {
-				if workspaceDeltaSegmentsMatch(rest, pathSegments[skip:]) {
-					return true
-				}
-			}
+	patternIndex, pathIndex := 0, 0
+	starPattern, starPath := -1, 0
+	for pathIndex < len(pathSegments) {
+		switch {
+		case patternIndex < len(patternSegments) && patternSegments[patternIndex] == "**":
+			starPattern, starPath = patternIndex, pathIndex
+			patternIndex++
+		case patternIndex < len(patternSegments) && workspaceDeltaSegmentMatches(patternSegments[patternIndex], pathSegments[pathIndex]):
+			patternIndex++
+			pathIndex++
+		case starPattern >= 0:
+			starPath++
+			pathIndex = starPath
+			patternIndex = starPattern + 1
+		default:
 			return false
 		}
-		if len(pathSegments) == 0 {
-			return false
-		}
-		if matched, err := path.Match(segment, pathSegments[0]); err != nil || !matched {
-			return false
-		}
-		patternSegments = patternSegments[1:]
-		pathSegments = pathSegments[1:]
 	}
-	return len(pathSegments) == 0
+	for patternIndex < len(patternSegments) && patternSegments[patternIndex] == "**" {
+		patternIndex++
+	}
+	return patternIndex == len(patternSegments)
+}
+
+func workspaceDeltaSegmentMatches(pattern, segment string) bool {
+	matched, err := path.Match(pattern, segment)
+	return err == nil && matched
 }
 
 func workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, changedPath string) bool {

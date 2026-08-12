@@ -2,6 +2,7 @@ package safesymlink
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +73,38 @@ func TestValidateGraphAcceptsChainWithRemainder(t *testing.T) {
 	links := map[string]string{"chain": "hop/tail", "hop": "real"}
 	if err := ValidateGraph(paths, links, 4096, 4096); err != nil {
 		t.Fatalf("safe chained graph rejected: %v", err)
+	}
+}
+
+func TestValidateGraphBoundsChainDepth(t *testing.T) {
+	t.Parallel()
+	buildChain := func(length int) (map[string]struct{}, map[string]string) {
+		paths := make(map[string]struct{}, length+1)
+		links := make(map[string]string, length)
+		for index := range length {
+			name := fmt.Sprintf("link-%04d", index)
+			next := fmt.Sprintf("link-%04d", index+1)
+			if index == length-1 {
+				next = "end"
+			}
+			paths[name] = struct{}{}
+			links[name] = next
+		}
+		paths["end"] = struct{}{}
+		return paths, links
+	}
+
+	paths, links := buildChain(maxSymlinkChainDepth - 1)
+	if err := ValidateGraph(paths, links, 4096, 4096); err != nil {
+		t.Fatalf("chain within the depth bound rejected: %v", err)
+	}
+
+	// Chains deeper than the kernel's resolution bound can never resolve at
+	// use time and would otherwise cost O(links x depth) validation work.
+	paths, links = buildChain(maxSymlinkChainDepth + 1)
+	err := ValidateGraph(paths, links, 4096, 4096)
+	if err == nil || !strings.Contains(err.Error(), "maximum resolution depth") {
+		t.Fatalf("over-deep chain error = %v, want maximum resolution depth rejection", err)
 	}
 }
 

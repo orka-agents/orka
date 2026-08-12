@@ -886,6 +886,15 @@ func TestWorkspaceDeltaPathAllowedRecursiveGlobs(t *testing.T) {
 			t.Errorf("expected %q to not match %v", tt.path, tt.patterns)
 		}
 	}
+	// Multiple ** segments over a long non-matching path must complete without
+	// backtracking blowup.
+	hostile := strings.Repeat("a/", 512) + "z.txt"
+	if workspaceDeltaPathAllowed(hostile, []string{"**/b/**/c/**/d/**/e/**/*.go"}) {
+		t.Fatal("hostile path unexpectedly matched")
+	}
+	if !workspaceDeltaPathAllowed("a/x/b/y/c/z/d/w/e/final.go", []string{"a/**/b/**/c/**/d/**/e/**/*.go"}) {
+		t.Fatal("interleaved multi-star pattern failed to match")
+	}
 }
 
 func TestWorkspaceDeltaRejectsSessionCredentials(t *testing.T) {

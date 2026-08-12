@@ -61,8 +61,25 @@ func unmarshalSecurityJSON(payload string, value any) error {
 	return json.Unmarshal([]byte(payload), value)
 }
 
+// Timestamps persist as TEXT and list queries order them lexicographically, so
+// every persisted time is normalized to UTC here regardless of the location
+// callers supplied.
+func utcTime(value time.Time) time.Time {
+	return value.UTC()
+}
+
+func utcTimePtr(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	utc := value.UTC()
+	return &utc
+}
+
 // CreateScanRun inserts a new scan run.
 func (s *Store) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
+	run.StartedAt = utcTime(run.StartedAt)
+	run.CompletedAt = utcTimePtr(run.CompletedAt)
 	now := time.Now().UTC()
 	if run.StartedAt.IsZero() {
 		run.StartedAt = now
@@ -110,6 +127,8 @@ func (s *Store) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
 
 // UpdateScanRun updates a scan run.
 func (s *Store) UpdateScanRun(ctx context.Context, run *store.ScanRun) error {
+	run.StartedAt = utcTime(run.StartedAt)
+	run.CompletedAt = utcTimePtr(run.CompletedAt)
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE security_scan_runs
 		 SET task_name = ?, mode = ?, phase = ?, base_commit = ?, head_commit = ?, commit_count = ?,
@@ -246,6 +265,8 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 		return err
 	}
 
+	slice.CreatedAt = utcTime(slice.CreatedAt)
+	slice.LastReviewedAt = utcTimePtr(slice.LastReviewedAt)
 	now := time.Now().UTC()
 	if slice.CreatedAt.IsZero() {
 		slice.CreatedAt = now
@@ -480,6 +501,7 @@ func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) e
 		model.Version = latestVersion + 1
 	}
 
+	model.CreatedAt = utcTime(model.CreatedAt)
 	now := time.Now().UTC()
 	if model.CreatedAt.IsZero() {
 		model.CreatedAt = now
@@ -539,6 +561,7 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		return err
 	}
 
+	finding.CreatedAt = utcTime(finding.CreatedAt)
 	now := time.Now().UTC()
 	if finding.CreatedAt.IsZero() {
 		finding.CreatedAt = now
@@ -843,6 +866,7 @@ func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchPr
 	if proposal.PublicationEvidence != nil {
 		return store.ValidationErrorf("patch proposal publication evidence must be bound with BindPatchProposalPublicationEvidence")
 	}
+	proposal.CreatedAt = utcTime(proposal.CreatedAt)
 	now := time.Now().UTC()
 	if proposal.CreatedAt.IsZero() {
 		proposal.CreatedAt = now
@@ -1151,6 +1175,7 @@ func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.Dropped
 			time.Now().UTC().Format(time.RFC3339Nano),
 		}, "|"))
 	}
+	dropped.CreatedAt = utcTime(dropped.CreatedAt)
 	if dropped.CreatedAt.IsZero() {
 		dropped.CreatedAt = time.Now().UTC()
 	}

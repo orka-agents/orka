@@ -74,6 +74,11 @@ func ValidateGraph(paths map[string]struct{}, links map[string]string, maxPathBy
 	return nil
 }
 
+// maxSymlinkChainDepth mirrors the Linux SYMLOOP_MAX resolution bound: chains
+// nested deeper than this can never resolve at use time, and the cap keeps
+// graph validation linear in the number of links instead of quadratic.
+const maxSymlinkChainDepth = 40
+
 func resolveGraph(start, value string, resolutions map[string]string, maxPathBytes int, visiting map[string]struct{}) error {
 	prefix, remainder, found := firstLinkPrefix(value, resolutions)
 	if !found {
@@ -81,6 +86,9 @@ func resolveGraph(start, value string, resolutions map[string]string, maxPathByt
 	}
 	if _, cycle := visiting[prefix]; cycle {
 		return fmt.Errorf("symlink %q participates in a cycle", start)
+	}
+	if len(visiting) >= maxSymlinkChainDepth {
+		return fmt.Errorf("symlink %q chain exceeds the maximum resolution depth", start)
 	}
 	visiting[prefix] = struct{}{}
 	defer delete(visiting, prefix)
