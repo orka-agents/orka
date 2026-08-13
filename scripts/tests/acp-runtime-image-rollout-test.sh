@@ -931,6 +931,7 @@ assert_converged() {
   local dependency_first_rollout_line dependency_last_rollout_line
   local dependency_first_endpoint_line dependency_last_endpoint_line
   local controller_line controller_rollout_line reference dependency
+  local converged_start converged_log
   reference="$(cat "${state_dir}/deployment-ref")"
   [[ -e "${state_dir}/namespace" ]]
   [[ -e "${state_dir}/configmaps/${reference}" ]]
@@ -950,17 +951,25 @@ assert_converged() {
   [[ "$(grep -c '^secret:agent-execution-snapshot-key$' "${state_dir}/apply.log")" == "1" ]]
   [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "7" ]]
   [[ "$(grep -c '^webhooks:orka-admission$' "${state_dir}/apply.log")" -ge 1 ]]
-  admission_line="$(grep -n '^admission-runtime:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
-  admission_rollout_line="$(grep -n '^rollout:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
-  smoke_line="$(grep -n '^smoke:' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
-  webhooks_line="$(grep -n '^webhooks:orka-admission$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
-  dependency_line="$(grep -n '^dependencies:' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
-  dependency_first_rollout_line="$(grep -nE '^rollout:(orka-provider-auth-proxy|orka-scm-egress-proxy|orka-workspace-publisher)$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
-  dependency_last_rollout_line="$(grep -nE '^rollout:(orka-provider-auth-proxy|orka-scm-egress-proxy|orka-workspace-publisher)$' "${state_dir}/apply.log" | tail -1 | cut -d: -f1)"
-  dependency_first_endpoint_line="$(grep -nE '^endpoint:(orka-provider-auth-proxy|orka-scm-egress-proxy|orka-workspace-publisher)$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
-  dependency_last_endpoint_line="$(grep -nE '^endpoint:(orka-provider-auth-proxy|orka-scm-egress-proxy|orka-workspace-publisher)$' "${state_dir}/apply.log" | tail -1 | cut -d: -f1)"
-  controller_line="$(grep -n '^full:' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
-  controller_rollout_line="$(grep -n '^rollout:orka-controller-manager$' "${state_dir}/apply.log" | head -1 | cut -d: -f1)"
+  # Recovery scenarios run the apply script twice into one shared log, so
+  # phase ordering is asserted on the final converged invocation, which always
+  # starts at its namespace claim. The aborted invocation's partial ordering is
+  # enforced by the fake kubectl state guards instead.
+  converged_start="$(grep -nE '^(namespace|namespace-metadata):' "${state_dir}/apply.log" | tail -1 | cut -d: -f1)"
+  [[ -n "${converged_start}" ]]
+  converged_log="${state_dir}/apply-converged.log"
+  tail -n "+${converged_start}" "${state_dir}/apply.log" >"${converged_log}"
+  admission_line="$(grep -n '^admission-runtime:orka-admission$' "${converged_log}" | head -1 | cut -d: -f1)"
+  admission_rollout_line="$(grep -n '^rollout:orka-admission$' "${converged_log}" | head -1 | cut -d: -f1)"
+  smoke_line="$(grep -n '^smoke:' "${converged_log}" | head -1 | cut -d: -f1)"
+  webhooks_line="$(grep -n '^webhooks:orka-admission$' "${converged_log}" | head -1 | cut -d: -f1)"
+  dependency_line="$(grep -n '^dependencies:' "${converged_log}" | head -1 | cut -d: -f1)"
+  dependency_first_rollout_line="$(grep -nE '^rollout:(orka-provider-auth-proxy|orka-scm-egress-proxy|orka-workspace-publisher)$' "${converged_log}" | head -1 | cut -d: -f1)"
+  dependency_last_rollout_line="$(grep -nE '^rollout:(orka-provider-auth-proxy|orka-scm-egress-proxy|orka-workspace-publisher)$' "${converged_log}" | tail -1 | cut -d: -f1)"
+  dependency_first_endpoint_line="$(grep -nE '^endpoint:(orka-provider-auth-proxy|orka-scm-egress-proxy|orka-workspace-publisher)$' "${converged_log}" | head -1 | cut -d: -f1)"
+  dependency_last_endpoint_line="$(grep -nE '^endpoint:(orka-provider-auth-proxy|orka-scm-egress-proxy|orka-workspace-publisher)$' "${converged_log}" | tail -1 | cut -d: -f1)"
+  controller_line="$(grep -n '^full:' "${converged_log}" | head -1 | cut -d: -f1)"
+  controller_rollout_line="$(grep -n '^rollout:orka-controller-manager$' "${converged_log}" | head -1 | cut -d: -f1)"
   (( admission_line < admission_rollout_line ))
   (( admission_rollout_line < smoke_line ))
   (( smoke_line < webhooks_line ))
