@@ -993,10 +993,10 @@ cleanup() {
   fi
 
   if [[ "${keep_resources}" == "1" || "${remote_cleanup_preserve}" == "1" ]]; then
-    if [[ "${namespace_created}" -eq 1 ]]; then
+    if [[ "${namespace_created}" -eq 1 || "${namespace_shared}" -eq 1 ]]; then
       warn "preserving namespace ${namespace}"
     fi
-  elif [[ "${namespace_created}" -eq 1 ]]; then
+  elif [[ "${namespace_created}" -eq 1 || "${namespace_shared}" -eq 1 ]]; then
     if ! delete_test_namespace_now; then
       cleanup_rc=1
     fi
