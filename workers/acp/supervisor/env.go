@@ -283,6 +283,10 @@ func providerAdapterDigests(provider string) map[string]string {
 	}
 }
 
+// codexAgentModeOrkaExternal is the Orka-patched codex-acp agent mode whose
+// externalSandbox policy keeps the runtime Pod as the enforcement boundary.
+const codexAgentModeOrkaExternal = "orka-external"
+
 var providerNativeToolNames = []string{
 	providerToolBash, providerToolEdit, providerToolGlob, providerToolGrep,
 	providerToolRead, providerToolWebFetch, providerToolWebSearch, providerToolWrite,
@@ -387,17 +391,14 @@ func codexSessionProjection(
 	if len(encoded) > maxCodexConfigEnvironmentBytes {
 		return ProviderSessionProjection{}, fmt.Errorf("codex session configuration exceeds the safe environment limit")
 	}
-	environment := map[string]string{"CODEX_CONFIG": string(encoded)}
-	if !policy.unrestricted {
-		// The read-only surface maps onto Codex's upstream read-only agent
-		// mode: every command runs inside the kernel-enforced read-only
-		// sandbox with network access disabled, and elevation requests are
-		// rejected unconditionally by the controller. The projection
-		// environment is merged last, so this overrides the default
-		// orka-external mode.
-		environment["INITIAL_AGENT_MODE"] = "read-only"
-	}
-	return ProviderSessionProjection{Environment: environment}, nil
+	// Read-only sessions keep the default orka-external agent mode: Codex's
+	// own sandbox needs unprivileged user namespaces that the runtime Pod
+	// forbids, so the RuntimeSession boundary enforces the surface instead —
+	// safe read commands execute, every elevation request is rejected
+	// unconditionally by the controller, file writes are mediated by the
+	// supervisor, and the read-intent workspace delta classification fails
+	// any turn that modifies the workspace.
+	return ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}, nil
 }
 
 // codexReadOnlySessionPolicy reports whether the session's restricted tool
@@ -555,7 +556,7 @@ func providerProfile(
 				// restricted Runtime Pod remains the enforcement boundary without asking
 				// the child to create nested Linux namespaces. Network remains restricted
 				// and on-request approvals remain active for explicit elevation requests.
-				mode := "orka-external"
+				mode := codexAgentModeOrkaExternal
 				config, err := json.Marshal(map[string]any{
 					"model": model, "openai_base_url": proxy.BaseURL, "check_for_update_on_startup": false,
 				})

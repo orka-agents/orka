@@ -287,9 +287,9 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace
 		}
 	case corev1alpha1.AgentRuntimeClaude:
 	case corev1alpha1.AgentRuntimeCodex:
-		// Codex reviewers run in the native read-only agent mode: a
-		// kernel-enforced read-only sandbox with no network access and
-		// controller-rejected elevation requests.
+		// Codex reviewers run inside the RuntimeSession boundary with
+		// controller-rejected elevation requests and read-intent workspace
+		// delta classification failing any modifying turn.
 		if role != "reviewer" {
 			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use %s", field, ref.Name, agent.Spec.Runtime.Type, allowedRuntimes))
 		}

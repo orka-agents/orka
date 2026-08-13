@@ -1052,7 +1052,7 @@ dump_diagnostics() {
   log "Failure diagnostics (Secret contents and task results are intentionally excluded)"
   run_redacted k get nodes -o wide || true
   run_redacted k -n "${orka_namespace}" get deployment,pod,service,persistentvolumeclaim -o wide || true
-  if [[ "${namespace_created}" -eq 1 ]]; then
+  if [[ "${namespace_created}" -eq 1 || "${namespace_shared}" -eq 1 ]]; then
     run_redacted k -n "${namespace}" get agent,task,runtimepool -o wide || true
     run_redacted k -n "${namespace}" get events --sort-by=.metadata.creationTimestamp || true
   fi
@@ -3224,7 +3224,7 @@ no_cleanup_pull_request_exists() {
 settle_write_task_for_remote_cleanup() {
   local pool outcome head number uid
   [[ "${write_task_started}" -eq 1 ]] || return 0
-  [[ "${namespace_created}" -eq 1 && -n "${write_task_name}" ]] || return 1
+  [[ ( "${namespace_created}" -eq 1 || "${namespace_shared}" -eq 1 ) && -n "${write_task_name}" ]] || return 1
   probe_namespace "${namespace}" || return 1
   [[ "${namespace_probe_state}" == "present" ]] || return 1
   probe_task "${write_task_name}" || return 1

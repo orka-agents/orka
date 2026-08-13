@@ -222,9 +222,10 @@ func validateACPProviderNativePolicy(provider string, intent corev1alpha1.Worksp
 
 // codexReadOnlyNativePolicy reports whether the provider-native slice of the
 // allowed tools is exactly the {Glob, Grep, Read} read-only surface. That is
-// the single restricted policy codex can enforce: its native read-only agent
-// mode confines every command with a kernel-enforced read-only sandbox and no
-// network access instead of per-tool switches. Brokered and custom tool names
+// the single restricted policy codex sessions support: instead of per-tool
+// switches, the RuntimeSession boundary rejects every elevation request,
+// mediates file writes through the supervisor, and fails any read-intent turn
+// whose workspace delta shows a modification. Brokered and custom tool names
 // are ignored here because the MCP broker enforces them, not codex.
 func codexReadOnlyNativePolicy(allowed []string) bool {
 	native := providerNativeTools[strings.ToLower(string(corev1alpha1.AgentRuntimeCodex))]

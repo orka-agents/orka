@@ -225,9 +225,10 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 		case corev1alpha1.AgentRuntimeClaude:
 			values = []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
 		case corev1alpha1.AgentRuntimeCodex:
-			// Codex has no per-tool switches; this exact surface maps to its
-			// native read-only agent mode, whose kernel-enforced sandbox
-			// confines every command to reads with no network access.
+			// Codex has no per-tool switches; this exact surface is enforced
+			// by the RuntimeSession boundary: elevation requests are rejected,
+			// file writes are supervisor-mediated, and the read-intent
+			// workspace delta classification fails any modifying turn.
 			values = []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
 		}
 	}

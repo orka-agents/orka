@@ -138,11 +138,11 @@ func TestCodexProviderSessionProjectionReadOnlySurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	maps.Copy(environment, projection.Environment)
-	// The projection environment merges last, so the read-only surface must
-	// override the default orka-external mode with Codex's native read-only
-	// agent mode (kernel-enforced read-only sandbox, no network).
-	if environment["INITIAL_AGENT_MODE"] != "read-only" {
-		t.Fatalf("INITIAL_AGENT_MODE = %q, want read-only", environment["INITIAL_AGENT_MODE"])
+	// Read-only sessions keep the orka-external agent mode: Codex's own
+	// sandbox needs unprivileged user namespaces the runtime Pod forbids, so
+	// the RuntimeSession boundary enforces the read-only surface instead.
+	if environment["INITIAL_AGENT_MODE"] != codexAgentModeOrkaExternal {
+		t.Fatalf("INITIAL_AGENT_MODE = %q, want orka-external", environment["INITIAL_AGENT_MODE"])
 	}
 	if !strings.Contains(environment["CODEX_CONFIG"], proxy.BaseURL) || environment["CODEX_API_KEY"] != proxy.Credential {
 		t.Fatalf("unexpected Codex environment: %#v", environment)
@@ -358,7 +358,7 @@ func TestCodexProviderProfileUsesExternalRuntimeSandbox(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := environment["INITIAL_AGENT_MODE"]; got != "orka-external" {
+			if got := environment["INITIAL_AGENT_MODE"]; got != codexAgentModeOrkaExternal {
 				t.Fatalf("INITIAL_AGENT_MODE = %q, want orka-external", got)
 			}
 		})
