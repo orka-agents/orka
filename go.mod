@@ -9,7 +9,7 @@ require (
 	github.com/github/copilot-sdk/go v0.1.25
 	github.com/go-logr/logr v1.4.4
 	github.com/gofiber/fiber/v3 v3.4.0
-	github.com/google/jsonschema-go v0.4.2
+	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/jwx/v3 v3.2.0
 	github.com/onsi/ginkgo/v2 v2.32.0
