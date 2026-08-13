@@ -33,17 +33,9 @@ func (a *ClaudeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comm
 	if err != nil {
 		return nil, err
 	}
-	dir := firstNonEmpty(turn.WorkDir, a.config.WorkDir)
-	if dir == "" {
-		dir = DefaultWrapperWorkDir
-	}
-	if stat, err := os.Stat(dir); err != nil || !stat.IsDir() {
-		if err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("stat claude workspace directory: %w", err)
-		}
-		if wd, wdErr := os.Getwd(); wdErr == nil {
-			dir = wd
-		}
+	dir, err := resolveAdapterWorkDir("claude", turn.WorkDir, a.config.WorkDir)
+	if err != nil {
+		return nil, err
 	}
 
 	return &CommandSpec{

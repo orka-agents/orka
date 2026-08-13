@@ -20,48 +20,7 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-var (
-	copilotRuntimeSecretCandidates = []string{"copilot-token"}
-	claudeRuntimeSecretCandidates  = []string{claudeCredentialsSecretName, claudeAPIKeySecretName}
-	codexRuntimeSecretCandidates   = []string{codexRuntimeCopilotSecretName, "codex-runtime-openai", "codex-credentials", "codex-api-key", codexProxyTokenSecretName, "openai-api-key"}
-	gitCredentialSecretCandidates  = []string{"git-credentials", "github-credentials", "copilot-token", "github-token", "git-token"}
-)
-
-// RuntimeSecretCandidates returns the supported secret names for the given runtime.
-func RuntimeSecretCandidates(runtimeType corev1alpha1.AgentRuntimeType) []string {
-	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCopilot:
-		return append([]string(nil), copilotRuntimeSecretCandidates...)
-	case corev1alpha1.AgentRuntimeClaude:
-		return append([]string(nil), claudeRuntimeSecretCandidates...)
-	case corev1alpha1.AgentRuntimeCodex:
-		return append([]string(nil), codexRuntimeSecretCandidates...)
-	default:
-		return nil
-	}
-}
-
-// FirstPresentSecretName returns the first candidate found in the present map.
-func FirstPresentSecretName(present map[string]bool, candidates []string) string {
-	for _, name := range candidates {
-		if present[name] {
-			return name
-		}
-	}
-	return ""
-}
-
-func FirstUsableRuntimeSecretName(secrets []corev1.Secret, runtimeType corev1alpha1.AgentRuntimeType) string {
-	for _, candidate := range RuntimeSecretCandidates(runtimeType) {
-		for i := range secrets {
-			if secrets[i].Name != candidate {
-				continue
-			}
-			return candidate
-		}
-	}
-	return ""
-}
+var gitCredentialSecretCandidates = []string{"git-credentials", "github-credentials", "copilot-token", "github-token", "git-token"}
 
 func resolveWorkspaceCredentialRef(ctx context.Context, k8sClient client.Reader, namespace string, agent *corev1alpha1.Agent, requested string) (*corev1alpha1.WorkspaceCredentialReference, error) {
 	if requested != "" {

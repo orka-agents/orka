@@ -199,11 +199,5 @@ func (t *FileReadTool) allowedRootForPath(requested string) (string, string, boo
 	return "", "", false
 }
 
-// isPathAllowed checks whether a path can be represented beneath an allowed os.Root.
-func (t *FileReadTool) isPathAllowed(path string) bool {
-	_, _, ok := t.allowedRootForPath(path)
-	return ok
-}
-
 // Ensure FileReadTool implements Tool
 var _ Tool = (*FileReadTool)(nil)

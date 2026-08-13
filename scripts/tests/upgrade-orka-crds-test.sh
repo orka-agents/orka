@@ -387,12 +387,12 @@ run_test() {
 test_controller_epoch_crd_uses_canonical_plural() {
   local generated chart
   generated="${root}/config/crd/bases/core.orka.ai_controllerepochs.yaml"
-  chart="${root}/charts/orka/crds/controllerepoch-customresourcedefinition.yaml"
+  chart="${root}/manifest_staging/charts/orka/crds/controllerepoch-customresourcedefinition.yaml"
 
   [[ -f "${generated}" ]]
   [[ -f "${chart}" ]]
   [[ ! -e "${root}/config/crd/bases/core.orka.ai_controllerepoches.yaml" ]]
-  [[ ! -e "${root}/charts/orka/crds/core.orka.ai_controllerepoches.yaml" ]]
+  [[ ! -e "${root}/manifest_staging/charts/orka/crds/core.orka.ai_controllerepoches.yaml" ]]
 
   grep -F '  name: controllerepochs.core.orka.ai' "${generated}" >/dev/null
   grep -F '    plural: controllerepochs' "${generated}" >/dev/null

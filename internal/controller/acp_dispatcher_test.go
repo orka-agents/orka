@@ -38,6 +38,23 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
+// dispatchQueuedTask reserves the queued Task on its RuntimePool and executes
+// the reserved attempt, mirroring the dispatcher's production reserve/execute
+// sequence.
+func dispatchQueuedTask(ctx context.Context, t *testing.T, dispatcher *ACPDispatcher, queued *corev1alpha1.Task) {
+	t.Helper()
+	task, target, err := dispatcher.reserveTask(ctx, queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task == nil {
+		t.Fatal("task was not reserved for ACP dispatch")
+	}
+	if err := dispatcher.executeReservedTask(ctx, task, target); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCompletedPromptResultTextPrefersTerminalContent(t *testing.T) {
 	terminal := &harnessv2.Event{Completed: &harnessv2.CompletedEvent{Result: harnessv2.PromptResult{
 		Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: `{"schemaVersion":1,"ok":true}`}},
@@ -629,9 +646,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
 		Snapshots: persistence, Epochs: epochs, Sessions: continuity,
 	}
-	if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
-		t.Fatal(err)
-	}
+	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
@@ -866,9 +881,7 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 				Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore,
 				Snapshots: controlStore, Epochs: epochs,
 			}
-			if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
-				t.Fatal(err)
-			}
+			dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
 			var got harnessv2.CreateRuntimeSessionRequest
 			select {
 			case got = <-createRequests:
@@ -1067,9 +1080,7 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 		Sessions:  continuity, Publisher: publisherClient, ArtifactCapabilitySecret: []byte(strings.Repeat("d", 32)),
 		ArtifactReservations: acceptingArtifactReservations{},
 	}
-	if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
-		t.Fatal(err)
-	}
+	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
@@ -1221,9 +1232,7 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 			return runtimeCtx, func() { cancelCause(context.Canceled) }
 		},
 	}
-	if err := dispatcher.executeTask(ctx, task.DeepCopy()); err != nil {
-		t.Fatal(err)
-	}
+	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)

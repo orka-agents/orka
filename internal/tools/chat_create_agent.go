@@ -106,7 +106,7 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 				}
 			}
 			if raw, supplied := m["contextWindow"]; supplied {
-				contextWindow, err := parseChatPositiveAgentModelInt32("model.contextWindow", raw)
+				contextWindow, err := parsePositiveAgentModelInt32("model.contextWindow", raw)
 				if err != nil {
 					return ChatToolErrorResult(
 						"invalid_arguments",
@@ -117,7 +117,7 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 				agent.Spec.Model.ContextWindow = &contextWindow
 			}
 			if raw, supplied := m["maxTokens"]; supplied {
-				maxTokens, err := parseChatPositiveAgentModelInt32("model.maxTokens", raw)
+				maxTokens, err := parsePositiveAgentModelInt32("model.maxTokens", raw)
 				if err != nil {
 					return ChatToolErrorResult(
 						"invalid_arguments",
@@ -189,51 +189,6 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	return ChatToolSuccess(map[string]any{nameField: agent.Name, namespaceField: agent.Namespace, messageField: "Agent created"})
-}
-
-func parseChatPositiveAgentModelInt32(field string, raw any) (int32, error) {
-	switch value := raw.(type) {
-	case float64:
-		return parsePositiveAgentModelInt32(field, value)
-	case int:
-		return parseChatPositiveAgentModelSignedInt32(field, int64(value))
-	case int8:
-		return parseChatPositiveAgentModelSignedInt32(field, int64(value))
-	case int16:
-		return parseChatPositiveAgentModelSignedInt32(field, int64(value))
-	case int32:
-		return parseChatPositiveAgentModelSignedInt32(field, int64(value))
-	case int64:
-		return parseChatPositiveAgentModelSignedInt32(field, value)
-	case uint:
-		return parseChatPositiveAgentModelUnsignedInt32(field, uint64(value))
-	case uint8:
-		return parseChatPositiveAgentModelUnsignedInt32(field, uint64(value))
-	case uint16:
-		return parseChatPositiveAgentModelUnsignedInt32(field, uint64(value))
-	case uint32:
-		return parseChatPositiveAgentModelUnsignedInt32(field, uint64(value))
-	case uint64:
-		return parseChatPositiveAgentModelUnsignedInt32(field, value)
-	default:
-		return 0, fmt.Errorf("%s must be an integer", field)
-	}
-}
-
-func parseChatPositiveAgentModelSignedInt32(field string, value int64) (int32, error) {
-	const maxInt32 = int64(1<<31 - 1)
-	if value < 1 || value > maxInt32 {
-		return 0, fmt.Errorf("%s must be a positive 32-bit integer", field)
-	}
-	return int32(value), nil
-}
-
-func parseChatPositiveAgentModelUnsignedInt32(field string, value uint64) (int32, error) {
-	const maxInt32 = uint64(1<<31 - 1)
-	if value < 1 || value > maxInt32 {
-		return 0, fmt.Errorf("%s must be a positive 32-bit integer", field)
-	}
-	return int32(value), nil
 }
 
 func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolContext, agent *corev1alpha1.Agent, namespace, initialPrompt string) (string, error) {
@@ -434,89 +389,10 @@ func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent) (string, bo
 	return "", true
 }
 
-const legacyDefaultOpenCodeTemperature = 0.7
-
 func normalizeChatOpenCodeModel(agent *corev1alpha1.Agent) (string, bool) {
-	if agent.Spec.Model == nil || strings.TrimSpace(agent.Spec.Model.Name) == "" {
-		result, _ := ChatToolErrorResult(
-			"invalid_arguments",
-			"model.name is required for opencode runtime",
-			"Set model.name to a literal provider/model ID such as openai/gpt-5.4.",
-		)
-		return result, false
-	}
-	requested := strings.TrimSpace(agent.Spec.Model.Name)
-	providerHint := strings.Trim(strings.TrimSpace(agent.Spec.Model.Provider), "/")
-	if strings.ContainsAny(requested, "{}") || strings.ContainsAny(providerHint, "{}") {
-		result, _ := ChatToolErrorResult(
-			"invalid_arguments",
-			"model.name for opencode runtime must not contain substitution braces",
-			"Use the literal provider/model ID without OpenCode config substitutions.",
-		)
-		return result, false
-	}
-	providerID, modelID, qualified := strings.Cut(requested, "/")
-	if qualified {
-		providerID = strings.TrimSpace(providerID)
-		modelID = strings.TrimSpace(modelID)
-		if providerHint != "" && providerHint != providerID {
-			result, _ := ChatToolErrorResult(
-				"invalid_arguments",
-				fmt.Sprintf("model.provider %q does not match provider %q in model.name for opencode runtime", providerHint, providerID),
-				"Use one provider consistently, or omit model.provider when model.name already uses provider/model form.",
-			)
-			return result, false
-		}
-	} else {
-		providerID = providerHint
-		modelID = requested
-	}
-	if providerID == "" || modelID == "" {
-		result, _ := ChatToolErrorResult(
-			"invalid_arguments",
-			"model.name for opencode runtime must use provider/model form",
-			"Set model.name to a literal provider/model ID such as openai/gpt-5.4.",
-		)
-		return result, false
-	}
-	if agent.Spec.Model.Temperature != nil && *agent.Spec.Model.Temperature != legacyDefaultOpenCodeTemperature {
-		result, _ := ChatToolErrorResult(
-			"invalid_arguments",
-			fmt.Sprintf("opencode runtime does not support model.temperature values other than the legacy default %.1f", legacyDefaultOpenCodeTemperature),
-			"Omit model.temperature for OpenCode or use the legacy default 0.7.",
-		)
-		return result, false
-	}
-	if len(agent.Spec.Model.Fallbacks) > 0 {
-		result, _ := ChatToolErrorResult(
-			"invalid_arguments",
-			"opencode runtime does not support model.fallbacks",
-			"Remove model.fallbacks from the OpenCode Agent.",
-		)
-		return result, false
-	}
-	if agent.Spec.Model.ContextWindow == nil || *agent.Spec.Model.ContextWindow <= 0 {
-		result, _ := ChatToolErrorResult(
-			"invalid_arguments",
-			"model.contextWindow is required for opencode runtime and must be positive",
-			"Set model.contextWindow to the reviewed context capacity for the selected model.",
-		)
-		return result, false
-	}
-	if agent.Spec.Model.MaxTokens == nil || *agent.Spec.Model.MaxTokens <= 0 {
-		result, _ := ChatToolErrorResult(
-			"invalid_arguments",
-			"model.maxTokens is required for opencode runtime and must be positive",
-			"Set model.maxTokens to the reviewed output limit for the selected model.",
-		)
-		return result, false
-	}
-	if *agent.Spec.Model.ContextWindow <= *agent.Spec.Model.MaxTokens {
-		result, _ := ChatToolErrorResult(
-			"invalid_arguments",
-			"model.contextWindow must exceed model.maxTokens for opencode runtime",
-			"Use the reviewed context and output capacities for the selected model.",
-		)
+	providerID, modelID, specErr := validateOpenCodeModelSpec(agent.Spec.Model)
+	if specErr != nil {
+		result, _ := ChatToolErrorResult("invalid_arguments", specErr.message, specErr.hint)
 		return result, false
 	}
 	agent.Spec.Model.Name = providerID + "/" + modelID

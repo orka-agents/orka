@@ -213,12 +213,6 @@ func WithEventTaskName(taskName string) EventOption {
 	}
 }
 
-func WithEventSessionName(sessionName string) EventOption {
-	return func(event *RecordedEvent) {
-		event.SessionName = sessionName
-	}
-}
-
 func WithEventAgentName(agentName string) EventOption {
 	return func(event *RecordedEvent) {
 		event.AgentName = agentName

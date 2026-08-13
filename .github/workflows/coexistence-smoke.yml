@@ -123,7 +123,7 @@ jobs:
   shell-syntax:
     name: Static-mode deployment scripts
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -132,26 +132,18 @@ jobs:
 
       - name: Validate scripts
         run: |
-          bash -n scripts/static-mode-crd-validate.sh
-          bash -n scripts/check-legacy-wrapper-resources.sh
-          bash -n scripts/apply-acp-production.sh
-          bash -n scripts/live-github-oidc-e2e.sh
-          bash -n scripts/security-scan-e2e.sh
-          bash -n scripts/agent-substrate-e2e.sh
-          bash -n scripts/live-github-label-trigger-e2e.sh
-          bash -n scripts/tests/acp-runtime-image-rollout-test.sh
-          bash -n scripts/tests/ensure-static-mode-namespace-test.sh
-          bash -n scripts/tests/live-github-oidc-e2e-test.sh
-          bash -n scripts/tests/static-mode-e2e-namespace-test.sh
-          bash -n scripts/tests/static-mode-deploy-gate-test.sh
+          set -Eeuo pipefail
+          for script in scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh; do
+            bash -n "${script}"
+          done
 
       - name: Install kustomize
         run: make kustomize
 
-      - name: Run static-mode deployment tests
+      - name: Run script test suites
         run: |
-          bash scripts/tests/static-mode-deploy-gate-test.sh
-          bash scripts/tests/ensure-static-mode-namespace-test.sh
-          KUSTOMIZE="$PWD/bin/kustomize" bash scripts/tests/acp-runtime-image-rollout-test.sh
-          bash scripts/tests/live-github-oidc-e2e-test.sh
-          bash scripts/tests/static-mode-e2e-namespace-test.sh
+          set -Eeuo pipefail
+          for suite in scripts/tests/*-test.sh; do
+            echo "==> ${suite}"
+            KUSTOMIZE="$PWD/bin/kustomize" bash "${suite}"
+          done

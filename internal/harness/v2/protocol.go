@@ -2,7 +2,6 @@ package v2
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 )
@@ -570,19 +569,4 @@ func validateUniqueStrings(name string, values []string, max int) error {
 		seen[value] = struct{}{}
 	}
 	return nil
-}
-
-// SortedSessionStateCounts returns stable state/count pairs for diagnostics or
-// deterministic conformance assertions.
-func SortedSessionStateCounts(sessions []RuntimeSessionStatus) []string {
-	counts := make(map[RuntimeSessionState]int)
-	for _, session := range sessions {
-		counts[session.State]++
-	}
-	out := make([]string, 0, len(counts))
-	for state, count := range counts {
-		out = append(out, fmt.Sprintf("%s=%d", state, count))
-	}
-	sort.Strings(out)
-	return out
 }

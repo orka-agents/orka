@@ -43,25 +43,10 @@ log() {
   printf '\n[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"
 }
 
-redact() {
-  local bootstrap_name bootstrap_value handoff_name line
-  bootstrap_name="ORKA_WORKSPACE_BOOTSTRAP_""TOKEN"
-  bootstrap_value="${SUBSTRATE_BOOTSTRAP_TOKEN:-}"
-  handoff_name="ORKA_WORKSPACE_HANDOFF_""TOKEN"
-  sed -E \
-    -e 's/((^|[^[:alnum:]_-])(Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-API-Key|API-Key|[A-Za-z0-9_-]*Token)[[:space:]"'\'']*[:=][[:space:]"'\'']*).*/\1[REDACTED]/I' \
-    -e 's/((Bearer|Basic)[[:space:]]+).*/\1[REDACTED]/I' \
-    -e "s/(\"name\":\"${bootstrap_name}\",\"value\":\")[^\"]+/\\1[REDACTED]/g" \
-    -e "s/(\"name\":\"${handoff_name}\",\"value\":\")[^\"]+/\\1[REDACTED]/g" \
-    -e "s/(${handoff_name}=).*/\\1[REDACTED]/g" \
-    -e "s/(${bootstrap_name}=).*/\\1[REDACTED]/g" |
-    while IFS= read -r line || [[ -n "${line}" ]]; do
-      if [[ -n "${bootstrap_value}" ]]; then
-        line="${line//"${bootstrap_value}"/[REDACTED]}"
-      fi
-      printf '%s\n' "${line}"
-    done
-}
+# Shared redaction; the bootstrap token literal is substituted at call time.
+# shellcheck source=scripts/lib/redact.sh
+. "${ROOT_DIR}/scripts/lib/redact.sh"
+ORKA_REDACT_SECRET_VARS=(SUBSTRATE_BOOTSTRAP_TOKEN)
 
 run_redacted() {
   set +e

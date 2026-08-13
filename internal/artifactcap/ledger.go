@@ -31,12 +31,6 @@ type OperationRecord struct {
 	FinishedAt    *time.Time       `json:"finishedAt,omitempty"`
 }
 
-type ReplayLedger interface {
-	Begin(context.Context, OperationRecord) error
-	Finish(context.Context, string, string, OperationState, string, time.Time) error
-	Get(context.Context, string) (OperationRecord, error)
-}
-
 type FileLedger struct {
 	dir string
 }

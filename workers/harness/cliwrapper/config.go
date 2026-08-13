@@ -130,14 +130,6 @@ func DefaultConfig() Config {
 	}
 }
 
-func LoadConfigFromEnv() (Config, error) {
-	cfg, err := LoadConfigFromEnvUnvalidated()
-	if err != nil {
-		return Config{}, err
-	}
-	return cfg, cfg.Validate()
-}
-
 //nolint:gocyclo // Centralized env parsing keeps wrapper configuration ownership in one module.
 func LoadConfigFromEnvUnvalidated() (Config, error) {
 	cfg := DefaultConfig()

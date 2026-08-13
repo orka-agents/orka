@@ -97,13 +97,6 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
 COPY . .
 RUN set -eu; \
-    grep -Eq '^[[:space:]]*ClaudeACPVersion[[:space:]]*= "0\.61\.0"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*ClaudeACPSourceCommit[[:space:]]*= "c19bddcf7914259d6c15103a2d1580c7371e1d16"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*ClaudeACPTarSHA256[[:space:]]*= "bb410d53e2d13591da5ebcaf09ae055d166ffefb27b7172988650cd62ef4ebd3"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*ClaudeAgentSDKVersion[[:space:]]*= "0\.3\.217"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*ClaudeCodeVersion[[:space:]]*= "2\.1\.217"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*ClaudeSDKLinuxX64SHA256[[:space:]]*= "8d2ccffbdf63aef1436a30b0fd32ef0eac663c3465318b181138471a68f02b92"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*ClaudeSDKLinuxARM64SHA256[[:space:]]*= "51080502df2942d2092c4a5b7122eda518041fbe954027a1e128ede3cb337563"$' internal/acp/pins.go; \
     test "$TARGETOS" = linux; \
     case "$TARGETARCH" in amd64|arm64) ;; *) exit 1 ;; esac; \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \

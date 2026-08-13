@@ -111,16 +111,6 @@ func WithResponseBodyLimit(maxBytes int64) ClientOption {
 	}
 }
 
-func WithErrorResponseBodyLimit(maxBytes int64) ClientOption {
-	return func(c *Client) error {
-		if maxBytes <= 0 || maxBytes > int64(MaxCanonicalJSONBytes) {
-			return fmt.Errorf("error response limit must be in range 1..%d", MaxCanonicalJSONBytes)
-		}
-		c.maxErrorBodyBytes = maxBytes
-		return nil
-	}
-}
-
 // WithProtocolLimits configures negotiated limits before Capabilities has been
 // called. A later successful Capabilities call atomically replaces these values
 // with the supervisor-advertised limits.

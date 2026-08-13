@@ -59,7 +59,6 @@ jobs:
     timeout-minutes: 90
     env:
       KIND_CLUSTER: orka-security-scan-${{ github.run_id }}-${{ github.run_attempt }}
-      KIND_VERSION: v0.31.0
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -69,13 +68,13 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install kind
+        uses: ./.github/actions/setup-kind
+
       - name: Install prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
-          curl -fsSL -o ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)"
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
 
       - name: Verify toolchain
         run: |

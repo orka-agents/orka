@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/e2e-common.sh
+. "${script_dir}/lib/e2e-common.sh"
+# shellcheck source=scripts/lib/redact.sh
+. "${script_dir}/lib/redact.sh"
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/live-acp-runtime-e2e.sh --context CONTEXT [--namespace NAMESPACE]
@@ -92,31 +98,9 @@ script preserves Kubernetes resources and remote effects for investigation.
 USAGE
 }
 
+# Timestamped override of the shared log helper for long-running live runs.
 log() {
   printf '\n[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
-}
-
-warn() {
-  printf 'warning: %s\n' "$*" >&2
-}
-
-die() {
-  printf 'error: %s\n' "$*" >&2
-  exit 1
-}
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
-}
-
-redact() {
-  sed -E \
-    -e 's/(Authorization:[[:space:]]*Bearer[[:space:]]+)[A-Za-z0-9._~+\/=:-]+/\1[REDACTED]/Ig' \
-    -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=:-]+/\1[REDACTED]/Ig' \
-    -e 's/gh[opusr]_[A-Za-z0-9_]+/[REDACTED_GITHUB_TOKEN]/g' \
-    -e 's/github_pat_[A-Za-z0-9_]+/[REDACTED_GITHUB_TOKEN]/g' \
-    -e 's/(api[_-]?key[=:][[:space:]]*)[A-Za-z0-9._~+\/=:-]+/\1[REDACTED]/Ig' \
-    -e 's/(token[=:][[:space:]]*)[A-Za-z0-9._~+\/=:-]+/\1[REDACTED]/Ig'
 }
 
 run_redacted() {

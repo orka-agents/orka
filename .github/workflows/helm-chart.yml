@@ -65,8 +65,6 @@ jobs:
     env:
       KIND_CLUSTER: orka-helm-crd-lifecycle
       KIND_IMAGE: kindest/node:v1.33.7@sha256:d26ef333bdb2cbe9862a0f7c3803ecc7b4303d8cea8e814b481b09949d353040
-      KIND_SHA256: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
-      KIND_VERSION: v0.31.0
       NAMESPACE: orka-helm-crd-lifecycle
       SNAPSHOT_KEY: snapshot-key
       SNAPSHOT_SECRET: agent-execution-snapshot-key
@@ -82,6 +80,12 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      - name: Run chart package comparison unit tests
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pytest
+          python3 -m pytest scripts/test_compare_helm_chart_packages.py -q
 
       - name: Verify generated chart and package
         run: |
@@ -282,14 +286,7 @@ jobs:
           test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 26
 
       - name: Install kind
-        run: |
-          set -euo pipefail
-
-          curl -fsSL --retry 3 --retry-delay 2 -o ./kind \
-            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
-          echo "${KIND_SHA256}  ./kind" | sha256sum --check --strict
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+        uses: ./.github/actions/setup-kind
 
       - name: Verify install, apply, and uninstall CRD behavior
         run: |

@@ -245,42 +245,10 @@ func LoadConfigFromEnv() (Config, error) {
 	return cfg, nil
 }
 
+// providerAdapterDigests keeps the supervisor's default-nil unknown-provider
+// behavior while sourcing the shared built-in adapter digest table.
 func providerAdapterDigests(provider string) map[string]string {
-	schema := "sha256:" + acp.ACPSchemaSHA256
-	switch provider {
-	case providerKindCodex:
-		return map[string]string{
-			"codex-acp":             "sha256:" + acp.CodexACPTarSHA256,
-			"codex-acp-orka-patch":  "sha256:" + acp.CodexACPOrkaPatchSHA256,
-			"codex-acp-orka-dist":   "sha256:" + acp.CodexACPOrkaDistSHA256,
-			"codex-cli-linux-amd64": "sha256:" + acp.CodexCLILinuxX64SHA256,
-			"codex-cli-linux-arm64": "sha256:" + acp.CodexCLILinuxARM64SHA256,
-			"acp-schema":            schema,
-		}
-	case providerKindClaude:
-		return map[string]string{
-			"claude-agent-acp":        "sha256:" + acp.ClaudeACPTarSHA256,
-			"claude-code-linux-amd64": "sha256:" + acp.ClaudeSDKLinuxX64SHA256,
-			"claude-code-linux-arm64": "sha256:" + acp.ClaudeSDKLinuxARM64SHA256,
-			"acp-schema":              schema,
-		}
-	case providerKindCopilot:
-		return map[string]string{
-			"copilot-cli-linux-amd64": "sha256:" + acp.CopilotCLILinuxX64SHA256,
-			"copilot-cli-linux-arm64": "sha256:" + acp.CopilotCLILinuxARM64SHA256,
-			"acp-schema":              schema,
-		}
-	case providerKindOpencode:
-		return map[string]string{
-			"opencode-cli-linux-amd64":     "sha256:" + acp.OpenCodeLinuxX64BinarySHA256,
-			"opencode-cli-linux-arm64":     "sha256:" + acp.OpenCodeLinuxARM64BinarySHA256,
-			"opencode-ripgrep-linux-amd64": "sha256:" + acp.OpenCodeRipgrepLinuxX64BinarySHA256,
-			"opencode-ripgrep-linux-arm64": "sha256:" + acp.OpenCodeRipgrepLinuxARM64BinarySHA256,
-			"acp-schema":                   schema,
-		}
-	default:
-		return nil
-	}
+	return acp.BuiltInRuntimeAdapterDigests(provider)
 }
 
 // codexAgentModeOrkaExternal is the Orka-patched codex-acp agent mode whose

@@ -42,12 +42,6 @@ type ArtifactUploader interface {
 	UploadWorkspaceDelta(context.Context, harnessv2.CreateWorkspaceDeltaRequest, []byte, string) (harnessv2.ArtifactReference, error)
 }
 
-type ArtifactUploaderFunc func(context.Context, harnessv2.CreateWorkspaceDeltaRequest, []byte, string) (harnessv2.ArtifactReference, error)
-
-func (f ArtifactUploaderFunc) UploadWorkspaceDelta(ctx context.Context, request harnessv2.CreateWorkspaceDeltaRequest, artifact []byte, digest string) (harnessv2.ArtifactReference, error) {
-	return f(ctx, request, artifact, digest)
-}
-
 type WorkspaceMaterializer interface {
 	Materialize(context.Context, harnessv2.CreateRuntimeSessionRequest, string) error
 }

@@ -239,14 +239,6 @@ func Env(name, value string) corev1.EnvVar {
 	return corev1.EnvVar{Name: name, Value: value}
 }
 
-// EnvIfSet returns an env var and true when value is non-empty.
-func EnvIfSet(name, value string) (corev1.EnvVar, bool) {
-	if value == "" {
-		return corev1.EnvVar{}, false
-	}
-	return Env(name, value), true
-}
-
 // AppendIfSet appends name=value to envVars only when value is non-empty.
 func AppendIfSet(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
 	if value == "" {

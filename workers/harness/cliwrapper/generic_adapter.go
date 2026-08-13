@@ -378,6 +378,24 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// resolveAdapterWorkDir resolves the working directory for an adapter command:
+// the turn workdir, then the adapter-configured workdir, then the wrapper
+// default. A missing directory falls back to the current working directory;
+// any other stat failure is returned as a "stat <provider> workspace
+// directory" error.
+func resolveAdapterWorkDir(provider, turnWorkDir, configWorkDir string) (string, error) {
+	dir := firstNonEmpty(turnWorkDir, configWorkDir, DefaultWrapperWorkDir)
+	if stat, err := os.Stat(dir); err != nil || !stat.IsDir() {
+		if err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat %s workspace directory: %w", provider, err)
+		}
+		if wd, wdErr := os.Getwd(); wdErr == nil {
+			dir = wd
+		}
+	}
+	return dir, nil
+}
+
 func setEnv(env []string, key, value string) []string {
 	key = strings.TrimSpace(key)
 	if key == "" {

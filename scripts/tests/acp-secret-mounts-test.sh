@@ -75,7 +75,7 @@ assert_secret_mounts() {
   | yaml_to_json \
   | assert_secret_mounts "Kustomize production overlay"
 
-"${helm}" template orka "${root}/charts/orka" \
+"${helm}" template orka "${root}/manifest_staging/charts/orka" \
   --namespace orka-system \
   --set-string controller.mode=harness-v2 \
   --set-string controller.watchNamespace=orka-system \

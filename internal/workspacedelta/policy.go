@@ -92,18 +92,6 @@ func DefaultLimits() Limits {
 	}
 }
 
-// DefaultExcludedNames returns path-component names which are fingerprinted
-// for mutation detection but never included in a change artifact.
-func DefaultExcludedNames() []string {
-	return append([]string(nil), mandatoryExcludedNames...)
-}
-
-// DefaultReservedNames returns infrastructure path-component names which may
-// never occur in a captured workspace.
-func DefaultReservedNames() []string {
-	return append([]string(nil), mandatoryReservedNames...)
-}
-
 func normalizeOptions(options Options) (normalizedOptions, error) {
 	limits, err := normalizeLimits(options.Limits)
 	if err != nil {

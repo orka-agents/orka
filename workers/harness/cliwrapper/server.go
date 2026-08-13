@@ -77,21 +77,7 @@ type RuntimeSupportProvider interface {
 	SupportedRuntimes() []string
 }
 
-type ServerOption func(*Server)
-
-func WithClock(now func() time.Time) ServerOption {
-	return func(s *Server) {
-		if now != nil {
-			s.now = now
-		}
-	}
-}
-
-func WithCommandRunner(runner CommandRunner) ServerOption {
-	return func(s *Server) { s.runner = runner }
-}
-
-func NewServer(cfg Config, adapter RuntimeAdapter, opts ...ServerOption) (*Server, error) {
+func NewServer(cfg Config, adapter RuntimeAdapter) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -109,11 +95,6 @@ func NewServer(cfg Config, adapter RuntimeAdapter, opts ...ServerOption) (*Serve
 		now:                            time.Now,
 		configuredExactRedactionValues: exactConfiguredEnvValues(cfg.CommandEnv),
 		turnRegistry:                   newTurnRegistry(),
-	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(s)
-		}
 	}
 	if ledgerPath := strings.TrimSpace(cfg.AdmissionLedgerPath); ledgerPath != "" {
 		admissionLedger, err := ledger.OpenWithGeneration(ledgerPath, cfg.LedgerGeneration)
@@ -608,16 +589,26 @@ func safeAdminTurnStatus(record *ledger.TurnRecord) (harness.DurableTurnStatus, 
 	return status, nil
 }
 
-func (s *Server) handleAdminTurn(w http.ResponseWriter, r *http.Request) {
+// requireAdmin applies the shared admin-endpoint guard ladder: authorization,
+// method check, then durable-ledger availability. It writes the error response
+// and returns false when the request must not proceed.
+func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request, method string) bool {
 	if !s.authorized(w, r) {
-		return
+		return false
 	}
-	if r.Method != http.MethodGet {
+	if r.Method != method {
 		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+		return false
 	}
 	if s.ledger == nil {
 		writeSafeError(w, http.StatusServiceUnavailable, "durable admission ledger is not configured")
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleAdminTurn(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r, http.MethodGet) {
 		return
 	}
 	turnID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, harness.AdminTurnsPath+"/"))
@@ -643,15 +634,7 @@ func (s *Server) handleAdminTurn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminClose(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(w, r) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if s.ledger == nil {
-		writeSafeError(w, http.StatusServiceUnavailable, "durable admission ledger is not configured")
+	if !s.requireAdmin(w, r, http.MethodPost) {
 		return
 	}
 	if err := s.ledger.CloseAdmission(r.Context()); err != nil {
@@ -662,15 +645,7 @@ func (s *Server) handleAdminClose(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminDrain(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(w, r) {
-		return
-	}
-	if r.Method != http.MethodGet {
-		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if s.ledger == nil {
-		writeSafeError(w, http.StatusServiceUnavailable, "durable admission ledger is not configured")
+	if !s.requireAdmin(w, r, http.MethodGet) {
 		return
 	}
 	closed, closedAt, err := s.ledger.AdmissionClosed(r.Context())
@@ -699,15 +674,7 @@ func (s *Server) handleAdminDrain(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminRollover(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(w, r) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if s.ledger == nil {
-		writeSafeError(w, http.StatusServiceUnavailable, "durable admission ledger is not configured")
+	if !s.requireAdmin(w, r, http.MethodPost) {
 		return
 	}
 	var request harness.DurableRolloverPrepareRequest
@@ -729,15 +696,7 @@ func (s *Server) handleAdminRollover(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminAbortRollover(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(w, r) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if s.ledger == nil {
-		writeSafeError(w, http.StatusServiceUnavailable, "durable admission ledger is not configured")
+	if !s.requireAdmin(w, r, http.MethodPost) {
 		return
 	}
 	var request harness.DurableRolloverAbortRequest

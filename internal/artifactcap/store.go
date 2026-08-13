@@ -47,8 +47,6 @@ func NewFileObjectStore(root string, maxObjectBytes int64) (*FileObjectStore, er
 	return store, nil
 }
 
-func (s *FileObjectStore) MaxObjectBytes() int64 { return s.maxObjectBytes }
-
 func (s *FileObjectStore) Put(ctx context.Context, request OperationRequest, body io.Reader, now time.Time) (Artifact, error) {
 	if request.ContentLength > s.maxObjectBytes {
 		return Artifact{}, ErrTooLarge

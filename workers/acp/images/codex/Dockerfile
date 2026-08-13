@@ -92,15 +92,6 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
 COPY . .
 RUN set -eu; \
-    grep -Eq '^[[:space:]]*CodexACPVersion[[:space:]]*= "1\.1\.7"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*CodexACPSourceCommit[[:space:]]*= "307d81018f7cc0c3141ddf71c7532d38310e2cfb"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*CodexACPTarSHA256[[:space:]]*= "642920240baa0b6b1951fb2c56b9ff11689648019499615f941000d95d127301"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*CodexACPOrkaPatchSHA256[[:space:]]*= "4b1fc39dc7ac0d6aa404030a3433f46c8b9c67e8e8223efca490a6ab8bf4287a"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*CodexACPOrkaDistSHA256[[:space:]]*= "bcfb6a2772a7de2d027e977d9bc9db5fa210a462de1af7ab061361be4410cc75"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*CodexCLIVersion[[:space:]]*= "0\.145\.0"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*CodexCLISourceCommit[[:space:]]*= "25af12f7e61572b0bc18ddb1008be543b91519b0"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*CodexCLILinuxX64SHA256[[:space:]]*= "11239480f8e3efd1430f23bbe91c1a397856b8bbe6185ccbaee2382d25e03df2"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*CodexCLILinuxARM64SHA256[[:space:]]*= "b78c57e172b2f18e5969ae26183253cd3cdd9abb3b424a8f7334f4b5530c2b27"$' internal/acp/pins.go; \
     test "$TARGETOS" = linux; \
     case "$TARGETARCH" in amd64|arm64) ;; *) exit 1 ;; esac; \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \

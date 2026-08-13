@@ -63,25 +63,7 @@ jobs:
 
       - name: Free disk space for Docker-heavy live E2E
         if: steps.gate.outputs.run == 'true'
-        run: |
-          set -euxo pipefail
-          echo "Disk usage before cleanup"
-          df -h
-          docker system df || true
-
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/share/swift
-
-          docker system prune -af || true
-          docker builder prune -af || true
-
-          echo "Disk usage after cleanup"
-          df -h
-          docker system df || true
+        uses: ./.github/actions/free-disk-space
 
       - name: Setup Go
         if: steps.gate.outputs.run == 'true'
@@ -91,10 +73,7 @@ jobs:
 
       - name: Install kind
         if: steps.gate.outputs.run == 'true'
-        run: |
-          curl -fsSL -o ./kind "https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)"
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+        uses: ./.github/actions/setup-kind
 
       - name: Verify kind installation
         if: steps.gate.outputs.run == 'true'

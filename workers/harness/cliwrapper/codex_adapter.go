@@ -76,19 +76,11 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 		_ = cleanupInstructions // cleanup is represented by TempFiles for the command runner.
 	}
 
-	dir := firstNonEmpty(turn.WorkDir, a.config.WorkDir)
-	if dir == "" {
-		dir = DefaultWrapperWorkDir
-	}
-	if stat, err := os.Stat(dir); err != nil || !stat.IsDir() {
-		if err != nil && !os.IsNotExist(err) {
-			_ = os.Remove(outputPath)
-			cleanupInstructions()
-			return nil, fmt.Errorf("stat codex workspace directory: %w", err)
-		}
-		if wd, wdErr := os.Getwd(); wdErr == nil {
-			dir = wd
-		}
+	dir, err := resolveAdapterWorkDir("codex", turn.WorkDir, a.config.WorkDir)
+	if err != nil {
+		_ = os.Remove(outputPath)
+		cleanupInstructions()
+		return nil, err
 	}
 
 	baseURL := firstNonEmpty(codexOpenAIBaseURL(), envEntryValue(turn.Env, workerenv.OpenAIBaseURL))

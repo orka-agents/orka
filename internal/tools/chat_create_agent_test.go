@@ -199,27 +199,17 @@ func TestChatCreateAgentTool_Execute_RejectsFractionalOpenCodeModelLimits(t *tes
 	}
 }
 
-func TestParseChatPositiveAgentModelInt32(t *testing.T) {
+func TestParsePositiveAgentModelInt32(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		raw  any
 		want int32
 	}{
 		{name: "decoded JSON integer", raw: float64(4096), want: 4096},
-		{name: "int", raw: int(4096), want: 4096},
-		{name: "int8", raw: int8(127), want: 127},
-		{name: "int16", raw: int16(4096), want: 4096},
-		{name: "int32", raw: int32(4096), want: 4096},
-		{name: "int64", raw: int64(4096), want: 4096},
-		{name: "uint", raw: uint(4096), want: 4096},
-		{name: "uint8", raw: uint8(127), want: 127},
-		{name: "uint16", raw: uint16(4096), want: 4096},
-		{name: "uint32", raw: uint32(4096), want: 4096},
-		{name: "uint64", raw: uint64(4096), want: 4096},
-		{name: "max int32", raw: int64(1<<31 - 1), want: 1<<31 - 1},
+		{name: "max int32", raw: float64(1<<31 - 1), want: 1<<31 - 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseChatPositiveAgentModelInt32("model.contextWindow", tc.raw)
+			got, err := parsePositiveAgentModelInt32("model.contextWindow", tc.raw)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -235,14 +225,13 @@ func TestParseChatPositiveAgentModelInt32(t *testing.T) {
 		wantError string
 	}{
 		{name: "fractional decoded JSON number", raw: float64(4096.5), wantError: "must be an integer"},
-		{name: "zero", raw: int(0), wantError: "positive 32-bit integer"},
-		{name: "negative", raw: int64(-1), wantError: "positive 32-bit integer"},
-		{name: "signed overflow", raw: int64(1 << 31), wantError: "positive 32-bit integer"},
-		{name: "unsigned overflow", raw: uint64(1 << 31), wantError: "positive 32-bit integer"},
+		{name: "zero", raw: float64(0), wantError: "positive 32-bit integer"},
+		{name: "negative", raw: float64(-1), wantError: "positive 32-bit integer"},
+		{name: "overflow", raw: float64(1 << 31), wantError: "positive 32-bit integer"},
 		{name: "wrong type", raw: "4096", wantError: "must be an integer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseChatPositiveAgentModelInt32("model.contextWindow", tc.raw)
+			_, err := parsePositiveAgentModelInt32("model.contextWindow", tc.raw)
 			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
 				t.Fatalf("error = %v, want %q", err, tc.wantError)
 			}

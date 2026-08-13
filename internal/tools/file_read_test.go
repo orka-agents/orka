@@ -347,7 +347,7 @@ func TestFileReadTool_Execute_RejectsAbsoluteSymlink(t *testing.T) {
 	}
 }
 
-func TestFileReadTool_isPathAllowed(t *testing.T) {
+func TestFileReadTool_allowedRootForPath(t *testing.T) {
 	tool := &FileReadTool{
 		allowedPaths: []string{defaultWorkspacePath, tempDirPath},
 	}
@@ -366,8 +366,8 @@ func TestFileReadTool_isPathAllowed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			if got := tool.isPathAllowed(tt.path); got != tt.allowed {
-				t.Errorf("isPathAllowed(%q) = %v, want %v", tt.path, got, tt.allowed)
+			if _, _, got := tool.allowedRootForPath(tt.path); got != tt.allowed {
+				t.Errorf("allowedRootForPath(%q) allowed = %v, want %v", tt.path, got, tt.allowed)
 			}
 		})
 	}

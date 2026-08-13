@@ -4,17 +4,10 @@ set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/lib/e2e-common.sh
+. "${script_dir}/lib/e2e-common.sh"
 release_tag="${1:-}"
 release_namespace="${RELEASE_NAMESPACE:-orka-system}"
-
-die() {
-  printf 'error: %s\n' "$*" >&2
-  exit 1
-}
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
-}
 
 chart_field() {
   local path="$1"

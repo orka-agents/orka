@@ -38,10 +38,6 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
 COPY . .
 RUN set -eu; \
-    grep -Eq '^[[:space:]]*CopilotCLIVersion[[:space:]]*= "1\.0\.77"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*CopilotCLISourceCommit[[:space:]]*= "aee1edd29ef0f2058425bf399bcc9e5002a2b8f2"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*CopilotCLILinuxX64SHA256[[:space:]]*= "c6414f99c5b29b049a3b0929ba824f0ff0ae88b85eb52559be45631b96b00f4c"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*CopilotCLILinuxARM64SHA256[[:space:]]*= "5bcf01b30bd74ce415cc93acb404885e0bc396cde037ca68efe2b8ec84f91e5a"$' internal/acp/pins.go; \
     test "$TARGETOS" = linux; \
     case "$TARGETARCH" in amd64|arm64) ;; *) exit 1 ;; esac; \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \

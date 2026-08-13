@@ -2,21 +2,12 @@
 
 set -Eeuo pipefail
 
-log() {
-  printf '==> %s\n' "$*" >&2
-}
-
-die() {
-  printf 'error: %s\n' "$*" >&2
-  exit 1
-}
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
-}
-
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/lib/e2e-common.sh
+. "${script_dir}/lib/e2e-common.sh"
+# shellcheck source=scripts/lib/redact.sh
+. "${script_dir}/lib/redact.sh"
 
 kind_cluster="${KIND_CLUSTER:-orka-live-copilot-proxy-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
@@ -48,21 +39,9 @@ cleanup_port_forward() {
   fi
 }
 
-redact() {
-  local text
-  text="$(cat)"
-  if [[ -n "${token_value}" ]]; then
-    text="${text//${token_value}/[REDACTED]}"
-  fi
-  printf '%s' "${text}" | sed -E \
-    -e 's/(Authorization: (Bearer|token) )[[:graph:]]+/\1[REDACTED]/g' \
-    -e 's/COPILOT_GITHUB_TOKEN=[^[:space:]]+/COPILOT_GITHUB_TOKEN=[REDACTED]/g' \
-    -e 's/GITHUB_TOKEN=[^[:space:]]+/GITHUB_TOKEN=[REDACTED]/g' \
-    -e 's/gh[opusr]_[A-Za-z0-9_]+/[REDACTED_GITHUB_TOKEN]/g' \
-    -e 's/github_pat_[A-Za-z0-9_]+/[REDACTED_GITHUB_TOKEN]/g' \
-    -e 's/("access_token":"[^"]*")/"access_token":"[REDACTED]"/g' \
-    -e 's/("token":"[^"]*")/"token":"[REDACTED]"/g'
-}
+# The shared redact() (scripts/lib/redact.sh) substitutes the current value of
+# the proxy token at call time.
+ORKA_REDACT_SECRET_VARS=(token_value)
 
 dump_diagnostics() {
   log "Collecting redacted diagnostics"

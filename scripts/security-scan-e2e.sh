@@ -2,23 +2,6 @@
 
 set -Eeuo pipefail
 
-log() {
-  printf '==> %s\n' "$*" >&2
-}
-
-warn() {
-  printf 'warning: %s\n' "$*" >&2
-}
-
-die() {
-  printf 'error: %s\n' "$*" >&2
-  exit 1
-}
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
-}
-
 sanitize_image_tag() {
   printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '-'
 }
@@ -34,6 +17,10 @@ parse_github_repository_identity() {
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/lib/e2e-common.sh
+. "${script_dir}/lib/e2e-common.sh"
+# shellcheck source=scripts/lib/redact.sh
+. "${script_dir}/lib/redact.sh"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${script_dir}/lib/kind-local-registry.sh"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh
@@ -77,14 +64,6 @@ api_auth_header_file="${work_dir}/api-auth-header"
 kubeconfig_file="${work_dir}/kubeconfig"
 kind_lock_dir=""
 registry_owner="security-scan-e2e-${e2e_run_id}"
-
-redact() {
-  sed -E \
-    -e 's/(Authorization:[[:space:]]*Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/Ig' \
-    -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/Ig' \
-    -e 's/gh[opusr]_[A-Za-z0-9_]+/[REDACTED_GITHUB_TOKEN]/g' \
-    -e 's/github_pat_[A-Za-z0-9_]+/[REDACTED_GITHUB_TOKEN]/g'
-}
 
 run() {
   printf '+ ' >&2

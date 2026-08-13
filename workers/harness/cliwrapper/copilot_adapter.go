@@ -40,17 +40,9 @@ func (a *CopilotAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Com
 			return nil, fmt.Errorf("resolve copilot helper executable: %w", err)
 		}
 	}
-	dir := firstNonEmpty(turn.WorkDir, a.config.WorkDir)
-	if dir == "" {
-		dir = DefaultWrapperWorkDir
-	}
-	if stat, err := os.Stat(dir); err != nil || !stat.IsDir() {
-		if err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("stat copilot workspace directory: %w", err)
-		}
-		if wd, wdErr := os.Getwd(); wdErr == nil {
-			dir = wd
-		}
+	dir, err := resolveAdapterWorkDir("copilot", turn.WorkDir, a.config.WorkDir)
+	if err != nil {
+		return nil, err
 	}
 	env := append([]string(nil), turn.Env...)
 	env = setEnv(env, "HOME", firstNonEmpty(envEntryValue(env, "HOME"), "/home/worker"))

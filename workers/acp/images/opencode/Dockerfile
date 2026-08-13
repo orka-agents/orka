@@ -96,21 +96,6 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
 COPY . .
 RUN set -eu; \
-    grep -Eq '^[[:space:]]*OpenCodeVersion[[:space:]]*= "1\.18\.9"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeSourceCommit[[:space:]]*= "4da7bb44c84e013fa53e9c5d02ac753d1435c81a"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeSourceTarSHA256[[:space:]]*= "bbc3363c6886c63865a60b75d456fff3fbe6b87d8a86f44b2439900695b35de3"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeLinuxX64BaselineTarSHA256[[:space:]]*= "59bf22db1f20c6c9836c926800a8e6416228330c2b518ade3d431d315cd76366"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeLinuxARM64TarSHA256[[:space:]]*= "4846a7e470797950f209126442a291cc06574fd44ddbb96c89d730017f60aae7"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeLinuxX64BinarySHA256[[:space:]]*= "7c4d91c84d2bfdeabb59257e3490c5e5acb08f2aacb3e42f3ddc296a1c3f1aca"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeLinuxARM64BinarySHA256[[:space:]]*= "ae8a9b7c591d3c763463f16bfb5f45230c4c741f039e8967218662836449ecdf"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeRipgrepVersion[[:space:]]*= "15\.2\.0"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeRipgrepDebianVersion[[:space:]]*= "15\.2\.0-1"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeRipgrepLinuxX64DebSHA256[[:space:]]*= "d9d86586969e925b8627936ec4387d10cc65baf7d42195258743a49e711b6157"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeRipgrepLinuxARM64DebSHA256[[:space:]]*= "8f18379cd499dd890d27190a359fe194d0bce92d7efad8e47b0f636e64bf4b46"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeRipgrepLinuxX64BinarySHA256[[:space:]]*= "af751db9b06d308fd5078aa973880cc8c75678289386bf1a6ee5faa614aa6f2d"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeRipgrepLinuxARM64BinarySHA256[[:space:]]*= "d3febe5d02e2a15da0909200caeb5af0be65e58736331c2ab88b7086d62e942b"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeRootInstructionSHA256[[:space:]]*= "b8e691e210a9502c9689ba20705806dfb1b5b10b5ca1062f73f9a85b1043a812"$' internal/acp/pins.go; \
-    grep -Eq '^[[:space:]]*OpenCodeImageNoticeSHA256[[:space:]]*= "93167c1d7505d3e38efce8bf019c2af4e10ef56529465b87c34e4b3401508a98"$' internal/acp/pins.go; \
     test "$TARGETOS" = linux; \
     case "$TARGETARCH" in amd64|arm64) ;; *) exit 1 ;; esac; \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \

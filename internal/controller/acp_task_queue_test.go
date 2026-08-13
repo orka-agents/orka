@@ -119,10 +119,6 @@ func TestQueueACPExternalRuntimeTaskFailsClosedWithoutDurableDispatchState(t *te
 			Workspace: &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead},
 		},
 	}
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("55555555-5555-5555-5555-555555555555"), Generation: 1},
-		Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"}}},
-	}
 	registered := plannerExternalRuntime()
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.AgentRuntime{}).WithObjects(task, registered).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
@@ -144,7 +140,7 @@ func TestQueueACPExternalRuntimeTaskFailsClosedWithoutDurableDispatchState(t *te
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10),
 		DurableControlStore: controlStore, ControllerEpochManager: epochs,
 	}
-	result, err := reconciler.queueACPExternalRuntimeTask(ctx, task.DeepCopy(), agent, registered.Name)
+	result, err := reconciler.failTask(ctx, task.DeepCopy(), externalAgentRuntimeDispatchUnsupportedReason(registered.Name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +372,7 @@ func TestQueueACPExternalRuntimeTaskSupportBoundaryPrecedesAdmissionAndWorkspace
 	reconciler := &TaskReconciler{Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), ACPAdmissionGate: gate}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := reconciler.queueACPExternalRuntimeTask(ctx, task.DeepCopy(), nil, " external-v2 "); err != nil {
+	if _, err := reconciler.failTask(ctx, task.DeepCopy(), externalAgentRuntimeDispatchUnsupportedReason(" external-v2 ")); err != nil {
 		t.Fatal(err)
 	}
 	failed := &corev1alpha1.Task{}

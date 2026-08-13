@@ -406,17 +406,6 @@ func queuedPromptAttemptMatchesTask(attempt *store.PromptAttempt, task *corev1al
 		attempt.RequestDigest == task.Status.Execution.RequestDigest
 }
 
-// queueACPExternalRuntimeTask is a hard support boundary: registration and
-// conformance remain available, but external runtimes cannot own Task dispatch.
-func (r *TaskReconciler) queueACPExternalRuntimeTask(
-	ctx context.Context,
-	task *corev1alpha1.Task,
-	_ *corev1alpha1.Agent,
-	runtimeName string,
-) (ctrl.Result, error) {
-	return r.failTask(ctx, task, externalAgentRuntimeDispatchUnsupportedReason(runtimeName))
-}
-
 type acpTaskQueueRank struct {
 	promoted          bool
 	effectivePriority int32

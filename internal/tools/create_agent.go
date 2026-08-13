@@ -251,41 +251,20 @@ func normalizedCreateAgentModel(runtime *RuntimeArgs, model *ModelArgs) (string,
 	if runtimeType != corev1alpha1.AgentRuntimeOpencode {
 		return requested, nil
 	}
-	if requested == "" {
-		return "", fmt.Errorf("model.name is required for opencode runtime")
-	}
-	providerHint := strings.Trim(strings.TrimSpace(model.Provider), "/")
-	if strings.ContainsAny(requested, "{}") || strings.ContainsAny(providerHint, "{}") {
-		return "", fmt.Errorf("model.name for opencode runtime must not contain substitution braces")
-	}
-	providerID, modelID, qualified := strings.Cut(requested, "/")
-	if qualified {
-		providerID = strings.TrimSpace(providerID)
-		modelID = strings.TrimSpace(modelID)
-		if providerHint != "" && providerHint != providerID {
-			return "", fmt.Errorf("model.provider %q does not match provider %q in model.name for opencode runtime", providerHint, providerID)
+	var spec *corev1alpha1.ModelConfig
+	if model != nil {
+		spec = &corev1alpha1.ModelConfig{
+			Provider:      model.Provider,
+			Name:          model.Name,
+			ContextWindow: model.ContextWindow,
+			MaxTokens:     model.MaxTokens,
 		}
-	} else {
-		providerID = providerHint
-		modelID = requested
 	}
-	composed := providerID + "/" + modelID
-	if strings.ContainsAny(composed, "{}") {
-		return "", fmt.Errorf("model.name for opencode runtime must not contain substitution braces")
+	providerID, modelID, specErr := validateOpenCodeModelSpec(spec)
+	if specErr != nil {
+		return "", specErr
 	}
-	if providerID == "" || modelID == "" {
-		return "", fmt.Errorf("model.name for opencode runtime must use provider/model form")
-	}
-	if model.ContextWindow == nil || *model.ContextWindow <= 0 {
-		return "", fmt.Errorf("model.contextWindow is required for opencode runtime and must be positive")
-	}
-	if model.MaxTokens == nil || *model.MaxTokens <= 0 {
-		return "", fmt.Errorf("model.maxTokens is required for opencode runtime and must be positive")
-	}
-	if *model.ContextWindow <= *model.MaxTokens {
-		return "", fmt.Errorf("model.contextWindow must exceed model.maxTokens for opencode runtime")
-	}
-	return composed, nil
+	return providerID + "/" + modelID, nil
 }
 
 func configureCreatedAgentRuntime(agent *corev1alpha1.Agent, runtimeArgs *RuntimeArgs) error {

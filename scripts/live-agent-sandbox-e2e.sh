@@ -2,29 +2,14 @@
 
 set -Eeuo pipefail
 
-log() {
-  printf '==> %s\n' "$*" >&2
-}
-
-warn() {
-  printf 'warning: %s\n' "$*" >&2
-}
-
-die() {
-  printf 'error: %s\n' "$*" >&2
-  exit 1
-}
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
-}
-
 sanitize_image_tag() {
   printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '-'
 }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/lib/e2e-common.sh
+. "${script_dir}/lib/e2e-common.sh"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${script_dir}/lib/kind-local-registry.sh"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh

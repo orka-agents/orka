@@ -13,6 +13,10 @@ ACP_CLAUDE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-claude-runtime:latest
 ACP_COPILOT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-copilot-runtime:latest
 ACP_OPENCODE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-opencode-runtime:latest
 WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
+# Providers backing the generated docker-build-acp-<provider>-runtime and
+# docker-push-acp-<provider>-runtime targets.
+ACP_RUNTIME_PROVIDERS = codex claude copilot opencode
+ACP_RUNTIME_IMGS = $(ACP_CODEX_RUNTIME_IMG) $(ACP_CLAUDE_RUNTIME_IMG) $(ACP_COPILOT_RUNTIME_IMG) $(ACP_OPENCODE_RUNTIME_IMG)
 RUN_CONTROLLER_MODE ?= harness-v2
 RUN_WATCH_NAMESPACE ?= orka-system
 RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE ?=
@@ -225,10 +229,7 @@ test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and 
 	$(KIND) load docker-image $(AI_WORKER_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(GENERAL_WORKER_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(HARNESS_WRAPPER_IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(ACP_CODEX_RUNTIME_IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(ACP_CLAUDE_RUNTIME_IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(ACP_COPILOT_RUNTIME_IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(ACP_OPENCODE_RUNTIME_IMG) --name $(KIND_CLUSTER)
+	set -e; for img in $(ACP_RUNTIME_IMGS); do $(KIND) load docker-image $$img --name $(KIND_CLUSTER); done
 	$(KIND) load docker-image $(WORKSPACE_PUBLISHER_IMG) --name $(KIND_CLUSTER)
 
 .PHONY: test-e2e-run-only
@@ -373,21 +374,13 @@ docker-build-general-worker: ## Build docker image for the general worker.
 docker-build-harness-wrapper: ## Build the opt-in harness v1 compatibility wrapper image.
 	$(CONTAINER_TOOL) build -t ${HARNESS_WRAPPER_IMG} -f workers/harness/Dockerfile .
 
-.PHONY: docker-build-acp-codex-runtime
+# Recipes for the docker-build-acp-<provider>-runtime targets are generated
+# from ACP_RUNTIME_PROVIDERS below; these dependency-less rules carry their
+# `make help` entries.
 docker-build-acp-codex-runtime: ## Build the immutable Codex ACP runtime image.
-	$(CONTAINER_TOOL) build -t ${ACP_CODEX_RUNTIME_IMG} -f workers/acp/images/codex/Dockerfile .
-
-.PHONY: docker-build-acp-claude-runtime
 docker-build-acp-claude-runtime: ## Build the immutable Claude ACP runtime image.
-	$(CONTAINER_TOOL) build -t ${ACP_CLAUDE_RUNTIME_IMG} -f workers/acp/images/claude/Dockerfile .
-
-.PHONY: docker-build-acp-copilot-runtime
 docker-build-acp-copilot-runtime: ## Build the immutable GitHub Copilot ACP runtime image.
-	$(CONTAINER_TOOL) build -t ${ACP_COPILOT_RUNTIME_IMG} -f workers/acp/images/copilot/Dockerfile .
-
-.PHONY: docker-build-acp-opencode-runtime
 docker-build-acp-opencode-runtime: ## Build the immutable OpenCode ACP runtime image.
-	$(CONTAINER_TOOL) build -t ${ACP_OPENCODE_RUNTIME_IMG} -f workers/acp/images/opencode/Dockerfile .
 
 .PHONY: docker-build-workspace-publisher
 docker-build-workspace-publisher: ## Build the clean-room workspace publisher image.
@@ -405,21 +398,30 @@ docker-push-general-worker: ## Push docker image for the general worker.
 docker-push-harness-wrapper: ## Push the opt-in harness v1 compatibility wrapper image.
 	$(CONTAINER_TOOL) push ${HARNESS_WRAPPER_IMG}
 
-.PHONY: docker-push-acp-codex-runtime
+# Recipes for the docker-push-acp-<provider>-runtime targets are generated
+# from ACP_RUNTIME_PROVIDERS below; these dependency-less rules carry their
+# `make help` entries.
 docker-push-acp-codex-runtime: ## Push the immutable Codex ACP runtime image.
-	$(CONTAINER_TOOL) push ${ACP_CODEX_RUNTIME_IMG}
-
-.PHONY: docker-push-acp-claude-runtime
 docker-push-acp-claude-runtime: ## Push the immutable Claude ACP runtime image.
-	$(CONTAINER_TOOL) push ${ACP_CLAUDE_RUNTIME_IMG}
-
-.PHONY: docker-push-acp-copilot-runtime
 docker-push-acp-copilot-runtime: ## Push the immutable GitHub Copilot ACP runtime image.
-	$(CONTAINER_TOOL) push ${ACP_COPILOT_RUNTIME_IMG}
-
-.PHONY: docker-push-acp-opencode-runtime
 docker-push-acp-opencode-runtime: ## Push the immutable OpenCode ACP runtime image.
-	$(CONTAINER_TOOL) push ${ACP_OPENCODE_RUNTIME_IMG}
+
+# acp-provider-uc maps an ACP runtime provider word to the uppercase form used
+# in its image variable name (ACP_<PROVIDER>_RUNTIME_IMG).
+acp-provider-uc = $(subst codex,CODEX,$(subst claude,CLAUDE,$(subst copilot,COPILOT,$(subst opencode,OPENCODE,$(1)))))
+
+# acp-runtime-image-targets generates the build/push recipes for one ACP
+# runtime provider word $(1) (target names, Dockerfile directory, and image
+# variable).
+define acp-runtime-image-targets
+.PHONY: docker-build-acp-$(1)-runtime docker-push-acp-$(1)-runtime
+docker-build-acp-$(1)-runtime:
+	$$(CONTAINER_TOOL) build -t $${ACP_$(call acp-provider-uc,$(1))_RUNTIME_IMG} -f workers/acp/images/$(1)/Dockerfile .
+docker-push-acp-$(1)-runtime:
+	$$(CONTAINER_TOOL) push $${ACP_$(call acp-provider-uc,$(1))_RUNTIME_IMG}
+endef
+
+$(foreach provider,$(ACP_RUNTIME_PROVIDERS),$(eval $(call acp-runtime-image-targets,$(provider))))
 
 .PHONY: docker-push-workspace-publisher
 docker-push-workspace-publisher: ## Push the clean-room workspace publisher image.

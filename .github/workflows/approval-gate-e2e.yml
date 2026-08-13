@@ -57,7 +57,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       KIND_CLUSTER: orka-approval-gate-e2e
-      KIND_VERSION: v0.31.0
       E2E_EPHEMERAL_CLUSTER: "true"
       E2E_GO_TEST_TIMEOUT: 30m
       E2E_GINKGO_FOCUS: Human Approval Gate
@@ -66,25 +65,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Free disk space for Docker-heavy E2E
-        run: |
-          set -euxo pipefail
-          echo "Disk usage before cleanup"
-          df -h
-          docker system df || true
-
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/share/swift
-
-          docker system prune -af || true
-          docker builder prune -af || true
-
-          echo "Disk usage after cleanup"
-          df -h
-          docker system df || true
+        uses: ./.github/actions/free-disk-space
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -92,10 +73,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Install kind
-        run: |
-          curl -fsSL --retry 3 --retry-delay 2 -o ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)"
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+        uses: ./.github/actions/setup-kind
 
       - name: Verify kind installation
         run: kind version

@@ -4,15 +4,10 @@ set -Eeuo pipefail
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
-redact() {
-  sed -E \
-    -e 's#(Authorization:[[:space:]]*Bearer[[:space:]]+)[^[:space:]"}]+#\1[REDACTED]#g' \
-    -e 's#(ACTIONS_ID_TOKEN_REQUEST_TOKEN=)[^[:space:]]+#\1[REDACTED]#g' \
-    -e 's#eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}#[REDACTED-JWT]#g'
-}
-
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/lib/redact.sh
+. "${script_dir}/lib/redact.sh"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${script_dir}/lib/kind-local-registry.sh"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh

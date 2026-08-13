@@ -65,13 +65,6 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 
 	requestedSystemPrompt := chatGetStringArg(a, systemPromptField)
-	if requestedSystemPrompt != "" && isOpenCodeAgent(agent) {
-		return ChatToolErrorResult(
-			"invalid_arguments",
-			"opencode runtime does not support systemPrompt",
-			"Omit systemPrompt for OpenCode Agents and use Task prompts for instructions.",
-		)
-	}
 
 	if rawModel, supplied := a[modelField]; supplied {
 		modelUpdate, err := parseAgentModelUpdate(rawModel)

@@ -208,17 +208,6 @@ func (b *ACPMCPBroker) Validate() error {
 	return nil
 }
 
-func RegisterACPMCPBrokerRoutes(mux *http.ServeMux, broker *ACPMCPBroker) error {
-	if mux == nil {
-		return fmt.Errorf("HTTP mux is required")
-	}
-	if err := broker.Validate(); err != nil {
-		return err
-	}
-	mux.Handle("POST "+harnessv2.MCPBrokerCallPath, broker)
-	return nil
-}
-
 func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost || r.URL.Path != harnessv2.MCPBrokerCallPath {
 		http.NotFound(w, r)

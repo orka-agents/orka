@@ -28,7 +28,6 @@ jobs:
     timeout-minutes: 75
     env:
       KIND_CLUSTER: orka-live-github-label-trigger-e2e
-      KIND_VERSION: v0.31.0
       GITHUB_LABEL_TRIGGER_TARGET_REPO_URL: ${{ inputs.target_repo_url }}
       GITHUB_LABEL_TRIGGER_TARGET_NUMBER: ${{ inputs.target_number }}
     steps:
@@ -51,10 +50,7 @@ jobs:
             -v
 
       - name: Install kind
-        run: |
-          curl -fsSL -o ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)"
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+        uses: ./.github/actions/setup-kind
 
       - name: Verify kind installation
         run: kind version

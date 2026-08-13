@@ -629,14 +629,6 @@ func (d *ACPDispatcher) isActive(uid types.UID) bool {
 	return ok
 }
 
-func (d *ACPDispatcher) executeTask(ctx context.Context, queued *corev1alpha1.Task) error {
-	task, target, err := d.reserveTask(ctx, queued)
-	if err != nil || task == nil {
-		return err
-	}
-	return d.executeReservedTask(ctx, task, target)
-}
-
 // loadVerifiedACPDispatchExecution re-establishes the immutable dispatch
 // authority after RuntimePool reservation and immediately before the first
 // supervisor RPC. Agent and Tool resources are deliberately not read here:

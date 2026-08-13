@@ -14,14 +14,13 @@ type ServiceConfig struct {
 	Root           string
 	Secret         []byte
 	MaxObjectBytes int64
-	Ledger         ReplayLedger
 	Now            func() time.Time
 }
 
 type Service struct {
 	secret      []byte
 	store       *FileObjectStore
-	ledger      ReplayLedger
+	ledger      *FileLedger
 	retirements *retirementStore
 	now         func() time.Time
 }
@@ -34,12 +33,9 @@ func NewService(config ServiceConfig) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	ledger := config.Ledger
-	if ledger == nil {
-		ledger, err = NewFileLedger(config.Root)
-		if err != nil {
-			return nil, err
-		}
+	ledger, err := NewFileLedger(config.Root)
+	if err != nil {
+		return nil, err
 	}
 	retirements, err := newRetirementStore(config.Root)
 	if err != nil {
@@ -166,7 +162,7 @@ type Download struct {
 	Artifact Artifact
 
 	file   *os.File
-	ledger ReplayLedger
+	ledger *FileLedger
 	record OperationRecord
 	now    func() time.Time
 

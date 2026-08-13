@@ -42,24 +42,6 @@ func validateACPRuntimePlanningAgent(task *corev1alpha1.Task, agent *corev1alpha
 	return ValidateOpenCodeAgentSpec(agent)
 }
 
-func PlanACPRuntime(task *corev1alpha1.Task, agent *corev1alpha1.Agent, images ACPRuntimeImages) (ACPRuntimePlan, error) {
-	if err := ValidateOpenCodeAgentSpec(agent); err != nil {
-		return ACPRuntimePlan{}, err
-	}
-	if agent != nil && agent.Spec.SystemPrompt != nil && agent.Spec.SystemPrompt.ConfigMapRef != nil {
-		return ACPRuntimePlan{}, fmt.Errorf("PlanACPRuntime requires a resolved ConfigMap-backed Agent systemPrompt")
-	}
-	systemPrompt := ""
-	if agent != nil && agent.Spec.SystemPrompt != nil {
-		systemPrompt = agent.Spec.SystemPrompt.Inline
-	}
-	configuration, err := buildACPAgentSessionConfiguration(task, agent, systemPrompt)
-	if err != nil {
-		return ACPRuntimePlan{}, err
-	}
-	return PlanACPRuntimeWithConfiguration(task, agent, images, configuration)
-}
-
 func PlanACPRuntimeWithConfiguration(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
@@ -271,40 +253,22 @@ func effectiveACPMaxTurns(task *corev1alpha1.Task, agent *corev1alpha1.Agent) in
 }
 
 func acpRuntimeArtifacts(runtime corev1alpha1.AgentRuntimeType, images ACPRuntimeImages) (map[string]string, string, error) {
-	switch runtime {
-	case corev1alpha1.AgentRuntimeCodex:
-		return map[string]string{
-			"codex-acp":             "sha256:" + acp.CodexACPTarSHA256,
-			"codex-acp-orka-patch":  "sha256:" + acp.CodexACPOrkaPatchSHA256,
-			"codex-acp-orka-dist":   "sha256:" + acp.CodexACPOrkaDistSHA256,
-			"codex-cli-linux-amd64": "sha256:" + acp.CodexCLILinuxX64SHA256,
-			"codex-cli-linux-arm64": "sha256:" + acp.CodexCLILinuxARM64SHA256,
-			"acp-schema":            "sha256:" + acp.ACPSchemaSHA256,
-		}, strings.TrimSpace(images.Codex), nil
-	case corev1alpha1.AgentRuntimeClaude:
-		return map[string]string{
-			"claude-agent-acp":        "sha256:" + acp.ClaudeACPTarSHA256,
-			"claude-code-linux-amd64": "sha256:" + acp.ClaudeSDKLinuxX64SHA256,
-			"claude-code-linux-arm64": "sha256:" + acp.ClaudeSDKLinuxARM64SHA256,
-			"acp-schema":              "sha256:" + acp.ACPSchemaSHA256,
-		}, strings.TrimSpace(images.Claude), nil
-	case corev1alpha1.AgentRuntimeCopilot:
-		return map[string]string{
-			"copilot-cli-linux-amd64": "sha256:" + acp.CopilotCLILinuxX64SHA256,
-			"copilot-cli-linux-arm64": "sha256:" + acp.CopilotCLILinuxARM64SHA256,
-			"acp-schema":              "sha256:" + acp.ACPSchemaSHA256,
-		}, strings.TrimSpace(images.Copilot), nil
-	case corev1alpha1.AgentRuntimeOpencode:
-		return map[string]string{
-			"opencode-cli-linux-amd64":     "sha256:" + acp.OpenCodeLinuxX64BinarySHA256,
-			"opencode-cli-linux-arm64":     "sha256:" + acp.OpenCodeLinuxARM64BinarySHA256,
-			"opencode-ripgrep-linux-amd64": "sha256:" + acp.OpenCodeRipgrepLinuxX64BinarySHA256,
-			"opencode-ripgrep-linux-arm64": "sha256:" + acp.OpenCodeRipgrepLinuxARM64BinarySHA256,
-			"acp-schema":                   "sha256:" + acp.ACPSchemaSHA256,
-		}, strings.TrimSpace(images.Opencode), nil
-	default:
+	digests := acp.BuiltInRuntimeAdapterDigests(string(runtime))
+	if digests == nil {
 		return nil, "", fmt.Errorf("runtime %q is not supported by the ACP core pool", runtime)
 	}
+	var image string
+	switch runtime {
+	case corev1alpha1.AgentRuntimeCodex:
+		image = images.Codex
+	case corev1alpha1.AgentRuntimeClaude:
+		image = images.Claude
+	case corev1alpha1.AgentRuntimeCopilot:
+		image = images.Copilot
+	case corev1alpha1.AgentRuntimeOpencode:
+		image = images.Opencode
+	}
+	return digests, strings.TrimSpace(image), nil
 }
 
 // ACPRuntimeImageAvailable reports whether a built-in runtime image is an

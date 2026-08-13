@@ -2,23 +2,6 @@
 
 set -Eeuo pipefail
 
-log() {
-  printf '==> %s\n' "$*" >&2
-}
-
-warn() {
-  printf 'warning: %s\n' "$*" >&2
-}
-
-die() {
-  printf 'error: %s\n' "$*" >&2
-  exit 1
-}
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
-}
-
 check_docker_ready() {
   if ! docker info >/dev/null 2>&1; then
     die "Docker daemon is not reachable; start Docker before running live kind-based GitHub label trigger E2E"
@@ -52,6 +35,10 @@ EOF_HELP
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/lib/e2e-common.sh
+. "${script_dir}/lib/e2e-common.sh"
+# shellcheck source=scripts/lib/redact.sh
+. "${script_dir}/lib/redact.sh"
 # shellcheck source=scripts/lib/kind-local-registry.sh
 . "${script_dir}/lib/kind-local-registry.sh"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh
@@ -78,16 +65,9 @@ api_pf_log="${work_dir}/api-port-forward.log"
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
 manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
 
-redact() {
-  local text
-  text="$(cat)"
-  if [[ -n "${webhook_secret}" ]]; then
-    text="${text//${webhook_secret}/[REDACTED_WEBHOOK_SECRET]}"
-  fi
-  printf '%s' "${text}" | sed -E \
-    -e 's/(X-Hub-Signature-256: *sha256=)[A-Fa-f0-9]+/\1[REDACTED_SIGNATURE]/g' \
-    -e 's/(ORKA_GITHUB_WEBHOOK_SECRET=)[^[:space:]]+/\1[REDACTED_WEBHOOK_SECRET]/g'
-}
+# The shared redact() (scripts/lib/redact.sh) substitutes the current value of
+# the webhook secret at call time.
+ORKA_REDACT_SECRET_VARS=(webhook_secret)
 
 cleanup_port_forward() {
   if [[ -n "${api_pf_pid}" ]]; then

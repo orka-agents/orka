@@ -805,11 +805,18 @@ func (s *Server) completeOperationFailure(replay *operationReplay, failure opera
 	s.mu.Unlock()
 }
 
-func writePermissionOperationReplay(
+// writeOperationReplay waits for a reserved operation replay to settle, then
+// writes the recorded failure or the replayed response with a
+// duplicate-classification stamp applied. extract selects which stored replay
+// response applies; stamp applies the endpoint-specific classification/state
+// to the copied response before it is written.
+func writeOperationReplay[T any](
 	w http.ResponseWriter,
 	r *http.Request,
 	replay *operationReplay,
 	classification harnessv2.Classification,
+	extract func(*operationReplay) *T,
+	stamp func(*T),
 ) {
 	select {
 	case <-replay.done:
@@ -820,14 +827,28 @@ func writePermissionOperationReplay(
 		writeError(w, replay.failure.status, replay.failure.code, replay.failure.message, &classification, replay.failure.retryable)
 		return
 	}
-	if replay.permission == nil {
+	stored := extract(replay)
+	if stored == nil {
 		writeClassificationError(w, classification)
 		return
 	}
-	response := *replay.permission
-	response.Classification = harnessv2.Classification{Class: harnessv2.RequestClassificationDuplicate, Phase: harnessv2.OperationPhaseApplied}
-	response.State = harnessv2.PermissionResolutionAlreadyResolved
+	response := *stored
+	stamp(&response)
 	writeJSON(w, http.StatusOK, response)
+}
+
+func writePermissionOperationReplay(
+	w http.ResponseWriter,
+	r *http.Request,
+	replay *operationReplay,
+	classification harnessv2.Classification,
+) {
+	writeOperationReplay(w, r, replay, classification,
+		func(replay *operationReplay) *harnessv2.PermissionResolutionResponse { return replay.permission },
+		func(response *harnessv2.PermissionResolutionResponse) {
+			response.Classification = harnessv2.Classification{Class: harnessv2.RequestClassificationDuplicate, Phase: harnessv2.OperationPhaseApplied}
+			response.State = harnessv2.PermissionResolutionAlreadyResolved
+		})
 }
 
 func writeLeaseOperationReplay(
@@ -836,22 +857,11 @@ func writeLeaseOperationReplay(
 	replay *operationReplay,
 	classification harnessv2.Classification,
 ) {
-	select {
-	case <-replay.done:
-	case <-r.Context().Done():
-		return
-	}
-	if replay.failure != nil {
-		writeError(w, replay.failure.status, replay.failure.code, replay.failure.message, &classification, replay.failure.retryable)
-		return
-	}
-	if replay.lease == nil {
-		writeClassificationError(w, classification)
-		return
-	}
-	response := *replay.lease
-	response.Classification = harnessv2.Classification{Class: harnessv2.RequestClassificationDuplicate, Phase: harnessv2.OperationPhaseApplied}
-	writeJSON(w, http.StatusOK, response)
+	writeOperationReplay(w, r, replay, classification,
+		func(replay *operationReplay) *harnessv2.PromptLeaseResponse { return replay.lease },
+		func(response *harnessv2.PromptLeaseResponse) {
+			response.Classification = harnessv2.Classification{Class: harnessv2.RequestClassificationDuplicate, Phase: harnessv2.OperationPhaseApplied}
+		})
 }
 
 func writeCancellationOperationReplay(
@@ -860,26 +870,15 @@ func writeCancellationOperationReplay(
 	replay *operationReplay,
 	classification harnessv2.Classification,
 ) {
-	select {
-	case <-replay.done:
-	case <-r.Context().Done():
-		return
-	}
-	if replay.failure != nil {
-		writeError(w, replay.failure.status, replay.failure.code, replay.failure.message, &classification, replay.failure.retryable)
-		return
-	}
-	if replay.cancellation == nil {
-		writeClassificationError(w, classification)
-		return
-	}
-	response := *replay.cancellation
-	response.Classification = harnessv2.Classification{
-		Class:         harnessv2.RequestClassificationSettled,
-		Phase:         harnessv2.OperationPhaseSettled,
-		TerminalEvent: response.Settlement.TerminalEvent,
-	}
-	writeJSON(w, http.StatusOK, response)
+	writeOperationReplay(w, r, replay, classification,
+		func(replay *operationReplay) *harnessv2.CancelPromptResponse { return replay.cancellation },
+		func(response *harnessv2.CancelPromptResponse) {
+			response.Classification = harnessv2.Classification{
+				Class:         harnessv2.RequestClassificationSettled,
+				Phase:         harnessv2.OperationPhaseSettled,
+				TerminalEvent: response.Settlement.TerminalEvent,
+			}
+		})
 }
 
 func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http.Request) {
