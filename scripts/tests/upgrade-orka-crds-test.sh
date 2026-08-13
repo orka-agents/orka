@@ -196,8 +196,9 @@ case "${command}" in
       esac
     done
     printf '%s\t%s\t%s\n' "${resource}" "${namespace}" "${name}" >>"${FAKE_DELETE_LOG}"
-    awk -F '\t' -v resource="${resource}" -v namespace="${namespace}" -v name="${name}" \
-      '!( $1 == resource && $2 == namespace && $3 == name )' "${FAKE_WRAPPER_STATE}" >"${FAKE_WRAPPER_STATE}.next"
+    # "namespace" is a reserved gawk builtin and cannot be an awk variable name.
+    awk -F '\t' -v resource="${resource}" -v ns="${namespace}" -v name="${name}" \
+      '!( $1 == resource && $2 == ns && $3 == name )' "${FAKE_WRAPPER_STATE}" >"${FAKE_WRAPPER_STATE}.next"
     mv "${FAKE_WRAPPER_STATE}.next" "${FAKE_WRAPPER_STATE}"
     ;;
   apply)
