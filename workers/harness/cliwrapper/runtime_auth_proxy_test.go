@@ -22,17 +22,20 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 		runtimeName   string
 		baseField     string
 		authField     string
+		crossField    string
 		requestHeader string
 		upstreamPath  string
 	}{
 		{
 			name: "codex", runtimeName: RuntimeCodex,
 			baseField: workerenv.OpenAIBaseURL, authField: workerenv.OpenAIAPIKey,
+			crossField:    workerenv.AnthropicAPIKey,
 			requestHeader: "Authorization", upstreamPath: "/v1/responses",
 		},
 		{
 			name: "claude", runtimeName: RuntimeClaude,
 			baseField: workerenv.AnthropicBaseURL, authField: workerenv.AnthropicAPIKey,
+			crossField:    workerenv.OpenAIAPIKey,
 			requestHeader: "x-api-key", upstreamPath: "/v1/messages",
 		},
 	}
@@ -54,12 +57,14 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 				_, _ = io.WriteString(w, `{"ok":true}`)
 			}))
 			basePath := strings.TrimSuffix(tt.upstreamPath, strings.TrimPrefix(tt.upstreamPath, "/v1"))
+			crossProviderValue := "other-provider-credential"
 			turn := TurnContext{
 				RuntimeName: tt.runtimeName,
 				Metadata:    map[string]string{"runtimeAuthOnly": "true"},
 				Env: []string{
 					tt.baseField + "=" + upstream.URL + basePath,
 					tt.authField + "=" + upstreamValue,
+					tt.crossField + "=" + crossProviderValue,
 					"NO_PROXY=existing.internal",
 					"no_proxy=lower.internal",
 				},
@@ -71,6 +76,11 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 			defer closeProxy()
 			if strings.Contains(strings.Join(protected.Env, "\n"), upstreamValue) {
 				t.Fatal("protected child environment retained the upstream credential")
+			}
+			// Runtime-auth-only turns must scrub other providers' credentials
+			// too, not only the proxied provider's.
+			if strings.Contains(strings.Join(protected.Env, "\n"), crossProviderValue) {
+				t.Fatal("protected child environment retained another provider's credential")
 			}
 			for _, name := range []string{"NO_PROXY", "no_proxy"} {
 				value := envEntryValue(protected.Env, name)

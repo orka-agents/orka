@@ -76,6 +76,73 @@ func TestValidateFinalizedSessionProjectionAcceptsPinnedLegacySparseExecution(t 
 	}
 }
 
+func TestValidateFinalizedSessionProjectionAcceptsContinuationLeaseGeneration(t *testing.T) {
+	// A session continuation prompt runs under a later mutation-lease
+	// generation than the RuntimeSession incarnation generation frozen in the
+	// Task execution identity. Reclamation must still validate, or every
+	// continuation Task becomes undeletable.
+	task, sourceUID, attempt, projection := restoredProjectionFixture()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-transcript", Create: false}
+	attempt.SessionLeaseGeneration = task.Status.Execution.RuntimeSessionGeneration + 1
+	payload := marshalProjection(t, projection)
+	turn := finalizedSessionProjectionTurn(t, payload, attempt)
+
+	if _, err := ValidateFinalizedSessionProjection(payload, task, sourceUID, attempt, turn); err != nil {
+		t.Fatalf("ValidateFinalizedSessionProjection(continuation lease) error = %v", err)
+	}
+}
+
+func TestValidateFinalizedSessionProjectionAcceptsStrippedNoWorkspaceRevision(t *testing.T) {
+	// A Task without a repository workspace freezes the protocol-only "empty"
+	// revision in its projected delivery evidence, while the outbox projector
+	// strips that value before the schema-validated Task status. Reclamation
+	// must compare through the same normalization, or every no-workspace Task
+	// with delivery evidence becomes undeletable.
+	task, sourceUID, attempt, projection := restoredProjectionFixture()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-transcript", Create: true}
+	attempt.DeliveryState = store.PromptDeliveryReadValidated
+	projection.Delivery = &corev1alpha1.TaskDeliveryStatus{
+		State:       corev1alpha1.TaskDeliveryStateReadValidated,
+		Outcome:     corev1alpha1.TaskDeliveryOutcomeReadValidated,
+		StartingSHA: NoWorkspaceRevision,
+	}
+	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+		State:   corev1alpha1.TaskDeliveryStateReadValidated,
+		Outcome: corev1alpha1.TaskDeliveryOutcomeReadValidated,
+	}
+	payload := marshalProjection(t, projection)
+	turn := finalizedSessionProjectionTurn(t, payload, attempt)
+
+	if _, err := ValidateFinalizedSessionProjection(payload, task, sourceUID, attempt, turn); err != nil {
+		t.Fatalf("ValidateFinalizedSessionProjection(no-workspace revision) error = %v", err)
+	}
+}
+
+func TestValidateRestoredProjectionRejectsNoWorkspaceRevisionForWorkspaceTask(t *testing.T) {
+	task, sourceUID, attempt, projection := restoredProjectionFixture()
+	task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{}
+	projection.Delivery.StartingSHA = NoWorkspaceRevision
+	task.Status.Delivery.StartingSHA = ""
+
+	if _, err := ValidateRestoredProjection(marshalProjection(t, projection), task, sourceUID, attempt); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("ValidateRestoredProjection(workspace task with protocol revision) error = %v, want ErrConflict", err)
+	}
+}
+
+func TestValidateFinalizedSessionProjectionRejectsLeaseGenerationDrift(t *testing.T) {
+	task, sourceUID, attempt, projection := restoredProjectionFixture()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-transcript", Create: false}
+	payload := marshalProjection(t, projection)
+	turn := finalizedSessionProjectionTurn(t, payload, attempt)
+	// Drift between the finalized turn and its attempt must stay fenced even
+	// though the Task's incarnation generation is no longer compared.
+	attempt.SessionLeaseGeneration++
+
+	if _, err := ValidateFinalizedSessionProjection(payload, task, sourceUID, attempt, turn); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("ValidateFinalizedSessionProjection(lease drift) error = %v, want ErrConflict", err)
+	}
+}
+
 func TestValidateFinalizedSessionProjectionRejectsUnpinnedOrPartialLegacyPayload(t *testing.T) {
 	tests := []struct {
 		name   string

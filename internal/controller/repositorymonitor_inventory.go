@@ -382,7 +382,6 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 				GitRepo:           workspaceRepo,
 				Ref:               pr.HeadSHA,
 				ReadCredentialRef: workspaceCredentialReference(readCredentialRef),
-				PRBaseBranch:      pr.BaseBranch,
 			},
 		},
 	}

@@ -31,6 +31,15 @@ rules:
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaces", "executionworkspaceclasses", "executionworkspacepools"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The workspace admission policies gate spec.coreAdmission writes on the
+  # "admit" verb and class-backed Task/Tool creation on the "use" verb, so the
+  # controller needs both or fail-closed admission rejects its own writes.
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaces"]
+    verbs: ["admit"]
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaceclasses"]
+    verbs: ["use"]
   - apiGroups: ["workspace.orka.ai"]
     resources: ["executionworkspaces/status", "executionworkspaceclasses/status", "executionworkspacepools/status"]
     verbs: ["get", "update", "patch"]

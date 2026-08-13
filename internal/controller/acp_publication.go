@@ -18,11 +18,12 @@ import (
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskterminal"
 )
 
 const (
 	acpPublicationGeneration int64 = 1
-	acpNoWorkspaceRevision         = "empty"
+	acpNoWorkspaceRevision         = taskterminal.NoWorkspaceRevision
 )
 
 type acpPublicationResult struct {
@@ -1334,10 +1335,17 @@ func (d *ACPDispatcher) patchDeliveryStatus(ctx context.Context, task *corev1alp
 }
 
 func (d *ACPDispatcher) completeSuccessWithDelivery(ctx context.Context, task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus, message string) error {
-	execution := corev1alpha1.TaskExecutionStatus{
-		State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
-		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
-	}
+	// The terminal projection must carry the complete frozen execution
+	// identity: prompt attempt reclamation validates the projection against
+	// the attempt's request digest and the Task's runtime identity, and a
+	// sparse payload makes the Task undeletable. Volatile fields are cleared
+	// so retried settlements enqueue byte-identical payloads.
+	execution := *task.Status.Execution.DeepCopy()
+	execution.State = corev1alpha1.TaskExecutionStateSucceeded
+	execution.Outcome = corev1alpha1.TaskExecutionOutcomeSucceeded
+	execution.Reason = ""
+	execution.Message = ""
+	execution.LastTransitionTime = nil
 	if err := d.enqueueStandaloneTaskProjection(ctx, task, taskTerminalProjection{
 		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: execution.Attempt,
 		Phase: corev1alpha1.TaskPhaseSucceeded, Message: message, Execution: execution, Delivery: &status,

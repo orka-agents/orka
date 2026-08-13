@@ -17,6 +17,12 @@ const (
 	// ProjectionKind is the durable outbox projection for terminal Task status.
 	ProjectionKind = "TaskTerminalStatus"
 
+	// NoWorkspaceRevision is the protocol-only revision harness v2 records for
+	// Tasks without a repository workspace. It is not a Git object ID: the
+	// outbox projector strips it from delivery evidence before the
+	// schema-validated Task status, while immutable projection payloads keep it.
+	NoWorkspaceRevision = "empty"
+
 	restoreIdentityChangedReason = corev1alpha1.TaskExecutionReason("RestoreIdentityChanged")
 )
 
@@ -144,7 +150,7 @@ func validateProjection(
 	if projection.Phase != terminalPhase(wantState, attempt.DeliveryState) {
 		return nil, conflict("restored terminal projection phase does not match its terminal outcome")
 	}
-	if task.Status.Delivery == nil || !equalDeliveryEvidence(projection.Delivery, task.Status.Delivery) {
+	if task.Status.Delivery == nil || !equalDeliveryEvidence(task, projection.Delivery, task.Status.Delivery) {
 		return nil, conflict("restored terminal projection delivery evidence does not match its Task")
 	}
 	if err := validateRuntimeIdentity(projection.Execution, *task.Status.Execution, *attempt); err != nil {
@@ -182,11 +188,16 @@ func validateFinalizedSessionTurn(
 		return conflict("finalized SessionTurn identity is invalid")
 	}
 	sourceTaskUID = strings.TrimSpace(sourceTaskUID)
+	// turn.Key.LeaseGeneration is the per-prompt Session mutation-lease
+	// generation and is fenced against the PromptAttempt's recorded lease.
+	// Task.Status.Execution.RuntimeSessionGeneration is the RuntimeSession
+	// incarnation generation — a different counter that only coincides with
+	// the lease generation for a session's first prompt — so the turn binds to
+	// the Task through the session UID, never through that generation.
 	if turn.Key.TaskUID != sourceTaskUID || turn.Key.Attempt != attempt.Key.Attempt ||
 		turn.Key.PromptID != attempt.Key.PromptID || turn.PromptAttemptID != attempt.ID ||
 		turn.Key.SessionUID != attempt.SessionUID || turn.Key.LeaseGeneration != attempt.SessionLeaseGeneration ||
-		turn.Key.SessionUID != task.Status.Execution.RuntimeSessionUID ||
-		turn.Key.LeaseGeneration != task.Status.Execution.RuntimeSessionGeneration {
+		turn.Key.SessionUID != task.Status.Execution.RuntimeSessionUID {
 		return conflict("finalized SessionTurn does not match its Task and PromptAttempt")
 	}
 	wantTerminalKind := store.SessionTurnOutcomeMarker
@@ -253,7 +264,7 @@ func terminalPhase(state corev1alpha1.TaskExecutionState, delivery store.PromptD
 	return corev1alpha1.TaskPhaseFailed
 }
 
-func equalDeliveryEvidence(left, right *corev1alpha1.TaskDeliveryStatus) bool {
+func equalDeliveryEvidence(task *corev1alpha1.Task, left, right *corev1alpha1.TaskDeliveryStatus) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}
@@ -262,6 +273,17 @@ func equalDeliveryEvidence(left, right *corev1alpha1.TaskDeliveryStatus) bool {
 	leftCopy.State, rightCopy.State = "", ""
 	leftCopy.Outcome, rightCopy.Outcome = "", ""
 	leftCopy.LastTransitionTime, rightCopy.LastTransitionTime = nil, nil
+	// The projector strips the protocol-only no-workspace revision before the
+	// schema-validated Task status while the immutable payload keeps it, so
+	// evidence is compared through that same normalization.
+	if task != nil && task.Spec.Workspace == nil {
+		if leftCopy.StartingSHA == NoWorkspaceRevision {
+			leftCopy.StartingSHA = ""
+		}
+		if rightCopy.StartingSHA == NoWorkspaceRevision {
+			rightCopy.StartingSHA = ""
+		}
+	}
 	return reflect.DeepEqual(leftCopy, rightCopy)
 }
 
@@ -279,8 +301,12 @@ func validateRuntimeIdentity(projected, task corev1alpha1.TaskExecutionStatus, a
 	if attempt.RuntimeInstanceID != "" && projected.RuntimeInstanceID != attempt.RuntimeInstanceID {
 		return conflict("restored terminal projection runtime instance does not match its source attempt")
 	}
-	if attempt.SessionUID != "" && (projected.RuntimeSessionUID != attempt.SessionUID ||
-		projected.RuntimeSessionGeneration != attempt.SessionLeaseGeneration) {
+	// The projection records the RuntimeSession incarnation generation while
+	// the attempt records the per-prompt Session mutation-lease generation;
+	// they only coincide for a session's first prompt, so the attempt binding
+	// is fenced by session UID here and by lease generation on the finalized
+	// SessionTurn.
+	if attempt.SessionUID != "" && projected.RuntimeSessionUID != attempt.SessionUID {
 		return conflict("restored terminal projection runtime Session does not match its source attempt")
 	}
 	return nil

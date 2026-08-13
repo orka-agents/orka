@@ -120,6 +120,46 @@ func TestCodexProviderSessionProjection(t *testing.T) {
 	}
 }
 
+func TestCodexProviderSessionProjectionReadOnlySurface(t *testing.T) {
+	paths := acp.SessionPaths{Home: "/sessions/private/home"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
+	codex, err := providerProfile(providerKindCodex, "gpt-test", harnessv2.WorkspaceIntentRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	surface := []string{providerToolGlob, providerToolGrep, providerToolRead}
+	request := testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "", surface, nil, false)
+	projection, err := codex.ProjectSession(request, paths, proxy)
+	if err != nil {
+		t.Fatalf("read-only codex projection error = %v", err)
+	}
+	environment, err := codex.EnvironmentForSession(request, paths, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maps.Copy(environment, projection.Environment)
+	// Read-only sessions keep the orka-external agent mode: Codex's own
+	// sandbox needs unprivileged user namespaces the runtime Pod forbids, so
+	// the RuntimeSession boundary enforces the read-only surface instead.
+	if environment["INITIAL_AGENT_MODE"] != codexAgentModeOrkaExternal {
+		t.Fatalf("INITIAL_AGENT_MODE = %q, want orka-external", environment["INITIAL_AGENT_MODE"])
+	}
+	if !strings.Contains(environment["CODEX_CONFIG"], proxy.BaseURL) || environment["CODEX_API_KEY"] != proxy.Credential {
+		t.Fatalf("unexpected Codex environment: %#v", environment)
+	}
+
+	rejected := testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "", []string{providerToolGlob, providerToolRead, providerToolWrite}, nil, false)
+	if _, err := codex.ProjectSession(rejected, paths, proxy); err == nil {
+		t.Fatal("restricted codex projection with Write was accepted")
+	}
+
+	writeIntent := testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "", surface, nil, false)
+	writeIntent.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+	if _, err := codex.ProjectSession(writeIntent, paths, proxy); err == nil {
+		t.Fatal("write-intent restricted codex projection was accepted")
+	}
+}
+
 func TestClaudeProviderSessionProjection(t *testing.T) {
 	paths := acp.SessionPaths{Home: "/sessions/private/home"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
@@ -318,7 +358,7 @@ func TestCodexProviderProfileUsesExternalRuntimeSandbox(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := environment["INITIAL_AGENT_MODE"]; got != "orka-external" {
+			if got := environment["INITIAL_AGENT_MODE"]; got != codexAgentModeOrkaExternal {
 				t.Fatalf("INITIAL_AGENT_MODE = %q, want orka-external", got)
 			}
 		})

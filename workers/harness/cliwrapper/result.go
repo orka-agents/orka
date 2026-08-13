@@ -22,7 +22,12 @@ const wrapperSafeCommandPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 
 const turnMetadataSkillsFiles = "skillsFiles"
 
-const wrapperGitPostTurnTimeout = 30 * time.Second
+// wrapperGitPostTurnTimeout bounds each post-turn git finalization phase
+// (ShouldFinalizeWorkDir, FinalizeTurnResult, CleanFinalizedWorkDir) so a hung
+// git process cannot wedge the turn. It is applied per phase, never shared
+// across phases, and must stay generous enough for `git add -A` plus a cached
+// binary diff on multi-gigabyte working trees.
+const wrapperGitPostTurnTimeout = 5 * time.Minute
 
 var wrapperGitBinary = resolveSafeExecutable("git")
 

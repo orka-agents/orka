@@ -40,54 +40,67 @@ func Resolve(linkPath, target string, maxPathBytes, maxTargetBytes int) (string,
 // path set. It rejects cycles and any non-directory archive entry nested below
 // a symlink path, preventing extraction through a link.
 func ValidateGraph(paths map[string]struct{}, links map[string]string, maxPathBytes, maxTargetBytes int) error {
+	resolutions := make(map[string]string, len(links))
 	for linkPath, target := range links {
 		if _, ok := paths[linkPath]; !ok {
 			return fmt.Errorf("symlink %q is absent from the path inventory", linkPath)
 		}
-		if _, err := Resolve(linkPath, target, maxPathBytes, maxTargetBytes); err != nil {
-			return err
-		}
-		prefix := linkPath + "/"
-		for entryPath := range paths {
-			if strings.HasPrefix(entryPath, prefix) {
-				return fmt.Errorf("archive entry %q is nested below symlink %q", entryPath, linkPath)
-			}
-		}
-	}
-	for linkPath, target := range links {
 		resolved, err := Resolve(linkPath, target, maxPathBytes, maxTargetBytes)
 		if err != nil {
 			return err
 		}
-		if err := resolveGraph(linkPath, resolved, links, maxPathBytes, maxTargetBytes, map[string]struct{}{linkPath: {}}); err != nil {
+		resolutions[linkPath] = resolved
+	}
+	if len(links) > 0 {
+		// An entry is nested below a link exactly when the bytes before one
+		// of its "/" separators equal a link path, so walking each entry's
+		// ancestors costs O(paths × depth) instead of O(links × paths).
+		for entryPath := range paths {
+			for index := range len(entryPath) {
+				if entryPath[index] != '/' {
+					continue
+				}
+				if _, ok := links[entryPath[:index]]; ok {
+					return fmt.Errorf("archive entry %q is nested below symlink %q", entryPath, entryPath[:index])
+				}
+			}
+		}
+	}
+	for linkPath, resolved := range resolutions {
+		if err := resolveGraph(linkPath, resolved, resolutions, maxPathBytes, map[string]struct{}{linkPath: {}}); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func resolveGraph(start, value string, links map[string]string, maxPathBytes, maxTargetBytes int, visiting map[string]struct{}) error {
-	prefix, remainder, found := firstLinkPrefix(value, links)
+// maxSymlinkChainDepth mirrors the Linux SYMLOOP_MAX resolution bound: chains
+// nested deeper than this can never resolve at use time, and the cap keeps
+// graph validation linear in the number of links instead of quadratic.
+const maxSymlinkChainDepth = 40
+
+func resolveGraph(start, value string, resolutions map[string]string, maxPathBytes int, visiting map[string]struct{}) error {
+	prefix, remainder, found := firstLinkPrefix(value, resolutions)
 	if !found {
 		return nil
 	}
 	if _, cycle := visiting[prefix]; cycle {
 		return fmt.Errorf("symlink %q participates in a cycle", start)
 	}
+	if len(visiting) >= maxSymlinkChainDepth {
+		return fmt.Errorf("symlink %q chain exceeds the maximum resolution depth", start)
+	}
 	visiting[prefix] = struct{}{}
 	defer delete(visiting, prefix)
 
-	resolved, err := Resolve(prefix, links[prefix], maxPathBytes, maxTargetBytes)
-	if err != nil {
-		return err
-	}
+	resolved := resolutions[prefix]
 	if remainder != "" {
 		resolved = path.Clean(path.Join(resolved, remainder))
 		if err := validatePath(resolved, maxPathBytes); err != nil {
 			return fmt.Errorf("symlink %q chain is unsafe: %w", start, err)
 		}
 	}
-	return resolveGraph(start, resolved, links, maxPathBytes, maxTargetBytes, visiting)
+	return resolveGraph(start, resolved, resolutions, maxPathBytes, visiting)
 }
 
 func firstLinkPrefix(value string, links map[string]string) (string, string, bool) {

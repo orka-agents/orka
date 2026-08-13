@@ -2765,10 +2765,7 @@ func validSHA256Digest(value string) bool {
 
 func sanitizeRuntimePoolMessage(message string) string {
 	message = events.RedactExecutionEventText(strings.TrimSpace(message))
-	if len(message) > 1024 {
-		message = message[:1024]
-	}
-	return message
+	return truncateUTF8(strings.ToValidUTF8(message, "�"), 1024)
 }
 
 func sanitizeRuntimePoolReason(reason string) string {

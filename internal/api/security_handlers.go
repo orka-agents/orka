@@ -292,7 +292,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 		ScannerPolicyVersion: security.ScannerPolicyVersion,
 		PolicyDigest:         policy.Digest,
 		IdempotencyKey:       idempotencyKey,
-		StartedAt:            time.Now(),
+		StartedAt:            time.Now().UTC(),
 	}
 	if err := h.securityStore.CreateScanRun(ctx, run); err != nil {
 		if errors.Is(err, store.ErrConflict) {

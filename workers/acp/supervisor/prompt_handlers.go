@@ -1174,7 +1174,7 @@ func workspaceDeltaPathAllowed(changedPath string, patterns []string) bool {
 		if strings.HasSuffix(patternValue, "/**") && strings.HasPrefix(changedPath, strings.TrimSuffix(patternValue, "**")) {
 			return true
 		}
-		if matched, err := path.Match(patternValue, changedPath); err == nil && matched {
+		if workspaceDeltaPatternMatches(patternValue, changedPath) {
 			return true
 		}
 		if strings.TrimSuffix(patternValue, "/") == strings.TrimSuffix(changedPath, "/") {
@@ -1182,6 +1182,51 @@ func workspaceDeltaPathAllowed(changedPath string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// workspaceDeltaPatternMatches applies gitignore-style glob semantics: a `**`
+// segment matches zero or more whole path segments, while every other segment
+// keeps path.Match single-segment semantics.
+func workspaceDeltaPatternMatches(patternValue, changedPath string) bool {
+	if !strings.Contains(patternValue, "**") {
+		matched, err := path.Match(patternValue, changedPath)
+		return err == nil && matched
+	}
+	return workspaceDeltaSegmentsMatch(strings.Split(patternValue, "/"), strings.Split(changedPath, "/"))
+}
+
+// workspaceDeltaSegmentsMatch uses the classic greedy wildcard algorithm at
+// segment granularity — backtracking only to the most recent `**` — so
+// matching stays O(pattern × path) even for agent-controlled paths against
+// patterns with many `**` segments.
+func workspaceDeltaSegmentsMatch(patternSegments, pathSegments []string) bool {
+	patternIndex, pathIndex := 0, 0
+	starPattern, starPath := -1, 0
+	for pathIndex < len(pathSegments) {
+		switch {
+		case patternIndex < len(patternSegments) && patternSegments[patternIndex] == "**":
+			starPattern, starPath = patternIndex, pathIndex
+			patternIndex++
+		case patternIndex < len(patternSegments) && workspaceDeltaSegmentMatches(patternSegments[patternIndex], pathSegments[pathIndex]):
+			patternIndex++
+			pathIndex++
+		case starPattern >= 0:
+			starPath++
+			pathIndex = starPath
+			patternIndex = starPattern + 1
+		default:
+			return false
+		}
+	}
+	for patternIndex < len(patternSegments) && patternSegments[patternIndex] == "**" {
+		patternIndex++
+	}
+	return patternIndex == len(patternSegments)
+}
+
+func workspaceDeltaSegmentMatches(pattern, segment string) bool {
+	matched, err := path.Match(pattern, segment)
+	return err == nil && matched
 }
 
 func workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, changedPath string) bool {

@@ -431,7 +431,7 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 		ScannerPolicyVersion: security.ScannerPolicyVersion,
 		PolicyDigest:         policy.Digest,
 		IdempotencyKey:       idempotencyKey,
-		StartedAt:            time.Now(),
+		StartedAt:            time.Now().UTC(),
 	}
 	if err := r.ensureScanRunRecord(ctx, run); err != nil {
 		if errors.Is(err, store.ErrConflict) {
@@ -440,7 +440,7 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 		return err
 	}
 	if err := r.Create(ctx, task); err != nil && !apierrors.IsAlreadyExists(err) {
-		now := time.Now()
+		now := time.Now().UTC()
 		run.Phase = scanRunPhaseFailed
 		run.CompletedAt = &now
 		run.ErrorMessage = "scan task creation failed"
@@ -491,7 +491,7 @@ func (r *RepositoryScanReconciler) hasActiveScanRun(
 		if run.Phase == scanRunPhasePending && time.Since(run.StartedAt) < scanRunAdmissionGrace {
 			return true, nil
 		}
-		now := time.Now()
+		now := time.Now().UTC()
 		run.Phase = scanRunPhaseFailed
 		run.CompletedAt = &now
 		run.ErrorMessage = "scan run has no active pipeline task for its idempotency key"
@@ -603,7 +603,7 @@ func (r *RepositoryScanReconciler) markScanRunTerminalError(ctx context.Context,
 	if r.SecurityStore == nil || run == nil || failure == nil {
 		return nil
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	message := failure.Error()
 	run.Phase = scanRunPhaseFailed
 	run.CompletedAt = &now
@@ -1179,7 +1179,7 @@ func (r *RepositoryScanReconciler) progressScanRunAfterMapper(ctx context.Contex
 	}
 
 	if run.Mode == scanModeIncremental && run.SliceCount > 0 && run.SkippedSliceCount == run.SliceCount {
-		now := time.Now()
+		now := time.Now().UTC()
 		run.Phase = scanRunPhaseSucceeded
 		run.CompletedAt = &now
 		run.ErrorMessage = ""
@@ -1195,7 +1195,7 @@ func (r *RepositoryScanReconciler) progressScanRunAfterMapper(ctx context.Contex
 		return true, nil
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	run.Phase = scanRunPhaseSucceeded
 	run.CompletedAt = &now
 	run.ErrorMessage = ""
@@ -1582,10 +1582,7 @@ func conciseTaskMessage(message, fallback string) string {
 		if line == "" {
 			continue
 		}
-		if len(line) > 512 {
-			line = line[:512]
-		}
-		return line
+		return truncateUTF8(line, 512)
 	}
 	return fallback
 }

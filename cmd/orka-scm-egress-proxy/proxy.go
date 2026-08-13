@@ -19,6 +19,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -171,18 +172,25 @@ func (p *scmEgressProxy) runTunnel(client, upstream net.Conn, buffered *bufio.Re
 	if err := buffered.Flush(); err != nil {
 		return
 	}
+	activity := newTunnelActivity()
 	clientBudget := p.config.MaxTunnelBytes
 	if buffered.Reader.Buffered() > 0 {
-		count, err := copyBuffered(upstream, buffered.Reader, clientBudget, p.config.IdleTimeout)
+		count, err := copyBuffered(upstream, buffered.Reader, clientBudget, p.config.IdleTimeout, activity)
 		if err != nil {
 			return
 		}
 		clientBudget -= count
 	}
-	p.copyTunnel(client, upstream, clientBudget)
+	p.copyTunnel(client, upstream, clientBudget, activity)
 }
 
-func copyBuffered(destination net.Conn, reader *bufio.Reader, limit int64, idleTimeout time.Duration) (int64, error) {
+func copyBuffered(
+	destination net.Conn,
+	reader *bufio.Reader,
+	limit int64,
+	idleTimeout time.Duration,
+	activity *tunnelActivity,
+) (int64, error) {
 	buffered := reader.Buffered()
 	if int64(buffered) > limit {
 		return 0, errTunnelLimit
@@ -191,32 +199,51 @@ func copyBuffered(destination net.Conn, reader *bufio.Reader, limit int64, idleT
 	if _, err := io.ReadFull(reader, data); err != nil {
 		return 0, err
 	}
-	deadline := &deadlineConn{Conn: destination, idleTimeout: idleTimeout}
+	deadline := &deadlineConn{Conn: destination, idleTimeout: idleTimeout, activity: activity}
 	written, err := io.CopyBuffer(deadline, bytes.NewReader(data), make([]byte, 32<<10))
 	return written, err
 }
 
-func (p *scmEgressProxy) copyTunnel(client, upstream net.Conn, clientBudget int64) {
+func (p *scmEgressProxy) copyTunnel(client, upstream net.Conn, clientBudget int64, activity *tunnelActivity) {
 	results := make(chan error, 2)
 	go func() {
-		results <- boundedTunnelCopy(
-			&deadlineConn{Conn: upstream, idleTimeout: p.config.IdleTimeout},
-			&deadlineConn{Conn: client, idleTimeout: p.config.IdleTimeout},
+		err := boundedTunnelCopy(
+			&deadlineConn{Conn: upstream, idleTimeout: p.config.IdleTimeout, activity: activity},
+			&deadlineConn{Conn: client, idleTimeout: p.config.IdleTimeout, activity: activity},
 			clientBudget,
 		)
+		if err == nil {
+			// The client finished sending cleanly; propagate the half-close so
+			// the upstream response direction can keep streaming.
+			closeWriteSide(upstream)
+		}
+		results <- err
 	}()
 	go func() {
-		results <- boundedTunnelCopy(
-			&deadlineConn{Conn: client, idleTimeout: p.config.IdleTimeout},
-			&deadlineConn{Conn: upstream, idleTimeout: p.config.IdleTimeout},
+		err := boundedTunnelCopy(
+			&deadlineConn{Conn: client, idleTimeout: p.config.IdleTimeout, activity: activity},
+			&deadlineConn{Conn: upstream, idleTimeout: p.config.IdleTimeout, activity: activity},
 			p.config.MaxTunnelBytes,
 		)
+		if err == nil {
+			closeWriteSide(client)
+		}
+		results <- err
 	}()
 	timer := time.NewTimer(p.config.TunnelTimeout)
 	defer timer.Stop()
-	select {
-	case <-results:
-	case <-timer.C:
+	// A clean EOF in one direction must not tear down an active transfer in
+	// the other, so wait for both directions unless one fails or the overall
+	// tunnel budget expires.
+	for range 2 {
+		select {
+		case err := <-results:
+			if err != nil {
+				return
+			}
+		case <-timer.C:
+			return
+		}
 	}
 }
 
@@ -228,23 +255,80 @@ func boundedTunnelCopy(destination io.Writer, source io.Reader, limit int64) err
 	return err
 }
 
+// tunnelActivity tracks the last byte movement across both tunnel directions
+// so idle enforcement applies to the tunnel as a whole: a quiet request
+// direction must not time out an active response direction.
+type tunnelActivity struct {
+	lastNanos atomic.Int64
+}
+
+func newTunnelActivity() *tunnelActivity {
+	activity := &tunnelActivity{}
+	activity.touch()
+	return activity
+}
+
+func (a *tunnelActivity) touch() {
+	a.lastNanos.Store(time.Now().UnixNano())
+}
+
+func (a *tunnelActivity) idleFor(idle time.Duration) bool {
+	return time.Since(time.Unix(0, a.lastNanos.Load())) >= idle
+}
+
+type writeCloser interface {
+	CloseWrite() error
+}
+
+func closeWriteSide(conn net.Conn) {
+	if half, ok := conn.(writeCloser); ok {
+		_ = half.CloseWrite()
+	}
+}
+
 type deadlineConn struct {
 	net.Conn
 	idleTimeout time.Duration
+	activity    *tunnelActivity
 }
 
 func (c *deadlineConn) Read(value []byte) (int, error) {
-	if err := c.SetReadDeadline(time.Now().Add(c.idleTimeout)); err != nil {
-		return 0, err
+	for {
+		if err := c.SetReadDeadline(time.Now().Add(c.idleTimeout)); err != nil {
+			return 0, err
+		}
+		read, err := c.Conn.Read(value)
+		if read > 0 {
+			c.activity.touch()
+		}
+		if read == 0 && isTimeoutError(err) && !c.activity.idleFor(c.idleTimeout) {
+			continue
+		}
+		return read, err
 	}
-	return c.Conn.Read(value)
 }
 
 func (c *deadlineConn) Write(value []byte) (int, error) {
-	if err := c.SetWriteDeadline(time.Now().Add(c.idleTimeout)); err != nil {
-		return 0, err
+	written := 0
+	for {
+		if err := c.SetWriteDeadline(time.Now().Add(c.idleTimeout)); err != nil {
+			return written, err
+		}
+		count, err := c.Conn.Write(value[written:])
+		written += count
+		if count > 0 {
+			c.activity.touch()
+		}
+		if written < len(value) && isTimeoutError(err) && !c.activity.idleFor(c.idleTimeout) {
+			continue
+		}
+		return written, err
 	}
-	return c.Conn.Write(value)
+}
+
+func isTimeoutError(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func (p *scmEgressProxy) handleForward(writer http.ResponseWriter, request *http.Request) {

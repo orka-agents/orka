@@ -283,6 +283,10 @@ func providerAdapterDigests(provider string) map[string]string {
 	}
 }
 
+// codexAgentModeOrkaExternal is the Orka-patched codex-acp agent mode whose
+// externalSandbox policy keeps the runtime Pod as the enforcement boundary.
+const codexAgentModeOrkaExternal = "orka-external"
+
 var providerNativeToolNames = []string{
 	providerToolBash, providerToolEdit, providerToolGlob, providerToolGrep,
 	providerToolRead, providerToolWebFetch, providerToolWebSearch, providerToolWrite,
@@ -367,7 +371,7 @@ func codexSessionProjection(
 	if err != nil {
 		return ProviderSessionProjection{}, err
 	}
-	if !policy.unrestricted {
+	if !policy.unrestricted && !codexReadOnlySessionPolicy(request, policy) {
 		return ProviderSessionProjection{}, fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	}
 	config := map[string]any{
@@ -387,7 +391,27 @@ func codexSessionProjection(
 	if len(encoded) > maxCodexConfigEnvironmentBytes {
 		return ProviderSessionProjection{}, fmt.Errorf("codex session configuration exceeds the safe environment limit")
 	}
+	// Read-only sessions keep the default orka-external agent mode: Codex's
+	// own sandbox needs unprivileged user namespaces that the runtime Pod
+	// forbids, so the RuntimeSession boundary enforces the surface instead —
+	// safe read commands execute, every elevation request is rejected
+	// unconditionally by the controller, file writes are mediated by the
+	// supervisor, and the read-intent workspace delta classification fails
+	// any turn that modifies the workspace.
 	return ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}, nil
+}
+
+// codexReadOnlySessionPolicy reports whether the session's restricted tool
+// policy is exactly the read-intent {Glob, Grep, Read} surface, which is the
+// only restricted shape the codex read-only agent mode enforces.
+func codexReadOnlySessionPolicy(request harnessv2.CreateRuntimeSessionRequest, policy providerNativePolicy) bool {
+	if request.Profile.WorkspaceIntent != harnessv2.WorkspaceIntentRead {
+		return false
+	}
+	if len(policy.allowed) != 3 {
+		return false
+	}
+	return policy.allows(providerToolGlob) && policy.allows(providerToolGrep) && policy.allows(providerToolRead)
 }
 
 func claudeSessionProjection(
@@ -532,7 +556,7 @@ func providerProfile(
 				// restricted Runtime Pod remains the enforcement boundary without asking
 				// the child to create nested Linux namespaces. Network remains restricted
 				// and on-request approvals remain active for explicit elevation requests.
-				mode := "orka-external"
+				mode := codexAgentModeOrkaExternal
 				config, err := json.Marshal(map[string]any{
 					"model": model, "openai_base_url": proxy.BaseURL, "check_for_update_on_startup": false,
 				})

@@ -363,9 +363,8 @@ func sanitizeOutboxError(err error) string {
 	if err == nil {
 		return ""
 	}
-	message := strings.TrimSpace(err.Error())
-	if len(message) > 1024 {
-		message = message[:1024]
-	}
-	return message
+	// The outbox store rejects invalid UTF-8, so repair invalid sequences and
+	// truncate on a rune boundary or the projection could never settle.
+	message := strings.ToValidUTF8(strings.TrimSpace(err.Error()), "�")
+	return truncateUTF8(message, 1024)
 }

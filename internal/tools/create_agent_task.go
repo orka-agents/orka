@@ -101,12 +101,10 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 
 	var agentRuntime *corev1alpha1.AgentRuntimeSpec
 
-	if maxTurns, ok := a["maxTurns"]; ok {
-		if agentRuntime == nil {
-			agentRuntime = &corev1alpha1.AgentRuntimeSpec{}
-		}
-		mt := int32(maxTurns.(float64))
-		agentRuntime.MaxTurns = &mt
+	if turns, errResult, ok := parseMaxTurnsArg(a); !ok {
+		return errResult, nil
+	} else if turns != nil {
+		agentRuntime = &corev1alpha1.AgentRuntimeSpec{MaxTurns: turns}
 	}
 
 	if ws, ok := a[workspaceField]; ok {
@@ -130,8 +128,12 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		wsCfg.PublicationGitRepo = chatGetStringArg(wsMap, "publicationGitRepo")
 		wsCfg.PushBranch = chatGetStringArg(wsMap, "pushBranch")
 		wsCfg.PRBaseBranch = chatGetStringArg(wsMap, "prBaseBranch")
-		wsCfg.CreatePR, _ = wsMap["createPR"].(bool)
-		if wsCfg.PublicationGitRepo != "" || wsCfg.PushBranch != "" || wsCfg.PRBaseBranch != "" || wsCfg.CreatePR {
+		createPR, errResult, ok := parseCreatePRArg(wsMap)
+		if !ok {
+			return errResult, nil
+		}
+		wsCfg.CreatePR = createPR
+		if workspaceRequestsPublication(wsCfg) {
 			wsCfg.Intent = corev1alpha1.WorkspaceIntentWrite
 		}
 		publicationCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationCredentialRef"))

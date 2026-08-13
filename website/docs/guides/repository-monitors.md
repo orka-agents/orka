@@ -37,7 +37,7 @@ The first implementation is intentionally narrow:
 - `spec.review.requireGreenCI` gates review selection until CI is green.
 - GitHub webhook-driven exact runs are opt-in with `spec.review.exactEventEnabled`.
 - Repair, maintainer command routing, issue action workflows, implementation budgets (`maxActive`, `maxAttemptsPerIssue`, `maxChangedFiles`, `allowedPaths`), and optional head-bound automerge are active monitor-owned workflows. Automerge remains disabled by default and requires explicit configuration plus a one-shot command.
-- Built-in reviewer Agents may use `runtime.type: claude`, `codex`, or `opencode`. They must omit `spec.secretRef`; provider credentials come from the controller-managed runtime proxy and never enter the Task spec.
+- Built-in reviewer Agents may use `runtime.type: claude`, `codex`, or `opencode`. Codex reviewers are confined by the RuntimeSession boundary: elevation requests are rejected by the controller, file writes are mediated by the supervisor, and the read-intent workspace delta classification fails any turn that modifies the workspace. Reviewer Agents must omit `spec.secretRef`; provider credentials come from the controller-managed runtime proxy and never enter the Task spec.
 
 ## CI Coverage
 

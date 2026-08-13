@@ -3336,12 +3336,15 @@ func validateReadOnlyBuiltInAgentRuntime(task *corev1alpha1.Task, runtimeType co
 		return nil
 	}
 	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCodex:
-		return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed")
 	case corev1alpha1.AgentRuntimeCopilot:
 		return fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
-
 	default:
+		// Codex is supported: read-only tasks run inside the RuntimeSession
+		// boundary with controller-rejected elevation requests,
+		// supervisor-mediated file writes, and read-intent workspace delta
+		// classification failing any modifying turn, with the same
+		// per-session loopback provider credential the other runtimes
+		// receive.
 		return nil
 	}
 }
