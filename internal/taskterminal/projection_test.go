@@ -92,6 +92,43 @@ func TestValidateFinalizedSessionProjectionAcceptsContinuationLeaseGeneration(t 
 	}
 }
 
+func TestValidateFinalizedSessionProjectionAcceptsStrippedNoWorkspaceRevision(t *testing.T) {
+	// A Task without a repository workspace freezes the protocol-only "empty"
+	// revision in its projected delivery evidence, while the outbox projector
+	// strips that value before the schema-validated Task status. Reclamation
+	// must compare through the same normalization, or every no-workspace Task
+	// with delivery evidence becomes undeletable.
+	task, sourceUID, attempt, projection := restoredProjectionFixture()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-transcript", Create: true}
+	attempt.DeliveryState = store.PromptDeliveryReadValidated
+	projection.Delivery = &corev1alpha1.TaskDeliveryStatus{
+		State:       corev1alpha1.TaskDeliveryStateReadValidated,
+		Outcome:     corev1alpha1.TaskDeliveryOutcomeReadValidated,
+		StartingSHA: NoWorkspaceRevision,
+	}
+	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+		State:   corev1alpha1.TaskDeliveryStateReadValidated,
+		Outcome: corev1alpha1.TaskDeliveryOutcomeReadValidated,
+	}
+	payload := marshalProjection(t, projection)
+	turn := finalizedSessionProjectionTurn(t, payload, attempt)
+
+	if _, err := ValidateFinalizedSessionProjection(payload, task, sourceUID, attempt, turn); err != nil {
+		t.Fatalf("ValidateFinalizedSessionProjection(no-workspace revision) error = %v", err)
+	}
+}
+
+func TestValidateRestoredProjectionRejectsNoWorkspaceRevisionForWorkspaceTask(t *testing.T) {
+	task, sourceUID, attempt, projection := restoredProjectionFixture()
+	task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{}
+	projection.Delivery.StartingSHA = NoWorkspaceRevision
+	task.Status.Delivery.StartingSHA = ""
+
+	if _, err := ValidateRestoredProjection(marshalProjection(t, projection), task, sourceUID, attempt); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("ValidateRestoredProjection(workspace task with protocol revision) error = %v, want ErrConflict", err)
+	}
+}
+
 func TestValidateFinalizedSessionProjectionRejectsLeaseGenerationDrift(t *testing.T) {
 	task, sourceUID, attempt, projection := restoredProjectionFixture()
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-transcript", Create: false}

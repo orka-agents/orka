@@ -18,11 +18,12 @@ import (
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskterminal"
 )
 
 const (
 	acpPublicationGeneration int64 = 1
-	acpNoWorkspaceRevision         = "empty"
+	acpNoWorkspaceRevision         = taskterminal.NoWorkspaceRevision
 )
 
 type acpPublicationResult struct {

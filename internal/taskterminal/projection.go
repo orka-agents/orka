@@ -17,6 +17,12 @@ const (
 	// ProjectionKind is the durable outbox projection for terminal Task status.
 	ProjectionKind = "TaskTerminalStatus"
 
+	// NoWorkspaceRevision is the protocol-only revision harness v2 records for
+	// Tasks without a repository workspace. It is not a Git object ID: the
+	// outbox projector strips it from delivery evidence before the
+	// schema-validated Task status, while immutable projection payloads keep it.
+	NoWorkspaceRevision = "empty"
+
 	restoreIdentityChangedReason = corev1alpha1.TaskExecutionReason("RestoreIdentityChanged")
 )
 
@@ -144,7 +150,7 @@ func validateProjection(
 	if projection.Phase != terminalPhase(wantState, attempt.DeliveryState) {
 		return nil, conflict("restored terminal projection phase does not match its terminal outcome")
 	}
-	if task.Status.Delivery == nil || !equalDeliveryEvidence(projection.Delivery, task.Status.Delivery) {
+	if task.Status.Delivery == nil || !equalDeliveryEvidence(task, projection.Delivery, task.Status.Delivery) {
 		return nil, conflict("restored terminal projection delivery evidence does not match its Task")
 	}
 	if err := validateRuntimeIdentity(projection.Execution, *task.Status.Execution, *attempt); err != nil {
@@ -258,7 +264,7 @@ func terminalPhase(state corev1alpha1.TaskExecutionState, delivery store.PromptD
 	return corev1alpha1.TaskPhaseFailed
 }
 
-func equalDeliveryEvidence(left, right *corev1alpha1.TaskDeliveryStatus) bool {
+func equalDeliveryEvidence(task *corev1alpha1.Task, left, right *corev1alpha1.TaskDeliveryStatus) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}
@@ -267,6 +273,17 @@ func equalDeliveryEvidence(left, right *corev1alpha1.TaskDeliveryStatus) bool {
 	leftCopy.State, rightCopy.State = "", ""
 	leftCopy.Outcome, rightCopy.Outcome = "", ""
 	leftCopy.LastTransitionTime, rightCopy.LastTransitionTime = nil, nil
+	// The projector strips the protocol-only no-workspace revision before the
+	// schema-validated Task status while the immutable payload keeps it, so
+	// evidence is compared through that same normalization.
+	if task != nil && task.Spec.Workspace == nil {
+		if leftCopy.StartingSHA == NoWorkspaceRevision {
+			leftCopy.StartingSHA = ""
+		}
+		if rightCopy.StartingSHA == NoWorkspaceRevision {
+			rightCopy.StartingSHA = ""
+		}
+	}
 	return reflect.DeepEqual(leftCopy, rightCopy)
 }
 
