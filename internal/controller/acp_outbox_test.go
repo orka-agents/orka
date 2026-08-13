@@ -328,6 +328,7 @@ func TestACPOutboxProjectorDeliveryFailureClassification(t *testing.T) {
 		name      string
 		payload   []byte
 		kubeError error
+		objects   []client.Object
 		wantState store.OutboxProjectionState
 	}{
 		{
@@ -342,10 +343,24 @@ func TestACPOutboxProjectorDeliveryFailureClassification(t *testing.T) {
 			name: "permanent-payload-failure-dead-letters", payload: corruptPayload,
 			wantState: store.OutboxProjectionDeadLetter,
 		},
+		{
+			// A Task name recreated with a different UID (and no restored
+			// source identity) can never satisfy this projection: after
+			// MaxAttempts it must dead-letter rather than being claimed and
+			// retried forever.
+			name: "identity-mismatch-dead-letters", payload: validPayload,
+			objects: []client.Object{&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default", Name: "task", UID: "recreated-uid",
+			}}},
+			wantState: store.OutboxProjectionDeadLetter,
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			builder := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{})
+			if len(testCase.objects) > 0 {
+				builder = builder.WithObjects(testCase.objects...)
+			}
 			if testCase.kubeError != nil {
 				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
 					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {

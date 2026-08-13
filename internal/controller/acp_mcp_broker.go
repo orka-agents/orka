@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -91,6 +93,15 @@ type RegistryACPMCPToolExecutor struct {
 	OutboundAccess      outboundaccess.Resolver
 	TransactionExchange *workerexecutor.TransactionExchangeConfig
 	ContextFactory      func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+
+	// EnforceTransactionCredentialAuth mirrors the controller-wide context-token
+	// authorization enforcement mode. When set, custom-Tool executions bind the
+	// authenticated Task's transaction and credential authority before running.
+	EnforceTransactionCredentialAuth bool
+	// TransactionCredentialReadScopes lists the transaction scopes that
+	// authorize Secret-backed outbound credentials, matching the scopes the
+	// controller stamps into worker Jobs.
+	TransactionCredentialReadScopes []string
 }
 
 func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
@@ -145,6 +156,9 @@ func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
 		}
 		executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, e.KubeClient, e.HTTPClient, e.OutboundAccess)
 		executor.SetTransactionExchangeConfig(e.TransactionExchange)
+		if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
+			return nil, bindErr
+		}
 		execCtx := workerexecutor.WithToolCallID(ctx, request.Call.CallID)
 		execCtx = workerexecutor.WithToolIdempotencyKey(execCtx, string(request.Metadata.OperationID))
 		result, err = executor.Execute(execCtx, tool, request.Call.Arguments)
@@ -168,6 +182,100 @@ func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
 	return raw, nil
 }
 
+// bindTaskTransactionAuthority initializes the per-request custom-Tool
+// executor with the authenticated Task's transaction and credential authority,
+// mirroring the worker Job environment the controller stamps for per-Task
+// execution (setTransactionCredentialAuthorizationEnv/addTransactionEnvVars
+// plus the owner-referenced transaction-token Secret mount). It is a no-op
+// when context-token credential authorization is not enforced, and it fails
+// closed when enforcement is on and the Task's authority cannot be resolved.
+func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
+	ctx context.Context,
+	request harnessv2.MCPBrokerCallRequest,
+	executor *workerexecutor.ToolExecutor,
+) error {
+	if !e.EnforceTransactionCredentialAuth {
+		return nil
+	}
+	authenticated, ok := ACPMCPAuthenticatedTaskFromContext(ctx)
+	if !ok || authenticated.Namespace != request.Namespace || authenticated.UID != string(request.Metadata.TaskUID) {
+		return errors.New("authenticated ACP MCP task authority is unavailable")
+	}
+	if e.Reader == nil {
+		return errors.New("ACP MCP task authority requires a Kubernetes reader")
+	}
+	task := &corev1alpha1.Task{}
+	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: authenticated.Namespace, Name: authenticated.Name}, task); err != nil {
+		return fmt.Errorf("load authenticated ACP MCP task authority: %w", err)
+	}
+	if string(task.UID) != authenticated.UID {
+		return errors.New("authenticated ACP MCP task identity changed")
+	}
+	transaction := task.Spec.Transaction
+	if transaction == nil {
+		// Worker parity: Jobs stamp TransactionCredentialAuthorizationEnforced
+		// as (tx != nil && enforced) and mount no transaction token, so a Task
+		// without transaction context has no credential authority to enforce
+		// and no task-scoped token. Empty authority still disables any
+		// controller-process token-file fallback.
+		executor.SetTransactionCredentialAuthority(false, false, "")
+		executor.SetTransactionAuthority("", nil)
+		return nil
+	}
+	scopes := append([]string(nil), transaction.Scopes...)
+	if len(scopes) == 0 {
+		scopes = strings.Fields(transaction.Scope)
+	}
+	required := make([]string, 0, len(e.TransactionCredentialReadScopes))
+	for _, scope := range e.TransactionCredentialReadScopes {
+		if scope = strings.TrimSpace(scope); scope != "" {
+			required = append(required, scope)
+		}
+	}
+	if len(required) == 0 {
+		required = []string{outboundaccess.DefaultCredentialReadScope}
+	}
+	scopeAllowed := slices.ContainsFunc(scopes, func(scope string) bool {
+		return slices.Contains(required, scope)
+	})
+	executor.SetTransactionCredentialAuthority(true, scopeAllowed, strings.TrimSpace(transaction.Context["secret"]))
+	token, err := e.readTaskOwnedTransactionToken(ctx, task)
+	if err != nil {
+		return err
+	}
+	executor.SetTransactionAuthority(token, scopes)
+	return nil
+}
+
+// readTaskOwnedTransactionToken loads the Task's delegated transaction token
+// from its owner-referenced Secret. The raw token is handed only to the
+// per-request executor and is never logged, persisted, or reused across Tasks.
+func (e RegistryACPMCPToolExecutor) readTaskOwnedTransactionToken(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (string, error) {
+	secretName := strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret])
+	if secretName == "" {
+		return "", nil
+	}
+	secret := &corev1.Secret{}
+	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: secretName}, secret); err != nil {
+		return "", fmt.Errorf("read ACP MCP task transaction-token Secret: %w", err)
+	}
+	owned := slices.ContainsFunc(secret.OwnerReferences, func(owner metav1.OwnerReference) bool {
+		return owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Kind == taskResourceKind &&
+			owner.Name == task.Name && owner.UID == task.UID
+	})
+	if !owned {
+		return "", errors.New("ACP MCP task transaction-token Secret is not owned by the authenticated Task")
+	}
+	token := strings.TrimSpace(string(secret.Data["token"]))
+	if token == "" {
+		return "", errors.New("ACP MCP task transaction-token Secret token is missing or empty")
+	}
+	return token, nil
+}
+
 type ACPMCPBrokerDependencies struct {
 	Reader              client.Reader
 	Epochs              *ControllerEpochManager
@@ -178,6 +286,12 @@ type ACPMCPBrokerDependencies struct {
 	OutboundAccess      outboundaccess.Resolver
 	TransactionExchange *workerexecutor.TransactionExchangeConfig
 	ContextFactory      func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+
+	// EnforceTransactionCredentialAuth and TransactionCredentialReadScopes bind
+	// brokered custom-Tool executions to the authenticated Task's transaction
+	// authority; see RegistryACPMCPToolExecutor.
+	EnforceTransactionCredentialAuth bool
+	TransactionCredentialReadScopes  []string
 }
 
 func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBroker, error) {
@@ -191,6 +305,11 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 			Registry: dependencies.Registry, Reader: dependencies.Reader, KubeClient: dependencies.KubeClient,
 			HTTPClient: dependencies.HTTPClient, OutboundAccess: dependencies.OutboundAccess,
 			TransactionExchange: dependencies.TransactionExchange, ContextFactory: dependencies.ContextFactory,
+			EnforceTransactionCredentialAuth: dependencies.EnforceTransactionCredentialAuth,
+			TransactionCredentialReadScopes: append(
+				[]string(nil),
+				dependencies.TransactionCredentialReadScopes...,
+			),
 		},
 		Effects: dependencies.ControlStore,
 	}

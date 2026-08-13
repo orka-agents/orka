@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -85,6 +86,141 @@ func TestRegistryACPMCPToolExecutorReusesCustomToolExecutorWithIdempotency(t *te
 		!strings.Contains(err.Error(), "changed after prompt authorization") {
 		t.Fatalf("descriptor drift error = %v", err)
 	}
+}
+
+func TestRegistryACPMCPToolExecutorBindsTaskTransactionAuthority(t *testing.T) {
+	request, _ := testMCPBrokerRequest(t, harnessv2.MCPToolEffectConsequential)
+	request.Call.ToolName = "custom_tool"
+	request.Call.Arguments = json.RawMessage(`{"value":"x"}`)
+	request.Metadata.OperationID = "mcp-custom-operation"
+	var lastTxnToken atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastTxnToken.Store(r.Header.Get("Txn-Token"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "custom_tool", Namespace: request.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "custom write", BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassWrite,
+			Parameters: &apiextensionsJSONForMCPTest,
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL: upstream.URL, Method: http.MethodPost,
+				AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "tool-credential", Key: "token"},
+			},
+		},
+	}
+	descriptor, err := customACPMCPToolDescriptor(tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	authenticated := ACPMCPAuthenticatedTask{Name: "task", Namespace: request.Namespace, UID: string(request.Metadata.TaskUID)}
+	newTask := func(scopes []string, constraint string, tokenSecret string) *corev1alpha1.Task {
+		task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+			Name: authenticated.Name, Namespace: authenticated.Namespace, UID: "task-uid",
+		}}
+		if tokenSecret != "" {
+			task.Annotations = map[string]string{"orka.ai/transaction-token-secret": tokenSecret}
+		}
+		task.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-1", Scopes: scopes}
+		if constraint != "" {
+			task.Spec.Transaction.Context = map[string]string{"secret": constraint}
+		}
+		return task
+	}
+	toolCredential := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "tool-credential", Namespace: request.Namespace},
+		Data:       map[string][]byte{"token": []byte("tool-token")},
+	}
+	newExecutor := func(enforce bool, objects ...client.Object) RegistryACPMCPToolExecutor {
+		objects = append(objects, tool.DeepCopy())
+		return RegistryACPMCPToolExecutor{
+			Reader:     fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
+			KubeClient: k8sfake.NewSimpleClientset(toolCredential.DeepCopy()), HTTPClient: upstream.Client(),
+			EnforceTransactionCredentialAuth: enforce,
+		}
+	}
+	authorizedTask := newTask([]string{"orka:secrets:credentials:read"}, "tool-credential", "")
+	ctx := withACPMCPAuthenticatedTask(context.Background(), authenticated)
+
+	t.Run("enforcement off preserves current behavior without task authority", func(t *testing.T) {
+		executor := newExecutor(false)
+		if _, err := executor.ExecuteACPMCPTool(context.Background(), request, descriptor); err != nil {
+			t.Fatalf("enforcement-off execution error = %v", err)
+		}
+	})
+	t.Run("missing authenticated task fails closed under enforcement", func(t *testing.T) {
+		executor := newExecutor(true, authorizedTask.DeepCopy())
+		if _, err := executor.ExecuteACPMCPTool(context.Background(), request, descriptor); err == nil ||
+			!strings.Contains(err.Error(), "task authority is unavailable") {
+			t.Fatalf("missing authenticated task error = %v", err)
+		}
+	})
+	t.Run("missing task object fails closed under enforcement", func(t *testing.T) {
+		executor := newExecutor(true)
+		if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err == nil ||
+			!strings.Contains(err.Error(), "load authenticated ACP MCP task authority") {
+			t.Fatalf("missing task object error = %v", err)
+		}
+	})
+	t.Run("task without credential-read scope is refused", func(t *testing.T) {
+		executor := newExecutor(true, newTask([]string{"reports.read"}, "", ""))
+		if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err == nil ||
+			!strings.Contains(err.Error(), "not authorized by task transaction authority") {
+			t.Fatalf("unauthorized scope error = %v", err)
+		}
+	})
+	t.Run("task secret constraint must match the tool credential", func(t *testing.T) {
+		executor := newExecutor(true, newTask([]string{"orka:secrets:credentials:read"}, "other-credential", ""))
+		if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err == nil ||
+			!strings.Contains(err.Error(), "does not match task transaction authority") {
+			t.Fatalf("secret constraint error = %v", err)
+		}
+	})
+	t.Run("authorized task executes and attaches its owner-referenced token", func(t *testing.T) {
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "task-txn-token", Namespace: request.Namespace,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task",
+					Name: authenticated.Name, UID: "task-uid",
+				}},
+			},
+			Data: map[string][]byte{"token": []byte("task-scoped-token")},
+		}
+		executor := newExecutor(true,
+			newTask([]string{"orka:secrets:credentials:read"}, "tool-credential", tokenSecret.Name), tokenSecret)
+		result, err := executor.ExecuteACPMCPTool(ctx, request, descriptor)
+		if err != nil {
+			t.Fatalf("authorized execution error = %v", err)
+		}
+		if string(result) != `{"ok":true}` {
+			t.Fatalf("authorized result = %s", result)
+		}
+		if got, _ := lastTxnToken.Load().(string); got != "task-scoped-token" {
+			t.Fatalf("Txn-Token header = %q, want the task's owner-referenced token", got)
+		}
+	})
+	t.Run("token secret not owned by the task fails closed", func(t *testing.T) {
+		unowned := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "task-txn-token", Namespace: request.Namespace},
+			Data:       map[string][]byte{"token": []byte("task-scoped-token")},
+		}
+		executor := newExecutor(true,
+			newTask([]string{"orka:secrets:credentials:read"}, "tool-credential", unowned.Name), unowned)
+		if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err == nil ||
+			!strings.Contains(err.Error(), "not owned by the authenticated Task") {
+			t.Fatalf("unowned token secret error = %v", err)
+		}
+	})
 }
 
 func TestACPMCPBrokerConsequentialCallUsesDurableReplay(t *testing.T) {

@@ -304,7 +304,11 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
 			if binding == nil || string(binding.Task.UID) != payload.TaskUID || !acpTaskUsesRestoredSourceIdentity(task) ||
 				task.Status.Execution == nil || task.Status.Execution.Attempt != payload.Attempt {
-				return fmt.Errorf("task UID does not match outbox projection")
+				// Permanent so MaxAttempts applies: the bounded retries cover an
+				// in-progress restore settlement, while a Task name recreated
+				// with a different UID can never deliver and must not be
+				// claimed and retried forever.
+				return permanentOutboxDelivery(fmt.Errorf("task UID does not match outbox projection"))
 			}
 			// Clean-cluster restore settlement already patched the new Task
 			// incarnation directly. This projection remains immutable source
@@ -316,7 +320,10 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			binding := task.Status.AgentExecutionBinding
 			if binding == nil || binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 ||
 				payload.BindingDigest == "" || binding.BindingDigest != payload.BindingDigest {
-				return fmt.Errorf("harness v1 task binding does not match outbox projection")
+				// Permanent for the same reason as the UID mismatch above: an
+				// incompatible binding cannot become deliverable, so it must
+				// dead-letter after MaxAttempts instead of retrying forever.
+				return permanentOutboxDelivery(fmt.Errorf("harness v1 task binding does not match outbox projection"))
 			}
 			if task.Status.HarnessRuntime != nil && task.Status.HarnessRuntime.Attempt > payload.Attempt {
 				deliveredResourceVersion = task.ResourceVersion

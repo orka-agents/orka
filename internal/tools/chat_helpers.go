@@ -8,6 +8,7 @@ package tools
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -106,6 +107,9 @@ func chatParseBoolArg(value any) (bool, error) {
 func chatParseIntArg(value any) (int, error) {
 	switch v := value.(type) {
 	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) {
+			return 0, fmt.Errorf("value is not an integer")
+		}
 		return int(v), nil
 	case int:
 		return v, nil

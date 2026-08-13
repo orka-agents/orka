@@ -368,6 +368,11 @@ func TestCreateAgentTaskTool_Execute_RejectsInvalidCreatePRAndMaxTurns(t *testin
 			args: `{"prompt":"Fix","agentRef":"codex-agent","maxTurns":0}`,
 			want: "maxTurns must be between 1 and 1000",
 		},
+		{
+			name: "maxTurnsFractional",
+			args: `{"prompt":"Fix","agentRef":"codex-agent","maxTurns":1.9}`,
+			want: "maxTurns must be an integer",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
