@@ -64,17 +64,31 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 	stdout := newLimitedBuffer(r.StdoutLimitBytes)
 	stdoutFull := newLimitedBuffer(maxStoredResultBytes)
 	stderr := newLimitedBuffer(r.StderrLimitBytes)
-	stdoutPipe, err := cmd.StdoutPipe()
+	// Parent-owned pipes instead of cmd.StdoutPipe/StderrPipe: Wait closes the
+	// pipes it created as soon as the process exits, racing the copy goroutines
+	// and silently truncating child output. With os.Pipe the read ends stay
+	// open until the copies drain to EOF or waitForPipeCopies times out.
+	stdoutRead, stdoutWrite, err := os.Pipe()
 	if err != nil {
 		return CommandResult{}, fmt.Errorf("open stdout pipe: %w", err)
 	}
-	stderrPipe, err := cmd.StderrPipe()
+	stderrRead, stderrWrite, err := os.Pipe()
 	if err != nil {
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
 		return CommandResult{}, fmt.Errorf("open stderr pipe: %w", err)
 	}
+	closePipes := func(pipes ...*os.File) {
+		for _, pipe := range pipes {
+			_ = pipe.Close()
+		}
+	}
+	cmd.Stdout = stdoutWrite
+	cmd.Stderr = stderrWrite
 
 	started := time.Now().UTC()
 	if err := ctx.Err(); err != nil {
+		closePipes(stdoutRead, stdoutWrite, stderrRead, stderrWrite)
 		return CommandResult{
 			StartedAt:  started,
 			FinishedAt: time.Now().UTC(),
@@ -85,18 +99,22 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 		}, err
 	}
 	if err := cmd.Start(); err != nil {
+		closePipes(stdoutRead, stdoutWrite, stderrRead, stderrWrite)
 		return CommandResult{StartedAt: started, FinishedAt: time.Now().UTC(), ExitCode: -1, ResultFile: spec.ResultFile}, err
 	}
+	// The child holds duplicated write ends; the parent's copies must close so
+	// the readers reach EOF once the process (group) exits.
+	closePipes(stdoutWrite, stderrWrite)
 
 	var copyWG sync.WaitGroup
 	copyWG.Add(2)
 	go func() {
 		defer copyWG.Done()
-		_, _ = io.Copy(io.MultiWriter(stdout, stdoutFull), stdoutPipe)
+		_, _ = io.Copy(io.MultiWriter(stdout, stdoutFull), stdoutRead)
 	}()
 	go func() {
 		defer copyWG.Done()
-		_, _ = io.Copy(stderr, stderrPipe)
+		_, _ = io.Copy(stderr, stderrRead)
 	}()
 
 	waitCh := make(chan error, 1)
@@ -130,7 +148,7 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 			fmt.Errorf("%w: %w", errChildCredentialProcessCleanupUnproven, cleanupErr),
 		)
 	}
-	waitForPipeCopies(&copyWG, stdoutPipe, stderrPipe, 5*time.Second)
+	waitForPipeCopies(&copyWG, stdoutRead, stderrRead, 5*time.Second)
 
 	finished := time.Now().UTC()
 	exitCode := exitCodeFromError(waitErr)
