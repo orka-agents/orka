@@ -65,8 +65,15 @@ live_acp_kind_preflight() {
   [[ -x "${LIVE_ACP_KINDCTL_BIN}" ]] || live_acp_kind_die "kindctl is not executable: ${LIVE_ACP_KINDCTL_BIN}" || return 1
   [[ -x "${LIVE_ACP_VEKIL_DEPLOY_SCRIPT}" ]] || live_acp_kind_die "Vekil deploy script is not executable: ${LIVE_ACP_VEKIL_DEPLOY_SCRIPT}" || return 1
   [[ -x "${LIVE_ACP_VALIDATOR_SCRIPT}" ]] || live_acp_kind_die "live ACP validator is not executable: ${LIVE_ACP_VALIDATOR_SCRIPT}" || return 1
-  [[ "${LIVE_ACP_VEKIL_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]] || \
-    live_acp_kind_die "LIVE_ACP_VEKIL_IMAGE must be digest-pinned" || return 1
+  if [[ -n "${LIVE_ACP_VEKIL_LOCAL_IMAGE:-}" ]]; then
+    # A locally built Vekil is published through the run's own registry and
+    # digest-pinned there, so development builds stay immutable end to end.
+    docker image inspect "${LIVE_ACP_VEKIL_LOCAL_IMAGE}" >/dev/null 2>&1 || \
+      live_acp_kind_die "LIVE_ACP_VEKIL_LOCAL_IMAGE is not a local Docker image: ${LIVE_ACP_VEKIL_LOCAL_IMAGE}" || return 1
+  else
+    [[ "${LIVE_ACP_VEKIL_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]] || \
+      live_acp_kind_die "LIVE_ACP_VEKIL_IMAGE must be digest-pinned" || return 1
+  fi
   [[ -n "${COPILOT_GITHUB_TOKEN:-}" ]] || \
     live_acp_kind_die "COPILOT_GITHUB_TOKEN is required; this bootstrap is noninteractive and never starts device-code login" || return 1
   [[ "${ACP_E2E_OPENCODE_CONTEXT_WINDOW:-}" =~ ^[1-9][0-9]*$ ]] || \
@@ -97,13 +104,22 @@ live_acp_kind_create_cluster() {
   export LIVE_ACP_CONTEXT LIVE_ACP_KIND_CLUSTER LIVE_ACP_KUBECONFIG
 }
 
-live_acp_kind_build_and_publish_images() {
+live_acp_kind_start_registry() {
   # shellcheck source=scripts/lib/kind-local-registry.sh
   . "${LIVE_ACP_REPO_ROOT}/scripts/lib/kind-local-registry.sh"
 
   orka_kind_registry_start "${LIVE_ACP_KIND_CLUSTER}"
   LIVE_ACP_REGISTRY_STARTED=1
 
+  if [[ -n "${LIVE_ACP_VEKIL_LOCAL_IMAGE:-}" ]]; then
+    # Publish the development Vekil before the Vekil deploy step so the
+    # deployment references the digest-pinned copy in the run's registry.
+    LIVE_ACP_VEKIL_IMAGE="$(orka_kind_registry_push "${LIVE_ACP_VEKIL_LOCAL_IMAGE}" vekil/vekil)"
+    export LIVE_ACP_VEKIL_IMAGE
+  fi
+}
+
+live_acp_kind_build_and_publish_images() {
   live_acp_kind_run make -C "${LIVE_ACP_REPO_ROOT}" \
     IMG="${LIVE_ACP_CONTROLLER_IMAGE}" \
     ACP_CODEX_RUNTIME_IMG="${LIVE_ACP_CODEX_IMAGE}" \
@@ -298,9 +314,11 @@ live_acp_kind_probe_vekil_wire_path() {
       )
       ;;
     /chat/completions)
+      # Reasoning-family chat models reject the deprecated max_tokens
+      # parameter, so the probe uses max_completion_tokens.
       payload="$(jq -cn --arg model "${model}" '{
         model:$model,
-        max_tokens:16,
+        max_completion_tokens:16,
         stream:true,
         messages:[{role:"user",content:"Reply with exactly OK."}]
       }')"
@@ -482,6 +500,7 @@ live_acp_kind_create_release_credentials() {
 
 live_acp_kind_bootstrap() {
   live_acp_kind_create_cluster
+  live_acp_kind_start_registry
   live_acp_kind_deploy_vekil
   live_acp_kind_build_and_publish_images
   live_acp_kind_deploy_orka

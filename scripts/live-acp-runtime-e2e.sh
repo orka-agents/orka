@@ -343,6 +343,7 @@ temp_root="$(mktemp -d "${TMPDIR:-/tmp}/orka-acp-e2e.XXXXXX")"
 chmod 700 "${temp_root}"
 namespace_create_attempted=0
 namespace_created=0
+namespace_shared=0
 namespace_uid=""
 api_forward_pid=""
 api_token_file="${temp_root}/api-token"
@@ -927,13 +928,13 @@ delete_test_branchclaims() {
 
 delete_test_namespace_now() {
   recover_namespace_ownership || return 1
-  [[ "${namespace_created}" -eq 1 ]] || return 0
+  [[ "${namespace_created}" -eq 1 || "${namespace_shared}" -eq 1 ]] || return 0
   probe_namespace "${namespace}" || return 1
   if [[ "${namespace_probe_state}" == "absent" ]]; then
     namespace_created=0
     return 0
   fi
-  if ! jq -e --arg run "${run_id}" --arg uid "${namespace_uid}" '
+  if [[ "${namespace_created}" -eq 1 ]] && ! jq -e --arg run "${run_id}" --arg uid "${namespace_uid}" '
       .metadata.uid == $uid
       and .metadata.labels["orka.ai/acp-e2e-run"] == $run
       and .metadata.labels["app.kubernetes.io/managed-by"] == "live-acp-runtime-e2e"
@@ -952,6 +953,11 @@ delete_test_namespace_now() {
     return 1
   fi
   delete_test_branchclaims "${owners_file}" || return 1
+
+  if [[ "${namespace_shared}" -eq 1 ]]; then
+    log "Leaving shared namespace ${namespace} in place after run-resource cleanup"
+    return 0
+  fi
 
   log "Cleaning up ACP e2e namespace ${namespace}"
   if ! k delete namespace "${namespace}" --ignore-not-found=true --wait=false >/dev/null; then
@@ -3354,22 +3360,35 @@ if [[ "${release_gate}" -eq 1 ]]; then
 fi
 
 if resource_exists get namespace "${namespace}"; then
-  die "test namespace ${namespace} already exists; choose another --namespace"
-fi
-namespace_create_attempted=1
-jq -n --arg name "${namespace}" --arg run "${run_id}" '{
-  apiVersion:"v1",
-  kind:"Namespace",
-  metadata:{
-    name:$name,
-    labels:{
-      "orka.ai/acp-e2e-run":$run,
-      "app.kubernetes.io/managed-by":"live-acp-runtime-e2e",
-      "pod-security.kubernetes.io/enforce":"restricted"
+  if k get namespace "${namespace}" -o json | jq -e '
+      .metadata.labels["orka.ai/controller-mode"] == "harness-v2"
+    ' >/dev/null; then
+    # Shared watch-namespace mode: the isolated harness-v2 controller only
+    # serves Tasks in its watch namespace, so the validator adopts that
+    # namespace and cleans up its run-labeled resources without ever owning
+    # the namespace lifecycle.
+    log "Adopting existing harness-v2 namespace ${namespace} (shared watch-namespace mode)"
+    namespace_shared=1
+  else
+    die "test namespace ${namespace} already exists; choose another --namespace"
+  fi
+else
+  namespace_create_attempted=1
+  jq -n --arg name "${namespace}" --arg run "${run_id}" '{
+    apiVersion:"v1",
+    kind:"Namespace",
+    metadata:{
+      name:$name,
+      labels:{
+        "orka.ai/acp-e2e-run":$run,
+        "orka.ai/controller-mode":"harness-v2",
+        "app.kubernetes.io/managed-by":"live-acp-runtime-e2e",
+        "pod-security.kubernetes.io/enforce":"restricted"
+      }
     }
-  }
-}' | k create -f - >/dev/null
-namespace_created=1
+  }' | k create -f - >/dev/null
+  namespace_created=1
+fi
 namespace_uid="$(k get namespace "${namespace}" -o jsonpath='{.metadata.uid}')"
 [[ -n "${namespace_uid}" ]] || die "test namespace UID is unavailable"
 

@@ -76,6 +76,36 @@ func TestValidateFinalizedSessionProjectionAcceptsPinnedLegacySparseExecution(t 
 	}
 }
 
+func TestValidateFinalizedSessionProjectionAcceptsContinuationLeaseGeneration(t *testing.T) {
+	// A session continuation prompt runs under a later mutation-lease
+	// generation than the RuntimeSession incarnation generation frozen in the
+	// Task execution identity. Reclamation must still validate, or every
+	// continuation Task becomes undeletable.
+	task, sourceUID, attempt, projection := restoredProjectionFixture()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-transcript", Create: false}
+	attempt.SessionLeaseGeneration = task.Status.Execution.RuntimeSessionGeneration + 1
+	payload := marshalProjection(t, projection)
+	turn := finalizedSessionProjectionTurn(t, payload, attempt)
+
+	if _, err := ValidateFinalizedSessionProjection(payload, task, sourceUID, attempt, turn); err != nil {
+		t.Fatalf("ValidateFinalizedSessionProjection(continuation lease) error = %v", err)
+	}
+}
+
+func TestValidateFinalizedSessionProjectionRejectsLeaseGenerationDrift(t *testing.T) {
+	task, sourceUID, attempt, projection := restoredProjectionFixture()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-transcript", Create: false}
+	payload := marshalProjection(t, projection)
+	turn := finalizedSessionProjectionTurn(t, payload, attempt)
+	// Drift between the finalized turn and its attempt must stay fenced even
+	// though the Task's incarnation generation is no longer compared.
+	attempt.SessionLeaseGeneration++
+
+	if _, err := ValidateFinalizedSessionProjection(payload, task, sourceUID, attempt, turn); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("ValidateFinalizedSessionProjection(lease drift) error = %v, want ErrConflict", err)
+	}
+}
+
 func TestValidateFinalizedSessionProjectionRejectsUnpinnedOrPartialLegacyPayload(t *testing.T) {
 	tests := []struct {
 		name   string

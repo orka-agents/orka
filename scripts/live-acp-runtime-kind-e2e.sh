@@ -19,6 +19,8 @@ Environment:
   ACP_E2E_KIND_CONFIG     optional Kind config path
   ACP_E2E_KEEP_CLUSTER=1  keep the cluster and local registry after the run
   ACP_E2E_VEKIL_IMAGE     digest-pinned Vekil image override
+  ACP_E2E_VEKIL_LOCAL_IMAGE local Docker image published through the run's
+                          registry and digest-pinned there (development builds)
   ACP_E2E_OPENCODE_MODEL  reviewed OpenCode provider/model identifier
   ACP_E2E_OPENCODE_CONTEXT_WINDOW reviewed OpenCode context capacity (required)
   ACP_E2E_OPENCODE_MAX_TOKENS reviewed OpenCode output limit (required)
@@ -72,7 +74,9 @@ LIVE_ACP_VALIDATOR_SCRIPT="${ACP_E2E_VALIDATOR_SCRIPT:-${repo_root}/scripts/live
 LIVE_ACP_KIND_TAG="${ACP_E2E_KIND_TAG:-live-acp-runtime-${image_tag}}"
 LIVE_ACP_KIND_CONFIG="${ACP_E2E_KIND_CONFIG:-}"
 LIVE_ACP_KEEP_CLUSTER="${ACP_E2E_KEEP_CLUSTER:-0}"
-LIVE_ACP_VEKIL_IMAGE="${ACP_E2E_VEKIL_IMAGE:-ghcr.io/sozercan/vekil:v0.14.0@sha256:9e6ab58b9c27888db34d76422c3520b3bf103742a058572439a1fe0aa35a2ade}"
+LIVE_ACP_VEKIL_IMAGE="${ACP_E2E_VEKIL_IMAGE:-ghcr.io/sozercan/vekil:v0.14.1@sha256:2fa0558f6304cc6ed1fb5b0135f62f12f28f1cdd0a8c057c4283414bceac1362}"
+LIVE_ACP_VEKIL_LOCAL_IMAGE="${ACP_E2E_VEKIL_LOCAL_IMAGE:-}"
+export LIVE_ACP_VEKIL_LOCAL_IMAGE
 LIVE_ACP_ROLLOUT_TIMEOUT="${ACP_E2E_ROLLOUT_TIMEOUT:-10m}"
 LIVE_ACP_CONTROLLER_IMAGE="orka-controller:live-acp-${image_tag}"
 LIVE_ACP_CODEX_IMAGE="orka-acp-codex:live-acp-${image_tag}"
@@ -141,8 +145,11 @@ trap 'status=$?; live_acp_kind_cleanup "${status}"; exit "${status}"' EXIT
 live_acp_kind_bootstrap
 
 validator_args=(--context "${LIVE_ACP_CONTEXT}")
-if [[ -n "${namespace}" ]]; then
-  validator_args+=(--namespace "${namespace}")
+if [[ -z "${namespace}" ]]; then
+  # The isolated harness-v2 controller only serves Tasks in its watch
+  # namespace, so the validator runs there in shared watch-namespace mode.
+  namespace="orka-system"
 fi
+validator_args+=(--namespace "${namespace}")
 live_acp_kind_log "Running canonical live ACP runtime validator"
 "${LIVE_ACP_VALIDATOR_SCRIPT}" "${validator_args[@]}"
