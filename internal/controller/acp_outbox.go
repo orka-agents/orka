@@ -201,9 +201,14 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 		availableAt := time.Time{}
 		if projectErr != nil {
 			lastError = sanitizeOutboxError(projectErr)
-			if projection.Attempts >= p.MaxAttempts {
+			if isPermanentOutboxDeliveryError(projectErr) && projection.Attempts >= p.MaxAttempts {
 				state = store.OutboxProjectionDeadLetter
 			} else {
+				// Infrastructure failures (for example a Kubernetes control-plane
+				// outage) must stay retryable: recovery treats any existing
+				// projection as authoritative and Task deletion requires the
+				// projection to reach Delivered, so dead-lettering a transient
+				// failure would leave the Task nonterminal and undeletable.
 				state = store.OutboxProjectionPending
 				availableAt = now.Add(outboxBackoff(projection.Attempts))
 			}
@@ -230,6 +235,27 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 
 type taskTerminalProjection = taskterminal.Projection
 
+// permanentOutboxDeliveryError marks delivery failures that can never succeed
+// on retry (payload corruption or identity mismatches). Only these may be
+// dead-lettered; every other failure is treated as transient infrastructure
+// trouble and stays pending so the terminal projection remains deliverable.
+type permanentOutboxDeliveryError struct{ err error }
+
+func (e *permanentOutboxDeliveryError) Error() string { return e.err.Error() }
+func (e *permanentOutboxDeliveryError) Unwrap() error { return e.err }
+
+func permanentOutboxDelivery(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentOutboxDeliveryError{err: err}
+}
+
+func isPermanentOutboxDeliveryError(err error) bool {
+	var permanent *permanentOutboxDeliveryError
+	return errors.As(err, &permanent)
+}
+
 func mergeTerminalExecutionStatus(existing *corev1alpha1.TaskExecutionStatus, projected corev1alpha1.TaskExecutionStatus) corev1alpha1.TaskExecutionStatus {
 	if existing == nil {
 		return projected
@@ -254,14 +280,14 @@ func mergeTerminalExecutionStatus(existing *corev1alpha1.TaskExecutionStatus, pr
 
 func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.OutboxProjection) (string, error) {
 	if projection.ProjectionKind != "TaskTerminalStatus" {
-		return "", fmt.Errorf("unsupported projection kind %q", projection.ProjectionKind)
+		return "", permanentOutboxDelivery(fmt.Errorf("unsupported projection kind %q", projection.ProjectionKind))
 	}
 	var payload taskTerminalProjection
 	if err := json.Unmarshal(projection.Payload, &payload); err != nil {
-		return "", fmt.Errorf("decode task terminal projection: %w", err)
+		return "", permanentOutboxDelivery(fmt.Errorf("decode task terminal projection: %w", err))
 	}
 	if payload.Namespace == "" || payload.Task == "" || payload.TaskUID == "" || payload.Attempt < 1 {
-		return "", fmt.Errorf("task terminal projection identity is incomplete")
+		return "", permanentOutboxDelivery(fmt.Errorf("task terminal projection identity is incomplete"))
 	}
 	key := types.NamespacedName{Namespace: payload.Namespace, Name: payload.Task}
 	var deliveredResourceVersion string

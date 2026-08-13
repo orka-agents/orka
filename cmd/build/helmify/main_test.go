@@ -1559,7 +1559,7 @@ func TestStaticChartRejectsUnsupportedProviderProxyOverrides(t *testing.T) {
 
 func TestStaticChartUsesRegisteredContextTokenTTSEndpointFlag(t *testing.T) {
 	rendered := requireHelmRender(t,
-		"--set-string", "controller.contextToken.tts.url=https://tts.example.test/oauth/token",
+		"--set-string", "controller.contextToken.tts.endpoint=https://tts.example.test/oauth/token",
 		"--show-only", "templates/deployment.yaml",
 	)
 

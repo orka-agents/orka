@@ -24,11 +24,13 @@ func childCredentialIDs() (int, int, bool) {
 	if os.Geteuid() != 0 {
 		return 0, 0, false
 	}
-	uid, err := strconv.ParseUint(strings.TrimSpace(os.Getenv(EnvChildUID)), 10, 32)
+	// Parse with bitSize 31 so the IDs always fit a non-negative platform int;
+	// larger values fail closed the same way as any other invalid identity.
+	uid, err := strconv.ParseUint(strings.TrimSpace(os.Getenv(EnvChildUID)), 10, 31)
 	if err != nil || uid == 0 {
 		return 0, 0, false
 	}
-	gid, err := strconv.ParseUint(strings.TrimSpace(os.Getenv(EnvChildGID)), 10, 32)
+	gid, err := strconv.ParseUint(strings.TrimSpace(os.Getenv(EnvChildGID)), 10, 31)
 	if err != nil || gid == 0 {
 		return 0, 0, false
 	}

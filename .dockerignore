@@ -34,6 +34,10 @@
 
 # Re-include script-local Go helpers used by live E2E Docker builds
 !scripts/
+!scripts/fixtures/
+!scripts/fixtures/security-scan-fake-acp/
+!scripts/fixtures/security-scan-fake-acp/*.go
+scripts/fixtures/security-scan-fake-acp/*_test.go
 
 # Re-include UI source files for frontend build
 !ui/

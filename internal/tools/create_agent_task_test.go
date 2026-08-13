@@ -358,6 +358,16 @@ func TestCreateAgentTaskTool_Execute_RejectsInvalidCreatePRAndMaxTurns(t *testin
 			args: `{"prompt":"Fix","agentRef":"codex-agent","maxTurns":"lots"}`,
 			want: "maxTurns must be an integer",
 		},
+		{
+			name: "maxTurnsOutOfRange",
+			args: `{"prompt":"Fix","agentRef":"codex-agent","maxTurns":2147483648}`,
+			want: "maxTurns must be between 1 and 1000",
+		},
+		{
+			name: "maxTurnsNonPositive",
+			args: `{"prompt":"Fix","agentRef":"codex-agent","maxTurns":0}`,
+			want: "maxTurns must be between 1 and 1000",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

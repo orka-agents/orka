@@ -18,7 +18,7 @@ func TestPullRequestNumberFromForgeID(t *testing.T) {
 	if !ok || number != 42 {
 		t.Fatalf("number, ok = %d, %t", number, ok)
 	}
-	for _, value := range []string{"42", "gitlab:123:42", "github:123:not-a-number", "github:123:0"} {
+	for _, value := range []string{"42", "gitlab:123:42", "github:123:not-a-number", "github:123:0", "github:123:2147483648"} {
 		if _, ok := pullRequestNumberFromForgeID(value); ok {
 			t.Fatalf("unexpectedly parsed %q", value)
 		}

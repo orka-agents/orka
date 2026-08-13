@@ -3168,7 +3168,7 @@ func (r *RepositoryScanReconciler) verifiedSecurityPatchPublication(
 		return securityPatchPublicationReceipt{}, "durable patch pull request receipt does not match the exact publication tuple", nil
 	}
 	prNumber, ok := pullRequestNumberFromForgeID(receipt.ForgeID)
-	if !ok || prNumber > int64(int(^uint(0)>>1)) {
+	if !ok {
 		return securityPatchPublicationReceipt{}, "durable patch pull request forge identity is invalid", nil
 	}
 	expectedURL := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(scan.Spec.RepoURL), "/"), ".git") +

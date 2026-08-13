@@ -73,7 +73,12 @@ func NewClient(config ClientConfig) (*Client, error) {
 	}
 	client := config.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 3 * time.Minute}
+		// No client-level timeout: operation deadlines come from the caller's
+		// request context so configured operation timeouts (for example
+		// ORKA_PUBLISHER_PUBLISH_TIMEOUT above the former three-minute client
+		// ceiling) are honored. Requests without a caller deadline fall back to
+		// defaultRequestTimeout in requestContext.
+		client = &http.Client{}
 	} else {
 		clone := *client
 		client = &clone
@@ -146,7 +151,21 @@ func (c *Client) ReconcilePullRequest(ctx context.Context, request PullRequestRe
 	return response, err
 }
 
+// defaultRequestTimeout bounds publisher requests whose caller context carries
+// no deadline. Callers with explicit deadlines (for example settlement contexts
+// sized to the publisher's configured operation timeouts) are never clamped.
+const defaultRequestTimeout = 3 * time.Minute
+
+func requestContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, defaultRequestTimeout)
+}
+
 func (c *Client) get(ctx context.Context, path string, target any) error {
+	ctx, cancel := requestContext(ctx)
+	defer cancel()
 	endpoint := *c.baseURL
 	endpoint.Path = path
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
@@ -158,6 +177,8 @@ func (c *Client) get(ctx context.Context, path string, target any) error {
 }
 
 func (c *Client) post(ctx context.Context, operation Operation, metadata OperationMetadata, value, target any) error {
+	ctx, cancel := requestContext(ctx)
+	defer cancel()
 	body, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encode workspace publisher request")

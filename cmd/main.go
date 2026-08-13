@@ -1771,6 +1771,7 @@ func main() {
 		mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
 			Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: durableControlStore,
 			KubeClient: kubeClient, Registry: acpMCPRegistry,
+			OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
 			ContextFactory: func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error) {
 				task, ok := controller.ACPMCPAuthenticatedTaskFromContext(ctx)
 				if !ok || task.Namespace != request.Namespace || task.UID != string(request.Metadata.TaskUID) {

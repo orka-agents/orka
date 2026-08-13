@@ -19,6 +19,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
@@ -83,11 +84,13 @@ func (f ACPMCPToolExecutorFunc) ExecuteACPMCPTool(ctx context.Context, request h
 }
 
 type RegistryACPMCPToolExecutor struct {
-	Registry       *tools.Registry
-	Reader         client.Reader
-	KubeClient     kubernetes.Interface
-	HTTPClient     *http.Client
-	ContextFactory func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+	Registry            *tools.Registry
+	Reader              client.Reader
+	KubeClient          kubernetes.Interface
+	HTTPClient          *http.Client
+	OutboundAccess      outboundaccess.Resolver
+	TransactionExchange *workerexecutor.TransactionExchangeConfig
+	ContextFactory      func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
 }
 
 func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
@@ -140,7 +143,8 @@ func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
 		if expectedErr != nil || currentErr != nil || !bytes.Equal(expected, current) {
 			return nil, fmt.Errorf("custom MCP tool %q changed after prompt authorization", descriptor.Name)
 		}
-		executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, e.KubeClient, e.HTTPClient)
+		executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, e.KubeClient, e.HTTPClient, e.OutboundAccess)
+		executor.SetTransactionExchangeConfig(e.TransactionExchange)
 		execCtx := workerexecutor.WithToolCallID(ctx, request.Call.CallID)
 		execCtx = workerexecutor.WithToolIdempotencyKey(execCtx, string(request.Metadata.OperationID))
 		result, err = executor.Execute(execCtx, tool, request.Call.Arguments)
@@ -165,13 +169,15 @@ func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
 }
 
 type ACPMCPBrokerDependencies struct {
-	Reader         client.Reader
-	Epochs         *ControllerEpochManager
-	ControlStore   store.DurableControlStore
-	KubeClient     kubernetes.Interface
-	HTTPClient     *http.Client
-	Registry       *tools.Registry
-	ContextFactory func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+	Reader              client.Reader
+	Epochs              *ControllerEpochManager
+	ControlStore        store.DurableControlStore
+	KubeClient          kubernetes.Interface
+	HTTPClient          *http.Client
+	Registry            *tools.Registry
+	OutboundAccess      outboundaccess.Resolver
+	TransactionExchange *workerexecutor.TransactionExchangeConfig
+	ContextFactory      func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
 }
 
 func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBroker, error) {
@@ -183,7 +189,8 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 		Prompts:     DurableACPMCPPromptAuthorizer{Attempts: dependencies.ControlStore},
 		Executor: RegistryACPMCPToolExecutor{
 			Registry: dependencies.Registry, Reader: dependencies.Reader, KubeClient: dependencies.KubeClient,
-			HTTPClient: dependencies.HTTPClient, ContextFactory: dependencies.ContextFactory,
+			HTTPClient: dependencies.HTTPClient, OutboundAccess: dependencies.OutboundAccess,
+			TransactionExchange: dependencies.TransactionExchange, ContextFactory: dependencies.ContextFactory,
 		},
 		Effects: dependencies.ControlStore,
 	}

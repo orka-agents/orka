@@ -220,6 +220,9 @@ spec:
             {{- if .secretRead }}
             - {{ printf "--context-token-secret-read-scopes=%s" .secretRead | quote }}
             {{- end }}
+            {{- if .secretCredentialRead }}
+            - {{ printf "--context-token-secret-credential-read-scopes=%s" .secretCredentialRead | quote }}
+            {{- end }}
             {{- if .agentRead }}
             - {{ printf "--context-token-agent-read-scopes=%s" .agentRead | quote }}
             {{- end }}
@@ -267,8 +270,8 @@ spec:
             {{- end }}
             {{- end }}
             {{- with .tts }}
-            {{- if .url }}
-            - {{ printf "--context-token-tts-endpoint=%s" .url | quote }}
+            {{- if .endpoint }}
+            - {{ printf "--context-token-tts-endpoint=%s" .endpoint | quote }}
             {{- end }}
             {{- if .audience }}
             - {{ printf "--context-token-tts-audience=%s" .audience | quote }}
@@ -294,6 +297,14 @@ spec:
             {{- if .toolTokenTTL }}
             - {{ printf "--context-token-tool-token-ttl=%s" .toolTokenTTL | quote }}
             {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.controller.outboundAccess }}
+            {{- if .trustedGatewayServices }}
+            - {{ printf "--outbound-access-trusted-gateway-services=%s" (join "," .trustedGatewayServices) | quote }}
+            {{- end }}
+            {{- if .trustedTokenEndpointServices }}
+            - {{ printf "--outbound-access-trusted-token-endpoint-services=%s" (join "," .trustedTokenEndpointServices) | quote }}
             {{- end }}
             {{- end }}
             - --store-backend=sqlite

@@ -894,7 +894,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 			return deadlineErr
 		}
-		_ = d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "workspace-unsupported")
+		if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "workspace-unsupported"); transitionErr != nil {
+			return transitionErr
+		}
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "WorkspaceUnsupported", err.Error())
 	}
 	baseline := preparedWorkspace.baseline
@@ -1341,7 +1343,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}); patchErr != nil {
 			return patchErr
 		}
-		_ = d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryConflict, "workspace-validation-failed", "workspace validation failed before a trusted delta was established")
+		if transitionErr := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryConflict, "workspace-validation-failed", "workspace validation failed before a trusted delta was established"); transitionErr != nil {
+			return transitionErr
+		}
 		status := corev1alpha1.TaskDeliveryStatus{
 			State: corev1alpha1.TaskDeliveryStateDeliveryConflict, Outcome: corev1alpha1.TaskDeliveryOutcomeDeliveryConflict,
 			Reason: "WorkspaceValidationFailed", Message: "workspace validation failed before a trusted delta was established", LastTransitionTime: nowMeta(),
@@ -3653,7 +3657,9 @@ func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *co
 		"diagnostic", diagnostic,
 		"serverMessage", boundedRuntimeSessionServerMessage(err),
 	)
-	_ = d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "runtime-session-start-failed")
+	if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "runtime-session-start-failed"); transitionErr != nil {
+		return transitionErr
+	}
 	return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "RuntimeSessionStartFailed", runtimeSessionStartFailureMessage(err))
 }
 
@@ -3687,7 +3693,9 @@ func (d *ACPDispatcher) handlePromptStreamError(
 	)
 	if runtimeContextErr != nil {
 		if !accepted && writeEvidence.SafeToResendSameIdentity() {
-			_ = d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled-before-acceptance")
+			if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled-before-acceptance"); transitionErr != nil {
+				return transitionErr
+			}
 			return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancelled before acceptance")
 		}
 		now := time.Now().UTC()
@@ -3707,10 +3715,14 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			if cancelErr == nil && response.SettlementProven {
 				switch response.Settlement.TerminalEvent {
 				case harnessv2.EventCancelled:
-					_ = d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled")
+					if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled"); transitionErr != nil {
+						return transitionErr
+					}
 					return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancellation settled")
 				case harnessv2.EventFailed:
-					_ = d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "cancel-failed")
+					if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "cancel-failed"); transitionErr != nil {
+						return transitionErr
+					}
 					return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptFailed", "prompt failed during cancellation")
 				}
 			}
@@ -3719,7 +3731,9 @@ func (d *ACPDispatcher) handlePromptStreamError(
 	}
 	var clientErr *harnessv2.ClientError
 	if !accepted && errors.As(err, &clientErr) && clientErr.WriteEvidence.SafeToResendSameIdentity() {
-		_ = d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "prompt-not-accepted")
+		if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "prompt-not-accepted"); transitionErr != nil {
+			return transitionErr
+		}
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptNotAccepted", "prompt transport failed before any request bytes were written")
 	}
 	return d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "accepted prompt outcome is unknown")

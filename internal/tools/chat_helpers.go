@@ -156,6 +156,13 @@ func parseTimeoutArg(args map[string]any) (time.Duration, string, bool) {
 	return d, "", true
 }
 
+// maxTurns bounds mirror the Task CRD validation on spec.agentRuntime.maxTurns
+// (+kubebuilder:validation:Minimum=1, +kubebuilder:validation:Maximum=1000).
+const (
+	minMaxTurns = 1
+	maxMaxTurns = 1000
+)
+
 // parseMaxTurnsArg parses the optional maxTurns argument and returns an error
 // result if invalid.
 func parseMaxTurnsArg(args map[string]any) (*int32, string, bool) {
@@ -168,6 +175,12 @@ func parseMaxTurnsArg(args map[string]any) (*int32, string, bool) {
 		r, _ := ChatToolErrorResult("invalid_arguments",
 			"maxTurns must be an integer",
 			"Provide maxTurns as a positive integer or omit it")
+		return nil, r, false
+	}
+	if turns < minMaxTurns || turns > maxMaxTurns {
+		r, _ := ChatToolErrorResult("invalid_arguments",
+			fmt.Sprintf("maxTurns must be between %d and %d", minMaxTurns, maxMaxTurns),
+			"Provide maxTurns within the allowed range or omit it")
 		return nil, r, false
 	}
 	value := int32(turns)

@@ -552,7 +552,10 @@ func pullRequestNumberFromForgeID(forgeID string) (int64, bool) {
 	if len(parts) < 3 || parts[0] != "github" {
 		return 0, false
 	}
-	number, err := strconv.ParseInt(parts[len(parts)-1], 10, 64)
+	// Parse with bitSize 32 so the number always fits platform int; real forge
+	// pull-request numbers never exceed that bound, and anything larger is an
+	// invalid forge identity.
+	number, err := strconv.ParseInt(parts[len(parts)-1], 10, 32)
 	return number, err == nil && number > 0
 }
 

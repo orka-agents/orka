@@ -12,7 +12,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -306,5 +308,95 @@ func TestACPOutboxProjectorAppliesHarnessV1ResultReference(t *testing.T) {
 	}
 	if updated.Status.ResultRef == nil || !updated.Status.ResultRef.Available {
 		t.Fatalf("Session outbox result reference = %#v, want available", updated.Status.ResultRef)
+	}
+}
+
+func TestACPOutboxProjectorDeliveryFailureClassification(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	validPayload, err := json.Marshal(taskTerminalProjection{
+		Namespace: "default", Task: "task", TaskUID: "task-uid", Attempt: 1, Phase: corev1alpha1.TaskPhaseSucceeded,
+		Execution: corev1alpha1.TaskExecutionStatus{Attempt: 1, State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptPayload := []byte(`{}`)
+	cases := []struct {
+		name      string
+		payload   []byte
+		kubeError error
+		wantState store.OutboxProjectionState
+	}{
+		{
+			// A Kubernetes control-plane outage must never dead-letter the
+			// terminal projection: recovery accepts any existing projection and
+			// Task deletion requires Delivered, so the projection has to stay
+			// retryable until the API server recovers.
+			name: "infrastructure-failure-stays-pending", payload: validPayload,
+			kubeError: apierrors.NewInternalError(context.DeadlineExceeded), wantState: store.OutboxProjectionPending,
+		},
+		{
+			name: "permanent-payload-failure-dead-letters", payload: corruptPayload,
+			wantState: store.OutboxProjectionDeadLetter,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{})
+			if testCase.kubeError != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+						return testCase.kubeError
+					},
+				})
+			}
+			kubeClient := builder.Build()
+			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close() //nolint:errcheck
+			controlStore := sqlite.NewStore(db, "test")
+			epochs := NewControllerEpochManager(controlStore, "controller")
+			epochCtx, cancelEpoch := context.WithCancel(context.Background())
+			epochDone := make(chan error, 1)
+			go func() { epochDone <- epochs.Start(epochCtx) }()
+			defer func() {
+				cancelEpoch()
+				if err := <-epochDone; err != nil {
+					t.Error(err)
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			fence, err := epochs.CurrentFence(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			projection := &store.OutboxProjection{
+				ID: store.CanonicalControlID("outbox", "turn-"+testCase.name, "TaskTerminalStatus"), AggregateKind: "Task", AggregateID: "task-uid",
+				ProjectionKind: "TaskTerminalStatus", Payload: testCase.payload, PayloadDigest: canonicalACPPayloadDigest(testCase.payload), AvailableAt: time.Now().UTC(),
+			}
+			if _, err := controlStore.EnqueueOutboxProjection(ctx, projection, fence); err != nil {
+				t.Fatal(err)
+			}
+			projector := &ACPOutboxProjector{Client: kubeClient, Store: controlStore, Epochs: epochs, WorkerID: "worker", MaxAttempts: 1}
+			if err := projector.projectOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := controlStore.GetOutboxProjection(ctx, projection.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.State != testCase.wantState {
+				t.Fatalf("projection state after exhausted attempts = %s, want %s (lastError %q)", stored.State, testCase.wantState, stored.LastError)
+			}
+			if stored.LastError == "" {
+				t.Fatalf("projection last error should be recorded")
+			}
+		})
 	}
 }
