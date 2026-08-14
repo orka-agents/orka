@@ -12,6 +12,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const testBrokeredEffectCommittedResult = "committed"
+
 func TestRunACPExternalEffectWithRetryRetainsLeaseAcrossTransientFailure(t *testing.T) {
 	controlStore, fence, closeStore := newACPSessionTestStore(
 		t, filepath.Join(t.TempDir(), "external-effect-retry.db"),
@@ -187,10 +189,10 @@ func TestRunExternalEffectBoundsCallToLeaseAccountableDuration(t *testing.T) {
 		context.Background(), controlStore, fence, identity, map[string]string{"call": "custom"},
 		func(ctx context.Context) (string, error) {
 			deadline, hasDeadline = ctx.Deadline()
-			return "committed", nil
+			return testBrokeredEffectCommittedResult, nil
 		},
 	)
-	if err != nil || result != "committed" {
+	if err != nil || result != testBrokeredEffectCommittedResult {
 		t.Fatalf("bounded call = %q error %v, want committed success", result, err)
 	}
 	if !hasDeadline {
@@ -207,6 +209,98 @@ func TestRunExternalEffectBoundsCallToLeaseAccountableDuration(t *testing.T) {
 			"call bound %s does not leave settlement margin inside the %s lease",
 			maxACPExternalEffectCallDuration, acpExternalEffectLease,
 		)
+	}
+}
+
+func TestRunExternalEffectSizesPublisherLeaseFromConfiguredPublishTimeout(t *testing.T) {
+	t.Setenv(envACPPublisherEffectTimeout, "10m")
+	controlStore, fence, closeStore := newACPSessionTestStore(
+		t, filepath.Join(t.TempDir(), "external-effect-publisher-timeout.db"),
+	)
+	defer closeStore()
+	identity := store.ExternalEffectIdentity{
+		Kind: "publisher.publish", Namespace: "default", AggregateID: "publication-1", OperationID: "publish-configured-timeout",
+	}
+	effectID, err := identity.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	var deadline time.Time
+	var hasDeadline bool
+	var leaseExpiresAt *time.Time
+
+	result, err := runExternalEffect(
+		context.Background(), controlStore, fence, identity, map[string]string{"artifact": "immutable"},
+		func(ctx context.Context) (string, error) {
+			deadline, hasDeadline = ctx.Deadline()
+			inFlight, getErr := controlStore.GetExternalEffect(ctx, effectID)
+			if getErr != nil {
+				return "", getErr
+			}
+			leaseExpiresAt = inFlight.LeaseExpiresAt
+			return "published", nil
+		},
+	)
+	if err != nil || result != "published" {
+		t.Fatalf("publisher effect = %q error %v, want published success", result, err)
+	}
+	if !hasDeadline {
+		t.Fatal("publisher external-effect call context has no deadline")
+	}
+	if deadline.Before(start.Add(9 * time.Minute)) {
+		t.Fatalf(
+			"publisher call deadline = %s after start, want the configured 10m publish timeout instead of the %s clamp",
+			deadline.Sub(start), maxACPExternalEffectCallDuration,
+		)
+	}
+	if leaseExpiresAt == nil {
+		t.Fatal("in-flight publisher effect has no lease expiry")
+	}
+	if leaseExpiresAt.Before(deadline) {
+		t.Fatalf(
+			"publisher lease expires at %s before the call deadline %s; an effect must never outlive its lease",
+			leaseExpiresAt, deadline,
+		)
+	}
+}
+
+func TestRunExternalEffectKeepsBrokeredClampWhenPublisherTimeoutConfigured(t *testing.T) {
+	t.Setenv(envACPPublisherEffectTimeout, "10m")
+	controlStore, fence, closeStore := newACPSessionTestStore(
+		t, filepath.Join(t.TempDir(), "external-effect-brokered-clamp.db"),
+	)
+	defer closeStore()
+	identity := store.ExternalEffectIdentity{
+		Kind: "acp-mcp-tool", Namespace: "default", AggregateID: "session-clamp", OperationID: "mcp-call-clamp",
+	}
+	start := time.Now()
+	var deadline time.Time
+
+	if _, err := runExternalEffect(
+		context.Background(), controlStore, fence, identity, map[string]string{"call": "custom"},
+		func(ctx context.Context) (string, error) {
+			deadline, _ = ctx.Deadline()
+			return testBrokeredEffectCommittedResult, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if deadline.After(start.Add(maxACPExternalEffectCallDuration + time.Second)) {
+		t.Fatalf(
+			"brokered call deadline = %s after start, want the fixed %s clamp regardless of the publisher timeout",
+			deadline.Sub(start), maxACPExternalEffectCallDuration,
+		)
+	}
+}
+
+func TestExternalEffectCallTimeoutFallsBackOnInvalidConfiguration(t *testing.T) {
+	publisherIdentity := store.ExternalEffectIdentity{Kind: "workspace.prepare"}
+	for _, value := range []string{"", "not-a-duration", "-1m", "0"} {
+		t.Setenv(envACPPublisherEffectTimeout, value)
+		if got := externalEffectCallTimeout(publisherIdentity); got != maxACPExternalEffectCallDuration {
+			t.Fatalf("externalEffectCallTimeout(%q) = %s, want default %s", value, got, maxACPExternalEffectCallDuration)
+		}
 	}
 }
 

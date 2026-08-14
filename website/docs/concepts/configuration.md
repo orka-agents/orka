@@ -784,6 +784,8 @@ The token is an ingress credential for the proxy only; it is not a Git or forge 
 
 `cmd/orka-workspace-publisher` also requires `ORKA_PUBLISHER_ARTIFACT_AUTHORIZATION_BROKER_URL`, `ORKA_PUBLISHER_CREDENTIAL_BROKER_URL`, and `ORKA_PUBLISHER_SCM_EGRESS_PROXY_REQUIRED=true` in normal startup. For isolated local tests only, `ORKA_PUBLISHER_ALLOW_DEVELOPMENT_FALLBACKS=true` permits the legacy local artifact signing key, filesystem credential root, and proxy-less mode. Do not set that flag in cluster manifests.
 
+When `ORKA_PUBLISHER_PUBLISH_TIMEOUT` is raised above the default on the Publisher, set the same value on the controller Deployment as well. The controller bounds each publisher-backed external-effect call and sizes the effect's ledger lease from this timeout plus a settlement margin; without the controller-side value, publisher operations are clamped to the default four-minute call bound. Brokered custom-Tool calls always keep the fixed four-minute clamp that their Tool descriptors were admitted under.
+
 ### Helm CRD lifecycle
 
 CRD behavior is not controlled through chart values. A fresh install creates all CRDs in the chart unless `--skip-crds` is used. Because CRDs are cluster-scoped, designate one lifecycle owner and use `--skip-crds` for other Orka releases. Helm does not update CRDs during `helm upgrade`; apply the CRDs from the exact target chart before upgrading the controller. Helm retains CRDs and Orka custom resources on uninstall. See the [Helm CRD lifecycle guide](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md).

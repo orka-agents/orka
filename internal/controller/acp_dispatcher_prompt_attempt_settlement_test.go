@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/taskterminal"
 )
 
 type postTransitionPromptAttemptReadStore struct {
@@ -448,4 +451,136 @@ func createPromptAttemptInStateForSettlementTest(
 	}
 	t.Fatalf("unsupported target PromptAttempt state %s", target)
 	return nil
+}
+
+// TestTerminalProjectionExecutionRoundTripsReclamationValidation proves the
+// standalone failure, delivery-failure, and post-execution-cancellation
+// projection constructors preserve the complete frozen execution identity:
+// each classification is built through terminalProjectionExecution and must
+// round-trip taskterminal.ValidateRestoredProjection against the Task it was
+// built from, exactly as Kubernetes composite-store reclamation revalidates
+// it before retiring the source PromptAttempt.
+func TestTerminalProjectionExecutionRoundTripsReclamationValidation(t *testing.T) {
+	transition := metav1.NewTime(time.Date(2026, 8, 12, 9, 30, 0, 0, time.UTC))
+	frozen := &corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateRunning, Attempt: 1, PromptID: "prompt-standalone-terminal",
+		RuntimePoolName: "codex-pool", RuntimePoolUID: "pool-uid", AgentRuntimeName: "codex", AgentRuntimeUID: "agent-uid",
+		RuntimeInstanceID: "runtime-instance", RuntimeSessionUID: "runtime-session-uid", RuntimeSessionGeneration: 3,
+		RuntimeSessionSupervisorBootID: "boot-id",
+		RuntimeSessionProfileDigest:    acpSessionTestDigest("profile"),
+		RuntimeSessionMCPDigest:        acpSessionTestDigest("mcp"),
+		RuntimeSessionWorkspaceDigest:  acpSessionTestDigest("workspace"),
+		RequestDigest:                  acpSessionTestDigest("request"),
+		ControllerEpoch:                7, Message: "running", LastTransitionTime: &transition,
+	}
+	tests := []struct {
+		name           string
+		state          corev1alpha1.TaskExecutionState
+		outcome        corev1alpha1.TaskExecutionOutcome
+		reason         corev1alpha1.TaskExecutionReason
+		message        string
+		phase          corev1alpha1.TaskPhase
+		executionState store.PromptExecutionState
+		deliveryState  store.PromptDeliveryState
+		delivery       corev1alpha1.TaskDeliveryStatus
+	}{
+		{
+			// failTaskWithProjection: sessionless prompt failure after RuntimeSession binding.
+			name: "prompt failure", state: corev1alpha1.TaskExecutionStateFailed,
+			outcome: corev1alpha1.TaskExecutionOutcomeFailed, reason: "PromptFailed", message: "prompt failed",
+			phase: corev1alpha1.TaskPhaseFailed, executionState: store.PromptExecutionFailed,
+			deliveryState: store.PromptDeliveryNotRequested,
+			delivery: corev1alpha1.TaskDeliveryStatus{
+				State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
+			},
+		},
+		{
+			// failTaskWithProjection: sessionless prompt cancellation after RuntimeSession binding.
+			name: "prompt cancellation", state: corev1alpha1.TaskExecutionStateCancelled,
+			outcome: corev1alpha1.TaskExecutionOutcomeCancelled, reason: "Cancelled", message: "prompt cancelled",
+			phase: corev1alpha1.TaskPhaseCancelled, executionState: store.PromptExecutionCancelled,
+			deliveryState: store.PromptDeliveryNotRequested,
+			delivery: corev1alpha1.TaskDeliveryStatus{
+				State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
+			},
+		},
+		{
+			// failTaskForDelivery: execution succeeded, publication failed.
+			name: "delivery failure", state: corev1alpha1.TaskExecutionStateSucceeded,
+			outcome: corev1alpha1.TaskExecutionOutcomeSucceeded, reason: "", message: "",
+			phase: corev1alpha1.TaskPhaseFailed, executionState: store.PromptExecutionSucceeded,
+			deliveryState: store.PromptDeliveryConflict,
+			delivery: corev1alpha1.TaskDeliveryStatus{
+				State: corev1alpha1.TaskDeliveryStateDeliveryConflict, Outcome: corev1alpha1.TaskDeliveryOutcomeDeliveryConflict,
+			},
+		},
+		{
+			// cancelTaskAfterExecution: execution succeeded, publication cancelled before push.
+			name: "post-execution cancellation", state: corev1alpha1.TaskExecutionStateSucceeded,
+			outcome: corev1alpha1.TaskExecutionOutcomeSucceeded, reason: "", message: "",
+			phase: corev1alpha1.TaskPhaseCancelled, executionState: store.PromptExecutionSucceeded,
+			deliveryState: store.PromptDeliveryCancelledBeforePublish,
+			delivery: corev1alpha1.TaskDeliveryStatus{
+				State:   corev1alpha1.TaskDeliveryStateCancelledBeforePublish,
+				Outcome: corev1alpha1.TaskDeliveryOutcomeCancelledBeforePublish,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			delivery := tt.delivery
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "orka-system", Name: "standalone-terminal", UID: types.UID("task-standalone-terminal")},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+				Status: corev1alpha1.TaskStatus{
+					Phase: tt.phase, Execution: frozen.DeepCopy(), Delivery: &delivery,
+				},
+			}
+			execution := terminalProjectionExecution(task, tt.state, tt.outcome, tt.reason, tt.message)
+			expected := *frozen.DeepCopy()
+			expected.State = tt.state
+			expected.Outcome = tt.outcome
+			expected.Reason = tt.reason
+			expected.Message = tt.message
+			expected.LastTransitionTime = nil
+			if !reflect.DeepEqual(execution, expected) {
+				t.Fatalf("terminalProjectionExecution() = %#v, want %#v", execution, expected)
+			}
+			attempt := &store.PromptAttempt{
+				ID: "prompt-attempt-standalone-terminal",
+				Key: store.PromptAttemptKey{
+					Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: frozen.PromptID,
+				},
+				RequestDigest: frozen.RequestDigest, RuntimeInstanceID: frozen.RuntimeInstanceID,
+				ExecutionState: tt.executionState, DeliveryState: tt.deliveryState,
+			}
+			payload, err := json.Marshal(taskTerminalProjection{
+				Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: execution.Attempt,
+				Phase: tt.phase, Message: tt.message, Execution: execution, Delivery: task.Status.Delivery,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := taskterminal.ValidateRestoredProjection(payload, task, string(task.UID), attempt); err != nil {
+				t.Fatalf("terminal projection failed reclamation validation: %v", err)
+			}
+
+			// The pre-fix sparse payload omitted the frozen runtime identity and
+			// must keep failing closed at reclamation.
+			sparse, err := json.Marshal(taskTerminalProjection{
+				Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: frozen.Attempt,
+				Phase: tt.phase, Message: tt.message, Delivery: task.Status.Delivery,
+				Execution: corev1alpha1.TaskExecutionStatus{
+					State: tt.state, Outcome: tt.outcome, Reason: tt.reason, Message: tt.message,
+					Attempt: frozen.Attempt, PromptID: frozen.PromptID,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := taskterminal.ValidateRestoredProjection(sparse, task, string(task.UID), attempt); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("sparse terminal projection validation error = %v, want store.ErrConflict", err)
+			}
+		})
+	}
 }

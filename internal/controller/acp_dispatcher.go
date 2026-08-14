@@ -3899,15 +3899,11 @@ func (d *ACPDispatcher) failTaskWithProjection(
 	if state == corev1alpha1.TaskExecutionStateCancelled {
 		phase = corev1alpha1.TaskPhaseCancelled
 	}
-	execution := corev1alpha1.TaskExecutionStatus{
-		State: state, Outcome: outcome, Reason: reason, Message: message,
-		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
-		RuntimePoolName: task.Status.Execution.RuntimePoolName, RuntimePoolUID: task.Status.Execution.RuntimePoolUID,
-		AgentRuntimeName: task.Status.Execution.AgentRuntimeName, AgentRuntimeUID: task.Status.Execution.AgentRuntimeUID,
-		RuntimeInstanceID: task.Status.Execution.RuntimeInstanceID, RuntimeSessionUID: task.Status.Execution.RuntimeSessionUID,
-		RuntimeSessionGeneration: task.Status.Execution.RuntimeSessionGeneration,
-		RequestDigest:            task.Status.Execution.RequestDigest, ControllerEpoch: task.Status.Execution.ControllerEpoch,
-	}
+	// Build the projection from a deep copy of the frozen execution identity
+	// and overlay only the terminal classification: reclamation validates the
+	// payload against the Task's complete runtime identity, so a hand-picked
+	// field subset would leave the source PromptAttempt impossible to retire.
+	execution := terminalProjectionExecution(task, state, outcome, reason, message)
 	payload := taskTerminalProjection{
 		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: execution.Attempt,
 		Phase: phase, Message: message, Execution: execution, Delivery: task.Status.Delivery,

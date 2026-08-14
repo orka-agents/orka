@@ -175,6 +175,21 @@ func ParseGitHubRepositoryURL(repoURL string) (owner string, repository string, 
 	return githubOwnerRepoFromPath(parsed.Path)
 }
 
+// CanonicalRepositoryCloneURL returns the canonical credential-free HTTPS
+// clone URL for GitHub repository URLs accepted by ParseGitHubRepositoryURL,
+// converting SSH roots (git@github.com:owner/repo[.git]) and normalizing HTTPS
+// forms to https://github.com/owner/repo. This is the only repository form the
+// ACP workspace preflight and the general worker's header-credential clone
+// support. Non-GitHub URLs are returned trimmed and unchanged.
+func CanonicalRepositoryCloneURL(repoURL string) string {
+	trimmed := strings.TrimSpace(repoURL)
+	owner, repository, err := ParseGitHubRepositoryURL(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	return "https://github.com/" + owner + "/" + repository
+}
+
 func githubOwnerRepoFromPath(repoPath string) (string, string, error) {
 	repoPath = strings.Trim(repoPath, "/")
 	segments := strings.Split(strings.TrimSuffix(repoPath, ".git"), "/")

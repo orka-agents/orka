@@ -104,6 +104,58 @@ func TestParseGitHubRepositoryURL(t *testing.T) {
 	}
 }
 
+func TestCanonicalRepositoryCloneURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		repoURL string
+		want    string
+	}{
+		{
+			name:    "SSH GitHub root converted to HTTPS",
+			repoURL: "git@github.com:example/project.git",
+			want:    "https://github.com/example/project",
+		},
+		{
+			name:    "SSH GitHub root without git suffix",
+			repoURL: "git@github.com:example/project",
+			want:    "https://github.com/example/project",
+		},
+		{
+			name:    "HTTPS GitHub URL normalized",
+			repoURL: " https://github.com/example/project.git ",
+			want:    "https://github.com/example/project",
+		},
+		{
+			name:    "canonical HTTPS GitHub URL unchanged",
+			repoURL: "https://github.com/example/project",
+			want:    "https://github.com/example/project",
+		},
+		{
+			name:    "non-GitHub HTTPS URL passes through",
+			repoURL: "https://git.example.com/example/project.git",
+			want:    "https://git.example.com/example/project.git",
+		},
+		{
+			name:    "credentialed URL passes through for downstream rejection",
+			repoURL: "https://token@github.com/example/project",
+			want:    "https://token@github.com/example/project",
+		},
+		{
+			name:    "empty URL stays empty",
+			repoURL: "  ",
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CanonicalRepositoryCloneURL(tt.repoURL); got != tt.want {
+				t.Fatalf("CanonicalRepositoryCloneURL(%q) = %q, want %q", tt.repoURL, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEffectiveWorkspaceBranch(t *testing.T) {
 	tests := []struct {
 		name string

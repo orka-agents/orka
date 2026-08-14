@@ -260,9 +260,20 @@ func validateContainerTaskWorkspace(task *corev1alpha1.Task) *ChatToolError {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeContainer {
 		return nil
 	}
+	// Mirror the Job builder's validateContainerPublicationWorkspace gates
+	// against the effective (post-inheritance) workspace. The tool schema never
+	// exposes these fields, so their only source here is a prior_task workspace
+	// copied from an agent Task; created Tasks carrying them would be rejected
+	// by the Job builder after creation.
+	if field := unsupportedContainerWorkspaceField(task.Spec.Workspace); field != "" {
+		return &ChatToolError{
+			Type: "unsupported_container_workspace_field",
+			Message: fmt.Sprintf(
+				"container tasks do not support %s, which was inherited from the prior_task workspace", field),
+			Suggestion: "Provide an explicit workspace (gitRepo, ref/branch, readCredentialRef) for the container task instead of inheriting the agent task's clean-room publication workspace.",
+		}
+	}
 	if task.Spec.Workspace != nil && strings.TrimSpace(task.Spec.Workspace.PushBranch) != "" {
-		// Mirror the Job builder's validateContainerPublicationWorkspace gates
-		// so doomed publication Tasks fail here instead of after creation.
 		if strings.TrimSpace(task.Spec.Image) != "" {
 			return &ChatToolError{
 				Type:       "unsupported_custom_image_publication",
@@ -288,6 +299,33 @@ func validateContainerTaskWorkspace(task *corev1alpha1.Task) *ChatToolError {
 		Type:       "missing_workspace",
 		Message:    "container command appears to validate or inspect repository files, but no workspace.gitRepo was provided or inherited",
 		Suggestion: "Retry create_container_task with workspace.gitRepo, workspace.readCredentialRef when private, and workspace.ref or workspace.branch for the exact code under test. Alternatively provide prior_task for a task that already has a workspace.",
+	}
+}
+
+// unsupportedContainerWorkspaceField returns the first workspace field the Job
+// builder's validateContainerPublicationWorkspace rejects for container Tasks:
+// clean-room publication and policy fields supported only on agent Tasks. Keep
+// this list in sync with internal/controller/job_builder.go.
+func unsupportedContainerWorkspaceField(workspace *corev1alpha1.WorkspaceConfig) string {
+	switch {
+	case workspace == nil:
+		return ""
+	case strings.TrimSpace(workspace.ExpectedRemoteSHA) != "":
+		return "workspace.expectedRemoteSHA"
+	case workspace.CreatePR:
+		return "workspace.createPR"
+	case workspace.MaxChangedFiles != nil:
+		return "workspace.maxChangedFiles"
+	case len(workspace.AllowedPaths) > 0:
+		return "workspace.allowedPaths"
+	case workspace.DenyRepositoryControlPaths:
+		return "workspace.denyRepositoryControlPaths"
+	case workspace.RejectBinaryFiles:
+		return "workspace.rejectBinaryFiles"
+	case workspace.RejectSecretLikeContent:
+		return "workspace.rejectSecretLikeContent"
+	default:
+		return ""
 	}
 }
 

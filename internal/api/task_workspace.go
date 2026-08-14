@@ -77,8 +77,10 @@ func repositoryScanTaskWorkspace(scan *corev1alpha1.RepositoryScan, intent corev
 		return nil
 	}
 	workspace := &corev1alpha1.WorkspaceConfig{
-		Intent:            intent,
-		GitRepo:           scan.Spec.RepoURL,
+		Intent: intent,
+		// The ACP workspace preflight admits only credential-free HTTPS URLs,
+		// so accepted GitHub-style SSH roots are canonicalized here.
+		GitRepo:           security.CanonicalRepositoryCloneURL(scan.Spec.RepoURL),
 		Branch:            security.EffectiveWorkspaceBranch(scan),
 		Ref:               security.EffectiveRef(scan),
 		ReadCredentialRef: taskWorkspaceCredentialReference(repositoryScanReadCredentialRef(scan)),
@@ -88,9 +90,9 @@ func repositoryScanTaskWorkspace(scan *corev1alpha1.RepositoryScan, intent corev
 		// prBaseBranch is a publication field: the ACP workspace preflight
 		// rejects it on non-write intents.
 		workspace.PRBaseBranch = scan.Spec.PRBaseBranch
-		workspace.PublicationGitRepo = strings.TrimSpace(scan.Spec.ForkRepo)
+		workspace.PublicationGitRepo = security.CanonicalRepositoryCloneURL(scan.Spec.ForkRepo)
 		if workspace.PublicationGitRepo == "" {
-			workspace.PublicationGitRepo = scan.Spec.RepoURL
+			workspace.PublicationGitRepo = workspace.GitRepo
 		}
 		if strings.TrimSpace(workspace.PRBaseBranch) == "" {
 			workspace.PRBaseBranch = security.EffectiveBranch(scan)

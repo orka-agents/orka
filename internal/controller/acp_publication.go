@@ -46,7 +46,7 @@ func (d *ACPDispatcher) publishWorkspaceDelta(
 	delta harnessv2.WorkspaceDeltaDescriptor,
 	session *acpTaskSession,
 ) (acpPublicationResult, error) {
-	deliveryCtx, cancelDelivery := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	deliveryCtx, cancelDelivery := context.WithTimeout(context.WithoutCancel(ctx), publicationSettlementWindow())
 	defer cancelDelivery()
 	ctx = deliveryCtx
 	if d.Publisher == nil {
@@ -320,7 +320,7 @@ func (d *ACPDispatcher) publishWorkspaceDelta(
 	// Publishing won the durable CAS. Task cancellation may be recorded by the
 	// caller, but it must not abort exact-commit publication or independent
 	// remote verification.
-	settlementCtx, cancelSettlement := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	settlementCtx, cancelSettlement := context.WithTimeout(context.WithoutCancel(ctx), publicationSettlementWindow())
 	defer cancelSettlement()
 
 	publishOperation := publicationOperationID("publish", task)
@@ -1337,18 +1337,37 @@ func (d *ACPDispatcher) patchDeliveryStatus(ctx context.Context, task *corev1alp
 	})
 }
 
-func (d *ACPDispatcher) completeSuccessWithDelivery(ctx context.Context, task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus, message string) error {
-	// The terminal projection must carry the complete frozen execution
-	// identity: prompt attempt reclamation validates the projection against
-	// the attempt's request digest and the Task's runtime identity, and a
-	// sparse payload makes the Task undeletable. Volatile fields are cleared
-	// so retried settlements enqueue byte-identical payloads.
-	execution := *task.Status.Execution.DeepCopy()
-	execution.State = corev1alpha1.TaskExecutionStateSucceeded
-	execution.Outcome = corev1alpha1.TaskExecutionOutcomeSucceeded
-	execution.Reason = ""
-	execution.Message = ""
+// terminalProjectionExecution builds the immutable terminal-projection
+// execution payload from a deep copy of the Task's frozen execution identity,
+// overlaying only the terminal classification. Prompt attempt reclamation
+// validates the projection against the attempt's request digest and the
+// Task's complete runtime identity — including the RuntimeSession supervisor
+// boot ID and the profile/MCP/workspace digests — so a sparse payload makes
+// the source PromptAttempt impossible to retire and the Task undeletable.
+// The volatile transition time is cleared so retried settlements enqueue
+// byte-identical payloads.
+func terminalProjectionExecution(
+	task *corev1alpha1.Task,
+	state corev1alpha1.TaskExecutionState,
+	outcome corev1alpha1.TaskExecutionOutcome,
+	reason corev1alpha1.TaskExecutionReason,
+	message string,
+) corev1alpha1.TaskExecutionStatus {
+	execution := corev1alpha1.TaskExecutionStatus{}
+	if task != nil && task.Status.Execution != nil {
+		execution = *task.Status.Execution.DeepCopy()
+	}
+	execution.State = state
+	execution.Outcome = outcome
+	execution.Reason = reason
+	execution.Message = message
 	execution.LastTransitionTime = nil
+	return execution
+}
+
+func (d *ACPDispatcher) completeSuccessWithDelivery(ctx context.Context, task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus, message string) error {
+	execution := terminalProjectionExecution(task,
+		corev1alpha1.TaskExecutionStateSucceeded, corev1alpha1.TaskExecutionOutcomeSucceeded, "", "")
 	if err := d.enqueueStandaloneTaskProjection(ctx, task, taskTerminalProjection{
 		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: execution.Attempt,
 		Phase: corev1alpha1.TaskPhaseSucceeded, Message: message, Execution: execution, Delivery: &status,
@@ -1380,10 +1399,10 @@ func (d *ACPDispatcher) completeSuccessWithDelivery(ctx context.Context, task *c
 }
 
 func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus, message string) error {
-	execution := corev1alpha1.TaskExecutionStatus{
-		State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
-		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
-	}
+	// Execution succeeded and only delivery failed, so the projection carries
+	// the frozen successful execution identity with the failed Phase.
+	execution := terminalProjectionExecution(task,
+		corev1alpha1.TaskExecutionStateSucceeded, corev1alpha1.TaskExecutionOutcomeSucceeded, "", "")
 	if err := d.enqueueStandaloneTaskProjection(ctx, task, taskTerminalProjection{
 		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: execution.Attempt,
 		Phase: corev1alpha1.TaskPhaseFailed, Message: message, Execution: execution, Delivery: &status,
@@ -1415,10 +1434,11 @@ func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alp
 }
 
 func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus, message string) error {
-	execution := corev1alpha1.TaskExecutionStatus{
-		State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
-		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
-	}
+	// Execution succeeded before the cancellation settled the publication, so
+	// the projection carries the frozen successful execution identity with the
+	// cancelled Phase.
+	execution := terminalProjectionExecution(task,
+		corev1alpha1.TaskExecutionStateSucceeded, corev1alpha1.TaskExecutionOutcomeSucceeded, "", "")
 	if err := d.enqueueStandaloneTaskProjection(ctx, task, taskTerminalProjection{
 		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: execution.Attempt,
 		Phase: corev1alpha1.TaskPhaseCancelled, Message: message, Execution: execution, Delivery: &status,
@@ -1483,4 +1503,17 @@ func (d *ACPDispatcher) cancelPreparedPublication(ctx context.Context, task *cor
 		return false, err
 	}
 	return true, nil
+}
+
+// publicationSettlementWindow bounds the multi-effect publication settlement
+// and delivery flows. It preserves the historical five-minute window and grows
+// with the configured publisher operation timeout plus a settlement margin, so
+// a deliberately raised ORKA_PUBLISHER_PUBLISH_TIMEOUT is not truncated by the
+// outer context while default installations keep byte-identical behavior.
+func publicationSettlementWindow() time.Duration {
+	window := 5 * time.Minute
+	if bound := externalEffectCallTimeout(store.ExternalEffectIdentity{Kind: "publisher.publish"}) + time.Minute; bound > window {
+		return bound
+	}
+	return window
 }
