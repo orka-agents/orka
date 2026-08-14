@@ -260,3 +260,41 @@ export type RuntimePool = z.infer<typeof runtimePoolSchema>
 export type AgentRuntime = z.infer<typeof agentRuntimeSchema>
 export type RuntimePoolList = z.infer<typeof runtimePoolListSchema>
 export type AgentRuntimeList = z.infer<typeof agentRuntimeListSchema>
+
+// ---- SubstrateActorPool (core.orka.ai/v1alpha1) ----
+
+export const substrateActorPoolSpecSchema = z.object({
+  templateRef: z.object({ name: z.string() }).optional(),
+  workerPoolRef: z.object({ name: z.string() }).optional(),
+  targetActors: z.number().optional(),
+  targetWorkers: z.number().optional(),
+  precreateActors: z.boolean().optional(),
+})
+
+export const substrateActorPoolStatusSchema = z.object({
+  phase: z.string().optional(),
+  observedGeneration: z.number().optional(),
+  workerCount: z.number().optional(),
+  actorCount: z.number().optional(),
+  runningActorCount: z.number().optional(),
+  suspendedActorCount: z.number().optional(),
+  actorsPerWorker: z.string().optional(),
+  message: z.string().optional(),
+  conditions: z.array(conditionSchema).optional(),
+})
+
+export const substrateActorPoolSchema = z.object({
+  apiVersion: z.string().optional(),
+  kind: z.string().optional(),
+  metadata: z.object({
+    name: z.string(),
+    namespace: z.string().optional(),
+    uid: z.string().optional(),
+    creationTimestamp: z.string().optional(),
+  }),
+  spec: substrateActorPoolSpecSchema,
+  status: substrateActorPoolStatusSchema.optional(),
+})
+
+export type SubstrateActorPool = z.infer<typeof substrateActorPoolSchema>
+export type SubstrateActorPoolSpec = z.infer<typeof substrateActorPoolSpecSchema>

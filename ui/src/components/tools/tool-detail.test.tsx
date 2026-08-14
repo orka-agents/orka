@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor } from '@/test/test-utils'
+import userEvent from '@testing-library/user-event'
 
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
@@ -209,5 +210,69 @@ describe('ToolDetail', () => {
 
     // Should NOT show HTTP Configuration for built-in tools
     expect(screen.queryByText('HTTP Configuration')).not.toBeInTheDocument()
+  })
+})
+
+describe('ToolDetail actions', () => {
+  const customTool = {
+    metadata: { name: 'tavily', namespace: 'default' },
+    spec: {
+      description: 'Web search',
+      http: { url: 'https://api.tavily.com', method: 'POST', authInject: 'body' },
+      parameters: { type: 'object' },
+    },
+    status: { available: true },
+  }
+
+  beforeEach(() => {
+    useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
+    useAuthStore.setState({ token: 'test-token' })
+    server.use(http.get('/api/v1/tools/:name', () => HttpResponse.json(customTool)))
+  })
+
+  it('hides actions for built-in tools', async () => {
+    server.use(
+      http.get('/api/v1/tools/:name', () =>
+        HttpResponse.json({ name: 'web_search', builtin: true, description: 'Search the web' }),
+      ),
+    )
+    render(<ToolDetail toolName="web_search" />)
+    await waitFor(() => expect(screen.getByText('Built-in')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: /edit spec/i })).not.toBeInTheDocument()
+  })
+
+  it('edits a custom tool spec through the manifest editor', async () => {
+    let putBody: any
+    server.use(
+      http.put('/api/v1/tools/:name', async ({ request }) => {
+        putBody = await request.json()
+        return HttpResponse.json({ metadata: { name: 'tavily', namespace: 'default' }, spec: putBody.spec })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<ToolDetail toolName="tavily" />)
+    await waitFor(() => expect(screen.getByRole('button', { name: /edit spec/i })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /edit spec/i }))
+    expect(await screen.findByLabelText('Manifest YAML')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /save changes/i }))
+    await waitFor(() => expect(putBody).toBeTruthy())
+    expect(putBody.spec.http.url).toBe('https://api.tavily.com')
+  })
+
+  it('deletes a custom tool after a two-step confirm', async () => {
+    let deleted = false
+    server.use(
+      http.delete('/api/v1/tools/:name', () => {
+        deleted = true
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<ToolDetail toolName="tavily" />)
+    await waitFor(() => expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /^delete$/i }))
+    expect(deleted).toBe(false)
+    await user.click(screen.getByRole('button', { name: /confirm delete/i }))
+    await waitFor(() => expect(deleted).toBe(true))
   })
 })

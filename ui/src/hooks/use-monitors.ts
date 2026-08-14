@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
-import type { MonitorAction, MonitorCommand, MonitorImplementationJob, MonitorItem, MonitorMutation, MonitorRun, MonitorWorkAction, RepositoryMonitor } from '@/schemas/monitor'
+import type { MonitorAction, MonitorCommand, MonitorEvent, MonitorImplementationJob, MonitorItem, MonitorMutation, MonitorRun, MonitorWorkAction, RepositoryMonitor } from '@/schemas/monitor'
 
 interface ListResponse<T> {
   items: T[]
@@ -157,5 +157,54 @@ export function useRunRepositoryMonitor(name: string) {
       queryClient.invalidateQueries({ queryKey: ['monitors', 'repository', namespace, name] })
       queryClient.invalidateQueries({ queryKey: ['monitors', 'repositories', namespace] })
     },
+  })
+}
+
+export interface UpdateRepositoryMonitorBody {
+  name: string
+  spec: Record<string, unknown>
+}
+
+export function useUpdateRepositoryMonitor() {
+  const queryClient = useQueryClient()
+  const namespace = useUIStore((s) => s.namespace)
+  return useMutation({
+    mutationFn: ({ name, spec }: UpdateRepositoryMonitorBody) =>
+      api.put<RepositoryMonitor>(`/monitors/repositories/${name}`, { spec }, { namespace }),
+    onSuccess: (_data, { name }) => {
+      queryClient.invalidateQueries({ queryKey: ['monitors'] })
+      queryClient.invalidateQueries({ queryKey: ['monitor', name] })
+    },
+  })
+}
+
+// Workflow timeline rows for a monitor (GET /monitors/events?name=).
+export function useRepositoryMonitorEvents(name: string, refetchInterval: number | false = 10000) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['monitorEvents', name, namespace],
+    queryFn: () =>
+      api.get<ListResponse<MonitorEvent>>('/monitors/events', { namespace, name, limit: '50' }),
+    enabled: Boolean(name),
+    refetchInterval,
+  })
+}
+
+export interface ImplementationJobPatchPreview {
+  job: MonitorImplementationJob
+  patch: unknown
+  contentType?: string
+}
+
+// Patch artifact preview for an implementation job. 501 when no artifact
+// store is configured; 404 when the job has no patch artifact yet.
+export function useImplementationJobPatchPreview(jobID: string, enabled: boolean) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['implementationJobPatch', jobID, namespace],
+    queryFn: () =>
+      api.get<ImplementationJobPatchPreview>(`/monitors/implementation-jobs/${jobID}/patch-preview`, { namespace }),
+    enabled: enabled && Boolean(jobID),
+    retry: false,
   })
 }

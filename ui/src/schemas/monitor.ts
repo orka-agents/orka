@@ -358,3 +358,22 @@ export type MonitorWorkAction = z.infer<typeof monitorWorkActionSchema>
 export type MonitorImplementationJob = z.infer<typeof monitorImplementationJobSchema>
 export type MonitorMutation = z.infer<typeof monitorMutationSchema>
 export type MonitorCommand = z.infer<typeof monitorCommandSchema>
+
+// Mirrors internal/store/monitor_types.go MonitorEvent (workflow timeline rows
+// served by GET /monitors/events).
+export const monitorEventSchema = z.object({
+  id: z.string(),
+  monitorNamespace: z.string().optional(),
+  monitorName: z.string().optional(),
+  runID: z.string().optional(),
+  itemKind: z.string().optional(),
+  itemNumber: z.number().optional(),
+  itemSHA: z.string().optional(),
+  eventType: z.string(),
+  actor: z.string().optional(),
+  summary: z.string().optional(),
+  metadataJSON: z.string().optional(),
+  createdAt: z.string(),
+})
+
+export type MonitorEvent = z.infer<typeof monitorEventSchema>

@@ -71,3 +71,32 @@ describe('Sidebar', () => {
     ).toBeInTheDocument()
   })
 })
+
+describe('Sidebar groups', () => {
+  beforeEach(() => {
+    useUIStore.setState({ sidebarCollapsed: false, theme: 'light', namespace: 'default' })
+  })
+
+  it('renders the water-column group labels', () => {
+    render(<Sidebar />)
+    for (const label of ['Operate', 'Automation', 'Registry', 'Fabric', 'Platform']) {
+      expect(screen.getByText(label)).toBeInTheDocument()
+    }
+  })
+
+  it('renders the new registry and system destinations', () => {
+    render(<Sidebar />)
+    expect(screen.getByText('Providers')).toBeInTheDocument()
+    expect(screen.getByText('Skills')).toBeInTheDocument()
+    expect(screen.getByText('Memory')).toBeInTheDocument()
+    expect(screen.getByText('Gateways')).toBeInTheDocument()
+    expect(screen.getByText('Monitors')).toBeInTheDocument()
+    expect(screen.getByText('Security')).toBeInTheDocument()
+  })
+
+  it('hides group labels when collapsed', () => {
+    useUIStore.setState({ sidebarCollapsed: true })
+    render(<Sidebar />)
+    expect(screen.queryByText('Registry')).not.toBeInTheDocument()
+  })
+})

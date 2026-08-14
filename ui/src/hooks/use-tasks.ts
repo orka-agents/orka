@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
-import type { ExecutionEvent, Task, TaskEventsResponse } from '@/schemas/task'
+import type { ExecutionEvent, PlanState, Task, TaskEventsResponse } from '@/schemas/task'
 
 interface ListResponse<T> {
   items: T[]
@@ -179,5 +179,32 @@ export function useTaskEvents(
       query.state.error instanceof ApiError && query.state.error.status === 501
         ? false
         : refetchInterval,
+  })
+}
+
+// Plan state for autonomous tasks. 501 until a plan store is configured.
+export function useTaskPlan(id: string, refetchInterval: number | false = 10000) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['taskPlan', id, namespace],
+    queryFn: () => api.get<PlanState>(`/tasks/${id}/plan`, { namespace }),
+    enabled: Boolean(id),
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && (error.status === 501 || error.status === 404)) && failureCount < 3,
+    refetchInterval: (query) =>
+      query.state.error instanceof ApiError &&
+      (query.state.error.status === 501 || query.state.error.status === 404)
+        ? false
+        : refetchInterval,
+  })
+}
+
+export function useTaskChildren(id: string, refetchInterval: number | false = 10000) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['taskChildren', id, namespace],
+    queryFn: () => api.get<ListResponse<Task>>(`/tasks/${id}/children`, { namespace }),
+    enabled: Boolean(id),
+    refetchInterval,
   })
 }

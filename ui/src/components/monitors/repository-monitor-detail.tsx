@@ -1,11 +1,15 @@
-import { Play } from 'lucide-react'
+import { useState } from 'react'
+import { Pencil, Play } from 'lucide-react'
+import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { ManifestEditor } from '@/components/ui/manifest-editor'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/layout/page-header'
-import { useCreateRepositoryMonitorCommand, useRepositoryMonitor, useRepositoryMonitorActions, useRepositoryMonitorCommands, useRepositoryMonitorImplementationJobs, useRepositoryMonitorItems, useRepositoryMonitorMutations, useRepositoryMonitorRuns, useRepositoryMonitorWorkActions, useRunRepositoryMonitor } from '@/hooks/use-monitors'
+import { useCreateRepositoryMonitorCommand, useRepositoryMonitor, useRepositoryMonitorActions, useRepositoryMonitorCommands, useRepositoryMonitorEvents, useRepositoryMonitorImplementationJobs, useRepositoryMonitorItems, useRepositoryMonitorMutations, useRepositoryMonitorRuns, useRepositoryMonitorWorkActions, useRunRepositoryMonitor, useUpdateRepositoryMonitor } from '@/hooks/use-monitors'
+import { ImplementationJobPatchDialog } from './implementation-job-patch-dialog'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
 
 function shortSHA(value?: string) {
@@ -42,8 +46,11 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
   const workActions = useRepositoryMonitorWorkActions(monitorName)
   const implementationJobs = useRepositoryMonitorImplementationJobs(monitorName)
   const mutations = useRepositoryMonitorMutations(monitorName)
+  const monitorEvents = useRepositoryMonitorEvents(monitorName)
   const runMonitor = useRunRepositoryMonitor(monitorName)
   const createCommand = useCreateRepositoryMonitorCommand(monitorName)
+  const updateMonitor = useUpdateRepositoryMonitor()
+  const [editing, setEditing] = useState(false)
 
   if (isLoading) {
     return (
@@ -69,12 +76,32 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
         action={
           <>
             <Badge variant={status?.phase === 'Ready' ? 'default' : 'secondary'}>{status?.phase || 'Pending'}</Badge>
+            <Button variant="outline" onClick={() => setEditing(true)}>
+              <Pencil className="mr-2 h-4 w-4" />
+              Edit spec
+            </Button>
             <Button variant="secondary" onClick={() => runMonitor.mutate()} disabled={runMonitor.isPending}>
               <Play className="mr-2 h-4 w-4" />
               Run
             </Button>
           </>
         }
+      />
+
+      <ManifestEditor
+        open={editing}
+        onOpenChange={setEditing}
+        title={`Edit ${displayName}`}
+        description="Edits the full RepositoryMonitor spec — targets, agents, labels, review publishing, repair, automerge, and policy."
+        initialValue={{ spec: monitor.spec }}
+        submitLabel="Save changes"
+        pending={updateMonitor.isPending}
+        onSubmit={async (manifest) => {
+          const spec = (manifest.spec ?? manifest) as Record<string, unknown>
+          await updateMonitor.mutateAsync({ name: monitorName, spec })
+          toast.success(`Monitor ${displayName} updated`)
+          setEditing(false)
+        }}
       />
 
       <div className="grid gap-4 md:grid-cols-6">
@@ -305,9 +332,39 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
                     </div>
                     <div className="mt-1 text-xs text-muted-foreground">Issue #{job.issueNumber} · attempt {job.attempt ?? 0} · validation {job.validationState || 'pending'}</div>
                     {job.branch ? <div className="mt-1 font-mono text-xs">Branch: {job.branch}</div> : null}
-                    {job.patchArtifactID ? <div className="mt-1 font-mono text-xs">Patch: {job.patchArtifactID}</div> : null}
+                    {job.patchArtifactID ? (
+                      <div className="mt-1 flex items-center justify-between gap-2">
+                        <span className="font-mono text-xs">Patch: {job.patchArtifactID}</span>
+                        <ImplementationJobPatchDialog job={job} />
+                      </div>
+                    ) : null}
                     {job.prNumber ? <div className="mt-1 text-xs">Linked PR #{job.prNumber}</div> : null}
                     {job.error ? <div className="mt-1 text-xs text-destructive">{job.error}</div> : null}
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Monitor Events</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(monitorEvents.data?.items ?? []).length === 0 ? (
+                <div className="py-8 text-center text-sm text-muted-foreground">No monitor events recorded yet.</div>
+              ) : (
+                (monitorEvents.data?.items ?? []).slice(0, 10).map((event) => (
+                  <div key={event.id} className="rounded-md border px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs">{event.eventType}</span>
+                      <span className="text-xs text-muted-foreground">{formatTime(event.createdAt)}</span>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {event.itemKind ? `${event.itemKind} #${event.itemNumber ?? '—'} · ` : ''}
+                      {event.actor ? `${event.actor} · ` : ''}
+                      {event.summary || '—'}
+                    </div>
                   </div>
                 ))
               )}

@@ -107,7 +107,7 @@ describe('AgentCreateForm', () => {
     await user.click(screen.getByRole('button', { name: 'Create Agent' }))
 
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Agent created'))
-    expect(submitted.spec.runtime).toEqual({ type: 'claude' })
+    expect(submitted.spec.runtime).toEqual({ type: 'claude', contractVersion: 'orka.harness.v2' })
     expect(submitted.spec.model).toEqual({ name: 'claude-sonnet-4-20250514' })
     expect(submitted.spec.runtime.defaultMaxTurns).toBeUndefined()
     expect(submitted.spec.secretRef).toBeUndefined()
@@ -137,7 +137,7 @@ describe('AgentCreateForm', () => {
     await user.click(screen.getByRole('button', { name: 'Create Agent' }))
 
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Agent created'))
-    expect(submitted.spec.runtime).toEqual({ type: 'copilot' })
+    expect(submitted.spec.runtime).toEqual({ type: 'copilot', contractVersion: 'orka.harness.v2' })
     expect(submitted.spec.model).toEqual({ name: 'gpt-5.3-codex' })
   })
 
@@ -175,6 +175,7 @@ describe('AgentCreateForm', () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Agent created'))
     expect(submitted.spec.runtime).toEqual({
       type: 'opencode',
+      contractVersion: 'orka.harness.v2',
       defaultAllowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],
       defaultAllowBash: true,
     })
@@ -277,7 +278,7 @@ describe('AgentCreateForm', () => {
     await user.click(screen.getByRole('button', { name: 'Create Agent' }))
 
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Agent created'))
-    expect(submitted.spec.runtime).toEqual({ runtimeRef: { name: 'external-codex' } })
+    expect(submitted.spec.runtime).toEqual({ runtimeRef: { name: 'external-codex' }, contractVersion: 'orka.harness.v2' })
     expect(submitted.spec.model).toBeUndefined()
   })
 

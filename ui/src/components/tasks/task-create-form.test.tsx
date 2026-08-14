@@ -43,6 +43,10 @@ import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { TaskCreateForm } from './task-create-form'
 
+function fill(element: Element, value: string) {
+  fireEvent.change(element, { target: { value } })
+}
+
 async function openWriteWorkspace(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByText(/Advanced Options/))
   await user.click(screen.getByText(/Workspace policy/))
@@ -141,9 +145,9 @@ describe('TaskCreateForm', () => {
     const user = userEvent.setup()
     render(<TaskCreateForm />)
 
-    await user.type(screen.getByPlaceholderText('my-task'), 'test-task')
-    await user.type(screen.getByPlaceholderText('alpine:latest'), 'nginx:latest')
-    await user.type(screen.getByPlaceholderText('echo hello'), 'ls -la')
+    fill(screen.getByPlaceholderText('my-task'), 'test-task')
+    fill(screen.getByPlaceholderText('alpine:latest'), 'nginx:latest')
+    fill(screen.getByPlaceholderText('echo hello'), 'ls -la')
 
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
 
@@ -157,8 +161,8 @@ describe('TaskCreateForm', () => {
     const user = userEvent.setup()
     render(<TaskCreateForm />)
 
-    await user.type(screen.getByPlaceholderText('my-task'), 'no-cmd-task')
-    await user.type(screen.getByPlaceholderText('alpine:latest'), 'nginx:latest')
+    fill(screen.getByPlaceholderText('my-task'), 'no-cmd-task')
+    fill(screen.getByPlaceholderText('alpine:latest'), 'nginx:latest')
     // Don't fill in command to test the `if (command)` branch false path
 
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
@@ -183,8 +187,8 @@ describe('TaskCreateForm', () => {
     const user = userEvent.setup()
     render(<TaskCreateForm />)
 
-    await user.type(screen.getByPlaceholderText('my-task'), 'bad-task')
-    await user.type(screen.getByPlaceholderText('alpine:latest'), 'nginx')
+    fill(screen.getByPlaceholderText('my-task'), 'bad-task')
+    fill(screen.getByPlaceholderText('alpine:latest'), 'nginx')
 
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
 
@@ -198,9 +202,9 @@ describe('TaskCreateForm', () => {
     const user = userEvent.setup()
     render(<TaskCreateForm />)
 
-    await user.type(screen.getByPlaceholderText('my-task'), 'ai-task')
-    await user.type(screen.getByPlaceholderText('claude-sonnet-4-20250514'), 'my-model')
-    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Hello AI')
+    fill(screen.getByPlaceholderText('my-task'), 'ai-task')
+    fill(screen.getByPlaceholderText('claude-sonnet-4-20250514'), 'my-model')
+    fill(screen.getByPlaceholderText('Enter your prompt...'), 'Hello AI')
 
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
 
@@ -224,8 +228,8 @@ describe('TaskCreateForm', () => {
     const user = userEvent.setup()
     render(<TaskCreateForm />)
 
-    await user.type(screen.getByPlaceholderText('my-task'), 'agent-task')
-    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Do something')
+    fill(screen.getByPlaceholderText('my-task'), 'agent-task')
+    fill(screen.getByPlaceholderText('Enter your prompt...'), 'Do something')
 
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
 
@@ -323,8 +327,8 @@ describe('TaskCreateForm', () => {
     const user = userEvent.setup()
     render(<TaskCreateForm />)
 
-    await user.type(screen.getByPlaceholderText('my-task'), 'write-task')
-    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
+    fill(screen.getByPlaceholderText('my-task'), 'write-task')
+    fill(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
     await user.click(screen.getByText(/Advanced Options/))
     await user.click(screen.getByText(/Workspace policy/))
 
@@ -333,22 +337,22 @@ describe('TaskCreateForm', () => {
     fireEvent.click(await screen.findByRole('option', { name: /Write — produce/ }))
 
     const repositoryURLs = screen.getAllByPlaceholderText('https://github.com/org/repo')
-    await user.type(repositoryURLs[0], 'https://github.com/source/repo')
-    await user.type(screen.getByLabelText('Source repository provider'), 'github')
-    await user.type(screen.getByLabelText('Source repository URL identity'), 'github.com/source/repo')
-    await user.type(screen.getByLabelText('Read credential Secret'), 'source-read')
-    await user.type(screen.getByLabelText('Read credential key'), 'source-token')
-    await user.type(repositoryURLs[1], 'https://github.com/publish/repo')
-    await user.type(screen.getByLabelText('Publication provider'), 'github')
-    await user.type(screen.getByLabelText('Publication repository URL identity'), 'github.com/publish/repo')
-    await user.type(screen.getByLabelText('Publication read credential Secret'), 'target-read')
-    await user.type(screen.getByLabelText('Publication read credential key'), 'verify-token')
-    await user.type(screen.getByLabelText('Publication write credential Secret'), 'target-write')
-    await user.type(screen.getByLabelText('Publication write credential key'), 'write-token')
-    await user.type(screen.getByLabelText('Forge credential Secret'), 'forge-api')
-    await user.type(screen.getByLabelText('Forge credential key'), 'forge-token')
-    await user.type(screen.getByPlaceholderText('Leave empty for an Orka-owned branch'), 'orka/change')
-    await user.type(screen.getByLabelText('Pull request base branch'), 'main')
+    fill(repositoryURLs[0], 'https://github.com/source/repo')
+    fill(screen.getByLabelText('Source repository provider'), 'github')
+    fill(screen.getByLabelText('Source repository URL identity'), 'github.com/source/repo')
+    fill(screen.getByLabelText('Read credential Secret'), 'source-read')
+    fill(screen.getByLabelText('Read credential key'), 'source-token')
+    fill(repositoryURLs[1], 'https://github.com/publish/repo')
+    fill(screen.getByLabelText('Publication provider'), 'github')
+    fill(screen.getByLabelText('Publication repository URL identity'), 'github.com/publish/repo')
+    fill(screen.getByLabelText('Publication read credential Secret'), 'target-read')
+    fill(screen.getByLabelText('Publication read credential key'), 'verify-token')
+    fill(screen.getByLabelText('Publication write credential Secret'), 'target-write')
+    fill(screen.getByLabelText('Publication write credential key'), 'write-token')
+    fill(screen.getByLabelText('Forge credential Secret'), 'forge-api')
+    fill(screen.getByLabelText('Forge credential key'), 'forge-token')
+    fill(screen.getByPlaceholderText('Leave empty for an Orka-owned branch'), 'orka/change')
+    fill(screen.getByLabelText('Pull request base branch'), 'main')
     await user.click(screen.getByRole('switch', { name: /Reconcile a pull request/ }))
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
 
@@ -371,7 +375,7 @@ describe('TaskCreateForm', () => {
     expect(submitted.agentRuntime?.workspace).toBeUndefined()
     expect(submitted.workspace.gitSecretRef).toBeUndefined()
     expect(submitted.workspace.forkRepo).toBeUndefined()
-  }, 10_000)
+  })
 
   it('requires a source repository URL for write workspaces', async () => {
     useStateTypeOverride = 'agent'
@@ -386,11 +390,11 @@ describe('TaskCreateForm', () => {
     const user = userEvent.setup()
     render(<TaskCreateForm />)
 
-    await user.type(screen.getByPlaceholderText('my-task'), 'write-task')
-    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
+    fill(screen.getByPlaceholderText('my-task'), 'write-task')
+    fill(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
     await openWriteWorkspace(user)
-    await user.type(screen.getByLabelText('Source repository URL'), '   ')
-    await user.type(screen.getByLabelText('Publication write credential Secret'), 'target-write')
+    fill(screen.getByLabelText('Source repository URL'), '   ')
+    fill(screen.getByLabelText('Publication write credential Secret'), 'target-write')
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
 
     expect(toast.error).toHaveBeenCalledWith('Source repository URL is required for write workspaces')
@@ -411,11 +415,11 @@ describe('TaskCreateForm', () => {
     const user = userEvent.setup()
     render(<TaskCreateForm />)
 
-    await user.type(screen.getByPlaceholderText('my-task'), 'write-task')
-    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
+    fill(screen.getByPlaceholderText('my-task'), 'write-task')
+    fill(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
     await openWriteWorkspace(user)
-    await user.type(screen.getByLabelText('Source repository URL'), 'https://github.com/source/repo')
-    await user.type(screen.getByLabelText('Publication write credential Secret'), '   ')
+    fill(screen.getByLabelText('Source repository URL'), 'https://github.com/source/repo')
+    fill(screen.getByLabelText('Publication write credential Secret'), '   ')
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
 
     expect(toast.error).toHaveBeenCalledWith('Publication write credential Secret is required for write workspaces')
@@ -436,13 +440,13 @@ describe('TaskCreateForm', () => {
     const user = userEvent.setup()
     render(<TaskCreateForm />)
 
-    await user.type(screen.getByPlaceholderText('my-task'), 'write-task')
-    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
+    fill(screen.getByPlaceholderText('my-task'), 'write-task')
+    fill(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
     await openWriteWorkspace(user)
-    await user.type(screen.getByLabelText('Source repository URL'), 'https://github.com/source/repo')
-    await user.type(screen.getByLabelText('Publication write credential Secret'), 'target-write')
-    await user.type(screen.getByLabelText('Forge credential Secret'), 'forge-api')
-    await user.type(screen.getByLabelText('Pull request base branch'), '   ')
+    fill(screen.getByLabelText('Source repository URL'), 'https://github.com/source/repo')
+    fill(screen.getByLabelText('Publication write credential Secret'), 'target-write')
+    fill(screen.getByLabelText('Forge credential Secret'), 'forge-api')
+    fill(screen.getByLabelText('Pull request base branch'), '   ')
     await user.click(screen.getByRole('switch', { name: /Reconcile a pull request/ }))
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
 
@@ -464,12 +468,12 @@ describe('TaskCreateForm', () => {
     const user = userEvent.setup()
     render(<TaskCreateForm />)
 
-    await user.type(screen.getByPlaceholderText('my-task'), 'write-task')
-    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
+    fill(screen.getByPlaceholderText('my-task'), 'write-task')
+    fill(screen.getByPlaceholderText('Enter your prompt...'), 'Update the repository')
     await openWriteWorkspace(user)
-    await user.type(screen.getByLabelText('Source repository URL'), 'https://github.com/source/repo')
-    await user.type(screen.getByLabelText('Publication write credential Secret'), 'target-write')
-    await user.type(screen.getByLabelText('Pull request base branch'), 'main')
+    fill(screen.getByLabelText('Source repository URL'), 'https://github.com/source/repo')
+    fill(screen.getByLabelText('Publication write credential Secret'), 'target-write')
+    fill(screen.getByLabelText('Pull request base branch'), 'main')
     await user.click(screen.getByRole('switch', { name: /Reconcile a pull request/ }))
     const submitButton = screen.getByRole('button', { name: 'Create Task' })
     fireEvent.submit(submitButton.closest('form')!)
@@ -559,5 +563,133 @@ describe('TaskCreateForm', () => {
     expect(await screen.findByRole('option', { name: /built-in-agent/ })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: /external-agent/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('option', { name: /provider-agent/ })).not.toBeInTheDocument()
+  })
+})
+
+describe('TaskCreateForm parity extensions', () => {
+  beforeEach(() => {
+    useUIStore.setState({ sidebarCollapsed: false, theme: 'light', namespace: 'default' })
+    useAuthStore.setState({ token: 'test-token' })
+    mockNavigate.mockClear()
+  })
+
+  it('submits schedule, env, retry, webhook, and session fields', async () => {
+    let posted: any
+    server.use(
+      http.post('/api/v1/tasks', async ({ request }) => {
+        posted = await request.json()
+        return HttpResponse.json({ metadata: { name: 'cron-task', namespace: 'default' }, spec: { type: 'container' } }, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    fill(screen.getByPlaceholderText('my-task'), 'cron-task')
+    fill(screen.getByPlaceholderText('alpine:latest'), 'alpine:3')
+    await user.click(screen.getByText(/Advanced Options/))
+    fill(screen.getByLabelText('Cron'), '0 9 * * 1-5')
+    fill(screen.getByLabelText('Time zone'), 'UTC')
+    fill(screen.getByLabelText(/Environment/), 'LOG_LEVEL=debug\nREGION=us-west-2')
+    fill(screen.getByLabelText('Webhook URL'), 'https://hooks.example.com/x')
+    fill(screen.getByLabelText('Secret ref'), 'creds')
+    fill(screen.getByLabelText('Max retries'), '2')
+    fill(screen.getByLabelText('Session name'), 'sess-1')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    await waitFor(() => expect(posted).toBeTruthy())
+    expect(posted.schedule).toBe('0 9 * * 1-5')
+    expect(posted.timeZone).toBe('UTC')
+    expect(posted.env).toEqual([
+      { name: 'LOG_LEVEL', value: 'debug' },
+      { name: 'REGION', value: 'us-west-2' },
+    ])
+    expect(posted.webhookURL).toBe('https://hooks.example.com/x')
+    expect(posted.secretRef).toEqual({ name: 'creds' })
+    expect(posted.retryPolicy).toEqual({ maxRetries: 2 })
+    expect(posted.sessionRef).toEqual({ name: 'sess-1' })
+  })
+
+  it('submits AI extras: system prompt, sampling, tools, and skills', async () => {
+    useStateTypeOverride = 'ai'
+    let posted: any
+    server.use(
+      http.post('/api/v1/tasks', async ({ request }) => {
+        posted = await request.json()
+        return HttpResponse.json({ metadata: { name: 'ai-task', namespace: 'default' }, spec: { type: 'ai' } }, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    fill(screen.getByPlaceholderText('my-task'), 'ai-task')
+    fill(screen.getByPlaceholderText('claude-sonnet-4-20250514'), 'claude-sonnet-4')
+    fill(screen.getByPlaceholderText('Enter your prompt...'), 'summarize the repo')
+    fill(screen.getByLabelText(/System prompt/), 'be terse')
+    fill(screen.getByLabelText(/Temperature/), '0.3')
+    fill(screen.getByLabelText(/Tools \(comma-separated/), 'web_search, code_exec')
+    fill(screen.getByLabelText(/Skills \(comma-separated/), 'code-review')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    await waitFor(() => expect(posted).toBeTruthy())
+    expect(posted.ai.systemPrompt).toBe('be terse')
+    expect(posted.ai.temperature).toBeCloseTo(0.3)
+    expect(posted.ai.tools).toEqual(['web_search', 'code_exec'])
+    expect(posted.ai.skills).toEqual([{ name: 'code-review' }])
+  })
+
+  it('submits agent runtime overrides', async () => {
+    useStateTypeOverride = 'agent'
+    let posted: any
+    server.use(
+      http.get('/api/v1/agents', () =>
+        HttpResponse.json({
+          items: [
+            {
+              metadata: { name: 'coder', namespace: 'default' },
+              spec: { runtime: { type: 'claude', contractVersion: 'orka.harness.v2' } },
+            },
+          ],
+          metadata: {},
+        }),
+      ),
+      http.post('/api/v1/tasks', async ({ request }) => {
+        posted = await request.json()
+        return HttpResponse.json({ metadata: { name: 'agent-task', namespace: 'default' }, spec: { type: 'agent' } }, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    fill(screen.getByPlaceholderText('my-task'), 'agent-task')
+    const agentTrigger = screen.getByText('Agent Reference').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+    // The select stays disabled until the agents query resolves.
+    await waitFor(() => expect(agentTrigger).not.toBeDisabled())
+    fireEvent.pointerDown(agentTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    fireEvent.click(await screen.findByRole('option', { name: /coder/ }))
+    fill(screen.getByPlaceholderText('Enter your prompt...'), 'fix the bug')
+    await user.click(screen.getByText(/Advanced Options/))
+    fill(screen.getByLabelText('Max turns'), '25')
+    fill(screen.getByLabelText('Allowed tools'), 'Read, Grep')
+    await user.click(screen.getByRole('switch', { name: 'Allow bash' }))
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    await waitFor(() => expect(posted).toBeTruthy())
+    expect(posted.agentRuntime).toEqual({ maxTurns: 25, allowedTools: ['Read', 'Grep'], allowBash: true })
+  })
+
+  it('opens the YAML editor seeded from form state and submits it', async () => {
+    let posted: any
+    server.use(
+      http.post('/api/v1/tasks', async ({ request }) => {
+        posted = await request.json()
+        return HttpResponse.json({ metadata: { name: 'yaml-task', namespace: 'default' }, spec: { type: 'container' } }, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    fill(screen.getByPlaceholderText('my-task'), 'yaml-task')
+    fill(screen.getByPlaceholderText('alpine:latest'), 'alpine:3')
+    await user.click(screen.getByRole('button', { name: /edit as yaml/i }))
+    const textarea = await screen.findByLabelText('Manifest YAML')
+    expect((textarea as HTMLTextAreaElement).value).toContain('yaml-task')
+    expect((textarea as HTMLTextAreaElement).value).toContain('alpine:3')
+    await user.click(screen.getByRole('button', { name: /create task$/i }))
+    await waitFor(() => expect(posted).toBeTruthy())
+    expect(posted.name).toBe('yaml-task')
+    expect(posted.image).toBe('alpine:3')
   })
 })

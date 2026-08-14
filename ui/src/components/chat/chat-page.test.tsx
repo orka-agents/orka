@@ -8,6 +8,7 @@ vi.mock('zustand/middleware', async () => {
 vi.mock('@/hooks/use-chat', () => ({
   useSendMessage: () => vi.fn(),
   useChatConfig: () => ({ data: { model: 'claude-sonnet-4-20250514', enabled: true } }),
+  useCancelChatSession: () => ({ mutateAsync: vi.fn().mockResolvedValue(undefined), isPending: false }),
 }))
 
 import { render, screen } from '@/test/test-utils'

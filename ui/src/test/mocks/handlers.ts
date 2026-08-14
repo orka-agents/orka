@@ -160,6 +160,231 @@ export const handlers = [
   http.get(`${API}/auth/validate`, () => {
     return new HttpResponse(null, { status: 200 })
   }),
+  http.get(`${API}/auth/whoami`, () => {
+    return HttpResponse.json({
+      authenticated: true,
+      authType: 'kubernetes',
+      username: 'system:serviceaccount:default:orka',
+      namespace: 'default',
+    })
+  }),
+
+  // Task plan + children extras
+  http.get(`${API}/tasks/:id/plan`, () => {
+    return HttpResponse.json({
+      summary: 'Working',
+      progressPct: 50,
+      goalComplete: false,
+      planDocument: '# Plan',
+      iteration: 1,
+    })
+  }),
+
+  // Providers
+  http.get(`${API}/providers`, () => {
+    return HttpResponse.json({ items: [], metadata: {} })
+  }),
+  http.get(`${API}/providers/:name`, ({ params }) => {
+    return HttpResponse.json({
+      metadata: { name: params.name, namespace: 'default' },
+      spec: { type: 'anthropic', secretRef: { name: 'anthropic-key' } },
+      status: { ready: true },
+    })
+  }),
+  http.post(`${API}/providers`, () => {
+    return HttpResponse.json(
+      { metadata: { name: 'new-provider', namespace: 'default' }, spec: { type: 'anthropic', secretRef: { name: 's' } } },
+      { status: 201 },
+    )
+  }),
+  http.put(`${API}/providers/:name`, ({ params }) => {
+    return HttpResponse.json({
+      metadata: { name: params.name, namespace: 'default' },
+      spec: { type: 'anthropic', secretRef: { name: 's' } },
+    })
+  }),
+  http.delete(`${API}/providers/:name`, () => {
+    return new HttpResponse(null, { status: 204 })
+  }),
+
+  // Skills
+  http.get(`${API}/skills`, () => {
+    return HttpResponse.json({ items: [], metadata: {} })
+  }),
+  http.get(`${API}/skills/:name`, ({ params }) => {
+    return HttpResponse.json({
+      metadata: { name: params.name, namespace: 'default' },
+      spec: { description: 'A skill', content: { inline: '# Skill' } },
+      status: { phase: 'Ready' },
+    })
+  }),
+  http.get(`${API}/skills/:name/content`, () => {
+    return new HttpResponse('# Skill content', {
+      status: 200,
+      headers: { 'Content-Type': 'text/markdown' },
+    })
+  }),
+  http.post(`${API}/skills`, () => {
+    return HttpResponse.json(
+      { metadata: { name: 'new-skill', namespace: 'default' }, spec: { description: 'd', content: { inline: '#' } } },
+      { status: 201 },
+    )
+  }),
+  http.put(`${API}/skills/:name`, ({ params }) => {
+    return HttpResponse.json({
+      metadata: { name: params.name, namespace: 'default' },
+      spec: { description: 'd', content: { inline: '#' } },
+    })
+  }),
+  http.delete(`${API}/skills/:name`, () => {
+    return new HttpResponse(null, { status: 204 })
+  }),
+
+  // Memories + proposals
+  http.get(`${API}/memories`, () => {
+    return HttpResponse.json({ items: [], metadata: {} })
+  }),
+  http.get(`${API}/memories/:id`, ({ params }) => {
+    return HttpResponse.json({
+      id: params.id,
+      namespace: 'default',
+      source: 'manual',
+      content: 'remembered fact',
+      createdAt: '2026-06-13T00:00:00Z',
+      updatedAt: '2026-06-13T00:00:00Z',
+    })
+  }),
+  http.post(`${API}/memories`, () => {
+    return HttpResponse.json(
+      {
+        id: 'mem-1',
+        namespace: 'default',
+        source: 'manual',
+        content: 'new memory',
+        createdAt: '2026-06-13T00:00:00Z',
+        updatedAt: '2026-06-13T00:00:00Z',
+      },
+      { status: 201 },
+    )
+  }),
+  http.put(`${API}/memories/:id`, ({ params }) => {
+    return HttpResponse.json({
+      id: params.id,
+      namespace: 'default',
+      source: 'manual',
+      content: 'updated memory',
+      createdAt: '2026-06-13T00:00:00Z',
+      updatedAt: '2026-06-13T00:00:00Z',
+    })
+  }),
+  http.delete(`${API}/memories/:id`, () => {
+    return new HttpResponse(null, { status: 204 })
+  }),
+  http.post(`${API}/memories/:id/enable`, () => {
+    return new HttpResponse(null, { status: 204 })
+  }),
+  http.post(`${API}/memories/:id/disable`, () => {
+    return new HttpResponse(null, { status: 204 })
+  }),
+  http.get(`${API}/memory-proposals`, () => {
+    return HttpResponse.json({ items: [], metadata: {} })
+  }),
+  http.get(`${API}/memory-proposals/:id`, ({ params }) => {
+    return HttpResponse.json({
+      id: params.id,
+      namespace: 'default',
+      type: 'memory',
+      title: 'Proposal',
+      status: 'pending',
+      createdAt: '2026-06-13T00:00:00Z',
+      updatedAt: '2026-06-13T00:00:00Z',
+    })
+  }),
+  http.post(`${API}/memory-proposals/:id/review`, () => {
+    return new HttpResponse(null, { status: 204 })
+  }),
+  http.post(`${API}/memory-proposals/:id/apply`, ({ params }) => {
+    return HttpResponse.json({
+      id: 'mem-from-proposal',
+      namespace: 'default',
+      source: 'proposal',
+      sourceProposalId: params.id,
+      content: 'applied memory',
+      createdAt: '2026-06-13T00:00:00Z',
+      updatedAt: '2026-06-13T00:00:00Z',
+    })
+  }),
+  http.post(`${API}/memory-proposals/:id/archive`, () => {
+    return new HttpResponse(null, { status: 204 })
+  }),
+
+  // Tools CRUD
+  http.post(`${API}/tools`, () => {
+    return HttpResponse.json(
+      { metadata: { name: 'new-tool', namespace: 'default' }, spec: { description: 'd' } },
+      { status: 201 },
+    )
+  }),
+  http.put(`${API}/tools/:name`, ({ params }) => {
+    return HttpResponse.json({
+      metadata: { name: params.name, namespace: 'default' },
+      spec: { description: 'd' },
+    })
+  }),
+  http.delete(`${API}/tools/:name`, () => {
+    return new HttpResponse(null, { status: 204 })
+  }),
+
+  // Runtime fabric
+  http.get(`${API}/substrate-actor-pools`, () => {
+    return HttpResponse.json({ items: [], metadata: {} })
+  }),
+  http.get(`${API}/substrate-actor-pools/:name`, ({ params }) => {
+    return HttpResponse.json({
+      metadata: { name: params.name, namespace: 'default' },
+      spec: {},
+      status: { phase: 'Ready' },
+    })
+  }),
+  http.post(`${API}/substrate-actor-pools`, () => {
+    return HttpResponse.json(
+      { metadata: { name: 'new-pool', namespace: 'default' }, spec: {} },
+      { status: 201 },
+    )
+  }),
+  http.put(`${API}/substrate-actor-pools/:name`, ({ params }) => {
+    return HttpResponse.json({ metadata: { name: params.name, namespace: 'default' }, spec: {} })
+  }),
+  http.delete(`${API}/substrate-actor-pools/:name`, () => {
+    return new HttpResponse(null, { status: 204 })
+  }),
+  http.post(`${API}/agent-runtimes`, () => {
+    return HttpResponse.json(
+      { metadata: { name: 'new-runtime', namespace: 'default' }, spec: { contractVersion: 'orka.harness.v2' } },
+      { status: 201 },
+    )
+  }),
+  http.put(`${API}/agent-runtimes/:name`, ({ params }) => {
+    return HttpResponse.json({
+      metadata: { name: params.name, namespace: 'default' },
+      spec: { contractVersion: 'orka.harness.v2' },
+    })
+  }),
+  http.delete(`${API}/agent-runtimes/:name`, () => {
+    return new HttpResponse(null, { status: 204 })
+  }),
+
+  // Gateway classes
+  http.get(`${API}/gatewayclasses`, () => {
+    return HttpResponse.json({ items: [], metadata: {} })
+  }),
+  http.get(`${API}/gatewayclasses/:name`, ({ params }) => {
+    return HttpResponse.json({
+      metadata: { name: params.name },
+      spec: { contractVersion: 'orka.gateway.v1', category: 'chat' },
+      status: { accepted: true },
+    })
+  }),
 
   // Chat
   http.get(`${API}/chat/config`, () => {

@@ -235,3 +235,38 @@ export function useCreatePullRequest(id: string) {
     },
   })
 }
+
+export function useUpdateRepositoryScan() {
+  const queryClient = useQueryClient()
+  const namespace = useUIStore((s) => s.namespace)
+  return useMutation({
+    mutationFn: ({ name, spec }: { name: string; spec: Record<string, unknown> }) =>
+      api.put<RepositoryScan>(`/security/repositories/${name}`, { spec }, { namespace }),
+    onSuccess: (_data, { name }) => {
+      queryClient.invalidateQueries({ queryKey: ['securityRepositories'] })
+      queryClient.invalidateQueries({ queryKey: ['securityRepository', name] })
+    },
+  })
+}
+
+export function useDeleteRepositoryScan() {
+  const queryClient = useQueryClient()
+  const namespace = useUIStore((s) => s.namespace)
+  return useMutation({
+    mutationFn: (name: string) =>
+      api.delete<void>(`/security/repositories/${name}`, { namespace }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['securityRepositories'] })
+    },
+  })
+}
+
+export function useReviewSliceDetail(repoName: string, sliceID: string, enabled: boolean) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['reviewSlice', repoName, sliceID, namespace],
+    queryFn: () =>
+      api.get<ReviewSlice>(`/security/repositories/${repoName}/slices/${sliceID}`, { namespace }),
+    enabled: enabled && Boolean(repoName) && Boolean(sliceID),
+  })
+}

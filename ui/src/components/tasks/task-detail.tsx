@@ -18,6 +18,9 @@ import { TaskApprovalPanel } from './task-approval-panel'
 import { ForkProvenance } from './fork-provenance'
 import { ExecutionGraph } from './execution-graph'
 import { RunTimeline } from './run-timeline'
+import { TaskIdentityCard } from './task-identity-card'
+import { TaskScheduleCard } from './task-schedule-card'
+import { TaskChildrenTable } from './task-children-table'
 import { TaskRuntimeView } from '@/components/runtime/task-runtime-view'
 import { TaskExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
@@ -212,6 +215,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
 
         <TabsContent value="overview" className="space-y-4">
           <ForkProvenance annotations={task.metadata.annotations} />
+          <TaskScheduleCard task={task} />
           <Card>
             <CardHeader>
               <CardTitle>Metadata</CardTitle>
@@ -267,6 +271,8 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               )}
             </CardContent>
           </Card>
+
+          <TaskIdentityCard task={task} />
 
           {(task.status?.iteration ?? 0) > 0 && (
             <Card>
@@ -455,13 +461,21 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         )}
 
         {(task.status?.childTasks?.length ?? 0) > 0 && (
-          <TabsContent value="children">
+          <TabsContent value="children" className="space-y-4">
             <Card>
               <CardHeader>
                 <CardTitle>Execution Graph</CardTitle>
               </CardHeader>
               <CardContent>
                 <ExecutionGraph task={task} events={taskEvents} />
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Child tasks</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <TaskChildrenTable taskId={taskId} />
               </CardContent>
             </Card>
           </TabsContent>

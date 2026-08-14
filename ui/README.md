@@ -1,73 +1,43 @@
-# React + TypeScript + Vite
+# Orka Web UI
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The dashboard embedded into the Orka controller binary. It covers the public
+REST surface end to end: tasks (create incl. full spec + YAML mode, timeline,
+trace, approvals, artifacts, plan, children, fork), chat, sessions, agents,
+providers, tools, skills, durable memory + proposal review, repository
+monitors, security scanning, runtime fabric (RuntimePools, external
+AgentRuntimes, substrate actor pools), gateways, and system status.
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+React 19 · TypeScript · Vite 6 · TanStack Router (file-based, generated
+`src/routeTree.gen.ts` — do not edit) · TanStack Query · Zustand · Tailwind 4 ·
+radix-ui · zod · js-yaml · Vitest + Testing Library + MSW.
 
-## React Compiler
+## Development
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+bun install
+bun run dev        # dev server on :5173, /api proxied to :8080
+bun run lint
+bun run test
+bun run test:coverage
+bun run build      # tsc -b && vite build
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+From the repo root, `make ui-build` builds and copies the bundle into
+`internal/uiembed/dist/` for `//go:embed`.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Conventions
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+- One schema module per API area in `src/schemas` (zod); canonical
+  execution-event shapes live in `execution-event.ts`.
+- Hooks in `src/hooks` wrap the API client (`src/lib/api-client.ts`); list
+  and detail calls pass the selected namespace from the UI store.
+- Optional backend capabilities (event store, memory store, artifact store,
+  plans) return 501 — render a "not enabled" state, never an error loop.
+- Deep specs (AgentRuntime, RepositoryMonitor, Tool, full TaskSpec) are edited
+  through the shared YAML `ManifestEditor`; the server remains the validation
+  authority.
+- Never render secret values: pickers submit Secret names/keys only.
+- Colocated `*.test.tsx` per component; MSW default handlers in
+  `src/test/mocks/handlers.ts`.

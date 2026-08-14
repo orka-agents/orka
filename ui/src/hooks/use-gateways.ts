@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
-import type { Gateway, GatewayBinding, GatewayDelivery, GatewayEvent } from '@/schemas/gateway'
+import type { Gateway, GatewayBinding, GatewayClass, GatewayDelivery, GatewayEvent } from '@/schemas/gateway'
 
 interface ListResponse<T> {
   items: T[]
@@ -157,5 +157,26 @@ export function useRetryGatewayDelivery() {
       const message = error instanceof Error ? error.message : 'Unknown error'
       toast.error(`Failed to retry gateway delivery: ${message}`)
     },
+  })
+}
+
+// ---- GatewayClasses (cluster-scoped, read-only) ----
+
+export function useGatewayClasses(refetchInterval: number | false = 30000) {
+  return useQuery({
+    queryKey: ['gateway-classes'],
+    queryFn: async () => {
+      const page = await api.get<ListResponse<GatewayClass>>('/gatewayclasses', { limit: '500' })
+      return page.items ?? []
+    },
+    refetchInterval,
+  })
+}
+
+export function useGatewayClass(name: string) {
+  return useQuery({
+    queryKey: ['gateway-class', name],
+    queryFn: () => api.get<GatewayClass>(`/gatewayclasses/${name}`),
+    enabled: Boolean(name),
   })
 }

@@ -3,16 +3,22 @@ import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { ManifestEditor } from '@/components/ui/manifest-editor'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { PageHeader } from '@/components/layout/page-header'
 import { useCreateTask } from '@/hooks/use-tasks'
 import { useAgentList } from '@/hooks/use-agents'
+import { useProviderList } from '@/hooks/use-providers'
 import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
 import { workspaceConfigSchema, type WorkspaceIntent } from '@/schemas/task'
 import { builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
+
+// Registered Provider CRs are referenced by name; the two direct values keep
+// the inline-provider path.
+const TASK_PROVIDER_REF_PREFIX = 'ref:'
 
 function optionalRepositoryIdentity(provider: string, id: string) {
   return provider.trim() && id.trim() ? { provider: provider.trim(), id: id.trim() } : undefined
@@ -25,10 +31,29 @@ function optionalCredentialReference(name: string, key: string) {
   return trimmedKey ? { name: trimmedName, key: trimmedKey } : { name: trimmedName }
 }
 
+function splitList(raw: string): string[] {
+  return raw.split(',').map((entry) => entry.trim()).filter(Boolean)
+}
+
+// KEY=VALUE per line → EnvVar[].
+function parseEnvLines(raw: string): Array<{ name: string; value: string }> {
+  return raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.indexOf('=')
+      if (separator === -1) return { name: line, value: '' }
+      return { name: line.slice(0, separator).trim(), value: line.slice(separator + 1) }
+    })
+    .filter((entry) => entry.name)
+}
+
 export function TaskCreateForm() {
   const navigate = useNavigate()
   const createTask = useCreateTask()
   const { data: agentsData } = useAgentList()
+  const { data: providersData } = useProviderList(false)
   const namespace = useUIStore((s) => s.namespace)
 
   const [name, setName] = useState('')
@@ -43,6 +68,50 @@ export function TaskCreateForm() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [priority, setPriority] = useState('')
   const [timeout, setTimeout] = useState('')
+
+  // AI-specific extras.
+  const [systemPrompt, setSystemPrompt] = useState('')
+  const [temperature, setTemperature] = useState('')
+  const [maxTokens, setMaxTokens] = useState('')
+  const [aiTools, setAITools] = useState('')
+  const [aiSkills, setAISkills] = useState('')
+
+  // Scheduling (any type): a cron expression turns the task into a durable
+  // scheduled parent that mints child runs.
+  const [schedule, setSchedule] = useState('')
+  const [timeZone, setTimeZone] = useState('')
+  const [concurrencyPolicy, setConcurrencyPolicy] = useState('')
+  const [suspend, setSuspend] = useState(false)
+
+  // Execution extras.
+  const [envText, setEnvText] = useState('')
+  const [argsText, setArgsText] = useState('')
+  const [webhookURL, setWebhookURL] = useState('')
+  const [secretRefName, setSecretRefName] = useState('')
+  const [retryMax, setRetryMax] = useState('')
+  const [retryInitialDelay, setRetryInitialDelay] = useState('')
+  const [retryBackoff, setRetryBackoff] = useState('')
+
+  // Session continuation.
+  const [sessionName, setSessionName] = useState('')
+  const [sessionCreate, setSessionCreate] = useState(false)
+  const [sessionMaxMessages, setSessionMaxMessages] = useState('')
+
+  // Agent runtime overrides.
+  const [maxTurns, setMaxTurns] = useState('')
+  const [allowedTools, setAllowedTools] = useState('')
+  const [disallowedTools, setDisallowedTools] = useState('')
+  const [allowBash, setAllowBash] = useState(false)
+
+  // Clean-room publication policies (write intent).
+  const [expectedRemoteSHA, setExpectedRemoteSHA] = useState('')
+  const [maxChangedFiles, setMaxChangedFiles] = useState('')
+  const [allowedPaths, setAllowedPaths] = useState('')
+  const [denyRepositoryControlPaths, setDenyRepositoryControlPaths] = useState(false)
+  const [rejectBinaryFiles, setRejectBinaryFiles] = useState(false)
+  const [rejectSecretLikeContent, setRejectSecretLikeContent] = useState(false)
+
+  const [yamlOpen, setYamlOpen] = useState(false)
 
   const [showWorkspace, setShowWorkspace] = useState(false)
   const [workspaceIntent, setWorkspaceIntent] = useState<WorkspaceIntent>('read')
@@ -84,15 +153,31 @@ export function TaskCreateForm() {
       : `AgentRuntime ${selectedRuntime.runtimeRef.name}`
     : undefined
 
-  const handleSubmit = async (event: React.FormEvent) => {
-    event.preventDefault()
+  // Builds the CreateTaskRequest body from form state, or returns null after
+  // toasting the first validation problem.
+  const buildBody = (silent = false): Record<string, unknown> | null => {
     const body: Record<string, unknown> = { name, namespace, type }
 
     if (type === 'container') {
       body.image = image
       if (command) body.command = command.split(' ')
+      const args = splitList(argsText)
+      if (args.length) body.args = args
     } else if (type === 'ai') {
-      body.ai = { provider, model, prompt }
+      const ai: Record<string, unknown> = { model, prompt }
+      if (provider.startsWith(TASK_PROVIDER_REF_PREFIX)) {
+        ai.providerRef = { name: provider.slice(TASK_PROVIDER_REF_PREFIX.length) }
+      } else if (provider) {
+        ai.provider = provider
+      }
+      if (systemPrompt.trim()) ai.systemPrompt = systemPrompt
+      if (temperature) ai.temperature = parseFloat(temperature)
+      if (maxTokens) ai.maxTokens = parseInt(maxTokens)
+      const tools = splitList(aiTools)
+      if (tools.length) ai.tools = tools
+      const skills = splitList(aiSkills)
+      if (skills.length) ai.skills = skills.map((skillName) => ({ name: skillName }))
+      body.ai = ai
     } else if (type === 'agent') {
       body.agentRef = { name: agentRef }
       body.prompt = prompt
@@ -109,24 +194,24 @@ export function TaskCreateForm() {
       ]
       const credentialWithoutName = credentialInputs.find(({ name: credentialName, key }) => key.trim() && !credentialName.trim())
       if (credentialWithoutName) {
-        toast.error(`${credentialWithoutName.label} Secret is required when a key is set`)
-        return
+        if (!silent) toast.error(`${credentialWithoutName.label} Secret is required when a key is set`)
+        return null
       }
       if (workspaceIntent === 'write' && !gitRepo.trim()) {
-        toast.error('Source repository URL is required for write workspaces')
-        return
+        if (!silent) toast.error('Source repository URL is required for write workspaces')
+        return null
       }
       if (workspaceIntent === 'write' && !publicationCredentialName.trim()) {
-        toast.error('Publication write credential Secret is required for write workspaces')
-        return
+        if (!silent) toast.error('Publication write credential Secret is required for write workspaces')
+        return null
       }
       if (workspaceIntent === 'write' && createPR && !prBaseBranch.trim()) {
-        toast.error('Pull request base branch is required when creating a pull request')
-        return
+        if (!silent) toast.error('Pull request base branch is required when creating a pull request')
+        return null
       }
       if (workspaceIntent === 'write' && createPR && !forgeCredentialName.trim()) {
-        toast.error('Forge credential Secret is required when creating a pull request')
-        return
+        if (!silent) toast.error('Forge credential Secret is required when creating a pull request')
+        return null
       }
 
       const workspace: Record<string, unknown> = { intent: workspaceIntent }
@@ -140,6 +225,13 @@ export function TaskCreateForm() {
       if (readCredentialRef) workspace.readCredentialRef = readCredentialRef
 
       if (workspaceIntent === 'write') {
+        if (expectedRemoteSHA.trim()) workspace.expectedRemoteSHA = expectedRemoteSHA.trim()
+        if (maxChangedFiles) workspace.maxChangedFiles = parseInt(maxChangedFiles)
+        const parsedAllowedPaths = splitList(allowedPaths)
+        if (parsedAllowedPaths.length) workspace.allowedPaths = parsedAllowedPaths
+        if (denyRepositoryControlPaths) workspace.denyRepositoryControlPaths = true
+        if (rejectBinaryFiles) workspace.rejectBinaryFiles = true
+        if (rejectSecretLikeContent) workspace.rejectSecretLikeContent = true
         if (publicationGitRepo.trim()) workspace.publicationGitRepo = publicationGitRepo.trim()
         const publicationRepository = optionalRepositoryIdentity(publicationProvider, publicationRepositoryID)
         if (publicationRepository) workspace.publicationRepository = publicationRepository
@@ -158,27 +250,95 @@ export function TaskCreateForm() {
       }
       const workspaceResult = workspaceConfigSchema.safeParse(workspace)
       if (!workspaceResult.success) {
-        toast.error(workspaceResult.error.issues[0]?.message ?? 'Invalid workspace configuration')
-        return
+        if (!silent) toast.error(workspaceResult.error.issues[0]?.message ?? 'Invalid workspace configuration')
+        return null
       }
       body.workspace = workspaceResult.data
+
+      const agentRuntime: Record<string, unknown> = {}
+      if (maxTurns) agentRuntime.maxTurns = parseInt(maxTurns)
+      const parsedAllowedTools = splitList(allowedTools)
+      if (parsedAllowedTools.length) agentRuntime.allowedTools = parsedAllowedTools
+      const parsedDisallowedTools = splitList(disallowedTools)
+      if (parsedDisallowedTools.length) agentRuntime.disallowedTools = parsedDisallowedTools
+      if (allowBash) agentRuntime.allowBash = true
+      if (Object.keys(agentRuntime).length) body.agentRuntime = agentRuntime
     }
 
     if (priority) body.priority = parseInt(priority)
     if (timeout) body.timeout = timeout
 
+    const env = parseEnvLines(envText)
+    if (env.length) body.env = env
+    if (webhookURL.trim()) body.webhookURL = webhookURL.trim()
+    if (secretRefName.trim()) body.secretRef = { name: secretRefName.trim() }
+    if (retryMax || retryInitialDelay || retryBackoff) {
+      body.retryPolicy = {
+        ...(retryMax ? { maxRetries: parseInt(retryMax) } : {}),
+        ...(retryInitialDelay ? { initialDelay: retryInitialDelay } : {}),
+        ...(retryBackoff ? { backoffMultiplier: parseFloat(retryBackoff) } : {}),
+      }
+    }
+    if (sessionName.trim()) {
+      body.sessionRef = {
+        name: sessionName.trim(),
+        ...(sessionCreate ? { create: true } : {}),
+        ...(sessionMaxMessages ? { maxMessages: parseInt(sessionMaxMessages) } : {}),
+      }
+    }
+    if (schedule.trim()) {
+      body.schedule = schedule.trim()
+      if (timeZone.trim()) body.timeZone = timeZone.trim()
+      if (concurrencyPolicy) body.concurrencyPolicy = concurrencyPolicy
+      if (suspend) body.suspend = true
+    }
+
+    return body
+  }
+
+  const submitBody = async (body: Record<string, unknown>) => {
     try {
       await createTask.mutateAsync(body)
       toast.success('Task created')
       navigate({ to: '/tasks' })
+      return true
     } catch (err) {
       toast.error(`Failed to create task: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      return false
     }
+  }
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    const body = buildBody()
+    if (!body) return
+    await submitBody(body)
   }
 
   return (
     <div className="space-y-4">
-      <PageHeader title="Create Task" description="Create a new task for execution" />
+      <PageHeader
+        title="Create Task"
+        description="Create a new task for execution"
+        action={
+          <Button variant="outline" onClick={() => setYamlOpen(true)}>
+            Edit as YAML
+          </Button>
+        }
+      />
+      <ManifestEditor
+        open={yamlOpen}
+        onOpenChange={setYamlOpen}
+        title="Create task from YAML"
+        description="Full CreateTaskRequest body — every TaskSpec field is available here, including fields the form does not cover. requestedBy and transaction are server-stamped and must not appear."
+        initialValue={buildBody(true) ?? { name: name || 'my-task', namespace, type }}
+        submitLabel="Create task"
+        pending={createTask.isPending}
+        onSubmit={async (manifest) => {
+          const created = await submitBody(manifest)
+          if (created) setYamlOpen(false)
+        }}
+      />
       <Card>
         <CardHeader>
           <CardTitle>Task Configuration</CardTitle>
@@ -224,6 +384,11 @@ export function TaskCreateForm() {
                     <Select value={provider} onValueChange={setProvider}>
                       <SelectTrigger><SelectValue placeholder="Select provider" /></SelectTrigger>
                       <SelectContent>
+                        {(providersData?.items ?? []).map((registered) => (
+                          <SelectItem key={registered.name} value={`${TASK_PROVIDER_REF_PREFIX}${registered.name}`}>
+                            {registered.name} (Provider)
+                          </SelectItem>
+                        ))}
                         <SelectItem value="anthropic">Anthropic</SelectItem>
                         <SelectItem value="openai">OpenAI</SelectItem>
                       </SelectContent>
@@ -244,6 +409,34 @@ export function TaskCreateForm() {
                     placeholder="Enter your prompt..."
                     required
                   />
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="ai-system-prompt" className="text-sm font-medium">System prompt (optional)</label>
+                  <textarea
+                    id="ai-system-prompt"
+                    className="flex min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    value={systemPrompt}
+                    onChange={(e) => setSystemPrompt(e.target.value)}
+                    placeholder="Overrides the agent/provider default system prompt"
+                  />
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <label htmlFor="ai-temperature" className="text-sm font-medium">Temperature (optional)</label>
+                    <Input id="ai-temperature" type="number" step="0.1" min="0" max="2" value={temperature} onChange={(e) => setTemperature(e.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <label htmlFor="ai-max-tokens" className="text-sm font-medium">Max tokens (optional)</label>
+                    <Input id="ai-max-tokens" type="number" min="1" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <label htmlFor="ai-tools" className="text-sm font-medium">Tools (comma-separated, optional)</label>
+                    <Input id="ai-tools" value={aiTools} onChange={(e) => setAITools(e.target.value)} placeholder="web_search, code_exec" />
+                  </div>
+                  <div className="space-y-2">
+                    <label htmlFor="ai-skills" className="text-sm font-medium">Skills (comma-separated, optional)</label>
+                    <Input id="ai-skills" value={aiSkills} onChange={(e) => setAISkills(e.target.value)} placeholder="code-review" />
+                  </div>
                 </div>
               </div>
             )}
@@ -319,6 +512,126 @@ export function TaskCreateForm() {
                     <Input id="task-timeout" value={timeout} onChange={(e) => setTimeout(e.target.value)} placeholder="30m" />
                   </div>
                 </div>
+
+                <div className="space-y-3 rounded-md border bg-muted/20 p-4">
+                  <p className="text-sm font-medium">Schedule (optional)</p>
+                  <p className="text-xs text-muted-foreground">
+                    A cron expression keeps this task as a Scheduled parent; each tick creates a child run.
+                  </p>
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <label htmlFor="task-schedule" className="text-sm font-medium">Cron</label>
+                      <Input id="task-schedule" value={schedule} onChange={(e) => setSchedule(e.target.value)} placeholder="0 9 * * 1-5" />
+                    </div>
+                    <div className="space-y-2">
+                      <label htmlFor="task-timezone" className="text-sm font-medium">Time zone</label>
+                      <Input id="task-timezone" value={timeZone} onChange={(e) => setTimeZone(e.target.value)} placeholder="America/Los_Angeles" disabled={!schedule.trim()} />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Concurrency</label>
+                      <Select value={concurrencyPolicy} onValueChange={setConcurrencyPolicy} disabled={!schedule.trim()}>
+                        <SelectTrigger aria-label="Concurrency policy"><SelectValue placeholder="Forbid (default)" /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="Forbid">Forbid</SelectItem>
+                          <SelectItem value="Allow">Allow</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm">
+                    <Switch checked={suspend} onCheckedChange={setSuspend} disabled={!schedule.trim()} aria-label="Create suspended" />
+                    Create suspended (no runs until resumed with kubectl)
+                  </label>
+                </div>
+
+                <div className="space-y-3 rounded-md border bg-muted/20 p-4">
+                  <p className="text-sm font-medium">Execution (optional)</p>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    {type === 'container' && (
+                      <div className="space-y-2">
+                        <label htmlFor="task-args" className="text-sm font-medium">Args (comma-separated)</label>
+                        <Input id="task-args" value={argsText} onChange={(e) => setArgsText(e.target.value)} placeholder="--verbose, --once" />
+                      </div>
+                    )}
+                    <div className="space-y-2">
+                      <label htmlFor="task-webhook" className="text-sm font-medium">Webhook URL</label>
+                      <Input id="task-webhook" value={webhookURL} onChange={(e) => setWebhookURL(e.target.value)} placeholder="https://hooks.example.com/orka" />
+                    </div>
+                    <div className="space-y-2">
+                      <label htmlFor="task-secret-ref" className="text-sm font-medium">Secret ref</label>
+                      <Input id="task-secret-ref" value={secretRefName} onChange={(e) => setSecretRefName(e.target.value)} placeholder="task-credentials" />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <label htmlFor="task-env" className="text-sm font-medium">Environment (KEY=VALUE per line)</label>
+                    <textarea
+                      id="task-env"
+                      className="flex min-h-16 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      value={envText}
+                      onChange={(e) => setEnvText(e.target.value)}
+                      placeholder={'LOG_LEVEL=debug\nREGION=us-west-2'}
+                    />
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <label htmlFor="task-retry-max" className="text-sm font-medium">Max retries</label>
+                      <Input id="task-retry-max" type="number" min="0" value={retryMax} onChange={(e) => setRetryMax(e.target.value)} />
+                    </div>
+                    <div className="space-y-2">
+                      <label htmlFor="task-retry-delay" className="text-sm font-medium">Initial delay</label>
+                      <Input id="task-retry-delay" value={retryInitialDelay} onChange={(e) => setRetryInitialDelay(e.target.value)} placeholder="10s" />
+                    </div>
+                    <div className="space-y-2">
+                      <label htmlFor="task-retry-backoff" className="text-sm font-medium">Backoff multiplier</label>
+                      <Input id="task-retry-backoff" type="number" step="0.1" min="1" value={retryBackoff} onChange={(e) => setRetryBackoff(e.target.value)} placeholder="2" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3 rounded-md border bg-muted/20 p-4">
+                  <p className="text-sm font-medium">Session (optional)</p>
+                  <p className="text-xs text-muted-foreground">
+                    Attach to a session to continue an earlier conversation with the same context.
+                  </p>
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <label htmlFor="task-session-name" className="text-sm font-medium">Session name</label>
+                      <Input id="task-session-name" value={sessionName} onChange={(e) => setSessionName(e.target.value)} placeholder="feature-discussion" />
+                    </div>
+                    <div className="space-y-2">
+                      <label htmlFor="task-session-max" className="text-sm font-medium">Max messages</label>
+                      <Input id="task-session-max" type="number" min="1" value={sessionMaxMessages} onChange={(e) => setSessionMaxMessages(e.target.value)} placeholder="50" disabled={!sessionName.trim()} />
+                    </div>
+                    <label className="flex items-center gap-2 self-end pb-2 text-sm">
+                      <Switch checked={sessionCreate} onCheckedChange={setSessionCreate} disabled={!sessionName.trim()} aria-label="Create session if missing" />
+                      Create if missing
+                    </label>
+                  </div>
+                </div>
+
+                {type === 'agent' && (
+                  <div className="space-y-3 rounded-md border bg-muted/20 p-4">
+                    <p className="text-sm font-medium">Runtime overrides (optional)</p>
+                    <div className="grid gap-4 md:grid-cols-3">
+                      <div className="space-y-2">
+                        <label htmlFor="task-max-turns" className="text-sm font-medium">Max turns</label>
+                        <Input id="task-max-turns" type="number" min="1" max="1000" value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} />
+                      </div>
+                      <div className="space-y-2">
+                        <label htmlFor="task-allowed-tools" className="text-sm font-medium">Allowed tools</label>
+                        <Input id="task-allowed-tools" value={allowedTools} onChange={(e) => setAllowedTools(e.target.value)} placeholder="Read, Grep" />
+                      </div>
+                      <div className="space-y-2">
+                        <label htmlFor="task-disallowed-tools" className="text-sm font-medium">Disallowed tools</label>
+                        <Input id="task-disallowed-tools" value={disallowedTools} onChange={(e) => setDisallowedTools(e.target.value)} placeholder="WebFetch" />
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-2 text-sm">
+                      <Switch checked={allowBash} onCheckedChange={setAllowBash} aria-label="Allow bash" />
+                      Allow bash
+                    </label>
+                  </div>
+                )}
 
                 {type === 'agent' && (
                   <>
@@ -450,6 +763,40 @@ export function TaskCreateForm() {
                             <div className="flex items-center gap-2">
                               <Switch id="create-pr" checked={createPR} onCheckedChange={setCreatePR} />
                               <label htmlFor="create-pr" className="text-sm font-medium">Reconcile a pull request after verified publication</label>
+                            </div>
+                            <div className="space-y-4 border-t pt-4">
+                              <div>
+                                <p className="text-sm font-medium">Clean-room policies</p>
+                                <p className="text-xs text-muted-foreground">Bounds enforced on the workspace delta before publication.</p>
+                              </div>
+                              <div className="grid gap-4 md:grid-cols-3">
+                                <div className="space-y-2">
+                                  <label htmlFor="expected-remote-sha" className="text-sm font-medium">Expected remote SHA</label>
+                                  <Input id="expected-remote-sha" value={expectedRemoteSHA} onChange={(e) => setExpectedRemoteSHA(e.target.value)} placeholder="Empty means branch must be absent" />
+                                </div>
+                                <div className="space-y-2">
+                                  <label htmlFor="max-changed-files" className="text-sm font-medium">Max changed files</label>
+                                  <Input id="max-changed-files" type="number" min="1" value={maxChangedFiles} onChange={(e) => setMaxChangedFiles(e.target.value)} />
+                                </div>
+                                <div className="space-y-2">
+                                  <label htmlFor="allowed-paths" className="text-sm font-medium">Allowed paths (globs)</label>
+                                  <Input id="allowed-paths" value={allowedPaths} onChange={(e) => setAllowedPaths(e.target.value)} placeholder="src/**, docs/**" />
+                                </div>
+                              </div>
+                              <div className="flex flex-wrap gap-x-6 gap-y-2">
+                                <label className="flex items-center gap-2 text-sm">
+                                  <Switch checked={denyRepositoryControlPaths} onCheckedChange={setDenyRepositoryControlPaths} aria-label="Deny repository control paths" />
+                                  Deny repository control paths
+                                </label>
+                                <label className="flex items-center gap-2 text-sm">
+                                  <Switch checked={rejectBinaryFiles} onCheckedChange={setRejectBinaryFiles} aria-label="Reject binary files" />
+                                  Reject binary files
+                                </label>
+                                <label className="flex items-center gap-2 text-sm">
+                                  <Switch checked={rejectSecretLikeContent} onCheckedChange={setRejectSecretLikeContent} aria-label="Reject secret-like content" />
+                                  Reject secret-like content
+                                </label>
+                              </div>
                             </div>
                           </div>
                         )}

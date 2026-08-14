@@ -137,3 +137,40 @@ export interface GatewayDelivery {
   updatedAt: string
   deliveredAt?: string
 }
+
+// ---- GatewayClass (gateway.orka.ai/v1alpha1, cluster-scoped) ----
+
+export interface GatewayClassCapabilities {
+  inboundText?: boolean
+  outboundText?: boolean
+  threads?: boolean
+  senderIdentity?: boolean
+  explicitSessions?: boolean
+  idempotentDelivery?: boolean
+}
+
+export interface GatewayClass {
+  metadata: {
+    name: string
+    uid?: string
+    creationTimestamp?: string
+  }
+  spec: {
+    contractVersion?: string
+    category?: 'chat' | 'webhook' | 'http' | 'event' | 'internal' | string
+    capabilities?: GatewayClassCapabilities
+    allowedMetadataKeys?: string[]
+  }
+  status?: {
+    accepted?: boolean
+    observedGeneration?: number
+    message?: string
+    conditions?: Array<{
+      type: string
+      status: string
+      reason?: string
+      message?: string
+      lastTransitionTime?: string
+    }>
+  }
+}

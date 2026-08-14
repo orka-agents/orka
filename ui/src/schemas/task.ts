@@ -29,6 +29,8 @@ export const sessionRefSchema = z.object({
   create: z.boolean().optional(),
   append: z.boolean().optional(),
   maxMessages: z.number().optional(),
+  throughMessageId: z.string().optional(),
+  promptIncluded: z.boolean().optional(),
 })
 
 export const agentRefSchema = z.object({
@@ -73,7 +75,13 @@ export const workspaceConfigSchema = z.object({
   subPath: z.string().optional(),
   prBaseBranch: z.string().optional(),
   pushBranch: z.string().optional(),
+  expectedRemoteSHA: z.string().optional(),
   createPR: z.boolean().optional(),
+  maxChangedFiles: z.number().optional(),
+  allowedPaths: z.array(z.string()).optional(),
+  denyRepositoryControlPaths: z.boolean().optional(),
+  rejectBinaryFiles: z.boolean().optional(),
+  rejectSecretLikeContent: z.boolean().optional(),
 }).strict().superRefine((workspace, context) => {
   if (workspace.createPR && !workspace.forgeCredentialRef) {
     context.addIssue({
@@ -250,6 +258,36 @@ export const executionWorkspaceStatusSchema = z.object({
   lastUpdateTime: z.string().optional(),
 })
 
+export const priorTaskRefSchema = z.object({
+  name: z.string(),
+  namespace: z.string().optional(),
+})
+
+// Server-stamped requester identity; immutable, never client-writable.
+export const requestedBySchema = z.object({
+  subject: z.string().optional(),
+  issuer: z.string().optional(),
+  username: z.string().optional(),
+  email: z.string().optional(),
+  groups: z.array(z.string()).optional(),
+  roles: z.array(z.string()).optional(),
+})
+
+// Server-stamped transaction-token metadata (safe, non-secret fields only).
+export const taskTransactionSchema = z.object({
+  profile: z.string().optional(),
+  id: z.string().optional(),
+  issuer: z.string().optional(),
+  audience: z.array(z.string()).optional(),
+  subject: z.string().optional(),
+  requestingWorkload: z.string().optional(),
+  scope: z.string().optional(),
+  scopes: z.array(z.string()).optional(),
+  contextDigest: z.string().optional(),
+  requesterContextDigest: z.string().optional(),
+  context: z.record(z.string()).optional(),
+})
+
 export const taskSpecSchema = z.object({
   type: taskTypeSchema,
   image: z.string().optional(),
@@ -268,6 +306,16 @@ export const taskSpecSchema = z.object({
   prompt: z.string().optional(),
   agentRuntime: agentRuntimeSpecSchema.optional(),
   workspace: workspaceConfigSchema.optional(),
+  priorTaskRef: priorTaskRefSchema.optional(),
+  schedule: z.string().optional(),
+  timeZone: z.string().nullable().optional(),
+  concurrencyPolicy: z.string().optional(),
+  startingDeadlineSeconds: z.number().optional(),
+  successfulRunsHistoryLimit: z.number().optional(),
+  failedRunsHistoryLimit: z.number().optional(),
+  suspend: z.boolean().optional(),
+  requestedBy: requestedBySchema.optional(),
+  transaction: taskTransactionSchema.optional(),
 })
 
 // Harness v1 compatibility status surface (non-secret routing metadata only).
@@ -337,6 +385,8 @@ export const taskStatusSchema = z.object({
   childTasks: z.array(childTaskStatusSchema).optional(),
   conditions: z.array(conditionSchema).optional(),
   executionWorkspace: executionWorkspaceStatusSchema.optional(),
+  lastScheduleTime: z.string().optional(),
+  nextScheduleTime: z.string().optional(),
 })
 
 export const k8sMetadataSchema = z.object({
@@ -385,38 +435,14 @@ export const taskWithPlanSchema = taskSchema.extend({
 export type PlanState = z.infer<typeof planStateSchema>
 export type TaskWithPlan = z.infer<typeof taskWithPlanSchema>
 
-export const executionEventSchema = z.object({
-  id: z.string(),
-  namespace: z.string(),
-  streamType: z.string(),
-  streamID: z.string(),
-  seq: z.number(),
-  type: z.string(),
-  severity: z.string(),
-  taskName: z.string().optional(),
-  sessionName: z.string().optional(),
-  agentName: z.string().optional(),
-  toolName: z.string().optional(),
-  toolCallID: z.string().optional(),
-  provider: z.string().optional(),
-  model: z.string().optional(),
-  stopReason: z.string().optional(),
-  inputTokens: z.number().optional(),
-  outputTokens: z.number().optional(),
-  summary: z.string().optional(),
-  content: z.unknown().optional(),
-  contentText: z.string().optional(),
-  createdAt: z.string(),
-})
-
-export const taskEventsResponseSchema = z.object({
-  namespace: z.string(),
-  streamType: z.string(),
-  streamID: z.string(),
-  afterSeq: z.number(),
-  latestSeq: z.number(),
-  events: z.array(executionEventSchema),
-})
-
-export type ExecutionEvent = z.infer<typeof executionEventSchema>
-export type TaskEventsResponse = z.infer<typeof taskEventsResponseSchema>
+// Canonical execution-event shapes live in execution-event.ts; re-exported
+// here so task-centric callers keep a single import path. The task events
+// response is the same wire shape as the canonical list response.
+export {
+  executionEventSchema,
+  listExecutionEventsResponseSchema as taskEventsResponseSchema,
+} from './execution-event'
+export type {
+  ExecutionEvent,
+  ListExecutionEventsResponse as TaskEventsResponse,
+} from './execution-event'

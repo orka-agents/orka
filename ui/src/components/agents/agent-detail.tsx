@@ -1,19 +1,23 @@
+import { useState } from 'react'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Separator } from '@/components/ui/separator'
+import { ManifestEditor } from '@/components/ui/manifest-editor'
 import { PageHeader } from '@/components/layout/page-header'
-import { ArrowLeft, Bot, Trash2 } from 'lucide-react'
-import { useAgent, useDeleteAgent } from '@/hooks/use-agents'
+import { ArrowLeft, Bot, Pencil, Trash2 } from 'lucide-react'
+import { useAgent, useDeleteAgent, useUpdateAgent } from '@/hooks/use-agents'
 import { toast } from 'sonner'
 import { builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
 
 export function AgentDetail({ agentId }: { agentId: string }) {
   const { data: agent, isLoading } = useAgent(agentId)
   const deleteAgent = useDeleteAgent()
+  const updateAgent = useUpdateAgent()
   const navigate = useNavigate()
+  const [editing, setEditing] = useState(false)
 
   const handleDelete = async () => {
     if (!confirm(`Delete agent "${agentId}"?`)) return
@@ -46,12 +50,33 @@ export function AgentDetail({ agentId }: { agentId: string }) {
           title={agent.metadata.name}
           description={agent.metadata.namespace}
           action={
-            <Button variant="destructive" size="sm" onClick={handleDelete} disabled={deleteAgent.isPending}>
-              <Trash2 className="mr-2 h-4 w-4" />{deleteAgent.isPending ? 'Deleting...' : 'Delete'}
-            </Button>
+            <>
+              <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
+                <Pencil className="mr-2 h-4 w-4" />Edit spec
+              </Button>
+              <Button variant="destructive" size="sm" onClick={handleDelete} disabled={deleteAgent.isPending}>
+                <Trash2 className="mr-2 h-4 w-4" />{deleteAgent.isPending ? 'Deleting...' : 'Delete'}
+              </Button>
+            </>
           }
         />
       </div>
+
+      <ManifestEditor
+        open={editing}
+        onOpenChange={setEditing}
+        title={`Edit ${agent.metadata.name}`}
+        description="Edits the full AgentSpec. runtime.contractVersion is immutable once set."
+        initialValue={{ spec: agent.spec }}
+        submitLabel="Save changes"
+        pending={updateAgent.isPending}
+        onSubmit={async (manifest) => {
+          const spec = (manifest.spec ?? manifest) as Record<string, unknown>
+          await updateAgent.mutateAsync({ name: agent.metadata.name, spec })
+          toast.success(`Agent ${agent.metadata.name} updated`)
+          setEditing(false)
+        }}
+      />
 
       <div className="grid gap-4 md:grid-cols-2">
         {agent.spec.model && (

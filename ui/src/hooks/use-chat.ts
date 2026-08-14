@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback } from 'react'
 import { api } from '@/lib/api-client'
 import { API_BASE_URL } from '@/lib/constants'
@@ -261,4 +261,16 @@ export function useSendMessage() {
     },
     [token, namespace, currentSessionId, addMessage, setSessionId, setStreaming, setUsageOnLastAssistant],
   )
+}
+
+// Cancels any in-flight turn for the session, then deletes it server-side.
+// 409 means unsettled work is still pinning the session.
+export function useCancelChatSession() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (sessionId: string) => api.delete<void>(`/chat/${sessionId}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['sessions'] })
+    },
+  })
 }

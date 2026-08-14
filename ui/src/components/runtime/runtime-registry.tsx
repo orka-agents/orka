@@ -7,6 +7,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ApiError } from '@/lib/api-client'
 import { useAgentRuntimes, useRuntimePools } from '@/hooks/use-runtimes'
+import { AgentRuntimeActions, RegisterRuntimeButton } from '@/components/runtime/agent-runtime-registration'
+import { SubstratePoolsPanel } from '@/components/runtime/substrate-pools-panel'
 import type { AgentRuntime, RuntimePool } from '@/schemas/runtime'
 
 function stateClass(state?: string) {
@@ -307,22 +309,37 @@ export function RuntimeRegistry() {
         <TabsList>
           <TabsTrigger value="pools">Runtime pools</TabsTrigger>
           <TabsTrigger value="external">External runtimes</TabsTrigger>
+          <TabsTrigger value="substrate">Substrate pools</TabsTrigger>
         </TabsList>
         <TabsContent value="pools" className="space-y-4">
           {pools.isLoading && <><Skeleton className="h-56 w-full" /><Skeleton className="h-56 w-full" /></>}
           {pools.error && <RuntimeAPIError error={pools.error} resource="RuntimePool" />}
           {!pools.isLoading && !pools.error && (pools.data?.items.length ?? 0) === 0 && (
-            <EmptyState icon={Boxes} headline="No runtime pools" hint="No ACP RuntimePool is registered in this namespace." />
+            <EmptyState icon={Boxes} headline="No runtime pools" hint="No ACP RuntimePool is registered in this namespace. Pools are controller-owned and appear when agent Tasks dispatch." />
           )}
           {pools.data?.items.map((pool) => <RuntimePoolCard key={pool.metadata.uid ?? pool.metadata.name} pool={pool} />)}
         </TabsContent>
         <TabsContent value="external" className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm text-muted-foreground">
+              Registrations validate and probe conformance. Task dispatch to external runtimes is fail-closed until the v2 dispatcher lands.
+            </p>
+            <RegisterRuntimeButton />
+          </div>
           {runtimes.isLoading && <><Skeleton className="h-56 w-full" /><Skeleton className="h-56 w-full" /></>}
           {runtimes.error && <RuntimeAPIError error={runtimes.error} resource="AgentRuntime" />}
           {!runtimes.isLoading && !runtimes.error && (runtimes.data?.items.length ?? 0) === 0 && (
             <EmptyState icon={ExternalLink} headline="No external runtimes" hint="No AgentRuntime is registered in this namespace." />
           )}
-          {runtimes.data?.items.map((runtime) => <AgentRuntimeCard key={runtime.metadata.uid ?? runtime.metadata.name} runtime={runtime} />)}
+          {runtimes.data?.items.map((runtime) => (
+            <div key={runtime.metadata.uid ?? runtime.metadata.name} className="space-y-1.5">
+              <AgentRuntimeCard runtime={runtime} />
+              <AgentRuntimeActions runtime={runtime} />
+            </div>
+          ))}
+        </TabsContent>
+        <TabsContent value="substrate" className="space-y-4">
+          <SubstratePoolsPanel />
         </TabsContent>
       </Tabs>
     </div>

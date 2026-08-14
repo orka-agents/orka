@@ -20,6 +20,7 @@ vi.mock('@tanstack/react-router', async () => {
 vi.mock('@/hooks/use-chat', () => ({
   useSendMessage: () => vi.fn(),
   useChatConfig: () => ({ data: { model: 'claude-sonnet-4-20250514', enabled: true } }),
+  useCancelChatSession: () => ({ mutateAsync: vi.fn().mockResolvedValue(undefined), isPending: false }),
 }))
 
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))

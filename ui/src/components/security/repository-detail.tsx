@@ -1,10 +1,13 @@
+import { useState } from 'react'
+import { useNavigate } from '@tanstack/react-router'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { ManifestEditor } from '@/components/ui/manifest-editor'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
-import { useAllFindings, useDroppedFindings, useRepositoryScan, useReviewSlices, useRunSecurityScan, useScanRuns } from '@/hooks/use-security'
+import { useAllFindings, useDeleteRepositoryScan, useDroppedFindings, useRepositoryScan, useReviewSlices, useRunSecurityScan, useScanRuns, useUpdateRepositoryScan } from '@/hooks/use-security'
 import { ThreatModelEditor } from './threat-model-editor'
 import { RecommendedFindings } from './recommended-findings'
 import { FindingTable } from './finding-table'
@@ -25,6 +28,11 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
   const reviewSlices = useReviewSlices(repositoryName)
   const droppedFindings = useDroppedFindings(repositoryName, repo?.status?.lastScanID)
   const runScan = useRunSecurityScan(repositoryName)
+  const updateScan = useUpdateRepositoryScan()
+  const deleteScan = useDeleteRepositoryScan()
+  const navigate = useNavigate()
+  const [editing, setEditing] = useState(false)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
   const latestDropped = droppedFindings.data?.items ?? []
   const droppedByLayer = latestDropped.reduce<Record<string, number>>((acc, item) => {
     const layer = item.layer || 'unknown'
@@ -52,6 +60,27 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
         action={
           <>
             <Badge variant={repo.status?.phase === 'Ready' ? 'default' : 'secondary'}>{repo.status?.phase || 'Pending'}</Badge>
+            <Button variant="outline" onClick={() => setEditing(true)}>Edit spec</Button>
+            <Button
+              variant={confirmingDelete ? 'destructive' : 'outline'}
+              onClick={async () => {
+                if (!confirmingDelete) {
+                  setConfirmingDelete(true)
+                  return
+                }
+                try {
+                  await deleteScan.mutateAsync(repositoryName)
+                  toast.success(`Repository ${repositoryName} removed from scanning`)
+                  navigate({ to: '/security' })
+                } catch (error) {
+                  toast.error(`Failed to delete: ${error instanceof Error ? error.message : 'Unknown error'}`)
+                  setConfirmingDelete(false)
+                }
+              }}
+              disabled={deleteScan.isPending}
+            >
+              {confirmingDelete ? 'Confirm delete' : 'Delete'}
+            </Button>
             <Button
               onClick={async () => {
                 try {
@@ -67,6 +96,22 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
             </Button>
           </>
         }
+      />
+
+      <ManifestEditor
+        open={editing}
+        onOpenChange={setEditing}
+        title={`Edit ${repo.spec.owner}/${repo.spec.repository}`}
+        description="Edits the RepositoryScan spec — schedule, validation mode and thresholds, policy ConfigMap refs, agents, and credentials."
+        initialValue={{ spec: repo.spec }}
+        submitLabel="Save changes"
+        pending={updateScan.isPending}
+        onSubmit={async (manifest) => {
+          const spec = (manifest.spec ?? manifest) as Record<string, unknown>
+          await updateScan.mutateAsync({ name: repositoryName, spec })
+          toast.success('Scan configuration updated')
+          setEditing(false)
+        }}
       />
 
       <div className="grid gap-4 md:grid-cols-4">

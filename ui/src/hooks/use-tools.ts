@@ -1,7 +1,7 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
-import type { ToolListItem, Tool } from '@/schemas/tool'
+import type { Tool, ToolListItem, ToolSpec } from '@/schemas/tool'
 
 interface ListResponse<T> {
   items: T[]
@@ -21,5 +21,36 @@ export function useTool(name: string) {
   return useQuery({
     queryKey: ['tool', name, namespace],
     queryFn: () => api.get<Tool>(`/tools/${name}`, { namespace }),
+  })
+}
+
+export function useCreateTool() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { name: string; namespace?: string; spec: ToolSpec }) =>
+      api.post<Tool>('/tools', body),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['tools'] }) },
+  })
+}
+
+export function useUpdateTool() {
+  const queryClient = useQueryClient()
+  const namespace = useUIStore((s) => s.namespace)
+  return useMutation({
+    mutationFn: ({ name, spec }: { name: string; spec: ToolSpec }) =>
+      api.put<Tool>(`/tools/${name}`, { spec }, { namespace }),
+    onSuccess: (_data, { name }) => {
+      queryClient.invalidateQueries({ queryKey: ['tools'] })
+      queryClient.invalidateQueries({ queryKey: ['tool', name] })
+    },
+  })
+}
+
+export function useDeleteTool() {
+  const queryClient = useQueryClient()
+  const namespace = useUIStore((s) => s.namespace)
+  return useMutation({
+    mutationFn: (name: string) => api.delete<void>(`/tools/${name}`, { namespace }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['tools'] }) },
   })
 }

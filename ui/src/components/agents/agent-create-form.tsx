@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageHeader } from '@/components/layout/page-header'
 import { useCreateAgent } from '@/hooks/use-agents'
+import { useProviderList } from '@/hooks/use-providers'
 import { useSecretNames } from '@/hooks/use-secrets'
 import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
@@ -15,10 +16,16 @@ import {
   type BuiltInAgentRuntimeType,
 } from '@/lib/agent-runtime'
 
+// Providers registered as CRs are referenced by name (providerRef); the two
+// direct values keep the historical inline-provider path working.
+const DIRECT_PROVIDER_PREFIX = 'direct:'
+const PROVIDER_REF_PREFIX = 'ref:'
+
 export function AgentCreateForm() {
   const navigate = useNavigate()
   const createAgent = useCreateAgent()
   const { data: secretsData } = useSecretNames()
+  const { data: providersData } = useProviderList(false)
   const namespace = useUIStore((s) => s.namespace)
 
   const [name, setName] = useState('')
@@ -79,11 +86,15 @@ export function AgentCreateForm() {
     const spec: Record<string, unknown> = {}
 
     if (mode === 'ai') {
+      const usingProviderRef = provider.startsWith(PROVIDER_REF_PREFIX)
       spec.model = {
-        provider,
+        ...(usingProviderRef ? {} : { provider: provider.replace(DIRECT_PROVIDER_PREFIX, '') }),
         name: model,
         ...(temperature ? { temperature: parseFloat(temperature) } : {}),
         ...(maxTokens ? { maxTokens: parseInt(maxTokens) } : {}),
+      }
+      if (usingProviderRef) {
+        spec.providerRef = { name: provider.slice(PROVIDER_REF_PREFIX.length) }
       }
       if (systemPrompt) {
         spec.systemPrompt = { inline: systemPrompt }
@@ -92,15 +103,19 @@ export function AgentCreateForm() {
         spec.secretRef = { name: secretRef }
       }
     } else {
+      // contractVersion is the fail-closed protocol selector: an Agent whose
+      // runtime block omits it can never dispatch (runtime.type alone is
+      // never protocol evidence), so creation always stamps v2 explicitly.
       spec.runtime = runtimeSource === 'built-in'
         ? runtimeType === 'opencode'
           ? {
               type: runtimeType,
+              contractVersion: 'orka.harness.v2',
               defaultAllowedTools: [...OPENCODE_REVIEWED_RUNTIME_DEFAULTS.defaultAllowedTools],
               defaultAllowBash: OPENCODE_REVIEWED_RUNTIME_DEFAULTS.defaultAllowBash,
             }
-          : { type: runtimeType }
-        : { runtimeRef: { name: runtimeRef.trim() } }
+          : { type: runtimeType, contractVersion: 'orka.harness.v2' }
+        : { runtimeRef: { name: runtimeRef.trim() }, contractVersion: 'orka.harness.v2' }
       if (trimmedModel) {
         spec.model = runtimeSource === 'built-in' && runtimeType === 'opencode'
           ? { name: trimmedModel, contextWindow: parsedContextWindow, maxTokens: parsedMaxTokens }
@@ -151,8 +166,13 @@ export function AgentCreateForm() {
                     <Select value={provider} onValueChange={setProvider}>
                       <SelectTrigger id="agent-provider"><SelectValue placeholder="Select provider" /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="anthropic">Anthropic</SelectItem>
-                        <SelectItem value="openai">OpenAI</SelectItem>
+                        {(providersData?.items ?? []).map((registered) => (
+                          <SelectItem key={registered.name} value={`${PROVIDER_REF_PREFIX}${registered.name}`}>
+                            {registered.name} (Provider)
+                          </SelectItem>
+                        ))}
+                        <SelectItem value={`${DIRECT_PROVIDER_PREFIX}anthropic`}>Anthropic (direct)</SelectItem>
+                        <SelectItem value={`${DIRECT_PROVIDER_PREFIX}openai`}>OpenAI (direct)</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>

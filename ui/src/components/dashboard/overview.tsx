@@ -8,6 +8,7 @@ import { Distribution } from '@/components/ui/distribution'
 import { taskPhaseSchema } from '@/schemas/task'
 import { StatsCards } from './stats-cards'
 import { RecentTasks } from './recent-tasks'
+import { NeedsAttention } from './needs-attention'
 
 // Drive the distribution from the full phase enum (Pending/Running/Succeeded/
 // Failed/Scheduled/Cancelled) so every task the Total card counts is also
@@ -38,6 +39,7 @@ export function Overview() {
         toolCount={toolsData?.items?.length}
         isLoading={isLoading}
       />
+      <NeedsAttention tasks={tasksData?.items ?? []} />
       <div className="grid gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-1">
           <CardHeader>

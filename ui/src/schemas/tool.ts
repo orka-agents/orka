@@ -84,3 +84,5 @@ export const toolListItemSchema = z.object({
 
 export type Tool = z.infer<typeof toolSchema>
 export type ToolListItem = z.infer<typeof toolListItemSchema>
+
+export type ToolSpec = z.infer<typeof toolSpecSchema>

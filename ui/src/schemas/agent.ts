@@ -1,12 +1,18 @@
 import { z } from 'zod'
 import { conditionSchema } from './task'
 
+export const modelFallbackSchema = z.object({
+  providerRef: z.object({ name: z.string(), namespace: z.string().optional() }).optional(),
+  model: z.string().optional(),
+})
+
 export const modelConfigSchema = z.object({
   provider: z.string().optional(),
   name: z.string().optional(),
   temperature: z.number().optional(),
   contextWindow: z.number().int().positive().optional(),
   maxTokens: z.number().optional(),
+  fallbacks: z.array(modelFallbackSchema).optional(),
 })
 
 export const toolRefSchema = z.object({
@@ -14,7 +20,13 @@ export const toolRefSchema = z.object({
   enabled: z.boolean().optional(),
 })
 
+// Harness protocol selector. Empty/omitted is fail-closed at dispatch:
+// runtime.type alone is never protocol evidence, so creation flows must stamp
+// an explicit value (built-ins use orka.harness.v2).
+export const agentContractVersionSchema = z.enum(['orka.harness.v1', 'orka.harness.v2'])
+
 const agentRuntimeDefaultsSchema = {
+  contractVersion: agentContractVersionSchema.optional(),
   defaultMaxTurns: z.number().optional(),
   defaultAllowedTools: z.array(z.string()).optional(),
   defaultAllowBash: z.boolean().optional(),
@@ -65,8 +77,12 @@ export const agentSpecSchema = z.object({
     allowedAgents: z.array(z.object({ name: z.string(), namespace: z.string().optional() })).optional(),
     maxConcurrentChildren: z.number().optional(),
     maxDepth: z.number().optional(),
+    autonomous: z.boolean().optional(),
+    maxIterations: z.number().optional(),
+    approvalRequiredTools: z.array(z.string()).optional(),
   }).optional(),
   runtime: agentRuntimeSchema.optional(),
+  ttlAfterLastTask: z.string().optional(),
 }).superRefine((spec, ctx) => {
   if (spec.runtime && 'type' in spec.runtime && spec.runtime.type === 'opencode') {
     if (spec.systemPrompt?.inline?.trim() || spec.systemPrompt?.configMapRef) {

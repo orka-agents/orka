@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useGatewayBindings, useGatewayDeliveries, useGatewayEvents, useGatewayLedgerPagination, useGateways } from '@/hooks/use-gateways'
+import { GatewayClassesPanel } from './gateway-classes-panel'
 import { GatewayLedgerPagination } from './gateway-pagination'
 import { GatewayQueryError } from './gateway-query-error'
 import { isGatewayResourceReady, isGatewayStatusFresh } from './gateway-readiness'
@@ -48,6 +49,7 @@ export function GatewayPage() {
           <TabsTrigger value="queues">Session queues</TabsTrigger>
           <TabsTrigger value="events">Event ledger</TabsTrigger>
           <TabsTrigger value="deliveries">Delivery outbox</TabsTrigger>
+          <TabsTrigger value="classes">Classes</TabsTrigger>
         </TabsList>
         <TabsContent value="gateways">
           {gateways.error ? (
@@ -169,6 +171,9 @@ export function GatewayPage() {
               />
             </>
           )}
+        </TabsContent>
+        <TabsContent value="classes" className="space-y-3">
+          <GatewayClassesPanel />
         </TabsContent>
       </Tabs>
     </div>

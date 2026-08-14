@@ -44,26 +44,45 @@ Production:
 
 ## Pages
 
+The sidebar groups destinations by depth: **Operate** (day-to-day work),
+**Automation** (standing repository automation), **Registry** (resources agents
+are built from), **Fabric** (runtime and gateway infrastructure), and
+**Platform** (system status).
+
 | Page | Route | Description |
 |------|-------|-------------|
-| Dashboard | `/` | Overview with task/session/agent/tool counts and recent tasks |
+| Dashboard | `/` | Overview counts, phase distribution, recent tasks, and a cross-task "waiting for approval" inbox |
+| Chat | `/chat` | Interactive chat with SSE streaming and tool execution; New Chat cancels and deletes the previous server-side session |
 | Tasks | `/tasks` | Create, monitor, and manage tasks with log streaming |
-| Task Detail | `/tasks/:taskId` | Task metadata, spec, status, result viewer, logs, execution timeline, trace, and approvals; fork provenance when forked |
-| Create Task | `/tasks/new` | Form with type selector (container/AI/agent) and conditional fields |
+| Task Detail | `/tasks/:taskId` | Metadata, requester/transaction provenance, schedule facts, result viewer, logs, execution timeline, trace, approvals, plan, and children (execution graph + API-resolved child table); fork provenance when forked |
+| Create Task | `/tasks/new` | Type selector (container/AI/agent) with schedule, env, retry, webhook, session, AI sampling/tools/skills, agent runtime overrides, workspace + clean-room policies — plus a full-spec YAML mode |
 | Board / Kanban | `/kanban` | Kanban board for task status and work-in-progress tracking |
 | Live | `/live` | Live agent grid for active task execution and status updates |
+| Monitors | `/monitors` | Repository monitor inventory with manual runs |
+| Monitor Detail | `/monitors/:monitorId` | PR/issue queues, command actions, workflow timeline, monitor events, implementation jobs with patch preview, GitHub mutation audit, and spec editing |
+| Create Monitor | `/monitors/create/new` | RepositoryMonitor creation form |
 | Security | `/security` | Repository scan inventory with scan status, finding counts, and manual scan actions |
 | New Repository Scan | `/security/new` | Form for creating a RepositoryScan from provider, URL, branch, schedule, and analysis agent |
-| Repository Security Detail | `/security/:repoId` | Threat model editor, scan history, finding tables, and recommended remediation view |
+| Repository Security Detail | `/security/:repoId` | Threat model editor, scan history, finding tables, recommended remediation, spec editing, and repository delete |
 | Security Finding Detail | `/security/findings/:findingId` | Evidence, validation status, patch proposal, dismissal/reopen, and remediation PR actions |
 | Sessions | `/sessions` | Browse sessions with message count and token stats |
 | Session Detail | `/sessions/:sessionId` | Transcript viewer plus an aggregated execution timeline across the session's tasks |
 | Agents | `/agents` | Card grid of agents with model and tool info |
-| Agent Detail | `/agents/:agentId` | Full agent configuration view |
-| Create Agent | `/agents/new` | Agent creation form |
-| Tools | `/tools` | Table of built-in and custom tools |
-| Tool Detail | `/tools/:toolName` | Tool spec with JSON Schema parameters |
-| Chat | `/chat` | Interactive chat with SSE streaming and tool execution |
+| Agent Detail | `/agents/:agentId` | Full agent configuration view with full-spec YAML editing |
+| Create Agent | `/agents/new` | Agent creation form; built-in ACP runtimes are stamped with `contractVersion: orka.harness.v2`, and registered Providers are offered via `providerRef` |
+| Providers | `/providers` | LLM Provider inventory (type, default model, readiness) |
+| Provider Detail | `/providers/:providerName` | Provider configuration and status with edit and delete |
+| Create Provider | `/providers/new` | Provider creation backed by a credentials Secret picker |
+| Tools | `/tools` | Table of built-in and custom tools with manifest-based tool creation |
+| Tool Detail | `/tools/:toolName` | Tool spec with JSON Schema parameters, spec editing, and delete for custom tools |
+| Skills | `/skills` | Skill inventory (version, tags, phase) |
+| Skill Detail | `/skills/:skillName` | Rendered SKILL.md content served by the API, bundled file list, edit, and delete |
+| Create Skill | `/skills/new` | Skill authoring form (metadata + inline SKILL.md) |
+| Memory | `/memory` | Durable memory browser (filters, enable/disable, soft delete, edit) and the proposal review inbox — accept/reject records a decision; applying an accepted proposal is the explicit step that creates memory |
+| Runtimes | `/runtimes` | RuntimePool capacity/admission (read-only), external AgentRuntime registration/edit/removal, and substrate actor pool management |
+| Gateways | `/gateways` | Gateway switchboard: bindings, session queues, event ledger, delivery outbox with manual retry, and cluster GatewayClasses |
+| Gateway Detail | `/gateways/:gatewayId` | Adapter boundary, observed capabilities, and per-gateway ledgers |
+| System | `/system` | Readiness checks, capability badges (chat, memory store), chat orchestrator limits, compat endpoint connect info, and the model catalog |
 | Login | `/login` | Token input for ServiceAccount authentication |
 
 ## Execution events
@@ -110,7 +129,8 @@ All API requests include `Authorization: Bearer <token>`.
 ## Features
 
 - **Dark/light theme**: Toggle with localStorage persistence
-- **Namespace selector**: Filter all views by Kubernetes namespace
+- **Namespace switcher**: Free-text namespace entry with recent history and the token's own namespace as suggestions (there is no list-namespaces API)
+- **Identity popover**: The verified caller identity from `GET /auth/whoami`, including transaction-token metadata when present
 - **Security workflow**: Manage repository scans, edit threat models, triage findings, validate/reproduce issues, generate patch proposals, and open remediation PRs
 - **Skeleton loaders**: Loading states for all list/detail pages
 - **Error handling**: Global error boundary, toast notifications, 401 redirect

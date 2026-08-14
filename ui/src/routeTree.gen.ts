@@ -9,7 +9,9 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as SystemRouteImport } from './routes/system'
 import { Route as RuntimeSimulatorRouteImport } from './routes/runtime-simulator'
+import { Route as MemoryRouteImport } from './routes/memory'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as LiveRouteImport } from './routes/live'
 import { Route as KanbanRouteImport } from './routes/kanban'
@@ -17,29 +19,47 @@ import { Route as ChatRouteImport } from './routes/chat'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ToolsIndexRouteImport } from './routes/tools/index'
 import { Route as TasksIndexRouteImport } from './routes/tasks/index'
+import { Route as SkillsIndexRouteImport } from './routes/skills/index'
 import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
 import { Route as SecurityIndexRouteImport } from './routes/security/index'
 import { Route as RuntimesIndexRouteImport } from './routes/runtimes/index'
+import { Route as ProvidersIndexRouteImport } from './routes/providers/index'
 import { Route as MonitorsIndexRouteImport } from './routes/monitors/index'
 import { Route as GatewaysIndexRouteImport } from './routes/gateways/index'
 import { Route as AgentsIndexRouteImport } from './routes/agents/index'
 import { Route as ToolsToolNameRouteImport } from './routes/tools/$toolName'
 import { Route as TasksNewRouteImport } from './routes/tasks/new'
 import { Route as TasksTaskIdRouteImport } from './routes/tasks/$taskId'
+import { Route as SkillsNewRouteImport } from './routes/skills/new'
+import { Route as SkillsSkillNameRouteImport } from './routes/skills/$skillName'
 import { Route as SessionsSessionIdRouteImport } from './routes/sessions/$sessionId'
 import { Route as SecurityNewRouteImport } from './routes/security/new'
 import { Route as SecurityRepoIdRouteImport } from './routes/security/$repoId'
+import { Route as ProvidersNewRouteImport } from './routes/providers/new'
+import { Route as ProvidersProviderNameRouteImport } from './routes/providers/$providerName'
 import { Route as MonitorsMonitorIdRouteImport } from './routes/monitors/$monitorId'
 import { Route as GatewaysGatewayIdRouteImport } from './routes/gateways/$gatewayId'
 import { Route as AgentsNewRouteImport } from './routes/agents/new'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
+import { Route as SkillsSkillNameEditRouteImport } from './routes/skills/$skillName_.edit'
 import { Route as SecurityFindingsFindingIdRouteImport } from './routes/security/findings/$findingId'
+import { Route as ProvidersProviderNameEditRouteImport } from './routes/providers/$providerName_.edit'
 import { Route as MonitorsCreateNewRouteImport } from './routes/monitors/create/new'
 import { Route as GatewaysBindingsBindingIdRouteImport } from './routes/gateways/bindings/$bindingId'
 
+const SystemRoute = SystemRouteImport.update({
+  id: '/system',
+  path: '/system',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RuntimeSimulatorRoute = RuntimeSimulatorRouteImport.update({
   id: '/runtime-simulator',
   path: '/runtime-simulator',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MemoryRoute = MemoryRouteImport.update({
+  id: '/memory',
+  path: '/memory',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -77,6 +97,11 @@ const TasksIndexRoute = TasksIndexRouteImport.update({
   path: '/tasks/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SkillsIndexRoute = SkillsIndexRouteImport.update({
+  id: '/skills/',
+  path: '/skills/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SessionsIndexRoute = SessionsIndexRouteImport.update({
   id: '/sessions/',
   path: '/sessions/',
@@ -90,6 +115,11 @@ const SecurityIndexRoute = SecurityIndexRouteImport.update({
 const RuntimesIndexRoute = RuntimesIndexRouteImport.update({
   id: '/runtimes/',
   path: '/runtimes/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProvidersIndexRoute = ProvidersIndexRouteImport.update({
+  id: '/providers/',
+  path: '/providers/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MonitorsIndexRoute = MonitorsIndexRouteImport.update({
@@ -122,6 +152,16 @@ const TasksTaskIdRoute = TasksTaskIdRouteImport.update({
   path: '/tasks/$taskId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SkillsNewRoute = SkillsNewRouteImport.update({
+  id: '/skills/new',
+  path: '/skills/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SkillsSkillNameRoute = SkillsSkillNameRouteImport.update({
+  id: '/skills/$skillName',
+  path: '/skills/$skillName',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SessionsSessionIdRoute = SessionsSessionIdRouteImport.update({
   id: '/sessions/$sessionId',
   path: '/sessions/$sessionId',
@@ -135,6 +175,16 @@ const SecurityNewRoute = SecurityNewRouteImport.update({
 const SecurityRepoIdRoute = SecurityRepoIdRouteImport.update({
   id: '/security/$repoId',
   path: '/security/$repoId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProvidersNewRoute = ProvidersNewRouteImport.update({
+  id: '/providers/new',
+  path: '/providers/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProvidersProviderNameRoute = ProvidersProviderNameRouteImport.update({
+  id: '/providers/$providerName',
+  path: '/providers/$providerName',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MonitorsMonitorIdRoute = MonitorsMonitorIdRouteImport.update({
@@ -157,10 +207,21 @@ const AgentsAgentIdRoute = AgentsAgentIdRouteImport.update({
   path: '/agents/$agentId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SkillsSkillNameEditRoute = SkillsSkillNameEditRouteImport.update({
+  id: '/skills/$skillName_/edit',
+  path: '/skills/$skillName/edit',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SecurityFindingsFindingIdRoute =
   SecurityFindingsFindingIdRouteImport.update({
     id: '/security/findings/$findingId',
     path: '/security/findings/$findingId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ProvidersProviderNameEditRoute =
+  ProvidersProviderNameEditRouteImport.update({
+    id: '/providers/$providerName_/edit',
+    path: '/providers/$providerName/edit',
     getParentRoute: () => rootRouteImport,
   } as any)
 const MonitorsCreateNewRoute = MonitorsCreateNewRouteImport.update({
@@ -181,28 +242,38 @@ export interface FileRoutesByFullPath {
   '/kanban': typeof KanbanRoute
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
+  '/memory': typeof MemoryRoute
   '/runtime-simulator': typeof RuntimeSimulatorRoute
+  '/system': typeof SystemRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
   '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
+  '/providers/$providerName': typeof ProvidersProviderNameRoute
+  '/providers/new': typeof ProvidersNewRoute
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/skills/$skillName': typeof SkillsSkillNameRoute
+  '/skills/new': typeof SkillsNewRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents/': typeof AgentsIndexRoute
   '/gateways/': typeof GatewaysIndexRoute
   '/monitors/': typeof MonitorsIndexRoute
+  '/providers/': typeof ProvidersIndexRoute
   '/runtimes/': typeof RuntimesIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/sessions/': typeof SessionsIndexRoute
+  '/skills/': typeof SkillsIndexRoute
   '/tasks/': typeof TasksIndexRoute
   '/tools/': typeof ToolsIndexRoute
   '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
+  '/providers/$providerName/edit': typeof ProvidersProviderNameEditRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
+  '/skills/$skillName/edit': typeof SkillsSkillNameEditRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -210,28 +281,38 @@ export interface FileRoutesByTo {
   '/kanban': typeof KanbanRoute
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
+  '/memory': typeof MemoryRoute
   '/runtime-simulator': typeof RuntimeSimulatorRoute
+  '/system': typeof SystemRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
   '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
+  '/providers/$providerName': typeof ProvidersProviderNameRoute
+  '/providers/new': typeof ProvidersNewRoute
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/skills/$skillName': typeof SkillsSkillNameRoute
+  '/skills/new': typeof SkillsNewRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents': typeof AgentsIndexRoute
   '/gateways': typeof GatewaysIndexRoute
   '/monitors': typeof MonitorsIndexRoute
+  '/providers': typeof ProvidersIndexRoute
   '/runtimes': typeof RuntimesIndexRoute
   '/security': typeof SecurityIndexRoute
   '/sessions': typeof SessionsIndexRoute
+  '/skills': typeof SkillsIndexRoute
   '/tasks': typeof TasksIndexRoute
   '/tools': typeof ToolsIndexRoute
   '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
+  '/providers/$providerName/edit': typeof ProvidersProviderNameEditRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
+  '/skills/$skillName/edit': typeof SkillsSkillNameEditRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -240,28 +321,38 @@ export interface FileRoutesById {
   '/kanban': typeof KanbanRoute
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
+  '/memory': typeof MemoryRoute
   '/runtime-simulator': typeof RuntimeSimulatorRoute
+  '/system': typeof SystemRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
   '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
+  '/providers/$providerName': typeof ProvidersProviderNameRoute
+  '/providers/new': typeof ProvidersNewRoute
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/skills/$skillName': typeof SkillsSkillNameRoute
+  '/skills/new': typeof SkillsNewRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents/': typeof AgentsIndexRoute
   '/gateways/': typeof GatewaysIndexRoute
   '/monitors/': typeof MonitorsIndexRoute
+  '/providers/': typeof ProvidersIndexRoute
   '/runtimes/': typeof RuntimesIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/sessions/': typeof SessionsIndexRoute
+  '/skills/': typeof SkillsIndexRoute
   '/tasks/': typeof TasksIndexRoute
   '/tools/': typeof ToolsIndexRoute
   '/gateways/bindings/$bindingId': typeof GatewaysBindingsBindingIdRoute
   '/monitors/create/new': typeof MonitorsCreateNewRoute
+  '/providers/$providerName_/edit': typeof ProvidersProviderNameEditRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
+  '/skills/$skillName_/edit': typeof SkillsSkillNameEditRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -271,28 +362,38 @@ export interface FileRouteTypes {
     | '/kanban'
     | '/live'
     | '/login'
+    | '/memory'
     | '/runtime-simulator'
+    | '/system'
     | '/agents/$agentId'
     | '/agents/new'
     | '/gateways/$gatewayId'
     | '/monitors/$monitorId'
+    | '/providers/$providerName'
+    | '/providers/new'
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
+    | '/skills/$skillName'
+    | '/skills/new'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents/'
     | '/gateways/'
     | '/monitors/'
+    | '/providers/'
     | '/runtimes/'
     | '/security/'
     | '/sessions/'
+    | '/skills/'
     | '/tasks/'
     | '/tools/'
     | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
+    | '/providers/$providerName/edit'
     | '/security/findings/$findingId'
+    | '/skills/$skillName/edit'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -300,28 +401,38 @@ export interface FileRouteTypes {
     | '/kanban'
     | '/live'
     | '/login'
+    | '/memory'
     | '/runtime-simulator'
+    | '/system'
     | '/agents/$agentId'
     | '/agents/new'
     | '/gateways/$gatewayId'
     | '/monitors/$monitorId'
+    | '/providers/$providerName'
+    | '/providers/new'
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
+    | '/skills/$skillName'
+    | '/skills/new'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents'
     | '/gateways'
     | '/monitors'
+    | '/providers'
     | '/runtimes'
     | '/security'
     | '/sessions'
+    | '/skills'
     | '/tasks'
     | '/tools'
     | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
+    | '/providers/$providerName/edit'
     | '/security/findings/$findingId'
+    | '/skills/$skillName/edit'
   id:
     | '__root__'
     | '/'
@@ -329,28 +440,38 @@ export interface FileRouteTypes {
     | '/kanban'
     | '/live'
     | '/login'
+    | '/memory'
     | '/runtime-simulator'
+    | '/system'
     | '/agents/$agentId'
     | '/agents/new'
     | '/gateways/$gatewayId'
     | '/monitors/$monitorId'
+    | '/providers/$providerName'
+    | '/providers/new'
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
+    | '/skills/$skillName'
+    | '/skills/new'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents/'
     | '/gateways/'
     | '/monitors/'
+    | '/providers/'
     | '/runtimes/'
     | '/security/'
     | '/sessions/'
+    | '/skills/'
     | '/tasks/'
     | '/tools/'
     | '/gateways/bindings/$bindingId'
     | '/monitors/create/new'
+    | '/providers/$providerName_/edit'
     | '/security/findings/$findingId'
+    | '/skills/$skillName_/edit'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -359,37 +480,61 @@ export interface RootRouteChildren {
   KanbanRoute: typeof KanbanRoute
   LiveRoute: typeof LiveRoute
   LoginRoute: typeof LoginRoute
+  MemoryRoute: typeof MemoryRoute
   RuntimeSimulatorRoute: typeof RuntimeSimulatorRoute
+  SystemRoute: typeof SystemRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRoute
   AgentsNewRoute: typeof AgentsNewRoute
   GatewaysGatewayIdRoute: typeof GatewaysGatewayIdRoute
   MonitorsMonitorIdRoute: typeof MonitorsMonitorIdRoute
+  ProvidersProviderNameRoute: typeof ProvidersProviderNameRoute
+  ProvidersNewRoute: typeof ProvidersNewRoute
   SecurityRepoIdRoute: typeof SecurityRepoIdRoute
   SecurityNewRoute: typeof SecurityNewRoute
   SessionsSessionIdRoute: typeof SessionsSessionIdRoute
+  SkillsSkillNameRoute: typeof SkillsSkillNameRoute
+  SkillsNewRoute: typeof SkillsNewRoute
   TasksTaskIdRoute: typeof TasksTaskIdRoute
   TasksNewRoute: typeof TasksNewRoute
   ToolsToolNameRoute: typeof ToolsToolNameRoute
   AgentsIndexRoute: typeof AgentsIndexRoute
   GatewaysIndexRoute: typeof GatewaysIndexRoute
   MonitorsIndexRoute: typeof MonitorsIndexRoute
+  ProvidersIndexRoute: typeof ProvidersIndexRoute
   RuntimesIndexRoute: typeof RuntimesIndexRoute
   SecurityIndexRoute: typeof SecurityIndexRoute
   SessionsIndexRoute: typeof SessionsIndexRoute
+  SkillsIndexRoute: typeof SkillsIndexRoute
   TasksIndexRoute: typeof TasksIndexRoute
   ToolsIndexRoute: typeof ToolsIndexRoute
   GatewaysBindingsBindingIdRoute: typeof GatewaysBindingsBindingIdRoute
   MonitorsCreateNewRoute: typeof MonitorsCreateNewRoute
+  ProvidersProviderNameEditRoute: typeof ProvidersProviderNameEditRoute
   SecurityFindingsFindingIdRoute: typeof SecurityFindingsFindingIdRoute
+  SkillsSkillNameEditRoute: typeof SkillsSkillNameEditRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/system': {
+      id: '/system'
+      path: '/system'
+      fullPath: '/system'
+      preLoaderRoute: typeof SystemRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/runtime-simulator': {
       id: '/runtime-simulator'
       path: '/runtime-simulator'
       fullPath: '/runtime-simulator'
       preLoaderRoute: typeof RuntimeSimulatorRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/memory': {
+      id: '/memory'
+      path: '/memory'
+      fullPath: '/memory'
+      preLoaderRoute: typeof MemoryRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -441,6 +586,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TasksIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/skills/': {
+      id: '/skills/'
+      path: '/skills'
+      fullPath: '/skills/'
+      preLoaderRoute: typeof SkillsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sessions/': {
       id: '/sessions/'
       path: '/sessions'
@@ -460,6 +612,13 @@ declare module '@tanstack/react-router' {
       path: '/runtimes'
       fullPath: '/runtimes/'
       preLoaderRoute: typeof RuntimesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/providers/': {
+      id: '/providers/'
+      path: '/providers'
+      fullPath: '/providers/'
+      preLoaderRoute: typeof ProvidersIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/monitors/': {
@@ -504,6 +663,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TasksTaskIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/skills/new': {
+      id: '/skills/new'
+      path: '/skills/new'
+      fullPath: '/skills/new'
+      preLoaderRoute: typeof SkillsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/skills/$skillName': {
+      id: '/skills/$skillName'
+      path: '/skills/$skillName'
+      fullPath: '/skills/$skillName'
+      preLoaderRoute: typeof SkillsSkillNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sessions/$sessionId': {
       id: '/sessions/$sessionId'
       path: '/sessions/$sessionId'
@@ -523,6 +696,20 @@ declare module '@tanstack/react-router' {
       path: '/security/$repoId'
       fullPath: '/security/$repoId'
       preLoaderRoute: typeof SecurityRepoIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/providers/new': {
+      id: '/providers/new'
+      path: '/providers/new'
+      fullPath: '/providers/new'
+      preLoaderRoute: typeof ProvidersNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/providers/$providerName': {
+      id: '/providers/$providerName'
+      path: '/providers/$providerName'
+      fullPath: '/providers/$providerName'
+      preLoaderRoute: typeof ProvidersProviderNameRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/monitors/$monitorId': {
@@ -553,11 +740,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsAgentIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/skills/$skillName_/edit': {
+      id: '/skills/$skillName_/edit'
+      path: '/skills/$skillName/edit'
+      fullPath: '/skills/$skillName/edit'
+      preLoaderRoute: typeof SkillsSkillNameEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/security/findings/$findingId': {
       id: '/security/findings/$findingId'
       path: '/security/findings/$findingId'
       fullPath: '/security/findings/$findingId'
       preLoaderRoute: typeof SecurityFindingsFindingIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/providers/$providerName_/edit': {
+      id: '/providers/$providerName_/edit'
+      path: '/providers/$providerName/edit'
+      fullPath: '/providers/$providerName/edit'
+      preLoaderRoute: typeof ProvidersProviderNameEditRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/monitors/create/new': {
@@ -583,28 +784,38 @@ const rootRouteChildren: RootRouteChildren = {
   KanbanRoute: KanbanRoute,
   LiveRoute: LiveRoute,
   LoginRoute: LoginRoute,
+  MemoryRoute: MemoryRoute,
   RuntimeSimulatorRoute: RuntimeSimulatorRoute,
+  SystemRoute: SystemRoute,
   AgentsAgentIdRoute: AgentsAgentIdRoute,
   AgentsNewRoute: AgentsNewRoute,
   GatewaysGatewayIdRoute: GatewaysGatewayIdRoute,
   MonitorsMonitorIdRoute: MonitorsMonitorIdRoute,
+  ProvidersProviderNameRoute: ProvidersProviderNameRoute,
+  ProvidersNewRoute: ProvidersNewRoute,
   SecurityRepoIdRoute: SecurityRepoIdRoute,
   SecurityNewRoute: SecurityNewRoute,
   SessionsSessionIdRoute: SessionsSessionIdRoute,
+  SkillsSkillNameRoute: SkillsSkillNameRoute,
+  SkillsNewRoute: SkillsNewRoute,
   TasksTaskIdRoute: TasksTaskIdRoute,
   TasksNewRoute: TasksNewRoute,
   ToolsToolNameRoute: ToolsToolNameRoute,
   AgentsIndexRoute: AgentsIndexRoute,
   GatewaysIndexRoute: GatewaysIndexRoute,
   MonitorsIndexRoute: MonitorsIndexRoute,
+  ProvidersIndexRoute: ProvidersIndexRoute,
   RuntimesIndexRoute: RuntimesIndexRoute,
   SecurityIndexRoute: SecurityIndexRoute,
   SessionsIndexRoute: SessionsIndexRoute,
+  SkillsIndexRoute: SkillsIndexRoute,
   TasksIndexRoute: TasksIndexRoute,
   ToolsIndexRoute: ToolsIndexRoute,
   GatewaysBindingsBindingIdRoute: GatewaysBindingsBindingIdRoute,
   MonitorsCreateNewRoute: MonitorsCreateNewRoute,
+  ProvidersProviderNameEditRoute: ProvidersProviderNameEditRoute,
   SecurityFindingsFindingIdRoute: SecurityFindingsFindingIdRoute,
+  SkillsSkillNameEditRoute: SkillsSkillNameEditRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
