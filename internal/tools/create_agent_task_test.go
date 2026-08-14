@@ -429,6 +429,7 @@ func TestCreateAgentTaskTool_Execute_BindsPublicationCredentialRoles(t *testing.
 			"gitRepo":"https://github.com/example/source.git",
 			"publicationGitRepo":"https://github.com/example/target.git",
 			"pushBranch":"orka/fix",
+			"prBaseBranch":"main",
 			"createPR":true,
 			"readCredentialRef":"source-read",
 			"publicationReadCredentialRef":"target-read",
@@ -591,6 +592,133 @@ func TestCreateAgentTaskTool_Execute_UsesCopilotAgentSecretForGitCredentials(t *
 	}
 	if task.Spec.Workspace.ReadCredentialRef.Name != testCustomCopilotSecretName {
 		t.Fatalf("readCredentialRef = %q, want %q", task.Spec.Workspace.ReadCredentialRef.Name, testCustomCopilotSecretName)
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_MirrorsWorkspacePreflight(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    string
+		wantErr string
+	}{
+		{
+			name:    "branch requires gitRepo",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"branch":"main"}}`,
+			wantErr: "workspace.branch requires workspace.gitRepo",
+		},
+		{
+			name:    "ref requires gitRepo",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"ref":"abc123"}}`,
+			wantErr: "workspace.ref requires workspace.gitRepo",
+		},
+		{
+			name:    "subPath requires gitRepo",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"subPath":"src"}}`,
+			wantErr: "workspace.subPath requires workspace.gitRepo",
+		},
+		{
+			name:    "readCredentialRef requires gitRepo",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"readCredentialRef":"source-read"}}`,
+			wantErr: "workspace.readCredentialRef requires workspace.gitRepo",
+		},
+		{
+			name:    "publicationReadCredentialRef requires write intent",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/example/repo","publicationReadCredentialRef":"target-read"}}`,
+			wantErr: "workspace.publicationReadCredentialRef requires write workspace intent",
+		},
+		{
+			name:    "publicationCredentialRef requires write intent",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/example/repo","publicationCredentialRef":"target-write"}}`,
+			wantErr: "workspace.publicationCredentialRef requires write workspace intent",
+		},
+		{
+			name:    "forgeCredentialRef requires write intent",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/example/repo","forgeCredentialRef":"forge"}}`,
+			wantErr: "workspace.forgeCredentialRef requires write workspace intent",
+		},
+		{
+			name:    "write intent requires gitRepo",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"intent":"write","publicationCredentialRef":"target-write"}}`,
+			wantErr: "workspace.gitRepo is required for write intent",
+		},
+		{
+			name:    "invalid pushBranch",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/example/repo","pushBranch":"bad..branch","publicationCredentialRef":"target-write"}}`,
+			wantErr: "workspace.pushBranch is invalid",
+		},
+		{
+			name:    "createPR requires prBaseBranch",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/example/repo","pushBranch":"orka/fix","createPR":true,"publicationCredentialRef":"target-write","forgeCredentialRef":"forge"}}`,
+			wantErr: "workspace.createPR requires workspace.prBaseBranch",
+		},
+		{
+			name:    "createPR with invalid prBaseBranch",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/example/repo","pushBranch":"orka/fix","prBaseBranch":"bad branch","createPR":true,"publicationCredentialRef":"target-write","forgeCredentialRef":"forge"}}`,
+			wantErr: "workspace.prBaseBranch is invalid",
+		},
+		{
+			name:    "createPR requires forgeCredentialRef",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/example/repo","pushBranch":"orka/fix","prBaseBranch":"main","createPR":true,"publicationCredentialRef":"target-write"}}`,
+			wantErr: "workspace.createPR requires workspace.forgeCredentialRef",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := newFakeClient()
+			ctx := newCreateAgentTaskToolCtx(fc)
+			tool := &CreateAgentTaskTool{}
+
+			result, err := tool.Execute(ctx, json.RawMessage(tt.args))
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, tt.wantErr) {
+				t.Fatalf("response = %#v, want %q", response, tt.wantErr)
+			}
+			taskList := &corev1alpha1.TaskList{}
+			if err := fc.List(context.Background(), taskList); err != nil {
+				t.Fatal(err)
+			}
+			if len(taskList.Items) != 0 {
+				t.Fatalf("expected no Task to be created, got %d", len(taskList.Items))
+			}
+		})
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_AllowsReadWorkspaceWithoutGitRepo(t *testing.T) {
+	// The controller preflight rejects readCredentialRef without gitRepo, so
+	// auto-discovery must not attach one to a repository-free read workspace.
+	fc := newFakeClient(
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testGitCredentialsSecret, Namespace: defaultNamespace}},
+	)
+	ctx := newCreateAgentTaskToolCtx(fc)
+	tool := &CreateAgentTaskTool{}
+
+	result, err := tool.Execute(ctx, json.RawMessage(`{"prompt":"p","agentRef":"a","workspace":{"intent":"read"}}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Success {
+		t.Fatalf("expected success, got error: %s", r.Error)
+	}
+	task := &corev1alpha1.Task{}
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testAgentTaskGeneratedName, Namespace: defaultNamespace}, task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Spec.Workspace == nil {
+		t.Fatal("expected workspace to be set")
+	}
+	if task.Spec.Workspace.ReadCredentialRef != nil {
+		t.Fatalf("readCredentialRef = %#v, want nil without gitRepo", task.Spec.Workspace.ReadCredentialRef)
 	}
 }
 

@@ -18,6 +18,13 @@ import (
 
 const acpExternalEffectLease = 5 * time.Minute
 
+// maxACPExternalEffectCallDuration bounds one in-flight external-effect call so
+// its outcome can always be committed while the ledger lease is still valid.
+// Without this bound, a call that outlives the lease plus the reconciliation
+// grace period is marked OutcomeUnknown by reconcileExpiredExternalEffects, and
+// a late upstream success can never be settled.
+const maxACPExternalEffectCallDuration = acpExternalEffectLease - time.Minute
+
 var externalEffectLeaseSequence atomic.Uint64
 
 // runACPExternalEffect persists a canonical pre-execution identity before one
@@ -92,7 +99,13 @@ func runExternalEffectWithReplay[T any](
 	if err != nil {
 		return zero, false, err
 	}
-	response, callErr := call(ctx)
+	// Bound the call to a duration the claimed lease can account for. A call
+	// that ran past the lease plus the reconciliation grace period would be
+	// classified OutcomeUnknown while still in flight, making a late success
+	// permanently unsettleable.
+	callCtx, cancelCall := context.WithTimeout(ctx, maxACPExternalEffectCallDuration)
+	response, callErr := call(callCtx)
+	cancelCall()
 	if callErr != nil {
 		// Leave the exact effect in-flight. The same identity/digest may be
 		// reclaimed and classified by a later reconciliation; a different request
@@ -134,7 +147,7 @@ func externalEffectLeaseOwner(fence store.ControllerEpochFence, identity store.E
 
 const (
 	defaultACPExternalEffectRetryDelay = 5 * time.Second
-	maxACPExternalEffectRetryBudget    = acpExternalEffectLease - time.Minute
+	maxACPExternalEffectRetryBudget    = maxACPExternalEffectCallDuration
 )
 
 // runACPExternalEffectWithRetry retries the same immutable external-effect

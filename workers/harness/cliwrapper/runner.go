@@ -149,6 +149,10 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 		)
 	}
 	waitForPipeCopies(&copyWG, stdoutRead, stderrRead, 5*time.Second)
+	// waitForPipeCopies closes the readers only on its timeout path; close
+	// them on every path so successful commands do not leak two descriptors
+	// per turn (Close after close is a harmless ErrClosed).
+	closePipes(stdoutRead, stderrRead)
 
 	finished := time.Now().UTC()
 	exitCode := exitCodeFromError(waitErr)

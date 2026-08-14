@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tracing"
 )
 
@@ -29,19 +30,19 @@ func (t *CreateAgentTaskTool) Description() string {
 
 func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
 	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, promptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The prompt/instruction for the agent"}, agentRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent name with runtime configured"}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, "maxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: minMaxTurns, jsonSchemaMaximumField: maxMaxTurns, jsonSchemaDescriptionField: "Maximum agent loop iterations"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
-		"intent":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaEnumField: []string{"read", "write"}, jsonSchemaDescriptionField: "Workspace intent. Defaults to read; publication fields require write."},
-		"gitRepo":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source Git repository URL"},
-		"branch":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist). Omit with ref to resolve and freeze the repository's advertised default branch."},
-		"ref":                          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact source commit, tag, or ref"},
-		"readCredentialRef":            map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for clone/read credentials. Omit to auto-discover a read credential when available."},
+		"intent":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaEnumField: []string{"read", "write"}, jsonSchemaDescriptionField: "Workspace intent. Defaults to read; publication fields require write. Write intent requires gitRepo and publicationCredentialRef."},
+		"gitRepo":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source Git repository URL. Required for write intent."},
+		"branch":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist). Omit with ref to resolve and freeze the repository's advertised default branch. Requires gitRepo."},
+		"ref":                          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact source commit, tag, or ref. Requires gitRepo."},
+		"readCredentialRef":            map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for clone/read credentials. Omit to auto-discover a read credential when available. Requires gitRepo."},
 		"publicationGitRepo":           map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication repository URL for write Tasks"},
-		"publicationReadCredentialRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for target-repository preflight and verification credentials"},
-		"publicationCredentialRef":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Secret name for target-repository write credentials. Required for write intent."},
-		"forgeCredentialRef":           map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for forge API credentials used to reconcile pull requests"},
-		"pushBranch":                   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication branch name"},
-		"prBaseBranch":                 map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Pull request base branch"},
-		"createPR":                     map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Reconcile a pull request after publication"},
-		"subPath":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo"},
+		"publicationReadCredentialRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for target-repository preflight and verification credentials. Write intent only."},
+		"publicationCredentialRef":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Secret name for target-repository write credentials. Required for write intent; write intent only."},
+		"forgeCredentialRef":           map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for forge API credentials used to reconcile pull requests. Required when createPR is true; write intent only."},
+		"pushBranch":                   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication branch name (write intent)"},
+		"prBaseBranch":                 map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Pull request base branch. Required when createPR is true."},
+		"createPR":                     map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Reconcile a pull request after publication. Requires prBaseBranch and forgeCredentialRef."},
+		"subPath":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo. Requires gitRepo."},
 	},
 	}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
 	}, jsonSchemaRequiredField: []string{nameField, promptField, agentRefField},
@@ -136,28 +137,36 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		if workspaceRequestsPublication(wsCfg) {
 			wsCfg.Intent = corev1alpha1.WorkspaceIntentWrite
 		}
+		readCredential := strings.TrimSpace(chatGetStringArg(wsMap, "readCredentialRef"))
+		publicationReadCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationReadCredentialRef"))
 		publicationCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationCredentialRef"))
-		if wsCfg.Intent == corev1alpha1.WorkspaceIntentWrite && publicationCredential == "" {
-			return ChatToolErrorResult("invalid_arguments", "workspace.publicationCredentialRef is required for write intent", "Provide a dedicated target-repository write credential")
+		forgeCredential := strings.TrimSpace(chatGetStringArg(wsMap, "forgeCredentialRef"))
+		if wsErr := agentWorkspacePreflightError(wsCfg, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
+			return ChatToolErrorResult(wsErr.Type, wsErr.Message, wsErr.Suggestion)
 		}
-		agent, err := loadAgent(ctx, tc.Client, namespace, agentRef)
-		if err != nil {
-			result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
-			return result, nil
+		// Only attach read credentials alongside a gitRepo: the controller
+		// workspace preflight rejects readCredentialRef without gitRepo, so
+		// auto-discovery must not doom a repository-free workspace.
+		if strings.TrimSpace(wsCfg.GitRepo) != "" {
+			agent, err := loadAgent(ctx, tc.Client, namespace, agentRef)
+			if err != nil {
+				result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
+				return result, nil
+			}
+			readRef, err := resolveWorkspaceCredentialRef(ctx, tc.Client, namespace, agent, readCredential)
+			if err != nil {
+				result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
+				return result, nil
+			}
+			wsCfg.ReadCredentialRef = readRef
 		}
-		readRef, err := resolveWorkspaceCredentialRef(ctx, tc.Client, namespace, agent, chatGetStringArg(wsMap, "readCredentialRef"))
-		if err != nil {
-			result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
-			return result, nil
-		}
-		wsCfg.ReadCredentialRef = readRef
-		if publicationReadCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationReadCredentialRef")); publicationReadCredential != "" {
+		if publicationReadCredential != "" {
 			wsCfg.PublicationReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: publicationReadCredential}
 		}
 		if publicationCredential != "" {
 			wsCfg.PublicationCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: publicationCredential}
 		}
-		if forgeCredential := strings.TrimSpace(chatGetStringArg(wsMap, "forgeCredentialRef")); forgeCredential != "" {
+		if forgeCredential != "" {
 			wsCfg.ForgeCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: forgeCredential}
 		}
 		task.Spec.Workspace = wsCfg
@@ -180,4 +189,71 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 
 	tc.IncrementTasks()
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(schedule)})
+}
+
+// agentWorkspacePreflightError mirrors the tool-expressible subset of the
+// controller's validateACPWorkspacePreflight rules so obviously doomed Tasks
+// are rejected before consuming the session task budget. The controller-side
+// preflight remains authoritative; keep the mirrored conditions in exact
+// behavior parity with it (not stricter and not looser).
+func agentWorkspacePreflightError(wsCfg *corev1alpha1.WorkspaceConfig, readCredential, publicationReadCredential, publicationCredential, forgeCredential string) *ChatToolError {
+	invalidArgs := func(message, suggestion string) *ChatToolError {
+		return &ChatToolError{Type: "invalid_arguments", Message: message, Suggestion: suggestion}
+	}
+	if strings.TrimSpace(wsCfg.GitRepo) == "" {
+		switch {
+		case strings.TrimSpace(wsCfg.Branch) != "":
+			return invalidArgs("workspace.branch requires workspace.gitRepo", "Provide workspace.gitRepo or omit branch")
+		case strings.TrimSpace(wsCfg.Ref) != "":
+			return invalidArgs("workspace.ref requires workspace.gitRepo", "Provide workspace.gitRepo or omit ref")
+		case strings.TrimSpace(wsCfg.SubPath) != "":
+			return invalidArgs("workspace.subPath requires workspace.gitRepo", "Provide workspace.gitRepo or omit subPath")
+		case readCredential != "":
+			return invalidArgs("workspace.readCredentialRef requires workspace.gitRepo", "Provide workspace.gitRepo or omit readCredentialRef")
+		}
+	}
+	if wsCfg.Intent != corev1alpha1.WorkspaceIntentWrite {
+		switch {
+		case publicationReadCredential != "":
+			return invalidArgs("workspace.publicationReadCredentialRef requires write workspace intent", "Set workspace.intent to write or omit publicationReadCredentialRef")
+		case publicationCredential != "":
+			return invalidArgs("workspace.publicationCredentialRef requires write workspace intent", "Set workspace.intent to write or omit publicationCredentialRef")
+		case forgeCredential != "":
+			return invalidArgs("workspace.forgeCredentialRef requires write workspace intent", "Set workspace.intent to write or omit forgeCredentialRef")
+		}
+		return nil
+	}
+	if publicationCredential == "" {
+		return invalidArgs("workspace.publicationCredentialRef is required for write intent", "Provide a dedicated target-repository write credential")
+	}
+	if strings.TrimSpace(wsCfg.GitRepo) == "" {
+		return invalidArgs("workspace.gitRepo is required for write intent", "Provide the source repository URL for the publication workspace")
+	}
+	if pushBranch := strings.TrimSpace(wsCfg.PushBranch); pushBranch != "" {
+		if err := validateWorkspaceBranchArg(pushBranch); err != nil {
+			return invalidArgs(fmt.Sprintf("workspace.pushBranch is invalid: %v", err), "Provide a valid Git branch name")
+		}
+	}
+	if wsCfg.CreatePR {
+		if strings.TrimSpace(wsCfg.PRBaseBranch) == "" {
+			return invalidArgs("workspace.createPR requires workspace.prBaseBranch", "Provide the pull request base branch")
+		}
+		if err := validateWorkspaceBranchArg(strings.TrimSpace(wsCfg.PRBaseBranch)); err != nil {
+			return invalidArgs(fmt.Sprintf("workspace.prBaseBranch is invalid: %v", err), "Provide a valid pull request base branch name")
+		}
+		if forgeCredential == "" {
+			return invalidArgs("workspace.createPR requires workspace.forgeCredentialRef", "Provide a forge API credential Secret for pull request reconciliation")
+		}
+	}
+	return nil
+}
+
+// validateWorkspaceBranchArg mirrors the controller's canonicalWorkspaceBranchRef
+// check with the same canonical branch-ref validator.
+func validateWorkspaceBranchArg(branch string) error {
+	ref := branch
+	if !strings.HasPrefix(ref, "refs/heads/") {
+		ref = "refs/heads/" + ref
+	}
+	return store.ValidateFullBranchRef(ref)
 }

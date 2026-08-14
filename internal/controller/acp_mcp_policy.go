@@ -248,6 +248,17 @@ func customACPMCPToolDescriptor(tool *corev1alpha1.Tool) (harnessv2.MCPToolDescr
 	if tool.Spec.BrokeredToolClass == corev1alpha1.AgentRuntimeBrokeredToolClassRead {
 		effect = harnessv2.MCPToolEffectReadOnly
 	}
+	// Consequential calls run under the external-effect ledger, whose fixed
+	// lease can only account for maxACPExternalEffectCallDuration of execution.
+	// A longer configured timeout would be cut off mid-flight and settled
+	// OutcomeUnknown, so reject it at exposure time instead.
+	if effect == harnessv2.MCPToolEffectConsequential && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil &&
+		tool.Spec.HTTP.Timeout.Duration > maxACPExternalEffectCallDuration {
+		return harnessv2.MCPToolDescriptor{}, fmt.Errorf(
+			"tool %q spec.http.timeout %s exceeds the maximum brokered consequential call duration %s",
+			tool.Name, tool.Spec.HTTP.Timeout.Duration, maxACPExternalEffectCallDuration,
+		)
+	}
 	definitionDigest, err := acpDomainDigest("mcp-custom-tool-definition", map[string]any{
 		"uid": string(tool.UID), "generation": tool.Generation, "spec": tool.Spec,
 		"endpoint": tool.Status.Endpoint, "actor": tool.Status.Actor,

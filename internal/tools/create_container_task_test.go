@@ -262,6 +262,25 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 			},
 		},
 		{
+			name: "custom image with push branch publication rejected",
+			args: json.RawMessage(`{"name":"publish","image":"golang:1.26","command":["sh","-lc"],"args":["echo change >> file.txt"],"workspace":{"gitRepo":"https://github.com/example/source.git","publicationGitRepo":"https://github.com/example/target.git","publicationCredentialRef":"target-write","pushBranch":"orka/publish"}}`),
+			checkResult: func(t *testing.T, result string) {
+				expectContainerTaskError(t, result, "unsupported_custom_image_publication")
+			},
+		},
+		{
+			name: "custom image with push branch rejected before credential check",
+			args: json.RawMessage(`{"name":"publish","image":"golang:1.26","command":["sh","-lc"],"args":["echo change >> file.txt"],"workspace":{"gitRepo":"https://github.com/example/source.git","pushBranch":"orka/publish"}}`),
+			checkResult: func(t *testing.T, result string) {
+				expectContainerTaskError(t, result, "unsupported_custom_image_publication")
+			},
+		},
+		{
+			name:        "custom image with read-only workspace accepted",
+			args:        json.RawMessage(`{"name":"inspect","image":"golang:1.26","command":["sh","-lc"],"args":["go vet ./..."],"workspace":{"gitRepo":"https://github.com/example/source.git","readCredentialRef":"source-read"}}`),
+			checkResult: expectContainerTaskSuccess,
+		},
+		{
 			name: "repo validation without workspace fails",
 			args: json.RawMessage(`{"name":"validation","image":"golang:1.26","command":["sh","-lc"],"args":["go test ./..."]}`),
 			checkResult: func(t *testing.T, result string) {

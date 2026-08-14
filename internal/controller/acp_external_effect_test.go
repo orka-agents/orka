@@ -171,6 +171,45 @@ func TestRunACPExternalEffectWithRetryDoesNotRetryNonRetryableResponse(t *testin
 	assertInFlightExternalEffectWithOneLease(t, controlStore, identity)
 }
 
+func TestRunExternalEffectBoundsCallToLeaseAccountableDuration(t *testing.T) {
+	controlStore, fence, closeStore := newACPSessionTestStore(
+		t, filepath.Join(t.TempDir(), "external-effect-call-bound.db"),
+	)
+	defer closeStore()
+	identity := store.ExternalEffectIdentity{
+		Kind: "acp-mcp-tool", Namespace: "default", AggregateID: "session-bound", OperationID: "mcp-call-bound",
+	}
+	start := time.Now()
+	var deadline time.Time
+	var hasDeadline bool
+
+	result, err := runExternalEffect(
+		context.Background(), controlStore, fence, identity, map[string]string{"call": "custom"},
+		func(ctx context.Context) (string, error) {
+			deadline, hasDeadline = ctx.Deadline()
+			return "committed", nil
+		},
+	)
+	if err != nil || result != "committed" {
+		t.Fatalf("bounded call = %q error %v, want committed success", result, err)
+	}
+	if !hasDeadline {
+		t.Fatal("external-effect call context has no deadline; a call must not outlive its ledger lease")
+	}
+	if deadline.After(start.Add(maxACPExternalEffectCallDuration + time.Second)) {
+		t.Fatalf(
+			"external-effect call deadline = %s after start, want at most the lease-accountable %s",
+			deadline.Sub(start), maxACPExternalEffectCallDuration,
+		)
+	}
+	if maxACPExternalEffectCallDuration >= acpExternalEffectLease {
+		t.Fatalf(
+			"call bound %s does not leave settlement margin inside the %s lease",
+			maxACPExternalEffectCallDuration, acpExternalEffectLease,
+		)
+	}
+}
+
 func assertInFlightExternalEffectWithOneLease(
 	t *testing.T,
 	controlStore store.ExternalEffectStore,

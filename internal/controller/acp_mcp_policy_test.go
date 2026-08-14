@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -798,5 +799,31 @@ func TestBuildRuntimeSessionMCPConfigurationHonorsExplicitEmptyTaskOpenCodeTools
 	}
 	if configuration.ToolPolicy.AllowedToolNames == nil || len(configuration.ToolPolicy.AllowedToolNames) != 0 {
 		t.Fatalf("allowed tools = %#v, want explicit deny-all", configuration.ToolPolicy.AllowedToolNames)
+	}
+}
+
+func TestCustomACPMCPToolDescriptorRejectsUnaccountableConsequentialTimeout(t *testing.T) {
+	newTool := func(class corev1alpha1.AgentRuntimeBrokeredToolClass, timeout time.Duration) *corev1alpha1.Tool {
+		return &corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: "custom_tool", Namespace: "default"},
+			Spec: corev1alpha1.ToolSpec{
+				Description: "custom tool", BrokeredToolClass: class,
+				HTTP: &corev1alpha1.HTTPExecution{
+					URL: "https://tools.example/invoke", Method: "POST",
+					Timeout: &metav1.Duration{Duration: timeout},
+				},
+			},
+		}
+	}
+
+	_, err := customACPMCPToolDescriptor(newTool(corev1alpha1.AgentRuntimeBrokeredToolClassWrite, 10*time.Minute))
+	if err == nil || !strings.Contains(err.Error(), "exceeds the maximum brokered consequential call duration") {
+		t.Fatalf("consequential over-bound timeout error = %v, want ledger-accountability rejection", err)
+	}
+	if _, err := customACPMCPToolDescriptor(newTool(corev1alpha1.AgentRuntimeBrokeredToolClassWrite, maxACPExternalEffectCallDuration)); err != nil {
+		t.Fatalf("consequential at-bound timeout error = %v, want acceptance", err)
+	}
+	if _, err := customACPMCPToolDescriptor(newTool(corev1alpha1.AgentRuntimeBrokeredToolClassRead, 10*time.Minute)); err != nil {
+		t.Fatalf("read-only long timeout error = %v, want acceptance (read calls bypass the effect ledger)", err)
 	}
 }
