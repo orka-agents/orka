@@ -520,32 +520,33 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return "", err
 	}
 
-	childTokenExchangeEnabled, err := shouldPrepareChildTransactionToken(dc.parentTask)
+	childTokenExchangeEnabled, err := shouldPrepareChildTransactionToken(ctx, dc.parentTask)
 	if err != nil {
 		return "", err
 	}
+	var childTokenPreparation *childTransactionTokenPreparation
 	if childTokenExchangeEnabled {
 		markChildTransactionTokenPending(childTask)
-		if err := prepareChildTransactionToken(ctx, t.k8sClient, dc.parentTask, childTask, "delegateTask", dc.args.Agent); err != nil {
+		childTokenPreparation, err = prepareChildTransactionToken(ctx, t.k8sClient, dc.parentTask, childTask)
+		if err != nil {
 			return "", err
+		}
+		if childTokenPreparation == nil {
+			return "", fmt.Errorf("child transaction token exchange became unavailable during preparation")
 		}
 	}
 
 	if err := t.k8sClient.Create(ctx, childTask); err != nil {
 		if childTokenExchangeEnabled {
-			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, childTask)
+			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, childTask, childTokenPreparation)
 		}
 		return "", fmt.Errorf("failed to create child task: %w", err)
 	}
 	span.SetAttributes(orkatracing.DelegateAttributes("", childTask.Name)...)
 
 	if childTokenExchangeEnabled {
-		if err := adoptChildTransactionTokenSecret(ctx, t.k8sClient, childTask); err != nil {
-			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, childTask)
-			return "", err
-		}
-		if err := patchPreparedChildTransactionToken(ctx, t.k8sClient, childTask); err != nil {
-			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, childTask)
+		if err := completeChildTransactionToken(ctx, t.k8sClient, childTask, childTokenPreparation); err != nil {
+			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, childTask, childTokenPreparation)
 			return "", err
 		}
 	}
@@ -569,34 +570,6 @@ func markChildTransactionTokenPending(childTask *corev1alpha1.Task) {
 	}
 	childTask.Annotations[labels.AnnotationTransactionTokenPending] = trueStr
 	childTask.Annotations[labels.AnnotationTransactionTokenPendingSince] = time.Now().Format(time.RFC3339Nano)
-}
-
-func patchPreparedChildTransactionToken(ctx context.Context, k8sClient client.Client, childTask *corev1alpha1.Task) error {
-	patch, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{
-			"annotations": map[string]any{
-				labels.AnnotationTransactionTokenPending:      nil,
-				labels.AnnotationTransactionTokenPendingSince: nil,
-			},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("encoding child task transaction token metadata patch: %w", err)
-	}
-	target := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      childTask.Name,
-			Namespace: childTask.Namespace,
-		},
-	}
-	if err := k8sClient.Patch(ctx, target, client.RawPatch(types.MergePatchType, patch)); err != nil {
-		return fmt.Errorf("updating child task transaction token metadata: %w", err)
-	}
-	if childTask.Annotations != nil {
-		delete(childTask.Annotations, labels.AnnotationTransactionTokenPending)
-		delete(childTask.Annotations, labels.AnnotationTransactionTokenPendingSince)
-	}
-	return nil
 }
 
 // Ensure DelegateTaskTool implements Tool

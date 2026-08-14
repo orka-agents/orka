@@ -16,6 +16,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestCreateContainerTaskTool_Name(t *testing.T) {
@@ -314,6 +317,38 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreateContainerTaskTool_ExecuteCoordination_BindsTTSChildTokenToCreatedTask(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	exchange := &childTokenExchange{}
+	issuer := newTransactionTokenIssuer(t)
+	ttsServer := startChildTransactionTokenServer(t, issuer, exchange)
+	defer ttsServer.Close()
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
+	t.Setenv(workerenv.ContextTokenSubjectTokenFile, writeTestSubjectToken(t))
+	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
+
+	fc := newFakeClient(parentTask())
+	result, err := NewCreateContainerTaskTool(fc).Execute(context.Background(), json.RawMessage(`{"image":"busybox","command":["echo"],"args":["hello"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := parseContainerTaskToolResult(t, result)
+	data := parsed.Data.(map[string]any)
+	child := &corev1alpha1.Task{}
+	if err := fc.Get(context.Background(), client.ObjectKey{Name: data[nameField].(string), Namespace: defaultNamespace}, child); err != nil {
+		t.Fatal(err)
+	}
+	if exchange.called.Load() {
+		t.Fatal("delegated container performed one-shot TTS exchange")
+	}
+	if child.Annotations[labels.AnnotationTransactionTokenPending] != trueStr {
+		t.Fatal("delegated container is not gated pending controller exchange")
+	}
+	requireRenewableChildTransactionSecrets(t, fc, child, child.Annotations[labels.AnnotationTransactionTokenSecret], "parent-tx-token")
 }
 
 func TestCreateContainerTaskTool_ExecuteCoordination_InheritsParentProvenance(t *testing.T) {

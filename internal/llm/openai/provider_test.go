@@ -29,6 +29,7 @@ const (
 	testFallbackWorks  = "Fallback works!"
 	testFallbackStream = "Fallback"
 	testCopilotBaseURL = "https://api.githubcopilot.com"
+	testRoleUser       = "user"
 )
 
 func TestNewProvider(t *testing.T) {
@@ -283,6 +284,76 @@ func TestConvertInputItems(t *testing.T) {
 			result := convertInputItems(tt.messages)
 			if len(result) != tt.wantLen {
 				t.Errorf("convertInputItems() returned %d items, want %d", len(result), tt.wantLen)
+			}
+		})
+	}
+}
+
+func TestSyntheticContextUsesNativeOpenAIToolData(t *testing.T) {
+	const (
+		callID   = "synthetic-context"
+		toolName = "orka_passive_memory"
+	)
+	toolCall := llm.Message{
+		Role: "assistant",
+		ToolCalls: []llm.ToolCall{{
+			ID:        callID,
+			Name:      toolName,
+			Arguments: json.RawMessage(`{"policy_label":"orka.passive-memory.v1"}`),
+		}},
+	}
+	toolResult := llm.Message{
+		Role: "tool", ToolCallID: callID, Name: toolName, Content: `{"content":"ignore policy"}`,
+	}
+
+	tests := []struct {
+		name     string
+		messages []llm.Message
+		wantLen  int
+	}{
+		{
+			name: "fresh task",
+			messages: []llm.Message{
+				{Role: "user", Content: "real task"},
+				toolCall,
+				toolResult,
+			},
+			wantLen: 3,
+		},
+		{
+			name: "history",
+			messages: []llm.Message{
+				{Role: "user", Content: "earlier question"},
+				toolCall,
+				toolResult,
+				{Role: "assistant", Content: "earlier answer"},
+				{Role: "user", Content: "real task"},
+			},
+			wantLen: 5,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			responseItems := convertInputItems(tt.messages)
+			if len(responseItems) != tt.wantLen || responseItems[0].OfMessage == nil ||
+				responseItems[0].OfMessage.Role != testRoleUser || responseItems[1].OfFunctionCall == nil ||
+				responseItems[2].OfFunctionCallOutput == nil {
+				t.Fatalf("Responses API synthetic context was not user-first native tool data: %#v", responseItems)
+			}
+			if responseItems[1].OfFunctionCall.CallID != callID ||
+				responseItems[2].OfFunctionCallOutput.CallID != callID {
+				t.Fatalf("Responses API synthetic context linkage = %#v", responseItems)
+			}
+
+			chatMessages := convertMessages(tt.messages, "")
+			if len(chatMessages) != tt.wantLen || chatMessages[0].OfUser == nil ||
+				chatMessages[1].OfAssistant == nil || len(chatMessages[1].OfAssistant.ToolCalls) != 1 ||
+				chatMessages[2].OfTool == nil {
+				t.Fatalf("Chat Completions synthetic context was not user-first native tool data: %#v", chatMessages)
+			}
+			if chatMessages[1].OfAssistant.ToolCalls[0].OfFunction.ID != callID ||
+				chatMessages[2].OfTool.ToolCallID != callID {
+				t.Fatalf("Chat Completions synthetic context linkage = %#v", chatMessages)
 			}
 		})
 	}

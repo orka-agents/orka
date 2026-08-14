@@ -48,8 +48,7 @@ type UpdateSubstrateActorPoolRequest struct {
 }
 
 func rejectContextTokenResourceMutation(c fiber.Ctx, resource string) error {
-	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken {
+	if contextTokenFromUserInfo(GetUserInfo(c)) == nil {
 		return nil
 	}
 	return fiber.NewError(
@@ -161,8 +160,7 @@ func isCredentialHeader(name string) bool {
 }
 
 func isContextTokenRequest(c fiber.Ctx) bool {
-	ui := GetUserInfo(c)
-	return ui != nil && ui.AuthType == AuthTypeContextToken
+	return contextTokenFromUserInfo(GetUserInfo(c)) != nil
 }
 
 func providerReadItems(c fiber.Ctx, providers []corev1alpha1.Provider) any {

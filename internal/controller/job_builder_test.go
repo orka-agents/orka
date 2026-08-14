@@ -250,6 +250,23 @@ func TestJobBuilder_WorkerServiceAccountForTask_EmptyNamesUseDefaults(t *testing
 	}
 }
 
+func TestAppendTaskEnvVars_TransactionalAICannotSelectInProcessCodeExec(t *testing.T) {
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+		Type:        corev1alpha1.TaskTypeAI,
+		Transaction: &corev1alpha1.TaskTransaction{ID: "txn-1", Scope: "orka:memory:read"},
+		Env: []corev1.EnvVar{
+			{Name: workerenv.CodeExecBackend, Value: "in-process"},
+			{Name: workerenv.CodeExecBackend + "_TENANT_DEFAULT", Value: "in-process"},
+			{Name: "TASK_SAFE_SETTING", Value: "allowed"},
+		},
+	}}
+
+	got := appendTaskEnvVars(nil, task)
+	if len(got) != 1 || got[0].Name != "TASK_SAFE_SETTING" || got[0].Value != "allowed" {
+		t.Fatalf("appendTaskEnvVars() = %#v, want only the non-reserved task setting", got)
+	}
+}
+
 func TestJobBuilder_Build_AgentTaskForExplicitJobBackend(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -376,6 +393,13 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 		"job":          job.ObjectMeta,
 		"pod template": job.Spec.Template.ObjectMeta,
 	} {
+		if meta.Annotations[labels.AnnotationTaskName] != task.Name {
+			t.Fatalf("%s task provenance annotation = %q, want %q", name, meta.Annotations[labels.AnnotationTaskName], task.Name)
+		}
+		if meta.Annotations[labels.AnnotationTaskLabel] != labels.SelectorValue(task.Name) {
+			t.Fatalf("%s task label annotation = %q, want %q", name,
+				meta.Annotations[labels.AnnotationTaskLabel], labels.SelectorValue(task.Name))
+		}
 		if meta.Labels[labels.LabelTransactionID] != labels.SelectorValue(testTransactionID) {
 			t.Fatalf("%s transaction label = %q, want txn-123", name, meta.Labels[labels.LabelTransactionID])
 		}

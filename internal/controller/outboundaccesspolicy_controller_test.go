@@ -875,7 +875,7 @@ func TestHarnessBrokeredTransactionAuthorityReadsTaskOwnedSecret(t *testing.T) {
 	}
 }
 
-func TestHarnessBrokeredTransactionAuthorityIdentityChangesOnSecretRotation(t *testing.T) {
+func TestHarnessBrokeredTransactionAuthorityIdentityStableAcrossRotationAndChangesOnReplacement(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -931,8 +931,29 @@ func TestHarnessBrokeredTransactionAuthorityIdentityChangesOnSecretRotation(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if firstDigest == secondDigest {
-		t.Fatal("transaction authority Secret rotation did not change brokered approval identity")
+	if firstDigest != secondDigest {
+		t.Fatal("transaction authority Secret rotation changed brokered approval identity")
+	}
+	if err := client.Delete(context.Background(), secret); err != nil {
+		t.Fatal(err)
+	}
+	replacement := secret.DeepCopy()
+	replacement.UID = types.UID("replacement-secret-uid")
+	replacement.ResourceVersion = ""
+	replacement.Data["token"] = []byte("token-c")
+	if err := client.Create(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	third, err := reconciler.harnessBrokeredTransactionAuthorityIdentity(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdDigest, err := approvals.TargetSpecDigest(third)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thirdDigest == firstDigest {
+		t.Fatal("replacement transaction authority Secret did not change brokered approval identity")
 	}
 }
 

@@ -304,6 +304,178 @@ func TestContextTokenProviderUseFailures(t *testing.T) {
 	})
 }
 
+func TestContextTokenAuthorizationAppliesToCompositeTokenReviewCaller(t *testing.T) {
+	cfg, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
+		Mode: ContextTokenAuthorizationModeEnforce,
+	})
+	require.NoError(t, err)
+
+	token := &ContextToken{
+		Scopes: []string{
+			ContextTokenScopeTaskCreate,
+			ContextTokenScopeTaskGet,
+			ContextTokenScopeToolsUse,
+			ContextTokenScopeSecretsCredentialsRead,
+		},
+		TransactionContext: map[string]any{
+			"namespace":    "team-a",
+			"task":         "team-a/task-a",
+			"allowedTools": []any{"file_read"},
+			"secret":       "allowed-secret",
+		},
+	}
+	user := &UserInfo{
+		Username:     "system:serviceaccount:team-a:worker",
+		Namespace:    "team-a",
+		AuthType:     AuthTypeTokenReview,
+		ContextToken: token,
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := &Handlers{
+		client:                    fake.NewClientBuilder().WithScheme(scheme).Build(),
+		contextTokenAuthorization: cfg,
+	}
+	loadedTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-b", Namespace: "team-b"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+
+	tests := []struct {
+		name      string
+		authorize func(fiber.Ctx) error
+	}{
+		{
+			name: "task create namespace and identity constraints",
+			authorize: func(c fiber.Ctx) error {
+				return handlers.authorizeContextTokenTaskCreate(c, CreateTaskRequest{
+					Name: "task-b",
+					Type: corev1alpha1.TaskTypeContainer,
+				}, "team-b")
+			},
+		},
+		{
+			name: "loaded task constraints",
+			authorize: func(c fiber.Ctx) error {
+				return handlers.authorizeContextTokenLoadedTask(c, "getTask", loadedTask)
+			},
+		},
+		{
+			name: "tool constraints",
+			authorize: func(c fiber.Ctx) error {
+				return authorizeContextTokenToolUse(c, cfg, "useTool", []string{"code_exec"})
+			},
+		},
+		{
+			name: "credential constraints",
+			authorize: func(c fiber.Ctx) error {
+				return handlers.authorizeContextTokenGitCredentialSecretName(c, "readGitSecret", "team-a", "other-secret")
+			},
+		},
+		{
+			name: "provider constraints",
+			authorize: func(c fiber.Ctx) error {
+				return authorizeContextTokenProviderUse(c, cfg, "useProvider", "team-b", ProviderResolutionInfo{Name: "openai", Namespace: "team-b"}, "gpt-5")
+			},
+		},
+		{
+			name: "agent constraints",
+			authorize: func(c fiber.Ctx) error {
+				return authorizeContextTokenAgentContext(c, cfg, "useAgent", "team-b", "agent-b")
+			},
+		},
+		{
+			name: "policy config map constraints",
+			authorize: func(c fiber.Ctx) error {
+				return handlers.authorizeContextTokenPolicyConfigMapName(c, "readPolicy", "team-b", "policy-b")
+			},
+		},
+		{
+			name: "repository monitor constraints",
+			authorize: func(c fiber.Ctx) error {
+				return handlers.authorizeContextTokenRepositoryMonitor(c, "readMonitor", &corev1alpha1.RepositoryMonitor{
+					ObjectMeta: metav1.ObjectMeta{Name: "monitor-b", Namespace: "team-b"},
+				})
+			},
+		},
+		{
+			name: "security scan constraints",
+			authorize: func(c fiber.Ctx) error {
+				return handlers.authorizeContextTokenSecurityScanTask(c, "readScan", &corev1alpha1.RepositoryScan{
+					ObjectMeta: metav1.ObjectMeta{Name: "scan-b", Namespace: "team-b"},
+				}, corev1alpha1.AgentReference{Name: "agent-b"})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := fiber.New()
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, user)
+				return c.Next()
+			})
+			app.Get("/test", tt.authorize)
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/test", nil))
+			require.NoError(t, err)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+		})
+	}
+}
+
+func TestContextTokenAuthorizationPreservesTokenReviewWithoutTransactionToken(t *testing.T) {
+	cfg, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
+		Mode: ContextTokenAuthorizationModeEnforce,
+	})
+	require.NoError(t, err)
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	handlers := &Handlers{
+		client:                    fake.NewClientBuilder().WithScheme(scheme).Build(),
+		contextTokenAuthorization: cfg,
+	}
+	user := &UserInfo{
+		Username:  "system:serviceaccount:team-a:worker",
+		Namespace: "team-a",
+		AuthType:  AuthTypeTokenReview,
+	}
+	loadedTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-b", Namespace: "team-b"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, user)
+		return c.Next()
+	})
+	app.Get("/test", func(c fiber.Ctx) error {
+		if err := handlers.authorizeContextTokenTaskCreate(c, CreateTaskRequest{
+			Name: "task-b",
+			Type: corev1alpha1.TaskTypeContainer,
+		}, "team-b"); err != nil {
+			return err
+		}
+		if err := handlers.authorizeContextTokenLoadedTask(c, "getTask", loadedTask); err != nil {
+			return err
+		}
+		if err := authorizeContextTokenToolUse(c, cfg, "useTool", []string{"code_exec"}); err != nil {
+			return err
+		}
+		if err := handlers.authorizeContextTokenGitCredentialSecretName(c, "readGitSecret", "team-b", "other-secret"); err != nil {
+			return err
+		}
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/test", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
 func TestAuthorizeContextTokenActionWithConfig(t *testing.T) {
 	cfg := enforceContextTokenAuthorizationConfig()
 

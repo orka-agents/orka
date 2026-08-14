@@ -139,6 +139,10 @@ func manifestWithNamespaceJSON(cmd *cobra.Command, path, namespace string) ([]by
 	if err != nil {
 		return nil, err
 	}
+	return marshalManifestWithNamespace(cmd, m, namespace)
+}
+
+func marshalManifestWithNamespace(cmd *cobra.Command, m map[string]any, namespace string) ([]byte, error) {
 	metadata, _ := m["metadata"].(map[string]any)
 	metadataNS := ""
 	if metadata != nil {

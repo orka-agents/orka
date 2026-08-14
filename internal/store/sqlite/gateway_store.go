@@ -25,8 +25,9 @@ const gatewaySessionOwnerType = store.SessionTypeGateway
 const gatewayEnvelopeDigestMetadataKey = "gatewayEnvelopeDigest"
 
 const (
-	gatewayDeliveryKindFinal = "final"
-	gatewayDeliveryKindError = "error"
+	gatewayCreatedCursorPredicate = ` AND (created_at < ? OR (created_at = ? AND id < ?))`
+	gatewayDeliveryKindFinal      = "final"
+	gatewayDeliveryKindError      = "error"
 )
 
 const gatewayEventColumns = `id, namespace, namespace_uid, gateway_uid, gateway_generation, gateway_name, binding_name, binding_uid, binding_generation, agent_name, agent_uid, external_event_id,
@@ -483,7 +484,7 @@ func (s *Store) ListGatewayEvents(ctx context.Context, filter store.GatewayEvent
 	query, args = appendGatewayStringFilter(query, args, "session_name", filter.SessionName)
 	query, args = appendGatewayStringFilter(query, args, "task_name", filter.TaskName)
 	if filter.BeforeCreatedAt != nil && filter.BeforeID != "" {
-		query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
+		query += gatewayCreatedCursorPredicate
 		args = append(args, filter.BeforeCreatedAt.UTC(), filter.BeforeCreatedAt.UTC(), filter.BeforeID)
 	}
 	if filter.DueBefore != nil {
@@ -1146,7 +1147,7 @@ func (s *Store) ListGatewayDeliveries(ctx context.Context, filter store.GatewayD
 	query, args = appendGatewayStringFilter(query, args, "session_name", filter.SessionName)
 	query, args = appendGatewayStringFilter(query, args, "task_name", filter.TaskName)
 	if filter.BeforeCreatedAt != nil && filter.BeforeID != "" {
-		query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
+		query += gatewayCreatedCursorPredicate
 		args = append(args, filter.BeforeCreatedAt.UTC(), filter.BeforeCreatedAt.UTC(), filter.BeforeID)
 	}
 	if len(filter.States) > 0 {

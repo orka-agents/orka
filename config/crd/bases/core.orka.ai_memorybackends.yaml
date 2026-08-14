@@ -1,0 +1,511 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+    memory.orka.ai/schema-version: v1alpha1
+  name: memorybackends.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    categories:
+    - orka
+    kind: MemoryBackend
+    listKind: MemoryBackendList
+    plural: memorybackends
+    shortNames:
+    - mb
+    singular: memorybackend
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.lifecycleState
+      name: Requested
+      type: string
+    - jsonPath: .status.effectiveLifecycleState
+      name: Effective
+      type: string
+    - jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - jsonPath: .spec.store.name
+      name: Store
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: MemoryBackend is the namespaced control-plane binding for external
+          OMS memory.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MemoryBackendSpec defines a namespace's requested external
+              memory backend.
+            properties:
+              clientAuth:
+                description: MemoryBackendClientAuth configures Orka-to-adapter authentication.
+                properties:
+                  bearerTokenSecretRef:
+                    description: |-
+                      BearerTokenSecretRef references a Secret explicitly bound to this backend,
+                      namespace incarnation, endpoint identity, tenant identity, and store.
+                    properties:
+                      key:
+                        description: Key is the Secret data key containing the bearer
+                          token.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                      name:
+                        description: Name is the same-namespace Secret name.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                required:
+                - bearerTokenSecretRef
+                type: object
+              deployment:
+                description: MemoryBackendDeployment configures the external OMS adapter
+                  endpoint.
+                properties:
+                  endpoint:
+                    description: |-
+                      Endpoint is a public HTTPS base URL. Credentials, queries, fragments, local
+                      names, private addresses, and Kubernetes Service names are rejected at runtime.
+                    maxLength: 2048
+                    minLength: 9
+                    pattern: ^https://[^\s@?#]+$
+                    type: string
+                  mode:
+                    description: Mode is the endpoint deployment mode.
+                    enum:
+                    - external-endpoint
+                    type: string
+                required:
+                - endpoint
+                - mode
+                type: object
+              lifecycleState:
+                default: Staged
+                description: |-
+                  LifecycleState is requested intent. Effective authority changes only after
+                  the durable binding coordinator completes the corresponding barrier.
+                enum:
+                - Staged
+                - Active
+                - ReadOnly
+                - Disabled
+                - Decommissioning
+                type: string
+              protocol:
+                description: MemoryBackendProtocol selects the exact OMS wire contract.
+                properties:
+                  omsVersion:
+                    description: OMSVersion is the adapter API version.
+                    enum:
+                    - "0.1"
+                    type: string
+                  profile:
+                    description: Profile is the closed Orka OMS profile implemented
+                      by the adapter.
+                    enum:
+                    - orka.oms.v0alpha1
+                    type: string
+                required:
+                - omsVersion
+                - profile
+                type: object
+              store:
+                description: MemoryBackendStore identifies an operator-precreated
+                  provider store.
+                properties:
+                  name:
+                    description: Name is the immutable provider store name.
+                    maxLength: 128
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - clientAuth
+            - deployment
+            - protocol
+            - store
+            type: object
+            x-kubernetes-validations:
+            - message: spec.protocol is immutable
+              rule: self.protocol == oldSelf.protocol
+            - message: spec.store.name is immutable
+              rule: self.store.name == oldSelf.store.name
+          status:
+            description: MemoryBackendStatus contains bounded, non-secret control-plane
+              observations.
+            properties:
+              accepted:
+                description: Accepted reports whether the current object shape and
+                  fixed-name contract are valid.
+                type: boolean
+              authorityEpoch:
+                format: int64
+                minimum: 0
+                type: integer
+              backendUID:
+                maxLength: 128
+                type: string
+              clusterIdentityDigest:
+                description: ClusterIdentityDigest records only a digest of the configured
+                  cluster identity.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              connected:
+                description: Connected reports whether strict OMS store, capability,
+                  and ownership probes succeeded.
+                type: boolean
+              effectiveLifecycleState:
+                description: EffectiveLifecycleState changes only after the durable
+                  lifecycle barrier completes.
+                enum:
+                - Staged
+                - Validating
+                - Active
+                - ReadOnly
+                - Disabled
+                - Decommissioning
+                - Draining
+                - Recovering
+                - IdentityMismatch
+                - IdentityConflict
+                - Diverged
+                - Removed
+                - Decommissioned
+                type: string
+              endpointDigest:
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              endpointIdentity:
+                description: EndpointIdentity is the canonical, credential-free HTTPS
+                  endpoint identity.
+                maxLength: 2048
+                type: string
+              lastValidated:
+                format: date-time
+                type: string
+              message:
+                description: Message is bounded and contains no bearer values or provider
+                  response content.
+                maxLength: 1024
+                type: string
+              namespaceUID:
+                maxLength: 128
+                type: string
+              observedCapabilities:
+                description: MemoryBackendObservedCapabilities records strict, non-secret
+                  OMS capability metadata.
+                properties:
+                  adapterName:
+                    description: AdapterName is the bounded adapter implementation
+                      identity.
+                    maxLength: 256
+                    type: string
+                  adapterVersion:
+                    description: AdapterVersion is the bounded adapter build/version
+                      identity.
+                    maxLength: 256
+                    type: string
+                  effective:
+                    description: Effective is the capability set Orka can safely use.
+                    items:
+                      description: MemoryBackendCapability is a closed capability
+                        advertised by the Orka OMS profile.
+                      enum:
+                      - durableIdempotency
+                      - idempotencyDigestConflicts
+                      - createIfAbsent
+                      - conditionalMutation
+                      - monotonicGenerations
+                      - deleteHighWatermark
+                      - durableRoutingFence
+                      - operationLookup
+                      - exactGet
+                      - stablePagination
+                      - exclusiveOwnership
+                      - keywordSearch
+                      - auditVersionVisibility
+                      - semanticSearch
+                      - hybridSearch
+                      type: string
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: set
+                  expiresAt:
+                    description: ExpiresAt is the adapter-declared capability expiry.
+                    format: date-time
+                    type: string
+                  limits:
+                    description: MemoryBackendCapabilityLimits contains bounded provider-advertised
+                      limits.
+                    properties:
+                      maxContentBytes:
+                        format: int64
+                        maximum: 262144
+                        minimum: 1
+                        type: integer
+                      maxMetadataEntries:
+                        format: int32
+                        maximum: 32
+                        minimum: 1
+                        type: integer
+                      maxMetadataKeyBytes:
+                        format: int32
+                        maximum: 64
+                        minimum: 1
+                        type: integer
+                      maxMetadataValueBytes:
+                        format: int32
+                        maximum: 1024
+                        minimum: 1
+                        type: integer
+                      maxPageSize:
+                        format: int32
+                        maximum: 8
+                        minimum: 1
+                        type: integer
+                      maxQueryBytes:
+                        format: int32
+                        maximum: 1024
+                        minimum: 1
+                        type: integer
+                      maxRequestBytes:
+                        format: int64
+                        maximum: 2097152
+                        minimum: 1
+                        type: integer
+                      maxResponseBytes:
+                        format: int64
+                        maximum: 4194304
+                        minimum: 1
+                        type: integer
+                      maxSnapshotRecords:
+                        format: int32
+                        maximum: 1024
+                        minimum: 1
+                        type: integer
+                      maxTagBytes:
+                        format: int32
+                        maximum: 128
+                        minimum: 1
+                        type: integer
+                      maxTags:
+                        format: int32
+                        maximum: 64
+                        minimum: 1
+                        type: integer
+                      snapshotTtlSeconds:
+                        format: int32
+                        maximum: 86400
+                        minimum: 1
+                        type: integer
+                    required:
+                    - maxContentBytes
+                    - maxMetadataEntries
+                    - maxMetadataKeyBytes
+                    - maxMetadataValueBytes
+                    - maxPageSize
+                    - maxQueryBytes
+                    - maxRequestBytes
+                    - maxResponseBytes
+                    - maxSnapshotRecords
+                    - maxTagBytes
+                    - maxTags
+                    - snapshotTtlSeconds
+                    type: object
+                  native:
+                    description: Native is the closed capability set advertised by
+                      the adapter.
+                    items:
+                      description: MemoryBackendCapability is a closed capability
+                        advertised by the Orka OMS profile.
+                      enum:
+                      - durableIdempotency
+                      - idempotencyDigestConflicts
+                      - createIfAbsent
+                      - conditionalMutation
+                      - monotonicGenerations
+                      - deleteHighWatermark
+                      - durableRoutingFence
+                      - operationLookup
+                      - exactGet
+                      - stablePagination
+                      - exclusiveOwnership
+                      - keywordSearch
+                      - auditVersionVisibility
+                      - semanticSearch
+                      - hybridSearch
+                      type: string
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: set
+                  revision:
+                    description: Revision is the adapter's stable capability-set revision.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                required:
+                - adapterName
+                - adapterVersion
+                - effective
+                - expiresAt
+                - limits
+                - native
+                - revision
+                type: object
+              observedGeneration:
+                format: int64
+                type: integer
+              ownershipClaimIdentity:
+                maxLength: 256
+                type: string
+              protected:
+                description: Protected reports whether the deletion-protection finalizer
+                  is persisted.
+                type: boolean
+              ready:
+                description: |-
+                  Ready reports whether the requested lifecycle is safely usable. Staged readiness
+                  means validation succeeded while legacy SQLite remains authoritative.
+                type: boolean
+              reason:
+                description: Reason is a stable, sanitized controller reason code.
+                maxLength: 64
+                pattern: ^[A-Za-z][A-Za-z0-9]*$
+                type: string
+              resolvedAddressDigest:
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              resolvedRefs:
+                description: ResolvedRefs reports whether the namespace and bound
+                  Secret were freshly resolved.
+                type: boolean
+              routingEpoch:
+                format: int64
+                minimum: 0
+                type: integer
+              secretResourceVersion:
+                maxLength: 128
+                type: string
+              secretUID:
+                maxLength: 128
+                type: string
+              serverCertificateDigest:
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              storeUUID:
+                maxLength: 128
+                type: string
+              validatedSpecDigest:
+                description: ValidatedSpecDigest is the canonical digest of the validated
+                  spec.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              validationExpiresAt:
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: MemoryBackend metadata.name must be default
+          rule: self.metadata.name == 'default'
+    served: true
+    storage: true
+    subresources:
+      status: {}

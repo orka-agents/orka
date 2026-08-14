@@ -4,7 +4,7 @@ Controller: {{ include "orka.fullname" . }}-controller
 Namespace:  {{ .Release.Namespace }}
 
 CRD lifecycle:
-  - A fresh install creates Orka's thirteen cluster-scoped CRDs unless --skip-crds is used.
+  - A fresh install creates Orka's twenty cluster-scoped CRDs unless --skip-crds is used.
   - Helm does not update CRDs during helm upgrade. Apply the CRDs from the exact
     target chart before upgrading the release.
   - helm uninstall retains the CRDs and all Orka custom resources.
@@ -25,7 +25,10 @@ Upgrade guidance: helm show readme <the same chart reference or archive>
 
 {{- else }}
 
-✅ SQLite store is using persistent storage (PVC: {{ include "orka.fullname" . }}-store).
+✅ SQLite store is using persistent storage (PVC: {{ include "orka.storePVCName" . }}).
+{{- if not .Values.store.persistence.existingClaim }}
+   The chart-created controller PVC is retained on Helm uninstall. Delete it manually only after every MemoryBackend is cleanly decommissioned or force-orphaned and its matched backup is verified.
+{{- end }}
    Data will survive pod restarts.
 
 {{- end }}
@@ -43,3 +46,16 @@ Generic Gateway CRD upgrade:
   source checkout's scripts/apply-helm-crds.sh) before upgrading. The controller
   remains gateway-disabled until all three Gateway CRDs and the Task
   session-cutoff schema are observed.
+
+{{- if .Values.controller.memoryBackend.enabled }}
+
+Remote memory control plane:
+  - Release stage: {{ include "orka.memoryReleaseStage" . }}
+  - Cluster identity: {{ .Values.controller.memoryBackend.clusterId }}
+  - Activation gate: {{ .Values.controller.memoryBackend.activationEnabled }}
+  - Apply/verify the exact target MemoryBackend CRD before enabling the runtime.
+  - Staged validation does not change SQLite authority; cutover remains explicit.
+{{- if not .Values.controller.memoryBackend.activationEnabled }}
+  - Foundation mode is active: remote authority activation is blocked.
+{{- end }}
+{{- end }}

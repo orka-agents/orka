@@ -227,6 +227,40 @@ func TestAuthorizeAndStampToolTaskCreateRequiresKubernetesRBACForTokenReviewUser
 	require.Contains(t, err.Error(), "not authorized to create tasks")
 }
 
+func TestAuthorizeAndStampToolTaskCreateCompositeCallerStillRequiresKubernetesRBAC(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "tool-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	token := &ContextToken{
+		Scopes:             []string{ContextTokenScopeTaskCreate},
+		TransactionContext: map[string]any{"namespace": "default"},
+	}
+	user := limitedTokenReviewUser("default")
+	user.ContextToken = token
+
+	err := authorizeAndStampToolTaskCreate(
+		context.Background(),
+		fakeClient,
+		denyingSubjectAccessReviewClient(t, nil, func(review *authorizationv1.SubjectAccessReview) {
+			require.Equal(t, user.Username, review.Spec.User)
+			require.Equal(t, "default", review.Spec.ResourceAttributes.Namespace)
+			require.Equal(t, "create", review.Spec.ResourceAttributes.Verb)
+			require.Equal(t, "tasks", review.Spec.ResourceAttributes.Resource)
+		}),
+		token,
+		enforceContextTokenAuthorizationConfig(),
+		"chatToolCreateTask",
+		user,
+		task,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not authorized to create tasks")
+}
+
 func TestCreateManualSecurityScanRequiresKubernetesRBACForTaskCreate(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))

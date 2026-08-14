@@ -28,6 +28,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
+	memoryruntime "github.com/orka-agents/orka/internal/memory"
+	"github.com/orka-agents/orka/internal/memorybackend"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -87,6 +89,7 @@ type Handlers struct {
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	contextTokenAuthorization ContextTokenAuthorizationConfig
+	contextTokenTTS           ContextTokenTTSConfig
 	resultStore               store.ResultStore
 	sessionStore              store.SessionStore
 	planStore                 store.PlanStore
@@ -94,6 +97,8 @@ type Handlers struct {
 	artifactStore             store.ArtifactStore
 	memoryStore               store.MemoryStore
 	memoryProposalStore       store.MemoryProposalStore
+	memoryService             *memoryruntime.Service
+	memoryBackendManager      *memorybackend.Manager
 	securityStore             store.SecurityStore
 	repositoryMonitorStore    store.RepositoryMonitorStore
 	executionEventStore       store.ExecutionEventStore
@@ -112,6 +117,7 @@ type HandlersConfig struct {
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	ContextTokenAuthorization ContextTokenAuthorizationConfig
+	ContextTokenTTS           ContextTokenTTSConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
 	PlanStore                 store.PlanStore
@@ -120,6 +126,8 @@ type HandlersConfig struct {
 	ArtifactStore             store.ArtifactStore
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
+	MemoryService             *memoryruntime.Service
+	MemoryBackendManager      *memorybackend.Manager
 	SecurityStore             store.SecurityStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
 	ExecutionEventStore       store.ExecutionEventStore
@@ -130,13 +138,14 @@ type HandlersConfig struct {
 
 // NewHandlers creates a new Handlers instance
 func NewHandlers(cfg HandlersConfig) *Handlers {
-	return &Handlers{
+	h := &Handlers{
 		client:                    cfg.Client,
 		apiReader:                 cfg.APIReader,
 		clientset:                 cfg.KubeClient,
 		watchNamespace:            cfg.WatchNamespace,
 		enforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
 		contextTokenAuthorization: cfg.ContextTokenAuthorization,
+		contextTokenTTS:           cfg.ContextTokenTTS,
 		resultStore:               cfg.ResultStore,
 		sessionStore:              cfg.SessionStore,
 		planStore:                 cfg.PlanStore,
@@ -144,6 +153,8 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		artifactStore:             cfg.ArtifactStore,
 		memoryStore:               cfg.MemoryStore,
 		memoryProposalStore:       cfg.MemoryProposalStore,
+		memoryService:             cfg.MemoryService,
+		memoryBackendManager:      cfg.MemoryBackendManager,
 		securityStore:             cfg.SecurityStore,
 		repositoryMonitorStore:    cfg.RepositoryMonitorStore,
 		executionEventStore:       cfg.ExecutionEventStore,
@@ -154,6 +165,10 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 	}
+	if h.memoryService == nil && (h.memoryStore != nil || h.memoryProposalStore != nil) {
+		h.memoryService = &memoryruntime.Service{Legacy: h.memoryStore, Proposals: h.memoryProposalStore}
+	}
+	return h
 }
 
 // MetadataRequest holds Kubernetes-style metadata fields
@@ -514,11 +529,27 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		return err
 	}
 
+	directTransactionToken, err := h.prepareDirectTaskTransactionToken(c, task)
+	if err != nil {
+		return err
+	}
+
 	if err := h.client.Create(ctx, task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "task already exists")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create task: %v", err))
+	}
+
+	if directTransactionToken != "" {
+		if err := h.persistDirectTaskTransactionTokenSubject(ctx, task, directTransactionToken); err != nil {
+			log.Error(err, "failed to stage task transaction token setup", "namespace", task.Namespace, "task", task.Name)
+			if cleanupErr := h.cleanupTaskAfterTransactionTokenSetupFailure(ctx, task); cleanupErr != nil {
+				log.Error(cleanupErr, "failed to clean up task after transaction token setup failure",
+					"namespace", task.Namespace, "task", task.Name)
+			}
+			return fiber.NewError(fiber.StatusServiceUnavailable, "failed to provision task-scoped transaction token")
+		}
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(task)

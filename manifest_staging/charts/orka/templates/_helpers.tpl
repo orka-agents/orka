@@ -63,6 +63,28 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
+Create the durable controller store PVC name, or return the operator-provided
+claim name when one is configured.
+*/}}
+{{- define "orka.storePVCName" -}}
+{{- if .Values.store.persistence.existingClaim -}}
+{{- .Values.store.persistence.existingClaim -}}
+{{- else -}}
+{{- printf "%s-store" (include "orka.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Return the immutable memory release stage carried by this chart artifact. A
+missing annotation is treated as foundation so repackaging cannot enable
+activation by omission. A later activation release must explicitly change the
+Chart.yaml annotation together with the controller source gate.
+*/}}
+{{- define "orka.memoryReleaseStage" -}}
+{{- index .Chart.Annotations "memory.orka.ai/release-stage" | default "foundation" -}}
+{{- end }}
+
+{{/*
 Create release-scoped worker ServiceAccount names. Reserve room for each
 suffix so long release names cannot collapse all trust tiers to one name.
 */}}

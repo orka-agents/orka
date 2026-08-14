@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,9 +39,13 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/transactiontoken"
 )
 
-const testWatchNamespace = "prod"
+const (
+	testWatchNamespace         = "prod"
+	testContextTokenScopeClaim = "scope"
+)
 
 func TestHandlers_CreateTaskRequiresKubernetesRBACForTokenReviewUser(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -132,6 +137,70 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 
 	app := fiber.New()
 	return handlers, app
+}
+
+func testDirectTaskIncomingTTSConfig() ContextTokenTTSConfig {
+	return ContextTokenTTSConfig{
+		Endpoint:      "https://transactions.example.test/token",
+		TokenSource:   ContextTokenTTSTokenSourceIncoming,
+		ChildTokenTTL: transactiontoken.MinimumProjectedTokenRequestedTTL,
+	}
+}
+
+func setupTestHandlersWithAuthzTaskUID(
+	t *testing.T,
+	ctxTokenConfig ContextTokenConfig,
+	mode string,
+	objs ...runtime.Object,
+) (*fiber.App, client.Client) {
+	return setupTestHandlersWithAuthzTaskUIDAndTTS(
+		t, ctxTokenConfig, mode, testDirectTaskIncomingTTSConfig(), objs...,
+	)
+}
+
+func setupTestHandlersWithAuthzTaskUIDAndTTS(
+	t *testing.T,
+	ctxTokenConfig ContextTokenConfig,
+	mode string,
+	ttsConfig ContextTokenTTSConfig,
+	objs ...runtime.Object,
+) (*fiber.App, client.Client) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(objs...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if task, ok := obj.(*corev1alpha1.Task); ok && task.UID == "" {
+					task.UID = types.UID("uid-" + task.Name)
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: mode})
+	require.NoError(t, err)
+	handlers := NewHandlers(HandlersConfig{
+		Client: fakeClient, ContextTokenAuthorization: authz, ContextTokenTTS: ttsConfig,
+	})
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/tasks", handlers.CreateTask)
+	return app, fakeClient
+}
+
+func taskOwnsTransactionTokenSecretForTest(task *corev1alpha1.Task, secret *corev1.Secret) bool {
+	for _, owner := range secret.OwnerReferences {
+		if owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Kind == directTaskTokenOwnerKind &&
+			owner.Name == task.Name && owner.UID == task.UID {
+			return true
+		}
+	}
+	return false
 }
 
 func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string, objs ...runtime.Object) *fiber.App {
@@ -496,10 +565,11 @@ func TestHandlers_CreateTask_StampsRequestedByFromContextToken(t *testing.T) {
 func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
-	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+	app, k8sClient := setupTestHandlersWithAuthzTaskUID(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
 
 	token := issueTestContextToken(t, provider, nil, map[string]any{
-		"scope": ContextTokenScopeTaskCreate + " orka:agents:run " + ContextTokenScopeSecretsCredentialsRead,
+		testContextTokenScopeClaim: ContextTokenScopeTaskCreate + " orka:agents:run " + ContextTokenScopeSecretsCredentialsRead +
+			" " + ContextTokenScopeMemoryRead + " " + ContextTokenScopeMemoryWrite,
 		"tctx": map[string]any{
 			"namespace":    "default",
 			"taskType":     "agent",
@@ -533,6 +603,197 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken
 	}
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+
+	created := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: body.Name}, created); err != nil {
+		t.Fatalf("get created task: %v", err)
+	}
+	if created.Annotations[labels.AnnotationTransactionTokenPending] != queryTrue ||
+		created.Annotations[labels.AnnotationTransactionTokenPendingSince] == "" {
+		t.Fatalf("created task is not gated on task token setup: %#v", created.Annotations)
+	}
+	secretName := created.Annotations[labels.AnnotationTransactionTokenSecret]
+	if secretName == "" {
+		t.Fatal("created task is missing its transaction token Secret reference")
+	}
+	secret := &corev1.Secret{}
+	if err := k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: secretName}, secret); err != nil {
+		t.Fatalf("get transaction token workload Secret: %v", err)
+	}
+	if !taskOwnsTransactionTokenSecretForTest(created, secret) {
+		t.Fatal("transaction token workload Secret is not owned by the created Task")
+	}
+	if secret.Labels[labels.LabelPurpose] != transactiontoken.WorkloadSecretPurpose || len(secret.Data) != 0 {
+		t.Fatal("workload Secret contains renewal authority or unexpected data")
+	}
+	authorities := &corev1.SecretList{}
+	if err := k8sClient.List(context.Background(), authorities, client.InNamespace("default"), client.MatchingLabels{
+		labels.LabelPurpose: transactiontoken.AuthoritySecretPurpose,
+		labels.LabelTaskUID: labels.SelectorValue(string(created.UID)),
+	}); err != nil {
+		t.Fatalf("list transaction renewal authority: %v", err)
+	}
+	if len(authorities.Items) != 1 || !taskOwnsTransactionTokenSecretForTest(created, &authorities.Items[0]) ||
+		string(authorities.Items[0].Data[transactiontoken.SubjectSecretKey]) != token {
+		t.Fatal("controller-only transaction renewal authority was not created correctly")
+	}
+	encodedTask, err := json.Marshal(created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encodedTask, []byte(token)) || bytes.Contains(encodedTask, []byte(authorities.Items[0].Name)) {
+		t.Fatal("Task exposed raw authority or the controller-only authority Secret name")
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenEnforceRejectsUnsupportedDirectTaskTTS(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	serviceAccountConfig, err := NewContextTokenTTSConfig(
+		"https://transactions.example.test/token", "", "", "", "", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if serviceAccountConfig.TokenSource != ContextTokenTTSTokenSourceServiceAccount {
+		t.Fatalf("default TokenSource = %q, want %q", serviceAccountConfig.TokenSource, ContextTokenTTSTokenSourceServiceAccount)
+	}
+
+	tests := []struct {
+		name       string
+		tts        ContextTokenTTSConfig
+		schedule   string
+		wantStatus int
+	}{
+		{name: "TTS disabled", wantStatus: http.StatusServiceUnavailable},
+		{name: "default serviceAccount source", tts: serviceAccountConfig, wantStatus: http.StatusServiceUnavailable},
+		{name: "unsupported schedule takes precedence", schedule: "@hourly", wantStatus: http.StatusUnprocessableEntity},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app, k8sClient := setupTestHandlersWithAuthzTaskUIDAndTTS(
+				t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, test.tts,
+			)
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				testContextTokenScopeClaim: ContextTokenScopeTaskCreate + " orka:agents:run " + ContextTokenScopeMemoryRead,
+				"tctx": map[string]any{
+					"namespace": "default", "taskType": "agent", "agent": "reviewer",
+				},
+			})
+			resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+				Name: "unsupported-direct-tts", Namespace: "default", Type: corev1alpha1.TaskTypeAgent,
+				AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}, Prompt: "perform review", Schedule: test.schedule,
+			})
+			if resp.StatusCode != test.wantStatus {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, test.wantStatus)
+			}
+			created := &corev1alpha1.Task{}
+			err := k8sClient.Get(context.Background(), types.NamespacedName{
+				Namespace: "default", Name: "unsupported-direct-tts",
+			}, created)
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("unsupported configuration created a Task: %v", err)
+			}
+			secrets := &corev1.SecretList{}
+			if err := k8sClient.List(context.Background(), secrets, client.InNamespace("default")); err != nil {
+				t.Fatalf("list Secrets: %v", err)
+			}
+			if len(secrets.Items) != 0 {
+				t.Fatalf("unsupported configuration created %d transaction token Secrets", len(secrets.Items))
+			}
+		})
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenEnforceCleansUpWhenSubjectSecretCreationFails(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				switch value := obj.(type) {
+				case *corev1alpha1.Task:
+					value.UID = types.UID("uid-" + value.Name)
+				case *corev1.Secret:
+					return errors.New("injected Secret creation failure")
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
+		Mode: ContextTokenAuthorizationModeEnforce,
+	})
+	require.NoError(t, err)
+	handlers := NewHandlers(HandlersConfig{
+		Client: fakeClient, ContextTokenAuthorization: authz, ContextTokenTTS: testDirectTaskIncomingTTSConfig(),
+	})
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/tasks", handlers.CreateTask)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		testContextTokenScopeClaim: ContextTokenScopeTaskCreate + " orka:agents:run",
+		"tctx": map[string]any{
+			"namespace": "default", "taskType": "agent", "agent": "reviewer",
+		},
+	})
+	resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+		Name: "subject-secret-failure", Namespace: "default", Type: corev1alpha1.TaskTypeAgent,
+		AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}, Prompt: "perform review",
+	})
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+	created := &corev1alpha1.Task{}
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "subject-secret-failure"}, created)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("Task remained after transaction token Secret creation failed: %v", err)
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenEnforceLeavesNonTransactionalTaskUnchanged(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
+		Mode: ContextTokenAuthorizationModeEnforce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handlers.contextTokenAuthorization = authz
+	app.Post("/tasks", handlers.CreateTask)
+
+	resp := testJSONRequest(t, app, http.MethodPost, "/tasks", CreateTaskRequest{
+		Name:      "non-transactional-ai-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAI,
+		AI:        &corev1alpha1.AISpec{Prompt: "perform non-transactional work"},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+	created := &corev1alpha1.Task{}
+	if err := handlers.client.Get(context.Background(), types.NamespacedName{
+		Namespace: "default", Name: "non-transactional-ai-task",
+	}, created); err != nil {
+		t.Fatalf("get created Task: %v", err)
+	}
+	if created.Spec.Transaction != nil || created.Annotations[labels.AnnotationTransactionTokenPending] != "" ||
+		created.Annotations[labels.AnnotationTransactionTokenSecret] != "" {
+		t.Fatalf("non-transactional Task was staged for token exchange: transaction=%#v annotations=%#v",
+			created.Spec.Transaction, created.Annotations)
+	}
+	secrets := &corev1.SecretList{}
+	if err := handlers.client.List(context.Background(), secrets, client.InNamespace("default")); err != nil {
+		t.Fatalf("list Secrets: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("created %d transaction token Secrets for a non-transactional Task", len(secrets.Items))
 	}
 }
 
@@ -756,7 +1017,14 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsCrossNamespaceProvi
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, privilegedProvider.DeepCopyObject(), defaultProvider.DeepCopyObject())
+			var app *fiber.App
+			if tt.wantStatus == http.StatusCreated {
+				app, _ = setupTestHandlersWithAuthzTaskUID(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce,
+					privilegedProvider.DeepCopyObject(), defaultProvider.DeepCopyObject())
+			} else {
+				app = setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce,
+					privilegedProvider.DeepCopyObject(), defaultProvider.DeepCopyObject())
+			}
 			token := issueTestContextToken(t, provider, nil, map[string]any{
 				"scope": ContextTokenScopeTaskCreate,
 				"tctx":  tt.transactionContext,
@@ -4434,7 +4702,9 @@ func TestHandlers_ApplyMemoryProposal_ContextTokenAuthorization(t *testing.T) {
 		scope string
 		want  int
 	}{
-		{name: "allowed with memory write", scope: ContextTokenScopeMemoryWrite, want: http.StatusOK},
+		{name: "allowed with memory write and operate", scope: ContextTokenScopeMemoryWrite + " " + ContextTokenScopeMemoryOperate, want: http.StatusOK},
+		{name: "denied with only memory write", scope: ContextTokenScopeMemoryWrite, want: http.StatusForbidden},
+		{name: "denied with only memory operate", scope: ContextTokenScopeMemoryOperate, want: http.StatusForbidden},
 		{name: "denied with only memory read", scope: ContextTokenScopeMemoryRead, want: http.StatusForbidden},
 	}
 
@@ -4682,4 +4952,28 @@ func TestHandlers_CreateTask_RejectsServerOwnedSpecCaseVariants(t *testing.T) {
 	}
 	resp := testJSONRequest(t, app, http.MethodPost, "/tasks", body)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestHandlers_CreateMemoryRejectsServerOwnedFields(t *testing.T) {
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	ss := sqlite.NewStore(db, ":memory:")
+	h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
+	app := fiber.New()
+	app.Post("/memories", h.CreateMemory)
+	request := httptest.NewRequest(http.MethodPost, "/memories?namespace=default", strings.NewReader(`{
+		"content":"safe content",
+		"source":"api",
+		"trust":"trusted",
+		"generation":99,
+		"deleted":true
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := app.Test(request)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, response.StatusCode)
+	memories, err := ss.ListMemories(context.Background(), store.MemoryFilter{Namespace: "default"})
+	require.NoError(t, err)
+	require.Empty(t, memories)
 }

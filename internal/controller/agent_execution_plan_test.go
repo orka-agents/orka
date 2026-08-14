@@ -19,7 +19,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 )
+
+const testTransactionalRuntimeRefName = "custom-runtime"
 
 func TestPlanAgentExecutionMatrix(t *testing.T) {
 	scheme := newTestScheme()
@@ -46,6 +49,31 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			},
 			wantPath:   agentExecutionPathRejected,
 			wantReason: "transaction token delegation",
+		},
+		{
+			name: "transactional runtimeRef without completed token setup is rejected",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-runtime-pending"}
+			},
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: testTransactionalRuntimeRefName}
+			},
+			wantPath:   agentExecutionPathRejected,
+			wantReason: "completed task-scoped transaction token setup",
+		},
+		{
+			name: "transactional runtimeRef with completed token setup is supported",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-runtime"}
+				if task.Annotations == nil {
+					task.Annotations = map[string]string{}
+				}
+				task.Annotations[labels.AnnotationTransactionTokenSecret] = "workload-token"
+			},
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: testTransactionalRuntimeRefName}
+			},
+			wantPath: agentExecutionPathHarnessWrapper,
 		},
 		{
 			name: "task resources are rejected before harness start",

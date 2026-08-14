@@ -1520,7 +1520,7 @@ func sensitiveURLParameter(name string) bool {
 		strings.Contains(normalized, "apikey") {
 		return true
 	}
-	if normalized == "token" {
+	if normalized == repositoryMonitorTokenKey {
 		return true
 	}
 	if !strings.HasSuffix(normalized, "-token") {

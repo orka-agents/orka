@@ -45,7 +45,7 @@ func TestListTaskEvents(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if listed.Namespace != "default" || listed.StreamType != store.ExecutionEventStreamTypeTask || listed.StreamID != "task-1" {
+	if listed.Namespace != testDefaultNamespace || listed.StreamType != store.ExecutionEventStreamTypeTask || listed.StreamID != "task-1" {
 		t.Fatalf("stream metadata = %#v", listed)
 	}
 	if listed.AfterSeq != 1 || listed.LatestSeq != 3 {

@@ -348,6 +348,7 @@ func setupOwnedInternalExecutionEventApp(t *testing.T, eventStore store.Executio
 			UID:        jobUID,
 		}},
 	}}
+	setTrustedInternalWorkerProvenance(task, job, workerPod)
 	otherPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:      "other-pod",
 		Namespace: "default",
@@ -465,6 +466,7 @@ func testInternalExecutionEventOwnedWorkerObjects(taskName string) (*corev1alpha
 			}},
 		},
 	}
+	setTrustedInternalWorkerProvenance(task, job, pod)
 	return task, job, pod
 }
 

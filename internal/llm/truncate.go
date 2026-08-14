@@ -9,9 +9,12 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
+
+const roleAssistant = "assistant"
 
 // estimateTokens returns an approximate token count (~4 chars per token).
 func estimateTokens(text string) int {
@@ -41,7 +44,7 @@ func groupMessageBlocks(messages []Message) []messageBlock {
 	i := 0
 	for i < len(messages) {
 		m := messages[i]
-		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+		if m.Role == roleAssistant && len(m.ToolCalls) > 0 {
 			block := messageBlock{messages: []Message{m}, tokens: estimateMessageTokens(m)}
 			i++
 			for i < len(messages) && messages[i].Role == "tool" {
@@ -61,77 +64,94 @@ func groupMessageBlocks(messages []Message) []messageBlock {
 	return blocks
 }
 
-// TruncateMessages keeps the first message and the newest messages that fit
-// within the token budget. Tool-call/tool-result groups are kept or dropped
-// atomically so the LLM never sees orphaned tool results.
+// TruncateMessages keeps the initial real conversation boundary and the newest
+// messages that fit within the token budget. Tool-call/tool-result groups are
+// kept or dropped atomically so the LLM never sees orphaned tool results.
 func TruncateMessages(messages []Message, tokenBudget int) []Message {
 	if len(messages) == 0 {
 		return messages
 	}
 
+	blocks := groupMessageBlocks(messages)
 	totalTokens := 0
-	for _, m := range messages {
-		totalTokens += estimateMessageTokens(m)
+	for _, block := range blocks {
+		totalTokens += block.tokens
 	}
 	if totalTokens <= tokenBudget {
 		return messages
 	}
 
-	// Always keep the first message
-	first := messages[0]
-	firstTokens := estimateMessageTokens(first)
-	remaining := tokenBudget - firstTokens
+	const mandatoryBlockCount = 1
+	mandatory := blocks[:mandatoryBlockCount]
+	mandatoryTokens := 0
+	for _, block := range mandatory {
+		mandatoryTokens += block.tokens
+	}
+	remaining := tokenBudget - mandatoryTokens
 	if remaining <= 0 {
-		return []Message{first}
+		return flattenMessageBlocks(mandatory)
 	}
 
-	// Group remaining messages into atomic blocks
-	blocks := groupMessageBlocks(messages[1:])
+	remainingBlocks := blocks[mandatoryBlockCount:]
 
 	// From the tail, collect blocks that fit
 	var kept []messageBlock
-	for i := len(blocks) - 1; i >= 0; i-- {
-		if remaining-blocks[i].tokens < 0 {
+	for _, block := range slices.Backward(remainingBlocks) {
+		if remaining-block.tokens < 0 {
 			break
 		}
-		remaining -= blocks[i].tokens
-		kept = append([]messageBlock{blocks[i]}, kept...)
+		remaining -= block.tokens
+		kept = append([]messageBlock{block}, kept...)
 	}
 
 	// Count how many blocks we dropped
-	droppedBlocks := len(blocks) - len(kept)
+	droppedBlocks := len(remainingBlocks) - len(kept)
 	if droppedBlocks > 0 {
-		noteContent := extractDroppedSummary(blocks[:droppedBlocks])
+		noteContent := extractDroppedSummary(remainingBlocks[:droppedBlocks])
 		noteTokens := estimateTokens(noteContent)
 
-		// If the note doesn't fit, drop more kept blocks to make room
-		for noteTokens > remaining && len(kept) > 0 {
+		// Reserve room for a truncation marker by dropping the oldest retained
+		// non-mandatory blocks first. The newest block is the current task and is
+		// never sacrificed merely to fit metadata.
+		for noteTokens > remaining && len(kept) > 1 {
 			remaining += kept[0].tokens
-			droppedBlocks++
 			kept = kept[1:]
-			noteContent = extractDroppedSummary(blocks[:droppedBlocks])
+			droppedBlocks++
+			noteContent = extractDroppedSummary(remainingBlocks[:droppedBlocks])
 			noteTokens = estimateTokens(noteContent)
 		}
-
-		// If the note still doesn't fit (very tight budget), use a minimal note
 		if noteTokens > remaining {
 			noteContent = "[Earlier messages truncated.]"
+			if estimateTokens(noteContent) > remaining {
+				noteContent = ""
+			}
 		}
 
-		note := Message{
-			Role:    "system",
-			Content: noteContent,
+		result := flattenMessageBlocks(mandatory)
+		if noteContent != "" {
+			result = append(result, Message{Role: "system", Content: noteContent})
 		}
-		result := []Message{first, note}
 		for _, b := range kept {
 			result = append(result, b.messages...)
 		}
 		return result
 	}
 
-	result := []Message{first}
+	result := flattenMessageBlocks(mandatory)
 	for _, b := range kept {
 		result = append(result, b.messages...)
+	}
+	return result
+}
+
+func flattenMessageBlocks(blocks []messageBlock) []Message {
+	messageCount := 0
+	for _, block := range blocks {
+		messageCount += len(block.messages)
+	}
+	result := make([]Message, 0, messageCount)
+	for _, block := range blocks {
+		result = append(result, block.messages...)
 	}
 	return result
 }
@@ -165,7 +185,7 @@ func extractDroppedSummary(dropped []messageBlock) string {
 
 	for _, block := range dropped {
 		for _, msg := range block.messages {
-			if msg.Role != "assistant" {
+			if msg.Role != roleAssistant {
 				continue
 			}
 			for _, tc := range msg.ToolCalls {

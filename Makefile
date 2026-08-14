@@ -64,7 +64,36 @@ manifests: controller-gen kustomize ## Generate canonical and Gatekeeper-style s
 		}; \
 		trap cleanup EXIT; \
 		mkdir -p "$$tmp/deploy" "$$tmp/charts/orka"; \
-		"$(KUSTOMIZE)" build config/default -o "$$tmp/deploy/orka.yaml"; \
+		"$(KUSTOMIZE)" build config/default | \
+		awk ' \
+		function flush_doc() { \
+			if (doc == "") return; \
+			docs[++count] = doc; \
+			prioritized[count] = index(doc, "orka.ai/task-provenance-policy:") > 0 && \
+				(index(doc, "\nkind: ValidatingAdmissionPolicy\n") > 0 || doc ~ /^kind: ValidatingAdmissionPolicy\n/ || \
+				 index(doc, "\nkind: ValidatingAdmissionPolicyBinding\n") > 0 || doc ~ /^kind: ValidatingAdmissionPolicyBinding\n/); \
+			deployment[count] = index(doc, "\nkind: Deployment\n") > 0 || doc ~ /^kind: Deployment\n/; \
+			doc = ""; \
+		} \
+		function emit_doc(text) { \
+			if (emitted) print "---"; \
+			print text; \
+			emitted = 1; \
+		} \
+		$$0 == "---" { flush_doc(); next } \
+		{ doc = doc (doc == "" ? "" : ORS) $$0 } \
+		END { \
+			flush_doc(); \
+			inserted = 0; \
+			for (i = 1; i <= count; i++) { \
+				if (!inserted && deployment[i]) { \
+					for (j = 1; j <= count; j++) if (prioritized[j]) emit_doc(docs[j]); \
+					inserted = 1; \
+				} \
+				if (!prioritized[i]) emit_doc(docs[i]); \
+			} \
+			if (!inserted) for (j = 1; j <= count; j++) if (prioritized[j]) emit_doc(docs[j]); \
+		}' > "$$tmp/deploy/orka.yaml"; \
 		"$(KUSTOMIZE)" build \
 			--load-restrictor LoadRestrictionsNone \
 			cmd/build/helmify | go run ./cmd/build/helmify -output-dir "$$tmp/charts/orka"; \

@@ -28,6 +28,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/llm"
 	openaiprovider "github.com/orka-agents/orka/internal/llm/openai"
+	memoryruntime "github.com/orka-agents/orka/internal/memory"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/test/utils"
 	workercommon "github.com/orka-agents/orka/workers/common"
@@ -1326,7 +1327,11 @@ func createDurableMemoryViaAPI(apiBaseURL, token string, memory store.Memory) st
 	if strings.TrimSpace(memory.Namespace) == "" {
 		memory.Namespace = namespace
 	}
-	payload, err := json.Marshal(memory)
+	payload, err := json.Marshal(memoryruntime.CreateRequest{
+		ID: memory.ID, Namespace: memory.Namespace, SessionName: memory.SessionName,
+		AgentName: memory.AgentName, TaskName: memory.TaskName, ParentTask: memory.ParentTask,
+		Source: memory.Source, Content: memory.Content, Tags: memory.Tags,
+	})
 	Expect(err).NotTo(HaveOccurred())
 
 	body, statusCode, err := doAuthorizedJSONRequest(
@@ -1385,7 +1390,11 @@ func updateDurableMemoryViaAPI(apiBaseURL, token, id string, memory store.Memory
 	if strings.TrimSpace(memory.Namespace) == "" {
 		memory.Namespace = namespace
 	}
-	payload, err := json.Marshal(memory)
+	payload, err := json.Marshal(memoryruntime.UpdateRequest{
+		Namespace: memory.Namespace, SessionName: &memory.SessionName, AgentName: &memory.AgentName,
+		TaskName: &memory.TaskName, ParentTask: &memory.ParentTask, Content: &memory.Content,
+		Source: &memory.Source, Tags: &memory.Tags,
+	})
 	Expect(err).NotTo(HaveOccurred())
 
 	body, statusCode, err := doAuthorizedJSONRequest(

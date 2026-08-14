@@ -16,6 +16,9 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  MEMORY_RELEASE_STAGE: foundation
+
 concurrency:
   group: release-pr-${{ github.event.inputs.release_version || github.ref_name }}
   cancel-in-progress: false
@@ -100,7 +103,9 @@ jobs:
 
           helm lint cmd/build/helmify/static
           helm lint charts/orka
-          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 19
+          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 20
+          test "$(awk '$1 == "memory.orka.ai/release-stage:" { print $2; exit }' cmd/build/helmify/static/Chart.yaml)" = "${MEMORY_RELEASE_STAGE}"
+          test "$(awk '$1 == "memory.orka.ai/release-stage:" { print $2; exit }' charts/orka/Chart.yaml)" = "${MEMORY_RELEASE_STAGE}"
           git diff --check
 
       - name: Create release pull request

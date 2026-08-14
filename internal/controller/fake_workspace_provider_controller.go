@@ -304,7 +304,7 @@ func (r *FakeExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ct
 				scheme := "http"
 				switch port.Protocol {
 				case "HTTPS":
-					scheme = "https"
+					scheme = urlSchemeHTTPS
 				case "TCP":
 					scheme = "tcp"
 				}

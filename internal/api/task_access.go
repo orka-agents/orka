@@ -79,8 +79,7 @@ func (a taskAccess) ensureReadable(c fiber.Ctx, action, namespace, taskName stri
 // The caller should already have run authorizeReadable for the URL task name.
 func (a taskAccess) loadReadableForContextToken(c fiber.Ctx, action, namespace, taskName string) (*corev1alpha1.Task, error) {
 	ui := GetUserInfo(c)
-	contextTokenCaller := a.h.contextTokenAuthorization.Enabled() && ui != nil &&
-		ui.AuthType == AuthTypeContextToken && ui.ContextToken != nil
+	contextTokenCaller := a.h.contextTokenAuthorization.Enabled() && contextTokenFromUserInfo(ui) != nil
 	tokenReviewCaller := ui != nil && ui.AuthType == AuthTypeTokenReview
 	if !contextTokenCaller && !tokenReviewCaller {
 		return nil, nil

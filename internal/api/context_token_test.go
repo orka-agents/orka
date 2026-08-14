@@ -396,3 +396,23 @@ func TestNewContextTokenConfigRejectsLegacyProviderProfile(t *testing.T) {
 		t.Fatalf("NewContextTokenConfig() error = %v, want unsupported profile", err)
 	}
 }
+
+func TestAllowedCORSHeadersIncludesMemoryIdempotencyKey(t *testing.T) {
+	headers := allowedCORSHeaders(ContextTokenConfig{})
+	if !slices.Contains(headers, "Idempotency-Key") {
+		t.Fatalf("allowedCORSHeaders() = %#v, want Idempotency-Key", headers)
+	}
+}
+
+func TestContextTokenAuthorizationDefaultsMemoryOperateAndRemoteSearchScopes(t *testing.T) {
+	config, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(config.MemoryOperateScopes, []string{ContextTokenScopeMemoryOperate}) {
+		t.Fatalf("MemoryOperateScopes = %#v", config.MemoryOperateScopes)
+	}
+	if !slices.Equal(config.MemorySearchRemoteScopes, []string{ContextTokenScopeMemorySearchRemote}) {
+		t.Fatalf("MemorySearchRemoteScopes = %#v", config.MemorySearchRemoteScopes)
+	}
+}

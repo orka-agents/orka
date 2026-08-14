@@ -8,10 +8,13 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +22,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/apierror"
+	memoryruntime "github.com/orka-agents/orka/internal/memory"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -459,5 +464,131 @@ func TestServer_SetupRoutes_InternalAPI(t *testing.T) {
 				t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 			}
 		})
+	}
+}
+
+func TestCustomErrorHandlerIncludesMemoryReasonAndRetryAfter(t *testing.T) {
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Get("/api/v1/test", func(fiber.Ctx) error {
+		return apierror.New(http.StatusServiceUnavailable, memoryruntime.ReasonBackendUnavailable, "memory backend unavailable").WithRetryAfter(3 * time.Second)
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/test", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close() //nolint:errcheck
+	if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") != "3" {
+		t.Fatalf("status=%d retry-after=%q", response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	var body map[string]map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["error"]["reason"] != memoryruntime.ReasonBackendUnavailable || body["error"]["code"] != float64(http.StatusServiceUnavailable) {
+		t.Fatalf("body = %#v", body)
+	}
+}
+
+func TestCustomErrorHandler_InternalAPI404DoesNotServeSPA(t *testing.T) {
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/memories/default/missing", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+	if contentType := resp.Header.Get("Content-Type"); contentType == "text/html; charset=utf-8" {
+		t.Fatalf("internal API 404 used SPA fallback: %q", contentType)
+	}
+}
+
+func TestCustomErrorHandlerExposesOpaqueIncompleteSearchCursor(t *testing.T) {
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Get("/api/v1/search", func(fiber.Ctx) error {
+		return &memoryruntime.IncompleteSearchError{
+			Cause:  apierror.New(http.StatusServiceUnavailable, memoryruntime.ReasonResultSetIncomplete, "incomplete"),
+			Cursor: "msc-safe-cursor",
+		}
+	})
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/search", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+	var body struct {
+		Error struct {
+			Reason string `json:"reason"`
+			Cursor string `json:"cursor"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Reason != memoryruntime.ReasonResultSetIncomplete || body.Error.Cursor != "msc-safe-cursor" {
+		t.Fatalf("error body = %#v", body.Error)
+	}
+}
+
+func TestServerPropagatesCustomContextTokenScopesToInternalMemoryHandlers(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ss := sqlite.NewStore(db, ":memory:")
+	custom := ContextTokenAuthorizationConfig{
+		Mode:                     ContextTokenAuthorizationModeEnforce,
+		MemoryReadScopes:         []string{"custom:memory:read"},
+		MemoryOperateScopes:      []string{"custom:memory:operate"},
+		MemorySearchRemoteScopes: []string{"custom:memory:remote"},
+	}
+	tts := testDirectTaskIncomingTTSConfig()
+	server := NewServer(fakeClient, nil, ServerConfig{
+		Port: 8080, ResultStore: ss, SessionStore: ss, PlanStore: ss, MessageStore: ss,
+		ContextTokenAuthorization: custom, ContextTokenTTS: tts,
+	})
+	if server.internalHandlers == nil {
+		t.Fatal("internal handlers were not configured")
+	}
+	if server.handlers == nil || server.handlers.contextTokenTTS != tts {
+		t.Fatalf("public handler TTS config = %#v, want %#v", server.handlers.contextTokenTTS, tts)
+	}
+	got := server.internalHandlers.contextTokenAuthorization
+	if !slices.Equal(got.MemoryReadScopes, custom.MemoryReadScopes) ||
+		!slices.Equal(got.MemoryOperateScopes, custom.MemoryOperateScopes) ||
+		!slices.Equal(got.MemorySearchRemoteScopes, custom.MemorySearchRemoteScopes) {
+		t.Fatalf("internal authorization = %#v, want custom scopes %#v", got, custom)
+	}
+}
+
+func TestMemoryServiceErrorPreservesIncompleteSearchCursor(t *testing.T) {
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Get("/api/v1/search", func(fiber.Ctx) error {
+		return memoryServiceError(&memoryruntime.IncompleteSearchError{
+			Cause:  apierror.New(http.StatusServiceUnavailable, memoryruntime.ReasonResultSetIncomplete, "incomplete"),
+			Cursor: "msc-mapped-cursor",
+		})
+	})
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/search", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Error struct {
+			Cursor string `json:"cursor"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Cursor != "msc-mapped-cursor" {
+		t.Fatalf("mapped cursor = %q", body.Error.Cursor)
 	}
 }

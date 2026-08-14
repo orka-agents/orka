@@ -46,6 +46,9 @@ resources:
 - agent_viewer_role.yaml
 - agentruntime_admin_role.yaml
 - agentruntime_viewer_role.yaml
+- memorybackend_admin_role.yaml
+- memorybackend_editor_role.yaml
+- memorybackend_viewer_role.yaml
 - gatewayclass_admin_role.yaml
 - gatewayclass_viewer_role.yaml
 - gateway_admin_role.yaml
@@ -59,3 +62,4 @@ resources:
 - task_viewer_role.yaml
 # Worker ServiceAccount and RBAC for task execution
 - worker_role.yaml
+- task_pod_provenance_admitter_role.yaml

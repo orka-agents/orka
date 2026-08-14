@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -45,9 +46,12 @@ import (
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/endpointpolicy"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
+	memoryruntime "github.com/orka-agents/orka/internal/memory"
+	"github.com/orka-agents/orka/internal/memorybackend"
 	_ "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -63,6 +67,58 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+const (
+	memoryReleaseStageFoundation = "foundation"
+	memoryReleaseStageActivation = "activation"
+
+	// memoryBuildReleaseStage is a source-level release gate. The foundation
+	// artifact must not be made activation-capable by a runtime flag or
+	// environment variable. A later activation release must explicitly change
+	// this constant together with the Helm chart release-stage annotation.
+	memoryBuildReleaseStage = memoryReleaseStageFoundation
+)
+
+type memoryReleaseCapabilities struct {
+	stage             string
+	featureEpoch      int64
+	activationAllowed bool
+}
+
+func memoryReleaseCapabilitiesForStage(stage string) (memoryReleaseCapabilities, error) {
+	switch stage {
+	case memoryReleaseStageFoundation:
+		return memoryReleaseCapabilities{
+			stage:        stage,
+			featureEpoch: memorybackend.FoundationFeatureEpoch,
+		}, nil
+	case memoryReleaseStageActivation:
+		return memoryReleaseCapabilities{
+			stage:             stage,
+			featureEpoch:      memorybackend.ActivationFeatureEpoch,
+			activationAllowed: true,
+		}, nil
+	default:
+		return memoryReleaseCapabilities{}, fmt.Errorf("unsupported memory release stage %q", stage)
+	}
+}
+
+func validateMemoryFeatureGates(
+	backendEnabled bool,
+	activationRequested bool,
+	capabilities memoryReleaseCapabilities,
+) error {
+	if activationRequested && !backendEnabled {
+		return fmt.Errorf("remote memory activation requires MemoryBackend support")
+	}
+	if activationRequested && !capabilities.activationAllowed {
+		return fmt.Errorf(
+			"remote memory activation is unavailable in the %s release artifact",
+			capabilities.stage,
+		)
+	}
+	return nil
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -149,6 +205,18 @@ func main() {
 	var chatMaxSessionSize int
 	var chatMaxPrematureEndRetries int
 	var gatewayEnabled bool
+	var memoryBackendEnabled bool
+	var memoryActivationEnabled bool
+	var memoryClusterIdentity string
+	var memoryBackendValidationTTL time.Duration
+	var memoryBackendProbeTimeout time.Duration
+	var memoryDispatcherInterval time.Duration
+	var memoryDispatcherGlobalConcurrency int
+	var memoryDispatcherNamespaceConcurrency int
+	var memoryDispatcherGlobalRPS float64
+	var memoryDispatcherNamespaceRPS float64
+	var memoryDispatcherGlobalBurst int
+	var memoryDispatcherNamespaceBurst int
 	var gatewayPendingPerSession int
 	var gatewayMaxRecordsPerGateway int
 	var gatewayMaxRejectedRecordsPerGateway int
@@ -193,6 +261,8 @@ func main() {
 	var contextTokenAgentWriteScopes string
 	var contextTokenMemoryReadScopes string
 	var contextTokenMemoryWriteScopes string
+	var contextTokenMemoryOperateScopes string
+	var contextTokenMemorySearchRemoteScopes string
 	var contextTokenSessionReadScopes string
 	var contextTokenSessionWriteScopes string
 	var contextTokenSecurityReadScopes string
@@ -304,6 +374,33 @@ func main() {
 			"no-tool-use response as the final turn. The model must emit the GOAL_STATE sentinel on its true "+
 			"final turn — see coordinatorSystemPrompt.")
 	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
+	flag.BoolVar(&memoryBackendEnabled, "memory-backend-enabled", envBool("ORKA_MEMORY_BACKEND_ENABLED"),
+		"Enable MemoryBackend staging, validation, governed remote dispatch, and APIs. Default false.")
+	flag.BoolVar(
+		&memoryActivationEnabled,
+		"memory-remote-activation-enabled",
+		envBool("ORKA_MEMORY_REMOTE_ACTIVATION_ENABLED"),
+		"Permit explicit remote-memory authority activation after foundation rollout gates pass. Default false.")
+	flag.StringVar(&memoryClusterIdentity, "memory-cluster-id", os.Getenv("ORKA_MEMORY_CLUSTER_ID"),
+		"Stable non-secret cluster identity bound into all remote memory operations.")
+	flag.DurationVar(&memoryBackendValidationTTL, "memory-backend-validation-ttl", 5*time.Minute,
+		"Maximum freshness lifetime for MemoryBackend validation.")
+	flag.DurationVar(&memoryBackendProbeTimeout, "memory-backend-probe-timeout", 15*time.Second,
+		"Timeout for strict OMS store, capability, and ownership probes.")
+	flag.DurationVar(&memoryDispatcherInterval, "memory-dispatcher-interval", time.Second,
+		"Background durable memory operation dispatch interval.")
+	flag.IntVar(&memoryDispatcherGlobalConcurrency, "memory-dispatcher-global-concurrency", 16,
+		"Maximum concurrent remote memory dispatches across all namespaces.")
+	flag.IntVar(&memoryDispatcherNamespaceConcurrency, "memory-dispatcher-namespace-concurrency", 2,
+		"Maximum concurrent remote memory dispatches per namespace.")
+	flag.Float64Var(&memoryDispatcherGlobalRPS, "memory-dispatcher-global-rps", 100,
+		"Maximum sustained remote memory dispatch starts per second globally.")
+	flag.Float64Var(&memoryDispatcherNamespaceRPS, "memory-dispatcher-namespace-rps", 10,
+		"Maximum sustained remote memory dispatch starts per second per namespace.")
+	flag.IntVar(&memoryDispatcherGlobalBurst, "memory-dispatcher-global-burst", 16,
+		"Maximum global remote memory dispatch burst.")
+	flag.IntVar(&memoryDispatcherNamespaceBurst, "memory-dispatcher-namespace-burst", 2,
+		"Maximum per-namespace remote memory dispatch burst.")
 	flag.IntVar(&gatewayPendingPerSession, "gateway-pending-per-session", 100,
 		"Maximum pending gateway events per Session.")
 	flag.IntVar(&gatewayMaxRecordsPerGateway, "gateway-max-records-per-gateway", 1000,
@@ -478,6 +575,14 @@ func main() {
 	flag.StringVar(&contextTokenMemoryWriteScopes, "context-token-memory-write-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_MEMORY_WRITE_SCOPES"),
 		"Comma-separated context-token scopes that authorize memory writes. Defaults to orka:memory:write.")
+	flag.StringVar(&contextTokenMemoryOperateScopes, "context-token-memory-operate-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_MEMORY_OPERATE_SCOPES"),
+		"Comma-separated context-token scopes that authorize memory lifecycle and operation administration. "+
+			"Defaults to orka:memory:operate.")
+	flag.StringVar(&contextTokenMemorySearchRemoteScopes, "context-token-memory-search-remote-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_MEMORY_SEARCH_REMOTE_SCOPES"),
+		"Comma-separated context-token scopes that authorize remote memory search query egress. "+
+			"Defaults to orka:memory:search:remote.")
 	flag.StringVar(&contextTokenSessionReadScopes, "context-token-session-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SESSION_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize session reads. Defaults to orka:sessions:read.")
@@ -634,6 +739,8 @@ func main() {
 		AgentWriteScopes:           contextTokenAgentWriteScopes,
 		MemoryReadScopes:           contextTokenMemoryReadScopes,
 		MemoryWriteScopes:          contextTokenMemoryWriteScopes,
+		MemoryOperateScopes:        contextTokenMemoryOperateScopes,
+		MemorySearchRemoteScopes:   contextTokenMemorySearchRemoteScopes,
 		SessionReadScopes:          contextTokenSessionReadScopes,
 		SessionWriteScopes:         contextTokenSessionWriteScopes,
 		SecurityReadScopes:         contextTokenSecurityReadScopes,
@@ -673,6 +780,32 @@ func main() {
 		os.Exit(1)
 	}
 	outboundAccessTrust := outboundaccess.TrustConfig{Gateways: trustedGateways, TokenEndpoints: trustedTokenEndpoints}
+
+	memoryCapabilities, err := memoryReleaseCapabilitiesForStage(memoryBuildReleaseStage)
+	if err != nil {
+		setupLog.Error(err, "invalid memory release artifact")
+		os.Exit(1)
+	}
+	if err := validateMemoryFeatureGates(memoryBackendEnabled, memoryActivationEnabled, memoryCapabilities); err != nil {
+		setupLog.Error(err, "invalid memory feature gates")
+		os.Exit(1)
+	}
+	if memoryBackendEnabled && strings.TrimSpace(memoryClusterIdentity) == "" {
+		setupLog.Error(fmt.Errorf("memory cluster identity is required"), "invalid memory configuration")
+		os.Exit(1)
+	}
+	if memoryBackendValidationTTL <= 0 || memoryBackendValidationTTL > time.Hour ||
+		memoryBackendProbeTimeout <= 0 || memoryBackendProbeTimeout > time.Minute ||
+		memoryDispatcherInterval <= 0 || memoryDispatcherGlobalConcurrency <= 0 ||
+		memoryDispatcherGlobalConcurrency > 1000 || memoryDispatcherNamespaceConcurrency <= 0 ||
+		memoryDispatcherNamespaceConcurrency > memoryDispatcherGlobalConcurrency ||
+		memoryDispatcherGlobalRPS <= 0 || memoryDispatcherGlobalRPS > 10000 ||
+		memoryDispatcherNamespaceRPS <= 0 || memoryDispatcherNamespaceRPS > memoryDispatcherGlobalRPS ||
+		memoryDispatcherGlobalBurst <= 0 || memoryDispatcherGlobalBurst > 10000 ||
+		memoryDispatcherNamespaceBurst <= 0 || memoryDispatcherNamespaceBurst > memoryDispatcherGlobalBurst {
+		setupLog.Error(fmt.Errorf("memory dispatcher settings are outside supported bounds"), "invalid memory configuration")
+		os.Exit(1)
+	}
 
 	if err := validateWorkspaceProviderSecurityConfig(
 		workspaceProviderAPIEnabled,
@@ -782,6 +915,18 @@ func main() {
 			gatewayEnabled = false
 		}
 	}
+	if memoryBackendEnabled {
+		checkCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		err := memorybackend.WaitForPrerequisites(checkCtx, mgr.GetAPIReader(), 500*time.Millisecond)
+		cancel()
+		if err != nil {
+			setupLog.Error(
+				err,
+				"MemoryBackend prerequisite verification failed; apply the target CRD before enabling the feature",
+			)
+			os.Exit(1)
+		}
+	}
 
 	if workspaceClassUseAdmissionEnabled {
 		orkaadmission.RegisterWorkspaceClassUseWebhooks(
@@ -849,6 +994,51 @@ func main() {
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
 		os.Exit(1)
+	}
+
+	memoryEndpointPolicy := endpointpolicy.PublicHTTPSPolicy{}
+	memoryResolver := &memoryruntime.BackendResolver{
+		Reader: mgr.GetAPIReader(), Store: sqliteStore, Policy: memoryEndpointPolicy,
+		ClusterIdentity: memoryClusterIdentity, RequestTimeout: memoryBackendProbeTimeout,
+		RemoteDisabled: !memoryBackendEnabled,
+	}
+	var memoryDispatcher *memoryruntime.Dispatcher
+	var memoryBindingCoordinator *memorybackend.StoreCoordinator
+	var memoryBackendManager *memorybackend.Manager
+	if memoryBackendEnabled {
+		memoryDispatcher = &memoryruntime.Dispatcher{
+			Store: sqliteStore, Resolver: memoryResolver,
+			GlobalConcurrency:    memoryDispatcherGlobalConcurrency,
+			NamespaceConcurrency: memoryDispatcherNamespaceConcurrency,
+			GlobalRPS:            memoryDispatcherGlobalRPS, NamespaceRPS: memoryDispatcherNamespaceRPS,
+			GlobalBurst: memoryDispatcherGlobalBurst, NamespaceBurst: memoryDispatcherNamespaceBurst,
+		}
+		memoryBindingCoordinator = &memorybackend.StoreCoordinator{
+			Store: sqliteStore, ActivationEnabled: memoryActivationEnabled,
+			RequiredFeatureEpoch: memorybackend.ActivationFeatureEpoch,
+		}
+		memoryBackendManager = &memorybackend.Manager{
+			Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Store: sqliteStore,
+		}
+		if err := mgr.Add(&memorybackend.FeatureHeartbeat{
+			Store: sqliteStore, InstanceID: strings.TrimSpace(os.Getenv("POD_UID")),
+			FeatureEpoch: memoryCapabilities.featureEpoch,
+		}); err != nil {
+			setupLog.Error(err, "unable to add memory feature heartbeat")
+			os.Exit(1)
+		}
+		if err := mgr.Add(&memoryruntime.Runner{
+			Dispatcher: memoryDispatcher,
+			Store:      sqliteStore,
+			Interval:   memoryDispatcherInterval,
+		}); err != nil {
+			setupLog.Error(err, "unable to add memory dispatcher")
+			os.Exit(1)
+		}
+	}
+	memoryService := &memoryruntime.Service{
+		Legacy: sqliteStore, Proposals: sqliteStore, Governed: sqliteStore,
+		Resolver: memoryResolver, Dispatcher: memoryDispatcher,
 	}
 
 	// Create helper components
@@ -1095,6 +1285,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	if memoryBackendEnabled {
+		if err := (&controller.MemoryBackendReconciler{
+			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(),
+			EndpointPolicy: memoryEndpointPolicy, BindingCoordinator: memoryBindingCoordinator,
+			ClusterIdentity: memoryClusterIdentity, ValidationTTL: memoryBackendValidationTTL,
+			ProbeTimeout: memoryBackendProbeTimeout,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "MemoryBackend")
+			os.Exit(1)
+		}
+	}
+
 	if gatewayEnabled {
 		if err := (&controller.GatewayClassReconciler{
 			Client: mgr.GetClient(), Scheme: mgr.GetScheme(),
@@ -1164,6 +1366,14 @@ func main() {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
+	if err := mgr.AddReadyzCheck("memory-feature-epoch", func(req *http.Request) error {
+		return memorybackend.CheckFeatureEpochReadiness(
+			req.Context(), sqliteStore, memoryCapabilities.featureEpoch, memoryBackendEnabled, memoryClusterIdentity,
+		)
+	}); err != nil {
+		setupLog.Error(err, "unable to set up memory feature epoch readiness check")
+		os.Exit(1)
+	}
 
 	// Register coordination tools the Anthropic/OpenAI proxy advertises but that
 	// RegisterChatToolsDefault does not provide. Without these the proxy lists the
@@ -1186,6 +1396,7 @@ func main() {
 		},
 		ContextTokens:             contextTokenConfig,
 		ContextTokenAuthorization: contextTokenAuthzConfig,
+		ContextTokenTTS:           contextTokenTTSConfig,
 		ResultStore:               sqliteStore,
 		SessionStore:              sqliteStore,
 		PlanStore:                 sqliteStore,
@@ -1193,6 +1404,8 @@ func main() {
 		ArtifactStore:             sqliteStore,
 		MemoryStore:               sqliteStore,
 		MemoryProposalStore:       sqliteStore,
+		MemoryService:             memoryService,
+		MemoryBackendManager:      memoryBackendManager,
 		SecurityStore:             sqliteStore,
 		RepositoryMonitorStore:    sqliteStore,
 		ExecutionEventStore:       sqliteStore,

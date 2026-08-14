@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,11 +85,13 @@ type UserInfo struct {
 	Extra     map[string]authenticationv1.ExtraValue
 	Namespace string // Extracted from ServiceAccount username (system:serviceaccount:<ns>:<name>)
 
-	AuthType     string
-	Subject      string
-	Email        string
-	Issuer       string
-	Roles        []string
+	AuthType string
+	Subject  string
+	Email    string
+	Issuer   string
+	Roles    []string
+	// ContextToken is an independently verified request-local transaction token.
+	// It may be attached while AuthType continues to identify the primary caller.
 	ContextToken *ContextToken
 }
 
@@ -150,7 +153,22 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 
 		var userInfo *UserInfo
 		if ok {
-			userInfo, err = authenticateContextToken(ctx.Context(), contextToken, profile)
+			contextUser, contextErr := authenticateContextToken(ctx.Context(), contextToken, profile)
+			if contextErr != nil {
+				err = contextErr
+			} else if primaryToken, extractErr := tokenExtractor.Extract(ctx); extractErr == nil && primaryToken != contextToken {
+				userInfo, err = authenticateToken(ctx.Context(), c, primaryToken, cfg)
+				if err == nil {
+					// Preserve the pod/ServiceAccount identity as the primary caller while
+					// carrying independently verified, request-local transaction authorization.
+					userInfo = cloneUserInfo(userInfo)
+					userInfo.ContextToken = cloneContextToken(contextUser.ContextToken)
+				}
+			} else if extractErr != nil && !errors.Is(extractErr, errMissingAuthToken) {
+				err = extractErr
+			} else {
+				userInfo = contextUser
+			}
 		} else {
 			bearerContextToken, bearerErr := isUnconfiguredBearerContextToken(ctx, cfg.ContextTokens)
 			if bearerErr != nil {
@@ -181,8 +199,12 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
 		}
 
-		// Store user info in context
+		// Store user info and the verified request-local credential in context.
+		// The raw credential is never copied into UserInfo or persisted on a Task.
 		ctx.Locals(UserInfoContextKey, userInfo)
+		if ok {
+			ctx.Locals(contextTokenCredentialLocalKey, contextToken)
+		}
 
 		return ctx.Next()
 	}
@@ -225,6 +247,69 @@ func authenticateContextToken(ctx context.Context, token string, profile Context
 	return contextTokenToUserInfo(contextToken), nil
 }
 
+func cloneUserInfo(userInfo *UserInfo) *UserInfo {
+	if userInfo == nil {
+		return nil
+	}
+
+	cloned := *userInfo
+	cloned.Groups = slices.Clone(userInfo.Groups)
+	cloned.Roles = slices.Clone(userInfo.Roles)
+	if userInfo.Extra != nil {
+		cloned.Extra = make(map[string]authenticationv1.ExtraValue, len(userInfo.Extra))
+		for key, values := range userInfo.Extra {
+			cloned.Extra[key] = slices.Clone(values)
+		}
+	}
+	cloned.ContextToken = cloneContextToken(userInfo.ContextToken)
+
+	return &cloned
+}
+
+func cloneContextToken(token *ContextToken) *ContextToken {
+	if token == nil {
+		return nil
+	}
+
+	cloned := *token
+	cloned.Audience = slices.Clone(token.Audience)
+	cloned.Scopes = slices.Clone(token.Scopes)
+	cloned.TransactionContext = cloneContextTokenMap(token.TransactionContext)
+	cloned.RequesterContext = cloneContextTokenMap(token.RequesterContext)
+	cloned.Claims = cloneContextTokenMap(token.Claims)
+
+	return &cloned
+}
+
+func cloneContextTokenMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = cloneContextTokenValue(value)
+	}
+	return cloned
+}
+
+func cloneContextTokenValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneContextTokenMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i, item := range typed {
+			cloned[i] = cloneContextTokenValue(item)
+		}
+		return cloned
+	case []string:
+		return slices.Clone(typed)
+	default:
+		return value
+	}
+}
+
 // validateToken validates a ServiceAccount token using TokenReview with caching
 func validateToken(ctx context.Context, c client.Client, token string) (*UserInfo, error) {
 	hash := getTokenHash(token)
@@ -232,7 +317,7 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 	// Check cache
 	if entry, ok := tokenCache.Load(hash); ok {
 		if cached := entry.(*tokenCacheEntry); time.Now().Before(cached.expiry) {
-			return cached.userInfo, nil
+			return cloneUserInfo(cached.userInfo), nil
 		}
 		tokenCache.Delete(hash)
 	}
@@ -269,7 +354,7 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 
 	// Cache the successful result
 	tokenCache.Store(hash, &tokenCacheEntry{
-		userInfo: userInfo,
+		userInfo: cloneUserInfo(userInfo),
 		expiry:   time.Now().Add(cacheTTL),
 	})
 	if tokenCacheSize.Add(1)%tokenCacheCleanupInterval == 0 {

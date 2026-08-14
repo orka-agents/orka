@@ -9,13 +9,13 @@ metadata:
 rules:
   # Custom Resource permissions
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks", "tools", "agents", "agentruntimes", "providers", "skills", "repositorymonitors", "repositoryscans", "substrateactorpools", "outboundaccesspolicies"]
+    resources: ["tasks", "tools", "agents", "agentruntimes", "providers", "skills", "repositorymonitors", "repositoryscans", "substrateactorpools", "outboundaccesspolicies", "memorybackends"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status"]
+    resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status", "memorybackends/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "agentruntimes/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers", "substrateactorpools/finalizers", "outboundaccesspolicies/finalizers"]
+    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "agentruntimes/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers", "substrateactorpools/finalizers", "outboundaccesspolicies/finalizers", "memorybackends/finalizers"]
     verbs: ["update"]
   - apiGroups: ["gateway.orka.ai"]
     resources: ["gatewayclasses", "gateways", "gatewaybindings"]
@@ -28,7 +28,7 @@ rules:
     verbs: ["update"]
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
-    resourceNames: ["tasks.core.orka.ai", "gatewayclasses.gateway.orka.ai", "gateways.gateway.orka.ai", "gatewaybindings.gateway.orka.ai"]
+    resourceNames: ["tasks.core.orka.ai", "memorybackends.core.orka.ai", "gatewayclasses.gateway.orka.ai", "gateways.gateway.orka.ai", "gatewaybindings.gateway.orka.ai"]
     verbs: ["get"]
 
   # Provider-neutral Execution Workspace control plane
@@ -55,6 +55,9 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs/task-provenance"]
+    verbs: ["admit"]
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
     verbs: ["get", "list", "watch"]
@@ -165,6 +168,9 @@ rules:
   - apiGroups: ["authorization.k8s.io"]
     resources: ["subjectaccessreviews"]
     verbs: ["create"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get", "list", "watch"]
 
   # Leader election
   - apiGroups: ["coordination.k8s.io"]
@@ -202,6 +208,14 @@ rules:
     verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks/status"]
+    verbs: ["get"]
+
+  # MemoryBackend permissions (the REST API still enforces memory-operate scopes and exact SAR checks).
+  - apiGroups: ["core.orka.ai"]
+    resources: ["memorybackends"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["memorybackends/status"]
     verbs: ["get"]
 
   # RepositoryMonitor permissions

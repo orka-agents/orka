@@ -182,6 +182,16 @@ make docker-push-harness-wrapper
 make docker-push-all
 ```
 
+### Out-of-tree OMS adapters
+
+Provider-specific OMS adapters are intentionally outside the Orka repository.
+The KD6 implementation, container image, Helm chart, and provider release gate
+are maintained in
+[`orka-agents/orka-oms-kd6-adapter`](https://github.com/orka-agents/orka-oms-kd6-adapter).
+This repository retains the canonical `pkg/oms/protocol` contract,
+`pkg/oms/conformance` library, and `cmd/orka-oms-conformance` command used by
+all adapters.
+
 ## Local Development with Kind
 
 ```bash

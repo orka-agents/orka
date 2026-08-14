@@ -107,34 +107,114 @@ Retrieve the autonomous plan state for a task.
 
 ## Memory
 
-Memory endpoints manage namespace-scoped durable memories and reviewable memory proposals. See [Memory](../concepts/memory.md) for the full lifecycle, worker behavior, and examples.
+Memory APIs manage namespace-scoped durable content, explicit search, remote-operation state, trust, proposals, and the fixed-name `MemoryBackend/default`. See [Memory](../concepts/memory.md) for the authority model, lifecycle matrix, worker behavior, and examples.
 
-### Durable Memories
+A namespace that has never activated a remote backend continues to use SQLite. After explicit activation, the OMS backend is content-authoritative and Orka fails closed instead of falling back to SQLite. Memory data routes support the configured API authentication and context-token memory scopes. Backend configuration/lifecycle routes require a TokenReview-authenticated Kubernetes identity plus `memorybackends` RBAC.
+
+### Durable Memories and Search
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/memories` | GET | List durable memories |
-| `/api/v1/memories` | POST | Create durable memory |
-| `/api/v1/memories/:id` | GET | Get durable memory |
-| `/api/v1/memories/:id` | PUT | Update durable memory |
-| `/api/v1/memories/:id` | DELETE | Soft-delete durable memory |
-| `/api/v1/memories/:id/disable` | POST | Disable memory for normal recall |
-| `/api/v1/memories/:id/enable` | POST | Re-enable memory for normal recall |
+| `/api/v1/memories` | GET | Deterministically list memories; `query`/`q` is legacy keyword compatibility |
+| `/api/v1/memories` | POST | Create memory |
+| `/api/v1/memories/search` | POST | Explicit bounded `keyword`, `semantic`, `hybrid`, or `auto` search |
+| `/api/v1/memories/:id` | GET | Get one memory; disabled content requires `includeDisabled=true` and memory-operate scope |
+| `/api/v1/memories/:id` | PUT | Update mutable memory fields |
+| `/api/v1/memories/:id` | DELETE | Delete memory / install a remote tombstone |
+| `/api/v1/memories/:id/disable` | POST | Suppress normal recall locally |
+| `/api/v1/memories/:id/enable` | POST | Re-enable normal recall locally |
+| `/api/v1/memories/:id/trust` | POST | Perform an audited trust transition |
 
-Common list query parameters: `namespace`, `query`/`q`, `sessionName`, `agentName`, `taskName`, `parentTask`, `source`, `tags`, `ids`, `includeDisabled`, `includeDeleted`, and `limit`.
+Common list query parameters are `namespace`, `query`/`q`, `sessionName`, `agentName`, `taskName`, `parentTask`, `source`, `tags`, `ids`, `trust`, `includeDisabled`, `includeDeleted`, `cursor`, and `limit`.
+
+Exact GET returns suppression metadata without content for a disabled record by default. Authorized operators can request verified disabled content with `includeDisabled=true`; context-token callers need both memory-read and memory-operate scopes.
+
+Explicit search request fields are `query`, `tags`, `ids`, `sources`, `sessionName`, `taskName`, `parentTask`, `agentName`, `trust`, `limit`, `cursor`, `mode`, `allowIncomplete`, `includeDisabled`, and `includeDeleted`. Successful search returns verified Memory objects plus provider-local scores, the actual mode, a safe opaque cursor, `exhausted`, and `complete`:
+
+```json
+{
+  "items": [
+    {"memory": {"id": "mem-example", "content": "...", "trust": "trusted"}, "score": 0.91}
+  ],
+  "actualMode": "keyword",
+  "cursor": "opaque-next-page-cursor",
+  "exhausted": false,
+  "complete": true
+}
+```
+
+Remote search is outbound data egress. Context-token callers need `orka:memory:search:remote` in addition to memory-read authorization and any configured approval policy. Worker `recall_memory` forwards its mounted task token in `Txn-Token`; the controller must validate that transaction context at actual provider egress. `semantic` and `hybrid` return `422 MEMORY_SEARCH_MODE_UNSUPPORTED` when unavailable; only `auto` may downgrade.
+
+### Trust
+
+Trust is server-owned:
+
+| Value | Meaning | Default recall |
+|-------|---------|----------------|
+| `untrusted` | Directly created or not yet promoted | Excluded |
+| `reviewed` | Applied from an accepted proposal with provenance | Included |
+| `trusted` | Explicitly promoted by an authorized operator | Included |
+
+Disabled, deleted, tombstoned, diverged, wrong-binding, and untrusted records remain locally suppressed even if returned by a provider.
+
+### Mutation Status, Headers, and Idempotency
+
+Remote create, update, delete, and proposal apply require `Idempotency-Key` (maximum 256 characters). The same key may replay only the exact same logical input; mismatched reuse returns `409 MEMORY_IDEMPOTENCY_KEY_REUSE`. Missing keys for remote mutation return `428 MEMORY_IDEMPOTENCY_KEY_REQUIRED`.
+
+| Operation outcome | Status | Response |
+|-------------------|--------|----------|
+| Create materialized immediately | `201 Created` | Memory JSON |
+| Update or proposal apply materialized immediately | `200 OK` | Memory JSON |
+| Delete materialized immediately | `204 No Content` | Empty body |
+| Remote work queued, retrying, or acknowledgement-ambiguous | `202 Accepted` | MemoryOperation JSON, `Location`, and `Retry-After` |
+| Capacity temporarily full | `429 Too Many Requests` | Structured reason and `Retry-After` |
+| Backend unavailable / strict search cannot prove completeness | `503 Service Unavailable` | Structured reason; strict incomplete search uses `MEMORY_RESULT_SET_INCOMPLETE` |
+
+Retain the idempotency key and any returned `Location` so the same logical request can be retried and asynchronous work can be polled while honoring `Retry-After`.
+
+### Memory Operations
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/memory-operations` | GET | List operations; filters include `namespace`, `state`, `cursor`, and `limit` |
+| `/api/v1/memory-operations/:id` | GET | Get one operation; non-terminal work includes `Retry-After` |
+| `/api/v1/memory-operations/:id/retry` | POST | Audited manual retry |
+| `/api/v1/memory-operations/:id/abandon` | POST | Submit audited non-application and routing-fence evidence for abandonment |
+
+Non-terminal states are `queued`, `leased`, `dispatching`, and `ambiguous`. Terminal states are `succeeded`, `dead_lettered`, `abandoned`, `superseded`, and `orphaned`. Operation resources expose safe metadata only; raw credentials and provider response bodies are not public.
+
+### Memory Backends
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/memory-backends` | GET | List the namespace backend |
+| `/api/v1/memory-backends` | POST | Create `MemoryBackend/default` in `Staged` |
+| `/api/v1/memory-backends/default` | GET / PUT / DELETE | Inspect, update, or delete the backend |
+| `/api/v1/memory-backends/default/status` | GET | Get bounded effective status |
+| `/api/v1/memory-backends/default/activate` | POST | Request validated durable cutover |
+| `/api/v1/memory-backends/default/decommission` | POST | Preview or start clean decommission |
+| `/api/v1/memory-backends/default/force-orphan` | POST | Fence locally and orphan unresolved remote state |
+| `/api/v1/memory-backends/default/restore-legacy` | POST | Preview or explicitly restore archived SQLite after clean decommission |
+| `/api/v1/memory-backends/default/checkpoints` | POST | Record a matched activation receipt or verified runtime checkpoint |
+| `/api/v1/memory-backends/default/purge` | POST | Purge explicitly selected, checkpoint-covered local retention state |
+
+Administrative writes require a non-empty audit `reason`. Lifecycle actions accept `dryRun` for preview where supported. Requested `spec.lifecycleState` values are `Staged`, `Active`, `ReadOnly`, `Disabled`, and `Decommissioning`; durable `status.effectiveLifecycleState` may additionally report `Validating`, `Draining`, `Recovering`, identity/divergence failures, `Decommissioned`, or `Removed`.
 
 ### Memory Proposals
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/memory-proposals` | GET | List memory proposals |
-| `/api/v1/memory-proposals` | POST | Create a memory proposal |
-| `/api/v1/memory-proposals/:id` | GET | Get a memory proposal |
+| `/api/v1/memory-proposals` | GET / POST | List or create proposals |
+| `/api/v1/memory-proposals/:id` | GET | Get a proposal |
 | `/api/v1/memory-proposals/:id/review` | POST | Record a review decision without applying it |
-| `/api/v1/memory-proposals/:id/apply` | POST | Apply an accepted `memory` proposal into durable memory |
-| `/api/v1/memory-proposals/:id/archive` | POST | Archive a proposal without applying it |
+| `/api/v1/memory-proposals/:id/apply` | POST | Apply an accepted memory proposal; returns Memory JSON or `202 MemoryOperation` |
+| `/api/v1/memory-proposals/:id/archive` | POST | Archive without applying |
 
-Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `status`, `query`/`q`, and `limit`. Review and archive return `204 No Content`. Apply accepts optional `appliedBy` and returns the linked durable memory JSON; repeated apply requests return the same memory.
+Proposal list parameters are `namespace`, `taskName`, `agentName`, `type`, `status`, `query`/`q`, and `limit`. Review and archive return `204 No Content`. For context-token callers, review requires memory-operate; apply requires both memory-write and memory-operate. Apply uses the same remote idempotency/status contract as other mutations. Applied proposal memories carry proposal provenance and `reviewed` trust.
+
+### Internal Worker Routes
+
+Namespace-bound worker equivalents are under `/internal/v1`: `/memories/:namespace`, `/memories/:namespace/search`, `/memories/:namespace/:id`, `/memory-operations/:namespace[/:id]`, and `/memory-proposals/:namespace[/:id]` plus the corresponding enable, disable, review, apply, and archive actions. These routes always verify the Kubernetes workload and namespace. When context-token authorization is enabled, they additionally require task-bound transaction context, operation-specific scopes, and remote-search approval; they are not an authorization bypass.
 
 ## Agents
 
