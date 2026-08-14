@@ -25,19 +25,9 @@ on:
       - "internal/harness/**"
       - "internal/store/**"
       - "pkg/harness/**"
-      - "scripts/check-legacy-wrapper-resources.sh"
-      - "scripts/apply-acp-production.sh"
-      - "scripts/lib/ensure-static-mode-namespace.sh"
-      - "scripts/live-github-oidc-e2e.sh"
-      - "scripts/security-scan-e2e.sh"
-      - "scripts/agent-substrate-e2e.sh"
-      - "scripts/live-github-label-trigger-e2e.sh"
-      - "scripts/static-mode-crd-validate.sh"
-      - "scripts/tests/acp-runtime-image-rollout-test.sh"
-      - "scripts/tests/ensure-static-mode-namespace-test.sh"
-      - "scripts/tests/live-github-oidc-e2e-test.sh"
-      - "scripts/tests/static-mode-e2e-namespace-test.sh"
-      - "scripts/tests/static-mode-deploy-gate-test.sh"
+      # The script jobs syntax-check every script and execute every
+      # scripts/tests/*-test.sh suite, so any script change is relevant.
+      - "scripts/**"
       - "workers/harness/**"
   pull_request:
     paths:
@@ -63,19 +53,9 @@ on:
       - "internal/harness/**"
       - "internal/store/**"
       - "pkg/harness/**"
-      - "scripts/check-legacy-wrapper-resources.sh"
-      - "scripts/apply-acp-production.sh"
-      - "scripts/lib/ensure-static-mode-namespace.sh"
-      - "scripts/live-github-oidc-e2e.sh"
-      - "scripts/security-scan-e2e.sh"
-      - "scripts/agent-substrate-e2e.sh"
-      - "scripts/live-github-label-trigger-e2e.sh"
-      - "scripts/static-mode-crd-validate.sh"
-      - "scripts/tests/acp-runtime-image-rollout-test.sh"
-      - "scripts/tests/ensure-static-mode-namespace-test.sh"
-      - "scripts/tests/live-github-oidc-e2e-test.sh"
-      - "scripts/tests/static-mode-e2e-namespace-test.sh"
-      - "scripts/tests/static-mode-deploy-gate-test.sh"
+      # The script jobs syntax-check every script and execute every
+      # scripts/tests/*-test.sh suite, so any script change is relevant.
+      - "scripts/**"
       - "workers/harness/**"
   workflow_dispatch:
 
