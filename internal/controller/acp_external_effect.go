@@ -106,9 +106,32 @@ func runExternalEffectWithReplay[T any](
 	request any,
 	call func(context.Context) (T, error),
 ) (T, bool, error) {
+	return runExternalEffectWithReplayCallTimeout(
+		ctx, effects, fence, identity, request, externalEffectCallTimeout(identity), call,
+	)
+}
+
+// runExternalEffectWithReplayCallTimeout runs one external effect with an
+// explicit bounded call duration. Callers that know the operation's real
+// configured deadline (for example a brokered Tool's spec.http.timeout) use it
+// so the effect call and the ledger lease — always sized as call timeout plus
+// settlement margin — cover the full legitimate operation instead of the
+// per-kind default clamp.
+func runExternalEffectWithReplayCallTimeout[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	callTimeout time.Duration,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
 	var zero T
 	if effects == nil {
 		return zero, false, fmt.Errorf("external-effect store is required")
+	}
+	if callTimeout <= 0 {
+		return zero, false, fmt.Errorf("external-effect call timeout must be positive")
 	}
 	requestDigest, err := acpDomainDigest("external-effect-request", map[string]any{
 		"identity": identity, "request": request,
@@ -136,7 +159,6 @@ func runExternalEffectWithReplay[T any](
 	// Size the lease from this effect's bounded call duration so the outcome of
 	// a call that runs to its deadline can still be committed under a valid
 	// lease, regardless of the configured per-kind timeout.
-	callTimeout := externalEffectCallTimeout(identity)
 	leaseExpiry := now.Add(callTimeout + externalEffectLeaseSettlementMargin)
 	leaseOwner := externalEffectLeaseOwner(fence, identity, now)
 	claimed, err := effects.TransitionExternalEffect(ctx, store.ExternalEffectTransition{

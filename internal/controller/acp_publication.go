@@ -46,6 +46,11 @@ func (d *ACPDispatcher) publishWorkspaceDelta(
 	delta harnessv2.WorkspaceDeltaDescriptor,
 	session *acpTaskSession,
 ) (acpPublicationResult, error) {
+	// The delivery context bounds the sequential pre-publish publisher stages
+	// (branch-claim refresh, preflight, prepare); the detached settlement
+	// context created after the publishing CAS separately bounds publish,
+	// verify, and PR reconciliation. Both windows budget
+	// maxSequentialPublisherSettlementStages full publisher calls.
 	deliveryCtx, cancelDelivery := context.WithTimeout(context.WithoutCancel(ctx), publicationSettlementWindow())
 	defer cancelDelivery()
 	ctx = deliveryCtx
@@ -1505,15 +1510,27 @@ func (d *ACPDispatcher) cancelPreparedPublication(ctx context.Context, task *cor
 	return true, nil
 }
 
+// maxSequentialPublisherSettlementStages is the largest number of sequential
+// publisher-backed external-effect stages that run under one bounded context
+// in publishWorkspaceDelta: the delivery context covers branch-claim refresh,
+// preflight, and prepare; the detached settlement context covers publish,
+// verify, and pull-request reconciliation. Ledger settle calls and durable
+// store bookkeeping between stages are covered by the trailing margin.
+const maxSequentialPublisherSettlementStages = 3
+
 // publicationSettlementWindow bounds the multi-effect publication settlement
-// and delivery flows. It preserves the historical five-minute window and grows
-// with the configured publisher operation timeout plus a settlement margin, so
-// a deliberately raised ORKA_PUBLISHER_PUBLISH_TIMEOUT is not truncated by the
-// outer context while default installations keep byte-identical behavior.
+// and delivery flows. publishWorkspaceDelta runs its publisher-backed stages
+// sequentially under a single context, so the window must budget every stage
+// at its full bounded call duration rather than only one:
+//
+//	window = stages x (call timeout + settlement margin) + settlement margin
+//
+// With the default 4m publisher call bound that is 3 x 5m + 1m = 16m; with
+// ORKA_PUBLISHER_PUBLISH_TIMEOUT=10m it is 3 x 11m + 1m = 34m. Budgeting only
+// one call timeout would let a slow-but-acknowledged publish starve remote
+// verification and PR reconciliation, misclassifying a delivered push as
+// outcome-unknown.
 func publicationSettlementWindow() time.Duration {
-	window := 5 * time.Minute
-	if bound := externalEffectCallTimeout(store.ExternalEffectIdentity{Kind: "publisher.publish"}) + time.Minute; bound > window {
-		return bound
-	}
-	return window
+	perStage := externalEffectCallTimeout(store.ExternalEffectIdentity{Kind: "publisher.publish"}) + externalEffectLeaseSettlementMargin
+	return maxSequentialPublisherSettlementStages*perStage + externalEffectLeaseSettlementMargin
 }

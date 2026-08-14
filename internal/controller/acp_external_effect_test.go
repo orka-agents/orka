@@ -294,6 +294,23 @@ func TestRunExternalEffectKeepsBrokeredClampWhenPublisherTimeoutConfigured(t *te
 	}
 }
 
+func TestPublicationSettlementWindowBudgetsSequentialPublisherStages(t *testing.T) {
+	// publishWorkspaceDelta runs up to three sequential publisher-backed
+	// stages under each bounded context (claim-refresh/preflight/prepare and
+	// publish/verify/PR reconcile), so the window must cover
+	// stages x (call timeout + margin) + margin — not a single call timeout.
+	t.Setenv(envACPPublisherEffectTimeout, "")
+	wantDefault := maxSequentialPublisherSettlementStages*(maxACPExternalEffectCallDuration+externalEffectLeaseSettlementMargin) + externalEffectLeaseSettlementMargin
+	if got := publicationSettlementWindow(); got != wantDefault || got != 16*time.Minute {
+		t.Fatalf("publicationSettlementWindow() = %s, want 3 x (4m + 1m) + 1m = %s", got, wantDefault)
+	}
+
+	t.Setenv(envACPPublisherEffectTimeout, "10m")
+	if got := publicationSettlementWindow(); got != 34*time.Minute {
+		t.Fatalf("publicationSettlementWindow() = %s, want 3 x (10m + 1m) + 1m = 34m", got)
+	}
+}
+
 func TestExternalEffectCallTimeoutFallsBackOnInvalidConfiguration(t *testing.T) {
 	publisherIdentity := store.ExternalEffectIdentity{Kind: "workspace.prepare"}
 	for _, value := range []string{"", "not-a-duration", "-1m", "0"} {

@@ -284,6 +284,219 @@ func TestContinueHarnessV1BrokeredToolCallReplaysDurableResult(t *testing.T) {
 	}
 }
 
+type harnessV1BrokeredToolTestSetup struct {
+	fixture  *harnessV1DispatcherStateFixture
+	tool     *corev1alpha1.Tool
+	call     harness.ToolCallRequest
+	frame    harness.HarnessEventFrame
+	identity store.ExternalEffectIdentity
+}
+
+func newHarnessV1BrokeredToolTestSetup(t *testing.T, timeout *metav1.Duration) *harnessV1BrokeredToolTestSetup {
+	t.Helper()
+	fixture := newHarnessV1DispatcherStateFixture(t)
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: fixture.task.Namespace, Name: "slow-lookup", UID: types.UID("slow-lookup-tool-uid"), Generation: 1,
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "look up a value", BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP: &corev1alpha1.HTTPExecution{URL: "https://tools.example.test/slow-lookup", Method: http.MethodPost, Timeout: timeout},
+		},
+	}
+	if err := fixture.dispatcher.Client.Create(fixture.ctx, tool); err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.Tool{}
+	if err := fixture.dispatcher.APIReader.Get(fixture.ctx, client.ObjectKeyFromObject(tool), current); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := harnessV1BrokeredToolDefinitionDigest(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.verified.body.HarnessV1.ToolExecutionMode = string(harness.ToolExecutionModeBrokered)
+	fixture.verified.body.HarnessV1.BrokeredToolClasses = []corev1alpha1.AgentRuntimeBrokeredToolClass{
+		corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+	}
+	fixture.verified.body.HarnessV1.BrokeredTools = []agentExecutionSnapshotHarnessV1BrokeredTool{{
+		Name: current.Name, Description: current.Spec.Description, BrokeredClass: current.Spec.BrokeredToolClass,
+		Parameters: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}`),
+		UID:        string(current.UID), Generation: current.Generation,
+		DefinitionDigest: digest,
+	}}
+	call := harness.ToolCallRequest{
+		Version: harness.ProtocolVersion, RuntimeSessionID: fixture.request.RuntimeSessionID,
+		TurnID: fixture.request.TurnID, ToolCallID: "call-slow-1", ToolName: current.Name,
+		Input: json.RawMessage(`{"query":"value"}`),
+	}
+	call.IdempotencyKey = harness.ToolRequestIdempotencyKey(call.RuntimeSessionID, call.TurnID, call.ToolCallID)
+	content, err := json.Marshal(call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := harness.HarnessEventFrame{
+		Version: harness.ProtocolVersion, Type: harness.FrameToolCallRequested,
+		RuntimeSessionID: fixture.request.RuntimeSessionID, TurnID: fixture.request.TurnID,
+		CorrelationID: fixture.request.CorrelationID, Seq: 2,
+		ToolName: current.Name, ToolCallID: call.ToolCallID, Content: content,
+	}
+	fixture.dispatcher.ExternalEffects = fixture.durable
+	return &harnessV1BrokeredToolTestSetup{
+		fixture: fixture, tool: current, call: call, frame: frame,
+		identity: harnessV1BrokeredToolEffectIdentity(fixture.task, fixture.request, call.ToolCallID),
+	}
+}
+
+func acceptingHarnessV1ProtocolClient(t *testing.T) *recordingHarnessV1RecoveryClient {
+	t.Helper()
+	return &recordingHarnessV1RecoveryClient{continueTurn: func(
+		_ context.Context,
+		request harness.ContinueTurnRequest,
+	) (*harness.ContinueTurnResponse, error) {
+		return &harness.ContinueTurnResponse{
+			Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID,
+			TurnID: request.TurnID, CorrelationID: request.CorrelationID,
+		}, nil
+	}}
+}
+
+func TestContinueHarnessV1BrokeredToolCallHonorsConfiguredToolTimeout(t *testing.T) {
+	// Read-class brokered Tools never pass the v2 consequential admission gate
+	// that caps spec.http.timeout at the fixed 4m clamp, so a legitimately
+	// larger configured timeout must size the effect call deadline and lease.
+	setup := newHarnessV1BrokeredToolTestSetup(t, &metav1.Duration{Duration: 10 * time.Minute})
+	fixture := setup.fixture
+	effectID, err := setup.identity.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	var deadline time.Time
+	var hasDeadline bool
+	var leaseExpiresAt *time.Time
+	fixture.dispatcher.BrokeredToolExecutor = HarnessV1BrokeredToolExecutorFunc(func(
+		callCtx context.Context,
+		_ string,
+		_ *corev1alpha1.Tool,
+		_ harness.ToolCallRequest,
+	) (json.RawMessage, error) {
+		deadline, hasDeadline = callCtx.Deadline()
+		inFlight, getErr := fixture.durable.GetExternalEffect(callCtx, effectID)
+		if getErr != nil {
+			t.Errorf("get in-flight effect: %v", getErr)
+			return nil, getErr
+		}
+		leaseExpiresAt = inFlight.LeaseExpiresAt
+		return json.RawMessage(`{"answer":42}`), nil
+	})
+	if err := fixture.dispatcher.continueHarnessV1BrokeredToolCall(
+		fixture.ctx, fixture.task, fixture.verified, acceptingHarnessV1ProtocolClient(t), fixture.request,
+		fixture.attempt, fixture.fence, setup.frame,
+	); err != nil {
+		t.Fatalf("continue brokered call: %v", err)
+	}
+	if !hasDeadline {
+		t.Fatal("brokered tool call context has no deadline")
+	}
+	if deadline.Before(start.Add(10 * time.Minute)) {
+		t.Fatalf(
+			"brokered call deadline = %s after start, want at least the configured 10m spec.http.timeout instead of the %s clamp",
+			deadline.Sub(start), maxACPExternalEffectCallDuration,
+		)
+	}
+	if leaseExpiresAt == nil || leaseExpiresAt.Before(deadline) {
+		t.Fatalf("effect lease expires at %v before the call deadline %s; an effect must never outlive its lease", leaseExpiresAt, deadline)
+	}
+}
+
+func TestContinueHarnessV1BrokeredToolCallDoesNotCommitDeadlineCancellation(t *testing.T) {
+	// A call abandoned because its bounded budget (or prompt authority)
+	// expired must stay in-flight for reconciliation instead of committing a
+	// permanently replayed ToolExecutionFailed result.
+	setup := newHarnessV1BrokeredToolTestSetup(t, nil)
+	fixture := setup.fixture
+	cancelCtx, cancel := context.WithCancel(fixture.ctx)
+	fixture.dispatcher.BrokeredToolExecutor = HarnessV1BrokeredToolExecutorFunc(func(
+		_ context.Context,
+		_ string,
+		_ *corev1alpha1.Tool,
+		_ harness.ToolCallRequest,
+	) (json.RawMessage, error) {
+		cancel()
+		return nil, errors.New("request interrupted by context cancellation")
+	})
+	protocolClient := acceptingHarnessV1ProtocolClient(t)
+	err := fixture.dispatcher.continueHarnessV1BrokeredToolCall(
+		cancelCtx, fixture.task, fixture.verified, protocolClient, fixture.request,
+		fixture.attempt, fixture.fence, setup.frame,
+	)
+	if err == nil || !strings.Contains(err.Error(), "did not complete within its bounded effect budget") {
+		t.Fatalf("continue brokered call error = %v, want bounded effect budget error", err)
+	}
+	if protocolClient.continueCalls != 0 {
+		t.Fatalf("ContinueTurn calls = %d, want none for an unsettled call", protocolClient.continueCalls)
+	}
+	assertInFlightExternalEffectWithOneLease(t, fixture.durable, setup.identity)
+
+	// Age the abandoned lease past expiry so a later retry may reclaim the
+	// same durable identity, exactly as it could after real lease expiry.
+	effectID, err := setup.identity.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	effect, err := fixture.durable.GetExternalEffect(fixture.ctx, effectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredAt := time.Now().Add(-time.Minute).UTC()
+	if _, err := fixture.durable.TransitionExternalEffect(fixture.ctx, store.ExternalEffectTransition{
+		ID: effect.ID, Fence: fixture.fence, ExpectedVersion: effect.Version, ExpectedState: store.ExternalEffectInFlight,
+		NewState: store.ExternalEffectInFlight, RequestDigest: effect.RequestDigest,
+		ExpectedLeaseOwner: effect.LeaseOwner, LeaseOwner: effect.LeaseOwner,
+		LeaseExpiresAt: &expiredAt, UpdatedAt: expiredAt.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("age abandoned lease: %v", err)
+	}
+
+	// A later retry under the same durable identity re-executes the read-class
+	// call and can still commit success — the cancellation was not replayed as
+	// a committed deterministic failure.
+	executeCalls := 0
+	fixture.dispatcher.BrokeredToolExecutor = HarnessV1BrokeredToolExecutorFunc(func(
+		_ context.Context,
+		_ string,
+		_ *corev1alpha1.Tool,
+		_ harness.ToolCallRequest,
+	) (json.RawMessage, error) {
+		executeCalls++
+		return json.RawMessage(`{"answer":42}`), nil
+	})
+	var continuedResults []harness.ToolCallResult
+	retryClient := &recordingHarnessV1RecoveryClient{continueTurn: func(
+		_ context.Context,
+		request harness.ContinueTurnRequest,
+	) (*harness.ContinueTurnResponse, error) {
+		continuedResults = append(continuedResults, request.ToolResults[0])
+		return &harness.ContinueTurnResponse{
+			Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID,
+			TurnID: request.TurnID, CorrelationID: request.CorrelationID,
+		}, nil
+	}}
+	if err := fixture.dispatcher.continueHarnessV1BrokeredToolCall(
+		fixture.ctx, fixture.task, fixture.verified, retryClient, fixture.request,
+		fixture.attempt, fixture.fence, setup.frame,
+	); err != nil {
+		t.Fatalf("retry brokered call: %v", err)
+	}
+	if executeCalls != 1 || len(continuedResults) != 1 {
+		t.Fatalf("retry execute/continue = %d/%d, want 1/1", executeCalls, len(continuedResults))
+	}
+	if !continuedResults[0].Approved || continuedResults[0].Error != nil || string(continuedResults[0].Output) != `{"answer":42}` {
+		t.Fatalf("retried result = %+v, want committed success output", continuedResults[0])
+	}
+}
+
 func TestBuildHarnessV1StartTurnRequestRendersFrozenSessionBootstrap(t *testing.T) {
 	bootstrap, err := buildACPBootstrapTranscript([]store.SessionMessage{
 		{Role: "user", Content: "earlier request"},

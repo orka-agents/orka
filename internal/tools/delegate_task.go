@@ -224,7 +224,7 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 					},
 					"readCredentialRef": {
 						"type": "string",
-						"description": "Optional Secret name for clone/read credentials. Omit to auto-discover a read credential when available."
+						"description": "Optional Secret name for clone/read credentials. Omit to auto-discover a read credential when available. Requires gitRepo."
 					},
 					"publicationGitRepo": {
 						"type": "string",
@@ -663,11 +663,21 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 		if workspace.Intent == corev1alpha1.WorkspaceIntentWrite && publicationCredential == "" {
 			return fmt.Errorf("workspace publicationCredentialRef is required for write intent")
 		}
-		readRef, err := resolveWorkspaceCredentialRef(ctx, t.k8sClient, dc.namespace, dc.targetAgent, dc.args.Workspace.ReadCredentialRef)
-		if err != nil {
-			return err
+		// Only attach read credentials alongside a gitRepo: the controller
+		// workspace preflight rejects readCredentialRef without gitRepo, so
+		// auto-discovery must not doom a repository-free workspace.
+		readCredential := strings.TrimSpace(dc.args.Workspace.ReadCredentialRef)
+		if strings.TrimSpace(workspace.GitRepo) == "" {
+			if readCredential != "" {
+				return fmt.Errorf("workspace readCredentialRef requires gitRepo")
+			}
+		} else {
+			readRef, err := resolveWorkspaceCredentialRef(ctx, t.k8sClient, dc.namespace, dc.targetAgent, readCredential)
+			if err != nil {
+				return err
+			}
+			workspace.ReadCredentialRef = readRef
 		}
-		workspace.ReadCredentialRef = readRef
 		if publicationReadCredential := strings.TrimSpace(dc.args.Workspace.PublicationReadCredentialRef); publicationReadCredential != "" {
 			workspace.PublicationReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: publicationReadCredential}
 		}
