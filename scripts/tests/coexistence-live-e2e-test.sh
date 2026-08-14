@@ -32,6 +32,10 @@ grep -Fq '[[ "${cluster_created_by_run}" == "1" && "${keep_cluster}" != "1" ]]' 
   fail 'E2E cleanup must delete only clusters owned by this invocation'
 grep -Fq 'export KUBECONFIG="${work_dir}/kubeconfig"' "${e2e_script}" ||
   fail 'E2E must use an isolated kubeconfig instead of mutating global state'
+grep -Fq 'orka_kind_registry_start "${kind_cluster}" "${registry_owner}"' "${e2e_script}" ||
+  fail 'E2E must start the kind registry with a per-run ownership label'
+grep -Fq 'orka_kind_registry_stop "${kind_cluster}" "${registry_owner}"' "${e2e_script}" ||
+  fail 'E2E must stop only the registry owned by this run'
 
 # Fail-closed ordering: shared CRD wave, then mode-labeled namespace identity,
 # then secrets, then the two Helm releases.

@@ -121,6 +121,10 @@ api_pf_pid=""
 preflight_only=0
 cluster_created_by_run=0
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/coexistence-live-e2e.XXXXXX")"
+# Per-run registry ownership label (derived from the unique temp directory) so
+# registry start/stop can never touch another run's registry container.
+registry_owner="coexistence-live-e2e-$(basename "${work_dir}" | tr -c 'a-zA-Z0-9.-' '-')"
+registry_owner="${registry_owner%-}"
 api_pf_log="${work_dir}/api-port-forward.log"
 api_local_port="${COEXISTENCE_API_LOCAL_PORT:-18093}"
 
@@ -210,7 +214,9 @@ on_exit() {
   fi
 
   cleanup_port_forward
-  orka_kind_registry_stop
+  # Ownership-checked stop: removes only the registry container carrying this
+  # run's owner label, never a foreign run's registry.
+  orka_kind_registry_stop "${kind_cluster}" "${registry_owner}" >/dev/null 2>&1 || true
   # Only delete a cluster this invocation created. A pre-existing cluster that
   # was reused (or one kept via COEXISTENCE_KEEP_CLUSTER=1) is left in place.
   if [[ "${cluster_created_by_run}" == "1" && "${keep_cluster}" != "1" ]]; then
@@ -467,7 +473,17 @@ main() {
   fi
   run kubectl config use-context "kind-${kind_cluster}"
 
-  orka_kind_registry_start "${kind_cluster}"
+  # Start the local registry with a per-run ownership label. The helper's
+  # unowned form force-removes any same-named container, which could destroy
+  # another run's registry when a pre-existing cluster is reused; the owned
+  # form never removes, so a foreign registry surfaces as a clear refusal
+  # instead of a docker name-conflict error.
+  local registry_name
+  registry_name="$(orka_kind_registry_name "${kind_cluster}")"
+  if docker container ls --all --filter "name=^/${registry_name}$" --format '{{.ID}}' | grep -q .; then
+    die "registry container ${registry_name} already exists and is not owned by this run; remove it or point KIND_CLUSTER at a dedicated cluster name"
+  fi
+  orka_kind_registry_start "${kind_cluster}" "${registry_owner}"
 
   if [[ "${skip_image_build}" != "1" ]]; then
     log "Building controller image ${manager_image}"
