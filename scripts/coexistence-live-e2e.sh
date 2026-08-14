@@ -18,7 +18,9 @@
 #      (scripts/fixtures/coexistence-fake-agent.sh via the wrapper's generic
 #      adapter) and reaches terminal Succeeded with its result persisted.
 #   4. The v1 controller is restarted while a wrapper turn is actively held
-#      open; ledger-backed recovery settles the Task to Succeeded afterwards
+#      open and provably past durable wrapper admission (the fake agent's hold
+#      marker can only appear after the wrapper records TurnAccepted in its
+#      ledger); ledger-backed recovery settles the Task to Succeeded afterwards
 #      and the v2 controller stays Ready throughout.
 #   5. Isolation matrix: each installation's controller ServiceAccount is
 #      denied reads and writes in the other watch namespace (kubectl auth
@@ -117,9 +119,15 @@ wrapper_token=""
 api_token=""
 api_pf_pid=""
 preflight_only=0
+cluster_created_by_run=0
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/coexistence-live-e2e.XXXXXX")"
 api_pf_log="${work_dir}/api-port-forward.log"
 api_local_port="${COEXISTENCE_API_LOCAL_PORT:-18093}"
+
+# All kubectl/helm/kind interactions use an isolated kubeconfig inside the
+# run's temp directory; the user's global kubeconfig and current-context are
+# never read or mutated.
+export KUBECONFIG="${work_dir}/kubeconfig"
 
 # The shared redact() (scripts/lib/redact.sh) substitutes the current values of
 # these variables at call time; both are test-only credentials.
@@ -203,7 +211,9 @@ on_exit() {
 
   cleanup_port_forward
   orka_kind_registry_stop
-  if [[ "${keep_cluster}" != "1" ]]; then
+  # Only delete a cluster this invocation created. A pre-existing cluster that
+  # was reused (or one kept via COEXISTENCE_KEEP_CLUSTER=1) is left in place.
+  if [[ "${cluster_created_by_run}" == "1" && "${keep_cluster}" != "1" ]]; then
     kind delete cluster --name "${kind_cluster}" >/dev/null 2>&1 || true
   fi
   rm -rf "${work_dir}" >/dev/null 2>&1 || true
@@ -449,7 +459,11 @@ main() {
 
   log "Creating or reusing kind cluster ${kind_cluster}"
   if ! kind get clusters 2>/dev/null | grep -qx "${kind_cluster}"; then
-    run kind create cluster --name "${kind_cluster}"
+    run kind create cluster --name "${kind_cluster}" --kubeconfig "${KUBECONFIG}"
+    cluster_created_by_run=1
+  else
+    warn "reusing pre-existing kind cluster ${kind_cluster}; it will not be deleted on exit"
+    run kind export kubeconfig --name "${kind_cluster}" --kubeconfig "${KUBECONFIG}"
   fi
   run kubectl config use-context "kind-${kind_cluster}"
 
@@ -717,6 +731,15 @@ EOF_TASK_TWO
   # terminal or admission-closed projection.
   wait_until "Task/coexistence-v1-restart-task active attempt" "${task_wait_seconds}" \
     task_harness_state_in coexistence-v1-restart-task Submitting SubmittedUnknown Accepted Running
+  # Controller-side "Submitting" is stamped before StartTurn reaches the
+  # wrapper, so additionally wait for the wrapper-side hold marker. The wrapper
+  # starts the fake agent child only after durably recording TurnAccepted in
+  # its admission ledger (StartTurn flow in
+  # workers/harness/cliwrapper/server.go), so the marker file the fake agent
+  # writes proves the wrapper durably admitted the held turn before we restart.
+  wait_until "wrapper-side durable admission of the held turn" "${task_wait_seconds}" \
+    kubectl -n "${v1_namespace}" exec "deployment/${wrapper_deployment}" -- \
+    test -f /tmp/coexistence-hold-turn-active
   cleanup_port_forward
   local pre_restart_pod post_restart_pod
   pre_restart_pod="$(kubectl -n "${v1_namespace}" get pods -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}')"

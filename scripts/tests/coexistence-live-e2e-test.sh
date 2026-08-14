@@ -18,17 +18,26 @@ fail() {
 bash -n "${e2e_script}"
 sh -n "${fake_agent}"
 
-# The script must reuse the shared E2E libraries instead of reimplementing them.
-grep -Fq 'lib/e2e-common.sh' "${e2e_script}" || fail 'E2E must source scripts/lib/e2e-common.sh'
-grep -Fq 'lib/redact.sh' "${e2e_script}" || fail 'E2E must source scripts/lib/redact.sh'
-grep -Fq 'lib/kind-local-registry.sh' "${e2e_script}" || fail 'E2E must source scripts/lib/kind-local-registry.sh'
+# The script must reuse the shared E2E libraries instead of reimplementing
+# them. Anchor on the executed source lines, not header comments.
+grep -Fq '. "${script_dir}/lib/e2e-common.sh"' "${e2e_script}" || fail 'E2E must source scripts/lib/e2e-common.sh'
+grep -Fq '. "${script_dir}/lib/redact.sh"' "${e2e_script}" || fail 'E2E must source scripts/lib/redact.sh'
+grep -Fq '. "${script_dir}/lib/kind-local-registry.sh"' "${e2e_script}" || fail 'E2E must source scripts/lib/kind-local-registry.sh'
 grep -Fq '| redact >&2' "${e2e_script}" || fail 'E2E diagnostics must be piped through redact'
+
+# Cluster and kubeconfig lifecycle safety: only clusters created by this
+# invocation may be deleted, and the user's global kubeconfig stays untouched.
+grep -Fq 'cluster_created_by_run=1' "${e2e_script}" || fail 'E2E must track whether it created the kind cluster'
+grep -Fq '[[ "${cluster_created_by_run}" == "1" && "${keep_cluster}" != "1" ]]' "${e2e_script}" ||
+  fail 'E2E cleanup must delete only clusters owned by this invocation'
+grep -Fq 'export KUBECONFIG="${work_dir}/kubeconfig"' "${e2e_script}" ||
+  fail 'E2E must use an isolated kubeconfig instead of mutating global state'
 
 # Fail-closed ordering: shared CRD wave, then mode-labeled namespace identity,
 # then secrets, then the two Helm releases.
-crd_line="$(grep -nF 'apply-helm-crds.sh' "${e2e_script}" | head -n1 | cut -d: -f1)"
-v1_ns_line="$(grep -nF 'ensure-static-mode-namespace.sh" kubectl "${v1_namespace}" harness-v1' "${e2e_script}" | head -n1 | cut -d: -f1)"
-v2_ns_line="$(grep -nF 'ensure-static-mode-namespace.sh" kubectl "${v2_namespace}" harness-v2' "${e2e_script}" | head -n1 | cut -d: -f1)"
+crd_line="$(grep -nF 'run bash "${script_dir}/apply-helm-crds.sh"' "${e2e_script}" | head -n1 | cut -d: -f1)"
+v1_ns_line="$(grep -nF 'run bash "${script_dir}/lib/ensure-static-mode-namespace.sh" kubectl "${v1_namespace}" harness-v1' "${e2e_script}" | head -n1 | cut -d: -f1)"
+v2_ns_line="$(grep -nF 'run bash "${script_dir}/lib/ensure-static-mode-namespace.sh" kubectl "${v2_namespace}" harness-v2' "${e2e_script}" | head -n1 | cut -d: -f1)"
 secret_line="$(grep -nF 'create_namespace_secrets "${v1_namespace}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
 v1_install_line="$(grep -nF 'helm install "${v1_release}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
 v2_install_line="$(grep -nF 'helm install "${v2_release}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
@@ -55,16 +64,20 @@ grep -Fq 'Agent contractVersion must match namespace execution mode "harness-v2"
   fail 'E2E must assert v1-contract Agent denial in the v2 namespace'
 
 # The v1 execution proof must run before the restart-recovery proof, and the
-# restart must wait for an actively held turn.
-task_line="$(grep -nF 'Task/coexistence-v1-task terminal success' "${e2e_script}" | head -n1 | cut -d: -f1)"
+# restart must wait for both the controller-side in-flight projection and the
+# wrapper-side durable-admission marker of the held turn.
+task_line="$(grep -nF 'task_phase_is coexistence-v1-task Succeeded' "${e2e_script}" | head -n1 | cut -d: -f1)"
 hold_line="$(grep -nF 'task_harness_state_in coexistence-v1-restart-task Submitting SubmittedUnknown Accepted Running' "${e2e_script}" | head -n1 | cut -d: -f1)"
+marker_line="$(grep -nF 'test -f /tmp/coexistence-hold-turn-active' "${e2e_script}" | head -n1 | cut -d: -f1)"
 restart_line="$(grep -nF 'rollout restart "deployment/${v1_controller_deployment}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
-settle_line="$(grep -nF 'Task/coexistence-v1-restart-task settlement after controller restart' "${e2e_script}" | head -n1 | cut -d: -f1)"
-for line in "${task_line}" "${hold_line}" "${restart_line}" "${settle_line}"; do
+settle_line="$(grep -nF 'task_phase_is coexistence-v1-restart-task Succeeded' "${e2e_script}" | head -n1 | cut -d: -f1)"
+for line in "${task_line}" "${hold_line}" "${marker_line}" "${restart_line}" "${settle_line}"; do
   [[ "${line}" =~ ^[0-9]+$ ]] || fail 'E2E is missing the v1 execution or restart-recovery steps'
 done
-((task_line < hold_line && hold_line < restart_line && restart_line < settle_line)) ||
-  fail 'E2E must complete a v1 Task, hold a turn open, restart the controller, then assert settlement'
+((task_line < hold_line && hold_line < marker_line && marker_line < restart_line && restart_line < settle_line)) ||
+  fail 'E2E must complete a v1 Task, prove the wrapper durably admitted a held turn, restart the controller, then assert settlement'
+grep -Fq ': >/tmp/coexistence-hold-turn-active' "${fake_agent}" ||
+  fail 'fake agent must write the durable-admission hold marker before sleeping'
 
 # Isolation matrix: RBAC denial both directions plus NetworkPolicy selection.
 grep -Fq 'kubectl auth can-i' "${e2e_script}" || fail 'E2E must run kubectl auth can-i isolation checks'
