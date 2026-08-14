@@ -1,0 +1,110 @@
+name: Coexistence Live E2E
+
+# Model-free, secret-free live proof of the harness v1/v2 isolated-coexistence
+# contract (website/docs/operations/harness-modes.md) on one kind cluster:
+# two mode-labeled installations, admission in both directions, a real
+# wrapper-executed v1 Task, v1 controller restart recovery, the cross-namespace
+# RBAC/NetworkPolicy isolation matrix, and the live
+# scripts/check-legacy-wrapper-resources.sh coexistence verdict.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".dockerignore"
+      - ".github/actions/free-disk-space/**"
+      - ".github/actions/setup-kind/**"
+      - ".github/workflows/coexistence-live-e2e.yml"
+      - "Dockerfile"
+      - "Makefile"
+      - "api/**"
+      - "cmd/build/helmify/**"
+      - "cmd/main.go"
+      - "cmd/harness_v1_tls.go"
+      - "cmd/orka-agent-harness-wrapper/**"
+      - "config/harness-wrapper/**"
+      - "go.mod"
+      - "go.sum"
+      - "internal/admission/**"
+      - "internal/controller/agent_execution*"
+      - "internal/controller/harness_v1*"
+      - "internal/executionmode/**"
+      - "internal/harness/**"
+      - "internal/store/**"
+      - "manifest_staging/charts/orka/**"
+      - "scripts/apply-helm-crds.sh"
+      - "scripts/check-legacy-wrapper-resources.sh"
+      - "scripts/coexistence-live-e2e.sh"
+      - "scripts/fixtures/coexistence-fake-agent.sh"
+      - "scripts/lib/e2e-common.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
+      - "scripts/lib/kind-local-registry.sh"
+      - "scripts/lib/redact.sh"
+      - "workers/harness/**"
+  pull_request:
+    paths:
+      - ".dockerignore"
+      - ".github/actions/free-disk-space/**"
+      - ".github/actions/setup-kind/**"
+      - ".github/workflows/coexistence-live-e2e.yml"
+      - "Dockerfile"
+      - "Makefile"
+      - "api/**"
+      - "cmd/build/helmify/**"
+      - "cmd/main.go"
+      - "cmd/harness_v1_tls.go"
+      - "cmd/orka-agent-harness-wrapper/**"
+      - "config/harness-wrapper/**"
+      - "go.mod"
+      - "go.sum"
+      - "internal/admission/**"
+      - "internal/controller/agent_execution*"
+      - "internal/controller/harness_v1*"
+      - "internal/executionmode/**"
+      - "internal/harness/**"
+      - "internal/store/**"
+      - "manifest_staging/charts/orka/**"
+      - "scripts/apply-helm-crds.sh"
+      - "scripts/check-legacy-wrapper-resources.sh"
+      - "scripts/coexistence-live-e2e.sh"
+      - "scripts/fixtures/coexistence-fake-agent.sh"
+      - "scripts/lib/e2e-common.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
+      - "scripts/lib/kind-local-registry.sh"
+      - "scripts/lib/redact.sh"
+      - "workers/harness/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coexistence-live-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coexistence-live-e2e:
+    name: Coexistence live E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      KIND_CLUSTER: orka-coexistence-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Free disk space for Docker-heavy E2E
+        uses: ./.github/actions/free-disk-space
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        uses: ./.github/actions/setup-kind
+
+      - name: Verify kind installation
+        run: kind version
+
+      - name: Run coexistence live E2E
+        run: bash scripts/coexistence-live-e2e.sh

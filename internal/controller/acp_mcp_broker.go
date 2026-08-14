@@ -9,12 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -211,69 +209,7 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 	if string(task.UID) != authenticated.UID {
 		return errors.New("authenticated ACP MCP task identity changed")
 	}
-	transaction := task.Spec.Transaction
-	if transaction == nil {
-		// Worker parity: Jobs stamp TransactionCredentialAuthorizationEnforced
-		// as (tx != nil && enforced) and mount no transaction token, so a Task
-		// without transaction context has no credential authority to enforce
-		// and no task-scoped token. Empty authority still disables any
-		// controller-process token-file fallback.
-		executor.SetTransactionCredentialAuthority(false, false, "")
-		executor.SetTransactionAuthority("", nil)
-		return nil
-	}
-	scopes := append([]string(nil), transaction.Scopes...)
-	if len(scopes) == 0 {
-		scopes = strings.Fields(transaction.Scope)
-	}
-	required := make([]string, 0, len(e.TransactionCredentialReadScopes))
-	for _, scope := range e.TransactionCredentialReadScopes {
-		if scope = strings.TrimSpace(scope); scope != "" {
-			required = append(required, scope)
-		}
-	}
-	if len(required) == 0 {
-		required = []string{outboundaccess.DefaultCredentialReadScope}
-	}
-	scopeAllowed := slices.ContainsFunc(scopes, func(scope string) bool {
-		return slices.Contains(required, scope)
-	})
-	executor.SetTransactionCredentialAuthority(true, scopeAllowed, strings.TrimSpace(transaction.Context["secret"]))
-	token, err := e.readTaskOwnedTransactionToken(ctx, task)
-	if err != nil {
-		return err
-	}
-	executor.SetTransactionAuthority(token, scopes)
-	return nil
-}
-
-// readTaskOwnedTransactionToken loads the Task's delegated transaction token
-// from its owner-referenced Secret. The raw token is handed only to the
-// per-request executor and is never logged, persisted, or reused across Tasks.
-func (e RegistryACPMCPToolExecutor) readTaskOwnedTransactionToken(
-	ctx context.Context,
-	task *corev1alpha1.Task,
-) (string, error) {
-	secretName := strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret])
-	if secretName == "" {
-		return "", nil
-	}
-	secret := &corev1.Secret{}
-	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: secretName}, secret); err != nil {
-		return "", fmt.Errorf("read ACP MCP task transaction-token Secret: %w", err)
-	}
-	owned := slices.ContainsFunc(secret.OwnerReferences, func(owner metav1.OwnerReference) bool {
-		return owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Kind == taskResourceKind &&
-			owner.Name == task.Name && owner.UID == task.UID
-	})
-	if !owned {
-		return "", errors.New("ACP MCP task transaction-token Secret is not owned by the authenticated Task")
-	}
-	token := strings.TrimSpace(string(secret.Data["token"]))
-	if token == "" {
-		return "", errors.New("ACP MCP task transaction-token Secret token is missing or empty")
-	}
-	return token, nil
+	return bindVerifiedTaskTransactionAuthority(ctx, e.Reader, task, e.TransactionCredentialReadScopes, executor)
 }
 
 type ACPMCPBrokerDependencies struct {

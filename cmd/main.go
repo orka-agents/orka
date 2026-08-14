@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -63,7 +62,6 @@ import (
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
-	"github.com/orka-agents/orka/internal/harness"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
@@ -1438,19 +1436,18 @@ func main() {
 			ResultStore:     sqliteStore,
 			EventStore:      sqliteStore,
 			ExternalEffects: kubeControlStore,
-			BrokeredToolExecutor: controller.HarnessV1BrokeredToolExecutorFunc(func(
-				ctx context.Context,
-				namespace string,
-				tool *corev1alpha1.Tool,
-				request harness.ToolCallRequest,
-			) (json.RawMessage, error) {
-				executor := worker.NewToolExecutorForNamespace(namespace, kubeClient, nil, outboundAccessResolver)
-				executor.SetTransactionExchangeConfig(brokeredTransactionExchange)
-				execCtx := worker.WithToolCallID(ctx, request.ToolCallID)
-				execCtx = worker.WithToolIdempotencyKey(execCtx, request.IdempotencyKey)
-				result, executeErr := executor.Execute(execCtx, tool, request.Input)
-				return json.RawMessage(result), executeErr
-			}),
+			BrokeredToolExecutor: &controller.KubernetesHarnessV1BrokeredToolExecutor{
+				Reader:              mgr.GetAPIReader(),
+				KubeClient:          kubeClient,
+				OutboundAccess:      outboundAccessResolver,
+				TransactionExchange: brokeredTransactionExchange,
+				EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode ==
+					api.ContextTokenAuthorizationModeEnforce,
+				TransactionCredentialReadScopes: append(
+					[]string(nil),
+					contextTokenAuthzConfig.SecretCredentialReadScopes()...,
+				),
+			},
 			Sessions:      acpSessionContinuity,
 			Epochs:        controllerEpochManager,
 			Interval:      harnessV1DispatchInterval,
