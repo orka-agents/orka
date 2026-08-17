@@ -25,17 +25,25 @@ grep -Fq '. "${script_dir}/lib/redact.sh"' "${e2e_script}" || fail 'E2E must sou
 grep -Fq '. "${script_dir}/lib/kind-local-registry.sh"' "${e2e_script}" || fail 'E2E must source scripts/lib/kind-local-registry.sh'
 grep -Fq '| redact >&2' "${e2e_script}" || fail 'E2E diagnostics must be piped through redact'
 
-# Cluster and kubeconfig lifecycle safety: only clusters created by this
-# invocation may be deleted, and the user's global kubeconfig stays untouched.
+# Cluster, registry, and kubeconfig lifecycle safety: only clusters created by
+# this invocation may be deleted, their owned registry is removed with them,
+# and retained clusters keep their registry. The user's global kubeconfig stays
+# untouched.
 grep -Fq 'cluster_created_by_run=1' "${e2e_script}" || fail 'E2E must track whether it created the kind cluster'
-grep -Fq '[[ "${cluster_created_by_run}" == "1" && "${keep_cluster}" != "1" ]]' "${e2e_script}" ||
-  fail 'E2E cleanup must delete only clusters owned by this invocation'
+cleanup_guard_line="$(grep -nF 'if [[ "${cluster_created_by_run}" == "1" && "${keep_cluster}" != "1" ]]; then' "${e2e_script}" | head -n1 | cut -d: -f1)"
+registry_stop_line="$(grep -nF 'orka_kind_registry_stop "${kind_cluster}" "${registry_owner}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
+cluster_delete_line="$(grep -nF 'kind delete cluster --name "${kind_cluster}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
+for line in "${cleanup_guard_line}" "${registry_stop_line}" "${cluster_delete_line}"; do
+  [[ "${line}" =~ ^[0-9]+$ ]] || fail 'E2E is missing ownership-scoped cluster and registry cleanup'
+done
+((cleanup_guard_line < registry_stop_line && registry_stop_line < cluster_delete_line)) ||
+  fail 'E2E must remove the owned registry only when it also removes the owned cluster'
+grep -Fq 'Retaining the owned kind registry because cluster ${kind_cluster} is retained' "${e2e_script}" ||
+  fail 'E2E must retain its registry when the cluster is retained or reused'
 grep -Fq 'export KUBECONFIG="${work_dir}/kubeconfig"' "${e2e_script}" ||
   fail 'E2E must use an isolated kubeconfig instead of mutating global state'
 grep -Fq 'orka_kind_registry_start "${kind_cluster}" "${registry_owner}"' "${e2e_script}" ||
   fail 'E2E must start the kind registry with a per-run ownership label'
-grep -Fq 'orka_kind_registry_stop "${kind_cluster}" "${registry_owner}"' "${e2e_script}" ||
-  fail 'E2E must stop only the registry owned by this run'
 
 # Fail-closed ordering: shared CRD wave, then mode-labeled namespace identity,
 # then secrets, then the two Helm releases.
@@ -51,9 +59,9 @@ done
 ((crd_line < v1_ns_line && v1_ns_line < v2_ns_line && v2_ns_line < secret_line && secret_line < v1_install_line && v1_install_line < v2_install_line)) ||
   fail 'E2E must apply CRDs, claim mode-labeled namespaces, and write secrets before installing either release'
 
-# Reuse safety: a pre-existing cluster must be proven free of the fixed
-# coexistence namespaces and Helm releases before any registry, CRD, or secret
-# write, and refused with an operator-actionable message otherwise.
+# Reuse safety: a pre-existing cluster must be proven free of every Orka CRD
+# and mode-labeled namespace as well as the fixed coexistence namespaces and
+# Helm releases before any registry, CRD, or secret write.
 guard_call_line="$(grep -nE '^[[:space:]]+assert_reused_cluster_is_unclaimed$' "${e2e_script}" | head -n1 | cut -d: -f1)"
 registry_line="$(grep -nF 'orka_kind_registry_start "${kind_cluster}" "${registry_owner}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
 for line in "${guard_call_line}" "${registry_line}"; do
@@ -63,6 +71,12 @@ done
   fail 'E2E must refuse a claimed pre-existing cluster before any registry, CRD, or secret write'
 grep -Fq 'kubectl get namespace "${ns}"' "${e2e_script}" ||
   fail 'reuse guard must check for the fixed coexistence namespaces'
+grep -Fq 'kubectl get customresourcedefinitions.apiextensions.k8s.io -o name' "${e2e_script}" ||
+  fail 'reuse guard must reject any existing Orka CRD before replacing the shared CRD wave'
+grep -Fq "kubectl get namespaces -l 'orka.ai/controller-mode' -o name" "${e2e_script}" ||
+  fail 'reuse guard must reject any existing mode-labeled Orka namespace'
+grep -Fq '"${crd}" == *.orka.ai' "${e2e_script}" ||
+  fail 'reuse guard must classify cluster-wide Orka CRDs rather than only fixed resource names'
 grep -Fq 'helm status "${release}" --namespace "${release_ns}"' "${e2e_script}" ||
   fail 'reuse guard must check for existing coexistence Helm releases'
 grep -Fq 'refusing to reuse pre-existing kind cluster' "${e2e_script}" ||

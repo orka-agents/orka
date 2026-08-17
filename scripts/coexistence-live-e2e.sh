@@ -257,13 +257,14 @@ on_exit() {
 
   stop_v2_readiness_monitor
   cleanup_port_forward
-  # Ownership-checked stop: removes only the registry container carrying this
-  # run's owner label, never a foreign run's registry.
-  orka_kind_registry_stop "${kind_cluster}" "${registry_owner}" >/dev/null 2>&1 || true
-  # Only delete a cluster this invocation created. A pre-existing cluster that
-  # was reused (or one kept via COEXISTENCE_KEEP_CLUSTER=1) is left in place.
+  # Remove the owned registry only with a cluster this invocation is also
+  # removing. Retained/reused clusters keep digest-pinned workloads that still
+  # depend on this registry after node cache eviction or replacement.
   if [[ "${cluster_created_by_run}" == "1" && "${keep_cluster}" != "1" ]]; then
+    orka_kind_registry_stop "${kind_cluster}" "${registry_owner}" >/dev/null 2>&1 || true
     kind delete cluster --name "${kind_cluster}" >/dev/null 2>&1 || true
+  else
+    log "Retaining the owned kind registry because cluster ${kind_cluster} is retained"
   fi
   rm -rf "${work_dir}" >/dev/null 2>&1 || true
 
@@ -479,15 +480,30 @@ split_image_digest() {
   printf '%s' "${1##*@}"
 }
 
-# Fail-closed reuse guard: a pre-existing cluster may only be reused when the
-# fixed coexistence namespaces and Helm releases are absent. Without this
-# check, a rerun against a live coexistence installation would rotate the
-# snapshot key, webhook TLS, and wrapper credentials under workloads this run
-# does not own before helm install ever had a chance to fail on the existing
-# releases. Runs before any cluster write; a cluster this invocation created
-# is fresh and needs no check.
+# Fail-closed reuse guard: a pre-existing cluster may only be reused when it
+# contains no Orka CRDs, mode-labeled namespaces, fixed coexistence namespaces,
+# or fixed coexistence Helm releases. The shared CRD wave uses server-side
+# force-conflicts, so even an Orka installation under unrelated release and
+# namespace names would be unsafe to adopt. Runs before any cluster write; a
+# cluster this invocation created is fresh and needs no check.
 assert_reused_cluster_is_unclaimed() {
-  local conflicts=() ns entry release release_ns
+  local conflicts=() crd crd_inventory mode_namespace mode_namespace_inventory
+  local ns entry release release_ns
+
+  crd_inventory="$(kubectl get customresourcedefinitions.apiextensions.k8s.io -o name 2>/dev/null)" || \
+    die "unable to inspect CRDs before reusing kind cluster ${kind_cluster}"
+  while IFS= read -r crd; do
+    [[ -n "${crd}" && "${crd}" == *.orka.ai ]] || continue
+    conflicts+=("${crd}")
+  done <<<"${crd_inventory}"
+
+  mode_namespace_inventory="$(kubectl get namespaces -l 'orka.ai/controller-mode' -o name 2>/dev/null)" || \
+    die "unable to inspect mode-labeled namespaces before reusing kind cluster ${kind_cluster}"
+  while IFS= read -r mode_namespace; do
+    [[ -n "${mode_namespace}" ]] || continue
+    conflicts+=("${mode_namespace}")
+  done <<<"${mode_namespace_inventory}"
+
   for ns in "${v1_namespace}" "${v2_namespace}" "${v2_runtime_namespace}"; do
     if kubectl get namespace "${ns}" >/dev/null 2>&1; then
       conflicts+=("namespace/${ns}")
