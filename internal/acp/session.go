@@ -409,7 +409,13 @@ func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 	}
 	s.mu.Unlock()
 	if active != nil {
-		_ = s.process.Client().Cancel(context.Background(), s.providerSessionID)
+		// Best-effort courtesy cancel: the notification is a blocking pipe write,
+		// and a wedged adapter that stopped reading stdin would otherwise block
+		// Delete forever before the bounded process stop. Adapter exit closes
+		// stdin, which unblocks the write and ends the goroutine.
+		go func() {
+			_ = s.process.Client().Cancel(context.Background(), s.providerSessionID)
+		}()
 	}
 	status, err := s.process.Stop(ctx, s.config.CancelGrace)
 	s.mu.Lock()

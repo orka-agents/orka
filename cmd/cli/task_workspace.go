@@ -80,6 +80,13 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 		}
 		return nil, nil
 	}
+	// Only serialize a workspace when the user actually set a workspace flag:
+	// a bare {intent: "read"} would make an otherwise valid prompt-only agent
+	// Task fail preflight in harness-v1 mode, which requires gitRepo on any
+	// non-nil workspace.
+	if !workspaceFlagsUsed {
+		return nil, nil
+	}
 	if (strings.TrimSpace(o.sourceRepositoryProvider) == "") != (strings.TrimSpace(o.sourceRepositoryID) == "") {
 		return nil, fmt.Errorf("--source-repository-provider and --source-repository-id must be set together")
 	}

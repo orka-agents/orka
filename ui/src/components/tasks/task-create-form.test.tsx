@@ -310,6 +310,27 @@ describe('TaskCreateForm', () => {
     expect(screen.getByLabelText('Forge credential Secret')).toBeRequired()
   })
 
+  it('omits workspace from prompt-only agent tasks', async () => {
+    useStateTypeOverride = 'agent'
+    let submitted: any
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({ items: [] })),
+      http.post('/api/v1/tasks', async ({ request }) => {
+        submitted = await request.json()
+        return HttpResponse.json({ metadata: { name: submitted.name }, spec: submitted })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'prompt-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Answer a question')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Task created'))
+    expect(submitted.workspace).toBeUndefined()
+  })
+
   it('submits top-level write workspace with distinct credential roles and keys', async () => {
     useStateTypeOverride = 'agent'
     let submitted: any

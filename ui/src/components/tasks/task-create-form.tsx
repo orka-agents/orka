@@ -156,12 +156,18 @@ export function TaskCreateForm() {
         if (prBaseBranch.trim()) workspace.prBaseBranch = prBaseBranch.trim()
         if (createPR) workspace.createPR = true
       }
-      const workspaceResult = workspaceConfigSchema.safeParse(workspace)
-      if (!workspaceResult.success) {
-        toast.error(workspaceResult.error.issues[0]?.message ?? 'Invalid workspace configuration')
-        return
+      // Only serialize workspace when a workspace field is actually configured:
+      // a bare {intent: "read"} would make an otherwise valid prompt-only Task
+      // fail preflight in harness-v1 mode, which requires gitRepo on any
+      // non-nil workspace.
+      if (Object.keys(workspace).length > 1) {
+        const workspaceResult = workspaceConfigSchema.safeParse(workspace)
+        if (!workspaceResult.success) {
+          toast.error(workspaceResult.error.issues[0]?.message ?? 'Invalid workspace configuration')
+          return
+        }
+        body.workspace = workspaceResult.data
       }
-      body.workspace = workspaceResult.data
     }
 
     if (priority) body.priority = parseInt(priority)
