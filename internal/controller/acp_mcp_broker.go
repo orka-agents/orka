@@ -209,7 +209,9 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 	if string(task.UID) != authenticated.UID {
 		return errors.New("authenticated ACP MCP task identity changed")
 	}
-	return bindVerifiedTaskTransactionAuthority(ctx, e.Reader, task, e.TransactionCredentialReadScopes, executor)
+	return bindVerifiedTaskTransactionAuthority(
+		ctx, e.Reader, task, e.TransactionCredentialReadScopes, true, executor,
+	)
 }
 
 type ACPMCPBrokerDependencies struct {

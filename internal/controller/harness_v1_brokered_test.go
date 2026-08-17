@@ -90,14 +90,28 @@ func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t 
 	authorizedTask := newTask([]string{"orka:secrets:credentials:read"}, "tool-credential", "")
 	ctx := withHarnessV1AuthenticatedTask(context.Background(), authenticated)
 
-	t.Run("enforcement off preserves current behavior without task authority", func(t *testing.T) {
-		executor := newExecutor(false)
-		result, err := executor.ExecuteHarnessV1BrokeredTool(context.Background(), namespace, tool.DeepCopy(), request)
+	t.Run("enforcement off still binds task transaction authority", func(t *testing.T) {
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "task-txn-token", Namespace: namespace,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task",
+					Name: authenticated.Name, UID: types.UID(authenticated.UID),
+				}},
+			},
+			Data: map[string][]byte{"token": []byte("task-scoped-token-off")},
+		}
+		executor := newExecutor(false,
+			newTask([]string{"reports.read"}, "other-credential", tokenSecret.Name), tokenSecret)
+		result, err := executor.ExecuteHarnessV1BrokeredTool(ctx, namespace, tool.DeepCopy(), request)
 		if err != nil {
 			t.Fatalf("enforcement-off execution error = %v", err)
 		}
 		if string(result) != upstreamOKBody {
 			t.Fatalf("enforcement-off result = %s", result)
+		}
+		if got, _ := lastTxnToken.Load().(string); got != "task-scoped-token-off" {
+			t.Fatalf("enforcement-off Txn-Token header = %q, want task authority", got)
 		}
 	})
 	t.Run("missing authenticated task fails closed under enforcement", func(t *testing.T) {

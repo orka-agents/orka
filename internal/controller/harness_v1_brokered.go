@@ -122,17 +122,15 @@ func (e *KubernetesHarnessV1BrokeredToolExecutor) ExecuteHarnessV1BrokeredTool(
 }
 
 // bindTaskTransactionAuthority initializes the per-request executor with the
-// authenticated Task's transaction and credential authority. It is a no-op
-// when context-token credential authorization is not enforced, and it fails
-// closed when enforcement is on and the Task's authority cannot be resolved.
+// authenticated Task's transaction and credential authority. Transaction
+// tokens/scopes are bound in every mode; only Secret-credential authorization
+// is gated by EnforceTransactionCredentialAuth. Missing Task authority always
+// fails closed.
 func (e *KubernetesHarnessV1BrokeredToolExecutor) bindTaskTransactionAuthority(
 	ctx context.Context,
 	namespace string,
 	executor *workerexecutor.ToolExecutor,
 ) error {
-	if !e.EnforceTransactionCredentialAuth {
-		return nil
-	}
 	authenticated, ok := harnessV1AuthenticatedTaskFromContext(ctx)
 	if !ok || authenticated.Namespace != namespace {
 		return errors.New("authenticated harness v1 brokered task authority is unavailable")
@@ -147,7 +145,10 @@ func (e *KubernetesHarnessV1BrokeredToolExecutor) bindTaskTransactionAuthority(
 	if string(task.UID) != authenticated.UID {
 		return errors.New("authenticated harness v1 brokered task identity changed")
 	}
-	return bindVerifiedTaskTransactionAuthority(ctx, e.Reader, task, e.TransactionCredentialReadScopes, executor)
+	return bindVerifiedTaskTransactionAuthority(
+		ctx, e.Reader, task, e.TransactionCredentialReadScopes,
+		e.EnforceTransactionCredentialAuth, executor,
+	)
 }
 
 // agentExecutionSnapshotHarnessV1BrokeredTool is the safe, immutable schema

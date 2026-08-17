@@ -30,6 +30,7 @@ func bindVerifiedTaskTransactionAuthority(
 	reader client.Reader,
 	task *corev1alpha1.Task,
 	readScopes []string,
+	enforceCredentialAuth bool,
 	executor *workerexecutor.ToolExecutor,
 ) error {
 	if reader == nil || task == nil || executor == nil {
@@ -50,19 +51,23 @@ func bindVerifiedTaskTransactionAuthority(
 	if len(scopes) == 0 {
 		scopes = strings.Fields(transaction.Scope)
 	}
-	required := make([]string, 0, len(readScopes))
-	for _, scope := range readScopes {
-		if scope = strings.TrimSpace(scope); scope != "" {
-			required = append(required, scope)
+	if enforceCredentialAuth {
+		required := make([]string, 0, len(readScopes))
+		for _, scope := range readScopes {
+			if scope = strings.TrimSpace(scope); scope != "" {
+				required = append(required, scope)
+			}
 		}
+		if len(required) == 0 {
+			required = []string{outboundaccess.DefaultCredentialReadScope}
+		}
+		scopeAllowed := slices.ContainsFunc(scopes, func(scope string) bool {
+			return slices.Contains(required, scope)
+		})
+		executor.SetTransactionCredentialAuthority(true, scopeAllowed, strings.TrimSpace(transaction.Context["secret"]))
+	} else {
+		executor.SetTransactionCredentialAuthority(false, false, "")
 	}
-	if len(required) == 0 {
-		required = []string{outboundaccess.DefaultCredentialReadScope}
-	}
-	scopeAllowed := slices.ContainsFunc(scopes, func(scope string) bool {
-		return slices.Contains(required, scope)
-	})
-	executor.SetTransactionCredentialAuthority(true, scopeAllowed, strings.TrimSpace(transaction.Context["secret"]))
 	token, err := readTaskOwnedTransactionToken(ctx, reader, task)
 	if err != nil {
 		return err
