@@ -689,7 +689,7 @@ Key configuration values for the Helm chart:
 |-----------|---------|-------------|
 | `controller.replicas` | `1` | Controller replicas |
 | `controller.image.repository` | `ghcr.io/orka-agents/orka` | Controller image |
-| `controller.mode` | required | Static agent execution mode: `harness-v1` or `harness-v2`. A release never serves both or changes mode in place. |
+| `controller.mode` | `harness-v2` | Static agent execution mode: `harness-v1` or `harness-v2`. Select v1 explicitly for a compatibility release; a release never serves both or changes mode in place. |
 | `controller.watchNamespace` | required | One non-empty namespace labeled `orka.ai/controller-mode` with the matching mode. Cluster-wide watch is rejected. |
 | `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `service.port` | `8080` | Controller Service port used by controller and Publisher in-cluster URLs. |

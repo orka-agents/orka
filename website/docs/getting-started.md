@@ -59,6 +59,9 @@ helm install orka charts/orka \
   --set controller.acpRuntime.opencodeImage=docker.io/sozercan/orka-acp-opencode@sha256:<opencode-digest>
 ```
 
+The chart defaults new installations to `harness-v2`. Controller mode remains
+an immutable installation identity and cannot be changed during an upgrade.
+
 A normal fresh install creates Orka's 26 cluster-scoped CRDs before the
 controller resources. Use `--skip-crds` only when one designated platform or
 release owner already manages compatible Orka CRDs for the cluster; all other

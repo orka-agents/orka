@@ -112,7 +112,6 @@ func helmTemplateStaticChartForRelease(
 func staticChartDefaultArgs() []string {
 	digest := "sha256:" + strings.Repeat("0", 64)
 	return []string{
-		"--set-string", "controller.mode=harness-v2",
 		"--set-string", "controller.watchNamespace=orka-test",
 		"--set-string", "controller.image.digest=" + digest,
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
@@ -644,7 +643,7 @@ func TestStaticChartMountsAgentExecutionSnapshotKey(t *testing.T) {
 	}
 }
 
-func TestStaticChartRendersOneStaticHarnessMode(t *testing.T) {
+func TestStaticChartDefaultsToHarnessV2AndAllowsV1Override(t *testing.T) {
 	v2 := requireHelmRender(t)
 	for _, marker := range []string{
 		"--controller-mode=harness-v2",

@@ -63,6 +63,9 @@ helm install orka charts/orka \
   --wait
 ```
 
+The chart defaults new installations to `harness-v2`. Controller mode remains
+an immutable installation identity and cannot be changed during an upgrade.
+
 The chart installs the exact cross-namespace ingress policy for Vekil. The
 chart-managed provider proxy itself always runs in the Helm release namespace. Leave
 `controller.acpRuntime.providerProxyNamespace` empty or set it to that release
@@ -115,9 +118,10 @@ Orka CRDs for the cluster.
 ## Static harness mode
 
 Every release selects exactly one controller mode: `harness-v1` or
-`harness-v2`. `dual`, `auto`, and `harness-v1-drain` are rejected. Each release
-also requires a distinct, non-empty `controller.watchNamespace` labeled with
-the matching mode:
+`harness-v2`. Fresh installs default to `harness-v2`; select `harness-v1`
+explicitly only for a compatibility release. `dual`, `auto`, and
+`harness-v1-drain` are rejected. Each release also requires a distinct,
+non-empty `controller.watchNamespace` labeled with the matching mode:
 
 ```bash
 kubectl create -f - <<'EOF'
