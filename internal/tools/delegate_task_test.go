@@ -1380,6 +1380,87 @@ func TestDelegateTaskTool_Execute_AutoDiscoversReadCredentialRef(t *testing.T) {
 	}
 }
 
+func TestDelegateTaskTool_Execute_RepositoryFreeWorkspaceSkipsReadCredentialDiscovery(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, "copilot-coder")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	// The agent carries a discoverable secret, but the controller workspace
+	// preflight rejects readCredentialRef without gitRepo — auto-discovery must
+	// not doom a repository-free workspace.
+	agentWithRuntime := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "copilot-coder", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+			SecretRef: &corev1.LocalObjectReference{Name: testCustomCopilotSecretName},
+		},
+	}
+	k8sClient := newFakeClient(parentTask(), agentWithRuntime)
+	tool := NewDelegateTaskTool(k8sClient)
+
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"agent": "copilot-coder",
+		"prompt": "Summarize the design",
+		"workspace": {"intent": "read"}
+	}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var delegateResult DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
+		t.Fatal(err)
+	}
+	childTask := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: delegateResult.TaskName, Namespace: defaultNamespace,
+	}, childTask); err != nil {
+		t.Fatalf("failed to get child task: %v", err)
+	}
+	if childTask.Spec.Workspace == nil {
+		t.Fatal("expected workspace to be set")
+	}
+	if childTask.Spec.Workspace.ReadCredentialRef != nil {
+		t.Fatalf("readCredentialRef = %#v, want nil without gitRepo", childTask.Spec.Workspace.ReadCredentialRef)
+	}
+}
+
+func TestDelegateTaskTool_Execute_ExplicitReadCredentialRequiresGitRepo(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, "copilot-coder")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	agentWithRuntime := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "copilot-coder", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+		},
+	}
+	k8sClient := newFakeClient(parentTask(), agentWithRuntime)
+	tool := NewDelegateTaskTool(k8sClient)
+
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"agent": "copilot-coder",
+		"prompt": "Summarize the design",
+		"workspace": {"readCredentialRef": "my-secret"}
+	}`))
+	if err == nil || !strings.Contains(err.Error(), "readCredentialRef requires gitRepo") {
+		t.Fatalf("Execute() error = %v, want readCredentialRef requires gitRepo", err)
+	}
+	taskList := &corev1alpha1.TaskList{}
+	if err := k8sClient.List(context.Background(), taskList); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range taskList.Items {
+		if task.Name != parentTaskName {
+			t.Fatalf("unexpected child Task %q created", task.Name)
+		}
+	}
+}
+
 func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)

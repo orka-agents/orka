@@ -690,6 +690,101 @@ func TestCreateAgentTaskTool_Execute_MirrorsWorkspacePreflight(t *testing.T) {
 	}
 }
 
+func TestCreateAgentTaskTool_Execute_CanonicalizesWorkspaceRepositoryArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        string
+		wantErr     string
+		wantGitRepo string
+		wantPubRepo string
+	}{
+		{
+			name:        "github ssh gitRepo canonicalized",
+			args:        `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"git@github.com:example/repo.git"}}`,
+			wantGitRepo: "https://github.com/example/repo",
+		},
+		{
+			name:        "plain https gitRepo accepted",
+			args:        `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/example/repo"}}`,
+			wantGitRepo: "https://github.com/example/repo",
+		},
+		{
+			name:    "http gitRepo rejected",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"http://github.com/example/repo"}}`,
+			wantErr: "workspace.gitRepo must be a credential-free HTTPS URL",
+		},
+		{
+			name:    "credential-embedding gitRepo rejected",
+			args:    `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://user:pass@github.com/example/repo"}}`,
+			wantErr: "workspace.gitRepo must be a credential-free HTTPS URL",
+		},
+		{
+			name: "github ssh publicationGitRepo canonicalized",
+			args: `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/example/repo",` +
+				`"publicationGitRepo":"git@github.com:example/fork.git","publicationCredentialRef":"target-write"}}`,
+			wantGitRepo: "https://github.com/example/repo",
+			wantPubRepo: "https://github.com/example/fork",
+		},
+		{
+			name: "http publicationGitRepo rejected",
+			args: `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/example/repo",` +
+				`"publicationGitRepo":"http://github.com/example/fork","publicationCredentialRef":"target-write"}}`,
+			wantErr: "workspace.publicationGitRepo must be a credential-free HTTPS URL",
+		},
+		{
+			name: "credential-embedding publicationGitRepo rejected",
+			args: `{"prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/example/repo",` +
+				`"publicationGitRepo":"https://user:pass@github.com/example/fork","publicationCredentialRef":"target-write"}}`,
+			wantErr: "workspace.publicationGitRepo must be a credential-free HTTPS URL",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := newFakeClient()
+			ctx := newCreateAgentTaskToolCtx(fc)
+			tool := &CreateAgentTaskTool{}
+
+			result, err := tool.Execute(ctx, json.RawMessage(tt.args))
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantErr != "" {
+				if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, tt.wantErr) {
+					t.Fatalf("response = %#v, want invalid_arguments containing %q", response, tt.wantErr)
+				}
+				taskList := &corev1alpha1.TaskList{}
+				if err := fc.List(context.Background(), taskList); err != nil {
+					t.Fatal(err)
+				}
+				if len(taskList.Items) != 0 {
+					t.Fatalf("expected no Task to be created, got %d", len(taskList.Items))
+				}
+				return
+			}
+			if !response.Success {
+				t.Fatalf("expected success, got error: %s", response.Error)
+			}
+			task := &corev1alpha1.Task{}
+			if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testAgentTaskGeneratedName, Namespace: defaultNamespace}, task); err != nil {
+				t.Fatal(err)
+			}
+			if task.Spec.Workspace == nil {
+				t.Fatal("expected workspace to be set")
+			}
+			if task.Spec.Workspace.GitRepo != tt.wantGitRepo {
+				t.Fatalf("gitRepo = %q, want %q", task.Spec.Workspace.GitRepo, tt.wantGitRepo)
+			}
+			if task.Spec.Workspace.PublicationGitRepo != tt.wantPubRepo {
+				t.Fatalf("publicationGitRepo = %q, want %q", task.Spec.Workspace.PublicationGitRepo, tt.wantPubRepo)
+			}
+		})
+	}
+}
+
 func TestCreateAgentTaskTool_Execute_AllowsReadWorkspaceWithoutGitRepo(t *testing.T) {
 	// The controller preflight rejects readCredentialRef without gitRepo, so
 	// auto-discovery must not attach one to a repository-free read workspace.

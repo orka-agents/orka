@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"k8s.io/client-go/kubernetes"
@@ -550,12 +551,13 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 		"snapshotDigest": attempt.SnapshotDigest, "toolDefinitionDigest": frozenTool.DefinitionDigest,
 		"request": request,
 	}
-	result, _, err := runExternalEffectWithReplay(
+	result, _, err := runExternalEffectWithReplayCallTimeout(
 		ctx,
 		d.ExternalEffects,
 		fence,
 		identity,
 		effectRequest,
+		harnessV1BrokeredToolCallTimeout(tool),
 		func(callCtx context.Context) (harness.ToolCallResult, error) {
 			// The Task passed the dispatcher's immutable binding/snapshot
 			// verification for this attempt; stamp its identity per request so
@@ -573,6 +575,19 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 				IdempotencyKey: request.IdempotencyKey, Approved: true,
 			}
 			if executeErr != nil {
+				if callCtx.Err() != nil {
+					// The bounded effect budget expired (or prompt authority
+					// was revoked) before the Tool produced an outcome. Do not
+					// commit ToolExecutionFailed: returning the error leaves
+					// the ledger entry in-flight so a retry can re-execute
+					// this read-class call under the same identity, and lease
+					// expiry reconciliation classifies an abandoned entry
+					// OutcomeUnknown instead of permanently replaying a
+					// deadline artifact as a committed deterministic failure.
+					return harness.ToolCallResult{}, fmt.Errorf(
+						"brokered harness v1 tool call did not complete within its bounded effect budget: %w", executeErr,
+					)
+				}
 				result.Approved = false
 				result.Error = &harness.ErrorInfo{Code: "ToolExecutionFailed", Message: "brokered tool execution failed"}
 				return result, nil
@@ -606,6 +621,24 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 		return fmt.Errorf("continue brokered harness v1 turn: %w", err)
 	}
 	return nil
+}
+
+// harnessV1BrokeredToolCallTimeout sizes the bounded external-effect call —
+// and therefore its ledger lease, which the effect runner derives as call
+// timeout plus settlement margin — from the Tool's own spec.http.timeout.
+// Harness v1 admits only read-class brokered Tools, which never pass the v2
+// consequential-timeout admission gate that caps spec.http.timeout at the
+// fixed brokered clamp, so a legitimately larger configured timeout must grow
+// the effect deadline instead of being truncated mid-flight. The added margin
+// lets the executor's own HTTP timeout fire first and produce a deterministic
+// classification before the effect budget expires.
+func harnessV1BrokeredToolCallTimeout(tool *corev1alpha1.Tool) time.Duration {
+	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {
+		if sized := tool.Spec.HTTP.Timeout.Duration + externalEffectLeaseSettlementMargin; sized > maxACPExternalEffectCallDuration {
+			return sized
+		}
+	}
+	return maxACPExternalEffectCallDuration
 }
 
 func harnessV1BrokeredToolEffectIdentity(

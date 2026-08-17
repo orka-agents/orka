@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -354,6 +355,132 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 			}
 			if tt.checkClient != nil {
 				tt.checkClient(t, fc)
+			}
+		})
+	}
+}
+
+func TestCreateContainerTaskTool_InheritedPublicationWorkspaceFields(t *testing.T) {
+	maxChanged := int32(3)
+	tests := []struct {
+		name          string
+		workspace     corev1alpha1.WorkspaceConfig
+		wantErrorType string
+		wantInMessage string
+	}{
+		{
+			name: "inherited expectedRemoteSHA rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:           "https://github.com/example/prior.git",
+				ExpectedRemoteSHA: "1111111111111111111111111111111111111111",
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.expectedRemoteSHA",
+		},
+		{
+			name: "inherited createPR rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:  "https://github.com/example/prior.git",
+				CreatePR: true,
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.createPR",
+		},
+		{
+			name: "inherited maxChangedFiles rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:         "https://github.com/example/prior.git",
+				MaxChangedFiles: &maxChanged,
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.maxChangedFiles",
+		},
+		{
+			name: "inherited allowedPaths rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:      "https://github.com/example/prior.git",
+				AllowedPaths: []string{"src/**"},
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.allowedPaths",
+		},
+		{
+			name: "inherited denyRepositoryControlPaths rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:                    "https://github.com/example/prior.git",
+				DenyRepositoryControlPaths: true,
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.denyRepositoryControlPaths",
+		},
+		{
+			name: "inherited rejectBinaryFiles rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:           "https://github.com/example/prior.git",
+				RejectBinaryFiles: true,
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.rejectBinaryFiles",
+		},
+		{
+			name: "inherited rejectSecretLikeContent rejected",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:                 "https://github.com/example/prior.git",
+				RejectSecretLikeContent: true,
+			},
+			wantErrorType: "unsupported_container_workspace_field",
+			wantInMessage: "workspace.rejectSecretLikeContent",
+		},
+		{
+			name: "inherited read workspace accepted",
+			workspace: corev1alpha1.WorkspaceConfig{
+				GitRepo:           "https://github.com/example/prior.git",
+				Ref:               "prior-sha",
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredentialsSecret},
+			},
+		},
+	}
+
+	args := json.RawMessage(`{"name":"validation","command":["sh","-lc"],"args":["go test ./..."],"prior_task":"coder-task"}`)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prior := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
+				Spec: corev1alpha1.TaskSpec{
+					Type:      corev1alpha1.TaskTypeAgent,
+					Workspace: tt.workspace.DeepCopy(),
+				},
+			}
+			fc := newFakeClient(prior)
+			ctx := newCreateContainerTaskToolCtx(fc)
+			tool := &CreateContainerTaskTool{}
+
+			result, err := tool.Execute(ctx, args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			r := parseContainerTaskToolResult(t, result)
+			if tt.wantErrorType == "" {
+				if !r.Success {
+					t.Fatalf("expected success, got %s: %s", r.ErrorType, r.Error)
+				}
+				return
+			}
+			if r.Success {
+				t.Fatalf("expected %s rejection, got success", tt.wantErrorType)
+			}
+			if r.ErrorType != tt.wantErrorType {
+				t.Errorf("errorType = %q, want %q", r.ErrorType, tt.wantErrorType)
+			}
+			if !strings.Contains(r.Error, tt.wantInMessage) {
+				t.Errorf("error message %q does not name %q", r.Error, tt.wantInMessage)
+			}
+			taskList := &corev1alpha1.TaskList{}
+			if err := fc.List(context.Background(), taskList); err != nil {
+				t.Fatalf("failed to list tasks: %v", err)
+			}
+			if len(taskList.Items) != 1 {
+				t.Fatalf("expected no container Task to be created, found %d Tasks", len(taskList.Items))
 			}
 		})
 	}

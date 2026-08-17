@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -16,14 +18,56 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const acpExternalEffectLease = 5 * time.Minute
+// externalEffectLeaseSettlementMargin is the slack an effect lease keeps beyond
+// its bounded call duration so a response returned at the deadline can still be
+// committed under a valid lease.
+const externalEffectLeaseSettlementMargin = time.Minute
 
-// maxACPExternalEffectCallDuration bounds one in-flight external-effect call so
-// its outcome can always be committed while the ledger lease is still valid.
-// Without this bound, a call that outlives the lease plus the reconciliation
-// grace period is marked OutcomeUnknown by reconcileExpiredExternalEffects, and
-// a late upstream success can never be settled.
-const maxACPExternalEffectCallDuration = acpExternalEffectLease - time.Minute
+const acpExternalEffectLease = maxACPExternalEffectCallDuration + externalEffectLeaseSettlementMargin
+
+// maxACPExternalEffectCallDuration bounds one in-flight brokered custom-Tool
+// call so its outcome can always be committed while the ledger lease is still
+// valid. Without this bound, a call that outlives the lease plus the
+// reconciliation grace period is marked OutcomeUnknown by
+// reconcileExpiredExternalEffects, and a late upstream success can never be
+// settled. Publisher-backed effects instead honor the configured publish
+// timeout (envACPPublisherEffectTimeout) and size their lease from it, so the
+// invariant lease > call duration holds for every effect kind.
+const maxACPExternalEffectCallDuration = 4 * time.Minute
+
+// envACPPublisherEffectTimeout mirrors the Workspace/Publisher's
+// ORKA_PUBLISHER_PUBLISH_TIMEOUT on the controller. When the publisher is
+// configured with a publish timeout above the default external-effect call
+// bound, set the same value on the controller so publisher-backed effects and
+// their ledger leases are sized to the real operation deadline instead of
+// truncating it.
+const envACPPublisherEffectTimeout = "ORKA_PUBLISHER_PUBLISH_TIMEOUT"
+
+// externalEffectCallTimeout returns the bounded call duration for one external
+// effect. Brokered custom-Tool calls keep the fixed clamp their descriptors
+// were admitted under (customACPMCPToolDescriptor rejects longer HTTP
+// timeouts); publisher-backed effects honor the controller-visible publish
+// timeout so legitimately configured long publisher operations are not
+// truncated. The claimed lease is always sized as call timeout plus settlement
+// margin, so no effect can run past its own lease.
+func externalEffectCallTimeout(identity store.ExternalEffectIdentity) time.Duration {
+	if !publisherBackedExternalEffectKind(identity.Kind) {
+		return maxACPExternalEffectCallDuration
+	}
+	raw := strings.TrimSpace(os.Getenv(envACPPublisherEffectTimeout))
+	if raw == "" {
+		return maxACPExternalEffectCallDuration
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return maxACPExternalEffectCallDuration
+	}
+	return parsed
+}
+
+func publisherBackedExternalEffectKind(kind string) bool {
+	return strings.HasPrefix(kind, "publisher.") || strings.HasPrefix(kind, "workspace.")
+}
 
 var externalEffectLeaseSequence atomic.Uint64
 
@@ -62,9 +106,32 @@ func runExternalEffectWithReplay[T any](
 	request any,
 	call func(context.Context) (T, error),
 ) (T, bool, error) {
+	return runExternalEffectWithReplayCallTimeout(
+		ctx, effects, fence, identity, request, externalEffectCallTimeout(identity), call,
+	)
+}
+
+// runExternalEffectWithReplayCallTimeout runs one external effect with an
+// explicit bounded call duration. Callers that know the operation's real
+// configured deadline (for example a brokered Tool's spec.http.timeout) use it
+// so the effect call and the ledger lease — always sized as call timeout plus
+// settlement margin — cover the full legitimate operation instead of the
+// per-kind default clamp.
+func runExternalEffectWithReplayCallTimeout[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	callTimeout time.Duration,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
 	var zero T
 	if effects == nil {
 		return zero, false, fmt.Errorf("external-effect store is required")
+	}
+	if callTimeout <= 0 {
+		return zero, false, fmt.Errorf("external-effect call timeout must be positive")
 	}
 	requestDigest, err := acpDomainDigest("external-effect-request", map[string]any{
 		"identity": identity, "request": request,
@@ -89,7 +156,10 @@ func runExternalEffectWithReplay[T any](
 	if effect.State == store.ExternalEffectFailed || effect.State == store.ExternalEffectOutcomeUnknown {
 		return zero, false, fmt.Errorf("external effect %s is terminal in state %s", effect.ID, effect.State)
 	}
-	leaseExpiry := now.Add(acpExternalEffectLease)
+	// Size the lease from this effect's bounded call duration so the outcome of
+	// a call that runs to its deadline can still be committed under a valid
+	// lease, regardless of the configured per-kind timeout.
+	leaseExpiry := now.Add(callTimeout + externalEffectLeaseSettlementMargin)
 	leaseOwner := externalEffectLeaseOwner(fence, identity, now)
 	claimed, err := effects.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
 		ID: effect.ID, Fence: fence, ExpectedVersion: effect.Version, ExpectedState: effect.State,
@@ -99,11 +169,11 @@ func runExternalEffectWithReplay[T any](
 	if err != nil {
 		return zero, false, err
 	}
-	// Bound the call to a duration the claimed lease can account for. A call
+	// Bound the call to the duration the claimed lease accounts for. A call
 	// that ran past the lease plus the reconciliation grace period would be
 	// classified OutcomeUnknown while still in flight, making a late success
 	// permanently unsettleable.
-	callCtx, cancelCall := context.WithTimeout(ctx, maxACPExternalEffectCallDuration)
+	callCtx, cancelCall := context.WithTimeout(ctx, callTimeout)
 	response, callErr := call(callCtx)
 	cancelCall()
 	if callErr != nil {
@@ -145,10 +215,7 @@ func externalEffectLeaseOwner(fence store.ControllerEpochFence, identity store.E
 	return "effect-" + hex.EncodeToString(sum[:16])
 }
 
-const (
-	defaultACPExternalEffectRetryDelay = 5 * time.Second
-	maxACPExternalEffectRetryBudget    = maxACPExternalEffectCallDuration
-)
+const defaultACPExternalEffectRetryDelay = 5 * time.Second
 
 // runACPExternalEffectWithRetry retries the same immutable external-effect
 // operation while retaining its controller-side lease until it commits, a
@@ -165,7 +232,7 @@ func runACPExternalEffectWithRetry[T any](
 ) (T, error) {
 	return runACPExternalEffectWithRetryPolicy(
 		ctx, d, fence, identity, request,
-		defaultACPExternalEffectRetryDelay, maxACPExternalEffectRetryBudget, call,
+		defaultACPExternalEffectRetryDelay, externalEffectCallTimeout(identity), call,
 	)
 }
 
@@ -179,7 +246,7 @@ func runACPExternalEffectWithRetryDelay[T any](
 	call func(context.Context) (T, error),
 ) (T, error) {
 	return runACPExternalEffectWithRetryPolicy(
-		ctx, d, fence, identity, request, retryDelay, maxACPExternalEffectRetryBudget, call,
+		ctx, d, fence, identity, request, retryDelay, externalEffectCallTimeout(identity), call,
 	)
 }
 
@@ -197,7 +264,7 @@ func runACPExternalEffectWithRetryPolicy[T any](
 	if retryDelay <= 0 {
 		return zero, fmt.Errorf("external-effect retry delay must be positive")
 	}
-	if retryBudget <= 0 || retryBudget > maxACPExternalEffectRetryBudget {
+	if retryBudget <= 0 || retryBudget > externalEffectCallTimeout(identity) {
 		return zero, fmt.Errorf("external-effect retry budget must be positive and leave the required lease settlement margin")
 	}
 	return runACPExternalEffect(ctx, d, fence, identity, request, func(callCtx context.Context) (T, error) {

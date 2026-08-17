@@ -3079,12 +3079,15 @@ func (r *RepositoryScanReconciler) verifiedSecurityPatchPublication(
 	if requestedBranch == "" || strings.TrimSpace(workspace.PushBranch) != requestedBranch {
 		return securityPatchPublicationReceipt{}, "patch publication branch does not match the requested branch", nil
 	}
-	expectedPublicationRepo := strings.TrimSpace(scan.Spec.ForkRepo)
+	expectedPublicationRepo := security.CanonicalRepositoryCloneURL(scan.Spec.ForkRepo)
 	if expectedPublicationRepo == "" {
-		expectedPublicationRepo = strings.TrimSpace(scan.Spec.RepoURL)
+		expectedPublicationRepo = security.CanonicalRepositoryCloneURL(scan.Spec.RepoURL)
 	}
-	if strings.TrimSpace(workspace.GitRepo) != strings.TrimSpace(scan.Spec.RepoURL) ||
-		strings.TrimSpace(workspace.PublicationGitRepo) != expectedPublicationRepo {
+	// Patch Task workspaces are constructed from the canonical HTTPS clone
+	// URL, so compare both sides in canonical form to keep SSH-specified scans
+	// bound to the same repository identity.
+	if security.CanonicalRepositoryCloneURL(workspace.GitRepo) != security.CanonicalRepositoryCloneURL(scan.Spec.RepoURL) ||
+		security.CanonicalRepositoryCloneURL(workspace.PublicationGitRepo) != expectedPublicationRepo {
 		return securityPatchPublicationReceipt{}, "patch publication repositories do not match the repository scan", nil
 	}
 	expectedBase := strings.TrimPrefix(strings.TrimSpace(scan.Spec.PRBaseBranch), "refs/heads/")
@@ -3171,7 +3174,7 @@ func (r *RepositoryScanReconciler) verifiedSecurityPatchPublication(
 	if !ok {
 		return securityPatchPublicationReceipt{}, "durable patch pull request forge identity is invalid", nil
 	}
-	expectedURL := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(scan.Spec.RepoURL), "/"), ".git") +
+	expectedURL := strings.TrimSuffix(strings.TrimSuffix(security.CanonicalRepositoryCloneURL(scan.Spec.RepoURL), "/"), ".git") +
 		"/pull/" + strconv.FormatInt(prNumber, 10)
 	if !strings.EqualFold(strings.TrimSpace(receipt.URL), expectedURL) {
 		return securityPatchPublicationReceipt{}, "durable patch pull request URL does not match the repository and number", nil
