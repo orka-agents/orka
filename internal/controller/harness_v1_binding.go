@@ -879,6 +879,25 @@ func (d *HarnessV1Dispatcher) loadHarnessV1ExecutionForSettlement(
 	return verifier.loadHarnessV1ExecutionWithOptions(ctx, task, binding, true, false)
 }
 
+func harnessV1TaskGenerationMatchesBinding(
+	task *corev1alpha1.Task,
+	binding *corev1alpha1.AgentExecutionBinding,
+	allowDeleting bool,
+) bool {
+	if task == nil || binding == nil {
+		return false
+	}
+	if task.Generation == binding.Task.BoundSpecGeneration {
+		return true
+	}
+	// The API server increments a custom resource's generation once when it
+	// starts deletion. Task spec writes are already rejected after execution
+	// authority is bound, so only that exact deletion transition is authorized
+	// for recovery, cancellation, and terminal settlement.
+	return allowDeleting && !task.DeletionTimestamp.IsZero() && task.Generation > 1 &&
+		task.Generation-1 == binding.Task.BoundSpecGeneration
+}
+
 //nolint:gocyclo // The options separate executor authorization from terminal-only settlement verification.
 func (r *TaskReconciler) loadHarnessV1ExecutionWithOptions(
 	ctx context.Context,
@@ -898,7 +917,8 @@ func (r *TaskReconciler) loadHarnessV1ExecutionWithOptions(
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
 		return nil, fmt.Errorf("uncached Task read before harness v1 dispatch: %w", err)
 	}
-	if current.UID != task.UID || (!allowDeleting && !current.DeletionTimestamp.IsZero()) || current.Generation != binding.Task.BoundSpecGeneration ||
+	if current.UID != task.UID || (!allowDeleting && !current.DeletionTimestamp.IsZero()) ||
+		!harnessV1TaskGenerationMatchesBinding(current, binding, allowDeleting) ||
 		current.Status.AgentExecutionBinding == nil || current.Status.AgentExecutionBinding.BindingDigest != binding.BindingDigest {
 		return nil, errors.New("task identity, generation, deletion state, or persisted harness v1 binding changed")
 	}

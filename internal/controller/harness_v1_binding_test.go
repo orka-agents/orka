@@ -123,6 +123,38 @@ func (r *harnessV1CandidateErrorReader) Get(
 	return r.Reader.Get(ctx, key, object, options...)
 }
 
+func TestHarnessV1TaskGenerationMatchesBinding(t *testing.T) {
+	deletionTime := metav1.Now()
+	tests := []struct {
+		name          string
+		generation    int64
+		deleting      bool
+		allowDeleting bool
+		want          bool
+	}{
+		{name: "bound generation", generation: 7, want: true},
+		{name: "non-deleting generation change", generation: 8},
+		{name: "deletion transition not authorized", generation: 8, deleting: true},
+		{name: "single deletion generation increment", generation: 8, deleting: true, allowDeleting: true, want: true},
+		{name: "multiple generation increments", generation: 9, deleting: true, allowDeleting: true},
+		{name: "stale generation", generation: 6, deleting: true, allowDeleting: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Generation: test.generation}}
+			if test.deleting {
+				task.DeletionTimestamp = &deletionTime
+			}
+			binding := &corev1alpha1.AgentExecutionBinding{
+				Task: corev1alpha1.AgentExecutionBindingTaskRef{BoundSpecGeneration: 7},
+			}
+			if got := harnessV1TaskGenerationMatchesBinding(task, binding, test.allowDeleting); got != test.want {
+				t.Fatalf("generation match = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestEnsureHarnessV1ExecutionBindingRequeuesTransientCandidateErrors(t *testing.T) {
 	tests := []struct {
 		name      string
