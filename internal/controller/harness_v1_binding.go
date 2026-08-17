@@ -135,6 +135,11 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	if err != nil {
 		return nil, err
 	}
+	if task.Spec.Transaction != nil && toolGovernance.mode != harness.ToolExecutionModeBrokered {
+		return nil, permanentHarnessV1Candidate(
+			errors.New("harness v1 transaction authority requires brokered tool execution"),
+		)
+	}
 	workspace, err := resolveHarnessV1PublicReadOnlyWorkspace(task, agent, target)
 	if err != nil {
 		return nil, permanentHarnessV1Candidate(err)
@@ -182,6 +187,10 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	if task.Spec.RetryPolicy != nil && task.Spec.RetryPolicy.MaxRetries > 0 && !duplicateSafe {
 		return nil, permanentHarnessV1Candidate(errors.New("harness v1 retry requires a duplicate-safe built-in workload without provider credentials"))
 	}
+	taskSpecDigest, err := harnessV1TaskSpecDigest(task.Spec)
+	if err != nil {
+		return nil, fmt.Errorf("digest harness v1 Task spec: %w", err)
+	}
 	body := agentExecutionSnapshotBody{
 		SchemaVersion:   store.AgentExecutionSnapshotSchemaVersion,
 		ContractVersion: string(corev1alpha1.AgentRuntimeContractHarnessV1),
@@ -203,6 +212,7 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 		RuntimeOverride: task.Spec.AgentRuntime.DeepCopy(),
 		HarnessV1: &agentExecutionSnapshotHarnessV1{
 			Endpoint: target.endpoint, Backend: string(target.backend), RuntimeName: target.runtimeName,
+			TaskSpecDigest:      taskSpecDigest,
 			ToolExecutionMode:   string(toolGovernance.mode),
 			BrokeredToolClasses: toolGovernance.classes,
 			BrokeredTools:       toolGovernance.tools,
@@ -265,9 +275,6 @@ func validateHarnessV1RuntimeAuthOnly(
 }
 
 func validateNewHarnessV1Workload(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
-	if task.Spec.Transaction != nil {
-		return errors.New("harness v1 agent Tasks do not accept transaction tokens")
-	}
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
 		return errors.New("new harness v1 bindings do not accept the legacy agentRuntime.workspace surface")
 	}
@@ -879,9 +886,14 @@ func (d *HarnessV1Dispatcher) loadHarnessV1ExecutionForSettlement(
 	return verifier.loadHarnessV1ExecutionWithOptions(ctx, task, binding, true, false)
 }
 
-func harnessV1TaskGenerationMatchesBinding(
+func harnessV1TaskSpecDigest(spec corev1alpha1.TaskSpec) (string, error) {
+	return acpDomainDigest("harness-v1-task-spec", spec)
+}
+
+func harnessV1TaskMatchesBindingSnapshot(
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
+	body agentExecutionSnapshotBody,
 	allowDeleting bool,
 ) bool {
 	if task == nil || binding == nil {
@@ -890,12 +902,17 @@ func harnessV1TaskGenerationMatchesBinding(
 	if task.Generation == binding.Task.BoundSpecGeneration {
 		return true
 	}
-	// The API server increments a custom resource's generation once when it
-	// starts deletion. Task spec writes are already rejected after execution
-	// authority is bound, so only that exact deletion transition is authorized
-	// for recovery, cancellation, and terminal settlement.
-	return allowDeleting && !task.DeletionTimestamp.IsZero() && task.Generation > 1 &&
-		task.Generation-1 == binding.Task.BoundSpecGeneration
+	// Recovery may observe a single generation transition while deletion is in
+	// progress. Never infer that transition from generation alone: require the
+	// complete live Task spec to match the digest frozen into the validated
+	// execution snapshot.
+	if !allowDeleting || task.DeletionTimestamp.IsZero() || task.Generation <= 1 ||
+		task.Generation-1 != binding.Task.BoundSpecGeneration || body.HarnessV1 == nil ||
+		body.HarnessV1.TaskSpecDigest == "" {
+		return false
+	}
+	digest, err := harnessV1TaskSpecDigest(task.Spec)
+	return err == nil && digest == body.HarnessV1.TaskSpecDigest
 }
 
 //nolint:gocyclo // The options separate executor authorization from terminal-only settlement verification.
@@ -918,9 +935,8 @@ func (r *TaskReconciler) loadHarnessV1ExecutionWithOptions(
 		return nil, fmt.Errorf("uncached Task read before harness v1 dispatch: %w", err)
 	}
 	if current.UID != task.UID || (!allowDeleting && !current.DeletionTimestamp.IsZero()) ||
-		!harnessV1TaskGenerationMatchesBinding(current, binding, allowDeleting) ||
 		current.Status.AgentExecutionBinding == nil || current.Status.AgentExecutionBinding.BindingDigest != binding.BindingDigest {
-		return nil, errors.New("task identity, generation, deletion state, or persisted harness v1 binding changed")
+		return nil, errors.New("task identity, deletion state, or persisted harness v1 binding changed")
 	}
 	canonicalDigest, err := canonicalAgentExecutionBindingDigest(*current.Status.AgentExecutionBinding)
 	if err != nil || canonicalDigest != binding.BindingDigest {
@@ -949,6 +965,9 @@ func (r *TaskReconciler) loadHarnessV1ExecutionWithOptions(
 	}
 	if err := validateHarnessV1Snapshot(binding, snapshot, body); err != nil {
 		return nil, err
+	}
+	if !harnessV1TaskMatchesBindingSnapshot(current, binding, body, allowDeleting) {
+		return nil, errors.New("task generation or spec no longer matches the persisted harness v1 binding")
 	}
 	if verifySecrets {
 		allRefs := append([]agentExecutionSnapshotSecretRef(nil), body.HarnessV1.CredentialRefs...)
