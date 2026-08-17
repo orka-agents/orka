@@ -127,6 +127,8 @@ registry_owner="coexistence-live-e2e-$(basename "${work_dir}" | tr -c 'a-zA-Z0-9
 registry_owner="${registry_owner%-}"
 api_pf_log="${work_dir}/api-port-forward.log"
 api_local_port="${COEXISTENCE_API_LOCAL_PORT:-18093}"
+v2_readiness_monitor_pid=""
+v2_readiness_violations="${work_dir}/v2-readiness-violations.log"
 
 # All kubectl/helm/kind interactions use an isolated kubeconfig inside the
 # run's temp directory; the user's global kubeconfig and current-context are
@@ -165,6 +167,46 @@ cleanup_port_forward() {
     fi
     wait "${api_pf_pid}" 2>/dev/null || true
     api_pf_pid=""
+  fi
+}
+
+# Continuously sample the v2 controller Deployment's readiness (1s cadence)
+# into a violations file so a transient v2 outage during the v1 controller
+# restart cannot escape a single post-restart check. A failed kubectl read is
+# retried once immediately so one apiserver blip is not misclassified; two
+# consecutive read failures are recorded fail-closed as a violation.
+start_v2_readiness_monitor() {
+  : >"${v2_readiness_violations}"
+  (
+    local deployment_json
+    while true; do
+      deployment_json="$(kubectl -n "${v2_namespace}" get deployment "${v2_controller_deployment}" -o json 2>/dev/null)" || deployment_json=""
+      if [[ -z "${deployment_json}" ]]; then
+        sleep 1
+        deployment_json="$(kubectl -n "${v2_namespace}" get deployment "${v2_controller_deployment}" -o json 2>/dev/null)" || deployment_json=""
+      fi
+      if ! jq -e \
+        '.status.observedGeneration == .metadata.generation
+          and (.status.updatedReplicas // 0) == .spec.replicas
+          and (.status.readyReplicas // 0) == .spec.replicas
+          and (.status.availableReplicas // 0) == .spec.replicas' \
+        >/dev/null 2>&1 <<<"${deployment_json}"; then
+        printf '%s v2 controller deployment was not fully Ready\n' \
+          "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"${v2_readiness_violations}"
+      fi
+      sleep 1
+    done
+  ) &
+  v2_readiness_monitor_pid=$!
+}
+
+stop_v2_readiness_monitor() {
+  if [[ -n "${v2_readiness_monitor_pid}" ]]; then
+    if kill -0 "${v2_readiness_monitor_pid}" 2>/dev/null; then
+      kill "${v2_readiness_monitor_pid}" 2>/dev/null || true
+    fi
+    wait "${v2_readiness_monitor_pid}" 2>/dev/null || true
+    v2_readiness_monitor_pid=""
   fi
 }
 
@@ -213,6 +255,7 @@ on_exit() {
     dump_diagnostics
   fi
 
+  stop_v2_readiness_monitor
   cleanup_port_forward
   # Ownership-checked stop: removes only the registry container carrying this
   # run's owner label, never a foreign run's registry.
@@ -294,28 +337,41 @@ base64_no_wrap() {
 }
 
 # Apply the manifest on stdin with server-side dry-run and require the request
-# to be denied with the expected admission message.
+# to be denied with the expected admission message. Transient webhook transport
+# errors (endpoint propagation or a webhook socket that is not accepting yet
+# right after rollout) surface as "failed calling webhook"; only those are
+# retried. An admitted request or a denial with the wrong message fails
+# immediately.
 expect_admission_denied() {
   local description="$1"
   local expected="$2"
   local manifest_file="$3"
   local err_file="${work_dir}/admission-denied.err"
+  local attempts_remaining=20
 
-  if kubectl apply --dry-run=server -f "${manifest_file}" >"${err_file}" 2>&1; then
-    {
-      echo "expected admission denial for ${description}, but the request was admitted:"
-      cat "${err_file}" 2>/dev/null || true
-    } | redact >&2
-    return 1
-  fi
-  if ! grep -Fq "${expected}" "${err_file}"; then
-    {
-      echo "admission denial for ${description} did not contain ${expected}:"
-      cat "${err_file}" 2>/dev/null || true
-    } | redact >&2
-    return 1
-  fi
-  log "Denied as expected: ${description}"
+  while (( attempts_remaining > 0 )); do
+    if kubectl apply --dry-run=server -f "${manifest_file}" >"${err_file}" 2>&1; then
+      {
+        echo "expected admission denial for ${description}, but the request was admitted:"
+        cat "${err_file}" 2>/dev/null || true
+      } | redact >&2
+      return 1
+    fi
+    if grep -Fq "${expected}" "${err_file}"; then
+      log "Denied as expected: ${description}"
+      return 0
+    fi
+    if ! grep -Eq 'failed calling webhook|no endpoints available' "${err_file}"; then
+      break
+    fi
+    attempts_remaining=$((attempts_remaining - 1))
+    sleep 3
+  done
+  {
+    echo "admission denial for ${description} did not contain ${expected}:"
+    cat "${err_file}" 2>/dev/null || true
+  } | redact >&2
+  return 1
 }
 
 expect_can_i() {
@@ -423,6 +479,33 @@ split_image_digest() {
   printf '%s' "${1##*@}"
 }
 
+# Fail-closed reuse guard: a pre-existing cluster may only be reused when the
+# fixed coexistence namespaces and Helm releases are absent. Without this
+# check, a rerun against a live coexistence installation would rotate the
+# snapshot key, webhook TLS, and wrapper credentials under workloads this run
+# does not own before helm install ever had a chance to fail on the existing
+# releases. Runs before any cluster write; a cluster this invocation created
+# is fresh and needs no check.
+assert_reused_cluster_is_unclaimed() {
+  local conflicts=() ns entry release release_ns
+  for ns in "${v1_namespace}" "${v2_namespace}" "${v2_runtime_namespace}"; do
+    if kubectl get namespace "${ns}" >/dev/null 2>&1; then
+      conflicts+=("namespace/${ns}")
+    fi
+  done
+  for entry in "${v1_release}:${v1_namespace}" "${v2_release}:${v2_namespace}"; do
+    release="${entry%%:*}"
+    release_ns="${entry#*:}"
+    if helm status "${release}" --namespace "${release_ns}" >/dev/null 2>&1; then
+      conflicts+=("helm-release/${release_ns}/${release}")
+    fi
+  done
+  if (( ${#conflicts[@]} > 0 )); then
+    die "refusing to reuse pre-existing kind cluster ${kind_cluster}: found ${conflicts[*]}; delete those namespaces/releases (or the cluster) or run with a dedicated KIND_CLUSTER name"
+  fi
+  log "Reused cluster contains no coexistence namespaces or releases; proceeding"
+}
+
 create_namespace_secrets() {
   local namespace="$1"
   local webhook_service="$2"
@@ -472,6 +555,11 @@ main() {
     run kind export kubeconfig --name "${kind_cluster}" --kubeconfig "${KUBECONFIG}"
   fi
   run kubectl config use-context "kind-${kind_cluster}"
+
+  if [[ "${cluster_created_by_run}" != "1" ]]; then
+    log "Verifying the reused cluster holds no existing coexistence installation"
+    assert_reused_cluster_is_unclaimed
+  fi
 
   # Start the local registry with a per-run ownership label. The helper's
   # unowned form force-removes any same-named container, which could destroy
@@ -759,11 +847,18 @@ EOF_TASK_TWO
   cleanup_port_forward
   local pre_restart_pod post_restart_pod
   pre_restart_pod="$(kubectl -n "${v1_namespace}" get pods -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}')"
+  log "Sampling v2 controller readiness continuously across the v1 restart"
+  start_v2_readiness_monitor
   run kubectl -n "${v1_namespace}" rollout restart "deployment/${v1_controller_deployment}"
   run kubectl -n "${v1_namespace}" rollout status "deployment/${v1_controller_deployment}" --timeout="${rollout_timeout}"
   post_restart_pod="$(kubectl -n "${v1_namespace}" get pods -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}')"
   [[ -n "${post_restart_pod}" && "${post_restart_pod}" != "${pre_restart_pod}" ]] || \
     die "v1 controller Pod was not replaced by the restart"
+  stop_v2_readiness_monitor
+  if [[ -s "${v2_readiness_violations}" ]]; then
+    cat "${v2_readiness_violations}" | redact >&2
+    die "v2 controller lost readiness during the v1 controller restart"
+  fi
 
   log "Asserting ledger-backed recovery settles the in-flight v1 Task"
   wait_until "Task/coexistence-v1-restart-task settlement after controller restart" "${task_wait_seconds}" \
@@ -773,7 +868,7 @@ EOF_TASK_TWO
   assert_result_contains coexistence-v1-restart-task "${nonce_two}"
   cleanup_port_forward
   deployment_ready "${v2_namespace}" "${v2_controller_deployment}" || \
-    die "v2 controller lost readiness during the v1 controller restart"
+    die "v2 controller was not Ready after the restarted v1 Task settled"
 
   log "Proving the isolation matrix: cross-namespace RBAC denial"
   expect_can_i yes "${v1_controller_sa}" get tasks.core.orka.ai "${v1_namespace}"
@@ -830,10 +925,45 @@ EOF_TASK_TWO
   grep -Fq "legacy harness-wrapper resources remain" "${legacy_out}" || \
     die "check-legacy-wrapper-resources.sh default branch did not report the wrapper inventory"
 
+  log "Deleting test-created v1 Tasks and Agent through the API before retirement"
+  # Wait for the v1 controller and wrapper to settle each orka.ai/cleanup
+  # finalizer before retiring either component. This proves the production
+  # deletion path instead of bypassing its wrapper-settlement barrier.
+  run kubectl -n "${v1_namespace}" delete task coexistence-v1-task coexistence-v1-restart-task \
+    --ignore-not-found --wait=true --timeout=120s
+  run kubectl -n "${v1_namespace}" delete agent coexistence-v1-agent \
+    --ignore-not-found --timeout=120s
+
   log "Uninstalling the v1 release and asserting the v2 installation is unaffected"
   run helm uninstall "${v1_release}" --namespace "${v1_namespace}" --timeout 5m
   wait_until "wrapper Deployment removal" 120 bash -c \
     "! kubectl -n '${v1_namespace}' get deployment '${wrapper_deployment}' >/dev/null 2>&1"
+
+  # helm uninstall removes only release-managed objects. The script-created
+  # Secrets/ConfigMap use custom names the legacy-resource check does not
+  # match, and the release's ledger PVC carries helm.sh/resource-policy: keep,
+  # so on a retained/reused cluster all of them would silently survive v1
+  # retirement. Delete every remaining test-created object explicitly, then
+  # prove nothing test-owned is left before asserting retirement.
+  log "Deleting test-created v1 Secrets, ConfigMap, and the kept ledger PVC"
+  run kubectl -n "${v1_namespace}" delete secret \
+    orka-agent-snapshot-key orka-webhook-tls orka-wrapper-auth orka-wrapper-tls \
+    --ignore-not-found
+  run kubectl -n "${v1_namespace}" delete configmap coexistence-fake-agent --ignore-not-found
+  run kubectl -n "${v1_namespace}" delete pvc "${v1_release}-harness-v1-ledger" \
+    --ignore-not-found --timeout=120s
+
+  log "Asserting no test-created objects survive v1 retirement"
+  local leftover
+  leftover="$(kubectl -n "${v1_namespace}" get \
+    secret/orka-agent-snapshot-key secret/orka-webhook-tls \
+    secret/orka-wrapper-auth secret/orka-wrapper-tls \
+    configmap/coexistence-fake-agent \
+    "pvc/${v1_release}-harness-v1-ledger" \
+    task/coexistence-v1-task task/coexistence-v1-restart-task \
+    agent/coexistence-v1-agent \
+    --ignore-not-found -o name 2>/dev/null)" || leftover="query-failed"
+  [[ -z "${leftover}" ]] || die "test-created objects survived v1 retirement: ${leftover}"
   deployment_ready "${v2_namespace}" "${v2_controller_deployment}" || \
     die "v2 controller lost readiness after the v1 release uninstall"
   kubectl get crd tasks.core.orka.ai >/dev/null || \

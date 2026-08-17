@@ -51,6 +51,23 @@ done
 ((crd_line < v1_ns_line && v1_ns_line < v2_ns_line && v2_ns_line < secret_line && secret_line < v1_install_line && v1_install_line < v2_install_line)) ||
   fail 'E2E must apply CRDs, claim mode-labeled namespaces, and write secrets before installing either release'
 
+# Reuse safety: a pre-existing cluster must be proven free of the fixed
+# coexistence namespaces and Helm releases before any registry, CRD, or secret
+# write, and refused with an operator-actionable message otherwise.
+guard_call_line="$(grep -nE '^[[:space:]]+assert_reused_cluster_is_unclaimed$' "${e2e_script}" | head -n1 | cut -d: -f1)"
+registry_line="$(grep -nF 'orka_kind_registry_start "${kind_cluster}" "${registry_owner}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
+for line in "${guard_call_line}" "${registry_line}"; do
+  [[ "${line}" =~ ^[0-9]+$ ]] || fail 'E2E is missing the cluster-reuse refusal guard'
+done
+((guard_call_line < registry_line && registry_line < crd_line && crd_line < secret_line)) ||
+  fail 'E2E must refuse a claimed pre-existing cluster before any registry, CRD, or secret write'
+grep -Fq 'kubectl get namespace "${ns}"' "${e2e_script}" ||
+  fail 'reuse guard must check for the fixed coexistence namespaces'
+grep -Fq 'helm status "${release}" --namespace "${release_ns}"' "${e2e_script}" ||
+  fail 'reuse guard must check for existing coexistence Helm releases'
+grep -Fq 'refusing to reuse pre-existing kind cluster' "${e2e_script}" ||
+  fail 'reuse guard must die with an operator-actionable refusal message'
+
 # Both releases install against the shared platform-owned CRD wave.
 [[ "$(grep -c -- '--skip-crds' "${e2e_script}")" -ge 2 ]] ||
   fail 'both Helm releases must install with --skip-crds'
@@ -83,6 +100,25 @@ done
 grep -Fq ': >/tmp/coexistence-hold-turn-active' "${fake_agent}" ||
   fail 'fake agent must write the durable-admission hold marker before sleeping'
 
+# v2 readiness must be sampled continuously across the v1 restart: sampler
+# started before the restart, stopped both on the main path after the
+# replacement controller settles and on every exit path, and asserted to have
+# recorded zero violations.
+monitor_start_line="$(grep -nE '^[[:space:]]+start_v2_readiness_monitor$' "${e2e_script}" | head -n1 | cut -d: -f1)"
+exit_stop_line="$(grep -nE '^[[:space:]]+stop_v2_readiness_monitor$' "${e2e_script}" | head -n1 | cut -d: -f1)"
+main_stop_line="$(grep -nE '^[[:space:]]+stop_v2_readiness_monitor$' "${e2e_script}" | tail -n1 | cut -d: -f1)"
+for line in "${monitor_start_line}" "${exit_stop_line}" "${main_stop_line}"; do
+  [[ "${line}" =~ ^[0-9]+$ ]] || fail 'E2E is missing the continuous v2 readiness sampler'
+done
+((exit_stop_line < monitor_start_line && monitor_start_line < restart_line && restart_line < main_stop_line)) ||
+  fail 'E2E must stop the v2 readiness sampler on exit paths and bracket the v1 restart with start/stop'
+grep -Fq '>>"${v2_readiness_violations}"' "${e2e_script}" ||
+  fail 'v2 readiness sampler must record violations into the violations file'
+grep -Fq '[[ -s "${v2_readiness_violations}" ]]' "${e2e_script}" ||
+  fail 'E2E must assert the v2 readiness violations file stayed empty'
+grep -Fq 'v2 controller lost readiness during the v1 controller restart' "${e2e_script}" ||
+  fail 'E2E must fail when the sampler observed a v2 readiness violation'
+
 # Isolation matrix: RBAC denial both directions plus NetworkPolicy selection.
 grep -Fq 'kubectl auth can-i' "${e2e_script}" || fail 'E2E must run kubectl auth can-i isolation checks'
 grep -Fq -- '--as="${v1_controller_sa}"' "${e2e_script}" || fail 'E2E must issue a real impersonated cross-namespace request as the v1 controller'
@@ -98,6 +134,33 @@ grep -Fq 'coexistence mode: wrapper resources are allowed' "${e2e_script}" ||
   fail 'E2E must assert the coexistence verdict of check-legacy-wrapper-resources.sh'
 grep -Fq 'legacy harness-wrapper resources remain' "${e2e_script}" ||
   fail 'E2E must assert the default-branch verdict while the wrapper exists'
+
+# v1 retirement must explicitly remove every test-created object: gracefully
+# wait for Tasks and the Agent while the v1 controller and wrapper can still
+# settle finalizers, then remove the custom-named Secrets, the fake-agent
+# ConfigMap, and the helm-kept ledger PVC, with a leftover assertion before the
+# final retirement check.
+task_delete_line="$(grep -nF 'delete task coexistence-v1-task coexistence-v1-restart-task' "${e2e_script}" | head -n1 | cut -d: -f1)"
+agent_delete_line="$(grep -nF 'delete agent coexistence-v1-agent' "${e2e_script}" | head -n1 | cut -d: -f1)"
+uninstall_line="$(grep -nF 'helm uninstall "${v1_release}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
+secret_delete_line="$(grep -nF 'orka-agent-snapshot-key orka-webhook-tls orka-wrapper-auth orka-wrapper-tls \' "${e2e_script}" | head -n1 | cut -d: -f1)"
+configmap_delete_line="$(grep -nF 'delete configmap coexistence-fake-agent --ignore-not-found' "${e2e_script}" | head -n1 | cut -d: -f1)"
+pvc_delete_line="$(grep -nF 'delete pvc "${v1_release}-harness-v1-ledger"' "${e2e_script}" | head -n1 | cut -d: -f1)"
+leftover_line="$(grep -nF 'test-created objects survived v1 retirement' "${e2e_script}" | head -n1 | cut -d: -f1)"
+final_check_line="$(grep -nF 'bash "${script_dir}/check-legacy-wrapper-resources.sh"' "${e2e_script}" | tail -n1 | cut -d: -f1)"
+for line in "${task_delete_line}" "${agent_delete_line}" "${uninstall_line}" "${secret_delete_line}" "${configmap_delete_line}" "${pvc_delete_line}" "${leftover_line}" "${final_check_line}"; do
+  [[ "${line}" =~ ^[0-9]+$ ]] || fail 'E2E is missing the explicit test-object retirement cleanup'
+done
+((task_delete_line < agent_delete_line && agent_delete_line < uninstall_line &&
+  uninstall_line < secret_delete_line && secret_delete_line < configmap_delete_line &&
+  configmap_delete_line < pvc_delete_line && pvc_delete_line < leftover_line &&
+  leftover_line < final_check_line)) ||
+  fail 'E2E must delete Tasks/Agent before uninstall, then Secrets/ConfigMap/PVC, then assert no leftovers before the final retirement check'
+grep -Fq -- '--ignore-not-found --wait=true --timeout=120s' "${e2e_script}" ||
+  fail 'E2E must wait for graceful Task finalization before uninstalling the v1 controller and wrapper'
+if grep -Fq '"finalizers":null' "${e2e_script}"; then
+  fail 'E2E must not bypass the Task cleanup finalizer during v1 retirement'
+fi
 
 # No controller-owned resources in the pre-isolation default namespace.
 if grep -Eq '(^|[[:space:]])-n[[:space:]]+default([[:space:]]|$)|^[[:space:]]*namespace:[[:space:]]+default([[:space:]]|$)' "${e2e_script}"; then
