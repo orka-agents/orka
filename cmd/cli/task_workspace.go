@@ -64,27 +64,30 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 	if intent != string(corev1alpha1.WorkspaceIntentRead) && intent != string(corev1alpha1.WorkspaceIntentWrite) {
 		return nil, fmt.Errorf("--workspace-intent must be read or write")
 	}
-	workspaceFlagsUsed := false
+	intentFlagUsed := cmd.Flags().Changed("workspace-intent")
+	otherWorkspaceFlagsUsed := false
 	for _, name := range []string{
-		"workspace-intent", "git-repo", "source-repository-provider", "source-repository-id", "branch", "ref",
+		"git-repo", "source-repository-provider", "source-repository-id", "branch", "ref",
 		"sub-path", "read-credential", "read-credential-key", "publication-git-repo", "publication-repository-provider",
 		"publication-repository-id", "publication-read-credential", "publication-read-credential-key",
 		"publication-credential", "publication-credential-key", "forge-credential", "forge-credential-key",
 		"push-branch", "pr-base-branch", "create-pr",
 	} {
-		workspaceFlagsUsed = workspaceFlagsUsed || cmd.Flags().Changed(name)
+		otherWorkspaceFlagsUsed = otherWorkspaceFlagsUsed || cmd.Flags().Changed(name)
 	}
 	if taskType != cliTaskTypeAgent {
-		if workspaceFlagsUsed {
+		if otherWorkspaceFlagsUsed || intentFlagUsed {
 			return nil, fmt.Errorf("workspace flags are supported only for agent tasks")
 		}
 		return nil, nil
 	}
-	// Only serialize a workspace when the user actually set a workspace flag:
-	// a bare {intent: "read"} would make an otherwise valid prompt-only agent
-	// Task fail preflight in harness-v1 mode, which requires gitRepo on any
-	// non-nil workspace.
-	if !workspaceFlagsUsed {
+	// Only serialize a workspace when the user actually configured a workspace
+	// field: a bare {intent: "read"} — whether defaulted or passed explicitly —
+	// would make an otherwise valid prompt-only agent Task fail preflight in
+	// harness-v1 mode, which requires gitRepo on any non-nil workspace. An
+	// explicit write intent is a real configuration and proceeds so its
+	// missing-gitRepo validation error surfaces instead of being dropped.
+	if !otherWorkspaceFlagsUsed && (!intentFlagUsed || intent != string(corev1alpha1.WorkspaceIntentWrite)) {
 		return nil, nil
 	}
 	if (strings.TrimSpace(o.sourceRepositoryProvider) == "") != (strings.TrimSpace(o.sourceRepositoryID) == "") {

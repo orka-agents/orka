@@ -12,6 +12,7 @@ import { useAgentList } from '@/hooks/use-agents'
 import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
 import { workspaceConfigSchema, type WorkspaceIntent } from '@/schemas/task'
+import { validateWorkspaceRepositoryUrl } from '@/lib/workspace-repository'
 import { builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
 
 function optionalRepositoryIdentity(provider: string, id: string) {
@@ -129,8 +130,19 @@ export function TaskCreateForm() {
         return
       }
 
+      const sourceRepoResult = validateWorkspaceRepositoryUrl('Source repository URL', gitRepo)
+      if ('error' in sourceRepoResult) {
+        toast.error(sourceRepoResult.error)
+        return
+      }
+      const publicationRepoResult = validateWorkspaceRepositoryUrl('Publication repository URL', publicationGitRepo)
+      if ('error' in publicationRepoResult) {
+        toast.error(publicationRepoResult.error)
+        return
+      }
+
       const workspace: Record<string, unknown> = { intent: workspaceIntent }
-      if (gitRepo.trim()) workspace.gitRepo = gitRepo.trim()
+      if (sourceRepoResult.url) workspace.gitRepo = sourceRepoResult.url
       const sourceRepository = optionalRepositoryIdentity(sourceProvider, sourceRepositoryID)
       if (sourceRepository) workspace.sourceRepository = sourceRepository
       if (branch.trim()) workspace.branch = branch.trim()
@@ -140,7 +152,7 @@ export function TaskCreateForm() {
       if (readCredentialRef) workspace.readCredentialRef = readCredentialRef
 
       if (workspaceIntent === 'write') {
-        if (publicationGitRepo.trim()) workspace.publicationGitRepo = publicationGitRepo.trim()
+        if (publicationRepoResult.url) workspace.publicationGitRepo = publicationRepoResult.url
         const publicationRepository = optionalRepositoryIdentity(publicationProvider, publicationRepositoryID)
         if (publicationRepository) workspace.publicationRepository = publicationRepository
         const publicationReadCredentialRef = optionalCredentialReference(

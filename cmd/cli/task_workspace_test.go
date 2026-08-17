@@ -122,6 +122,48 @@ func TestTaskCreateOmitsWorkspaceForPromptOnlyAgentTask(t *testing.T) {
 	}
 }
 
+func TestTaskCreateOmitsWorkspaceForExplicitReadIntentWithoutFields(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "prompt-task"}}) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{
+		"--server", server.URL, "--token", "test-token",
+		"task", "create", "Answer a question", "--type", "agent", "--agent", "a", "--workspace-intent", "read",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["workspace"]; ok {
+		t.Fatalf("explicit default read intent alone must omit workspace, got %#v", body["workspace"])
+	}
+}
+
+func TestTaskCreateRejectsExplicitWriteIntentWithoutGitRepo(t *testing.T) {
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "create", "Change things", "--type", "agent", "--agent", "a", "--workspace-intent", "write"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--workspace-intent write requires --git-repo") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTaskCreateRejectsWorkspaceIntentForNonAgentTask(t *testing.T) {
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "create", "--type", "container", "--image", "busybox", "--workspace-intent", "read"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "workspace flags are supported only for agent tasks") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestTaskCreateRejectsPublicationForReadIntent(t *testing.T) {
 	root := newRootCmd()
 	root.SetArgs([]string{"task", "create", "Inspect", "--type", "agent", "--agent", "a", "--publication-credential", "repo-write"})
