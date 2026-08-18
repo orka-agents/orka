@@ -45,7 +45,9 @@ func NewBrokerArtifactAuthorizationProvider(baseURL, namespace, bearer string, c
 	if strings.TrimSpace(namespace) == "" || len(strings.TrimSpace(bearer)) < 32 || len(capabilitySecret) < harnessv2.MinCapabilitySecretBytes {
 		return nil, fmt.Errorf("artifact broker identity is invalid")
 	}
-	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	// Authenticated in-cluster controller traffic must never traverse an
+	// inherited environment proxy.
+	client := &http.Client{Timeout: 30 * time.Second, Transport: harnessv2.NewProxylessTransport(), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return &brokerArtifactAuthorizationProvider{endpoint: parsed, client: client, namespace: namespace, controllerBearer: bearer, capabilitySecret: append([]byte(nil), capabilitySecret...)}, nil
 }
 

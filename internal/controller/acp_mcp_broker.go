@@ -380,8 +380,11 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusGone, "MCP broker policy is stale")
 		return
 	}
+	// Verify with a fresh timestamp: credential resolution above performs
+	// Kubernetes I/O, and a capability that expired while it ran must not be
+	// accepted against the stale pre-resolution clock.
 	if err := harnessv2.VerifyOperationCapability(
-		credentials.CapabilitySecret, r.Header.Get(harnessv2.OperationCapabilityHeader), request.Metadata, true, now,
+		credentials.CapabilitySecret, r.Header.Get(harnessv2.OperationCapabilityHeader), request.Metadata, true, time.Now().UTC(),
 	); err != nil {
 		writeACPMCPError(w, http.StatusForbidden, "MCP broker operation authorization failed")
 		return

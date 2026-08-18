@@ -73,7 +73,9 @@ func newArtifactClient(baseURL string, client *http.Client, authorization Artifa
 		return nil, fmt.Errorf("artifact API base URL must not contain a path")
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 2 * time.Minute}
+		// Authenticated in-cluster artifact transfers must never traverse an
+		// inherited environment proxy.
+		client = &http.Client{Timeout: 2 * time.Minute, Transport: harnessv2.NewProxylessTransport()}
 	}
 	clientCopy := *client
 	clientCopy.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }

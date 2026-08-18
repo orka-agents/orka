@@ -44,7 +44,10 @@ func NewControllerMCPBrokerClient(baseURL, namespace, bearer string, capabilityS
 		return nil, fmt.Errorf("MCP broker identity is invalid")
 	}
 	transport := &http.Transport{
-		Proxy:                  http.ProxyFromEnvironment,
+		// Broker requests target the in-cluster controller endpoint with the
+		// controller bearer and operation capability in headers; environment
+		// proxies must never carry them.
+		Proxy:                  nil,
 		DialContext:            (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2:      true,
 		MaxIdleConns:           100,

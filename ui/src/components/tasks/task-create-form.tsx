@@ -13,6 +13,7 @@ import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
 import { workspaceConfigSchema, type WorkspaceIntent } from '@/schemas/task'
 import { validateWorkspaceRepositoryUrl } from '@/lib/workspace-repository'
+import { workspaceSourceBranchError, workspaceSourceRefError } from '@/lib/workspace-source-ref'
 import { builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
 
 function optionalRepositoryIdentity(provider: string, id: string) {
@@ -138,9 +139,27 @@ export function TaskCreateForm() {
           { label: 'Source ref', value: gitRef },
           { label: 'Source subpath', value: subPath },
           { label: 'Read credential Secret', value: readCredentialName },
+          { label: 'Source repository provider', value: sourceProvider },
+          { label: 'Source repository URL identity', value: sourceRepositoryID },
         ].find((field) => field.value.trim())
         if (dependentField) {
           toast.error(`${dependentField.label} requires a source repository URL`)
+          return
+        }
+      }
+      // Mirror the controller's canonical source-ref validation so malformed
+      // selectors fail here instead of after the Task is created.
+      if (gitRef.trim()) {
+        const refError = workspaceSourceRefError(gitRef.trim())
+        if (refError) {
+          toast.error(`Source ref is invalid: ${refError}`)
+          return
+        }
+      }
+      if (branch.trim()) {
+        const branchError = workspaceSourceBranchError(branch.trim())
+        if (branchError) {
+          toast.error(`Source branch is invalid: ${branchError}`)
           return
         }
       }

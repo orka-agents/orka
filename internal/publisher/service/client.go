@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 type ClientConfig struct {
@@ -77,8 +79,10 @@ func NewClient(config ClientConfig) (*Client, error) {
 		// request context so configured operation timeouts (for example
 		// ORKA_PUBLISHER_PUBLISH_TIMEOUT above the former three-minute client
 		// ceiling) are honored. Requests without a caller deadline fall back to
-		// defaultRequestTimeout in requestContext.
-		client = &http.Client{}
+		// defaultRequestTimeout in requestContext. Every mutation carries the
+		// publisher bearer and signed operation capability to an in-cluster
+		// Service, so the transport must never resolve environment proxies.
+		client = &http.Client{Transport: harnessv2.NewProxylessTransport()}
 	} else {
 		clone := *client
 		client = &clone

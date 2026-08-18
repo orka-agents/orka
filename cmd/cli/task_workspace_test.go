@@ -175,6 +175,50 @@ func TestTaskCreateRejectsSourceSelectorsWithoutRepository(t *testing.T) {
 		{name: "ref without repository", args: []string{"--ref", "refs/heads/main"}, want: "--ref requires --git-repo"},
 		{name: "sub-path without repository", args: []string{"--sub-path", "services/api"}, want: "--sub-path requires --git-repo"},
 		{name: "read credential without repository", args: []string{"--read-credential", "repo-read"}, want: "--read-credential requires --git-repo"},
+		{
+			name: "source repository identity without repository",
+			args: []string{"--source-repository-provider", "github", "--source-repository-id", "github.com/owner/repo"},
+			want: "--source-repository-provider requires --git-repo",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newRootCmd()
+			root.SetArgs(append([]string{"task", "create", "Inspect", "--type", "agent", "--agent", "a"}, tt.args...))
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestTaskCreateRejectsMalformedSourceSelectors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "unsupported ref namespace as branch",
+			args: []string{"--git-repo", "https://github.com/owner/repo", "--branch", "refs/remotes/origin/main"},
+			want: "--branch is invalid",
+		},
+		{
+			name: "malformed branch",
+			args: []string{"--git-repo", "https://github.com/owner/repo", "--branch", "bad..branch"},
+			want: "--branch is invalid",
+		},
+		{
+			name: "unsupported ref namespace",
+			args: []string{"--git-repo", "https://github.com/owner/repo", "--ref", "refs/remotes/origin/main"},
+			want: "--ref is invalid",
+		},
+		{
+			name: "malformed ref",
+			args: []string{"--git-repo", "https://github.com/owner/repo", "--ref", "refs/heads/bad..ref"},
+			want: "--ref is invalid",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

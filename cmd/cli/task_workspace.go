@@ -9,6 +9,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/cli/client"
+	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/security"
 )
 
@@ -85,6 +86,9 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 		return nil, err
 	}
 	if err := o.validateSourceSelectorDependencies(); err != nil {
+		return nil, err
+	}
+	if err := o.validateSourceSelectors(); err != nil {
 		return nil, err
 	}
 	if (strings.TrimSpace(o.sourceRepositoryProvider) == "") != (strings.TrimSpace(o.sourceRepositoryID) == "") {
@@ -170,9 +174,33 @@ func (o taskWorkspaceCreateOptions) validateSourceSelectorDependencies() error {
 		{flag: "--ref", value: o.ref},
 		{flag: "--sub-path", value: o.subPath},
 		{flag: "--read-credential", value: o.readCredential},
+		{flag: "--source-repository-provider", value: o.sourceRepositoryProvider},
+		{flag: "--source-repository-id", value: o.sourceRepositoryID},
 	} {
 		if strings.TrimSpace(dependent.value) != "" {
 			return fmt.Errorf("%s requires --git-repo", dependent.flag)
+		}
+	}
+	return nil
+}
+
+// validateSourceSelectors mirrors the controller's runtimeWorkspaceSourceRef
+// selector validation with the same canonical source-ref validator, so a Task
+// with a malformed branch or ref selector fails here instead of after
+// creation. Keep in exact behavior parity with the controller.
+func (o taskWorkspaceCreateOptions) validateSourceSelectors() error {
+	if ref := strings.TrimSpace(o.ref); ref != "" {
+		if _, err := publisherservice.CanonicalWorkspaceSourceRef(ref); err != nil {
+			return fmt.Errorf("--ref is invalid: %v", err)
+		}
+	}
+	if branch := strings.TrimSpace(o.branch); branch != "" {
+		candidate := branch
+		if !strings.HasPrefix(candidate, "refs/") {
+			candidate = "refs/heads/" + candidate
+		}
+		if _, err := publisherservice.CanonicalWorkspaceSourceRef(candidate); err != nil {
+			return fmt.Errorf("--branch is invalid: %v", err)
 		}
 	}
 	return nil

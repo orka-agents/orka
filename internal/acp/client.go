@@ -166,9 +166,30 @@ func (c *Client) call(ctx context.Context, method string, params, result any, on
 	c.pendingMu.Unlock()
 
 	request := rpcMessage{JSONRPC: "2.0", ID: idRaw, Method: method, Params: paramsRaw}
-	if err := c.writeMessage(request); err != nil {
+	// The request write blocks indefinitely when the adapter stops reading
+	// stdin, so it must honor cancellation like the response wait below: run
+	// it in a goroutine and abandon it on ctx expiry. If the abandoned write
+	// completes later, a courtesy cancel follows it on the same ordered pipe
+	// so the adapter does not keep executing a request whose caller gave up.
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- c.writeMessage(request) }()
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			c.removePending(key)
+			return err
+		}
+	case <-ctx.Done():
 		c.removePending(key)
-		return err
+		go func() {
+			if err := <-writeDone; err == nil {
+				_ = c.Notify(context.Background(), MethodCancelRequest, CancelRequestNotification{RequestID: idRaw})
+			}
+		}()
+		return ctx.Err()
+	case <-c.closed:
+		c.removePending(key)
+		return c.closedError()
 	}
 	if onWritten != nil {
 		onWritten()

@@ -62,7 +62,10 @@ func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
 	}
 	capabilitySecret := secret.Data[runtimePoolCapabilitySecretKeyAPI]
-	if err := harnessv2.VerifyOperationCapability(capabilitySecret, string(c.Request().Header.Peek(harnessv2.OperationCapabilityHeader)), request.Metadata, true, now); err != nil {
+	// Verify with a fresh timestamp: runtime-pool resolution above performs
+	// Kubernetes I/O, and a capability that expired while it ran must not be
+	// accepted against the stale pre-resolution clock.
+	if err := harnessv2.VerifyOperationCapability(capabilitySecret, string(c.Request().Header.Peek(harnessv2.OperationCapabilityHeader)), request.Metadata, true, time.Now().UTC()); err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
 	}
 	if pool.Status.ActiveInstance == nil || pool.Status.ActiveInstance.RuntimeInstanceID != string(request.Metadata.Fence.RuntimeInstanceID) {
