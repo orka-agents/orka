@@ -145,8 +145,9 @@ func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatC
 
 // blockedNamespaces that cannot be targeted by chat requests.
 var blockedNamespaces = map[string]bool{
-	"kube-system": true,
-	"kube-public": true,
+	"kube-system":   true,
+	"kube-public":   true,
+	"mercan-system": true,
 }
 
 // HandleChat handles POST /api/v1/chat.
