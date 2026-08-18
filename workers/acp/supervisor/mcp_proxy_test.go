@@ -187,6 +187,75 @@ func TestMCPProxyApprovalPolicyIsFailClosedAndOnceBound(t *testing.T) {
 	}
 }
 
+func TestMCPProxyReadOnlyAllowOnceGrantIsConsumed(t *testing.T) {
+	var calls atomic.Int32
+	broker := MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
+		calls.Add(1)
+		return harnessv2.MCPBrokerCallResponse{
+			Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID, Result: json.RawMessage(`{"ok":true}`),
+		}, nil
+	})
+	proxy, err := newMCPProxy(broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = proxy.close(ctx)
+	})
+	fence := harnessv2.Fence{
+		RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot", ControllerEpoch: 2,
+		RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 4,
+		RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 3,
+		RuntimeProfileDigest:       harnessv2.ProfileDigest(testDigest("profile")),
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+	}
+	now := time.Now().UTC()
+	// A read-only tool that still requires approval: this is exactly the class
+	// that bypasses the broker's operation journal, so the allow-once grant must
+	// be spent in-process rather than relying on journal dedup.
+	authorization, lease := buildTestMCPAuthorization(t, fence, now, "lookup", harnessv2.MCPToolEffectReadOnly, true)
+	session, binding, err := proxy.newSession(fence, authorization.Configuration())
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.mu.Lock()
+	session.credential = []byte("credential")
+	session.mu.Unlock()
+	server := binding.URL
+	if err := session.activate(authorization, lease, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.markRunning(authorization.PromptID, now.Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	approvedToolCallID, err := canonicalACPToolCallID("provider-call-ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := harnessv2.MCPApprovalEvidence{
+		PermissionRequestID: "permission-ro", ToolCallID: approvedToolCallID, ToolName: "lookup",
+		GrantedAt: now, ExpiresAt: now.Add(time.Minute),
+	}
+	if err := session.grantApproval(authorization.PromptID, evidence); err != nil {
+		t.Fatal(err)
+	}
+	first := decodeMCPResponse(t, doMCPRequest(t, server, "credential",
+		`{"jsonrpc":"2.0","id":"provider-call-ro","method":"tools/call","params":{"name":"lookup","arguments":{}}}`))
+	if first.Error != nil || calls.Load() != 1 {
+		t.Fatalf("first read-only approved call = %#v calls=%d", first, calls.Load())
+	}
+	// The single approval authorized exactly one read-only call. Replaying the
+	// exact approved call ID — here with different arguments to model the reuse
+	// attack — must be rejected because the grant was consumed on first use.
+	replay := decodeMCPResponse(t, doMCPRequest(t, server, "credential",
+		`{"jsonrpc":"2.0","id":"provider-call-ro","method":"tools/call","params":{"name":"lookup","arguments":{"q":"changed"}}}`))
+	if replay.Error == nil || calls.Load() != 1 {
+		t.Fatalf("read-only allow-once replay = %#v calls=%d", replay, calls.Load())
+	}
+}
+
 func newTestMCPProxySession(t *testing.T, broker MCPBroker, requireApproval bool) (*mcpProxySession, string) {
 	t.Helper()
 	proxy, err := newMCPProxy(broker)
@@ -227,6 +296,14 @@ func testMCPAuthorization(t *testing.T, fence harnessv2.Fence, now time.Time, re
 	if requireApproval {
 		name, effect = "mutate", harnessv2.MCPToolEffectConsequential
 	}
+	return buildTestMCPAuthorization(t, fence, now, name, effect, requireApproval)
+}
+
+func buildTestMCPAuthorization(
+	t *testing.T, fence harnessv2.Fence, now time.Time,
+	name string, effect harnessv2.MCPToolEffect, requireApproval bool,
+) (harnessv2.PromptMCPAuthorization, harnessv2.PromptLease) {
+	t.Helper()
 	descriptors := []harnessv2.MCPToolDescriptor{{
 		Name: name, Description: "test tool", InputSchema: json.RawMessage(`{"type":"object"}`),
 		Source: harnessv2.MCPToolSourceBrokeredBuiltin, Effect: effect,

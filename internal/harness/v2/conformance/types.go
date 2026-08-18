@@ -52,6 +52,15 @@ type Target struct {
 	// traffic at loopback, private, or link-local targets (including via DNS
 	// rebinding between validation and dialing).
 	RequirePublicAddresses bool
+	// PinnedBackendAddresses, when set, forces every conformance dial to one of
+	// the given verified backend ip:port targets instead of the endpoint's own
+	// (Service ClusterIP) resolution. A same-namespace Service endpoint sets it
+	// to the backend Pod addresses proven by the endpoint policy so a caller
+	// that mutates the EndpointSlice between validation and dial cannot steer
+	// bearer-authenticated probe traffic through the still-mutable Service. It
+	// is mutually exclusive with RequirePublicAddresses (Service endpoints pin;
+	// non-Service endpoints require public addresses).
+	PinnedBackendAddresses []string
 }
 
 // Result contains only sanitized protocol observations. Authentication values,

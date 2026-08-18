@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -91,6 +92,19 @@ func PublicAddressAllowed(addr netip.Addr) bool {
 // controller-reachable address.
 func PublicAddressDialTransport() *http.Transport {
 	transport := harnessv2.NewProxylessTransport()
+	ApplyPublicAddressDialControl(transport)
+	return transport
+}
+
+// ApplyPublicAddressDialControl installs the per-dial public-address control on
+// an existing transport, preserving its TLS configuration and any other
+// settings. Use it when a conformance dial must keep configured TLS roots (the
+// harness v1 client) yet still reject a hostname that resolves or rebinds to a
+// non-public, cross-namespace, or link-local address.
+func ApplyPublicAddressDialControl(transport *http.Transport) {
+	if transport == nil {
+		return
+	}
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -99,7 +113,39 @@ func PublicAddressDialTransport() *http.Transport {
 		},
 	}
 	transport.DialContext = dialer.DialContext
+}
+
+// PinnedBackendDialTransport returns a proxy-disabled transport that dials only
+// the given verified backend ip:port targets, ignoring the address the endpoint
+// URL would otherwise resolve to (a Service ClusterIP). Pinning the
+// authenticated connection to verified Pod backends closes the validate-then-dial
+// TOCTOU that routing conformance probes through the still-mutable Service would
+// leave open. It round-robins across the pins and fails closed when none remain.
+func PinnedBackendDialTransport(addresses []string) *http.Transport {
+	transport := harnessv2.NewProxylessTransport()
+	ApplyPinnedBackendDial(transport, addresses)
 	return transport
+}
+
+// ApplyPinnedBackendDial forces every dial on an existing transport to one of
+// the given verified backend ip:port targets, preserving the transport's TLS
+// configuration. Use it when a conformance dial must keep configured TLS roots
+// (the harness v1 client) yet still pin to verified Service backends rather than
+// the mutable Service ClusterIP.
+func ApplyPinnedBackendDial(transport *http.Transport, addresses []string) {
+	if transport == nil {
+		return
+	}
+	pinned := append([]string(nil), addresses...)
+	base := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	var next atomic.Uint64
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		if len(pinned) == 0 {
+			return nil, fmt.Errorf("no verified backend to dial")
+		}
+		target := pinned[int(next.Add(1)-1)%len(pinned)]
+		return base.DialContext(ctx, network, target)
+	}
 }
 
 // requirePublicDialAddress rejects dial targets that are not public global
@@ -147,7 +193,13 @@ func Check(ctx context.Context, target Target) Result {
 			return http.ErrUseLastResponse
 		},
 	}
-	if target.RequirePublicAddresses {
+	// A Service endpoint pins to the verified backends; a non-Service endpoint
+	// restricts every dial to a public address. The two are mutually exclusive,
+	// and pinning takes precedence so verified backends are never re-resolved
+	// through the mutable Service.
+	if len(target.PinnedBackendAddresses) > 0 {
+		httpClient.Transport = PinnedBackendDialTransport(target.PinnedBackendAddresses)
+	} else if target.RequirePublicAddresses {
 		httpClient.Transport = PublicAddressDialTransport()
 	}
 	expectedProfileDigest, err := harnessv2.CanonicalProfileDigest(target.Profile)

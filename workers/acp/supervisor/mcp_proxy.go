@@ -396,13 +396,26 @@ func (s *mcpProxySession) authorizeCall(toolName, callID string, now time.Time) 
 			// A reusable (allow-always) grant covers any call of the tool; a
 			// non-reusable (allow-once) grant is bound to the exact tool call
 			// the user approved, so a child cannot approve a benign call and
-			// then execute a different one. Idempotent retries of the approved
-			// call are deduplicated by the operation journal.
-			if grant.evidence.Reusable || approvedCallMatches(grant.evidence.ToolCallID, callID) {
-				evidence := grant.evidence
-				reservation = &MCPApprovalEvidenceReservation{Evidence: evidence}
-				break
+			// then execute a different one.
+			if !grant.evidence.Reusable && !approvedCallMatches(grant.evidence.ToolCallID, callID) {
+				continue
 			}
+			evidence := grant.evidence
+			reservation = &MCPApprovalEvidenceReservation{Evidence: evidence}
+			// Consume a non-reusable (allow-once) grant for a read-only tool on
+			// reservation. Consequential tools are deduplicated and replay-bound
+			// by the operation journal (runExternalEffectWithReplay returns the
+			// originally approved outcome for a repeated operation identity and
+			// rejects a changed payload), so their grant must survive an
+			// idempotent retry. Read-only tools bypass that journal entirely, so
+			// an unconsumed allow-once grant would let a child re-drive the same
+			// approved call ID with new arguments while the evidence is
+			// unexpired; spend it here so a single approval authorizes exactly
+			// one read-only call.
+			if !grant.evidence.Reusable && descriptor.Effect != harnessv2.MCPToolEffectConsequential {
+				s.approvals[toolName] = append(s.approvals[toolName][:index], s.approvals[toolName][index+1:]...)
+			}
+			break
 		}
 		if reservation == nil {
 			return nil, harnessv2.PromptMCPAuthorization{}, harnessv2.PromptLease{}, nil, fmt.Errorf("MCP tool approval is missing")

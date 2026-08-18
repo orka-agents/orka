@@ -18,7 +18,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -99,8 +98,16 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if err := r.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
 		return nil, false, "", "", err.Error()
 	}
+	// Resolve the verified Service backend pins now, right after the endpoint
+	// policy passed, so every conformance dial below (v1 or v2) targets a proven
+	// backend Pod rather than the mutable Service ClusterIP. Non-Service
+	// endpoints return no pins and fall back to the public-address dial control.
+	backendPins, err := r.serviceBackendPinsForValidatedEndpoint(ctx, runtime)
+	if err != nil {
+		return nil, false, "", "", err.Error()
+	}
 	if runtime.RegisteredContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV1 {
-		return r.probeHarnessV1AgentRuntime(ctx, runtime)
+		return r.probeHarnessV1AgentRuntime(ctx, runtime, backendPins)
 	}
 	auth, err := r.agentRuntimeAuthMaterial(ctx, runtime)
 	if err != nil {
@@ -136,6 +143,7 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 		WorkspaceGovernance:             governance,
 		ProbeLifecycle:                  deepProbe,
 		RequirePublicAddresses:          agentRuntimeEndpointRequiresPublicDial(runtime.Spec.Deployment.Endpoint),
+		PinnedBackendAddresses:          backendPins,
 	}
 	probe := v2conformance.Check(probeCtx, target)
 	if !deepProbe && probe.Passed && agentRuntimeAuthenticatedIdentityChanged(runtime.Status.ObservedCapabilities, probe.ObservedStatus) {
@@ -174,6 +182,7 @@ func agentRuntimeAuthenticatedIdentityChanged(
 func (r *AgentRuntimeReconciler) probeHarnessV1AgentRuntime(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
+	backendPins []string,
 ) (*corev1alpha1.AgentRuntimeObservedCapabilities, bool, string, string, string) {
 	auth, err := r.agentRuntimeV1BearerAuthMaterial(ctx, runtime)
 	if err != nil {
@@ -186,7 +195,7 @@ func (r *AgentRuntimeReconciler) probeHarnessV1AgentRuntime(
 	target := v1conformance.Target{
 		BaseURL:        runtime.Spec.Deployment.Endpoint,
 		BearerToken:    auth.bearerToken,
-		HTTPClient:     r.HarnessV1HTTPClient,
+		HTTPClient:     agentRuntimeV1DialControlledClient(r.HarnessV1HTTPClient, runtime.Spec.Deployment.Endpoint, backendPins),
 		ControlTimeout: agentRuntimeProbeTimeout,
 		RequireAuth:    true,
 	}
@@ -830,6 +839,14 @@ func (r *AgentRuntimeReconciler) AgentRuntimeServiceBackendPins(ctx context.Cont
 	if err := r.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
 		return nil, err
 	}
+	return r.serviceBackendPinsForValidatedEndpoint(ctx, runtime)
+}
+
+// serviceBackendPinsForValidatedEndpoint returns the verified Service backend
+// pins for an endpoint whose policy the caller has already validated. It skips
+// the endpoint-policy revalidation AgentRuntimeServiceBackendPins performs so a
+// reconcile probe that validated the policy once does not repeat it.
+func (r *AgentRuntimeReconciler) serviceBackendPinsForValidatedEndpoint(ctx context.Context, runtime *corev1alpha1.AgentRuntime) ([]string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(runtime.Spec.Deployment.Endpoint))
 	if err != nil {
 		return nil, fmt.Errorf("parse AgentRuntime endpoint: %w", err)
@@ -850,20 +867,37 @@ func (r *AgentRuntimeReconciler) AgentRuntimeServiceBackendPins(ctx context.Cont
 // the given verified backend addresses, ignoring the Service ClusterIP the URL
 // would otherwise resolve to. Pinning the authenticated connection to a
 // verified Pod backend closes the validate-then-dial TOCTOU that routing
-// through the still-mutable Service would leave open.
+// through the still-mutable Service would leave open. It shares the conformance
+// package's dial implementation so dispatch and conformance pin identically.
 func PinnedBackendDialTransport(addresses []string) *http.Transport {
-	pinned := append([]string(nil), addresses...)
-	transport := harnessv2.NewProxylessTransport()
-	base := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	var next atomic.Uint64
-	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
-		if len(pinned) == 0 {
-			return nil, fmt.Errorf("no verified AgentRuntime backend to dial")
+	return v2conformance.PinnedBackendDialTransport(addresses)
+}
+
+// agentRuntimeV1DialControlledClient returns a copy of the configured harness v1
+// TLS client whose transport dials only verified Service backends (when pins are
+// present) or rejects any dial to a non-public address (for a non-Service
+// endpoint), while preserving the client's TLS roots. The v1 client would
+// otherwise dial the mutable Service ClusterIP or follow an attacker-controlled
+// hostname that resolves — or rebinds — to a private, link-local, or
+// cross-namespace address, so applying the same per-dial control here brings v1
+// readiness probes to parity with the v2 conformance dial guarantees.
+func agentRuntimeV1DialControlledClient(base *http.Client, endpoint string, backendPins []string) *http.Client {
+	transport := &http.Transport{}
+	clientCopy := http.Client{}
+	if base != nil {
+		clientCopy = *base
+		if baseTransport, ok := base.Transport.(*http.Transport); ok && baseTransport != nil {
+			transport = baseTransport.Clone()
 		}
-		target := pinned[int(next.Add(1)-1)%len(pinned)]
-		return base.DialContext(ctx, network, target)
 	}
-	return transport
+	switch {
+	case len(backendPins) > 0:
+		v2conformance.ApplyPinnedBackendDial(transport, backendPins)
+	case agentRuntimeEndpointRequiresPublicDial(endpoint):
+		v2conformance.ApplyPublicAddressDialControl(transport)
+	}
+	clientCopy.Transport = transport
+	return &clientCopy
 }
 
 // agentRuntimeEndpointRequiresPublicDial reports whether conformance dials to
