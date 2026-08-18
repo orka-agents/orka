@@ -122,7 +122,7 @@ type RuntimePoolProbeResult struct {
 // RuntimePoolSupervisorClient is the v2 control surface required by the
 // Kubernetes reconciler. It intentionally excludes task and session dispatch.
 type RuntimePoolSupervisorClient interface {
-	Probe(ctx context.Context, endpoint, bearerToken string) (RuntimePoolProbeResult, error)
+	Probe(ctx context.Context, endpoint, bearerToken string, capabilitySecret []byte) (RuntimePoolProbeResult, error)
 	RequestDrain(ctx context.Context, endpoint, bearerToken string, capabilitySecret []byte, status harnessv2.StatusResponse, reason string) error
 }
 
@@ -637,7 +637,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
-	probe, err := r.supervisorClient().Probe(ctx, runtimePoolPodEndpoint(&readyPods[0]), string(authSecret.Data[runtimePoolControllerTokenKey]))
+	probe, err := r.supervisorClient().Probe(ctx, runtimePoolPodEndpoint(&readyPods[0]), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		if !runtimePoolActiveInstanceMatchesPod(status.ActiveInstance, &readyPods[0]) {
 			status.ActiveInstance = nil
@@ -964,7 +964,7 @@ func (r *RuntimePoolReconciler) reconcileReadyRuntimePoolRollout(
 	if err != nil {
 		return r.finishRuntimePoolRolloutFailure(ctx, pool, status, err)
 	}
-	probe, err := r.supervisorClient().Probe(ctx, runtimePoolPodEndpoint(pod), string(authSecret.Data[runtimePoolControllerTokenKey]))
+	probe, err := r.supervisorClient().Probe(ctx, runtimePoolPodEndpoint(pod), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		return r.finishRuntimePoolRolloutFailure(ctx, pool, status, fmt.Errorf("authenticated rollout status probe failed: %w", err))
 	}
@@ -1179,7 +1179,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
-	probe, err := r.supervisorClient().Probe(ctx, runtimePoolPodEndpoint(&readyPods[0]), string(authSecret.Data[runtimePoolControllerTokenKey]))
+	probe, err := r.supervisorClient().Probe(ctx, runtimePoolPodEndpoint(&readyPods[0]), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -2808,12 +2808,23 @@ type runtimePoolHTTPSupervisorClient struct {
 	now    func() time.Time
 }
 
-func (c *runtimePoolHTTPSupervisorClient) Probe(ctx context.Context, endpoint, bearerToken string) (RuntimePoolProbeResult, error) {
+func (c *runtimePoolHTTPSupervisorClient) Probe(ctx context.Context, endpoint, bearerToken string, capabilitySecret []byte) (RuntimePoolProbeResult, error) {
 	var result RuntimePoolProbeResult
-	if err := c.getJSON(ctx, endpoint+harnessv2.CapabilitiesPath, "", &result.Capabilities); err != nil {
+	if err := c.getJSON(ctx, endpoint+harnessv2.CapabilitiesPath, "", "", &result.Capabilities); err != nil {
 		return result, fmt.Errorf("get capabilities: %w", err)
 	}
-	if err := c.getJSON(ctx, endpoint+harnessv2.StatusPath, bearerToken, &result.Status); err != nil {
+	now := time.Now().UTC()
+	if c.now != nil {
+		now = c.now().UTC()
+	}
+	// Status requires proof of the pool's capability secret in addition to
+	// the bearer; the claims carry no fence because status is how the
+	// controller first learns the supervisor-generated fence components.
+	capability, err := harnessv2.SignStatusCapability(capabilitySecret, harnessv2.NewStatusCapabilityClaims(now.Add(harnessv2.DefaultStatusCapabilityTTL)))
+	if err != nil {
+		return result, fmt.Errorf("sign status capability: %w", err)
+	}
+	if err := c.getJSON(ctx, endpoint+harnessv2.StatusPath, bearerToken, capability, &result.Status); err != nil {
 		return result, fmt.Errorf("get status: %w", err)
 	}
 	return result, nil
@@ -2875,13 +2886,16 @@ func (c *runtimePoolHTTPSupervisorClient) RequestDrain(
 	return drain.Validate()
 }
 
-func (c *runtimePoolHTTPSupervisorClient) getJSON(ctx context.Context, endpoint, bearerToken string, target any) error {
+func (c *runtimePoolHTTPSupervisorClient) getJSON(ctx context.Context, endpoint, bearerToken, capability string, target any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
 	}
 	if bearerToken != "" {
 		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+	if capability != "" {
+		req.Header.Set(runtimePoolOperationHeader, capability)
 	}
 	response, err := c.client.Do(req)
 	if err != nil {

@@ -67,6 +67,31 @@ export function canonicalRepositoryCloneUrl(raw: string): string {
 export type WorkspaceRepositoryUrlResult = { url: string } | { error: string }
 
 /**
+ * Mirrors the controller/Publisher IP-literal rule: loopback, unspecified,
+ * and link-local (unicast or multicast) repository hosts are rejected. The
+ * URL parser has already normalized IPv4 shorthand and IPv6 spellings.
+ */
+function isForbiddenRepositoryIpLiteral(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (v4) {
+    const [a, b, c] = [Number(v4[1]), Number(v4[2]), Number(v4[3])]
+    if (a === 127) return true // loopback
+    if (host === '0.0.0.0') return true // unspecified
+    if (a === 169 && b === 254) return true // link-local unicast
+    if (a === 224 && b === 0 && c === 0) return true // link-local multicast
+    return false
+  }
+  if (host.includes(':')) {
+    if (host === '::1' || host === '::') return true // loopback / unspecified
+    if (/^fe[89ab]/.test(host)) return true // link-local unicast fe80::/10
+    if (/^ff[0-9a-f]2:/.test(host)) return true // link-local multicast ffX2::/16
+    return false
+  }
+  return false
+}
+
+/**
  * Derives the canonical repository identity for a clone URL that already
  * passed validateWorkspaceRepositoryUrl, mirroring the controller's
  * canonicalWorkspaceRepositoryURL derivation: lower-cased host plus the path
@@ -141,6 +166,9 @@ export function validateWorkspaceRepositoryUrl(label: string, raw: string): Work
   }
   if (parsed.port && parsed.port !== '443') {
     return invalid('must use the default HTTPS port')
+  }
+  if (isForbiddenRepositoryIpLiteral(parsed.hostname)) {
+    return invalid('uses a forbidden IP literal')
   }
   const path = parsed.pathname
   // The browser URL parser resolves dot segments (/org/../repo -> /repo)

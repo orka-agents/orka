@@ -9,10 +9,13 @@ import (
 	"io"
 	"maps"
 	"mime"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -23,6 +26,25 @@ const (
 	defaultControlTimeout = 60 * time.Second
 	maxProbeResponseBytes = int64(harnessv2.MaxCanonicalJSONBytes)
 )
+
+// requirePublicDialAddress rejects dial targets that are not public global
+// unicast addresses.
+func requirePublicDialAddress(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("conformance dial address is invalid")
+	}
+	parsed, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("conformance dial address is invalid")
+	}
+	parsed = parsed.Unmap()
+	if !parsed.IsValid() || !parsed.IsGlobalUnicast() || parsed.IsPrivate() || parsed.IsLoopback() ||
+		parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() || parsed.IsUnspecified() {
+		return fmt.Errorf("conformance dial target is not a public address")
+	}
+	return nil
+}
 
 // Check probes one external runtime. It is deliberately single-attempt: no
 // control request is retried, and the lifecycle probe opens exactly one prompt
@@ -45,9 +67,26 @@ func Check(ctx context.Context, target Target) Result {
 
 	httpClient := &http.Client{
 		Timeout: timeout,
+		// Conformance traffic targets a declared runtime endpoint; it must
+		// never traverse an inherited environment proxy.
+		Transport: harnessv2.NewProxylessTransport(),
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+	}
+	if target.RequirePublicAddresses {
+		transport := harnessv2.NewProxylessTransport()
+		dialer := &net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+			// The control hook runs per connection attempt after DNS
+			// resolution, so it also rejects rebinding to internal targets.
+			Control: func(_, address string, _ syscall.RawConn) error {
+				return requirePublicDialAddress(address)
+			},
+		}
+		transport.DialContext = dialer.DialContext
+		httpClient.Transport = transport
 	}
 	client, err := harnessv2.NewClient(
 		target.BaseURL,
@@ -291,6 +330,11 @@ func probeStatusAuthNegatives(ctx context.Context, client *http.Client, target T
 	}
 	if err := expectAuthRejected(ctx, client, target.BaseURL, http.MethodGet, harnessv2.StatusPath, wrongToken, "", nil); err != nil {
 		return fmt.Errorf("wrong-token status negative probe: %w", err)
+	}
+	// The bearer alone must not read status: without a valid status
+	// capability the runtime must reject the request.
+	if err := expectAuthRejected(ctx, client, target.BaseURL, http.MethodGet, harnessv2.StatusPath, target.ControllerBearerToken, "", nil); err != nil {
+		return fmt.Errorf("bearer-without-capability status negative probe: %w", err)
 	}
 	return nil
 }

@@ -96,6 +96,11 @@ func TestSupervisorCreateAndPrompt(t *testing.T) {
 
 	statusReq := httptest.NewRequest(http.MethodGet, harnessv2.StatusPath, nil)
 	statusReq.Header.Set("Authorization", "Bearer "+cfg.ControllerBearerToken)
+	statusCapability, err := harnessv2.SignStatusCapability(cfg.CapabilitySecret, harnessv2.NewStatusCapabilityClaims(time.Now().UTC().Add(time.Minute)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusReq.Header.Set(OperationCapabilityHeader, statusCapability)
 	statusResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(statusResponse, statusReq)
 	if statusResponse.Code != http.StatusOK {

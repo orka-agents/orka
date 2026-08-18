@@ -237,6 +237,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeController(w, r) {
 		return
 	}
+	// Status discloses Task, prompt, permission, and fence identifiers, so it
+	// requires proof of the operation-capability secret in addition to the
+	// controller bearer; a disclosed bearer alone must not read it.
+	if s.cfg.RequireCapabilities {
+		if err := harnessv2.VerifyStatusCapability(s.cfg.CapabilitySecret, r.Header.Get(OperationCapabilityHeader), time.Now().UTC()); err != nil {
+			writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "status authorization failed", nil, false)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, s.status())
 }
 

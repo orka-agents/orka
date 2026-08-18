@@ -97,7 +97,7 @@ func (c *runtimePoolPodDeleteRecordingClient) Delete(ctx context.Context, object
 	return c.Client.Delete(ctx, object, options...)
 }
 
-func (f *fakeRuntimePoolSupervisorClient) Probe(_ context.Context, _, _ string) (RuntimePoolProbeResult, error) {
+func (f *fakeRuntimePoolSupervisorClient) Probe(_ context.Context, _, _ string, _ []byte) (RuntimePoolProbeResult, error) {
 	f.probeCalls++
 	return f.probe, f.probeErr
 }

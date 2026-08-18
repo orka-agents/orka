@@ -23,7 +23,7 @@ Authenticated control operations:
 - `GET /v2/status` — exact instance fence, lifecycle, drain/admission state, resident sessions, prompts, permissions, descendants, and bounded pressure metadata;
 - `PUT /v2/drain` — atomically stop admission of new RuntimeSessions.
 
-External runtimes advertise whether they implement the drain extension. All status and mutation operations require controller authentication and operation-scoped authorization.
+External runtimes advertise whether they implement the drain extension. All status and mutation operations require controller authentication and operation-scoped authorization. Mutations present an exact-fence operation capability; status presents a status capability (audience `orka.harness.v2/status`, expiry-bounded, signed with the same operation-capability secret) because status is the channel through which the controller first learns the runtime-generated fence components. Conformance rejects runtimes that serve status on the controller bearer alone.
 
 ## RuntimeSession operations
 

@@ -46,6 +46,12 @@ type Target struct {
 	SupportsPublicationFinalization bool
 	WorkspaceGovernance             WorkspaceGovernanceClaims
 	ProbeLifecycle                  bool
+	// RequirePublicAddresses restricts every conformance dial to public
+	// global unicast addresses. External (non-Service) registrations must set
+	// it so a DNS name or endpoint cannot steer controller-originated probe
+	// traffic at loopback, private, or link-local targets (including via DNS
+	// rebinding between validation and dialing).
+	RequirePublicAddresses bool
 }
 
 // Result contains only sanitized protocol observations. Authentication values,

@@ -61,12 +61,9 @@ func ClaimsForMutation(metadata MutationMetadata) OperationCapabilityClaims {
 	}
 }
 
-func SignOperationCapability(secret []byte, claims OperationCapabilityClaims) (string, error) {
+func signCapabilityClaims(secret []byte, claims any) (string, error) {
 	if len(secret) < MinCapabilitySecretBytes {
 		return "", fmt.Errorf("operation capability secret must be at least %d bytes", MinCapabilitySecretBytes)
-	}
-	if err := claims.ValidateAt(time.Now().UTC(), claims.Fence.RuntimeSessionUID != ""); err != nil {
-		return "", err
 	}
 	payload, err := CanonicalValue(claims)
 	if err != nil {
@@ -79,34 +76,49 @@ func SignOperationCapability(secret []byte, claims OperationCapabilityClaims) (s
 	return encoding.EncodeToString(payload) + "." + encoding.EncodeToString(signature), nil
 }
 
-func VerifyOperationCapability(secret []byte, token string, expected MutationMetadata, requireSession bool, now time.Time) error {
+func verifyCapabilityToken(secret []byte, token string) ([]byte, error) {
 	if len(secret) < MinCapabilitySecretBytes {
-		return fmt.Errorf("operation capability secret must be at least %d bytes", MinCapabilitySecretBytes)
+		return nil, fmt.Errorf("operation capability secret must be at least %d bytes", MinCapabilitySecretBytes)
 	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return fmt.Errorf("operation capability token is malformed")
+		return nil, fmt.Errorf("operation capability token is malformed")
 	}
 	encoding := base64.RawURLEncoding
 	payload, err := encoding.DecodeString(parts[0])
 	if err != nil {
-		return fmt.Errorf("decode operation capability payload: %w", err)
+		return nil, fmt.Errorf("decode operation capability payload: %w", err)
 	}
 	signature, err := encoding.DecodeString(parts[1])
 	if err != nil {
-		return fmt.Errorf("decode operation capability signature: %w", err)
+		return nil, fmt.Errorf("decode operation capability signature: %w", err)
 	}
 	mac := hmac.New(sha256.New, secret)
 	_, _ = mac.Write(payload)
 	if !hmac.Equal(signature, mac.Sum(nil)) {
-		return fmt.Errorf("operation capability signature is invalid")
+		return nil, fmt.Errorf("operation capability signature is invalid")
 	}
 	canonical, err := CanonicalJSON(payload)
 	if err != nil {
-		return fmt.Errorf("operation capability payload is invalid: %w", err)
+		return nil, fmt.Errorf("operation capability payload is invalid: %w", err)
 	}
 	if string(canonical) != string(payload) {
-		return fmt.Errorf("operation capability payload is not canonical")
+		return nil, fmt.Errorf("operation capability payload is not canonical")
+	}
+	return payload, nil
+}
+
+func SignOperationCapability(secret []byte, claims OperationCapabilityClaims) (string, error) {
+	if err := claims.ValidateAt(time.Now().UTC(), claims.Fence.RuntimeSessionUID != ""); err != nil {
+		return "", err
+	}
+	return signCapabilityClaims(secret, claims)
+}
+
+func VerifyOperationCapability(secret []byte, token string, expected MutationMetadata, requireSession bool, now time.Time) error {
+	payload, err := verifyCapabilityToken(secret, token)
+	if err != nil {
+		return err
 	}
 	var claims OperationCapabilityClaims
 	dec := json.NewDecoder(strings.NewReader(string(payload)))
@@ -123,4 +135,67 @@ func VerifyOperationCapability(secret []byte, token string, expected MutationMet
 		return fmt.Errorf("operation capability claims do not match request metadata")
 	}
 	return nil
+}
+
+// StatusCapabilityAudience distinguishes status-read capabilities from
+// mutation operation capabilities signed with the same secret.
+const StatusCapabilityAudience = "orka.harness.v2/status"
+
+// DefaultStatusCapabilityTTL bounds how long a signed status capability
+// remains presentable.
+const DefaultStatusCapabilityTTL = time.Minute
+
+// StatusCapabilityClaims prove possession of the per-runtime operation
+// capability secret for the status read. Status discloses Task, prompt,
+// permission, and fence identifiers, so the controller bearer alone must not
+// authorize it. The claims deliberately carry no fence: status is the channel
+// through which the controller first learns the supervisor-generated fence
+// components (boot ID, instance ID), so exact per-operation fences remain a
+// mutation-only requirement, and the capability secret is already scoped to
+// exactly one pool or external runtime by construction.
+type StatusCapabilityClaims struct {
+	Version   string    `json:"version"`
+	Audience  string    `json:"audience"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+func NewStatusCapabilityClaims(expiresAt time.Time) StatusCapabilityClaims {
+	return StatusCapabilityClaims{Version: OperationCapabilityVersion, Audience: StatusCapabilityAudience, ExpiresAt: expiresAt}
+}
+
+func (c StatusCapabilityClaims) ValidateAt(now time.Time) error {
+	if c.Version != OperationCapabilityVersion {
+		return fmt.Errorf("capability version %q is unsupported", c.Version)
+	}
+	if c.Audience != StatusCapabilityAudience {
+		return fmt.Errorf("capability audience %q is invalid", c.Audience)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if c.ExpiresAt.IsZero() || !c.ExpiresAt.After(now) {
+		return fmt.Errorf("status capability is expired")
+	}
+	return nil
+}
+
+func SignStatusCapability(secret []byte, claims StatusCapabilityClaims) (string, error) {
+	if err := claims.ValidateAt(time.Now().UTC()); err != nil {
+		return "", err
+	}
+	return signCapabilityClaims(secret, claims)
+}
+
+func VerifyStatusCapability(secret []byte, token string, now time.Time) error {
+	payload, err := verifyCapabilityToken(secret, token)
+	if err != nil {
+		return err
+	}
+	var claims StatusCapabilityClaims
+	dec := json.NewDecoder(strings.NewReader(string(payload)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&claims); err != nil {
+		return fmt.Errorf("decode status capability claims: %w", err)
+	}
+	return claims.ValidateAt(now)
 }

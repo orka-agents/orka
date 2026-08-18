@@ -198,8 +198,15 @@ func (c *Client) Status(ctx context.Context) (*StatusResponse, error) {
 	if err := c.requireControllerAuth(operation); err != nil {
 		return nil, err
 	}
+	if len(c.capabilitySecret) < MinCapabilitySecretBytes {
+		return nil, clientError(operation, ClientErrorConfiguration, "status requires the operation capability secret", ErrClientConfiguration)
+	}
+	capability, err := SignStatusCapability(c.capabilitySecret, NewStatusCapabilityClaims(time.Now().UTC().Add(DefaultStatusCapabilityTTL)))
+	if err != nil {
+		return nil, clientError(operation, ClientErrorConfiguration, "sign status capability", err)
+	}
 	var response StatusResponse
-	if err := c.getJSON(ctx, operation, StatusPath, true, &response); err != nil {
+	if err := c.getJSONWithCapability(ctx, operation, StatusPath, true, capability, &response); err != nil {
 		return nil, err
 	}
 	if err := response.Validate(); err != nil {
@@ -394,6 +401,10 @@ func (c *Client) Drain(ctx context.Context, request DrainRequest) (*DrainRespons
 }
 
 func (c *Client) getJSON(ctx context.Context, operation, relative string, authenticated bool, out any) error {
+	return c.getJSONWithCapability(ctx, operation, relative, authenticated, "", out)
+}
+
+func (c *Client) getJSONWithCapability(ctx context.Context, operation, relative string, authenticated bool, capability string, out any) error {
 	if c == nil {
 		return clientError(operation, ClientErrorConfiguration, "client is nil", ErrClientConfiguration)
 	}
@@ -410,6 +421,9 @@ func (c *Client) getJSON(ctx context.Context, operation, relative string, authen
 	setCommonHeaders(req, "application/json")
 	if authenticated {
 		req.Header.Set("Authorization", "Bearer "+c.controllerBearer)
+	}
+	if capability != "" {
+		req.Header.Set(OperationCapabilityHeader, capability)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

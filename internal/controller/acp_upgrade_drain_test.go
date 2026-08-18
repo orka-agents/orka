@@ -800,7 +800,7 @@ type fakeUpgradeDrainSupervisor struct {
 	expectedCapability []byte
 }
 
-func (s *fakeUpgradeDrainSupervisor) Probe(_ context.Context, endpoint, token string) (RuntimePoolProbeResult, error) {
+func (s *fakeUpgradeDrainSupervisor) Probe(_ context.Context, endpoint, token string, _ []byte) (RuntimePoolProbeResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if endpoint != s.expectedEndpoint {

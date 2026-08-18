@@ -241,7 +241,10 @@ func TestAgentRuntimeReconcilerRechecksHostileCycleAfterAuthRotation(t *testing.
 		t.Fatal(err)
 	}
 	updated := getAgentRuntime(t, reconciler, runtimeObject)
-	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "operation capability") {
+	// The rotated key now fails closed at the earliest capability-guarded
+	// surface: the status probe itself rejects the stale capability secret.
+	if updated.Status.Ready ||
+		(!strings.Contains(updated.Status.Message, "operation capability") && !strings.Contains(updated.Status.Message, "status authorization failed")) {
 		t.Fatalf("rotated mismatched capability key did not fail closed: %#v", updated.Status)
 	}
 }

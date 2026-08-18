@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"path"
 	"strings"
@@ -290,6 +291,13 @@ func canonicalWorkspaceRepositoryURL(rawURL string) (*url.URL, string, error) {
 	}
 	if port := parsed.Port(); port != "" && port != "443" {
 		return nil, "", errWorkspaceRepositoryHTTPSPort
+	}
+	// Mirror the Publisher's validateRepository IP-literal rule so a Task the
+	// Publisher would unconditionally reject fails preflight instead of
+	// settling as WorkspaceUnsupported after creation.
+	if ip := net.ParseIP(strings.ToLower(parsed.Hostname())); ip != nil &&
+		(ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+		return nil, "", fmt.Errorf("repository URL uses a forbidden IP literal")
 	}
 	if parsed.RawPath != "" && parsed.EscapedPath() != parsed.Path {
 		return nil, "", fmt.Errorf("repository URL escaped path is non-canonical")

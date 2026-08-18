@@ -126,6 +126,7 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 		SupportsPublicationFinalization: runtime.Spec.Capabilities.SupportsPublicationFinalization,
 		WorkspaceGovernance:             governance,
 		ProbeLifecycle:                  deepProbe,
+		RequirePublicAddresses:          agentRuntimeEndpointRequiresPublicDial(runtime.Spec.Deployment.Endpoint),
 	}
 	probe := v2conformance.Check(probeCtx, target)
 	if !deepProbe && probe.Passed && agentRuntimeAuthenticatedIdentityChanged(runtime.Status.ObservedCapabilities, probe.ObservedStatus) {
@@ -686,7 +687,41 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 	if parsed.Scheme != urlSchemeHTTPS {
 		return fmt.Errorf("external AgentRuntime endpoints must use https")
 	}
+	// A non-service endpoint is probed and conformance-tested from the
+	// controller's privileged network position. A private, link-local, or
+	// otherwise non-public IP literal would let a namespace-scoped caller
+	// bypass the same-namespace Service restriction (e.g. by naming a
+	// ClusterIP directly) and aim controller traffic at internal addresses.
+	if address, err := netip.ParseAddr(host); err == nil && !isPublicAgentRuntimeAddress(address) {
+		return fmt.Errorf("external AgentRuntime endpoints must not use non-public IP literals")
+	}
 	return nil
+}
+
+// isPublicAgentRuntimeAddress permits only public global unicast addresses
+// for external AgentRuntime endpoints and conformance dials.
+func isPublicAgentRuntimeAddress(address netip.Addr) bool {
+	address = address.Unmap()
+	return address.IsValid() && address.IsGlobalUnicast() && !address.IsPrivate() &&
+		!address.IsLoopback() && !address.IsLinkLocalUnicast() && !address.IsLinkLocalMulticast() &&
+		!address.IsUnspecified()
+}
+
+// agentRuntimeEndpointRequiresPublicDial reports whether conformance dials to
+// the endpoint must be restricted to public addresses: everything except
+// recognized same-namespace Service DNS forms (which legitimately resolve to
+// cluster-internal addresses) and the loopback test escape hatch.
+func agentRuntimeEndpointRequiresPublicDial(endpoint string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return true
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if isLoopbackAgentRuntimeEndpoint(host) && agentRuntimeAllowInsecureLoopbackForTests {
+		return false
+	}
+	_, _, serviceEndpoint := parseAgentRuntimeServiceNamespaceHost(host)
+	return !serviceEndpoint
 }
 
 func isLoopbackAgentRuntimeEndpoint(host string) bool {

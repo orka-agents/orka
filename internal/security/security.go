@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"path"
 	"strings"
@@ -213,6 +214,10 @@ func CanonicalWorkspaceRepositoryCloneURL(raw string) (string, error) {
 	}
 	if port := parsed.Port(); port != "" && port != "443" {
 		return "", fmt.Errorf("must use the default HTTPS port")
+	}
+	if ip := net.ParseIP(strings.ToLower(parsed.Hostname())); ip != nil &&
+		(ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+		return "", fmt.Errorf("uses a forbidden IP literal")
 	}
 	if parsed.RawPath != "" && parsed.EscapedPath() != parsed.Path {
 		return "", fmt.Errorf("has a non-canonical escaped path")
