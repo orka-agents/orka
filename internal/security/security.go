@@ -224,6 +224,41 @@ func CanonicalWorkspaceRepositoryCloneURL(raw string) (string, error) {
 	return canonical, nil
 }
 
+// WorkspaceRepositoryURLIdentity derives the canonical repository identity for
+// a clone URL that already passed CanonicalWorkspaceRepositoryCloneURL,
+// mirroring the controller's canonicalWorkspaceRepositoryURL derivation:
+// lower-cased host plus the cleaned path with any .git suffix removed, with
+// the path additionally lower-cased for github.com.
+func WorkspaceRepositoryURLIdentity(canonicalURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(canonicalURL))
+	if err != nil {
+		return "", fmt.Errorf("repository URL is invalid")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	cleaned := strings.TrimSuffix(strings.TrimPrefix(path.Clean(parsed.Path), "/"), ".git")
+	if host == "" || cleaned == "" || cleaned == "." {
+		return "", fmt.Errorf("repository URL path is invalid")
+	}
+	if host == "github.com" {
+		cleaned = strings.ToLower(cleaned)
+	}
+	return host + "/" + cleaned, nil
+}
+
+// SameWorkspaceRepositoryIdentity mirrors the controller's identity
+// comparison: exact match, or case-insensitive match for github.com
+// identities.
+func SameWorkspaceRepositoryIdentity(first, second string) bool {
+	first = strings.TrimSpace(first)
+	second = strings.TrimSpace(second)
+	if first == second {
+		return true
+	}
+	return strings.HasPrefix(strings.ToLower(first), "github.com/") &&
+		strings.HasPrefix(strings.ToLower(second), "github.com/") &&
+		strings.EqualFold(first, second)
+}
+
 func githubOwnerRepoFromPath(repoPath string) (string, string, error) {
 	repoPath = strings.Trim(repoPath, "/")
 	segments := strings.Split(strings.TrimSuffix(repoPath, ".git"), "/")

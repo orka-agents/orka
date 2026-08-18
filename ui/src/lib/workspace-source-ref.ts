@@ -85,3 +85,28 @@ export function workspaceSourceBranchError(branch: string): string | null {
   const candidate = branch.startsWith('refs/') ? branch : `refs/heads/${branch}`
   return workspaceSourceRefError(candidate)
 }
+
+/**
+ * Mirror of the controller's canonicalWorkspaceBranchRef validation
+ * (store.ValidateFullBranchRef) for publication branch fields such as
+ * pushBranch and prBaseBranch.
+ */
+export function workspacePublicationBranchError(branch: string): string | null {
+  const ref = branch.startsWith('refs/heads/') ? branch : `refs/heads/${branch}`
+  if (ref !== ref.trim() || hasControl(ref) || !(ref.isWellFormed?.() ?? true)) {
+    return 'branch is non-canonical'
+  }
+  if (ref.length > 1024) return 'branch is too long'
+  if (ref.length === 'refs/heads/'.length) return 'branch is required'
+  if (
+    ref.includes('..') ||
+    ref.includes('@{') ||
+    /[ ~^:?*[\\]/.test(ref) ||
+    ref.endsWith('.') ||
+    ref.endsWith('/') ||
+    ref.includes('//')
+  ) {
+    return 'branch is not a canonical Git branch name'
+  }
+  return null
+}

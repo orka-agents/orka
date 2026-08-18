@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { canonicalRepositoryCloneUrl, validateWorkspaceRepositoryUrl } from './workspace-repository'
+import {
+  canonicalRepositoryCloneUrl,
+  sameWorkspaceRepositoryIdentity,
+  validateWorkspaceRepositoryUrl,
+  workspaceRepositoryIdentity,
+} from './workspace-repository'
 
 describe('canonicalRepositoryCloneUrl', () => {
   it('converts GitHub SSH roots to canonical HTTPS', () => {
@@ -19,6 +24,25 @@ describe('canonicalRepositoryCloneUrl', () => {
     expect(canonicalRepositoryCloneUrl('git@gitlab.example.com:owner/repo.git')).toBe(
       'git@gitlab.example.com:owner/repo.git',
     )
+  })
+})
+
+describe('workspaceRepositoryIdentity', () => {
+  it('derives the canonical identity with lower-cased github paths', () => {
+    expect(workspaceRepositoryIdentity('https://github.com/Owner/Repo')).toBe('github.com/owner/repo')
+    expect(workspaceRepositoryIdentity('https://gitlab.example.com/Owner/Repo.git')).toBe(
+      'gitlab.example.com/Owner/Repo',
+    )
+  })
+})
+
+describe('sameWorkspaceRepositoryIdentity', () => {
+  it('matches exactly, and case-insensitively only for github.com', () => {
+    expect(sameWorkspaceRepositoryIdentity('github.com/Owner/Repo', 'github.com/owner/repo')).toBe(true)
+    expect(sameWorkspaceRepositoryIdentity('gitlab.example.com/Owner/Repo', 'gitlab.example.com/owner/repo')).toBe(
+      false,
+    )
+    expect(sameWorkspaceRepositoryIdentity('github.com/owner/repo', 'github.com/other/repo')).toBe(false)
   })
 })
 

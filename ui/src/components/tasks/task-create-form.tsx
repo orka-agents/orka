@@ -12,8 +12,16 @@ import { useAgentList } from '@/hooks/use-agents'
 import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
 import { workspaceConfigSchema, type WorkspaceIntent } from '@/schemas/task'
-import { validateWorkspaceRepositoryUrl } from '@/lib/workspace-repository'
-import { workspaceSourceBranchError, workspaceSourceRefError } from '@/lib/workspace-source-ref'
+import {
+  sameWorkspaceRepositoryIdentity,
+  validateWorkspaceRepositoryUrl,
+  workspaceRepositoryIdentity,
+} from '@/lib/workspace-repository'
+import {
+  workspacePublicationBranchError,
+  workspaceSourceBranchError,
+  workspaceSourceRefError,
+} from '@/lib/workspace-source-ref'
 import { builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
 
 function optionalRepositoryIdentity(provider: string, id: string) {
@@ -173,6 +181,51 @@ export function TaskCreateForm() {
       if ('error' in publicationRepoResult) {
         toast.error(publicationRepoResult.error)
         return
+      }
+
+      // Mirror the controller's canonical repository identity checks: a
+      // supplied identity must use the github provider and match the
+      // canonical credential-free URL identity, with the publication
+      // identity's URL falling back to the source URL.
+      const identityError = (label: string, provider: string, id: string, canonicalUrl: string): string | null => {
+        if (!provider.trim() && !id.trim()) return null
+        if (provider.trim().toLowerCase() !== 'github') return `${label} provider must be github`
+        const derived = workspaceRepositoryIdentity(canonicalUrl)
+        if (!derived) return `${label} identity requires a valid repository URL`
+        if (!sameWorkspaceRepositoryIdentity(id, derived)) {
+          return `${label} identity must match the canonical credential-free URL identity "${derived}"`
+        }
+        return null
+      }
+      const sourceIdentityError = identityError('Source repository', sourceProvider, sourceRepositoryID, sourceRepoResult.url)
+      if (sourceIdentityError) {
+        toast.error(sourceIdentityError)
+        return
+      }
+      if (workspaceIntent === 'write') {
+        const publicationIdentityError = identityError(
+          'Publication repository',
+          publicationProvider,
+          publicationRepositoryID,
+          publicationRepoResult.url || sourceRepoResult.url,
+        )
+        if (publicationIdentityError) {
+          toast.error(publicationIdentityError)
+          return
+        }
+        // Mirror the controller's publication branch validation.
+        for (const field of [
+          { label: 'Publication branch', value: pushBranch },
+          { label: 'Pull request base branch', value: prBaseBranch },
+        ]) {
+          if (field.value.trim()) {
+            const branchError = workspacePublicationBranchError(field.value.trim())
+            if (branchError) {
+              toast.error(`${field.label} is invalid: ${branchError}`)
+              return
+            }
+          }
+        }
       }
 
       const workspace: Record<string, unknown> = { intent: workspaceIntent }

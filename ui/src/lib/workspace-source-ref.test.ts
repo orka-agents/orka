@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { workspaceSourceBranchError, workspaceSourceRefError } from './workspace-source-ref'
+import {
+  workspacePublicationBranchError,
+  workspaceSourceBranchError,
+  workspaceSourceRefError,
+} from './workspace-source-ref'
 
 describe('workspaceSourceRefError', () => {
   it.each([
@@ -28,6 +32,26 @@ describe('workspaceSourceRefError', () => {
     ['empty component', 'refs/heads/a//b'],
   ])('rejects %s', (_name, ref) => {
     expect(workspaceSourceRefError(ref)).not.toBeNull()
+  })
+})
+
+describe('workspacePublicationBranchError', () => {
+  it('accepts valid branch names and refs/heads/ refs', () => {
+    expect(workspacePublicationBranchError('main')).toBeNull()
+    expect(workspacePublicationBranchError('orka/change')).toBeNull()
+    expect(workspacePublicationBranchError('refs/heads/main')).toBeNull()
+  })
+
+  it.each([
+    ['double dots', 'bad..branch'],
+    ['space', 'bad branch'],
+    ['trailing slash', 'bad/'],
+    ['trailing dot', 'bad.'],
+    ['at-brace', 'bad@{branch'],
+    ['backslash', 'bad\\branch'],
+    ['empty component', 'a//b'],
+  ])('rejects %s', (_name, branch) => {
+    expect(workspacePublicationBranchError(branch)).not.toBeNull()
   })
 })
 

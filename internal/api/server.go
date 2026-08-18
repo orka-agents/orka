@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
@@ -170,6 +171,14 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 	if len(parts) == 6 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
 		strings.EqualFold(parts[2], "gateways") && strings.EqualFold(parts[5], "events") {
 		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
+	}
+	// Internal broker endpoints authorize against per-pool secrets that are
+	// only resolvable from the request body, so unauthenticated peers cannot
+	// be rejected on headers alone. Bound both the body size and the full
+	// request read so a Pod-local peer cannot hold controller connections
+	// open by dripping chunked bodies.
+	if strings.HasPrefix(path, "/internal/v2/acp/") {
+		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
 	return fasthttp.RequestConfig{}
 }

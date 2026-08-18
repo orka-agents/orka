@@ -26,10 +26,10 @@ func TestTaskCreateWritesCanonicalWorkspaceCredentialRoles(t *testing.T) {
 		"--server", server.URL, "--token", "test-token", "--namespace", "default",
 		"task", "create", "Update the repository", "--type", "agent", "--agent", "codex-agent", "--name", "write-task",
 		"--workspace-intent", "write", "--git-repo", "https://github.com/source/repo",
-		"--source-repository-provider", "github", "--source-repository-id", "source-id",
+		"--source-repository-provider", "github", "--source-repository-id", "github.com/source/repo",
 		"--read-credential", "repo-read", "--read-credential-key", "source-token",
 		"--publication-git-repo", "https://github.com/publish/repo", "--publication-repository-provider", "github",
-		"--publication-repository-id", "publish-id",
+		"--publication-repository-id", "github.com/publish/repo",
 		"--publication-read-credential", "repo-verify", "--publication-read-credential-key", "verify-token",
 		"--publication-credential", "repo-write", "--publication-credential-key", "write-token",
 		"--forge-credential", "repo-forge", "--forge-credential-key", "forge-token",
@@ -224,6 +224,66 @@ func TestTaskCreateRejectsMalformedSourceSelectors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			root := newRootCmd()
 			root.SetArgs(append([]string{"task", "create", "Inspect", "--type", "agent", "--agent", "a"}, tt.args...))
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestTaskCreateRejectsMismatchedRepositoryIdentitiesAndInvalidPublicationBranches(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "source identity mismatch",
+			args: []string{
+				"--git-repo", "https://github.com/owner/repo",
+				"--source-repository-provider", "github", "--source-repository-id", "github.com/other/repo",
+			},
+			want: `--source-repository-id must match the canonical credential-free URL identity "github.com/owner/repo"`,
+		},
+		{
+			name: "source identity provider not github",
+			args: []string{
+				"--git-repo", "https://github.com/owner/repo",
+				"--source-repository-provider", "gitlab", "--source-repository-id", "github.com/owner/repo",
+			},
+			want: "--source-repository-provider must be github",
+		},
+		{
+			name: "publication identity mismatch against source fallback",
+			args: []string{
+				"--workspace-intent", "write", "--git-repo", "https://github.com/owner/repo",
+				"--publication-credential", "repo-write",
+				"--publication-repository-provider", "github", "--publication-repository-id", "github.com/other/repo",
+			},
+			want: `--publication-repository-id must match the canonical credential-free URL identity "github.com/owner/repo"`,
+		},
+		{
+			name: "invalid push branch",
+			args: []string{
+				"--workspace-intent", "write", "--git-repo", "https://github.com/owner/repo",
+				"--publication-credential", "repo-write", "--push-branch", "bad..branch",
+			},
+			want: "--push-branch is invalid",
+		},
+		{
+			name: "invalid pull request base branch",
+			args: []string{
+				"--workspace-intent", "write", "--git-repo", "https://github.com/owner/repo",
+				"--publication-credential", "repo-write", "--pr-base-branch", "bad..branch",
+			},
+			want: "--pr-base-branch is invalid",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newRootCmd()
+			root.SetArgs(append([]string{"task", "create", "Publish", "--type", "agent", "--agent", "a"}, tt.args...))
 			err := root.Execute()
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want %q", err, tt.want)

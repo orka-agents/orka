@@ -63,6 +63,9 @@ func (h *Handlers) CreateRuntimePool(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeRuntimeResourceMutation(c, "create", "runtimepools", namespace, name); err != nil {
+		return err
+	}
 	pool.TypeMeta = metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RuntimePool"}
 	pool.Namespace = namespace
 	pool.ResourceVersion = ""
@@ -83,6 +86,9 @@ func (h *Handlers) UpdateRuntimePool(c fiber.Ctx) error {
 	}
 	existing, err := h.fetchRuntimePool(c, c.Params("name"))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeRuntimeResourceMutation(c, "update", "runtimepools", existing.Namespace, existing.Name); err != nil {
 		return err
 	}
 	var desired corev1alpha1.RuntimePool
@@ -107,10 +113,24 @@ func (h *Handlers) DeleteRuntimePool(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeRuntimeResourceMutation(c, "delete", "runtimepools", pool.Namespace, pool.Name); err != nil {
+		return err
+	}
 	if err := h.client.Delete(c.Context(), pool); err != nil && !apierrors.IsNotFound(err) {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete runtime pool: %v", err))
 	}
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// authorizeRuntimeResourceMutation enforces Kubernetes RBAC for RuntimePool
+// and AgentRuntime writes, like the Task and gateway paths: a
+// TokenReview-authenticated identity must pass a SubjectAccessReview for the
+// exact verb, resource, and name before the controller client mutates on its
+// behalf.
+func (h *Handlers) authorizeRuntimeResourceMutation(c fiber.Ctx, verb, resource, namespace, name string) error {
+	return authorizeKubernetesResourceAction(
+		c.Context(), h.clientset, GetUserInfo(c), namespace, verb, corev1alpha1.GroupVersion.Group, resource, name,
+	)
 }
 
 func (h *Handlers) fetchRuntimePool(c fiber.Ctx, name string) (*corev1alpha1.RuntimePool, error) {
@@ -177,6 +197,9 @@ func (h *Handlers) CreateAgentRuntime(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeRuntimeResourceMutation(c, "create", "agentruntimes", namespace, strings.TrimSpace(runtime.Name)); err != nil {
+		return err
+	}
 	runtime.TypeMeta = metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "AgentRuntime"}
 	runtime.Namespace = namespace
 	runtime.ResourceVersion = ""
@@ -199,6 +222,9 @@ func (h *Handlers) UpdateAgentRuntime(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeRuntimeResourceMutation(c, "update", "agentruntimes", existing.Namespace, existing.Name); err != nil {
+		return err
+	}
 	var desired corev1alpha1.AgentRuntime
 	if err := c.Bind().JSON(&desired); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid agent runtime manifest")
@@ -219,6 +245,9 @@ func (h *Handlers) DeleteAgentRuntime(c fiber.Ctx) error {
 	}
 	runtime, err := h.fetchAgentRuntime(c, c.Params("name"))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeRuntimeResourceMutation(c, "delete", "agentruntimes", runtime.Namespace, runtime.Name); err != nil {
 		return err
 	}
 	if err := h.client.Delete(c.Context(), runtime); err != nil && !apierrors.IsNotFound(err) {

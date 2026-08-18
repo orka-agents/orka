@@ -190,12 +190,9 @@ func constantAPIStringEqual(left, right string) bool {
 const envWorkspacePublisherControllerTokenFile = "ORKA_WORKSPACE_PUBLISHER_CONTROLLER_TOKEN_FILE"
 
 func (s *Server) issuePublisherArtifactAuthorization(c fiber.Ctx) error {
-	var request publisherservice.ArtifactAuthorizationRequest
-	decoder := json.NewDecoder(strings.NewReader(string(c.Body())))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) == nil || request.Validate() != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
-	}
+	// Authenticate from headers before consuming the body: runtime Pods can
+	// reach this endpoint, so unauthenticated peers must be rejected without
+	// being allowed to stream request bodies.
 	expectedBearer, err := readSecretAtEnvPath(envWorkspacePublisherControllerTokenFile, 16)
 	if err != nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_authorization_unavailable"})
@@ -203,6 +200,12 @@ func (s *Server) issuePublisherArtifactAuthorization(c fiber.Ctx) error {
 	bearer := strings.TrimSpace(strings.TrimPrefix(string(c.Request().Header.Peek("Authorization")), "Bearer "))
 	if !constantAPIStringEqual(bearer, string(expectedBearer)) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	var request publisherservice.ArtifactAuthorizationRequest
+	decoder := json.NewDecoder(strings.NewReader(string(c.Body())))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) == nil || request.Validate() != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
 	}
 	if err := s.authorizePublisherArtifactRequest(c.Context(), request); err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})

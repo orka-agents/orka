@@ -56,6 +56,38 @@ export function canonicalRepositoryCloneUrl(raw: string): string {
 
 export type WorkspaceRepositoryUrlResult = { url: string } | { error: string }
 
+/**
+ * Derives the canonical repository identity for a clone URL that already
+ * passed validateWorkspaceRepositoryUrl, mirroring the controller's
+ * canonicalWorkspaceRepositoryURL derivation: lower-cased host plus the path
+ * with any .git suffix removed, additionally lower-cased for github.com.
+ */
+export function workspaceRepositoryIdentity(canonicalUrl: string): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(canonicalUrl)
+  } catch {
+    return null
+  }
+  const host = parsed.hostname.toLowerCase()
+  let identityPath = parsed.pathname.replace(/^\/+/, '').replace(/\.git$/, '')
+  if (!host || !identityPath) return null
+  if (host === 'github.com') identityPath = identityPath.toLowerCase()
+  return `${host}/${identityPath}`
+}
+
+/** Mirrors the controller's identity comparison: exact match, or case-insensitive for github.com identities. */
+export function sameWorkspaceRepositoryIdentity(first: string, second: string): boolean {
+  const a = first.trim()
+  const b = second.trim()
+  if (a === b) return true
+  return (
+    a.toLowerCase().startsWith('github.com/') &&
+    b.toLowerCase().startsWith('github.com/') &&
+    a.toLowerCase() === b.toLowerCase()
+  )
+}
+
 /** Canonicalize and validate a workspace repository URL field. Empty input is allowed and returns an empty URL. */
 export function validateWorkspaceRepositoryUrl(label: string, raw: string): WorkspaceRepositoryUrlResult {
   const trimmed = raw.trim()
