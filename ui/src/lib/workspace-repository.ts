@@ -10,6 +10,16 @@
 
 const GITHUB_SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/
 
+// Matches lone UTF-16 surrogates, i.e. strings that cannot encode to valid
+// UTF-8 (the equivalent of Go's utf8.ValidString check). Implemented as a
+// regex so it does not require the ES2024 String.isWellFormed lib.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+/** True when the string contains no lone surrogates and therefore encodes to valid UTF-8. */
+export function isWellFormedText(value: string): boolean {
+  return !LONE_SURROGATE.test(value)
+}
+
 function githubOwnerRepoFromPath(repoPath: string): [string, string] | null {
   const segments = repoPath
     .replace(/^\/+|\/+$/g, '')
@@ -84,7 +94,7 @@ export function workspaceRepositoryIdentity(canonicalUrl: string): string | null
 export function workspaceSubPathError(subPath: string): string | null {
   const root = subPath.trim()
   if (!root || root === '.') return null
-  if (!(root.isWellFormed?.() ?? true)) return 'contains invalid characters'
+  if (!isWellFormedText(root)) return 'contains invalid characters'
   if (new TextEncoder().encode(root).length > 1024) return 'exceeds 1024 bytes'
   if (root.startsWith('/') || root.includes('\\')) return 'must be a relative slash-separated path'
   for (const segment of root.split('/')) {

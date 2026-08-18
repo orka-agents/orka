@@ -8,6 +8,8 @@
  * never be stricter than the controller's rule.
  */
 
+import { isWellFormedText } from './workspace-repository'
+
 const SHORT_REF_MAX = 1024 - 'refs/heads/'.length
 
 function hasControl(value: string): boolean {
@@ -20,7 +22,7 @@ function hasControl(value: string): boolean {
 
 function isCanonicalObjectId(value: string): boolean {
   return (
-    (value.length === 40 || value.length === 64) && /^[0-9a-f]+$/.test(value) && value.replaceAll('0', '') !== ''
+    (value.length === 40 || value.length === 64) && /^[0-9a-f]+$/.test(value) && value.replace(/0/g, '') !== ''
   )
 }
 
@@ -29,7 +31,7 @@ function looksLikeObjectId(value: string): boolean {
 }
 
 function commonRefError(value: string): string | null {
-  if (value !== value.trim() || hasControl(value) || value.includes('\\') || !(value.isWellFormed?.() ?? true)) {
+  if (value !== value.trim() || hasControl(value) || value.includes('\\') || !isWellFormedText(value)) {
     return 'ref is non-canonical'
   }
   return null
@@ -93,7 +95,7 @@ export function workspaceSourceBranchError(branch: string): string | null {
  */
 export function workspacePublicationBranchError(branch: string): string | null {
   const ref = branch.startsWith('refs/heads/') ? branch : `refs/heads/${branch}`
-  if (ref !== ref.trim() || hasControl(ref) || !(ref.isWellFormed?.() ?? true)) {
+  if (ref !== ref.trim() || hasControl(ref) || !isWellFormedText(ref)) {
     return 'branch is non-canonical'
   }
   if (ref.length > 1024) return 'branch is too long'
