@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 const (
@@ -102,7 +104,9 @@ func newBrokerCredentialProvider(rawURL string, client *http.Client, bearer []by
 	parsed.Path = CredentialBrokerPath
 	parsed.RawPath = ""
 	if client == nil {
-		client = &http.Client{Timeout: timeout}
+		// Authenticated in-cluster controller traffic must never traverse an
+		// inherited environment proxy.
+		client = &http.Client{Timeout: timeout, Transport: harnessv2.NewProxylessTransport()}
 	} else {
 		clone := *client
 		client = &clone

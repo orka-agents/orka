@@ -26,10 +26,21 @@ func main() {
 		logger.Error("create workspace publisher", "error", err)
 		os.Exit(1)
 	}
+	// Server read/write deadlines must never undercut the configured
+	// operation timeouts: a publish permitted to run longer than the write
+	// deadline would otherwise be cut off mid-response while the remote push
+	// still completes, leaving the controller with a spurious transport
+	// failure. Size both from the largest configured operation timeout plus
+	// settlement overhead.
+	serverTimeout := 3 * time.Minute
+	operationTimeout := max(config.PublishTimeout, config.ArtifactTimeout) + time.Minute
+	if operationTimeout > serverTimeout {
+		serverTimeout = operationTimeout
+	}
 	httpServer := &http.Server{
 		Addr: config.ListenAddress, Handler: server.Handler(),
-		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 3 * time.Minute,
-		WriteTimeout: 3 * time.Minute, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 32 << 10,
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: serverTimeout,
+		WriteTimeout: serverTimeout, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 32 << 10,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
