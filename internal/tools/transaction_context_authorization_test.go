@@ -138,6 +138,26 @@ func TestValidateChildTaskAgainstParentTransactionRejectsDisallowedProviderModel
 	}
 }
 
+func TestValidateChildTaskAgainstParentTransactionRejectsRefOverridingBranchConstraint(t *testing.T) {
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace": defaultNamespace,
+		"branch":    "main",
+	}
+	agent := researcherAgent()
+	child := childTaskForResearcherAgent()
+	child.Spec.Workspace = &corev1alpha1.WorkspaceConfig{
+		GitRepo: "https://github.com/example/repo",
+		Branch:  "main",
+		Ref:     "refs/heads/attacker-selected",
+	}
+
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), "overrides the branch constrained by transaction context") {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want ref-overrides-branch denial", err)
+	}
+}
+
 func TestValidateChildTaskAgainstParentTransactionRejectsProviderlessChildUnderProviderConstraints(t *testing.T) {
 	parent := parentTask()
 	parent.Spec.Transaction.Context = map[string]string{

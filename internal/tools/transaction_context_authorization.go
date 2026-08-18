@@ -112,6 +112,12 @@ func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient cl
 			return fmt.Errorf("child task workspace %s %q does not match transaction context %q", constraint.key, constraint.got, want)
 		}
 	}
+	// Execution gives workspace.ref precedence over branch, so a branch-only
+	// transaction constraint must not be bypassed by supplying the allowed
+	// branch together with an unconstrained ref selector.
+	if strings.TrimSpace(txCtx["branch"]) != "" && strings.TrimSpace(txCtx["ref"]) == "" && workspaceRef(workspace) != "" {
+		return fmt.Errorf("child task workspace ref %q overrides the branch constrained by transaction context", workspaceRef(workspace))
+	}
 	if err := validateChildProviderModelConstraints(txCtx, childCtx); err != nil {
 		return err
 	}

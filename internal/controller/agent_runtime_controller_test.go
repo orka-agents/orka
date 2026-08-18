@@ -669,6 +669,23 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "https") {
 		t.Fatalf("external HTTP endpoint error = %v", err)
 	}
+	for _, endpoint := range []string{
+		"https://100.64.0.1", "https://198.18.0.5", "https://192.0.2.9", "https://[2002::1]",
+	} {
+		runtimeObject.Spec.Deployment.Endpoint = endpoint
+		if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "non-public IP") {
+			t.Fatalf("special-use endpoint %s error = %v", endpoint, err)
+		}
+	}
+	service.Spec.Type = corev1.ServiceTypeExternalName
+	service.Spec.ExternalName = "internal.other-namespace.svc.cluster.local"
+	if err := reconciler.Update(t.Context(), service); err != nil {
+		t.Fatal(err)
+	}
+	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "ExternalName") {
+		t.Fatalf("ExternalName Service endpoint error = %v", err)
+	}
 }
 
 func TestValidateHarnessV1AgentRuntimeEndpointSpecRequiresTLS(t *testing.T) {

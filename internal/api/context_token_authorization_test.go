@@ -145,6 +145,22 @@ func TestContextTokenTaskCreateFailures(t *testing.T) {
 	})
 }
 
+func TestContextTokenWorkspaceFailuresRejectRefOverridingBranchConstraint(t *testing.T) {
+	token := &ContextToken{TransactionContext: map[string]any{"branch": "main"}}
+	failures := contextTokenWorkspaceFailures(token, &corev1alpha1.WorkspaceConfig{
+		GitRepo: "https://github.com/example/repo", Branch: "main", Ref: "refs/heads/attacker-selected",
+	})
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], "overrides the branch constrained by token context")
+
+	// A ref allowed by an explicit token ref constraint remains accepted.
+	token = &ContextToken{TransactionContext: map[string]any{"branch": "main", "ref": "abc123"}}
+	failures = contextTokenWorkspaceFailures(token, &corev1alpha1.WorkspaceConfig{
+		GitRepo: "https://github.com/example/repo", Branch: "main", Ref: "abc123",
+	})
+	require.Empty(t, failures)
+}
+
 func TestContextTokenWorkspaceCredentialFailuresAuthorizeAllRoles(t *testing.T) {
 	firstName := "workspace-a"
 	secondName := "workspace-b"

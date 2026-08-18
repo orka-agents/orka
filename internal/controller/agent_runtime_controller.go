@@ -688,6 +688,13 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 		if err := r.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: serviceName}, &service); err != nil {
 			return fmt.Errorf("get AgentRuntime endpoint Service %s/%s: %w", serviceNamespace, serviceName, err)
 		}
+		// An ExternalName Service is a CNAME alias to an arbitrary hostname:
+		// it would let a namespace-scoped caller steer conformance traffic —
+		// which exempts recognized .svc hostnames from the public-address
+		// dial policy — at cross-namespace or internal targets.
+		if service.Spec.Type == corev1.ServiceTypeExternalName {
+			return fmt.Errorf("AgentRuntime endpoint Service %s/%s is an ExternalName alias; only cluster-backed Services are permitted", serviceNamespace, serviceName)
+		}
 		return nil
 	}
 	if parsed.Scheme != urlSchemeHTTPS {
@@ -791,6 +798,17 @@ func (r *AgentRuntimeReconciler) agentRuntimeAuthMaterial(ctx context.Context, r
 	capabilityKey, ok := capabilitySecret.Data[capabilityRef.Key]
 	if !ok || len(capabilityKey) < harnessv2.MinCapabilitySecretBytes {
 		return agentRuntimeAuthMaterial{}, fmt.Errorf("AgentRuntime operation capability Secret %s/%s key %q must contain at least %d bytes", runtime.Namespace, capabilityRef.Name, capabilityRef.Key, harnessv2.MinCapabilitySecretBytes)
+	}
+	// Runtimes that project these Secrets as files trim surrounding
+	// whitespace before verifying, while the controller signs with the raw
+	// bytes; a trailing newline would make every signed capability invalid
+	// and leave the runtime permanently unready. Fail closed with a clear
+	// message instead.
+	if !bytes.Equal(controllerToken, bytes.TrimSpace(controllerToken)) {
+		return agentRuntimeAuthMaterial{}, fmt.Errorf("AgentRuntime controller bearer token Secret %s/%s key %q must not contain surrounding whitespace", runtime.Namespace, controllerRef.Name, controllerRef.Key)
+	}
+	if !bytes.Equal(capabilityKey, bytes.TrimSpace(capabilityKey)) {
+		return agentRuntimeAuthMaterial{}, fmt.Errorf("AgentRuntime operation capability Secret %s/%s key %q must not contain surrounding whitespace", runtime.Namespace, capabilityRef.Name, capabilityRef.Key)
 	}
 	// The bearer is transmitted on every request; the capability secret is a
 	// signing key that must never transit. Identical resolved bytes would let
