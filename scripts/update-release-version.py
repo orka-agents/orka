@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Update Gatekeeper-style Helm generator inputs for an Orka release."""
+"""Update Helm generator inputs for an Orka release."""
 
 from __future__ import annotations
 

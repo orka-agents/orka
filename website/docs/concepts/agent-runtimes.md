@@ -25,7 +25,7 @@ PR-blocking live CI currently exercises these runtime scenarios against real mod
 
 This coverage is about Orka's runtime wiring and task/session/workspace behavior. The live backend used in CI is harness infrastructure, not the main product under test.
 
-OpenCode uses a custom OpenAI-compatible provider, so it can target chat-completions endpoints such as vLLM, Ray Serve, or Ollama. Set `OPENAI_BASE_URL` to the endpoint base, optionally including a trailing `/chat/completions`. Set `OPENAI_API_KEY` when the endpoint requires authentication; it may be omitted for unauthenticated local endpoints. The adapter strips the trailing chat-completions path before configuring OpenCode.
+OpenCode uses a custom OpenAI-compatible provider, so it can target chat-completions endpoints such as vLLM, Ray Serve, or other compatible servers. Set `OPENAI_BASE_URL` to the endpoint base, optionally including a trailing `/chat/completions`. Set `OPENAI_API_KEY` when the endpoint requires authentication; it may be omitted for unauthenticated local endpoints. The adapter strips the trailing chat-completions path before configuring OpenCode.
 
 OpenCode CLI session continuation is not wired initially. Each Orka turn starts a new OpenCode CLI session, while Orka still retains its own task, result, and lineage records. Read-only scheduled agent tasks do not support OpenCode initially because non-interactive OpenCode runs pre-approve file edits.
 

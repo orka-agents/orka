@@ -18,10 +18,7 @@ Gatekeeper
 Copyright 2018-2020 The Gatekeeper Authors
 
 The derived source is licensed under the Apache License, Version 2.0. See
-`cmd/build/helmify/LICENSE`,
-`cmd/build/helmify/NOTICE`, and
-`cmd/build/helmify/README.md` for the license,
-upstream revision, and Orka modification notes.
+`cmd/build/helmify/LICENSE` and `cmd/build/helmify/NOTICE`.
 
 ## GitHub Copilot CLI
 

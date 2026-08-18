@@ -101,7 +101,7 @@ Common task commands:
 
 ## Chat and dashboard helpers
 
-`orka run` is an Ollama-style chat interface backed by Orka chat/provider configuration:
+`orka run` is a chat interface backed by Orka chat and provider configuration:
 
 ```bash
 orka run "explain this task failure"

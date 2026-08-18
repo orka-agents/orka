@@ -19,11 +19,11 @@ execution system.
 | **`RepositoryScan` is a first-class CRD**, not config embedded in ad hoc tasks | Scan config is durable, namespace-scoped, and policy-like, with its own status, conditions, and reconciliation lifecycle. Dynamic outputs (findings, evidence) stay in SQLite. |
 | **Dynamic security data lives in SQLite**, not CRD status | Findings are high-volume and change frequently; the store enables filtering by repository, severity, validation status, and patch status, consistent with results/plans/sessions/artifacts. |
 | **Scans run as Kubernetes-backed tasks** with a git workspace | Threat-model, review, validation, and patch work run as agent tasks. The deterministic mapper runs as a container task using the managed general worker, so slice generation does not require model access. |
-| **Human approval is mandatory for remediation** | Patch generation and PR creation are explicit user actions, matching the safer Codex Security interaction pattern and reducing the risk of noisy or unsafe automated changes. |
+| **Human approval is mandatory for remediation** | Patch generation and PR creation are explicit user actions, reducing the risk of noisy or unsafe automated changes. |
 
-This design mirrors the broad Codex Security workflow (threat model first; scan history and
-merged commits; validate likely findings in isolation; propose a patch; let the user review
-and create a PR). Reference: [OpenAI Codex Security](https://developers.openai.com/codex/security/setup).
+The workflow generates a threat model first, scans history and merged commits, validates
+likely findings in isolation, proposes patches, and lets users review and create pull
+requests.
 
 ### Scope (v1)
 

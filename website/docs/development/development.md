@@ -31,7 +31,7 @@ make run
 
 ## Helm Chart Generation and Releases
 
-Orka follows Gatekeeper's staged chart flow. The editable Helm generator and static chart inputs live under `cmd/build/helmify/`; canonical Kubernetes resources live under `config/`. Generated and promoted outputs are committed so pull requests and release preparation review the exact manifests that will ship.
+Orka uses a staged chart flow. The editable Helm generator and static chart inputs live under `cmd/build/helmify/`; canonical Kubernetes resources live under `config/`. Generated and promoted outputs are committed so pull requests and release preparation review the exact manifests that will ship.
 
 | Path | Purpose | Edit directly? |
 | --- | --- | --- |
@@ -49,7 +49,7 @@ For a normal manifest or chart contribution:
 
 `make manifests` rebuilds staging from scratch, so direct changes in `manifest_staging/` are clobbered. CI reruns generation and requires a clean diff to detect stale output; run `make manifests` and inspect `git diff` for the same drift check locally.
 
-Release preparation runs the same targets as Gatekeeper's flow:
+Release preparation runs the staged release targets:
 
 ```bash
 make release-manifest NEWVERSION=vX.Y.Z[-beta.N|-rc.N]
