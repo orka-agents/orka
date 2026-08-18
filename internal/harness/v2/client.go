@@ -124,12 +124,24 @@ func WithProtocolLimits(limits ProtocolLimits) ClientOption {
 	}
 }
 
+// NewProxylessTransport returns a clone of http.DefaultTransport with
+// environment proxy resolution disabled. Supervisor control traffic targets
+// exact in-cluster Pod endpoints; routing it through an inherited HTTP(S)_PROXY
+// would either expose authenticated control headers to an intermediary or
+// leave pools unreachable when the proxy cannot reach Pod IPs.
+func NewProxylessTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return transport
+}
+
 func NewClient(baseURL string, options ...ClientOption) (*Client, error) {
 	parsed, prefix, err := parseClientBaseURL(baseURL)
 	if err != nil {
 		return nil, clientError("new_client", ClientErrorConfiguration, err.Error(), err)
 	}
 	defaultHTTPClient := *http.DefaultClient
+	defaultHTTPClient.Transport = NewProxylessTransport()
 	defaultHTTPClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}

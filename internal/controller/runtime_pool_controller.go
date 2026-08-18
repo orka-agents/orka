@@ -2643,7 +2643,9 @@ func (r *RuntimePoolReconciler) supervisorClient() RuntimePoolSupervisorClient {
 	}
 	httpClient := r.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: runtimePoolProbeTimeout}
+		// Supervisor probes and drains target exact Pod endpoints with
+		// authenticated headers; environment proxies must never carry them.
+		httpClient = &http.Client{Timeout: runtimePoolProbeTimeout, Transport: harnessv2.NewProxylessTransport()}
 	}
 	isolatedClient := *httpClient
 	isolatedClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }

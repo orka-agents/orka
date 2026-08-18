@@ -19,6 +19,20 @@ const clientTestBearer = "controller-bearer-token-0123456789abcdef"
 
 var clientTestCapabilitySecret = []byte("capability-secret-0123456789abcdef")
 
+func TestNewClientDefaultsToProxylessTransport(t *testing.T) {
+	client, err := NewClient("http://10.0.0.1:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("default client transport = %T, want *http.Transport", client.httpClient.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("default supervisor transport must not resolve environment proxies: authenticated exact-Pod control traffic would traverse HTTP_PROXY")
+	}
+}
+
 func TestClientControlSurfaceAndAuthentication(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	createRequest := clientTestCreateSessionRequest(t, now, "create-op")

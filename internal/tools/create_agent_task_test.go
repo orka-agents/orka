@@ -418,6 +418,50 @@ func TestCreateAgentTaskTool_Execute_RequiresExplicitPublicationCredentialForWri
 	}
 }
 
+func TestCreateAgentTaskTool_Execute_RejectsInvalidSourceSelectors(t *testing.T) {
+	tests := []struct {
+		name      string
+		workspace string
+		want      string
+	}{
+		{
+			name:      "unsupported ref namespace",
+			workspace: `{"gitRepo":"https://github.com/example/repo","ref":"refs/remotes/origin/main"}`,
+			want:      "workspace.ref is invalid",
+		},
+		{
+			name:      "malformed ref",
+			workspace: `{"gitRepo":"https://github.com/example/repo","ref":"refs/heads/bad..ref"}`,
+			want:      "workspace.ref is invalid",
+		},
+		{
+			name:      "malformed branch",
+			workspace: `{"gitRepo":"https://github.com/example/repo","branch":"bad..branch"}`,
+			want:      "workspace.branch is invalid",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := newFakeClient()
+			ctx := newCreateAgentTaskToolCtx(fc)
+			tool := &CreateAgentTaskTool{}
+			args := json.RawMessage(`{"prompt":"Fix the bug","agentRef":"codex-agent","workspace":` + tt.workspace + `}`)
+
+			result, err := tool.Execute(ctx, args)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, tt.want) {
+				t.Fatalf("response = %#v, want %q rejection", response, tt.want)
+			}
+		})
+	}
+}
+
 func TestCreateAgentTaskTool_Execute_BindsPublicationCredentialRoles(t *testing.T) {
 	fc := newFakeClient()
 	ctx := newCreateAgentTaskToolCtx(fc)

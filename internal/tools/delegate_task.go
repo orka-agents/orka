@@ -211,11 +211,11 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 					},
 					"branch": {
 						"type": "string",
-						"description": "Git branch name. Omit with ref to resolve and freeze the repository's advertised default branch."
+						"description": "Git branch name (short name or refs/heads/... ref). Omit with ref to resolve and freeze the repository's advertised default branch."
 					},
 					"ref": {
 						"type": "string",
-						"description": "Git ref (commit SHA or tag)"
+						"description": "Exact source selector: a full commit SHA, refs/heads/... branch, refs/tags/... tag, or short ref name. Other refs/ namespaces are rejected."
 					},
 					"intent": {
 						"type": "string",
@@ -674,6 +674,9 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 		// Mirror the controller's workspace preflight before creating the child
 		// Task so a doomed configuration fails here instead of after creation.
 		if wsErr := agentWorkspacePreflightError(workspace, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
+			return fmt.Errorf("%s (%s)", wsErr.Message, wsErr.Suggestion)
+		}
+		if wsErr := agentWorkspaceSourceSelectorError(workspace); wsErr != nil {
 			return fmt.Errorf("%s (%s)", wsErr.Message, wsErr.Suggestion)
 		}
 		// Only attach read credentials alongside a gitRepo: the controller

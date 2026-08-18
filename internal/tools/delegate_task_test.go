@@ -1535,6 +1535,16 @@ func TestDelegateTaskTool_Execute_RejectsDoomedWriteWorkspaces(t *testing.T) {
 			workspace: `{"gitRepo": "http://github.com/myorg/myrepo"}`,
 			want:      "credential-free HTTPS URL",
 		},
+		{
+			name:      "unsupported source ref namespace",
+			workspace: `{"gitRepo": "https://github.com/myorg/myrepo", "ref": "refs/remotes/origin/main"}`,
+			want:      "workspace.ref is invalid",
+		},
+		{
+			name:      "malformed source branch",
+			workspace: `{"gitRepo": "https://github.com/myorg/myrepo", "branch": "bad..branch"}`,
+			want:      "workspace.branch is invalid",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
