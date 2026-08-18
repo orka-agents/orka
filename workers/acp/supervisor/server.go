@@ -12,6 +12,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,49 @@ type Server struct {
 // TTL by a clock-skew margin so a token cannot be replayed at the edge of
 // expiry.
 const statusNonceRetentionSlack = 30 * time.Second
+
+const (
+	// tombstoneRetention bounds how long a deleted or failed session's replay
+	// tombstone is retained. It must exceed the maximum operation-capability
+	// lifetime plus clock skew so a legitimate replay whose capability is still
+	// valid is still classified against its tombstone; past this window the
+	// capability itself has expired and the replay is rejected at the capability
+	// layer, so the tombstone is no longer needed. Without this bound a
+	// long-lived supervisor serving many sessions accumulates one record per
+	// historical session until restart or OOM.
+	tombstoneRetention = time.Hour
+	// maxRetainedTombstones is a hard backstop on tombstone memory under
+	// sustained session churn within the retention window; the oldest records
+	// are evicted first.
+	maxRetainedTombstones = 4096
+)
+
+// pruneTombstonesLocked bounds s.tombstones by dropping records older than
+// tombstoneRetention and, as a backstop, evicting the oldest until at most
+// maxRetainedTombstones remain. It must be called with s.mu held, before a new
+// tombstone is inserted.
+func (s *Server) pruneTombstonesLocked(now time.Time) {
+	for uid, tombstone := range s.tombstones {
+		if now.Sub(tombstone.DeletedAt) > tombstoneRetention {
+			delete(s.tombstones, uid)
+		}
+	}
+	if len(s.tombstones) <= maxRetainedTombstones {
+		return
+	}
+	type agedTombstone struct {
+		uid       harnessv2.RuntimeSessionUID
+		deletedAt time.Time
+	}
+	entries := make([]agedTombstone, 0, len(s.tombstones))
+	for uid, tombstone := range s.tombstones {
+		entries = append(entries, agedTombstone{uid: uid, deletedAt: tombstone.DeletedAt})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].deletedAt.Before(entries[j].deletedAt) })
+	for i := 0; i < len(entries)-maxRetainedTombstones; i++ {
+		delete(s.tombstones, entries[i].uid)
+	}
+}
 
 type sessionCreationError struct {
 	stage string
@@ -272,6 +316,7 @@ func (s *Server) tombstoneFailedCreateLocked(sessionID harnessv2.RuntimeSessionI
 		return
 	}
 	delete(s.sessions, sessionID)
+	s.pruneTombstonesLocked(time.Now().UTC())
 	s.tombstones[metadata.Fence.RuntimeSessionUID] = harnessv2.RuntimeSessionTombstone{
 		RuntimeSessionUID:        metadata.Fence.RuntimeSessionUID,
 		RuntimeSessionGeneration: metadata.Fence.RuntimeSessionGeneration,
@@ -951,6 +996,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 			RuntimeProfileDigest: state.descriptor.RuntimeProfileDigest, DeletedAt: deletedAt, Operations: operations,
 		}
 		delete(s.sessions, sessionID)
+		s.pruneTombstonesLocked(deletedAt)
 		s.tombstones[tombstone.RuntimeSessionUID] = tombstone
 	}
 	s.mu.Unlock()

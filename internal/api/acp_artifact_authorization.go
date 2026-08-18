@@ -412,12 +412,14 @@ func (s *Server) authorizePublisherParentEffect(
 	if err := s.authorizationReader().List(ctx, &effects, client.InNamespace(metadata.Namespace)); err != nil {
 		return err
 	}
+	now := time.Now().UTC()
 	matches := 0
 	for i := range effects.Items {
 		effect := &effects.Items[i]
 		if effect.Spec.Kind == kind && effect.Spec.IdentityNamespace == metadata.Namespace &&
 			effect.Spec.AggregateID == aggregateID && effect.Spec.OperationID == metadata.OperationID &&
-			effect.Status.State == corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight) {
+			effect.Status.State == corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight) &&
+			externalEffectLeaseActive(effect.Status, now) {
 			matches++
 		}
 	}
@@ -425,4 +427,18 @@ func (s *Server) authorizePublisherParentEffect(
 		return fmt.Errorf("publisher parent effect is not uniquely in flight")
 	}
 	return nil
+}
+
+// externalEffectLeaseActive reports whether an in-flight external effect still
+// holds a live lease: a non-empty owner, a recorded controller epoch, and an
+// unexpired lease expiry. The publisher broker paths authenticate on a shared
+// bearer with no per-request epoch capability, so without this check a request
+// arriving after the lease expired — but before reconciliation moves the record
+// out of InFlight — would keep retrieving frozen credentials and artifact
+// capabilities past the point its operation authority should have ended.
+func externalEffectLeaseActive(status corev1alpha1.ExternalEffectStatus, now time.Time) bool {
+	if strings.TrimSpace(status.LeaseOwner) == "" || status.ControllerEpoch <= 0 {
+		return false
+	}
+	return status.LeaseExpiresAt != nil && status.LeaseExpiresAt.After(now)
 }

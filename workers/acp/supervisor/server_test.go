@@ -1650,3 +1650,30 @@ func TestSupervisorRejectsFreshPromptWhenDrainCleanupIsScheduled(t *testing.T) {
 		t.Fatal("fresh prompt was admitted while drain cleanup was scheduled")
 	}
 }
+
+func TestPruneTombstonesLockedBoundsRetentionAndCount(t *testing.T) {
+	server := &Server{tombstones: map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone{}}
+	now := time.Now().UTC()
+	server.tombstones["fresh"] = harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "fresh", DeletedAt: now.Add(-time.Minute)}
+	server.tombstones["stale"] = harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "stale", DeletedAt: now.Add(-2 * tombstoneRetention)}
+	server.pruneTombstonesLocked(now)
+	if _, ok := server.tombstones["stale"]; ok {
+		t.Fatal("tombstone older than the retention window was retained")
+	}
+	if _, ok := server.tombstones["fresh"]; !ok {
+		t.Fatal("in-window tombstone was dropped")
+	}
+
+	// Sustained churn within the window must still be bounded by the hard cap,
+	// evicting the oldest first.
+	for i := range maxRetainedTombstones + 256 {
+		uid := harnessv2.RuntimeSessionUID(fmt.Sprintf("session-%05d", i))
+		server.tombstones[uid] = harnessv2.RuntimeSessionTombstone{
+			RuntimeSessionUID: uid, DeletedAt: now.Add(-time.Duration(i) * time.Millisecond),
+		}
+	}
+	server.pruneTombstonesLocked(now)
+	if len(server.tombstones) > maxRetainedTombstones {
+		t.Fatalf("tombstone count = %d, want at most %d", len(server.tombstones), maxRetainedTombstones)
+	}
+}

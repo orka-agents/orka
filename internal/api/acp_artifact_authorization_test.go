@@ -671,6 +671,64 @@ func TestAuthorizePublisherParentEffectUsesFreshReaderWithFallback(t *testing.T)
 	}
 }
 
+func TestAuthorizePublisherParentEffectRequiresLiveLease(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	metadata := publisherservice.OperationMetadata{
+		Namespace: "default", TaskID: "task-uid", OperationID: "workspace-prepare-prompt",
+	}
+	base := func() *corev1alpha1.ExternalEffect {
+		return publisherEffectForTest("workspace-effect", "workspace.prepare", metadata.TaskID, metadata.OperationID)
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*corev1alpha1.ExternalEffect)
+		wantErr bool
+	}{
+		{name: "live lease authorizes", mutate: func(*corev1alpha1.ExternalEffect) {}},
+		{
+			name: "expired lease is rejected",
+			mutate: func(e *corev1alpha1.ExternalEffect) {
+				e.Status.LeaseExpiresAt = &metav1.Time{Time: time.Now().UTC().Add(-time.Minute)}
+			},
+			wantErr: true,
+		},
+		{
+			name:    "missing lease expiry is rejected",
+			mutate:  func(e *corev1alpha1.ExternalEffect) { e.Status.LeaseExpiresAt = nil },
+			wantErr: true,
+		},
+		{
+			name:    "missing lease owner is rejected",
+			mutate:  func(e *corev1alpha1.ExternalEffect) { e.Status.LeaseOwner = "" },
+			wantErr: true,
+		},
+		{
+			name:    "missing controller epoch is rejected",
+			mutate:  func(e *corev1alpha1.ExternalEffect) { e.Status.ControllerEpoch = 0 },
+			wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			effect := base()
+			test.mutate(effect)
+			server := &Server{client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(effect).Build()}
+			err := server.authorizePublisherParentEffect(
+				context.Background(), publisherservice.OperationWorkspacePrepare, metadata,
+			)
+			if test.wantErr && err == nil {
+				t.Fatal("expected authorization to fail for a non-live lease")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("expected authorization to succeed: %v", err)
+			}
+		})
+	}
+}
+
 func publisherEffectForTest(name, kind, aggregateID, operationID string) *corev1alpha1.ExternalEffect {
 	return &corev1alpha1.ExternalEffect{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name},
@@ -678,7 +736,12 @@ func publisherEffectForTest(name, kind, aggregateID, operationID string) *corev1
 			ID: name, Kind: kind, IdentityNamespace: "default", AggregateID: aggregateID,
 			OperationID: operationID, RequestDigest: "sha256:" + strings.Repeat("9", 64),
 		},
-		Status: corev1alpha1.ExternalEffectStatus{State: corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight)},
+		Status: corev1alpha1.ExternalEffectStatus{
+			State:                       corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight),
+			LeaseOwner:                  "controller-epoch-1",
+			LeaseExpiresAt:              &metav1.Time{Time: time.Now().UTC().Add(2 * time.Minute)},
+			ControlRecordMutationStatus: corev1alpha1.ControlRecordMutationStatus{ControllerEpoch: 1},
+		},
 	}
 }
 

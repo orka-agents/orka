@@ -855,9 +855,19 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context
 			if pod.Status.PodIP != "" {
 				podIPs[pod.Status.PodIP] = struct{}{}
 			}
+			// Every endpoint's advertised address is still validated against the
+			// backing Pod, but only a currently serving backend enters the pinned
+			// set: ApplyPinnedBackendDial round-robins the pins without a health
+			// fallback, so an explicitly unready or terminating endpoint (or a Pod
+			// being deleted) would make dispatch fail even though healthy backends
+			// remain.
+			pinnable := agentRuntimeEndpointPinnable(endpoint, &pod)
 			for _, address := range endpoint.Addresses {
 				if _, ok := podIPs[address]; !ok {
 					return nil, deny(fmt.Sprintf("advertises address %q that is not an IP of backend Pod %q", address, ref.Name))
+				}
+				if !pinnable {
+					continue
 				}
 				for _, port := range slice.Ports {
 					if port.Port == nil || *port.Port <= 0 {
@@ -888,6 +898,21 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context
 	}
 	sort.Strings(addresses)
 	return addresses, nil
+}
+
+// agentRuntimeEndpointPinnable reports whether an EndpointSlice endpoint is
+// currently serving and may be pinned. A nil Ready condition is treated as
+// ready (older EndpointSlices and controllers omit it), but an explicitly
+// unready or terminating endpoint, or a Pod carrying a deletion timestamp, is
+// excluded so the pinned set contains only live backends.
+func agentRuntimeEndpointPinnable(endpoint discoveryv1.Endpoint, pod *corev1.Pod) bool {
+	if endpoint.Conditions.Ready != nil && !*endpoint.Conditions.Ready {
+		return false
+	}
+	if endpoint.Conditions.Terminating != nil && *endpoint.Conditions.Terminating {
+		return false
+	}
+	return pod == nil || pod.DeletionTimestamp == nil
 }
 
 // agentRuntimeEndpointPortName dereferences an EndpointSlice port name, treating
