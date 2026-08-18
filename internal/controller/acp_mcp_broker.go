@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -762,16 +763,36 @@ func runtimePoolACPMCPAuthMaterial(
 	}); err != nil {
 		return "", nil, err
 	}
-	if len(secrets.Items) != 1 {
-		return "", nil, fmt.Errorf("runtime pool requires exactly one auth Secret")
+	// During graceful epoch replacement both the draining instance's Secret
+	// and the next epoch's Secret exist; select the one mounted by the pool's
+	// exact active instance instead of requiring one Secret globally.
+	secret, err := runtimePoolAuthSecretForEpoch(secrets.Items, active.ControllerEpoch)
+	if err != nil {
+		return "", nil, err
 	}
-	secret := secrets.Items[0]
 	bearer := strings.TrimSpace(string(secret.Data[runtimePoolControllerTokenKey]))
 	capability := append([]byte(nil), secret.Data[runtimePoolCapabilitySecretKey]...)
 	if len(bearer) < 32 || len(capability) < harnessv2.MinCapabilitySecretBytes {
 		return "", nil, fmt.Errorf("runtime pool auth Secret is incomplete")
 	}
 	return bearer, capability, nil
+}
+
+// runtimePoolAuthSecretForEpoch selects the auth Secret bound to the given
+// controller epoch (name suffix auth-e<epoch>) from the pool's labeled
+// Secrets.
+func runtimePoolAuthSecretForEpoch(secrets []corev1.Secret, epoch int64) (*corev1.Secret, error) {
+	suffix := "auth-e" + strconv.FormatInt(epoch, 10)
+	var matched []*corev1.Secret
+	for i := range secrets {
+		if strings.HasSuffix(secrets[i].Name, suffix) {
+			matched = append(matched, &secrets[i])
+		}
+	}
+	if len(matched) != 1 {
+		return nil, fmt.Errorf("runtime pool requires exactly one auth Secret for controller epoch %d", epoch)
+	}
+	return matched[0], nil
 }
 
 func writeACPMCPError(w http.ResponseWriter, status int, message string) {

@@ -38,11 +38,11 @@ func TestACPArtifactAuthorizationBrokerIssuesExactUploadCapability(t *testing.T)
 	poolUID := types.UID("pool-uid")
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: poolUID, Generation: 1},
-		Status:     corev1alpha1.RuntimePoolStatus{ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{PodNamespace: "orka-runtimes", RuntimeInstanceID: "runtime-1"}},
+		Status:     corev1alpha1.RuntimePoolStatus{ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{PodNamespace: "orka-runtimes", RuntimeInstanceID: "runtime-1", ControllerEpoch: 1}},
 	}
 	controllerToken := strings.Repeat("t", 32)
 	operationSecret := []byte(strings.Repeat("s", 32))
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "auth", Labels: map[string]string{"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(poolUID)}}, Data: map[string][]byte{runtimePoolControllerTokenKeyAPI: []byte(controllerToken), runtimePoolCapabilitySecretKeyAPI: operationSecret}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1", Labels: map[string]string{"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(poolUID)}}, Data: map[string][]byte{runtimePoolControllerTokenKeyAPI: []byte(controllerToken), runtimePoolCapabilitySecretKeyAPI: operationSecret}}
 	taskUID := types.UID("task-uid")
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: taskUID}, Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{State: corev1alpha1.TaskExecutionStateSettling, PromptID: "prompt-1", RuntimeSessionUID: "session-1", RuntimeInstanceID: "runtime-1"}}}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, secret, task).Build()
@@ -137,14 +137,14 @@ func TestACPArtifactAuthorizationBrokerRejectsStaleCachedRevocationState(t *test
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: poolUID, Generation: 1},
 		Status: corev1alpha1.RuntimePoolStatus{ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
-			PodNamespace: "orka-runtimes", RuntimeInstanceID: "runtime-1",
+			PodNamespace: "orka-runtimes", RuntimeInstanceID: "runtime-1", ControllerEpoch: 1,
 		}},
 	}
 	controllerToken := strings.Repeat("t", 32)
 	operationSecret := []byte(strings.Repeat("s", 32))
 	authSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "orka-runtimes", Name: "auth", UID: "old-secret-uid",
+			Namespace: "orka-runtimes", Name: "pool-auth-e1", UID: "old-secret-uid",
 			Labels: map[string]string{"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(poolUID)},
 		},
 		Data: map[string][]byte{

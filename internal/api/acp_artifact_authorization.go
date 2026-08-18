@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -137,10 +138,20 @@ func (s *Server) resolveArtifactRuntimePool(ctx context.Context, request acpArti
 	}); err != nil {
 		return nil, nil, err
 	}
-	if len(secrets.Items) != 1 {
-		return nil, nil, fmt.Errorf("runtime pool auth secret is ambiguous")
+	// During graceful epoch replacement both the draining instance's Secret
+	// and the next epoch's Secret exist; select the one mounted by the
+	// pool's exact active instance instead of requiring one Secret globally.
+	suffix := "auth-e" + strconv.FormatInt(pool.Status.ActiveInstance.ControllerEpoch, 10)
+	var matched []*corev1.Secret
+	for i := range secrets.Items {
+		if strings.HasSuffix(secrets.Items[i].Name, suffix) {
+			matched = append(matched, &secrets.Items[i])
+		}
 	}
-	return pool, secrets.Items[0].DeepCopy(), nil
+	if len(matched) != 1 {
+		return nil, nil, fmt.Errorf("runtime pool auth secret is ambiguous for controller epoch %d", pool.Status.ActiveInstance.ControllerEpoch)
+	}
+	return pool, matched[0].DeepCopy(), nil
 }
 
 func (s *Server) findTaskByUID(ctx context.Context, namespace, uid string) (*corev1alpha1.Task, error) {

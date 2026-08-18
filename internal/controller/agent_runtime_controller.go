@@ -14,8 +14,11 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
+
 	"strings"
 	"time"
+
+	discoveryv1 "k8s.io/api/discovery/v1"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -64,6 +67,7 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 
 // Reconcile validates one exact external runtime and publishes condition-ready status.
 func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -695,7 +699,14 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 		if service.Spec.Type == corev1.ServiceTypeExternalName {
 			return fmt.Errorf("AgentRuntime endpoint Service %s/%s is an ExternalName alias; only cluster-backed Services are permitted", serviceNamespace, serviceName)
 		}
-		return nil
+		// The same-namespace exemption from the public-address dial policy is
+		// justified only when the Service routes to same-namespace Pods that
+		// Kubernetes selected. A selectorless Service or a manually managed
+		// EndpointSlice/Endpoints backend can route the ClusterIP anywhere.
+		if len(service.Spec.Selector) == 0 {
+			return fmt.Errorf("AgentRuntime endpoint Service %s/%s has no selector; only Services selecting same-namespace Pods are permitted", serviceNamespace, serviceName)
+		}
+		return r.validateAgentRuntimeServiceBackends(ctx, serviceNamespace, serviceName)
 	}
 	if parsed.Scheme != urlSchemeHTTPS {
 		return fmt.Errorf("external AgentRuntime endpoints must use https")
@@ -716,6 +727,34 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 // for external AgentRuntime endpoints, sharing the conformance dial policy.
 func isPublicAgentRuntimeAddress(address netip.Addr) bool {
 	return v2conformance.PublicAddressAllowed(address)
+}
+
+// validateAgentRuntimeServiceBackends requires every EndpointSlice serving
+// the endpoint Service to be managed by the Kubernetes endpoint controllers
+// for selector-based Services and to target same-namespace Pods. Manually
+// created slices (and legacy Endpoints, which are mirrored with a different
+// managed-by value) can steer a ClusterIP at arbitrary internal addresses.
+// This is re-validated on every reconcile immediately before probing.
+func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context.Context, serviceNamespace, serviceName string) error {
+	var endpointSlices discoveryv1.EndpointSliceList
+	if err := r.List(ctx, &endpointSlices, client.InNamespace(serviceNamespace), client.MatchingLabels{
+		discoveryv1.LabelServiceName: serviceName,
+	}); err != nil {
+		return fmt.Errorf("list AgentRuntime endpoint Service %s/%s EndpointSlices: %w", serviceNamespace, serviceName, err)
+	}
+	for i := range endpointSlices.Items {
+		slice := &endpointSlices.Items[i]
+		if slice.Labels[discoveryv1.LabelManagedBy] != "endpointslice-controller.k8s.io" {
+			return fmt.Errorf("AgentRuntime endpoint Service %s/%s has an EndpointSlice %q not managed by the Kubernetes endpoint controller; manually managed backends are not permitted", serviceNamespace, serviceName, slice.Name)
+		}
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.TargetRef == nil || endpoint.TargetRef.Kind != "Pod" ||
+				(endpoint.TargetRef.Namespace != "" && endpoint.TargetRef.Namespace != serviceNamespace) {
+				return fmt.Errorf("AgentRuntime endpoint Service %s/%s routes to a backend that is not a same-namespace Pod; only same-namespace Pod backends are permitted", serviceNamespace, serviceName)
+			}
+		}
+	}
+	return nil
 }
 
 // agentRuntimeEndpointRequiresPublicDial reports whether conformance dials to

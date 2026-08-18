@@ -418,6 +418,29 @@ func TestACPMCPBrokerRejectsAuthFenceProfileAndInactivePrompt(t *testing.T) {
 	}
 }
 
+func TestRuntimePoolAuthSecretForEpochSelectsActiveInstanceSecretDuringRollover(t *testing.T) {
+	secrets := []corev1.Secret{
+		{ObjectMeta: metav1.ObjectMeta{Name: "pool-auth-e1"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "pool-auth-e2"}},
+	}
+	selected, err := runtimePoolAuthSecretForEpoch(secrets, 1)
+	if err != nil || selected.Name != "pool-auth-e1" {
+		t.Fatalf("epoch 1 selection = %v, %v; want pool-auth-e1", selected, err)
+	}
+	selected, err = runtimePoolAuthSecretForEpoch(secrets, 2)
+	if err != nil || selected.Name != "pool-auth-e2" {
+		t.Fatalf("epoch 2 selection = %v, %v; want pool-auth-e2", selected, err)
+	}
+	if _, err := runtimePoolAuthSecretForEpoch(secrets, 3); err == nil {
+		t.Fatal("missing epoch secret unexpectedly selected")
+	}
+	if _, err := runtimePoolAuthSecretForEpoch([]corev1.Secret{
+		{ObjectMeta: metav1.ObjectMeta{Name: "pool-auth-e11"}},
+	}, 1); err == nil {
+		t.Fatal("suffix must be anchored: auth-e11 must not satisfy epoch 1")
+	}
+}
+
 func TestKubernetesACPMCPBrokerCredentialResolverChecksTaskSessionGeneration(t *testing.T) {
 	request, profile := testMCPBrokerRequest(t, harnessv2.MCPToolEffectReadOnly)
 	scheme := runtime.NewScheme()
@@ -453,7 +476,7 @@ func TestKubernetesACPMCPBrokerCredentialResolverChecksTaskSessionGeneration(t *
 		}},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "pool-auth", Namespace: "runtime-system", Labels: map[string]string{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-auth-e1", Namespace: "runtime-system", Labels: map[string]string{
 			runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
 		}},
 		Data: map[string][]byte{

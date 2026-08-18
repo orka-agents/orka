@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -656,7 +657,10 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
 	config := conformancetest.Config{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims}
 	runtimeObject, _ := testAgentRuntimeAndSecret(t, "http://runtime.default.svc.cluster.local:8080", config)
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"}}
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"},
+		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "runtime"}},
+	}
 	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service)
 	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err != nil {
 		t.Fatalf("same-namespace Service endpoint: %v", err)
@@ -677,12 +681,59 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 			t.Fatalf("special-use endpoint %s error = %v", endpoint, err)
 		}
 	}
+	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
+	foreignSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-manual",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+	}
+	if err := reconciler.Create(t.Context(), foreignSlice); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "not managed by the Kubernetes endpoint controller") {
+		t.Fatalf("manually managed EndpointSlice error = %v", err)
+	}
+	if err := reconciler.Delete(t.Context(), foreignSlice); err != nil {
+		t.Fatal(err)
+	}
+	crossNamespaceSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-mirrored",
+			Labels: map[string]string{
+				discoveryv1.LabelServiceName: "runtime",
+				discoveryv1.LabelManagedBy:   "endpointslice-controller.k8s.io",
+			},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"10.0.0.9"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "other-namespace", Name: "victim"},
+		}},
+	}
+	if err := reconciler.Create(t.Context(), crossNamespaceSlice); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "same-namespace Pod") {
+		t.Fatalf("cross-namespace backend error = %v", err)
+	}
+	if err := reconciler.Delete(t.Context(), crossNamespaceSlice); err != nil {
+		t.Fatal(err)
+	}
+	service.Spec.Selector = nil
+	if err := reconciler.Update(t.Context(), service); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "no selector") {
+		t.Fatalf("selectorless Service endpoint error = %v", err)
+	}
+	service.Spec.Selector = map[string]string{"app": "runtime"}
 	service.Spec.Type = corev1.ServiceTypeExternalName
 	service.Spec.ExternalName = "internal.other-namespace.svc.cluster.local"
 	if err := reconciler.Update(t.Context(), service); err != nil {
 		t.Fatal(err)
 	}
-	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
 	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "ExternalName") {
 		t.Fatalf("ExternalName Service endpoint error = %v", err)
 	}
@@ -887,6 +938,9 @@ func newAgentRuntimeUnitReconciler(t *testing.T, objects ...client.Object) *Agen
 		t.Fatal(err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := discoveryv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.AgentRuntime{}).WithObjects(objects...).Build()
