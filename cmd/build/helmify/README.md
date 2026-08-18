@@ -1,6 +1,7 @@
 # Orka Helm chart generator
 
-This directory contains Orka's Helm chart generator.
+This directory is derived from Gatekeeper's `cmd/build/helmify` flow at
+`c9b67657102032a460a28e7f3b9c88ec0c193453` and adapted for Orka.
 
 `make manifests` performs the staged generation flow:
 
