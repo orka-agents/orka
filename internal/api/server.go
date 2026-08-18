@@ -167,9 +167,7 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 	if parsed, err := url.ParseRequestURI(rawTarget); err == nil && parsed.EscapedPath() != "" {
 		path = parsed.EscapedPath()
 	}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) == 6 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
-		strings.EqualFold(parts[2], "gateways") && strings.EqualFold(parts[5], "events") {
+	if isGatewayIngressPath(path) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
 	}
 	// Internal broker endpoints authorize against per-pool secrets that are
@@ -181,6 +179,15 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
 	return fasthttp.RequestConfig{}
+}
+
+// isGatewayIngressPath matches /api/v1/gateways/{gateway}/{channel}/events,
+// the adapter ingress route with its own bounded request configuration and
+// streaming body reader.
+func isGatewayIngressPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	return len(parts) == 6 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
+		strings.EqualFold(parts[2], "gateways") && strings.EqualFold(parts[5], "events")
 }
 
 // setupMiddleware configures middleware for the server

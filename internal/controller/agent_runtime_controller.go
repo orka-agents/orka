@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -137,6 +138,9 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if !probe.Passed {
 		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion,
 			sanitizeAgentRuntimeStatusMessage(probe.Message)
+	}
+	if err := r.requireCurrentAgentRuntimeAuthMaterial(ctx, runtime, auth); err != nil {
+		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, err.Error()
 	}
 	return observed, true, auth.controllerResourceVersion, auth.capabilityResourceVersion,
 		"authenticated orka.harness.v2 conformance passed"
@@ -413,6 +417,8 @@ func (r *AgentRuntimeReconciler) requireCurrentAgentRuntimeV1BearerAuthMaterial(
 type agentRuntimeAuthMaterial struct {
 	controllerBearerToken     string
 	operationCapabilitySecret []byte
+	controllerSecretUID       types.UID
+	capabilitySecretUID       types.UID
 	controllerResourceVersion string
 	capabilityResourceVersion string
 }
@@ -699,12 +705,10 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 }
 
 // isPublicAgentRuntimeAddress permits only public global unicast addresses
-// for external AgentRuntime endpoints and conformance dials.
+// outside every special-use range (CGNAT, benchmarking, TEST-NETs, relays)
+// for external AgentRuntime endpoints, sharing the conformance dial policy.
 func isPublicAgentRuntimeAddress(address netip.Addr) bool {
-	address = address.Unmap()
-	return address.IsValid() && address.IsGlobalUnicast() && !address.IsPrivate() &&
-		!address.IsLoopback() && !address.IsLinkLocalUnicast() && !address.IsLinkLocalMulticast() &&
-		!address.IsUnspecified()
+	return v2conformance.PublicAddressAllowed(address)
 }
 
 // agentRuntimeEndpointRequiresPublicDial reports whether conformance dials to
@@ -788,12 +792,41 @@ func (r *AgentRuntimeReconciler) agentRuntimeAuthMaterial(ctx context.Context, r
 	if !ok || len(capabilityKey) < harnessv2.MinCapabilitySecretBytes {
 		return agentRuntimeAuthMaterial{}, fmt.Errorf("AgentRuntime operation capability Secret %s/%s key %q must contain at least %d bytes", runtime.Namespace, capabilityRef.Name, capabilityRef.Key, harnessv2.MinCapabilitySecretBytes)
 	}
+	// The bearer is transmitted on every request; the capability secret is a
+	// signing key that must never transit. Identical resolved bytes would let
+	// a bearer holder mint valid status and exact-fence capabilities.
+	if bytes.Equal(bytes.TrimSpace(controllerToken), bytes.TrimSpace(capabilityKey)) {
+		return agentRuntimeAuthMaterial{}, fmt.Errorf("AgentRuntime controller bearer token and operation capability secret must resolve to distinct values")
+	}
 	return agentRuntimeAuthMaterial{
 		controllerBearerToken:     string(controllerToken),
 		operationCapabilitySecret: append([]byte(nil), capabilityKey...),
+		controllerSecretUID:       controllerSecret.UID,
+		capabilitySecretUID:       capabilitySecret.UID,
 		controllerResourceVersion: controllerSecret.ResourceVersion,
 		capabilityResourceVersion: capabilitySecret.ResourceVersion,
 	}, nil
+}
+
+// requireCurrentAgentRuntimeAuthMaterial revalidates both v2 auth Secrets
+// after conformance so readiness fails closed when either was replaced or
+// rotated while the probe ran, mirroring the v1 bearer recheck.
+func (r *AgentRuntimeReconciler) requireCurrentAgentRuntimeAuthMaterial(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+	expected agentRuntimeAuthMaterial,
+) error {
+	current, err := r.agentRuntimeAuthMaterial(ctx, runtime)
+	if err != nil {
+		return fmt.Errorf("revalidate AgentRuntime v2 auth material after conformance: %w", err)
+	}
+	if current.controllerSecretUID != expected.controllerSecretUID || current.capabilitySecretUID != expected.capabilitySecretUID {
+		return fmt.Errorf("AgentRuntime v2 auth Secret was replaced during conformance; readiness fails closed")
+	}
+	if current.controllerResourceVersion != expected.controllerResourceVersion || current.capabilityResourceVersion != expected.capabilityResourceVersion {
+		return fmt.Errorf("AgentRuntime v2 auth Secret changed during conformance; readiness fails closed")
+	}
+	return nil
 }
 
 func (r *AgentRuntimeReconciler) getAgentRuntimeAuthSecret(
@@ -801,8 +834,15 @@ func (r *AgentRuntimeReconciler) getAgentRuntimeAuthSecret(
 	runtime *corev1alpha1.AgentRuntime,
 	ref corev1alpha1.AgentRuntimeSecretKeyReference,
 ) (*corev1.Secret, error) {
+	// Prefer the uncached APIReader so rotation is observed exactly, not at
+	// informer-cache latency; the dispatcher constructs this reconciler
+	// without one and falls back to the cached client.
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
 	var secret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: runtime.Namespace, Name: ref.Name}, &secret); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: runtime.Namespace, Name: ref.Name}, &secret); err != nil {
 		return nil, fmt.Errorf("get AgentRuntime auth Secret %s/%s: %w", runtime.Namespace, ref.Name, err)
 	}
 	if err := validateAgentRuntimeAuthSecretUse(runtime.Name, runtime.Spec.Deployment.Endpoint, &secret); err != nil {

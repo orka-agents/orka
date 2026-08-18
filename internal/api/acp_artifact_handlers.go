@@ -183,6 +183,13 @@ func acpArtifactStreamingGuard(c fiber.Ctx) error {
 	if strings.HasPrefix(c.Path(), acpArtifactRoutePrefix+"/") {
 		return c.Next()
 	}
+	// Gateway adapter ingress legitimately arrives chunked (or as HTTP/2
+	// without a declared length); it carries its own per-route body-size
+	// configuration and reads a bounded body stream, so the Content-Length
+	// requirement must not reject it.
+	if isGatewayIngressPath(c.Path()) {
+		return c.Next()
+	}
 	method := c.Method()
 	if method != fiber.MethodPost && method != fiber.MethodPut && method != fiber.MethodPatch {
 		return c.Next()

@@ -27,8 +27,63 @@ const (
 	maxProbeResponseBytes = int64(harnessv2.MaxCanonicalJSONBytes)
 )
 
+// deniedSpecialUsePrefixes mirrors the SCM egress proxy's special-use deny
+// list. Go's IsGlobalUnicast/IsPrivate predicates alone miss internally
+// routable special-use ranges such as CGNAT 100.64/10, benchmarking
+// 198.18/15, TEST-NETs, and 6to4/Teredo relays.
+var deniedSpecialUsePrefixes = mustPrefixes(
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.0.0.0/24",
+	"192.0.2.0/24",
+	"192.168.0.0/16",
+	"198.18.0.0/15",
+	"198.51.100.0/24",
+	"203.0.113.0/24",
+	"224.0.0.0/4",
+	"240.0.0.0/4",
+	"::/128",
+	"::1/128",
+	"64:ff9b::/96",
+	"64:ff9b:1::/48",
+	"100::/64",
+	"2001::/32",
+	"2001:db8::/32",
+	"2002::/16",
+	"fc00::/7",
+	"fe80::/10",
+	"ff00::/8",
+)
+
+func mustPrefixes(values ...string) []netip.Prefix {
+	result := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		result = append(result, netip.MustParsePrefix(value))
+	}
+	return result
+}
+
+// PublicAddressAllowed reports whether addr is a public global unicast
+// address outside every special-use range.
+func PublicAddressAllowed(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	if !addr.IsValid() || !addr.IsGlobalUnicast() {
+		return false
+	}
+	for _, prefix := range deniedSpecialUsePrefixes {
+		if prefix.Contains(addr) {
+			return false
+		}
+	}
+	return true
+}
+
 // requirePublicDialAddress rejects dial targets that are not public global
-// unicast addresses.
+// unicast addresses outside every special-use range.
 func requirePublicDialAddress(address string) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -38,9 +93,7 @@ func requirePublicDialAddress(address string) error {
 	if err != nil {
 		return fmt.Errorf("conformance dial address is invalid")
 	}
-	parsed = parsed.Unmap()
-	if !parsed.IsValid() || !parsed.IsGlobalUnicast() || parsed.IsPrivate() || parsed.IsLoopback() ||
-		parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() || parsed.IsUnspecified() {
+	if !PublicAddressAllowed(parsed) {
 		return fmt.Errorf("conformance dial target is not a public address")
 	}
 	return nil
