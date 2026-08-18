@@ -364,9 +364,14 @@ func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (Pro
 	done := active.done
 	s.mu.Unlock()
 
-	if err := s.process.Client().Cancel(ctx, s.providerSessionID); err != nil && !errors.Is(err, ErrClosed) {
-		return PromptResult{}, err
-	}
+	// Best-effort courtesy cancel: the notification write can block when the
+	// adapter stops reading stdin, and cancellation must reach the bounded
+	// grace/stop escalation below regardless. A healthy adapter settles the
+	// prompt (closing done); a dead or wedged transport is escalated to the
+	// bounded process stop after the grace window.
+	go func() {
+		_ = s.process.Client().Cancel(ctx, s.providerSessionID)
+	}()
 	timer := time.NewTimer(s.config.CancelGrace)
 	defer timer.Stop()
 	select {

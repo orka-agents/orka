@@ -520,6 +520,20 @@ func TestPrepareChildTransactionTokenDisabledForNonTransactionalParent(t *testin
 	}
 }
 
+func TestChildTokenSecretOwnerReferences(t *testing.T) {
+	parent := parentTask()
+	sameNamespaceChild := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: parent.Namespace}}
+	refs := childTokenSecretOwnerReferences(parent, sameNamespaceChild)
+	if len(refs) != 1 || refs[0].UID != parent.UID {
+		t.Fatalf("same-namespace child token secret must be parent-owned pre-adoption, got %#v", refs)
+	}
+
+	crossNamespaceChild := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: parent.Namespace + "-other"}}
+	if refs := childTokenSecretOwnerReferences(parent, crossNamespaceChild); len(refs) != 0 {
+		t.Fatalf("cross-namespace child token secret must not carry an invalid cross-namespace parent owner, got %#v", refs)
+	}
+}
+
 func TestChildTransactionTokenSecretNameExtremeParentNames(t *testing.T) {
 	tests := []struct {
 		name       string

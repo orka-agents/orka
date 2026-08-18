@@ -94,5 +94,17 @@ export function validateWorkspaceRepositoryUrl(label: string, raw: string): Work
   if (!path.slice(1).replace(/\.git$/, '')) {
     return invalid('path is invalid')
   }
+  // Mirror the controller's escaped-path canonicality check: the path as
+  // written must round-trip through decode + canonical re-encoding, so
+  // escapes like %2F that hide extra path structure are rejected.
+  let decodedPath: string
+  try {
+    decodedPath = decodeURIComponent(path)
+  } catch {
+    return invalid('has a non-canonical escaped path')
+  }
+  if (encodeURI(decodedPath) !== path) {
+    return invalid('has a non-canonical escaped path')
+  }
   return { url: canonical }
 }

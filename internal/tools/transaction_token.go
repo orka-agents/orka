@@ -97,7 +97,7 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            secretName,
 			Namespace:       childTask.Namespace,
-			OwnerReferences: taskOwnerReference(parentTask),
+			OwnerReferences: childTokenSecretOwnerReferences(parentTask, childTask),
 			Labels: map[string]string{
 				labels.LabelParentTask: labels.SelectorValue(parentTask.Name),
 			},
@@ -193,6 +193,20 @@ func taskOwnerReference(task *corev1alpha1.Task) []metav1.OwnerReference {
 
 func childOwnerReference(childTask *corev1alpha1.Task) []metav1.OwnerReference {
 	return taskOwnerReference(childTask)
+}
+
+// childTokenSecretOwnerReferences returns the pre-adoption owner references
+// for a child transaction token Secret. A namespaced owner reference is only
+// valid within the owner's namespace, so a cross-namespace parent owner would
+// mark the Secret for garbage collection before the child Task adopts it.
+// Cross-namespace delegation therefore leaves the Secret briefly unowned:
+// adoption rewrites ownership to the child immediately after the child Task
+// is created, and every failure path deletes the Secret explicitly.
+func childTokenSecretOwnerReferences(parentTask, childTask *corev1alpha1.Task) []metav1.OwnerReference {
+	if parentTask == nil || childTask == nil || parentTask.Namespace != childTask.Namespace {
+		return nil
+	}
+	return taskOwnerReference(parentTask)
 }
 
 func stampChildTransactionScope(childTask *corev1alpha1.Task, scope string) {

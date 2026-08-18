@@ -164,6 +164,68 @@ func TestTaskCreateRejectsWorkspaceIntentForNonAgentTask(t *testing.T) {
 	}
 }
 
+func TestTaskCreateCanonicalizesSSHRepositoryURL(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "ssh-task"}}) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{
+		"--server", server.URL, "--token", "test-token",
+		"task", "create", "Inspect", "--type", "agent", "--agent", "a",
+		"--git-repo", "git@github.com:owner/repo.git",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := anyString(nestedMap(body, "workspace")["gitRepo"]); got != "https://github.com/owner/repo" {
+		t.Fatalf("gitRepo = %q, want canonical https://github.com/owner/repo", got)
+	}
+}
+
+func TestTaskCreateRejectsInvalidRepositoryURLs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "plain HTTP source URL",
+			args: []string{"--git-repo", "http://github.com/owner/repo"},
+			want: "--git-repo must be a credential-free HTTPS URL",
+		},
+		{
+			name: "credentialed source URL",
+			args: []string{"--git-repo", "https://user:token@github.com/owner/repo"},
+			want: "--git-repo must be a credential-free HTTPS URL",
+		},
+		{
+			name: "non-GitHub SSH publication URL",
+			args: []string{
+				"--workspace-intent", "write", "--git-repo", "https://github.com/owner/repo",
+				"--publication-credential", "repo-write", "--publication-git-repo", "git@gitlab.example.com:owner/repo.git",
+			},
+			want: "--publication-git-repo must be a credential-free HTTPS URL",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newRootCmd()
+			root.SetArgs(append([]string{"task", "create", "Inspect", "--type", "agent", "--agent", "a"}, tt.args...))
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestTaskCreateRejectsPublicationForReadIntent(t *testing.T) {
 	root := newRootCmd()
 	root.SetArgs([]string{"task", "create", "Inspect", "--type", "agent", "--agent", "a", "--publication-credential", "repo-write"})

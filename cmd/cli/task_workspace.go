@@ -9,6 +9,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/cli/client"
+	"github.com/orka-agents/orka/internal/security"
 )
 
 type taskWorkspaceCreateOptions struct {
@@ -90,6 +91,9 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 	if !otherWorkspaceFlagsUsed && (!intentFlagUsed || intent != string(corev1alpha1.WorkspaceIntentWrite)) {
 		return nil, nil
 	}
+	if err := o.canonicalizeRepositoryURLs(); err != nil {
+		return nil, err
+	}
 	if (strings.TrimSpace(o.sourceRepositoryProvider) == "") != (strings.TrimSpace(o.sourceRepositoryID) == "") {
 		return nil, fmt.Errorf("--source-repository-provider and --source-repository-id must be set together")
 	}
@@ -140,6 +144,27 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 		}
 	}
 	return workspace, nil
+}
+
+// canonicalizeRepositoryURLs canonicalizes repository URL flags to the only
+// form the controller's workspace preflight accepts so a doomed Task fails
+// here instead of after creation: GitHub SSH roots are converted
+// automatically, everything else must be a credential-free HTTPS URL.
+func (o *taskWorkspaceCreateOptions) canonicalizeRepositoryURLs() error {
+	for _, field := range []struct {
+		flag  string
+		value *string
+	}{
+		{flag: "--git-repo", value: &o.gitRepo},
+		{flag: "--publication-git-repo", value: &o.publicationGitRepo},
+	} {
+		canonical, err := security.CanonicalWorkspaceRepositoryCloneURL(*field.value)
+		if err != nil {
+			return fmt.Errorf("%s %v (use a credential-free HTTPS URL such as https://github.com/owner/repo; GitHub SSH roots like git@github.com:owner/repo are converted automatically)", field.flag, err)
+		}
+		*field.value = canonical
+	}
+	return nil
 }
 
 func (o taskWorkspaceCreateOptions) validatePublicationOptions(intent string, publicationRequested bool) error {

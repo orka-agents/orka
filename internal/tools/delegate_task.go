@@ -845,7 +845,7 @@ func (t *DelegateTaskTool) prepareBrokeredChildTransactionToken(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            secretName,
 			Namespace:       childTask.Namespace,
-			OwnerReferences: taskOwnerReference(parentTask),
+			OwnerReferences: childTokenSecretOwnerReferences(parentTask, childTask),
 			Labels: map[string]string{
 				labels.LabelParentTask: labels.SelectorValue(parentTask.Name),
 			},

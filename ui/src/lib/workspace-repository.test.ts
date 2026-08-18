@@ -33,6 +33,12 @@ describe('validateWorkspaceRepositoryUrl', () => {
     })
   })
 
+  it('accepts canonically escaped paths', () => {
+    expect(validateWorkspaceRepositoryUrl('Source repository URL', 'https://gitlab.example.com/owner/re%20po')).toEqual(
+      { url: 'https://gitlab.example.com/owner/re%20po' },
+    )
+  })
+
   it('accepts credential-free non-GitHub HTTPS URLs', () => {
     expect(validateWorkspaceRepositoryUrl('Source repository URL', 'https://gitlab.example.com/owner/repo.git')).toEqual(
       { url: 'https://gitlab.example.com/owner/repo.git' },
@@ -49,6 +55,8 @@ describe('validateWorkspaceRepositoryUrl', () => {
     ['empty path', 'https://gitlab.example.com/'],
     ['trailing slash', 'https://gitlab.example.com/owner/repo/'],
     ['empty path segment', 'https://gitlab.example.com/owner//repo'],
+    ['escaped path separator', 'https://gitlab.example.com/owner%2Frepo'],
+    ['non-canonical escaped character', 'https://gitlab.example.com/owner/repo%41'],
   ])('rejects %s', (_name, url) => {
     const result = validateWorkspaceRepositoryUrl('Source repository URL', url)
     expect(result).toHaveProperty('error')

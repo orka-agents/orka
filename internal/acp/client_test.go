@@ -267,6 +267,86 @@ func TestDecodeSessionUpdateAndStopReasons(t *testing.T) {
 	}
 }
 
+func TestClientBoundsConcurrentRequests(t *testing.T) {
+	clientConn, agentConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = agentConn.Close()
+	})
+
+	release := make(chan struct{})
+	client := NewClient(clientConn, clientConn, Options{
+		MaxConcurrentRequests: 2,
+		RequestHandler: func(_ context.Context, _ IncomingRequest) (any, *RPCError) {
+			<-release
+			return map[string]any{"ok": true}, nil
+		},
+	})
+	_ = client
+
+	for id := 1; id <= 3; id++ {
+		if err := writeTestMessage(agentConn, map[string]any{
+			"jsonrpc": "2.0", "id": id, "method": MethodRequestPermission, "params": map[string]any{},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reader := bufio.NewReader(agentConn)
+	rejected, err := readTestMessage(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rejected.ID) != "3" || rejected.Error == nil || rejected.Error.Code != -32000 {
+		t.Fatalf("expected request 3 rejected with -32000 while the gate is full, got %#v", rejected)
+	}
+
+	close(release)
+	seen := map[string]bool{}
+	for range 2 {
+		message, err := readTestMessage(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if message.Error != nil {
+			t.Fatalf("gated request unexpectedly failed: %#v", message)
+		}
+		seen[string(message.ID)] = true
+	}
+	if !seen["1"] || !seen["2"] {
+		t.Fatalf("gated requests 1 and 2 must complete after release, got %v", seen)
+	}
+}
+
+type stalledWriter struct {
+	release chan struct{}
+}
+
+func (w *stalledWriter) Write(p []byte) (int, error) {
+	<-w.release
+	return len(p), nil
+}
+
+func TestClientNotifyHonorsContextWhenTransportStalls(t *testing.T) {
+	writer := &stalledWriter{release: make(chan struct{})}
+	t.Cleanup(func() { close(writer.release) })
+	reader, _ := net.Pipe()
+	t.Cleanup(func() { _ = reader.Close() })
+
+	client := NewClient(reader, writer, Options{})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.Notify(ctx, MethodSessionCancel, CancelNotification{SessionID: "s1"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Notify() error = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("Notify() blocked %v on a stalled transport instead of honoring cancellation", elapsed)
+	}
+}
+
 func readTestMessage(reader *bufio.Reader) (rpcMessage, error) {
 	line, err := reader.ReadBytes('\n')
 	if err != nil {

@@ -15,6 +15,12 @@ import (
 
 const DefaultMaxMessageBytes = 8 << 20
 
+// DefaultMaxConcurrentRequests bounds concurrently handled adapter-initiated
+// requests per connection. Legitimate adapters issue at most a handful of
+// concurrent permission or filesystem requests; the bound exists to stop an
+// untrusted child from pinning unbounded blocked handler goroutines.
+const DefaultMaxConcurrentRequests = 32
+
 var ErrClosed = errors.New("ACP connection closed")
 
 type RPCError struct {
@@ -45,15 +51,23 @@ type RequestHandler func(context.Context, IncomingRequest) (any, *RPCError)
 type NotificationHandler func(context.Context, IncomingNotification)
 
 type Options struct {
-	MaxMessageBytes     int
-	RequestHandler      RequestHandler
-	NotificationHandler NotificationHandler
+	MaxMessageBytes int
+	// MaxConcurrentRequests bounds concurrently handled adapter-initiated
+	// requests. Handlers can block on permission resolution, so an unbounded
+	// flood from an untrusted child would pin one goroutine per message and
+	// exhaust supervisor memory. Defaults to DefaultMaxConcurrentRequests.
+	MaxConcurrentRequests int
+	RequestHandler        RequestHandler
+	NotificationHandler   NotificationHandler
 }
 
 type Client struct {
 	reader *bufio.Reader
 	writer io.Writer
 	opts   Options
+
+	requestGate chan struct{}
+	rejectGate  chan struct{}
 
 	writeMu sync.Mutex
 	nextID  atomic.Int64
@@ -86,13 +100,18 @@ func NewClient(reader io.Reader, writer io.Writer, opts Options) *Client {
 	if opts.MaxMessageBytes <= 0 {
 		opts.MaxMessageBytes = DefaultMaxMessageBytes
 	}
+	if opts.MaxConcurrentRequests <= 0 {
+		opts.MaxConcurrentRequests = DefaultMaxConcurrentRequests
+	}
 	client := &Client{
-		reader:  bufio.NewReaderSize(reader, min(opts.MaxMessageBytes, 64<<10)),
-		writer:  writer,
-		opts:    opts,
-		pending: make(map[string]chan rpcResponse),
-		closed:  make(chan struct{}),
-		done:    make(chan struct{}),
+		reader:      bufio.NewReaderSize(reader, min(opts.MaxMessageBytes, 64<<10)),
+		writer:      writer,
+		opts:        opts,
+		requestGate: make(chan struct{}, opts.MaxConcurrentRequests),
+		rejectGate:  make(chan struct{}, opts.MaxConcurrentRequests),
+		pending:     make(map[string]chan rpcResponse),
+		closed:      make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 	client.nextID.Store(0)
 	go client.readLoop()
@@ -190,7 +209,22 @@ func (c *Client) Notify(ctx context.Context, method string, params any) error {
 	if err != nil {
 		return fmt.Errorf("marshal ACP %s notification: %w", method, err)
 	}
-	return c.writeMessage(rpcMessage{JSONRPC: "2.0", Method: method, Params: paramsRaw})
+	// The transport write blocks indefinitely when the adapter stops reading
+	// stdin, so it must honor cancellation: run it in a goroutine and abandon
+	// it when ctx expires. An abandoned write holds writeMu until adapter
+	// exit closes the pipe, which unblocks the write and ends the goroutine.
+	written := make(chan error, 1)
+	go func() {
+		written <- c.writeMessage(rpcMessage{JSONRPC: "2.0", Method: method, Params: paramsRaw})
+	}()
+	select {
+	case err := <-written:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.closed:
+		return c.closedError()
+	}
 }
 
 func (c *Client) Initialize(ctx context.Context, request InitializeRequest) (InitializeResponse, error) {
@@ -276,7 +310,7 @@ func (c *Client) readLoop() {
 		case len(message.ID) > 0 && message.Method == "":
 			c.deliverResponse(message)
 		case len(message.ID) > 0 && message.Method != "":
-			go c.handleRequest(message)
+			c.dispatchRequest(message)
 		case message.Method != "":
 			if handler := c.opts.NotificationHandler; handler != nil {
 				handler(context.Background(), IncomingNotification{Method: message.Method, Params: cloneRaw(message.Params)})
@@ -304,6 +338,36 @@ func (c *Client) deliverResponse(message rpcMessage) {
 		return
 	}
 	responseCh <- rpcResponse{result: cloneRaw(message.Result)}
+}
+
+// dispatchRequest bounds concurrently handled adapter-initiated requests.
+// Handlers can block until permission resolution or prompt settlement, so
+// excess requests are rejected with a JSON-RPC error through a second bounded
+// lane instead of spawning more blocked handler goroutines; when even the
+// rejection lane is saturated the request is dropped, because a peer flooding
+// both lanes is not reading responses anyway.
+func (c *Client) dispatchRequest(message rpcMessage) {
+	select {
+	case c.requestGate <- struct{}{}:
+		go func() {
+			defer func() { <-c.requestGate }()
+			c.handleRequest(message)
+		}()
+		return
+	default:
+	}
+	select {
+	case c.rejectGate <- struct{}{}:
+		id := cloneRaw(message.ID)
+		go func() {
+			defer func() { <-c.rejectGate }()
+			response := rpcMessage{JSONRPC: "2.0", ID: id, Error: &RPCError{Code: -32000, Message: "too many concurrent requests"}}
+			if err := c.writeMessage(response); err != nil {
+				c.fail(err)
+			}
+		}()
+	default:
+	}
 }
 
 func (c *Client) handleRequest(message rpcMessage) {

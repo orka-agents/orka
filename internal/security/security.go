@@ -190,6 +190,40 @@ func CanonicalRepositoryCloneURL(repoURL string) string {
 	return "https://github.com/" + owner + "/" + repository
 }
 
+// CanonicalWorkspaceRepositoryCloneURL canonicalizes a workspace repository
+// URL to the only form the controller's workspace preflight accepts: a
+// credential-free HTTPS URL without query or fragment. GitHub-style SSH roots
+// (git@github.com:owner/repo[.git]) are first converted with
+// CanonicalRepositoryCloneURL. The reject conditions mirror the RULE enforced
+// by the controller's canonicalWorkspaceRepositoryURL — keep them in exact
+// behavior parity (not stricter and not looser) so an accepted URL never
+// fails the controller preflight after a Task is created. Empty input is
+// allowed and returns an empty URL; error text describes only the failed
+// condition so callers can prefix their own field name.
+func CanonicalWorkspaceRepositoryCloneURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	canonical := CanonicalRepositoryCloneURL(trimmed)
+	parsed, err := url.Parse(canonical)
+	if err != nil || parsed.User != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
+		return "", fmt.Errorf("must be a credential-free HTTPS URL without query or fragment")
+	}
+	if port := parsed.Port(); port != "" && port != "443" {
+		return "", fmt.Errorf("must use the default HTTPS port")
+	}
+	if parsed.RawPath != "" && parsed.EscapedPath() != parsed.Path {
+		return "", fmt.Errorf("has a non-canonical escaped path")
+	}
+	cleaned := strings.TrimSuffix(strings.TrimPrefix(path.Clean(parsed.Path), "/"), ".git")
+	if cleaned == "" || cleaned == "." || parsed.Path == "/" || path.Clean(parsed.Path) != parsed.Path {
+		return "", fmt.Errorf("path is invalid")
+	}
+	return canonical, nil
+}
+
 func githubOwnerRepoFromPath(repoPath string) (string, string, error) {
 	repoPath = strings.Trim(repoPath, "/")
 	segments := strings.Split(strings.TrimSuffix(repoPath, ".git"), "/")

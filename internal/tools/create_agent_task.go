@@ -10,8 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
-	"path"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -260,42 +258,18 @@ func agentWorkspacePreflightError(wsCfg *corev1alpha1.WorkspaceConfig, readCrede
 }
 
 // canonicalAgentWorkspaceRepositoryArg canonicalizes a workspace repository
-// argument to the only form the controller's workspace preflight accepts: a
-// credential-free HTTPS URL without query or fragment. GitHub-style SSH roots
-// (git@github.com:owner/repo[.git]) are first converted with
-// security.CanonicalRepositoryCloneURL, consistent with the repository-scan
-// path. The reject conditions mirror the RULE enforced by the controller's
-// canonicalWorkspaceRepositoryURL — keep them in exact behavior parity (not
-// stricter and not looser) so an accepted URL never fails the controller
-// preflight after the Task is created.
+// argument through security.CanonicalWorkspaceRepositoryCloneURL, the shared
+// mirror of the controller's canonicalWorkspaceRepositoryURL rule, and wraps
+// rejections into tool errors carrying the offending field name.
 func canonicalAgentWorkspaceRepositoryArg(field, raw string) (string, *ChatToolError) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return "", nil
-	}
-	invalid := func(detail string) *ChatToolError {
-		return &ChatToolError{
+	canonical, err := security.CanonicalWorkspaceRepositoryCloneURL(raw)
+	if err != nil {
+		return "", &ChatToolError{
 			Type:    "invalid_arguments",
-			Message: fmt.Sprintf("workspace.%s %s", field, detail),
+			Message: fmt.Sprintf("workspace.%s %s", field, err.Error()),
 			Suggestion: "Use a credential-free HTTPS URL such as https://github.com/owner/repo" +
 				" (GitHub SSH roots like git@github.com:owner/repo are converted automatically)",
 		}
-	}
-	canonical := security.CanonicalRepositoryCloneURL(trimmed)
-	parsed, err := url.Parse(canonical)
-	if err != nil || parsed.User != nil || parsed.Scheme != "https" || parsed.Host == "" ||
-		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
-		return "", invalid("must be a credential-free HTTPS URL without query or fragment")
-	}
-	if port := parsed.Port(); port != "" && port != "443" {
-		return "", invalid("must use the default HTTPS port")
-	}
-	if parsed.RawPath != "" && parsed.EscapedPath() != parsed.Path {
-		return "", invalid("has a non-canonical escaped path")
-	}
-	cleaned := strings.TrimSuffix(strings.TrimPrefix(path.Clean(parsed.Path), "/"), ".git")
-	if cleaned == "" || cleaned == "." || parsed.Path == "/" || path.Clean(parsed.Path) != parsed.Path {
-		return "", invalid("path is invalid")
 	}
 	return canonical, nil
 }
