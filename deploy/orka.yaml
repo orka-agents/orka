@@ -1453,6 +1453,18 @@ spec:
                           instead of resuming from the provider's default snapshot. Currently supported
                           by the Substrate provider.
                         type: boolean
+                      classRef:
+                        description: |-
+                          ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
+                          classRef implicitly enables the controller-first workspace path.
+                        properties:
+                          name:
+                            description: Name is the class name.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
                       cleanupPolicy:
                         description: |-
                           CleanupPolicy controls whether the workspace is deleted or retained after use.
@@ -1486,6 +1498,13 @@ spec:
                               worker derives a stable key from namespace, template, and reuse key.
                             type: string
                         type: object
+                      onDetach:
+                        description: OnDetach requests an action allowed by the selected
+                          class.
+                        enum:
+                        - Suspend
+                        - Delete
+                        type: string
                       poolRef:
                         description: |-
                           PoolRef references an operator-managed Substrate actor pool for placement,
@@ -1554,7 +1573,22 @@ spec:
                               It defaults to the Task namespace, or the controller namespace when configured.
                             type: string
                         type: object
+                      workspaceSlot:
+                        default: default
+                        description: WorkspaceSlot names one independently reusable
+                          workspace within a Session.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: classRef cannot be combined with legacy enabled, provider,
+                        template, pool, cleanup, boot, snapshot, or hibernation settings
+                      rule: '!has(self.classRef) || (!has(self.provider) && !has(self.templateRef)
+                        && !has(self.poolRef) && (!has(self.enabled) || !self.enabled)
+                        && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot)
+                        && !has(self.snapshot) && !has(self.hibernation))'
                 type: object
               model:
                 description: |-
@@ -1715,6 +1749,17 @@ spec:
                     maximum: 1000
                     minimum: 1
                     type: integer
+                  defaultReasoningEffort:
+                    description: |-
+                      DefaultReasoningEffort configures the CLI runtime reasoning effort for tasks using this Agent.
+                      Runtime adapters reject values they do not support (for example, Codex does not support max).
+                    enum:
+                    - low
+                    - medium
+                    - high
+                    - xhigh
+                    - max
+                    type: string
                   runtimeRef:
                     description: RuntimeRef selects an admin-governed AgentRuntime
                       for custom/BYO harness runtimes.
@@ -1847,6 +1892,9 @@ spec:
                   Zero means the agent is never auto-deleted (permanent). Default is no TTL (permanent).
                 type: string
             type: object
+            x-kubernetes-validations:
+            - message: execution.workspace.classRef is only supported on Task specs
+              rule: '!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)'
           status:
             description: AgentStatus defines the observed state of Agent
             properties:
@@ -1927,6 +1975,1638 @@ spec:
             required:
             - activeTasks
             type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: executionworkspaceclasses.workspace.orka.ai
+spec:
+  group: workspace.orka.ai
+  names:
+    categories:
+    - orka
+    kind: ExecutionWorkspaceClass
+    listKind: ExecutionWorkspaceClassList
+    plural: executionworkspaceclasses
+    shortNames:
+    - ewc
+    singular: executionworkspaceclass
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.providerRef.name
+      name: Provider
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ExecutionWorkspaceClass represents an immutable user-selectable
+          workspace profile and policy.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ExecutionWorkspaceClassSpec defines a user-selectable environment and policy.
+              Direct provisioning requires both providerRef and parametersRef; pooled provisioning requires poolRef.
+            properties:
+              allowedReuseScopes:
+                description: AllowedReuseScopes lists the reuse scopes Tasks may request.
+                items:
+                  description: WorkspaceReuseScope is a reuse scope a class permits.
+                  enum:
+                  - None
+                  - Session
+                  type: string
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: set
+              lifecycle:
+                description: Lifecycle defines detach, retention, and deletion policy.
+                properties:
+                  allowedOnDetach:
+                    description: AllowedOnDetach lists the actions a Task may request.
+                    items:
+                      description: WorkspaceOnDetach is the lifecycle action taken
+                        after an interactive attachment is revoked.
+                      enum:
+                      - Suspend
+                      - Delete
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  defaultOnDetach:
+                    default: Suspend
+                    description: DefaultOnDetach is used when a Task does not request
+                      an allowed override.
+                    enum:
+                    - Suspend
+                    - Delete
+                    type: string
+                  deletionPolicy:
+                    description: DeletionPolicy describes the required disposition
+                      of provider and retained data.
+                    properties:
+                      checkpoints:
+                        description: Checkpoints controls provider checkpoints and
+                          snapshots.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                      persistentVolumes:
+                        description: PersistentVolumes controls durable volume retention.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                      providerResources:
+                        description: ProviderResources controls provider-native compute
+                          and control-plane objects.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                    required:
+                    - checkpoints
+                    - persistentVolumes
+                    - providerResources
+                    type: object
+                  detachTimeout:
+                    default: 2m
+                    description: DetachTimeout bounds how long Task finalization waits
+                      for attachment revocation.
+                    type: string
+                  idleTimeout:
+                    description: IdleTimeout is the maximum idle duration before the
+                      provider may apply the class policy.
+                    type: string
+                  maxLifetime:
+                    description: MaxLifetime is the maximum lifetime of a concrete
+                      workspace.
+                    type: string
+                required:
+                - allowedOnDetach
+                - defaultOnDetach
+                - deletionPolicy
+                - detachTimeout
+                type: object
+                x-kubernetes-validations:
+                - message: defaultOnDetach must be included in allowedOnDetach
+                  rule: self.allowedOnDetach.exists(action, action == self.defaultOnDetach)
+                - message: detachTimeout must be positive
+                  rule: duration(self.detachTimeout) > duration('0s')
+                - message: idleTimeout must be positive when set
+                  rule: '!has(self.idleTimeout) || duration(self.idleTimeout) > duration(''0s'')'
+                - message: maxLifetime must be positive when set
+                  rule: '!has(self.maxLifetime) || duration(self.maxLifetime) > duration(''0s'')'
+                - message: maxLifetime must be greater than or equal to idleTimeout
+                  rule: '!has(self.idleTimeout) || !has(self.maxLifetime) || duration(self.maxLifetime)
+                    >= duration(self.idleTimeout)'
+              mode:
+                default: Interactive
+                description: Mode selects interactive Task attachment or persistent
+                  Service hosting.
+                enum:
+                - Interactive
+                - Service
+                type: string
+              parametersRef:
+                description: ParametersRef points at namespaced adapter-owned workspace
+                  profile parameters.
+                properties:
+                  group:
+                    description: Group is the API group of the referenced object.
+                    minLength: 1
+                    type: string
+                  kind:
+                    description: Kind is the kind of the referenced object.
+                    minLength: 1
+                    type: string
+                  name:
+                    description: Name is the name of the referenced object.
+                    minLength: 1
+                    type: string
+                required:
+                - group
+                - kind
+                - name
+                type: object
+              poolRef:
+                description: PoolRef selects a pool in the same namespace.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              providerRef:
+                description: ProviderRef selects a cluster-scoped provider for direct
+                  provisioning.
+                properties:
+                  name:
+                    description: Name is the name of the referenced cluster-scoped
+                      object.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              requiredFeatures:
+                description: RequiredFeatures must be a subset of the selected provider's
+                  advertised features.
+                items:
+                  description: ExecutionWorkspaceFeature names a provider capability
+                    required by a class.
+                  pattern: ^[a-z][a-z0-9.-]{0,62}$
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+            required:
+            - allowedReuseScopes
+            - lifecycle
+            - mode
+            type: object
+            x-kubernetes-validations:
+            - message: 'exactly one provisioning source is required: providerRef with
+                parametersRef, or poolRef'
+              rule: (has(self.providerRef) && has(self.parametersRef) && !has(self.poolRef))
+                || (!has(self.providerRef) && !has(self.parametersRef) && has(self.poolRef))
+            - message: poolRef.name is required
+              rule: '!has(self.poolRef) || self.poolRef.name.size() > 0'
+            - message: ExecutionWorkspaceClass functional spec is immutable; create
+                a new class
+              rule: self == oldSelf
+            - message: Service classes may only allow the None reuse scope
+              rule: self.mode == 'Interactive' || self.allowedReuseScopes.all(scope,
+                scope == 'None')
+          status:
+            description: ExecutionWorkspaceClassStatus reports resolution and readiness
+              without provider-native details.
+            properties:
+              conditions:
+                description: Conditions represent reference, feature, and policy readiness.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by core.
+                format: int64
+                type: integer
+              profileHash:
+                description: |-
+                  ProfileHash pins the first successfully resolved functional class profile.
+                  Later referenced-object drift makes the class NotReady instead of changing this hash.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              providerRef:
+                description: ProviderRef is the provider resolved directly or through
+                  the selected pool.
+                properties:
+                  name:
+                    description: Name is the name of the referenced cluster-scoped
+                      object.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: executionworkspacepools.workspace.orka.ai
+spec:
+  group: workspace.orka.ai
+  names:
+    categories:
+    - orka
+    kind: ExecutionWorkspacePool
+    listKind: ExecutionWorkspacePoolList
+    plural: executionworkspacepools
+    shortNames:
+    - ewpool
+    singular: executionworkspacepool
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.providerRef.name
+      name: Provider
+      type: string
+    - jsonPath: .status.available
+      name: Available
+      type: integer
+    - jsonPath: .status.allocated
+      name: Allocated
+      type: integer
+    - jsonPath: .status.total
+      name: Total
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ExecutionWorkspacePool represents provider-managed warm or reusable
+          capacity.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ExecutionWorkspacePoolSpec defines generic provider-managed
+              capacity.
+            properties:
+              capacity:
+                description: Capacity is the desired provider-managed capacity envelope.
+                properties:
+                  maxSize:
+                    description: MaxSize is the hard provider-side allocation limit
+                      for this pool.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  minReady:
+                    description: MinReady is the desired minimum number of immediately
+                      allocatable workspaces.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - maxSize
+                - minReady
+                type: object
+                x-kubernetes-validations:
+                - message: maxSize must be greater than or equal to minReady
+                  rule: self.maxSize >= self.minReady
+              parametersRef:
+                description: ParametersRef points at namespaced adapter-owned pool
+                  parameters in this namespace.
+                properties:
+                  group:
+                    description: Group is the API group of the referenced object.
+                    minLength: 1
+                    type: string
+                  kind:
+                    description: Kind is the kind of the referenced object.
+                    minLength: 1
+                    type: string
+                  name:
+                    description: Name is the name of the referenced object.
+                    minLength: 1
+                    type: string
+                required:
+                - group
+                - kind
+                - name
+                type: object
+              providerRef:
+                description: ProviderRef selects the cluster-scoped provider installation.
+                properties:
+                  name:
+                    description: Name is the name of the referenced cluster-scoped
+                      object.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - capacity
+            - parametersRef
+            - providerRef
+            type: object
+            x-kubernetes-validations:
+            - message: providerRef is immutable
+              rule: self.providerRef == oldSelf.providerRef
+            - message: parametersRef is immutable
+              rule: self.parametersRef == oldSelf.parametersRef
+          status:
+            description: ExecutionWorkspacePoolStatus reports provider-independent
+              pool counts.
+            properties:
+              allocated:
+                description: Allocated is non-suspended capacity currently reserved
+                  for or bound to concrete workspaces.
+                format: int32
+                type: integer
+              available:
+                description: Available is immediately allocatable capacity.
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions represent readiness, admission, draining,
+                  and capacity pressure.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the adapter.
+                format: int64
+                type: integer
+              suspended:
+                description: Suspended is a disjoint bucket of reusable capacity not
+                  consuming active compute.
+                format: int32
+                type: integer
+              total:
+                description: Total is all capacity represented by the disjoint Available,
+                  Allocated, and Suspended buckets.
+                format: int32
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: executionworkspaceproviders.workspace.orka.ai
+spec:
+  group: workspace.orka.ai
+  names:
+    categories:
+    - orka
+    kind: ExecutionWorkspaceProvider
+    listKind: ExecutionWorkspaceProviderList
+    plural: executionworkspaceproviders
+    shortNames:
+    - ewp
+    singular: executionworkspaceprovider
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.lifecycleState
+      name: State
+      type: string
+    - jsonPath: .spec.controllerName
+      name: Controller
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ExecutionWorkspaceProvider is a cluster-scoped provider adapter
+          installation.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ExecutionWorkspaceProviderSpec defines a configured provider
+              adapter installation.
+            properties:
+              controllerName:
+                description: ControllerName is the globally unique adapter controller
+                  identity.
+                maxLength: 253
+                minLength: 1
+                type: string
+              lifecycleState:
+                default: Active
+                description: LifecycleState controls new allocations while preserving
+                  cleanup for existing workspaces.
+                enum:
+                - Active
+                - Draining
+                - Disabled
+                type: string
+              parametersRef:
+                description: ParametersRef points at the adapter-owned provider configuration
+                  object.
+                properties:
+                  group:
+                    description: Group is the API group of the referenced object.
+                    minLength: 1
+                    type: string
+                  kind:
+                    description: Kind is the kind of the referenced object.
+                    minLength: 1
+                    type: string
+                  name:
+                    description: Name is the name of the referenced object.
+                    minLength: 1
+                    type: string
+                required:
+                - group
+                - kind
+                - name
+                type: object
+              requiredContracts:
+                description: RequiredContracts lists contracts the adapter must advertise
+                  before this provider is usable.
+                items:
+                  type: string
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: set
+              usagePolicy:
+                description: UsagePolicy constrains which namespaces may resolve classes
+                  to this provider.
+                properties:
+                  allowedNamespaceSelector:
+                    description: |-
+                      AllowedNamespaceSelector selects namespaces that may resolve classes to this provider.
+                      An empty selector matches all namespaces.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
+            required:
+            - controllerName
+            - lifecycleState
+            - parametersRef
+            - requiredContracts
+            type: object
+            x-kubernetes-validations:
+            - message: controllerName is immutable
+              rule: self.controllerName == oldSelf.controllerName
+            - message: parametersRef is immutable
+              rule: self.parametersRef == oldSelf.parametersRef
+            - message: requiredContracts is immutable
+              rule: self.requiredContracts == oldSelf.requiredContracts
+          status:
+            description: |-
+              ExecutionWorkspaceProviderStatus defines the observed provider state. The matching adapter is the
+              sole writer of adapter/backend/features/heartbeat; Orka core owns only generic usability conditions.
+            properties:
+              adapter:
+                description: Adapter reports adapter build identity.
+                properties:
+                  digest:
+                    description: Digest is the immutable adapter image or build digest.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  version:
+                    description: Version is the adapter semantic version.
+                    type: string
+                type: object
+              backend:
+                description: Backend reports safe provider-native compatibility metadata.
+                properties:
+                  apiVersions:
+                    description: APIVersions lists provider-native API versions understood
+                      by the adapter.
+                    items:
+                      type: string
+                    type: array
+                  version:
+                    description: Version is the observed backend version.
+                    type: string
+                type: object
+              conditions:
+                description: Conditions represent generic readiness and compatibility.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastHeartbeat:
+                description: LastHeartbeat is the last successful adapter heartbeat.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent spec generation
+                  observed by the adapter.
+                format: int64
+                type: integer
+              supportedContracts:
+                description: SupportedContracts lists generic control/data-plane contracts
+                  implemented by this adapter.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+              supportedFeatures:
+                description: SupportedFeatures lists generic features implemented
+                  by this installation.
+                items:
+                  description: ExecutionWorkspaceFeature names a provider capability
+                    required by a class.
+                  pattern: ^[a-z][a-z0-9.-]{0,62}$
+                  type: string
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: executionworkspaces.workspace.orka.ai
+spec:
+  group: workspace.orka.ai
+  names:
+    categories:
+    - orka
+    kind: ExecutionWorkspace
+    listKind: ExecutionWorkspaceList
+    plural: executionworkspaces
+    shortNames:
+    - ew
+    singular: executionworkspace
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.classBinding.name
+      name: Class
+      type: string
+    - jsonPath: .spec.providerBinding.name
+      name: Provider
+      type: string
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.state
+      name: State
+      type: string
+    - jsonPath: .status.attachedEpoch
+      name: Epoch
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ExecutionWorkspace represents one concrete provider-bound environment.
+          It is controller-created.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ExecutionWorkspaceSpec defines one concrete provider-bound
+              environment.
+            properties:
+              attachment:
+                description: Attachment grants exclusive Task access for Interactive
+                  mode.
+                properties:
+                  epoch:
+                    description: Epoch monotonically increases for every attachment
+                      attempt.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  expiresAt:
+                    description: ExpiresAt is the hard attachment credential expiry.
+                    format: date-time
+                    type: string
+                  taskRef:
+                    description: TaskRef identifies the attached Task.
+                    properties:
+                      name:
+                        description: Name is the object name.
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: UID is the immutable object UID.
+                        type: string
+                    required:
+                    - name
+                    - uid
+                    type: object
+                    x-kubernetes-validations:
+                    - message: uid is required
+                      rule: self.uid.size() > 0
+                  tokenSHA256:
+                    description: TokenSHA256 is the digest of the bearer token held
+                      only in tokenSecretRef.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  tokenSecretRef:
+                    description: TokenSecretRef references the core-owned attachment
+                      Secret in this namespace.
+                    properties:
+                      name:
+                        description: Name is the Secret name in the workspace namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - epoch
+                - expiresAt
+                - taskRef
+                - tokenSHA256
+                - tokenSecretRef
+                type: object
+              attachmentEpoch:
+                description: |-
+                  AttachmentEpoch is the highest attachment epoch allocated by Orka core.
+                  It remains after Attachment is cleared and only increases atomically with
+                  a new attachment intent.
+                format: int64
+                minimum: 1
+                type: integer
+              classBinding:
+                description: ClassBinding pins the immutable class revision used to
+                  create this workspace.
+                properties:
+                  generation:
+                    description: Generation is the observed generation used to resolve
+                      the binding.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  name:
+                    description: Name is the bound object's name.
+                    minLength: 1
+                    type: string
+                  profileHash:
+                    description: |-
+                      ProfileHash is a SHA-256 digest of the functional profile resolved for this binding.
+                      It is populated for class bindings and may be omitted for provider bindings.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  uid:
+                    description: UID is the bound object's immutable Kubernetes UID.
+                    type: string
+                required:
+                - generation
+                - name
+                - uid
+                type: object
+                x-kubernetes-validations:
+                - message: uid is required
+                  rule: self.uid.size() > 0
+              coreAdmission:
+                description: |-
+                  CoreAdmission is written once by Orka core after validating class and provider policy.
+                  Provider adapters must treat it as read-only and must not progress normal
+                  lifecycle work until this marker matches the immutable bindings,
+                  coreAdmission.admittedGeneration equals metadata.generation, and the
+                  Admitted=True condition records that same generation. The spec marker and
+                  status condition form a dual signal: provider status writers cannot mint the
+                  marker, and ordinary spec writers cannot mint the condition.
+                properties:
+                  admittedGeneration:
+                    description: AdmittedGeneration is the workspace generation validated
+                      by Orka core.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  classBinding:
+                    description: ClassBinding is the exact class binding admitted
+                      by core.
+                    properties:
+                      generation:
+                        description: Generation is the observed generation used to
+                          resolve the binding.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      name:
+                        description: Name is the bound object's name.
+                        minLength: 1
+                        type: string
+                      profileHash:
+                        description: |-
+                          ProfileHash is a SHA-256 digest of the functional profile resolved for this binding.
+                          It is populated for class bindings and may be omitted for provider bindings.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      uid:
+                        description: UID is the bound object's immutable Kubernetes
+                          UID.
+                        type: string
+                    required:
+                    - generation
+                    - name
+                    - uid
+                    type: object
+                    x-kubernetes-validations:
+                    - message: uid is required
+                      rule: self.uid.size() > 0
+                  poolBinding:
+                    description: PoolBinding pins the pool identity used for a pooled
+                      workspace.
+                    properties:
+                      generation:
+                        description: Generation is the observed generation used to
+                          resolve the binding.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      name:
+                        description: Name is the bound object's name.
+                        minLength: 1
+                        type: string
+                      profileHash:
+                        description: |-
+                          ProfileHash is a SHA-256 digest of the functional profile resolved for this binding.
+                          It is populated for class bindings and may be omitted for provider bindings.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      uid:
+                        description: UID is the bound object's immutable Kubernetes
+                          UID.
+                        type: string
+                    required:
+                    - generation
+                    - name
+                    - uid
+                    type: object
+                    x-kubernetes-validations:
+                    - message: uid is required
+                      rule: self.uid.size() > 0
+                  providerBinding:
+                    description: ProviderBinding is the exact provider binding admitted
+                      by core.
+                    properties:
+                      generation:
+                        description: Generation is the observed generation used to
+                          resolve the binding.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      name:
+                        description: Name is the bound object's name.
+                        minLength: 1
+                        type: string
+                      profileHash:
+                        description: |-
+                          ProfileHash is a SHA-256 digest of the functional profile resolved for this binding.
+                          It is populated for class bindings and may be omitted for provider bindings.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      uid:
+                        description: UID is the bound object's immutable Kubernetes
+                          UID.
+                        type: string
+                    required:
+                    - generation
+                    - name
+                    - uid
+                    type: object
+                    x-kubernetes-validations:
+                    - message: uid is required
+                      rule: self.uid.size() > 0
+                required:
+                - admittedGeneration
+                - classBinding
+                - providerBinding
+                type: object
+              desiredState:
+                default: Ready
+                description: DesiredState is owned by Orka core.
+                enum:
+                - Ready
+                - Suspended
+                - Deleted
+                - Quarantined
+                type: string
+              lifecycle:
+                description: Lifecycle is the class policy resolved at creation time.
+                properties:
+                  allowedOnDetach:
+                    description: AllowedOnDetach lists the actions a Task may request.
+                    items:
+                      description: WorkspaceOnDetach is the lifecycle action taken
+                        after an interactive attachment is revoked.
+                      enum:
+                      - Suspend
+                      - Delete
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  defaultOnDetach:
+                    default: Suspend
+                    description: DefaultOnDetach is used when a Task does not request
+                      an allowed override.
+                    enum:
+                    - Suspend
+                    - Delete
+                    type: string
+                  deletionPolicy:
+                    description: DeletionPolicy describes the required disposition
+                      of provider and retained data.
+                    properties:
+                      checkpoints:
+                        description: Checkpoints controls provider checkpoints and
+                          snapshots.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                      persistentVolumes:
+                        description: PersistentVolumes controls durable volume retention.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                      providerResources:
+                        description: ProviderResources controls provider-native compute
+                          and control-plane objects.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                    required:
+                    - checkpoints
+                    - persistentVolumes
+                    - providerResources
+                    type: object
+                  detachTimeout:
+                    default: 2m
+                    description: DetachTimeout bounds how long Task finalization waits
+                      for attachment revocation.
+                    type: string
+                  idleTimeout:
+                    description: IdleTimeout is the maximum idle duration before the
+                      provider may apply the class policy.
+                    type: string
+                  maxLifetime:
+                    description: MaxLifetime is the maximum lifetime of a concrete
+                      workspace.
+                    type: string
+                required:
+                - allowedOnDetach
+                - defaultOnDetach
+                - deletionPolicy
+                - detachTimeout
+                type: object
+                x-kubernetes-validations:
+                - message: defaultOnDetach must be included in allowedOnDetach
+                  rule: self.allowedOnDetach.exists(action, action == self.defaultOnDetach)
+                - message: detachTimeout must be positive
+                  rule: duration(self.detachTimeout) > duration('0s')
+                - message: idleTimeout must be positive when set
+                  rule: '!has(self.idleTimeout) || duration(self.idleTimeout) > duration(''0s'')'
+                - message: maxLifetime must be positive when set
+                  rule: '!has(self.maxLifetime) || duration(self.maxLifetime) > duration(''0s'')'
+                - message: maxLifetime must be greater than or equal to idleTimeout
+                  rule: '!has(self.idleTimeout) || !has(self.maxLifetime) || duration(self.maxLifetime)
+                    >= duration(self.idleTimeout)'
+              mode:
+                description: Mode is copied from the class.
+                enum:
+                - Interactive
+                - Service
+                type: string
+              providerBinding:
+                description: ProviderBinding pins the provider installation used to
+                  create this workspace.
+                properties:
+                  generation:
+                    description: Generation is the observed generation used to resolve
+                      the binding.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  name:
+                    description: Name is the bound object's name.
+                    minLength: 1
+                    type: string
+                  profileHash:
+                    description: |-
+                      ProfileHash is a SHA-256 digest of the functional profile resolved for this binding.
+                      It is populated for class bindings and may be omitted for provider bindings.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  uid:
+                    description: UID is the bound object's immutable Kubernetes UID.
+                    type: string
+                required:
+                - generation
+                - name
+                - uid
+                type: object
+                x-kubernetes-validations:
+                - message: uid is required
+                  rule: self.uid.size() > 0
+              service:
+                description: Service declares requested endpoints for Service mode.
+                properties:
+                  ports:
+                    description: Ports lists requested service ports.
+                    items:
+                      description: ExecutionWorkspaceServicePort declares a Service-mode
+                        port requested by the owning Tool.
+                      properties:
+                        name:
+                          description: Name is a stable endpoint name.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        port:
+                          description: Port is the container/service port.
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        protocol:
+                          description: Protocol is the endpoint application protocol.
+                          enum:
+                          - HTTP
+                          - HTTPS
+                          - TCP
+                          type: string
+                      required:
+                      - name
+                      - port
+                      - protocol
+                      type: object
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                required:
+                - ports
+                type: object
+              sessionRef:
+                description: SessionRef pins the conversation Session for session-scoped
+                  reuse.
+                properties:
+                  name:
+                    description: Name is the object name.
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: UID is the immutable object UID.
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+                x-kubernetes-validations:
+                - message: uid is required
+                  rule: self.uid.size() > 0
+              slot:
+                default: default
+                description: Slot allows one Session to hold multiple independently
+                  named workspaces.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+            required:
+            - classBinding
+            - desiredState
+            - lifecycle
+            - mode
+            - providerBinding
+            - slot
+            type: object
+            x-kubernetes-validations:
+            - message: classBinding.profileHash is required
+              rule: self.classBinding.profileHash.size() > 0
+            - message: coreAdmission must match the immutable workspace bindings
+              rule: '!has(self.coreAdmission) || (self.coreAdmission.classBinding.name
+                == self.classBinding.name && self.coreAdmission.classBinding.uid ==
+                self.classBinding.uid && self.coreAdmission.classBinding.generation
+                == self.classBinding.generation && has(self.coreAdmission.classBinding.profileHash)
+                == has(self.classBinding.profileHash) && (!has(self.coreAdmission.classBinding.profileHash)
+                || self.coreAdmission.classBinding.profileHash == self.classBinding.profileHash)
+                && self.coreAdmission.providerBinding.name == self.providerBinding.name
+                && self.coreAdmission.providerBinding.uid == self.providerBinding.uid
+                && self.coreAdmission.providerBinding.generation == self.providerBinding.generation
+                && has(self.coreAdmission.providerBinding.profileHash) == has(self.providerBinding.profileHash)
+                && (!has(self.coreAdmission.providerBinding.profileHash) || self.coreAdmission.providerBinding.profileHash
+                == self.providerBinding.profileHash))'
+            - message: coreAdmission cannot be removed once set
+              rule: '!has(oldSelf.coreAdmission) || has(self.coreAdmission)'
+            - message: coreAdmission.admittedGeneration must not decrease
+              rule: '!has(oldSelf.coreAdmission) || self.coreAdmission.admittedGeneration
+                >= oldSelf.coreAdmission.admittedGeneration'
+            - message: mode is immutable
+              rule: self.mode == oldSelf.mode
+            - message: classBinding is immutable
+              rule: self.classBinding == oldSelf.classBinding
+            - message: providerBinding is immutable
+              rule: self.providerBinding == oldSelf.providerBinding
+            - message: sessionRef is immutable
+              rule: has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef)
+                || self.sessionRef == oldSelf.sessionRef)
+            - message: slot is immutable
+              rule: self.slot == oldSelf.slot
+            - message: lifecycle is immutable
+              rule: self.lifecycle == oldSelf.lifecycle
+            - message: Deleted desiredState is terminal
+              rule: oldSelf.desiredState != 'Deleted' || self.desiredState == 'Deleted'
+            - message: attachmentEpoch must not decrease
+              rule: '!has(oldSelf.attachmentEpoch) || (has(self.attachmentEpoch) &&
+                self.attachmentEpoch >= oldSelf.attachmentEpoch)'
+            - message: attachments are only valid for Interactive workspaces
+              rule: '!has(self.attachment) || self.mode == ''Interactive'''
+            - message: service ports are only valid for Service workspaces
+              rule: '!has(self.service) || self.mode == ''Service'''
+            - message: Service workspaces require service configuration
+              rule: self.mode != 'Service' || has(self.service)
+            - message: Interactive workspaces cannot request service ports
+              rule: self.mode != 'Interactive' || !has(self.service)
+          status:
+            description: |-
+              ExecutionWorkspaceStatus defines adapter-observed state. Exactly one provider adapter owns this status;
+              Orka core projects it into Task and Tool status rather than allowing adapters to write those resources.
+            properties:
+              attachedEpoch:
+                description: AttachedEpoch is the epoch currently enforced by the
+                  data plane.
+                format: int64
+                type: integer
+              conditions:
+                description: Conditions represent admission, provisioning, data-plane,
+                  attachment, and finalization state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              connectionSecretRef:
+                description: ConnectionSecretRef contains endpoint, CA, and provider
+                  lifecycle credentials for trusted control-plane consumers.
+                properties:
+                  name:
+                    description: Name is the Secret name in the workspace namespace.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              disposition:
+                description: Disposition reports cleanup progress independent of owning
+                  Task/Tool terminal state.
+                properties:
+                  accessCredentials:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  checkpoints:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  compute:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  ephemeralSecrets:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  persistentVolumes:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  providerResources:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  workspaceData:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                required:
+                - accessCredentials
+                - checkpoints
+                - compute
+                - ephemeralSecrets
+                - persistentVolumes
+                - providerResources
+                - workspaceData
+                type: object
+              endpoints:
+                description: Endpoints contains sanitized endpoint metadata only.
+                items:
+                  description: |-
+                    ExecutionWorkspaceEndpoint is sanitized endpoint metadata. Credentials and private connection material
+                    are always delivered through a Secret and never placed in status.
+                  properties:
+                    name:
+                      description: Name matches a requested service port or the reserved
+                        data-plane name.
+                      type: string
+                    protocol:
+                      description: Protocol is the endpoint application protocol.
+                      type: string
+                    url:
+                      description: URL is the sanitized endpoint URL. It must not
+                        contain userinfo or credentials.
+                      minLength: 1
+                      pattern: ^(https?|tcp)://[^/:@?#[:space:]][^@?#[:space:]]*$
+                      type: string
+                  required:
+                  - name
+                  - url
+                  type: object
+                type: array
+              externalID:
+                description: ExternalID is a sanitized opaque provider resource identifier
+                  for operator diagnostics.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent spec generation
+                  observed by the adapter.
+                format: int64
+                type: integer
+              providerBinding:
+                description: ProviderBinding records the exact adapter/backend contract
+                  serving this workspace.
+                properties:
+                  adapterDigest:
+                    description: AdapterDigest is the immutable adapter build digest.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  adapterVersion:
+                    description: AdapterVersion is the adapter semantic version.
+                    type: string
+                  backendAPIVersion:
+                    description: BackendAPIVersion is the selected provider-native
+                      API version.
+                    type: string
+                  contractVersion:
+                    description: ContractVersion is the selected generic provider
+                      contract.
+                    type: string
+                type: object
+              state:
+                description: State is the provider-neutral lifecycle state.
+                enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Attaching
+                - Attached
+                - Detaching
+                - Suspending
+                - Suspended
+                - Deleting
+                - Deleted
+                - Quarantined
+                - Failed
+                type: string
+            type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true
@@ -2769,6 +4449,555 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
+  name: outboundaccesspolicies.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    kind: OutboundAccessPolicy
+    listKind: OutboundAccessPolicyList
+    plural: outboundaccesspolicies
+    singular: outboundaccesspolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+      name: Accepted
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="ResolvedRefs")].status
+      name: ResolvedRefs
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          OutboundAccessPolicy governs resource credentials or trusted gateway routing
+          for Tools in the same namespace.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              OutboundAccessPolicySpec configures exactly one outbound credential or
+              routing adapter.
+            properties:
+              direct:
+                description: Direct exchanges a resolved subject for a downstream
+                  resource credential.
+                properties:
+                  actor:
+                    description: Actor optionally resolves an RFC 8693 actor token.
+                    properties:
+                      secretRef:
+                        description: SecretRef selects a same-namespace Secret value.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      serviceAccountRef:
+                        description: ServiceAccountRef selects a ServiceAccount and
+                          TokenRequest parameters.
+                        properties:
+                          audiences:
+                            description: Audiences are requested for the projected
+                              ServiceAccount token.
+                            items:
+                              type: string
+                            type: array
+                          expirationSeconds:
+                            default: 600
+                            description: ExpirationSeconds requests a bounded token
+                              lifetime.
+                            format: int64
+                            maximum: 3600
+                            minimum: 600
+                            type: integer
+                          name:
+                            description: Name is the exact same-namespace ServiceAccount
+                              name.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      source:
+                        description: Source selects TransactionToken, ServiceAccount,
+                          or SecretRef.
+                        enum:
+                        - TransactionToken
+                        - ServiceAccount
+                        - SecretRef
+                        type: string
+                      tokenType:
+                        description: |-
+                          TokenType is an arbitrary RFC 8693 token-type URN. It is not used by
+                          RFC 7523 JWT bearer grants.
+                        type: string
+                    required:
+                    - source
+                    type: object
+                    x-kubernetes-validations:
+                    - message: TransactionToken must not configure Secret or ServiceAccount
+                        references
+                      rule: self.source != 'TransactionToken' || (!has(self.secretRef)
+                        && !has(self.serviceAccountRef))
+                    - message: ServiceAccount requires only serviceAccountRef
+                      rule: self.source != 'ServiceAccount' || (has(self.serviceAccountRef)
+                        && !has(self.secretRef))
+                    - message: SecretRef requires only secretRef
+                      rule: self.source != 'SecretRef' || (has(self.secretRef) &&
+                        !has(self.serviceAccountRef))
+                  additionalParameters:
+                    additionalProperties:
+                      type: string
+                    description: AdditionalParameters are static form parameters.
+                      Reserved OAuth fields are rejected.
+                    maxProperties: 32
+                    type: object
+                  audiences:
+                    description: Audiences are emitted as repeated OAuth audience
+                      parameters.
+                    items:
+                      type: string
+                    type: array
+                  clientAuthentication:
+                    description: ClientAuthentication configures OAuth client authentication.
+                    properties:
+                      audience:
+                        description: Audience overrides the private_key_jwt aud claim.
+                          The endpoint is the default.
+                        type: string
+                      clientID:
+                        description: ClientID is required by confidential-client methods.
+                        type: string
+                      clientSecretRef:
+                        description: ClientSecretRef supplies client-secret basic/post
+                          credentials.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      keyID:
+                        description: KeyID is copied into the private_key_jwt header.
+                        type: string
+                      method:
+                        default: None
+                        description: Method defaults to None.
+                        enum:
+                        - None
+                        - ClientSecretBasic
+                        - ClientSecretPost
+                        - PrivateKeyJWT
+                        type: string
+                      privateKeyRef:
+                        description: PrivateKeyRef supplies a PEM RSA or P-256 key
+                          for private_key_jwt.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: None must not configure client credentials
+                      rule: self.method != 'None' || (!has(self.clientSecretRef) &&
+                        !has(self.privateKeyRef))
+                    - message: client-secret methods require clientID and clientSecretRef
+                        only
+                      rule: '!(self.method in [''ClientSecretBasic'',''ClientSecretPost''])
+                        || (has(self.clientID) && self.clientID.size() > 0 && has(self.clientSecretRef)
+                        && !has(self.privateKeyRef))'
+                    - message: PrivateKeyJWT requires clientID and privateKeyRef only
+                      rule: self.method != 'PrivateKeyJWT' || (has(self.clientID)
+                        && self.clientID.size() > 0 && has(self.privateKeyRef) &&
+                        !has(self.clientSecretRef))
+                  expectedIssuedTokenType:
+                    description: |-
+                      ExpectedIssuedTokenType is the exact issued_token_type required for RFC 8693.
+                      RFC 7523 responses may omit issued_token_type.
+                    minLength: 1
+                    type: string
+                  grant:
+                    default: TokenExchange
+                    description: Grant selects RFC 8693 token exchange or RFC 7523
+                      JWT bearer.
+                    enum:
+                    - TokenExchange
+                    - JWTBearer
+                    type: string
+                  output:
+                    description: Output configures resource credential injection.
+                    properties:
+                      header:
+                        default: Authorization
+                        description: Header defaults to Authorization. Txn-Token is
+                          forbidden.
+                        type: string
+                      prefix:
+                        default: 'Bearer '
+                        description: Prefix defaults to "Bearer ". Set an explicit
+                          empty string for no prefix.
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: Txn-Token cannot be used as the resource credential
+                        output header
+                      rule: '!has(self.header) || self.header.lowerAscii() != ''txn-token'''
+                  requestedTokenType:
+                    description: RequestedTokenType is an arbitrary OAuth token-type
+                      URN.
+                    type: string
+                  resources:
+                    description: Resources are emitted as repeated RFC 8707 resource
+                      parameters.
+                    items:
+                      type: string
+                    type: array
+                  scopes:
+                    description: |-
+                      Scopes are emitted as a space-separated OAuth scope parameter.
+                      TransactionToken subjects may request only a subset of the parent scope.
+                    items:
+                      type: string
+                    type: array
+                  subject:
+                    description: Subject resolves the subject token or JWT assertion.
+                    properties:
+                      secretRef:
+                        description: SecretRef selects a same-namespace Secret value.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      serviceAccountRef:
+                        description: ServiceAccountRef selects a ServiceAccount and
+                          TokenRequest parameters.
+                        properties:
+                          audiences:
+                            description: Audiences are requested for the projected
+                              ServiceAccount token.
+                            items:
+                              type: string
+                            type: array
+                          expirationSeconds:
+                            default: 600
+                            description: ExpirationSeconds requests a bounded token
+                              lifetime.
+                            format: int64
+                            maximum: 3600
+                            minimum: 600
+                            type: integer
+                          name:
+                            description: Name is the exact same-namespace ServiceAccount
+                              name.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      source:
+                        description: Source selects TransactionToken, ServiceAccount,
+                          or SecretRef.
+                        enum:
+                        - TransactionToken
+                        - ServiceAccount
+                        - SecretRef
+                        type: string
+                      tokenType:
+                        description: |-
+                          TokenType is an arbitrary RFC 8693 token-type URN. It is not used by
+                          RFC 7523 JWT bearer grants.
+                        type: string
+                    required:
+                    - source
+                    type: object
+                    x-kubernetes-validations:
+                    - message: TransactionToken must not configure Secret or ServiceAccount
+                        references
+                      rule: self.source != 'TransactionToken' || (!has(self.secretRef)
+                        && !has(self.serviceAccountRef))
+                    - message: ServiceAccount requires only serviceAccountRef
+                      rule: self.source != 'ServiceAccount' || (has(self.serviceAccountRef)
+                        && !has(self.secretRef))
+                    - message: SecretRef requires only secretRef
+                      rule: self.source != 'SecretRef' || (has(self.secretRef) &&
+                        !has(self.serviceAccountRef))
+                  tokenEndpoint:
+                    description: TokenEndpoint is the exact OAuth token endpoint.
+                    properties:
+                      path:
+                        description: Path is the exact endpoint path used with ServiceRef.
+                        type: string
+                      scheme:
+                        description: Scheme is used with ServiceRef and defaults to
+                          https.
+                        enum:
+                        - http
+                        - https
+                        type: string
+                      serviceRef:
+                        description: |-
+                          ServiceRef selects a token endpoint Service. Cross-namespace refs require
+                          an exact controller allowlist entry.
+                        properties:
+                          name:
+                            type: string
+                          namespace:
+                            description: |-
+                              Namespace defaults to the policy namespace. Cross-namespace refs require
+                              an exact trusted Service-reference allowlist entry.
+                            type: string
+                          port:
+                            format: int32
+                            maximum: 65535
+                            minimum: 1
+                            type: integer
+                        required:
+                        - name
+                        - port
+                        type: object
+                      tls:
+                        description: TLS configures verification for an HTTPS endpoint.
+                        properties:
+                          caSecretRef:
+                            description: CASecretRef selects PEM CA data from a same-namespace
+                              Secret.
+                            properties:
+                              key:
+                                type: string
+                              name:
+                                type: string
+                              namespace:
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                          serverName:
+                            description: ServerName overrides TLS SNI and hostname
+                              verification.
+                            type: string
+                        type: object
+                      url:
+                        description: URL is an exact absolute HTTPS token endpoint
+                          without userinfo.
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of url or serviceRef is required
+                      rule: has(self.url) != has(self.serviceRef)
+                    - message: scheme and path are only valid with serviceRef
+                      rule: '!has(self.url) || (!has(self.scheme) && !has(self.path))'
+                    - message: url token endpoints must use https
+                      rule: '!has(self.url) || self.url.startsWith(''https://'')'
+                required:
+                - subject
+                - tokenEndpoint
+                type: object
+                x-kubernetes-validations:
+                - message: JWTBearer does not support actor
+                  rule: self.grant != 'JWTBearer' || !has(self.actor)
+                - message: JWTBearer subject must not set tokenType
+                  rule: self.grant != 'JWTBearer' || !has(self.subject.tokenType)
+                - message: SecretRef token exchange subjects require tokenType
+                  rule: self.grant != 'TokenExchange' || self.subject.source != 'SecretRef'
+                    || (has(self.subject.tokenType) && self.subject.tokenType.size()
+                    > 0)
+                - message: SecretRef token exchange actors require tokenType
+                  rule: self.grant != 'TokenExchange' || !has(self.actor) || self.actor.source
+                    != 'SecretRef' || (has(self.actor.tokenType) && self.actor.tokenType.size()
+                    > 0)
+                - message: TokenExchange requires expectedIssuedTokenType
+                  rule: self.grant != 'TokenExchange' || (has(self.expectedIssuedTokenType)
+                    && self.expectedIssuedTokenType.size() > 0)
+                - message: additionalParameters must not contain reserved OAuth fields
+                  rule: '!has(self.additionalParameters) || self.additionalParameters.all(k,
+                    !(k.lowerAscii() in [''grant_type'',''subject_token'',''subject_token_type'',''actor_token'',''actor_token_type'',''assertion'',''scope'',''audience'',''resource'',''requested_token_type'',''client_id'',''client_secret'',''client_assertion'',''client_assertion_type'']))'
+              gateway:
+                description: Gateway routes the original Tool request through a trusted
+                  Kubernetes Service.
+                properties:
+                  scheme:
+                    default: http
+                    description: Scheme defaults to http for in-cluster gateways.
+                    enum:
+                    - http
+                    - https
+                    type: string
+                  serviceRef:
+                    description: ServiceRef selects the gateway Service.
+                    properties:
+                      name:
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace defaults to the policy namespace. Cross-namespace refs require
+                          an exact trusted Service-reference allowlist entry.
+                        type: string
+                      port:
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                    required:
+                    - name
+                    - port
+                    type: object
+                  tls:
+                    description: TLS configures gateway verification when scheme is
+                      https.
+                    properties:
+                      caSecretRef:
+                        description: CASecretRef selects PEM CA data from a same-namespace
+                          Secret.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      serverName:
+                        description: ServerName overrides TLS SNI and hostname verification.
+                        type: string
+                    type: object
+                required:
+                - serviceRef
+                type: object
+            type: object
+            x-kubernetes-validations:
+            - message: exactly one of direct or gateway is required
+              rule: has(self.direct) != has(self.gateway)
+          status:
+            description: OutboundAccessPolicyStatus contains only safe validation
+              state.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
   name: providers.core.orka.ai
 spec:
   group: core.orka.ai
@@ -3017,12 +5246,25 @@ spec:
             description: RepositoryMonitorSpec defines the desired state of RepositoryMonitor.
             properties:
               agents:
-                description: Agents configures the agents used by monitor review and
-                  repair tasks.
+                description: Agents configures the agents used by monitor review,
+                  issue, and repair tasks.
                 properties:
                   implementer:
                     description: Implementer is the agent used for guarded issue implementation
                       tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  planner:
+                    description: Planner is the agent used for issue planning tasks.
                     properties:
                       name:
                         description: Name is the name of the Agent
@@ -3047,9 +5289,35 @@ spec:
                     required:
                     - name
                     type: object
+                  researcher:
+                    description: Researcher is the agent used for issue research tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
                   reviewer:
                     description: Reviewer is the agent used for pull-request review
                       tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  triager:
+                    description: Triager is the agent used for issue triage tasks.
                     properties:
                       name:
                         description: Name is the name of the Agent
@@ -3110,6 +5378,87 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
+              issueWorkflow:
+                description: IssueWorkflow controls issue triage, research, planning,
+                  and implementation behavior.
+                properties:
+                  implementation:
+                    description: Implementation controls bounded implementation tasks.
+                    properties:
+                      allowedPaths:
+                        description: |-
+                          AllowedPaths optionally restricts implementation patch files to these path globs/prefixes.
+                          Examples: api/**, internal/**, docs/**.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                      branchPrefix:
+                        description: BranchPrefix is the branch prefix for implementation
+                          push branches. Defaults to orka/issue.
+                        type: string
+                      enabled:
+                        description: Enabled enables implementation. Defaults to true
+                          when an implementer agent is configured and a command requests
+                          it.
+                        type: boolean
+                      maxActive:
+                        description: MaxActive bounds concurrently active issue implementation/mutation
+                          jobs per monitor. Defaults to 2.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      maxAttemptsPerIssue:
+                        description: MaxAttemptsPerIssue bounds implementation attempts
+                          for one issue. Defaults to 2.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      maxChangedFiles:
+                        description: MaxChangedFiles bounds changed files in an implementation
+                          patch. Defaults to 12.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      requireApprovedPlan:
+                        description: RequireApprovedPlan blocks implementation unless
+                          the latest plan was approved.
+                        type: boolean
+                    type: object
+                  planning:
+                    description: Planning controls read-only implementation plan generation.
+                    properties:
+                      enabled:
+                        description: Enabled enables planning. Defaults to true when
+                          a planner agent is configured and a command requests it.
+                        type: boolean
+                      requireHumanApprovalFor:
+                        description: RequireHumanApprovalFor names risk levels or
+                          plan categories that require explicit approval.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                    type: object
+                  research:
+                    description: Research controls read-only issue research.
+                    properties:
+                      enabled:
+                        description: Enabled enables this phase. Defaults to true
+                          when the corresponding agent is configured and a command
+                          requests it.
+                        type: boolean
+                    type: object
+                  triage:
+                    description: Triage controls read-only issue classification.
+                    properties:
+                      enabled:
+                        description: Enabled enables this phase. Defaults to true
+                          when the corresponding agent is configured and a command
+                          requests it.
+                        type: boolean
+                    type: object
+                type: object
               owner:
                 description: Owner is the repository owner or organization.
                 type: string
@@ -3347,6 +5696,20 @@ spec:
                       enabled:
                         description: Enabled enables issue monitoring.
                         type: boolean
+                      excludeLabels:
+                        description: ExcludeLabels excludes matching issues from actionable
+                          inventory.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                      includeLabels:
+                        description: IncludeLabels optionally restricts issue inventory
+                          to issues with any of these labels.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
                       maxPerRun:
                         description: MaxPerRun limits issues selected by one background
                           run.
@@ -3379,6 +5742,79 @@ spec:
               timeZone:
                 description: TimeZone is the IANA time zone for the schedule.
                 type: string
+              triggers:
+                description: Triggers configures external events that create durable
+                  monitor commands.
+                properties:
+                  github:
+                    description: GitHub configures GitHub webhook triggers.
+                    properties:
+                      labels:
+                        description: Labels maps GitHub labels to durable RepositoryMonitor
+                          commands.
+                        properties:
+                          consumeCommandLabels:
+                            description: ConsumeCommandLabels removes accepted one-shot
+                              command labels after durable intake.
+                            type: boolean
+                          enabled:
+                            description: Enabled enables durable command intake for
+                              configured GitHub labels.
+                            type: boolean
+                          issues:
+                            description: Issues maps issue command intents to label
+                              names. Empty fields use the default orka:* labels.
+                            properties:
+                              approvePlan:
+                                type: string
+                              decompose:
+                                type: string
+                              implement:
+                                type: string
+                              plan:
+                                type: string
+                              research:
+                                type: string
+                              resume:
+                                type: string
+                              stop:
+                                type: string
+                              triage:
+                                type: string
+                            type: object
+                          pullRequests:
+                            description: PullRequests maps pull-request command intents
+                              to label names. Empty fields use the default orka:*
+                              labels.
+                            properties:
+                              automerge:
+                                type: string
+                              fix:
+                                type: string
+                              fixCI:
+                                type: string
+                              resume:
+                                type: string
+                              review:
+                                type: string
+                              stop:
+                                type: string
+                              updateBranch:
+                                type: string
+                            type: object
+                          requireActorPermission:
+                            default: write
+                            description: |-
+                              RequireActorPermission is the minimum GitHub permission for mutating/code-executing commands.
+                              Supported values are write, maintain, and admin. Defaults to write.
+                            enum:
+                            - write
+                            - maintain
+                            - admin
+                            type: string
+                        type: object
+                    type: object
+                type: object
               validation:
                 description: Validation configures deterministic validation commands
                   for repair.
@@ -3406,6 +5842,11 @@ spec:
             properties:
               activeRepairs:
                 description: ActiveRepairs is the count of repair jobs currently active.
+                format: int32
+                type: integer
+              blockedIssues:
+                description: BlockedIssues is the count of issues blocked by guard
+                  labels or workflow policy.
                 format: int32
                 type: integer
               blockedItems:
@@ -3497,9 +5938,19 @@ spec:
                   in status.
                 format: int64
                 type: integer
+              openIssues:
+                description: OpenIssues is the current count of open issues seen by
+                  the monitor.
+                format: int32
+                type: integer
               openPullRequests:
                 description: OpenPullRequests is the current count of open pull requests
                   seen by the monitor.
+                format: int32
+                type: integer
+              pendingIssueActions:
+                description: PendingIssueActions is the count of issues waiting for
+                  a queued workflow action.
                 format: int32
                 type: integer
               pendingReviews:
@@ -5636,6 +8087,18 @@ spec:
                           instead of resuming from the provider's default snapshot. Currently supported
                           by the Substrate provider.
                         type: boolean
+                      classRef:
+                        description: |-
+                          ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
+                          classRef implicitly enables the controller-first workspace path.
+                        properties:
+                          name:
+                            description: Name is the class name.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
                       cleanupPolicy:
                         description: |-
                           CleanupPolicy controls whether the workspace is deleted or retained after use.
@@ -5669,6 +8132,13 @@ spec:
                               worker derives a stable key from namespace, template, and reuse key.
                             type: string
                         type: object
+                      onDetach:
+                        description: OnDetach requests an action allowed by the selected
+                          class.
+                        enum:
+                        - Suspend
+                        - Delete
+                        type: string
                       poolRef:
                         description: |-
                           PoolRef references an operator-managed Substrate actor pool for placement,
@@ -5737,7 +8207,22 @@ spec:
                               It defaults to the Task namespace, or the controller namespace when configured.
                             type: string
                         type: object
+                      workspaceSlot:
+                        default: default
+                        description: WorkspaceSlot names one independently reusable
+                          workspace within a Session.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: classRef cannot be combined with legacy enabled, provider,
+                        template, pool, cleanup, boot, snapshot, or hibernation settings
+                      rule: '!has(self.classRef) || (!has(self.provider) && !has(self.templateRef)
+                        && !has(self.poolRef) && (!has(self.enabled) || !self.enabled)
+                        && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot)
+                        && !has(self.snapshot) && !has(self.hibernation))'
                 type: object
               failedRunsHistoryLimit:
                 default: 1
@@ -6082,6 +8567,9 @@ spec:
             - message: transaction is immutable
               rule: has(self.transaction) == has(oldSelf.transaction) && (!has(self.transaction)
                 || self.transaction == oldSelf.transaction)
+            - message: session workspace reuse requires spec.sessionRef
+              rule: '!has(self.execution) || !has(self.execution.workspace) || self.execution.workspace.reusePolicy
+                != ''session'' || has(self.sessionRef)'
           status:
             description: TaskStatus defines the observed state of Task
             properties:
@@ -6107,6 +8595,7 @@ spec:
                       enum:
                       - Pending
                       - Running
+                      - Finalizing
                       - Succeeded
                       - Failed
                       - Scheduled
@@ -6185,18 +8674,146 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              executionOutcome:
+                description: |-
+                  ExecutionOutcome is the immutable outcome recorded when workload execution ends. Workspace
+                  attachment revocation and cleanup continue independently while the Task is Finalizing.
+                properties:
+                  attempt:
+                    description: Attempt is the Task attempt that produced this outcome.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  message:
+                    description: Message contains sanitized execution context.
+                    type: string
+                  phase:
+                    allOf:
+                    - enum:
+                      - Pending
+                      - Running
+                      - Finalizing
+                      - Succeeded
+                      - Failed
+                      - Scheduled
+                      - Cancelled
+                    - enum:
+                      - Succeeded
+                      - Failed
+                      - Cancelled
+                    description: Phase is the terminal workload execution phase.
+                    type: string
+                  recordedAt:
+                    description: RecordedAt is when Orka durably recorded the execution
+                      outcome.
+                    format: date-time
+                    type: string
+                  resultRef:
+                    description: ResultRef indicates whether the corresponding result
+                      was persisted.
+                    properties:
+                      available:
+                        description: Available indicates whether a result has been
+                          stored for this task
+                        type: boolean
+                    required:
+                    - available
+                    type: object
+                required:
+                - attempt
+                - phase
+                - recordedAt
+                type: object
               executionWorkspace:
                 description: |-
                   ExecutionWorkspace reports the provider-neutral lifecycle state for a
                   requested execution workspace. Provider-native identifiers and credentials
                   are intentionally omitted.
                 properties:
+                  attachedEpoch:
+                    description: AttachedEpoch is the attachment epoch enforced for
+                      this Task.
+                    format: int64
+                    type: integer
+                  classRef:
+                    description: ClassRef is the provider-neutral class selected for
+                      controller-first execution.
+                    properties:
+                      name:
+                        description: Name is the class name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   cleanupPolicy:
                     description: CleanupPolicy is the resolved cleanup policy.
                     enum:
                     - delete
                     - retain
                     type: string
+                  conditions:
+                    description: Conditions project generic workspace admission, readiness,
+                      attachment, and finalization state.
+                    items:
+                      description: Condition contains details for one aspect of the
+                        current state of this API Resource.
+                      properties:
+                        lastTransitionTime:
+                          description: |-
+                            lastTransitionTime is the last time the condition transitioned from one status to another.
+                            This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                          format: date-time
+                          type: string
+                        message:
+                          description: |-
+                            message is a human readable message indicating details about the transition.
+                            This may be an empty string.
+                          maxLength: 32768
+                          type: string
+                        observedGeneration:
+                          description: |-
+                            observedGeneration represents the .metadata.generation that the condition was set based upon.
+                            For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                            with respect to the current state of the instance.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        reason:
+                          description: |-
+                            reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                            Producers of specific condition types may define expected values and meanings for this field,
+                            and whether the values are considered a guaranteed API.
+                            The value should be a CamelCase string.
+                            This field may not be empty.
+                          maxLength: 1024
+                          minLength: 1
+                          pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                          type: string
+                        status:
+                          description: status of the condition, one of True, False,
+                            Unknown.
+                          enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                          type: string
+                        type:
+                          description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                          maxLength: 316
+                          pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                          type: string
+                      required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - type
+                    x-kubernetes-list-type: map
                   density:
                     description: Density reports non-secret actor and worker counts
                       for the workspace provider.
@@ -6262,7 +8879,7 @@ spec:
                         type: string
                     type: object
                   provider:
-                    description: Provider is the resolved workspace backend.
+                    description: Provider is the resolved legacy workspace backend.
                     enum:
                     - agent-sandbox
                     - substrate
@@ -6300,6 +8917,10 @@ spec:
                     description: Reused reports whether an existing workspace was
                       reattached.
                     type: boolean
+                  state:
+                    description: State is the provider-neutral concrete workspace
+                      state.
+                    type: string
                   templateRef:
                     description: TemplateRef is the resolved workspace template.
                     properties:
@@ -6311,6 +8932,19 @@ spec:
                           Namespace is the namespace of the workspace template and claim.
                           It defaults to the Task namespace, or the controller namespace when configured.
                         type: string
+                    type: object
+                  workspaceRef:
+                    description: WorkspaceRef identifies the concrete ExecutionWorkspace
+                      in the Task namespace.
+                    properties:
+                      name:
+                        description: Name is the ExecutionWorkspace name.
+                        type: string
+                      uid:
+                        description: UID is the immutable ExecutionWorkspace UID.
+                        type: string
+                    required:
+                    - name
                     type: object
                 type: object
               harnessRuntime:
@@ -6381,6 +9015,7 @@ spec:
                 enum:
                 - Pending
                 - Running
+                - Finalizing
                 - Succeeded
                 - Failed
                 - Scheduled
@@ -6405,6 +9040,9 @@ spec:
                   called
                 type: boolean
             type: object
+            x-kubernetes-validations:
+            - message: executionOutcome is immutable once recorded
+              rule: '!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome'
         type: object
     served: true
     storage: true
@@ -6525,6 +9163,17 @@ spec:
                     - PATCH
                     - DELETE
                     type: string
+                  outboundAccessPolicyRef:
+                    description: OutboundAccessPolicyRef references an OutboundAccessPolicy
+                      in the same namespace.
+                    properties:
+                      name:
+                        description: Name is the referenced object name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   timeout:
                     description: 'Timeout is the request timeout (default: 30s)'
                     type: string
@@ -6546,8 +9195,8 @@ spec:
                       Defaults to /mcp.
                     type: string
                   substrateActor:
-                    description: SubstrateActor configures a durable Substrate actor
-                      that hosts the MCP server.
+                    description: SubstrateActor configures the legacy durable Substrate
+                      actor backend.
                     properties:
                       boot:
                         description: Boot asks Substrate to boot this actor from scratch
@@ -6581,9 +9230,34 @@ spec:
                     required:
                     - templateRef
                     type: object
-                required:
-                - substrateActor
+                  workspace:
+                    description: Workspace configures a provider-neutral Service-mode
+                      ExecutionWorkspace.
+                    properties:
+                      classRef:
+                        description: ClassRef references a class in the Tool namespace.
+                        properties:
+                          name:
+                            description: Name is the class name.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      port:
+                        description: Port is the service port exposed by the MCP server.
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                    required:
+                    - classRef
+                    - port
+                    type: object
                 type: object
+                x-kubernetes-validations:
+                - message: exactly one of substrateActor or workspace is required
+                  rule: has(self.substrateActor) != has(self.workspace)
               parameters:
                 description: Parameters is the JSON Schema for tool parameters (OpenAI
                   function calling format)
@@ -6592,11 +9266,13 @@ spec:
             - description
             type: object
             x-kubernetes-validations:
-            - message: http or mcp.substrateActor is required
-              rule: has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor))
-            - message: http.url is required unless mcp.substrateActor is set
-              rule: '!has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor))
-                || (has(self.http.url) && self.http.url.size() > 0)'
+            - message: http or an MCP workspace backend is required
+              rule: has(self.http) || (has(self.mcp) && (has(self.mcp.substrateActor)
+                || has(self.mcp.workspace)))
+            - message: http.url is required unless an MCP workspace backend is set
+              rule: '!has(self.http) || (has(self.mcp) && (has(self.mcp.substrateActor)
+                || has(self.mcp.workspace))) || (has(self.http.url) && self.http.url.size()
+                > 0)'
           status:
             description: ToolStatus defines the observed state of Tool
             properties:
@@ -6715,6 +9391,100 @@ spec:
                 description: LastCheck is the timestamp of the last health check
                 format: date-time
                 type: string
+              workspace:
+                description: Workspace reports the provider-neutral Service workspace
+                  backing this Tool.
+                properties:
+                  classRef:
+                    description: ClassRef is the selected Service workspace class.
+                    properties:
+                      name:
+                        description: Name is the class name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  conditions:
+                    description: Conditions project generic readiness and cleanup
+                      state.
+                    items:
+                      description: Condition contains details for one aspect of the
+                        current state of this API Resource.
+                      properties:
+                        lastTransitionTime:
+                          description: |-
+                            lastTransitionTime is the last time the condition transitioned from one status to another.
+                            This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                          format: date-time
+                          type: string
+                        message:
+                          description: |-
+                            message is a human readable message indicating details about the transition.
+                            This may be an empty string.
+                          maxLength: 32768
+                          type: string
+                        observedGeneration:
+                          description: |-
+                            observedGeneration represents the .metadata.generation that the condition was set based upon.
+                            For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                            with respect to the current state of the instance.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        reason:
+                          description: |-
+                            reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                            Producers of specific condition types may define expected values and meanings for this field,
+                            and whether the values are considered a guaranteed API.
+                            The value should be a CamelCase string.
+                            This field may not be empty.
+                          maxLength: 1024
+                          minLength: 1
+                          pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                          type: string
+                        status:
+                          description: status of the condition, one of True, False,
+                            Unknown.
+                          enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                          type: string
+                        type:
+                          description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                          maxLength: 316
+                          pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                          type: string
+                      required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - type
+                    x-kubernetes-list-type: map
+                  state:
+                    description: State is the provider-neutral workspace state.
+                    type: string
+                  workspaceRef:
+                    description: WorkspaceRef identifies the owned concrete workspace.
+                    properties:
+                      name:
+                        description: Name is the ExecutionWorkspace name.
+                        type: string
+                      uid:
+                        description: UID is the immutable ExecutionWorkspace UID.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - classRef
+                type: object
             required:
             - available
             type: object
@@ -6945,6 +9715,7 @@ rules:
   - core.orka.ai
   resources:
   - tools
+  - outboundaccesspolicies
   verbs:
   - get
   - list
@@ -7273,6 +10044,7 @@ rules:
   - ""
   resources:
   - configmaps
+  - secrets
   verbs:
   - create
   - delete
@@ -7317,19 +10089,9 @@ rules:
   - ""
   resources:
   - pods/portforward
+  - serviceaccounts/token
   verbs:
   - create
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - update
-  - watch
 - apiGroups:
   - ""
   resources:
@@ -7378,6 +10140,12 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
 - apiGroups:
   - autoscaling
   resources:
@@ -7443,6 +10211,7 @@ rules:
   resources:
   - agentruntimes/finalizers
   - agents/finalizers
+  - outboundaccesspolicies/finalizers
   - providers/finalizers
   - repositorymonitors/finalizers
   - repositoryscans/finalizers
@@ -7457,6 +10226,7 @@ rules:
   resources:
   - agentruntimes/status
   - agents/status
+  - outboundaccesspolicies/status
   - providers/status
   - repositorymonitors/status
   - repositoryscans/status
@@ -7468,6 +10238,14 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - outboundaccesspolicies
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - discovery.k8s.io
   resources:
@@ -7575,12 +10353,21 @@ rules:
   resources:
   - clusterrolebindings
   - rolebindings
+  - roles
   verbs:
   - create
   - delete
   - get
   - list
   - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io
@@ -7593,21 +10380,75 @@ rules:
   verbs:
   - bind
 - apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
-  - clusterroles
-  - roles
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - storage.k8s.io
   resources:
   - storageclasses
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - use
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses/finalizers
+  - executionworkspaceproviders/finalizers
+  - executionworkspaces/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses/status
+  - executionworkspacepools/status
+  - executionworkspaceproviders/status
+  - executionworkspaces/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacepools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaces
+  verbs:
+  - admit
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -7797,6 +10638,7 @@ rules:
   - core.orka.ai
   resources:
   - tools
+  - outboundaccesspolicies
   verbs:
   - get
   - list
@@ -7968,6 +10810,255 @@ rules:
   - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-executionworkspace-viewer-role
+rules:
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaces/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-executionworkspaceclass-admin-role
+rules:
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses
+  verbs:
+  - '*'
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-executionworkspaceclass-editor-role
+rules:
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-executionworkspaceclass-viewer-role
+rules:
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-executionworkspacepool-admin-role
+rules:
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacepools
+  verbs:
+  - '*'
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacepools/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-executionworkspacepool-editor-role
+rules:
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacepools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacepools/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-executionworkspacepool-viewer-role
+rules:
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacepools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacepools/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-executionworkspaceprovider-admin-role
+rules:
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders
+  verbs:
+  - '*'
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-executionworkspaceprovider-editor-role
+rules:
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-executionworkspaceprovider-viewer-role
+rules:
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders/status
+  verbs:
+  - get
+---
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      workspace.orka.ai/aggregate-to-parameter-reader: "true"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-parameter-reader
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   labels:
@@ -8050,6 +11141,22 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: orka-vendor-worker
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-workspace-parameter-reader-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-workspace-parameter-reader
+subjects:
+- kind: ServiceAccount
+  name: orka-controller-manager
   namespace: orka-system
 ---
 apiVersion: v1
@@ -8351,6 +11458,46 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-executionworkspace-core-admission.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - workspace.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - executionworkspaces
+  validations:
+  - expression: |-
+      !has(object.spec.coreAdmission) || (oldObject != null && has(oldObject.spec.coreAdmission) &&
+
+       object.spec.coreAdmission.admittedGeneration == oldObject.spec.coreAdmission.admittedGeneration &&
+       has(object.spec.coreAdmission.poolBinding) == has(oldObject.spec.coreAdmission.poolBinding) &&
+       (!has(object.spec.coreAdmission.poolBinding) ||
+        (object.spec.coreAdmission.poolBinding.name == oldObject.spec.coreAdmission.poolBinding.name &&
+         object.spec.coreAdmission.poolBinding.uid == oldObject.spec.coreAdmission.poolBinding.uid &&
+         object.spec.coreAdmission.poolBinding.generation == oldObject.spec.coreAdmission.poolBinding.generation &&
+         has(object.spec.coreAdmission.poolBinding.profileHash) == has(oldObject.spec.coreAdmission.poolBinding.profileHash) &&
+         (!has(object.spec.coreAdmission.poolBinding.profileHash) ||
+          object.spec.coreAdmission.poolBinding.profileHash == oldObject.spec.coreAdmission.poolBinding.profileHash)))) ||
+      authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaces')
+        .namespace(request.namespace)
+        .name(object.metadata.name)
+        .check('admit').allowed()
+    message: only the Orka core controller may establish or advance ExecutionWorkspace
+      core admission
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-gateway-task-protection
 spec:
   failurePolicy: Fail
@@ -8402,10 +11549,93 @@ spec:
     name: containerWorkerServiceAccount
 ---
 apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-task-workspace-class-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - tasks
+  validations:
+  - expression: |-
+      !has(object.spec.execution) || !has(object.spec.execution.workspace) || !has(object.spec.execution.workspace.classRef) || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.spec.execution.workspace.classRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected ExecutionWorkspaceClass
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-tool-workspace-class-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - tools
+  validations:
+  - expression: |-
+      !has(object.spec.mcp) || !has(object.spec.mcp.workspace) || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.spec.mcp.workspace.classRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected ExecutionWorkspaceClass
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-executionworkspace-core-admission.orka.ai
+spec:
+  policyName: orka-executionworkspace-core-admission.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
   name: orka-gateway-task-protection
 spec:
   policyName: orka-gateway-task-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-task-workspace-class-use.orka.ai
+spec:
+  policyName: orka-task-workspace-class-use.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-tool-workspace-class-use.orka.ai
+spec:
+  policyName: orka-tool-workspace-class-use.orka.ai
   validationActions:
   - Deny

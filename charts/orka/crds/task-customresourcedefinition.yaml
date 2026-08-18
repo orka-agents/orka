@@ -1378,6 +1378,18 @@ spec:
                           instead of resuming from the provider's default snapshot. Currently supported
                           by the Substrate provider.
                         type: boolean
+                      classRef:
+                        description: |-
+                          ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
+                          classRef implicitly enables the controller-first workspace path.
+                        properties:
+                          name:
+                            description: Name is the class name.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
                       cleanupPolicy:
                         description: |-
                           CleanupPolicy controls whether the workspace is deleted or retained after use.
@@ -1411,6 +1423,13 @@ spec:
                               worker derives a stable key from namespace, template, and reuse key.
                             type: string
                         type: object
+                      onDetach:
+                        description: OnDetach requests an action allowed by the selected
+                          class.
+                        enum:
+                        - Suspend
+                        - Delete
+                        type: string
                       poolRef:
                         description: |-
                           PoolRef references an operator-managed Substrate actor pool for placement,
@@ -1479,7 +1498,22 @@ spec:
                               It defaults to the Task namespace, or the controller namespace when configured.
                             type: string
                         type: object
+                      workspaceSlot:
+                        default: default
+                        description: WorkspaceSlot names one independently reusable
+                          workspace within a Session.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: classRef cannot be combined with legacy enabled, provider,
+                        template, pool, cleanup, boot, snapshot, or hibernation settings
+                      rule: '!has(self.classRef) || (!has(self.provider) && !has(self.templateRef)
+                        && !has(self.poolRef) && (!has(self.enabled) || !self.enabled)
+                        && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot)
+                        && !has(self.snapshot) && !has(self.hibernation))'
                 type: object
               failedRunsHistoryLimit:
                 default: 1
@@ -1824,6 +1858,9 @@ spec:
             - message: transaction is immutable
               rule: has(self.transaction) == has(oldSelf.transaction) && (!has(self.transaction)
                 || self.transaction == oldSelf.transaction)
+            - message: session workspace reuse requires spec.sessionRef
+              rule: '!has(self.execution) || !has(self.execution.workspace) || self.execution.workspace.reusePolicy
+                != ''session'' || has(self.sessionRef)'
           status:
             description: TaskStatus defines the observed state of Task
             properties:
@@ -1849,6 +1886,7 @@ spec:
                       enum:
                       - Pending
                       - Running
+                      - Finalizing
                       - Succeeded
                       - Failed
                       - Scheduled
@@ -1927,18 +1965,146 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              executionOutcome:
+                description: |-
+                  ExecutionOutcome is the immutable outcome recorded when workload execution ends. Workspace
+                  attachment revocation and cleanup continue independently while the Task is Finalizing.
+                properties:
+                  attempt:
+                    description: Attempt is the Task attempt that produced this outcome.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  message:
+                    description: Message contains sanitized execution context.
+                    type: string
+                  phase:
+                    allOf:
+                    - enum:
+                      - Pending
+                      - Running
+                      - Finalizing
+                      - Succeeded
+                      - Failed
+                      - Scheduled
+                      - Cancelled
+                    - enum:
+                      - Succeeded
+                      - Failed
+                      - Cancelled
+                    description: Phase is the terminal workload execution phase.
+                    type: string
+                  recordedAt:
+                    description: RecordedAt is when Orka durably recorded the execution
+                      outcome.
+                    format: date-time
+                    type: string
+                  resultRef:
+                    description: ResultRef indicates whether the corresponding result
+                      was persisted.
+                    properties:
+                      available:
+                        description: Available indicates whether a result has been
+                          stored for this task
+                        type: boolean
+                    required:
+                    - available
+                    type: object
+                required:
+                - attempt
+                - phase
+                - recordedAt
+                type: object
               executionWorkspace:
                 description: |-
                   ExecutionWorkspace reports the provider-neutral lifecycle state for a
                   requested execution workspace. Provider-native identifiers and credentials
                   are intentionally omitted.
                 properties:
+                  attachedEpoch:
+                    description: AttachedEpoch is the attachment epoch enforced for
+                      this Task.
+                    format: int64
+                    type: integer
+                  classRef:
+                    description: ClassRef is the provider-neutral class selected for
+                      controller-first execution.
+                    properties:
+                      name:
+                        description: Name is the class name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   cleanupPolicy:
                     description: CleanupPolicy is the resolved cleanup policy.
                     enum:
                     - delete
                     - retain
                     type: string
+                  conditions:
+                    description: Conditions project generic workspace admission, readiness,
+                      attachment, and finalization state.
+                    items:
+                      description: Condition contains details for one aspect of the
+                        current state of this API Resource.
+                      properties:
+                        lastTransitionTime:
+                          description: |-
+                            lastTransitionTime is the last time the condition transitioned from one status to another.
+                            This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                          format: date-time
+                          type: string
+                        message:
+                          description: |-
+                            message is a human readable message indicating details about the transition.
+                            This may be an empty string.
+                          maxLength: 32768
+                          type: string
+                        observedGeneration:
+                          description: |-
+                            observedGeneration represents the .metadata.generation that the condition was set based upon.
+                            For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                            with respect to the current state of the instance.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        reason:
+                          description: |-
+                            reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                            Producers of specific condition types may define expected values and meanings for this field,
+                            and whether the values are considered a guaranteed API.
+                            The value should be a CamelCase string.
+                            This field may not be empty.
+                          maxLength: 1024
+                          minLength: 1
+                          pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                          type: string
+                        status:
+                          description: status of the condition, one of True, False,
+                            Unknown.
+                          enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                          type: string
+                        type:
+                          description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                          maxLength: 316
+                          pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                          type: string
+                      required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - type
+                    x-kubernetes-list-type: map
                   density:
                     description: Density reports non-secret actor and worker counts
                       for the workspace provider.
@@ -2004,7 +2170,7 @@ spec:
                         type: string
                     type: object
                   provider:
-                    description: Provider is the resolved workspace backend.
+                    description: Provider is the resolved legacy workspace backend.
                     enum:
                     - agent-sandbox
                     - substrate
@@ -2042,6 +2208,10 @@ spec:
                     description: Reused reports whether an existing workspace was
                       reattached.
                     type: boolean
+                  state:
+                    description: State is the provider-neutral concrete workspace
+                      state.
+                    type: string
                   templateRef:
                     description: TemplateRef is the resolved workspace template.
                     properties:
@@ -2053,6 +2223,19 @@ spec:
                           Namespace is the namespace of the workspace template and claim.
                           It defaults to the Task namespace, or the controller namespace when configured.
                         type: string
+                    type: object
+                  workspaceRef:
+                    description: WorkspaceRef identifies the concrete ExecutionWorkspace
+                      in the Task namespace.
+                    properties:
+                      name:
+                        description: Name is the ExecutionWorkspace name.
+                        type: string
+                      uid:
+                        description: UID is the immutable ExecutionWorkspace UID.
+                        type: string
+                    required:
+                    - name
                     type: object
                 type: object
               harnessRuntime:
@@ -2123,6 +2306,7 @@ spec:
                 enum:
                 - Pending
                 - Running
+                - Finalizing
                 - Succeeded
                 - Failed
                 - Scheduled
@@ -2147,6 +2331,9 @@ spec:
                   called
                 type: boolean
             type: object
+            x-kubernetes-validations:
+            - message: executionOutcome is immutable once recorded
+              rule: '!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome'
         type: object
     served: true
     storage: true

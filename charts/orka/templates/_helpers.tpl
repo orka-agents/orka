@@ -90,6 +90,14 @@ that must remain valid DNS labels (notably the Service name).
 {{- printf "%s-harness-wrapper-auth" (include "orka.fullname" . | trunc 42 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{/*
+Create the workspace admission webhook Service name while reserving room for
+its suffix so long release names remain valid DNS labels.
+*/}}
+{{- define "orka.workspaceWebhookName" -}}
+{{- printf "%s-workspace-webhook" (include "orka.fullname" . | trunc 45 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 
 {{/*
 Create the namespace for the chart-managed client ServiceAccount.
