@@ -100,23 +100,8 @@ func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient cl
 	if len(txCtx) == 0 {
 		return validateChildToolCredentialConstraints(ctx, k8sClient, parent, child, childCtx)
 	}
-	for _, constraint := range []struct {
-		key string
-		got string
-	}{
-		{key: "repo", got: workspaceGitRepo(workspace)},
-		{key: "branch", got: workspaceBranch(workspace)},
-		{key: "ref", got: workspaceRef(workspace)},
-	} {
-		if want := strings.TrimSpace(txCtx[constraint.key]); want != "" && constraint.got != want {
-			return fmt.Errorf("child task workspace %s %q does not match transaction context %q", constraint.key, constraint.got, want)
-		}
-	}
-	// Execution gives workspace.ref precedence over branch, so a branch-only
-	// transaction constraint must not be bypassed by supplying the allowed
-	// branch together with an unconstrained ref selector.
-	if strings.TrimSpace(txCtx["branch"]) != "" && strings.TrimSpace(txCtx["ref"]) == "" && workspaceRef(workspace) != "" {
-		return fmt.Errorf("child task workspace ref %q overrides the branch constrained by transaction context", workspaceRef(workspace))
+	if err := validateChildWorkspaceSelectorConstraints(txCtx, workspace); err != nil {
+		return err
 	}
 	if err := validateChildProviderModelConstraints(txCtx, childCtx); err != nil {
 		return err
@@ -842,6 +827,29 @@ func workspaceGitRepo(workspace *corev1alpha1.WorkspaceConfig) string {
 		return ""
 	}
 	return workspace.GitRepo
+}
+
+// validateChildWorkspaceSelectorConstraints enforces the transaction-context
+// repo/branch/ref constraints on the child workspace and rejects a ref that
+// would override a branch-only constraint, since execution gives
+// workspace.ref precedence over branch.
+func validateChildWorkspaceSelectorConstraints(txCtx map[string]string, workspace *corev1alpha1.WorkspaceConfig) error {
+	for _, constraint := range []struct {
+		key string
+		got string
+	}{
+		{key: "repo", got: workspaceGitRepo(workspace)},
+		{key: "branch", got: workspaceBranch(workspace)},
+		{key: "ref", got: workspaceRef(workspace)},
+	} {
+		if want := strings.TrimSpace(txCtx[constraint.key]); want != "" && constraint.got != want {
+			return fmt.Errorf("child task workspace %s %q does not match transaction context %q", constraint.key, constraint.got, want)
+		}
+	}
+	if strings.TrimSpace(txCtx["branch"]) != "" && strings.TrimSpace(txCtx["ref"]) == "" && workspaceRef(workspace) != "" {
+		return fmt.Errorf("child task workspace ref %q overrides the branch constrained by transaction context", workspaceRef(workspace))
+	}
+	return nil
 }
 
 func workspaceBranch(workspace *corev1alpha1.WorkspaceConfig) string {
