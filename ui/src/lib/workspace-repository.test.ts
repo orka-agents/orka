@@ -56,6 +56,8 @@ describe('validateWorkspaceRepositoryUrl', () => {
     ['trailing slash', 'https://gitlab.example.com/owner/repo/'],
     ['empty path segment', 'https://gitlab.example.com/owner//repo'],
     ['escaped path separator', 'https://gitlab.example.com/owner%2Frepo'],
+    ['dot segments normalized by the browser parser', 'https://gitlab.example.com/owner/../repo'],
+    ['encoded dot segments', 'https://gitlab.example.com/owner/%2e%2e/repo'],
     ['non-canonical escaped character', 'https://gitlab.example.com/owner/repo%41'],
   ])('rejects %s', (_name, url) => {
     const result = validateWorkspaceRepositoryUrl('Source repository URL', url)

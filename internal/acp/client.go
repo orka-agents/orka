@@ -188,7 +188,12 @@ func (c *Client) call(ctx context.Context, method string, params, result any, on
 		return nil
 	case <-ctx.Done():
 		c.removePending(key)
-		_ = c.Notify(context.Background(), MethodCancelRequest, CancelRequestNotification{RequestID: idRaw})
+		// Best-effort courtesy cancel: it must not block the caller past its
+		// already-expired deadline when the adapter stopped reading stdin, so
+		// it is dispatched asynchronously; adapter exit unblocks the write.
+		go func() {
+			_ = c.Notify(context.Background(), MethodCancelRequest, CancelRequestNotification{RequestID: idRaw})
+		}()
 		return ctx.Err()
 	case <-c.closed:
 		c.removePending(key)

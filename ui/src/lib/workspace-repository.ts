@@ -84,6 +84,16 @@ export function validateWorkspaceRepositoryUrl(label: string, raw: string): Work
     return invalid('must use the default HTTPS port')
   }
   const path = parsed.pathname
+  // The browser URL parser resolves dot segments (/org/../repo -> /repo)
+  // before the checks below run, but the original string is what gets
+  // submitted and the controller rejects unclean paths. Require the path as
+  // written to match the parsed pathname so normalized-away segments are
+  // rejected instead of silently accepted.
+  const pathStart = canonical.indexOf('/', canonical.indexOf('://') + 3)
+  const rawPath = pathStart === -1 ? '' : canonical.slice(pathStart)
+  if (rawPath !== path) {
+    return invalid('path is invalid')
+  }
   if (path === '/' || path.endsWith('/') || path.includes('//')) {
     return invalid('path is invalid')
   }

@@ -130,6 +130,21 @@ export function TaskCreateForm() {
         return
       }
 
+      // The controller workspace preflight rejects source selectors and read
+      // credentials without a repository; fail here instead of after creation.
+      if (!gitRepo.trim()) {
+        const dependentField = [
+          { label: 'Source branch', value: branch },
+          { label: 'Source ref', value: gitRef },
+          { label: 'Source subpath', value: subPath },
+          { label: 'Read credential Secret', value: readCredentialName },
+        ].find((field) => field.value.trim())
+        if (dependentField) {
+          toast.error(`${dependentField.label} requires a source repository URL`)
+          return
+        }
+      }
+
       const sourceRepoResult = validateWorkspaceRepositoryUrl('Source repository URL', gitRepo)
       if ('error' in sourceRepoResult) {
         toast.error(sourceRepoResult.error)

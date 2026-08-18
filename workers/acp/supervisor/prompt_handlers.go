@@ -27,7 +27,7 @@ import (
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.StartPromptRequest
-	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+	if !s.decodeAuthenticatedJSON(w, r, &request) {
 		return
 	}
 	now := time.Now().UTC()
@@ -476,7 +476,7 @@ func promptExecutionDiagnosticIdentifier(value string) string {
 
 func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.RenewPromptLeaseRequest
-	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+	if !s.decodeAuthenticatedJSON(w, r, &request) {
 		return
 	}
 	now := time.Now().UTC()
@@ -576,7 +576,7 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.ResolvePermissionRequest
-	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+	if !s.decodeAuthenticatedJSON(w, r, &request) {
 		return
 	}
 	now := time.Now().UTC()
@@ -696,7 +696,7 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.CancelPromptRequest
-	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+	if !s.decodeAuthenticatedJSON(w, r, &request) {
 		return
 	}
 	now := time.Now().UTC()
@@ -883,7 +883,7 @@ func writeCancellationOperationReplay(
 
 func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.FinalizeRuntimeSessionPublicationRequest
-	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+	if !s.decodeAuthenticatedJSON(w, r, &request) {
 		return
 	}
 	now := time.Now().UTC()
@@ -997,7 +997,7 @@ func publicationFinalizationMatches(a, b harnessv2.PublicationFinalizationReceip
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.DeleteRuntimeSessionRequest
-	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+	if !s.decodeAuthenticatedJSON(w, r, &request) {
 		return
 	}
 	now := time.Now().UTC()
@@ -1309,7 +1309,7 @@ func workspaceDeltaContainsSessionCredential(artifact []byte, state *sessionStat
 //nolint:gocyclo // Workspace validation keeps security invariants in one auditable boundary.
 func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.CreateWorkspaceDeltaRequest
-	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+	if !s.decodeAuthenticatedJSON(w, r, &request) {
 		return
 	}
 	now := time.Now().UTC()

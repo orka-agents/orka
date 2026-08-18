@@ -334,7 +334,7 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.CreateRuntimeSessionRequest
-	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+	if !s.decodeAuthenticatedJSON(w, r, &request) {
 		return
 	}
 	now := time.Now().UTC()
@@ -610,6 +610,19 @@ func (s *Server) expectedFence(sessionUID harnessv2.RuntimeSessionUID, generatio
 
 func (s *Server) decodeMutation(w http.ResponseWriter, r *http.Request, target any, requireSession bool, _ harnessv2.MutationMetadata) bool {
 	_ = requireSession
+	return s.decodeAuthenticatedJSON(w, r, target)
+}
+
+// decodeAuthenticatedJSON verifies the controller bearer token before reading
+// the request body. An untrusted ACP child shares the Pod network namespace
+// and can reach this listener, so unauthenticated peers must be rejected on
+// headers alone instead of being allowed to drip-feed mutation bodies. The
+// operation-capability check still runs after decoding because it needs the
+// mutation metadata from the body.
+func (s *Server) decodeAuthenticatedJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	if !s.authorizeController(w, r) {
+		return false
+	}
 	return decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, target)
 }
 

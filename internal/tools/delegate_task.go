@@ -788,6 +788,9 @@ func (t *DelegateTaskTool) prepareBrokeredChildTransactionToken(
 	if parentTask.UID == "" {
 		return fmt.Errorf("parent task UID is required for child transaction token exchange")
 	}
+	if err := requireSameNamespaceChildTokenExchange(parentTask, childTask); err != nil {
+		return err
+	}
 	if config.Exchanger == nil {
 		return fmt.Errorf("brokered delegate_task transaction-token exchanger is not configured")
 	}

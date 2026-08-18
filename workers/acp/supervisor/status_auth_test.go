@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,6 +48,43 @@ func TestSupervisorV2ProbeAuthenticationBoundary(t *testing.T) {
 			}
 			if apiError.Code != harnessv2.ErrorCodeUnauthenticated {
 				t.Fatalf("auth rejection code = %q, want %q", apiError.Code, harnessv2.ErrorCodeUnauthenticated)
+			}
+		})
+	}
+}
+
+// unreadableBody proves the mutation body is never read on the
+// unauthenticated path: any Read fails the test.
+type unreadableBody struct{ t *testing.T }
+
+func (b *unreadableBody) Read([]byte) (int, error) {
+	b.t.Fatal("unauthenticated mutation must be rejected before the request body is read")
+	return 0, io.EOF
+}
+
+func TestSupervisorMutationsAuthenticateBeforeReadingBodies(t *testing.T) {
+	server, _, _ := newTestServer(t, "immediate")
+	paths := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPut, path: harnessv2.DrainPath},
+		{method: http.MethodPut, path: "/v2/runtime-sessions/session-a"},
+		{method: http.MethodPut, path: "/v2/runtime-sessions/session-a/publication-finalization"},
+		{method: http.MethodDelete, path: "/v2/runtime-sessions/session-a"},
+		{method: http.MethodPut, path: "/v2/runtime-sessions/session-a/prompts/prompt-a"},
+		{method: http.MethodPut, path: "/v2/runtime-sessions/session-a/prompts/prompt-a/lease"},
+		{method: http.MethodPut, path: "/v2/runtime-sessions/session-a/prompts/prompt-a/permissions/request-a"},
+		{method: http.MethodPut, path: "/v2/runtime-sessions/session-a/prompts/prompt-a/cancel"},
+		{method: http.MethodPut, path: "/v2/runtime-sessions/session-a/workspace-deltas/delta-a"},
+	}
+	for _, test := range paths {
+		t.Run(test.method+" "+test.path, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, &unreadableBody{t: t})
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("%s %s status = %d, want %d", test.method, test.path, response.Code, http.StatusUnauthorized)
 			}
 		})
 	}

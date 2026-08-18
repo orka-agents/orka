@@ -84,7 +84,8 @@ func TestTaskCreateLeavesCredentialKeyOmittedForAPIDefault(t *testing.T) {
 	root := newRootCmd()
 	root.SetArgs([]string{
 		"--server", server.URL, "--token", "test-token",
-		"task", "create", "Inspect", "--type", "agent", "--agent", "a", "--read-credential", "repo-read",
+		"task", "create", "Inspect", "--type", "agent", "--agent", "a",
+		"--git-repo", "https://github.com/source/repo", "--read-credential", "repo-read",
 	})
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
@@ -161,6 +162,29 @@ func TestTaskCreateRejectsWorkspaceIntentForNonAgentTask(t *testing.T) {
 	err := root.Execute()
 	if err == nil || !strings.Contains(err.Error(), "workspace flags are supported only for agent tasks") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTaskCreateRejectsSourceSelectorsWithoutRepository(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "branch without repository", args: []string{"--branch", "main"}, want: "--branch requires --git-repo"},
+		{name: "ref without repository", args: []string{"--ref", "refs/heads/main"}, want: "--ref requires --git-repo"},
+		{name: "sub-path without repository", args: []string{"--sub-path", "services/api"}, want: "--sub-path requires --git-repo"},
+		{name: "read credential without repository", args: []string{"--read-credential", "repo-read"}, want: "--read-credential requires --git-repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newRootCmd()
+			root.SetArgs(append([]string{"task", "create", "Inspect", "--type", "agent", "--agent", "a"}, tt.args...))
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

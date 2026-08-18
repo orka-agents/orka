@@ -46,6 +46,9 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	if parentTask.UID == "" {
 		return fmt.Errorf("parent task UID is required for child transaction token exchange")
 	}
+	if err := requireSameNamespaceChildTokenExchange(parentTask, childTask); err != nil {
+		return err
+	}
 	subjectToken, err := childTransactionSubjectToken(ttsConfig.TokenSource)
 	if err != nil {
 		return err
@@ -195,13 +198,30 @@ func childOwnerReference(childTask *corev1alpha1.Task) []metav1.OwnerReference {
 	return taskOwnerReference(childTask)
 }
 
+// requireSameNamespaceChildTokenExchange fails child transaction token
+// exchange closed for cross-namespace delegation. The raw child TxToken must
+// only ever exist in an owner-referenced Secret, and a namespaced owner
+// reference is only valid within the owner's namespace: a cross-namespace
+// parent owner would be garbage-collected before the child adopts the Secret,
+// while an unowned Secret would orphan the token if the tool crashes between
+// Secret creation and child-Task creation. Neither window is acceptable, so
+// the combination is rejected before any token is exchanged or stored.
+func requireSameNamespaceChildTokenExchange(parentTask, childTask *corev1alpha1.Task) error {
+	if parentTask == nil || childTask == nil || parentTask.Namespace == childTask.Namespace {
+		return nil
+	}
+	return fmt.Errorf(
+		"child transaction token exchange requires the child Task namespace %q to match the parent namespace %q; cross-namespace delegation is not supported while child token exchange is enabled",
+		childTask.Namespace, parentTask.Namespace,
+	)
+}
+
 // childTokenSecretOwnerReferences returns the pre-adoption owner references
-// for a child transaction token Secret. A namespaced owner reference is only
-// valid within the owner's namespace, so a cross-namespace parent owner would
-// mark the Secret for garbage collection before the child Task adopts it.
-// Cross-namespace delegation therefore leaves the Secret briefly unowned:
-// adoption rewrites ownership to the child immediately after the child Task
-// is created, and every failure path deletes the Secret explicitly.
+// for a child transaction token Secret. requireSameNamespaceChildTokenExchange
+// guarantees parent and child share a namespace before any Secret is created;
+// returning no owner for a cross-namespace pair is defense in depth against
+// an invalid cross-namespace owner reference that garbage collection would
+// act on before the child adopts the Secret.
 func childTokenSecretOwnerReferences(parentTask, childTask *corev1alpha1.Task) []metav1.OwnerReference {
 	if parentTask == nil || childTask == nil || parentTask.Namespace != childTask.Namespace {
 		return nil

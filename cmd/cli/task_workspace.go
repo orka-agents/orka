@@ -65,17 +65,7 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 	if intent != string(corev1alpha1.WorkspaceIntentRead) && intent != string(corev1alpha1.WorkspaceIntentWrite) {
 		return nil, fmt.Errorf("--workspace-intent must be read or write")
 	}
-	intentFlagUsed := cmd.Flags().Changed("workspace-intent")
-	otherWorkspaceFlagsUsed := false
-	for _, name := range []string{
-		"git-repo", "source-repository-provider", "source-repository-id", "branch", "ref",
-		"sub-path", "read-credential", "read-credential-key", "publication-git-repo", "publication-repository-provider",
-		"publication-repository-id", "publication-read-credential", "publication-read-credential-key",
-		"publication-credential", "publication-credential-key", "forge-credential", "forge-credential-key",
-		"push-branch", "pr-base-branch", "create-pr",
-	} {
-		otherWorkspaceFlagsUsed = otherWorkspaceFlagsUsed || cmd.Flags().Changed(name)
-	}
+	intentFlagUsed, otherWorkspaceFlagsUsed := workspaceFlagUsage(cmd)
 	if taskType != cliTaskTypeAgent {
 		if otherWorkspaceFlagsUsed || intentFlagUsed {
 			return nil, fmt.Errorf("workspace flags are supported only for agent tasks")
@@ -92,6 +82,9 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 		return nil, nil
 	}
 	if err := o.canonicalizeRepositoryURLs(); err != nil {
+		return nil, err
+	}
+	if err := o.validateSourceSelectorDependencies(); err != nil {
 		return nil, err
 	}
 	if (strings.TrimSpace(o.sourceRepositoryProvider) == "") != (strings.TrimSpace(o.sourceRepositoryID) == "") {
@@ -144,6 +137,45 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 		}
 	}
 	return workspace, nil
+}
+
+// workspaceFlagUsage reports whether the workspace-intent flag and any other
+// workspace flag were explicitly set on the command line.
+func workspaceFlagUsage(cmd *cobra.Command) (intentUsed, othersUsed bool) {
+	intentUsed = cmd.Flags().Changed("workspace-intent")
+	for _, name := range []string{
+		"git-repo", "source-repository-provider", "source-repository-id", "branch", "ref",
+		"sub-path", "read-credential", "read-credential-key", "publication-git-repo", "publication-repository-provider",
+		"publication-repository-id", "publication-read-credential", "publication-read-credential-key",
+		"publication-credential", "publication-credential-key", "forge-credential", "forge-credential-key",
+		"push-branch", "pr-base-branch", "create-pr",
+	} {
+		othersUsed = othersUsed || cmd.Flags().Changed(name)
+	}
+	return intentUsed, othersUsed
+}
+
+// validateSourceSelectorDependencies mirrors the controller workspace
+// preflight rule that source selectors and read credentials require a
+// repository, so a doomed Task fails here instead of after creation.
+func (o taskWorkspaceCreateOptions) validateSourceSelectorDependencies() error {
+	if strings.TrimSpace(o.gitRepo) != "" {
+		return nil
+	}
+	for _, dependent := range []struct {
+		flag  string
+		value string
+	}{
+		{flag: "--branch", value: o.branch},
+		{flag: "--ref", value: o.ref},
+		{flag: "--sub-path", value: o.subPath},
+		{flag: "--read-credential", value: o.readCredential},
+	} {
+		if strings.TrimSpace(dependent.value) != "" {
+			return fmt.Errorf("%s requires --git-repo", dependent.flag)
+		}
+	}
+	return nil
 }
 
 // canonicalizeRepositoryURLs canonicalizes repository URL flags to the only
