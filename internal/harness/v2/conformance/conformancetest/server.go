@@ -222,7 +222,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Mirror the production supervisor: status requires proof of the
 	// operation capability secret in addition to the controller bearer.
 	if !s.config.AllowUnauthenticatedStatus {
-		binding := harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: s.Fence().RuntimeProfileDigest}
+		binding := harnessv2.StatusCapabilityBinding{
+			RuntimeProfileDigest: s.Fence().RuntimeProfileDigest,
+			RuntimeInstanceID:    s.Fence().RuntimeInstanceID,
+		}
 		if _, err := harnessv2.VerifyStatusCapability(s.config.OperationCapabilitySecret, r.Header.Get(harnessv2.OperationCapabilityHeader), binding, time.Now().UTC()); err != nil {
 			writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "status authorization failed", nil)
 			return

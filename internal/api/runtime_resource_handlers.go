@@ -21,6 +21,9 @@ func (h *Handlers) ListRuntimePools(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "listRuntimePools", h.contextTokenAuthorization.AgentReadScopes); err != nil {
 		return err
 	}
+	if err := h.authorizeRuntimeResourceAction(c, "list", "runtimepools", namespace, ""); err != nil {
+		return err
+	}
 	pagination, err := ParsePagination(c.Query("limit", "100"), c.Query("continue", ""))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
@@ -38,6 +41,13 @@ func (h *Handlers) ListRuntimePools(c fiber.Ctx) error {
 
 func (h *Handlers) GetRuntimePool(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "getRuntimePool", h.contextTokenAuthorization.AgentReadScopes); err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeRuntimeResourceAction(c, "get", "runtimepools", namespace, c.Params("name")); err != nil {
 		return err
 	}
 	pool, err := h.fetchRuntimePool(c, c.Params("name"))
@@ -63,7 +73,7 @@ func (h *Handlers) CreateRuntimePool(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeRuntimeResourceMutation(c, "create", "runtimepools", namespace, name); err != nil {
+	if err := h.authorizeRuntimeResourceAction(c, "create", "runtimepools", namespace, name); err != nil {
 		return err
 	}
 	pool.TypeMeta = metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RuntimePool"}
@@ -88,7 +98,7 @@ func (h *Handlers) UpdateRuntimePool(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeRuntimeResourceMutation(c, "update", "runtimepools", existing.Namespace, existing.Name); err != nil {
+	if err := h.authorizeRuntimeResourceAction(c, "update", "runtimepools", existing.Namespace, existing.Name); err != nil {
 		return err
 	}
 	var desired corev1alpha1.RuntimePool
@@ -113,7 +123,7 @@ func (h *Handlers) DeleteRuntimePool(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeRuntimeResourceMutation(c, "delete", "runtimepools", pool.Namespace, pool.Name); err != nil {
+	if err := h.authorizeRuntimeResourceAction(c, "delete", "runtimepools", pool.Namespace, pool.Name); err != nil {
 		return err
 	}
 	if err := h.client.Delete(c.Context(), pool); err != nil && !apierrors.IsNotFound(err) {
@@ -122,12 +132,13 @@ func (h *Handlers) DeleteRuntimePool(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// authorizeRuntimeResourceMutation enforces Kubernetes RBAC for RuntimePool
-// and AgentRuntime writes, like the Task and gateway paths: a
+// authorizeRuntimeResourceAction enforces Kubernetes RBAC for RuntimePool and
+// AgentRuntime reads and writes, like the Task and gateway paths: a
 // TokenReview-authenticated identity must pass a SubjectAccessReview for the
-// exact verb, resource, and name before the controller client mutates on its
-// behalf.
-func (h *Handlers) authorizeRuntimeResourceMutation(c fiber.Ctx, verb, resource, namespace, name string) error {
+// exact verb, resource, and name before the controller client acts on its
+// behalf. It is a no-op for non-TokenReview auth (e.g. context tokens, which
+// carry their own scope checks).
+func (h *Handlers) authorizeRuntimeResourceAction(c fiber.Ctx, verb, resource, namespace, name string) error {
 	return authorizeKubernetesResourceAction(
 		c.Context(), h.clientset, GetUserInfo(c), namespace, verb, corev1alpha1.GroupVersion.Group, resource, name,
 	)
@@ -156,6 +167,9 @@ func (h *Handlers) ListAgentRuntimes(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "listAgentRuntimes", h.contextTokenAuthorization.AgentReadScopes); err != nil {
 		return err
 	}
+	if err := h.authorizeRuntimeResourceAction(c, "list", "agentruntimes", namespace, ""); err != nil {
+		return err
+	}
 	pagination, err := ParsePagination(c.Query("limit", "100"), c.Query("continue", ""))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
@@ -173,6 +187,13 @@ func (h *Handlers) ListAgentRuntimes(c fiber.Ctx) error {
 
 func (h *Handlers) GetAgentRuntime(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "getAgentRuntime", h.contextTokenAuthorization.AgentReadScopes); err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeRuntimeResourceAction(c, "get", "agentruntimes", namespace, c.Params("name")); err != nil {
 		return err
 	}
 	runtime, err := h.fetchAgentRuntime(c, c.Params("name"))
@@ -197,7 +218,7 @@ func (h *Handlers) CreateAgentRuntime(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeRuntimeResourceMutation(c, "create", "agentruntimes", namespace, strings.TrimSpace(runtime.Name)); err != nil {
+	if err := h.authorizeRuntimeResourceAction(c, "create", "agentruntimes", namespace, strings.TrimSpace(runtime.Name)); err != nil {
 		return err
 	}
 	runtime.TypeMeta = metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "AgentRuntime"}
@@ -222,7 +243,7 @@ func (h *Handlers) UpdateAgentRuntime(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeRuntimeResourceMutation(c, "update", "agentruntimes", existing.Namespace, existing.Name); err != nil {
+	if err := h.authorizeRuntimeResourceAction(c, "update", "agentruntimes", existing.Namespace, existing.Name); err != nil {
 		return err
 	}
 	var desired corev1alpha1.AgentRuntime
@@ -247,7 +268,7 @@ func (h *Handlers) DeleteAgentRuntime(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeRuntimeResourceMutation(c, "delete", "agentruntimes", runtime.Namespace, runtime.Name); err != nil {
+	if err := h.authorizeRuntimeResourceAction(c, "delete", "agentruntimes", runtime.Namespace, runtime.Name); err != nil {
 		return err
 	}
 	if err := h.client.Delete(c.Context(), runtime); err != nil && !apierrors.IsNotFound(err) {

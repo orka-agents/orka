@@ -249,7 +249,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// capability is bound to this runtime's profile and carries a single-use
 	// nonce so a captured token cannot be replayed within its TTL.
 	if s.cfg.RequireCapabilities {
-		binding := harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: s.cfg.Fence.RuntimeProfileDigest}
+		binding := harnessv2.StatusCapabilityBinding{
+			RuntimeProfileDigest: s.cfg.Fence.RuntimeProfileDigest,
+			RuntimeInstanceID:    s.cfg.Fence.RuntimeInstanceID,
+		}
 		nonce, err := harnessv2.VerifyStatusCapability(s.cfg.CapabilitySecret, r.Header.Get(OperationCapabilityHeader), binding, time.Now().UTC())
 		if err != nil || !s.consumeStatusNonce(nonce) {
 			writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "status authorization failed", nil, false)
@@ -257,6 +260,40 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, s.status())
+}
+
+// rejectTombstonedSessionCreateLocked classifies a create against the deletion
+// tombstone for its session UID/generation. It must be called with s.mu held;
+// when it handles the request it unlocks s.mu, writes the response, and
+// returns true, so the caller must return immediately.
+func (s *Server) rejectTombstonedSessionCreateLocked(
+	w http.ResponseWriter,
+	metadata harnessv2.MutationMetadata,
+	expected harnessv2.Fence,
+	now time.Time,
+) bool {
+	tombstone, ok := s.tombstones[metadata.Fence.RuntimeSessionUID]
+	if !ok || tombstone.RuntimeSessionGeneration < metadata.Fence.RuntimeSessionGeneration {
+		return false
+	}
+	operations := make(map[harnessv2.OperationID]harnessv2.OperationRecord, len(tombstone.Operations))
+	for i := range tombstone.Operations {
+		operations[tombstone.Operations[i].OperationID] = tombstone.Operations[i]
+	}
+	classification, classifyErr := harnessv2.ClassifyOperation(expected, metadata, operationPtr(operations, metadata.OperationID), true, now)
+	s.mu.Unlock()
+	if classifyErr != nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, classifyErr.Error(), nil, false)
+		return true
+	}
+	if classification.Class == harnessv2.RequestClassificationFresh {
+		// The session UID/generation is tombstoned but this operation was never
+		// recorded on it: fail closed rather than resurrect it.
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, "runtime session was deleted", nil, false)
+		return true
+	}
+	writeClassificationError(w, classification)
+	return true
 }
 
 // consumeStatusNonce records a status capability nonce and reports whether it
@@ -425,6 +462,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		writeClassificationError(w, classification)
+		return
+	}
+	// A create replayed after the session was deleted must not recreate it and
+	// re-run the prompt: consult the deletion tombstone before admitting a new
+	// OS identity.
+	if handled := s.rejectTombstonedSessionCreateLocked(w, request.Metadata, expected, now); handled {
 		return
 	}
 	if !s.drain.AcceptingNewSessions || s.lifecycle != harnessv2.SupervisorLifecycleReady {

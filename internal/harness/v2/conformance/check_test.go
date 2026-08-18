@@ -209,9 +209,13 @@ func TestCheckRejectsExactInstanceMismatch(t *testing.T) {
 	target.BaseURL = server.URL()
 	target.ExpectedRuntimeInstanceID = "different-runtime-instance"
 
+	// The instance mismatch now trips the status capability binding (the
+	// probe binds the expected instance, the supervisor verifies its own), so
+	// the authenticated status probe is rejected before the exact-status
+	// fence comparison runs.
 	result := conformance.Check(t.Context(), target)
-	if result.Passed || !strings.Contains(result.Message, "runtime instance ID") {
-		t.Fatalf("Check() = %#v, want exact-instance failure", result)
+	if result.Passed || !strings.Contains(result.Message, "status") {
+		t.Fatalf("Check() = %#v, want exact-instance status-probe failure", result)
 	}
 }
 

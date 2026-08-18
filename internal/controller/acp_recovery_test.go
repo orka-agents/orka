@@ -1451,12 +1451,19 @@ func TestRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t *te
 			ProtocolVersion: corev1alpha1.RuntimePoolProtocolHarnessV2, ProfileDigest: string(profileDigest), ProfileDigestSchemaVersion: strconv.FormatUint(uint64(harnessv2.ProfileDigestSchemaVersion), 10),
 		}},
 	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth", Labels: map[string]string{
-			runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
-		}},
-		Data: map[string][]byte{runtimePoolControllerTokenKey: []byte(strings.Repeat("t", 32)), runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32))},
+	// The stale-epoch cleanup runs while the active instance is at fence.Epoch-1
+	// and then again after the test advances it to fence.Epoch; both Secrets
+	// coexist during that overlap, exactly as during a graceful replacement.
+	newSecret := func(epoch int64) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: fmt.Sprintf("pool-auth-e%d", epoch), Labels: map[string]string{
+				runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
+			}},
+			Data: map[string][]byte{runtimePoolControllerTokenKey: []byte(strings.Repeat("t", 32)), runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32))},
+		}
 	}
+	oldSecret := newSecret(fence.Epoch - 1)
+	currentSecret := newSecret(fence.Epoch)
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -1464,7 +1471,7 @@ func TestRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t *te
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task, pool, secret).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task, pool, oldSecret, currentSecret).Build()
 	attemptKey := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID}
 	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: attemptKey, RequestDigest: task.Status.Execution.RequestDigest}), fence)
 	if err != nil {
@@ -2351,7 +2358,7 @@ func newRecoveredWriteCleanupFixture(t *testing.T, options recoveredWriteCleanup
 		}},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth", Labels: map[string]string{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: fmt.Sprintf("pool-auth-e%d", pool.Status.ActiveInstance.ControllerEpoch), Labels: map[string]string{
 			runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
 		}},
 		Data: map[string][]byte{runtimePoolControllerTokenKey: []byte(strings.Repeat("t", 32)), runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32))},

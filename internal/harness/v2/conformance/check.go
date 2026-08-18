@@ -152,7 +152,9 @@ func Check(ctx context.Context, target Target) Result {
 		harnessv2.WithControlTimeout(timeout),
 		harnessv2.WithControllerBearerToken(target.ControllerBearerToken),
 		harnessv2.WithOperationCapabilitySecret(target.OperationCapabilitySecret),
-		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: expectedProfileDigest}),
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{
+			RuntimeProfileDigest: expectedProfileDigest, RuntimeInstanceID: target.ExpectedRuntimeInstanceID,
+		}),
 		harnessv2.WithProtocolLimits(target.Limits),
 	)
 	if err != nil {

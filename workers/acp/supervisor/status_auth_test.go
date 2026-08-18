@@ -29,6 +29,7 @@ func TestSupervisorV2ProbeAuthenticationBoundary(t *testing.T) {
 	validCapability := signStatus(cfg.CapabilitySecret, binding)
 	wrongCapability := signStatus([]byte(strings.Repeat("q", 32)), binding)
 	wrongProfileCapability := signStatus(cfg.CapabilitySecret, harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: harnessv2.ProfileDigest("sha256:" + strings.Repeat("e", 64))})
+	wrongInstanceCapability := signStatus(cfg.CapabilitySecret, harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: binding.RuntimeProfileDigest, RuntimeInstanceID: "some-other-instance"})
 	replayedCapability := signStatus(cfg.CapabilitySecret, binding)
 	// Consume the replayed capability once so the boundary test's second use is a replay.
 	replayRequest := httptest.NewRequest(http.MethodGet, harnessv2.StatusPath, nil)
@@ -51,6 +52,7 @@ func TestSupervisorV2ProbeAuthenticationBoundary(t *testing.T) {
 		{name: "status rejects bearer without capability", path: harnessv2.StatusPath, authorization: "Bearer " + cfg.ControllerBearerToken, wantStatus: http.StatusForbidden},
 		{name: "status rejects bearer with wrong-key capability", path: harnessv2.StatusPath, authorization: "Bearer " + cfg.ControllerBearerToken, capability: wrongCapability, wantStatus: http.StatusForbidden},
 		{name: "status rejects capability bound to a different profile", path: harnessv2.StatusPath, authorization: "Bearer " + cfg.ControllerBearerToken, capability: wrongProfileCapability, wantStatus: http.StatusForbidden},
+		{name: "status rejects capability bound to a different instance", path: harnessv2.StatusPath, authorization: "Bearer " + cfg.ControllerBearerToken, capability: wrongInstanceCapability, wantStatus: http.StatusForbidden},
 		{name: "status rejects replayed capability", path: harnessv2.StatusPath, authorization: "Bearer " + cfg.ControllerBearerToken, capability: replayedCapability, wantStatus: http.StatusForbidden},
 		{name: "status accepts controller bearer with capability", path: harnessv2.StatusPath, authorization: "Bearer " + cfg.ControllerBearerToken, capability: validCapability, wantStatus: http.StatusOK},
 	}

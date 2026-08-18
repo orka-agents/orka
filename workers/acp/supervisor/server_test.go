@@ -1392,6 +1392,17 @@ func TestSupervisorFinalizesPreparedPublicationBeforeDeletion(t *testing.T) {
 	if freshError.Classification != nil {
 		t.Fatalf("fresh delete after tombstone carried classification=%#v", freshError.Classification)
 	}
+
+	// Replaying the original still-valid create after deletion must not
+	// resurrect the session and re-run its prompt; the deletion tombstone
+	// classifies the create as a duplicate.
+	replayedCreate := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if replayedCreate.Code == http.StatusOK {
+		t.Fatalf("replayed create after deletion recreated the session: body=%s", replayedCreate.Body.String())
+	}
+	if _, resident := server.sessions["session-1"]; resident {
+		t.Fatal("replayed create after deletion made the session resident again")
+	}
 }
 
 func TestCleanupDrainedSessionClearsDeferredSchedule(t *testing.T) {

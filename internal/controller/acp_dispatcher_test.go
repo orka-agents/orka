@@ -586,7 +586,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth", Labels: map[string]string{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1", Labels: map[string]string{
 			runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
 		}},
 		Data: map[string][]byte{runtimePoolControllerTokenKey: []byte(strings.Repeat("t", 32)), runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32))},
@@ -820,7 +820,7 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 			}
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "orka-runtimes", Name: "frozen-pool-auth",
+					Namespace: "orka-runtimes", Name: "frozen-pool-auth-e1",
 					Labels: map[string]string{runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID)},
 				},
 				Data: map[string][]byte{
@@ -990,7 +990,7 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth", Labels: map[string]string{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1", Labels: map[string]string{
 			runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
 		}},
 		Data: map[string][]byte{runtimePoolControllerTokenKey: []byte(strings.Repeat("t", 32)), runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32))},
@@ -1188,7 +1188,7 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth", Labels: map[string]string{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1", Labels: map[string]string{
 			runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
 		}},
 		Data: map[string][]byte{runtimePoolControllerTokenKey: []byte(strings.Repeat("t", 32)), runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32))},

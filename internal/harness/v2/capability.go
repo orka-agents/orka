@@ -154,13 +154,17 @@ const DefaultStatusCapabilityTTL = time.Minute
 // components (boot ID, instance ID), so exact per-operation fences remain a
 // mutation-only requirement, and the capability secret is already scoped to
 // exactly one pool or external runtime by construction.
-// StatusCapabilityBinding is the subset of fence identity every status caller
+// StatusCapabilityBinding is the subset of fence identity a status caller
 // knows before contact. The capability secret is already per-pool and
 // per-epoch (auth-e<epoch>), so registration and epoch are bound by the
-// signing key itself; the profile digest is bound here as defense in depth,
-// and the boot ID and instance ID remain the values status discovers.
+// signing key itself; the profile digest is always bound here. The runtime
+// instance ID is bound whenever the caller knows the exact target — external
+// registrations and post-discovery dispatch — so a captured token cannot be
+// replayed against a different replica sharing the registration secret; it is
+// left empty only for the initial pool probe, which is the discovery channel.
 type StatusCapabilityBinding struct {
-	RuntimeProfileDigest ProfileDigest `json:"runtimeProfileDigest"`
+	RuntimeProfileDigest ProfileDigest     `json:"runtimeProfileDigest"`
+	RuntimeInstanceID    RuntimeInstanceID `json:"runtimeInstanceID,omitempty"`
 }
 
 type StatusCapabilityClaims struct {
@@ -236,6 +240,12 @@ func VerifyStatusCapability(secret []byte, token string, expected StatusCapabili
 	}
 	if claims.Binding.RuntimeProfileDigest != expected.RuntimeProfileDigest {
 		return "", fmt.Errorf("status capability profile binding does not match this runtime")
+	}
+	// The instance binding is optional (empty for the discovery probe), but
+	// when the caller committed to an exact instance it must be this one, so a
+	// token minted for one replica cannot be replayed against another.
+	if claims.Binding.RuntimeInstanceID != "" && claims.Binding.RuntimeInstanceID != expected.RuntimeInstanceID {
+		return "", fmt.Errorf("status capability instance binding does not match this runtime")
 	}
 	return claims.Nonce, nil
 }
