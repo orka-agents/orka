@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"text/tabwriter"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -159,6 +160,9 @@ func (o taskWorkspaceCreateOptions) validateWorkspaceFlags() error {
 	if err := o.validatePublicationBranches(); err != nil {
 		return err
 	}
+	if err := validateWorkspaceSubPathFlag(o.subPath); err != nil {
+		return err
+	}
 	for _, credential := range []struct {
 		nameFlag string
 		name     string
@@ -172,6 +176,34 @@ func (o taskWorkspaceCreateOptions) validateWorkspaceFlags() error {
 	} {
 		if strings.TrimSpace(credential.key) != "" && strings.TrimSpace(credential.name) == "" {
 			return fmt.Errorf("%s requires %s", credential.keyFlag, credential.nameFlag)
+		}
+	}
+	return nil
+}
+
+// validateWorkspaceSubPathFlag mirrors the harness-v2 workspace relative-root
+// validation so an unsafe --sub-path fails at create time instead of failing
+// RuntimeSession creation.
+func validateWorkspaceSubPathFlag(subPath string) error {
+	root := strings.TrimSpace(subPath)
+	if root == "" || root == "." {
+		return nil
+	}
+	invalid := func(detail string) error {
+		return fmt.Errorf("--sub-path %s (use a relative slash-separated path inside the repository)", detail)
+	}
+	if !utf8.ValidString(root) {
+		return invalid("contains invalid UTF-8")
+	}
+	if len(root) > 1024 {
+		return invalid("exceeds 1024 bytes")
+	}
+	if strings.HasPrefix(root, "/") || strings.Contains(root, `\`) {
+		return invalid("must be a relative slash-separated path")
+	}
+	for segment := range strings.SplitSeq(root, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return invalid("contains an unsafe segment")
 		}
 	}
 	return nil

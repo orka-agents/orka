@@ -673,10 +673,7 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 		forgeCredential := strings.TrimSpace(dc.args.Workspace.ForgeCredentialRef)
 		// Mirror the controller's workspace preflight before creating the child
 		// Task so a doomed configuration fails here instead of after creation.
-		if wsErr := agentWorkspacePreflightError(workspace, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
-			return fmt.Errorf("%s (%s)", wsErr.Message, wsErr.Suggestion)
-		}
-		if wsErr := agentWorkspaceSourceSelectorError(workspace); wsErr != nil {
+		if wsErr := agentWorkspaceArgError(workspace, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
 			return fmt.Errorf("%s (%s)", wsErr.Message, wsErr.Suggestion)
 		}
 		// Only attach read credentials alongside a gitRepo: the controller

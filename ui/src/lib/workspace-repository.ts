@@ -76,6 +76,23 @@ export function workspaceRepositoryIdentity(canonicalUrl: string): string | null
   return `${host}/${identityPath}`
 }
 
+/**
+ * Mirrors the harness-v2 workspace relative-root validation so an unsafe
+ * subpath is rejected before the Task is created instead of failing
+ * RuntimeSession creation. Returns an error description, or null when valid.
+ */
+export function workspaceSubPathError(subPath: string): string | null {
+  const root = subPath.trim()
+  if (!root || root === '.') return null
+  if (!(root.isWellFormed?.() ?? true)) return 'contains invalid characters'
+  if (new TextEncoder().encode(root).length > 1024) return 'exceeds 1024 bytes'
+  if (root.startsWith('/') || root.includes('\\')) return 'must be a relative slash-separated path'
+  for (const segment of root.split('/')) {
+    if (!segment || segment === '.' || segment === '..') return 'contains an unsafe segment'
+  }
+  return null
+}
+
 /** Mirrors the controller's identity comparison: exact match, or case-insensitive for github.com identities. */
 export function sameWorkspaceRepositoryIdentity(first: string, second: string): boolean {
   const a = first.trim()

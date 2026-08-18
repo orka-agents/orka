@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -44,7 +45,7 @@ func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
 		"pushBranch":                   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication branch name (write intent)"},
 		"prBaseBranch":                 map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Pull request base branch. Required when createPR is true."},
 		"createPR":                     map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Reconcile a pull request after publication. Requires prBaseBranch and forgeCredentialRef."},
-		"subPath":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo. Requires gitRepo."},
+		"subPath":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo as a relative slash-separated path (no leading /, no . or .. segments, max 1024 bytes). Requires gitRepo."},
 	},
 	}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
 	}, jsonSchemaRequiredField: []string{nameField, promptField, agentRefField},
@@ -151,10 +152,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		publicationReadCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationReadCredentialRef"))
 		publicationCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationCredentialRef"))
 		forgeCredential := strings.TrimSpace(chatGetStringArg(wsMap, "forgeCredentialRef"))
-		if wsErr := agentWorkspacePreflightError(wsCfg, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
-			return ChatToolErrorResult(wsErr.Type, wsErr.Message, wsErr.Suggestion)
-		}
-		if wsErr := agentWorkspaceSourceSelectorError(wsCfg); wsErr != nil {
+		if wsErr := agentWorkspaceArgError(wsCfg, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
 			return ChatToolErrorResult(wsErr.Type, wsErr.Message, wsErr.Suggestion)
 		}
 		// Only attach read credentials alongside a gitRepo: the controller
@@ -202,6 +200,19 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 
 	tc.IncrementTasks()
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(schedule)})
+}
+
+// agentWorkspaceArgError runs the full workspace-argument preflight mirror:
+// credential/publication prerequisites, canonical source selectors, and the
+// harness-v2 subPath rule.
+func agentWorkspaceArgError(wsCfg *corev1alpha1.WorkspaceConfig, readCredential, publicationReadCredential, publicationCredential, forgeCredential string) *ChatToolError {
+	if wsErr := agentWorkspacePreflightError(wsCfg, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
+		return wsErr
+	}
+	if wsErr := agentWorkspaceSourceSelectorError(wsCfg); wsErr != nil {
+		return wsErr
+	}
+	return agentWorkspaceSubPathError(wsCfg.SubPath)
 }
 
 // agentWorkspacePreflightError mirrors the tool-expressible subset of the
@@ -305,6 +316,40 @@ func agentWorkspaceSourceSelectorError(wsCfg *corev1alpha1.WorkspaceConfig) *Cha
 				Message:    fmt.Sprintf("workspace.branch is invalid: %v", err),
 				Suggestion: "Use a valid Git branch name or refs/heads/... ref",
 			}
+		}
+	}
+	return nil
+}
+
+// agentWorkspaceSubPathError mirrors the harness-v2 workspace relative-root
+// validation (validateWorkspaceRelativeRoot) so an unsafe subPath is rejected
+// before the Task is created instead of failing RuntimeSession creation. Keep
+// the mirrored conditions in exact behavior parity (not stricter and not
+// looser).
+func agentWorkspaceSubPathError(subPath string) *ChatToolError {
+	root := strings.TrimSpace(subPath)
+	if root == "" || root == "." {
+		return nil
+	}
+	invalid := func(detail string) *ChatToolError {
+		return &ChatToolError{
+			Type:       "invalid_arguments",
+			Message:    "workspace.subPath " + detail,
+			Suggestion: "Use a relative slash-separated path inside the repository, such as services/api",
+		}
+	}
+	if !utf8.ValidString(root) {
+		return invalid("contains invalid UTF-8")
+	}
+	if len(root) > 1024 {
+		return invalid("exceeds 1024 bytes")
+	}
+	if strings.HasPrefix(root, "/") || strings.Contains(root, `\`) {
+		return invalid("must be a relative slash-separated path")
+	}
+	for segment := range strings.SplitSeq(root, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return invalid("contains an unsafe segment")
 		}
 	}
 	return nil

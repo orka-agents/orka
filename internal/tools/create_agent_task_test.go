@@ -439,6 +439,21 @@ func TestCreateAgentTaskTool_Execute_RejectsInvalidSourceSelectors(t *testing.T)
 			workspace: `{"gitRepo":"https://github.com/example/repo","branch":"bad..branch"}`,
 			want:      "workspace.branch is invalid",
 		},
+		{
+			name:      "traversal subPath",
+			workspace: `{"gitRepo":"https://github.com/example/repo","subPath":"../private"}`,
+			want:      "workspace.subPath contains an unsafe segment",
+		},
+		{
+			name:      "absolute subPath",
+			workspace: `{"gitRepo":"https://github.com/example/repo","subPath":"/absolute"}`,
+			want:      "workspace.subPath must be a relative slash-separated path",
+		},
+		{
+			name:      "empty subPath segment",
+			workspace: `{"gitRepo":"https://github.com/example/repo","subPath":"a//b"}`,
+			want:      "workspace.subPath contains an unsafe segment",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -219,6 +219,16 @@ func TestTaskCreateRejectsMalformedSourceSelectors(t *testing.T) {
 			args: []string{"--git-repo", "https://github.com/owner/repo", "--ref", "refs/heads/bad..ref"},
 			want: "--ref is invalid",
 		},
+		{
+			name: "traversal sub-path",
+			args: []string{"--git-repo", "https://github.com/owner/repo", "--sub-path", "../private"},
+			want: "--sub-path contains an unsafe segment",
+		},
+		{
+			name: "absolute sub-path",
+			args: []string{"--git-repo", "https://github.com/owner/repo", "--sub-path", "/absolute"},
+			want: "--sub-path must be a relative slash-separated path",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -4,6 +4,7 @@ import {
   sameWorkspaceRepositoryIdentity,
   validateWorkspaceRepositoryUrl,
   workspaceRepositoryIdentity,
+  workspaceSubPathError,
 } from './workspace-repository'
 
 describe('canonicalRepositoryCloneUrl', () => {
@@ -33,6 +34,24 @@ describe('workspaceRepositoryIdentity', () => {
     expect(workspaceRepositoryIdentity('https://gitlab.example.com/Owner/Repo.git')).toBe(
       'gitlab.example.com/Owner/Repo',
     )
+  })
+})
+
+describe('workspaceSubPathError', () => {
+  it('accepts empty and canonical relative paths', () => {
+    expect(workspaceSubPathError('')).toBeNull()
+    expect(workspaceSubPathError('.')).toBeNull()
+    expect(workspaceSubPathError('services/api')).toBeNull()
+  })
+
+  it.each([
+    ['traversal', '../private'],
+    ['absolute path', '/absolute'],
+    ['empty segment', 'a//b'],
+    ['dot segment', 'a/./b'],
+    ['backslash', 'a\\b'],
+  ])('rejects %s', (_name, subPath) => {
+    expect(workspaceSubPathError(subPath)).not.toBeNull()
   })
 })
 

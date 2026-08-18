@@ -16,6 +16,7 @@ import {
   sameWorkspaceRepositoryIdentity,
   validateWorkspaceRepositoryUrl,
   workspaceRepositoryIdentity,
+  workspaceSubPathError,
 } from '@/lib/workspace-repository'
 import {
   workspacePublicationBranchError,
@@ -168,6 +169,13 @@ export function TaskCreateForm() {
         const branchError = workspaceSourceBranchError(branch.trim())
         if (branchError) {
           toast.error(`Source branch is invalid: ${branchError}`)
+          return
+        }
+      }
+      if (subPath.trim()) {
+        const subPathError = workspaceSubPathError(subPath)
+        if (subPathError) {
+          toast.error(`Source subpath is invalid: ${subPathError}`)
           return
         }
       }
