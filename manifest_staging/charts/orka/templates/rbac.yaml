@@ -1,3 +1,4 @@
+{{- $workspaceProvider := .Values.controller.workspaceProvider | default dict -}}
 {{- if .Values.rbac.create -}}
 # Controller ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
@@ -542,7 +543,7 @@ aggregationRule:
     - matchLabels:
         workspace.orka.ai/aggregate-to-parameter-reader: "true"
 rules: []
-{{- if .Values.controller.workspaceProvider.fakeProviderEnabled }}
+{{- if $workspaceProvider.fakeProviderEnabled }}
 ---
 # Development-only fake provider parameters contribute to the aggregate reader.
 apiVersion: rbac.authorization.k8s.io/v1

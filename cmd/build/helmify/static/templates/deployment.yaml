@@ -1,12 +1,14 @@
-{{- if and .Values.controller.workspaceProvider.fakeProviderEnabled (not .Values.controller.workspaceProvider.apiEnabled) -}}
+{{- $workspaceProvider := .Values.controller.workspaceProvider | default dict -}}
+{{- $classUseAdmission := $workspaceProvider.classUseAdmission | default dict -}}
+{{- if and $workspaceProvider.fakeProviderEnabled (not $workspaceProvider.apiEnabled) -}}
 {{- fail "controller.workspaceProvider.fakeProviderEnabled requires controller.workspaceProvider.apiEnabled" -}}
 {{- end -}}
-{{- if and .Values.controller.workspaceProvider.apiEnabled (not .Values.controller.workspaceProvider.classUseAdmission.enabled) -}}
+{{- if and $workspaceProvider.apiEnabled (not $classUseAdmission.enabled) -}}
 {{- fail "controller.workspaceProvider.apiEnabled requires controller.workspaceProvider.classUseAdmission.enabled" -}}
 {{- end -}}
-{{- if .Values.controller.workspaceProvider.classUseAdmission.enabled -}}
-{{- $workspaceWebhookSecret := required "controller.workspaceProvider.classUseAdmission.existingSecret is required when class-use admission is enabled" .Values.controller.workspaceProvider.classUseAdmission.existingSecret -}}
-{{- $workspaceWebhookCA := required "controller.workspaceProvider.classUseAdmission.caBundle is required when class-use admission is enabled" .Values.controller.workspaceProvider.classUseAdmission.caBundle -}}
+{{- if $classUseAdmission.enabled -}}
+{{- $workspaceWebhookSecret := required "controller.workspaceProvider.classUseAdmission.existingSecret is required when class-use admission is enabled" $classUseAdmission.existingSecret -}}
+{{- $workspaceWebhookCA := required "controller.workspaceProvider.classUseAdmission.caBundle is required when class-use admission is enabled" $classUseAdmission.caBundle -}}
 {{- end -}}
 {{- $gatewayCRDsReady := false -}}
 {{- if and .Values.controller.gateway.enabled (not .Values.controller.gateway.crdsReadyOverride) -}}
@@ -250,7 +252,7 @@ spec:
             {{- if gt (int .Values.controller.maxTasksPerNamespace) 0 }}
             - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
             {{- end }}
-            {{- with .Values.controller.workspaceProvider }}
+            {{- with $workspaceProvider }}
             {{- if .apiEnabled }}
             - --enable-workspace-provider-api=true
             {{- end }}
@@ -368,7 +370,7 @@ spec:
             - name: health
               containerPort: {{ .Values.controller.healthPort }}
               protocol: TCP
-            {{- if .Values.controller.workspaceProvider.classUseAdmission.enabled }}
+            {{- if $classUseAdmission.enabled }}
             - name: webhook-server
               containerPort: 9443
               protocol: TCP
@@ -401,7 +403,7 @@ spec:
             - name: harness-wrapper-auth
               mountPath: /var/run/orka/harness-wrapper
               readOnly: true
-            {{- if .Values.controller.workspaceProvider.classUseAdmission.enabled }}
+            {{- if $classUseAdmission.enabled }}
             - name: workspace-webhook-certs
               mountPath: /var/run/orka/workspace-webhook
               readOnly: true
@@ -415,10 +417,10 @@ spec:
             items:
               - key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
                 path: token
-        {{- if .Values.controller.workspaceProvider.classUseAdmission.enabled }}
+        {{- if $classUseAdmission.enabled }}
         - name: workspace-webhook-certs
           secret:
-            secretName: {{ .Values.controller.workspaceProvider.classUseAdmission.existingSecret | quote }}
+            secretName: {{ $classUseAdmission.existingSecret | quote }}
             defaultMode: 0400
             items:
               - key: tls.crt

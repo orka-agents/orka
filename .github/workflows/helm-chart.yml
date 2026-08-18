@@ -89,10 +89,47 @@ jobs:
             echo "The raw installer must require a pre-created harness-wrapper-auth Secret, not embed one." >&2
             exit 1
           fi
+          if ! awk '
+            function finish_resource() {
+              if (kind == "ValidatingAdmissionPolicy" || kind == "ValidatingAdmissionPolicyBinding") {
+                count++
+                if (namespace != "") {
+                  printf "%s %s must not set metadata.namespace (%s)\n", kind, name, namespace > "/dev/stderr"
+                  invalid = 1
+                }
+              }
+            }
+            /^---$/ {
+              finish_resource()
+              kind = ""
+              name = ""
+              namespace = ""
+              next
+            }
+            /^kind: / { kind = $2; next }
+            /^  name: / && name == "" { name = $2; next }
+            /^  namespace: / { namespace = $2; next }
+            END {
+              finish_resource()
+              if (count != 8) {
+                printf "Expected 8 admission policies and bindings, found %d\n", count > "/dev/stderr"
+                invalid = 1
+              }
+              exit invalid
+            }
+          ' manifest_staging/deploy/orka.yaml; then
+            echo "Cluster-scoped admission resources in the raw installer are invalid." >&2
+            exit 1
+          fi
 
           go test ./cmd/build/helmify
           helm lint cmd/build/helmify/static
           helm lint manifest_staging/charts/orka
+          helm template legacy-values manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-json controller.workspaceProvider=null \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            > /dev/null
 
           fake_provider_render=$(mktemp)
           default_render=$(mktemp)
@@ -103,7 +140,8 @@ jobs:
           long_render=$(mktemp)
           long_wrapper_service=$(mktemp)
           long_wrapper_secret=$(mktemp)
-          trap 'rm -f "${fake_provider_render}" "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_wrapper_service}" "${long_wrapper_secret}"' EXIT
+          long_workspace_webhook=$(mktemp)
+          trap 'rm -f "${fake_provider_render}" "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_wrapper_service}" "${long_wrapper_secret}" "${long_workspace_webhook}"' EXIT
           "$(pwd)/bin/kustomize" build \
             --load-restrictor LoadRestrictionsNone \
             config/development/fake-workspace-provider \
@@ -154,6 +192,14 @@ jobs:
             --set-string workers.harnessWrapper.auth.token=mock-token \
             --show-only templates/harness-wrapper-secret.yaml \
             > "${long_wrapper_secret}"
+          helm template "${long_release}" manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set controller.workspaceProvider.classUseAdmission.enabled=true \
+            --set-string controller.workspaceProvider.classUseAdmission.existingSecret=workspace-webhook-tls \
+            --set-string controller.workspaceProvider.classUseAdmission.caBundle=Y2E= \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            --show-only templates/workspace-class-use-webhook.yaml \
+            > "${long_workspace_webhook}"
 
           grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
           grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc:8080" "${secondary_render}"
@@ -167,11 +213,14 @@ jobs:
           done
           wrapper_name=$(awk '$1 == "name:" { print $2; exit }' "${long_wrapper_service}")
           wrapper_secret_name=$(awk '$1 == "name:" { print $2; exit }' "${long_wrapper_secret}")
+          workspace_webhook_name=$(awk '$1 == "name:" { print $2; exit }' "${long_workspace_webhook}")
           [[ -n "${wrapper_name}" && ${#wrapper_name} -le 63 ]]
           [[ -n "${wrapper_secret_name}" && ${#wrapper_secret_name} -le 63 ]]
+          [[ -n "${workspace_webhook_name}" && ${#workspace_webhook_name} -le 63 ]]
           grep -Fq -- "http://${wrapper_name}:8080" "${long_render}"
           grep -Fq -- "serviceAccountName: ${wrapper_name}" "${long_render}"
           grep -Fq -- "secretName: ${wrapper_secret_name}" "${long_render}"
+          test "$(grep -Fc -- "name: ${workspace_webhook_name}" "${long_workspace_webhook}")" -eq 3
 
           chart_version=$(awk '$1 == "version:" { print $2; exit }' manifest_staging/charts/orka/Chart.yaml)
           grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker:${chart_version}" "${secondary_render}"

@@ -11459,7 +11459,6 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
   name: orka-executionworkspace-core-admission.orka.ai
-  namespace: orka-system
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -11494,64 +11493,6 @@ spec:
         .check('admit').allowed()
     message: only the Orka core controller may establish or advance ExecutionWorkspace
       core admission
-    reason: Forbidden
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicy
-metadata:
-  name: orka-task-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  failurePolicy: Fail
-  matchConstraints:
-    resourceRules:
-    - apiGroups:
-      - core.orka.ai
-      apiVersions:
-      - v1alpha1
-      operations:
-      - CREATE
-      - UPDATE
-      resources:
-      - tasks
-  validations:
-  - expression: |-
-      !has(object.spec.execution) || !has(object.spec.execution.workspace) || !has(object.spec.execution.workspace.classRef) || authorizer.group('workspace.orka.ai')
-
-        .resource('executionworkspaceclasses')
-        .namespace(request.namespace)
-        .name(object.spec.execution.workspace.classRef.name)
-        .check('use').allowed()
-    message: caller is not authorized to use the selected ExecutionWorkspaceClass
-    reason: Forbidden
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicy
-metadata:
-  name: orka-tool-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  failurePolicy: Fail
-  matchConstraints:
-    resourceRules:
-    - apiGroups:
-      - core.orka.ai
-      apiVersions:
-      - v1alpha1
-      operations:
-      - CREATE
-      - UPDATE
-      resources:
-      - tools
-  validations:
-  - expression: |-
-      !has(object.spec.mcp) || !has(object.spec.mcp.workspace) || authorizer.group('workspace.orka.ai')
-
-        .resource('executionworkspaceclasses')
-        .namespace(request.namespace)
-        .name(object.spec.mcp.workspace.classRef.name)
-        .check('use').allowed()
-    message: caller is not authorized to use the selected ExecutionWorkspaceClass
     reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -11608,32 +11549,67 @@ spec:
     name: containerWorkerServiceAccount
 ---
 apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-task-workspace-class-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - tasks
+  validations:
+  - expression: |-
+      !has(object.spec.execution) || !has(object.spec.execution.workspace) || !has(object.spec.execution.workspace.classRef) || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.spec.execution.workspace.classRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected ExecutionWorkspaceClass
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-tool-workspace-class-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - tools
+  validations:
+  - expression: |-
+      !has(object.spec.mcp) || !has(object.spec.mcp.workspace) || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.spec.mcp.workspace.classRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected ExecutionWorkspaceClass
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
   name: orka-executionworkspace-core-admission.orka.ai
-  namespace: orka-system
 spec:
   policyName: orka-executionworkspace-core-admission.orka.ai
-  validationActions:
-  - Deny
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicyBinding
-metadata:
-  name: orka-task-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  policyName: orka-task-workspace-class-use.orka.ai
-  validationActions:
-  - Deny
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicyBinding
-metadata:
-  name: orka-tool-workspace-class-use.orka.ai
-  namespace: orka-system
-spec:
-  policyName: orka-tool-workspace-class-use.orka.ai
   validationActions:
   - Deny
 ---
@@ -11643,5 +11619,23 @@ metadata:
   name: orka-gateway-task-protection
 spec:
   policyName: orka-gateway-task-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-task-workspace-class-use.orka.ai
+spec:
+  policyName: orka-task-workspace-class-use.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-tool-workspace-class-use.orka.ai
+spec:
+  policyName: orka-tool-workspace-class-use.orka.ai
   validationActions:
   - Deny
