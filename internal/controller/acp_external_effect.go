@@ -175,12 +175,23 @@ func runExternalEffectWithReplayCallTimeout[T any](
 	// permanently unsettleable.
 	callCtx, cancelCall := context.WithTimeout(ctx, callTimeout)
 	response, callErr := call(callCtx)
+	// Capture the call context's error before cancelCall() so a deadline that
+	// elapsed during the call is still observable (cancelCall would otherwise
+	// overwrite it with context.Canceled).
+	callCtxErr := callCtx.Err()
 	cancelCall()
 	if callErr != nil {
 		// Leave the exact effect in-flight. The same identity/digest may be
 		// reclaimed and classified by a later reconciliation; a different request
 		// cannot reuse it.
 		return zero, false, callErr
+	}
+	if callCtxErr != nil {
+		// The effect implementation ignored cancellation and returned a result
+		// after its bounded call deadline had already elapsed. The configured
+		// tool/publisher timeout expired, so the response must not be committed
+		// as Succeeded; leave the effect in-flight for explicit reconciliation.
+		return zero, false, callCtxErr
 	}
 	if err := ctx.Err(); err != nil {
 		// The side effect may have crossed its external boundary, but prompt

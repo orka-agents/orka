@@ -79,6 +79,8 @@ func TestACPArtifactAuthorizationBrokerIssuesExactUploadCapability(t *testing.T)
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+controllerToken)
 	httpRequest.Header.Set(harnessv2.OperationCapabilityHeader, capability)
+	httpRequest.Header.Set(harnessv2.MCPBrokerPoolNamespaceHeader, "default")
+	httpRequest.Header.Set(harnessv2.MCPBrokerPoolUIDHeader, string(poolUID))
 	reservationStart := time.Now().UTC()
 	response, err := app.Test(httpRequest)
 	if err != nil {
@@ -106,6 +108,60 @@ func TestACPArtifactAuthorizationBrokerIssuesExactUploadCapability(t *testing.T)
 	minimumExpiry := reservationStart.Add(2*time.Minute + artifactcap.MaxClockSkew)
 	if reservations.expiresAt[0].Before(minimumExpiry) {
 		t.Fatalf("capability reservation expiry = %s, want at least %s", reservations.expiresAt[0], minimumExpiry)
+	}
+}
+
+func TestACPArtifactAuthorizationBrokerAuthenticatesBeforeBody(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	poolUID := types.UID("pool-uid")
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: poolUID, Generation: 1},
+		Status:     corev1alpha1.RuntimePoolStatus{ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{PodNamespace: "orka-runtimes", RuntimeInstanceID: "runtime-1", ControllerEpoch: 1}},
+	}
+	controllerToken := strings.Repeat("t", 32)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1", Labels: map[string]string{"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(poolUID)}},
+		Data:       map[string][]byte{runtimePoolControllerTokenKeyAPI: []byte(controllerToken), runtimePoolCapabilitySecretKeyAPI: []byte(strings.Repeat("s", 32))},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, secret).Build()
+	app := fiber.New()
+	server := &Server{app: app, client: kubeClient, config: ServerConfig{ArtifactReservations: &recordingCapabilityReservations{}}}
+	server.installACPArtifactAuthorizationBroker()
+
+	cases := []struct {
+		name           string
+		bearer         string
+		setPoolHeaders bool
+		body           string
+	}{
+		{name: "missing pool identity headers", bearer: controllerToken, setPoolHeaders: false, body: "{}"},
+		// An invalid-JSON body would yield 400 if the handler parsed it first;
+		// rejecting the wrong bearer with 403 proves pre-auth precedes the body.
+		{name: "wrong bearer before body parse", bearer: strings.Repeat("x", 32), setPoolHeaders: true, body: "not-json{"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			httpRequest := httptest.NewRequest(http.MethodPost, acpArtifactAuthorizationPath, strings.NewReader(tc.body))
+			httpRequest.Header.Set("Content-Type", "application/json")
+			httpRequest.Header.Set("Authorization", "Bearer "+tc.bearer)
+			if tc.setPoolHeaders {
+				httpRequest.Header.Set(harnessv2.MCPBrokerPoolNamespaceHeader, "default")
+				httpRequest.Header.Set(harnessv2.MCPBrokerPoolUIDHeader, string(poolUID))
+			}
+			response, err := app.Test(httpRequest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != fiber.StatusForbidden {
+				t.Fatalf("status = %d, want %d", response.StatusCode, fiber.StatusForbidden)
+			}
+		})
 	}
 }
 

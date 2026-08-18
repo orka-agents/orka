@@ -668,7 +668,10 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	runtimeObject, _ := testAgentRuntimeAndSecret(t, "http://runtime.default.svc.cluster.local:8080", config)
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"},
-		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "runtime"}},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "runtime"},
+			Ports:    []corev1.ServicePort{{Port: 8080}},
+		},
 	}
 	backendPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-pod", Labels: map[string]string{"app": "runtime"}},
@@ -796,6 +799,77 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	}
 	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "ExternalName") {
 		t.Fatalf("ExternalName Service endpoint error = %v", err)
+	}
+}
+
+func TestAgentRuntimeServiceBackendPinsFailClosedWithoutEndpoints(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims}
+	runtimeObject, _ := testAgentRuntimeAndSecret(t, "http://runtime.default.svc.cluster.local:8080", config)
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "runtime"},
+			Ports:    []corev1.ServicePort{{Port: 8080}},
+		},
+	}
+	// A selector-backed Service with no EndpointSlices (a rollout gap) must fail
+	// closed instead of yielding zero pins that degrade to an unpinned Service
+	// ClusterIP dial exempt from the public-address control.
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service)
+	if _, err := reconciler.AgentRuntimeServiceBackendPins(t.Context(), runtimeObject); err == nil ||
+		!strings.Contains(err.Error(), "no verified backend endpoint for port 8080") {
+		t.Fatalf("empty-backend pins error = %v", err)
+	}
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil ||
+		!strings.Contains(err.Error(), "no verified backend endpoint for port 8080") {
+		t.Fatalf("empty-backend policy error = %v", err)
+	}
+}
+
+func TestAgentRuntimeServiceBackendPinsSelectsMatchingPort(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims}
+	runtimeObject, _ := testAgentRuntimeAndSecret(t, "http://runtime.default.svc.cluster.local:8080", config)
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "runtime"},
+			Ports: []corev1.ServicePort{
+				{Name: "acp", Port: 8080},
+				{Name: "metrics", Port: 9090},
+			},
+		},
+	}
+	backendPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-pod", Labels: map[string]string{"app": "runtime"}},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.9", PodIPs: []corev1.PodIP{{IP: "10.0.0.9"}}},
+	}
+	slice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-multiport",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Ports: []discoveryv1.EndpointPort{
+			{Name: new("acp"), Port: new(int32(8443))},
+			{Name: new("metrics"), Port: new(int32(9090))},
+		},
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"10.0.0.9"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-pod"},
+		}},
+	}
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service, backendPod, slice)
+	pins, err := reconciler.AgentRuntimeServiceBackendPins(t.Context(), runtimeObject)
+	if err != nil {
+		t.Fatalf("multi-port pins error: %v", err)
+	}
+	// The endpoint URL targets ServicePort 8080 ("acp"), which maps to the
+	// EndpointSlice "acp" target 8443; the metrics listener (9090) must never be
+	// pinned or receive controller bearer/capability traffic.
+	if len(pins) != 1 || pins[0] != "10.0.0.9:8443" {
+		t.Fatalf("multi-port pins = %v, want [10.0.0.9:8443]", pins)
 	}
 }
 

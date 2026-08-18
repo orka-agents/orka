@@ -41,9 +41,33 @@ func (s *Server) installACPArtifactAuthorizationBroker() {
 }
 
 func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
+	// Authenticate on the pool bearer resolved from the non-secret pool
+	// namespace/UID headers before consuming the body: runtime Pods can reach
+	// this endpoint, so an unauthenticated peer must be rejected without being
+	// allowed to stream — or drip-feed a declared-length — request body and
+	// occupy controller handlers.
+	poolNamespace := strings.TrimSpace(string(c.Request().Header.Peek(harnessv2.MCPBrokerPoolNamespaceHeader)))
+	poolUID := strings.TrimSpace(string(c.Request().Header.Peek(harnessv2.MCPBrokerPoolUIDHeader)))
+	if poolNamespace == "" || poolUID == "" {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	pool, secret, err := s.resolveArtifactRuntimePoolByIdentity(c.Context(), poolNamespace, poolUID)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	bearer := strings.TrimSpace(strings.TrimPrefix(string(c.Request().Header.Peek("Authorization")), "Bearer "))
+	expectedBearer := strings.TrimSpace(string(secret.Data[runtimePoolControllerTokenKeyAPI]))
+	if !constantAPIStringEqual(bearer, expectedBearer) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
 	var request acpArtifactAuthorizationRequest
 	if err := json.Unmarshal(c.Body(), &request); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+	}
+	// The body's pool identity must match the pre-authenticated headers so a
+	// valid bearer for one pool cannot authorize an artifact for another.
+	if request.Namespace != poolNamespace || string(request.Metadata.Fence.RuntimePoolUID) != poolUID {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
 	}
 	now := time.Now().UTC()
 	if request.Namespace == "" || request.Metadata.PromptID == "" || request.Metadata.TaskUID == "" ||
@@ -52,15 +76,6 @@ func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
 	}
 	if got, err := harnessv2.CanonicalRequestDigest(request); err != nil || got != request.Metadata.RequestDigest {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
-	}
-	pool, secret, err := s.resolveArtifactRuntimePool(c.Context(), request)
-	if err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
-	}
-	bearer := strings.TrimSpace(strings.TrimPrefix(string(c.Request().Header.Peek("Authorization")), "Bearer "))
-	expectedBearer := strings.TrimSpace(string(secret.Data[runtimePoolControllerTokenKeyAPI]))
-	if !constantAPIStringEqual(bearer, expectedBearer) {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
 	}
 	capabilitySecret := secret.Data[runtimePoolCapabilitySecretKeyAPI]
 	// Verify with a fresh timestamp: runtime-pool resolution above performs
@@ -115,16 +130,20 @@ func (s *Server) authorizationReader() client.Reader {
 	return s.client
 }
 
-func (s *Server) resolveArtifactRuntimePool(ctx context.Context, request acpArtifactAuthorizationRequest) (*corev1alpha1.RuntimePool, *corev1.Secret, error) {
+// resolveArtifactRuntimePoolByIdentity resolves the RuntimePool and its exact
+// active-instance controller-auth Secret from a non-secret pool namespace and
+// UID. It is called with header-supplied identity so the caller's bearer can be
+// authenticated before the request body is read.
+func (s *Server) resolveArtifactRuntimePoolByIdentity(ctx context.Context, poolNamespace, poolUID string) (*corev1alpha1.RuntimePool, *corev1.Secret, error) {
 	reader := s.authorizationReader()
 	var pools corev1alpha1.RuntimePoolList
-	if err := reader.List(ctx, &pools, client.InNamespace(request.Namespace)); err != nil {
+	if err := reader.List(ctx, &pools, client.InNamespace(poolNamespace)); err != nil {
 		return nil, nil, err
 	}
 	var pool *corev1alpha1.RuntimePool
 	for i := range pools.Items {
 		candidate := &pools.Items[i]
-		if string(candidate.UID) == string(request.Metadata.Fence.RuntimePoolUID) {
+		if string(candidate.UID) == poolUID {
 			pool = candidate.DeepCopy()
 			break
 		}

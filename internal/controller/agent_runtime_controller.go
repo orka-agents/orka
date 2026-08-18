@@ -730,7 +730,11 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 		if len(service.Spec.Selector) == 0 {
 			return fmt.Errorf("AgentRuntime endpoint Service %s/%s has no selector; only Services selecting same-namespace Pods are permitted", serviceNamespace, serviceName)
 		}
-		return r.validateAgentRuntimeServiceBackends(ctx, &service)
+		servicePort, err := agentRuntimeEndpointServicePort(parsed)
+		if err != nil {
+			return err
+		}
+		return r.validateAgentRuntimeServiceBackends(ctx, &service, servicePort)
 	}
 	if parsed.Scheme != urlSchemeHTTPS {
 		return fmt.Errorf("external AgentRuntime endpoints must use https")
@@ -760,9 +764,43 @@ func isPublicAgentRuntimeAddress(address netip.Addr) bool {
 // all writable by a namespace caller, so none of them are trusted as proof of
 // ownership; only the Pod's own status and labels are. This runs on every
 // reconcile immediately before probing.
-func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context.Context, service *corev1.Service) error {
-	_, err := r.verifiedAgentRuntimeServiceBackends(ctx, service)
+func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context.Context, service *corev1.Service, targetPort int32) error {
+	_, err := r.verifiedAgentRuntimeServiceBackends(ctx, service, targetPort)
 	return err
+}
+
+// agentRuntimeEndpointServicePort resolves the Service port the endpoint URL
+// targets: the explicit URL port, or the scheme default. Only the EndpointSlice
+// port matching this Service port is pinned, so a Service exposing extra ports
+// (metrics, sidecars) never diverts controller bearer/capability traffic.
+func agentRuntimeEndpointServicePort(parsed *url.URL) (int32, error) {
+	if portText := parsed.Port(); portText != "" {
+		port, err := strconv.Atoi(portText)
+		if err != nil || port <= 0 || port > 65535 {
+			return 0, fmt.Errorf("AgentRuntime endpoint has an invalid port %q", portText)
+		}
+		return int32(port), nil
+	}
+	switch parsed.Scheme {
+	case urlSchemeHTTPS:
+		return 443, nil
+	case urlSchemeHTTP:
+		return 80, nil
+	default:
+		return 0, fmt.Errorf("AgentRuntime endpoint scheme %q has no default port", parsed.Scheme)
+	}
+}
+
+// agentRuntimeServicePortName returns the name of the ServicePort matching the
+// target port and whether the Service exposes it. The name (empty for a single
+// unnamed port) keys the corresponding EndpointSlice port.
+func agentRuntimeServicePortName(service *corev1.Service, targetPort int32) (string, bool) {
+	for i := range service.Spec.Ports {
+		if service.Spec.Ports[i].Port == targetPort {
+			return service.Spec.Ports[i].Name, true
+		}
+	}
+	return "", false
 }
 
 // verifiedAgentRuntimeServiceBackends validates the Service's backends and
@@ -771,18 +809,26 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context
 // this check and the dial cannot route the request to an arbitrary address
 // (the validate-then-dial TOCTOU cannot be closed while routing through the
 // still-mutable Service ClusterIP).
-func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context.Context, service *corev1.Service) ([]string, error) {
+func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context.Context, service *corev1.Service, targetPort int32) ([]string, error) {
 	serviceNamespace, serviceName := service.Namespace, service.Name
 	selector := labels.SelectorFromSet(service.Spec.Selector)
+	deny := func(detail string) error {
+		return fmt.Errorf("AgentRuntime endpoint Service %s/%s %s; only same-namespace Pods selected by the Service are permitted", serviceNamespace, serviceName, detail)
+	}
+	// Resolve the ServicePort the endpoint URL targets so only its matching
+	// EndpointSlice port is pinned. A Service exposing extra ports (metrics,
+	// sidecars) must never receive controller bearer/capability traffic, and an
+	// endpoint naming a port the Service does not expose is rejected.
+	servicePortName, ok := agentRuntimeServicePortName(service, targetPort)
+	if !ok {
+		return nil, deny(fmt.Sprintf("does not expose port %d", targetPort))
+	}
 	reader := r.endpointReader()
 	var endpointSlices discoveryv1.EndpointSliceList
 	if err := reader.List(ctx, &endpointSlices, client.InNamespace(serviceNamespace), client.MatchingLabels{
 		discoveryv1.LabelServiceName: serviceName,
 	}); err != nil {
 		return nil, fmt.Errorf("list AgentRuntime endpoint Service %s/%s EndpointSlices: %w", serviceNamespace, serviceName, err)
-	}
-	deny := func(detail string) error {
-		return fmt.Errorf("AgentRuntime endpoint Service %s/%s %s; only same-namespace Pods selected by the Service are permitted", serviceNamespace, serviceName, detail)
 	}
 	verified := map[string]struct{}{}
 	for i := range endpointSlices.Items {
@@ -817,10 +863,24 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context
 					if port.Port == nil || *port.Port <= 0 {
 						continue
 					}
+					// EndpointSlice port names mirror the ServicePort name, so
+					// pin only the port serving the endpoint's Service port.
+					if agentRuntimeEndpointPortName(port.Name) != servicePortName {
+						continue
+					}
 					verified[net.JoinHostPort(address, strconv.Itoa(int(*port.Port)))] = struct{}{}
 				}
 			}
 		}
+	}
+	// Fail closed: a Service endpoint with no verified backend for the selected
+	// port (a rollout gap, or a caller's validation race) must not degrade to an
+	// unpinned Service ClusterIP dial, which recognized .svc endpoints also
+	// exempt from the public-address control. Treating zero pins as "not pinned"
+	// would let an EndpointSlice added after this check divert authenticated
+	// status or mutation traffic to an unverified address.
+	if len(verified) == 0 {
+		return nil, deny(fmt.Sprintf("has no verified backend endpoint for port %d", targetPort))
 	}
 	addresses := make([]string, 0, len(verified))
 	for address := range verified {
@@ -828,6 +888,15 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context
 	}
 	sort.Strings(addresses)
 	return addresses, nil
+}
+
+// agentRuntimeEndpointPortName dereferences an EndpointSlice port name, treating
+// a nil name as the empty name of a single unnamed ServicePort.
+func agentRuntimeEndpointPortName(name *string) string {
+	if name == nil {
+		return ""
+	}
+	return *name
 }
 
 // AgentRuntimeServiceBackendPins validates the endpoint policy and, for a
@@ -856,11 +925,15 @@ func (r *AgentRuntimeReconciler) serviceBackendPinsForValidatedEndpoint(ctx cont
 	if !serviceEndpoint {
 		return nil, nil
 	}
+	servicePort, err := agentRuntimeEndpointServicePort(parsed)
+	if err != nil {
+		return nil, err
+	}
 	var service corev1.Service
 	if err := r.endpointReader().Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: serviceName}, &service); err != nil {
 		return nil, fmt.Errorf("get AgentRuntime endpoint Service %s/%s: %w", serviceNamespace, serviceName, err)
 	}
-	return r.verifiedAgentRuntimeServiceBackends(ctx, &service)
+	return r.verifiedAgentRuntimeServiceBackends(ctx, &service, servicePort)
 }
 
 // PinnedBackendDialTransport returns a proxy-disabled transport that dials only

@@ -80,6 +80,10 @@ func (p *brokerArtifactAuthorizationProvider) AuthorizeArtifact(ctx context.Cont
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+p.controllerBearer)
 	httpRequest.Header.Set(harnessv2.OperationCapabilityHeader, capability)
+	// Carry the non-secret pool identity so the controller can authenticate the
+	// bearer before reading this request body.
+	httpRequest.Header.Set(harnessv2.MCPBrokerPoolNamespaceHeader, p.namespace)
+	httpRequest.Header.Set(harnessv2.MCPBrokerPoolUIDHeader, string(brokerRequest.Metadata.Fence.RuntimePoolUID))
 	response, err := p.client.Do(httpRequest)
 	if err != nil {
 		return artifactcap.Authorization{}, fmt.Errorf("artifact authorization broker transport failed")
