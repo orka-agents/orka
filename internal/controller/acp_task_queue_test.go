@@ -499,6 +499,30 @@ func TestValidateACPWorkspacePreflightRejectsUnsafeRepositoriesBeforeDemand(t *t
 			},
 			want: errWorkspaceRepositoryHTTPSPort.Error(),
 		},
+		{
+			name: "traversal subPath",
+			workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/orka-agents/orka.git",
+				SubPath: "../private",
+			},
+			want: "subPath is invalid",
+		},
+		{
+			name: "absolute subPath",
+			workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/orka-agents/orka.git",
+				SubPath: "/absolute",
+			},
+			want: "subPath is invalid",
+		},
+		{
+			name: "empty subPath segment",
+			workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/orka-agents/orka.git",
+				SubPath: "a//b",
+			},
+			want: "subPath is invalid",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

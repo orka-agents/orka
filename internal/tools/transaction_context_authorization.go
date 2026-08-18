@@ -61,8 +61,20 @@ func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient cl
 		agentName = child.Spec.AgentRef.Name
 	}
 
-	if want := strings.TrimSpace(txCtx["namespace"]); want != "" && child.Namespace != want {
-		return fmt.Errorf("child task namespace %q does not match transaction context %q", child.Namespace, want)
+	if want := strings.TrimSpace(txCtx["namespace"]); want != "" {
+		if child.Namespace != want {
+			return fmt.Errorf("child task namespace %q does not match transaction context %q", child.Namespace, want)
+		}
+		// A namespace constraint binds every resolved dependency, not only
+		// the child Task, mirroring the direct API's dependency-namespace
+		// rule: cross-namespace Agent or provider authority must not be
+		// exercised under a namespace-scoped delegated token.
+		if agentNamespace != "" && agentNamespace != want {
+			return fmt.Errorf("child task agent namespace %q does not match transaction context %q", agentNamespace, want)
+		}
+		if providerNamespace := strings.TrimSpace(childCtx.providerInfo.Namespace); providerNamespace != "" && providerNamespace != want {
+			return fmt.Errorf("child task provider namespace %q does not match transaction context %q", providerNamespace, want)
+		}
 	}
 	if want := strings.TrimSpace(txCtx["taskType"]); want != "" && string(child.Spec.Type) != want {
 		return fmt.Errorf("child task type %q does not match transaction context %q", child.Spec.Type, want)
