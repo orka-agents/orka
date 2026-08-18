@@ -4,7 +4,7 @@ Controller: {{ include "orka.fullname" . }}-controller
 Namespace:  {{ .Release.Namespace }}
 
 CRD lifecycle:
-  - A fresh install creates Orka's twelve cluster-scoped CRDs unless --skip-crds is used.
+  - A fresh install creates Orka's thirteen cluster-scoped CRDs unless --skip-crds is used.
   - Helm does not update CRDs during helm upgrade. Apply the CRDs from the exact
     target chart before upgrading the release.
   - helm uninstall retains the CRDs and all Orka custom resources.

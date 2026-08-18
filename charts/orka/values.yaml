@@ -44,6 +44,25 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
+  # Provider-neutral workspace.orka.ai control plane (disabled by default during rollout).
+  # Before enabling it during a Helm upgrade, apply the current chart CRDs explicitly;
+  # Helm does not upgrade CRDs from the crds/ directory and the chart fails closed otherwise.
+  workspaceProvider:
+    # Enable generic provider/class/pool/workspace coordination controllers.
+    apiEnabled: false
+    # Offline helm template --is-upgrade cannot use lookup. Set this only after
+    # independently verifying/applying the current workspace CRD schema.
+    crdUpgradeSchemaVerified: false
+    # Enable the development-only fake provider adapter.
+    fakeProviderEnabled: false
+    # Fail-closed Kubernetes admission required whenever apiEnabled is true.
+    classUseAdmission:
+      enabled: false
+      # Existing TLS Secret with tls.crt and tls.key for the webhook Service DNS name.
+      existingSecret: ""
+      # Base64-encoded PEM CA bundle trusted by the API server.
+      caBundle: ""
+
   # Provider-neutral external gateway plane.
   gateway:
     enabled: true
@@ -114,16 +133,16 @@ controller:
     # Namespace assigned to authorized OIDC callers for namespace isolation. Empty uses controller default.
     namespace: ""
 
-  # Context-token authentication, scoped authorization, and optional kontxt TTS exchange.
+  # Transaction-token authentication, scoped authorization, and optional vendor-neutral TTS exchange.
   # Empty values keep the controller defaults / corresponding environment variables.
   contextToken:
-    # Profile for external context tokens (supported: kontxt).
+    # Profile for external context tokens (supported: transaction-token).
     profile: ""
     # Issuer URL expected in context tokens. Requires profile and audience when set.
     issuer: ""
     # Audience expected in context tokens. Requires profile and issuer when set.
     audience: ""
-    # Optional JWKS URL. For kontxt, defaults to <issuer>/.well-known/jwks.json.
+    # Optional JWKS URL. For transaction-token, defaults to <issuer>/.well-known/jwks.json.
     jwksUrl: ""
     # Comma-separated token headers, e.g. Txn-Token or Txn-Token,Authorization:Bearer.
     headers: ""
@@ -139,6 +158,7 @@ controller:
       toolUse: ""
       providerUse: ""
       secretRead: ""
+      secretCredentialRead: ""
       agentRead: ""
       agentWrite: ""
       memoryRead: ""
@@ -155,8 +175,8 @@ controller:
       gatewayRead: ""
       gatewayOperate: ""
     tts:
-      # kontxt TTS base URL for child/outbound token exchange.
-      url: ""
+      # Exact TTS OAuth endpoint for child/outbound transaction-token exchange.
+      endpoint: ""
       # Optional exchange audience.
       audience: ""
       # Exchange timeout, e.g. 5s.
@@ -172,6 +192,12 @@ controller:
       # Requested TTLs, e.g. 5m and 2m.
       childTokenTTL: ""
       toolTokenTTL: ""
+
+  outboundAccess:
+    # Exact namespace/name:port tuples trusted for cross-namespace gateway refs.
+    trustedGatewayServices: []
+    # Exact namespace/name:port tuples trusted for cross-namespace token endpoint refs.
+    trustedTokenEndpointServices: []
 
 # Worker configuration
 workers:
