@@ -53,7 +53,9 @@ controller:
     # Offline helm template --is-upgrade cannot use lookup. Set this only after
     # independently verifying/applying the current workspace CRD schema.
     crdUpgradeSchemaVerified: false
-    # Enable the development-only fake provider adapter.
+    # Enable the development-only fake provider adapter. Its CRDs are not
+    # shipped in this chart; apply config/development/fake-workspace-provider
+    # from a matching source checkout before enabling it.
     fakeProviderEnabled: false
     # Fail-closed Kubernetes admission required whenever apiEnabled is true.
     classUseAdmission:

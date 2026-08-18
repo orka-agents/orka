@@ -70,7 +70,7 @@ jobs:
           diff --no-dereference --recursive --unified manifest_staging/charts/orka charts/orka
           diff --no-dereference --recursive --unified manifest_staging/deploy deploy
           helm lint charts/orka
-          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 19
+          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 17
 
           rendered_chart=$(mktemp)
           trap 'rm -f "${rendered_chart}"' EXIT
@@ -121,8 +121,8 @@ jobs:
             echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
             exit 1
           fi
-          if [[ $(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$') -ne 19 ]]; then
-            echo "Packaged Orka chart must contain exactly 19 CRDs." >&2
+          if [[ $(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$') -ne 17 ]]; then
+            echo "Packaged Orka chart must contain exactly 17 CRDs." >&2
             exit 1
           fi
 

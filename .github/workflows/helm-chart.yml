@@ -94,6 +94,7 @@ jobs:
           helm lint cmd/build/helmify/static
           helm lint manifest_staging/charts/orka
 
+          fake_provider_render=$(mktemp)
           default_render=$(mktemp)
           secondary_render=$(mktemp)
           secondary_rbac=$(mktemp)
@@ -102,7 +103,18 @@ jobs:
           long_render=$(mktemp)
           long_wrapper_service=$(mktemp)
           long_wrapper_secret=$(mktemp)
-          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_wrapper_service}" "${long_wrapper_secret}"' EXIT
+          trap 'rm -f "${fake_provider_render}" "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_wrapper_service}" "${long_wrapper_secret}"' EXIT
+          "$(pwd)/bin/kustomize" build \
+            --load-restrictor LoadRestrictionsNone \
+            config/development/fake-workspace-provider \
+            > "${fake_provider_render}"
+          test "$(grep -c '^kind: CustomResourceDefinition$' "${fake_provider_render}")" -eq 2
+          grep -Fq 'name: fakepoolparameters.fake.workspace.orka.ai' "${fake_provider_render}"
+          grep -Fq 'name: fakeproviderconfigs.fake.workspace.orka.ai' "${fake_provider_render}"
+          if grep -Fq 'fake.workspace.orka.ai' manifest_staging/deploy/orka.yaml; then
+            echo "The production installer must not contain development-only fake provider resources." >&2
+            exit 1
+          fi
           helm template orka manifest_staging/charts/orka \
             --namespace "${NAMESPACE}" \
             --set-string workers.harnessWrapper.auth.token=mock-token \
@@ -182,7 +194,7 @@ jobs:
             echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
             exit 1
           fi
-          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 19
+          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 17
 
       - name: Install kind
         run: |
@@ -220,8 +232,6 @@ jobs:
           executionworkspacepools.workspace.orka.ai
           executionworkspaceproviders.workspace.orka.ai
           executionworkspaces.workspace.orka.ai
-          fakepoolparameters.fake.workspace.orka.ai
-          fakeproviderconfigs.fake.workspace.orka.ai
           gatewaybindings.gateway.orka.ai
           gatewayclasses.gateway.orka.ai
           gateways.gateway.orka.ai

@@ -58,7 +58,7 @@ make promote-staging-manifest
 
 The first target updates release inputs and regenerates staging. The second copies the reviewed staging installer and chart into `deploy/` and `charts/orka/`. Normally `.github/workflows/release-pr.yml` runs both and opens the release-preparation PR. A matching `v*` tag packages and publishes those committed root snapshots; tag workflows do not regenerate or promote manifests.
 
-CRDs are generated from the canonical definitions in `config/crd/bases/`. Chart generation makes them available on fresh install, but Helm does not update them during upgrades. Apply the CRDs from the exact target chart before upgrading the controller, as documented in `charts/orka/README.md`.
+CRDs are generated into `config/crd/bases/`, while `config/crd/kustomization.yaml` selects the production APIs packaged in the installer and chart. The development-only fake workspace CRDs and RBAC are kept in the separate `config/development/fake-workspace-provider` package. Helm makes production CRDs available on fresh install but does not update them during upgrades. Apply the CRDs from the exact target chart before upgrading the controller, as documented in `charts/orka/README.md`.
 
 ## Testing
 
