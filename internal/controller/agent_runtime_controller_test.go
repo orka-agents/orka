@@ -661,9 +661,27 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"},
 		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "runtime"}},
 	}
-	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service)
+	backendPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-pod", Labels: map[string]string{"app": "runtime"}},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.9", PodIPs: []corev1.PodIP{{IP: "10.0.0.9"}}},
+	}
+	validSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-valid",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"10.0.0.9"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-pod"},
+		}},
+	}
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service, backendPod, validSlice)
 	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err != nil {
 		t.Fatalf("same-namespace Service endpoint: %v", err)
+	}
+	if err := reconciler.Delete(t.Context(), validSlice); err != nil {
+		t.Fatal(err)
 	}
 	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.other.svc.cluster.local:8080"
 	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "must match") {
@@ -682,29 +700,62 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 		}
 	}
 	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
-	foreignSlice := &discoveryv1.EndpointSlice{
+	// A forged address that is not one of the backing Pod's IPs is rejected
+	// even though the slice claims a same-namespace Pod TargetRef.
+	forgedAddressSlice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default", Name: "runtime-manual",
+			Namespace: "default", Name: "runtime-forged",
 			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
 		},
 		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"169.254.169.254"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-pod"},
+		}},
 	}
-	if err := reconciler.Create(t.Context(), foreignSlice); err != nil {
+	if err := reconciler.Create(t.Context(), forgedAddressSlice); err != nil {
 		t.Fatal(err)
 	}
-	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "not managed by the Kubernetes endpoint controller") {
-		t.Fatalf("manually managed EndpointSlice error = %v", err)
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "not an IP of backend Pod") {
+		t.Fatalf("forged EndpointSlice address error = %v", err)
 	}
-	if err := reconciler.Delete(t.Context(), foreignSlice); err != nil {
+	if err := reconciler.Delete(t.Context(), forgedAddressSlice); err != nil {
 		t.Fatal(err)
 	}
+	// A slice whose TargetRef Pod does not match the Service selector is
+	// rejected even if the address matches that Pod's real IP.
+	strayPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "stray-pod", Labels: map[string]string{"app": "other"}},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.20", PodIPs: []corev1.PodIP{{IP: "10.0.0.20"}}},
+	}
+	if err := reconciler.Create(t.Context(), strayPod); err != nil {
+		t.Fatal(err)
+	}
+	straySlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-stray",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"10.0.0.20"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "stray-pod"},
+		}},
+	}
+	if err := reconciler.Create(t.Context(), straySlice); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "selector does not select") {
+		t.Fatalf("stray-pod EndpointSlice error = %v", err)
+	}
+	if err := reconciler.Delete(t.Context(), straySlice); err != nil {
+		t.Fatal(err)
+	}
+	// A cross-namespace TargetRef is rejected outright.
 	crossNamespaceSlice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default", Name: "runtime-mirrored",
-			Labels: map[string]string{
-				discoveryv1.LabelServiceName: "runtime",
-				discoveryv1.LabelManagedBy:   "endpointslice-controller.k8s.io",
-			},
+			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
 		},
 		AddressType: discoveryv1.AddressTypeIPv4,
 		Endpoints: []discoveryv1.Endpoint{{

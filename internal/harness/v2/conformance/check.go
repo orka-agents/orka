@@ -141,12 +141,18 @@ func Check(ctx context.Context, target Target) Result {
 		transport.DialContext = dialer.DialContext
 		httpClient.Transport = transport
 	}
+	expectedProfileDigest, err := harnessv2.CanonicalProfileDigest(target.Profile)
+	if err != nil {
+		result.Message = boundedMessage(fmt.Errorf("compute expected profile digest: %w", err))
+		return result
+	}
 	client, err := harnessv2.NewClient(
 		target.BaseURL,
 		harnessv2.WithHTTPClient(httpClient),
 		harnessv2.WithControlTimeout(timeout),
 		harnessv2.WithControllerBearerToken(target.ControllerBearerToken),
 		harnessv2.WithOperationCapabilitySecret(target.OperationCapabilitySecret),
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: expectedProfileDigest}),
 		harnessv2.WithProtocolLimits(target.Limits),
 	)
 	if err != nil {

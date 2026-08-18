@@ -28,14 +28,20 @@ type Server struct {
 	mcpProxy      *mcpProxy
 	identityLock  io.Closer
 
-	mu          sync.Mutex
-	lifecycle   harnessv2.SupervisorLifecycle
-	drain       harnessv2.DrainStatus
-	sessions    map[harnessv2.RuntimeSessionID]*sessionState
-	tombstones  map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone
-	poolOps     map[harnessv2.OperationID]harnessv2.OperationRecord
-	promptSlots chan struct{}
+	mu           sync.Mutex
+	lifecycle    harnessv2.SupervisorLifecycle
+	drain        harnessv2.DrainStatus
+	sessions     map[harnessv2.RuntimeSessionID]*sessionState
+	tombstones   map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone
+	poolOps      map[harnessv2.OperationID]harnessv2.OperationRecord
+	statusNonces map[string]time.Time
+	promptSlots  chan struct{}
 }
+
+// statusNonceRetentionSlack keeps a consumed status nonce past its capability
+// TTL by a clock-skew margin so a token cannot be replayed at the edge of
+// expiry.
+const statusNonceRetentionSlack = 30 * time.Second
 
 type sessionCreationError struct {
 	stage string
@@ -239,14 +245,44 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// Status discloses Task, prompt, permission, and fence identifiers, so it
 	// requires proof of the operation-capability secret in addition to the
-	// controller bearer; a disclosed bearer alone must not read it.
+	// controller bearer; a disclosed bearer alone must not read it. The
+	// capability is bound to this runtime's profile and carries a single-use
+	// nonce so a captured token cannot be replayed within its TTL.
 	if s.cfg.RequireCapabilities {
-		if err := harnessv2.VerifyStatusCapability(s.cfg.CapabilitySecret, r.Header.Get(OperationCapabilityHeader), time.Now().UTC()); err != nil {
+		binding := harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: s.cfg.Fence.RuntimeProfileDigest}
+		nonce, err := harnessv2.VerifyStatusCapability(s.cfg.CapabilitySecret, r.Header.Get(OperationCapabilityHeader), binding, time.Now().UTC())
+		if err != nil || !s.consumeStatusNonce(nonce) {
 			writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "status authorization failed", nil, false)
 			return
 		}
 	}
 	writeJSON(w, http.StatusOK, s.status())
+}
+
+// consumeStatusNonce records a status capability nonce and reports whether it
+// was previously unseen. Expired nonces are pruned opportunistically; the map
+// stays bounded because nonces live only for the capability TTL.
+func (s *Server) consumeStatusNonce(nonce string) bool {
+	if nonce == "" {
+		return false
+	}
+	now := time.Now().UTC()
+	expiry := now.Add(harnessv2.DefaultStatusCapabilityTTL + statusNonceRetentionSlack)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.statusNonces == nil {
+		s.statusNonces = make(map[string]time.Time)
+	}
+	for seen, seenExpiry := range s.statusNonces {
+		if !seenExpiry.After(now) {
+			delete(s.statusNonces, seen)
+		}
+	}
+	if _, replayed := s.statusNonces[nonce]; replayed {
+		return false
+	}
+	s.statusNonces[nonce] = expiry
+	return true
 }
 
 func (s *Server) status() harnessv2.StatusResponse {

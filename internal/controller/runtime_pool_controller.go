@@ -2818,9 +2818,14 @@ func (c *runtimePoolHTTPSupervisorClient) Probe(ctx context.Context, endpoint, b
 		now = c.now().UTC()
 	}
 	// Status requires proof of the pool's capability secret in addition to
-	// the bearer; the claims carry no fence because status is how the
-	// controller first learns the supervisor-generated fence components.
-	capability, err := harnessv2.SignStatusCapability(capabilitySecret, harnessv2.NewStatusCapabilityClaims(now.Add(harnessv2.DefaultStatusCapabilityTTL)))
+	// the bearer, bound to the pool's profile digest and carrying a single-use
+	// nonce; the boot ID and instance ID remain the values status discovers.
+	nonce, err := harnessv2.NewCapabilityNonce()
+	if err != nil {
+		return result, fmt.Errorf("generate status nonce: %w", err)
+	}
+	binding := harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: result.Capabilities.RuntimeProfileDigest}
+	capability, err := harnessv2.SignStatusCapability(capabilitySecret, harnessv2.NewStatusCapabilityClaims(binding, nonce, now.Add(harnessv2.DefaultStatusCapabilityTTL)))
 	if err != nil {
 		return result, fmt.Errorf("sign status capability: %w", err)
 	}

@@ -24,6 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -706,7 +707,7 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 		if len(service.Spec.Selector) == 0 {
 			return fmt.Errorf("AgentRuntime endpoint Service %s/%s has no selector; only Services selecting same-namespace Pods are permitted", serviceNamespace, serviceName)
 		}
-		return r.validateAgentRuntimeServiceBackends(ctx, serviceNamespace, serviceName)
+		return r.validateAgentRuntimeServiceBackends(ctx, &service)
 	}
 	if parsed.Scheme != urlSchemeHTTPS {
 		return fmt.Errorf("external AgentRuntime endpoints must use https")
@@ -729,28 +730,53 @@ func isPublicAgentRuntimeAddress(address netip.Addr) bool {
 	return v2conformance.PublicAddressAllowed(address)
 }
 
-// validateAgentRuntimeServiceBackends requires every EndpointSlice serving
-// the endpoint Service to be managed by the Kubernetes endpoint controllers
-// for selector-based Services and to target same-namespace Pods. Manually
-// created slices (and legacy Endpoints, which are mirrored with a different
-// managed-by value) can steer a ClusterIP at arbitrary internal addresses.
-// This is re-validated on every reconcile immediately before probing.
-func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context.Context, serviceNamespace, serviceName string) error {
+// validateAgentRuntimeServiceBackends resolves every EndpointSlice address
+// serving the endpoint Service back to a live same-namespace Pod that the
+// Service selector actually selects and whose PodIPs contain the advertised
+// address. EndpointSlice fields (managed-by label, TargetRef, Addresses) are
+// all writable by a namespace caller, so none of them are trusted as proof of
+// ownership; only the Pod's own status and labels are. This runs on every
+// reconcile immediately before probing.
+func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context.Context, service *corev1.Service) error {
+	serviceNamespace, serviceName := service.Namespace, service.Name
+	selector := labels.SelectorFromSet(service.Spec.Selector)
 	var endpointSlices discoveryv1.EndpointSliceList
 	if err := r.List(ctx, &endpointSlices, client.InNamespace(serviceNamespace), client.MatchingLabels{
 		discoveryv1.LabelServiceName: serviceName,
 	}); err != nil {
 		return fmt.Errorf("list AgentRuntime endpoint Service %s/%s EndpointSlices: %w", serviceNamespace, serviceName, err)
 	}
+	deny := func(detail string) error {
+		return fmt.Errorf("AgentRuntime endpoint Service %s/%s %s; only same-namespace Pods selected by the Service are permitted", serviceNamespace, serviceName, detail)
+	}
 	for i := range endpointSlices.Items {
 		slice := &endpointSlices.Items[i]
-		if slice.Labels[discoveryv1.LabelManagedBy] != "endpointslice-controller.k8s.io" {
-			return fmt.Errorf("AgentRuntime endpoint Service %s/%s has an EndpointSlice %q not managed by the Kubernetes endpoint controller; manually managed backends are not permitted", serviceNamespace, serviceName, slice.Name)
-		}
 		for _, endpoint := range slice.Endpoints {
-			if endpoint.TargetRef == nil || endpoint.TargetRef.Kind != "Pod" ||
-				(endpoint.TargetRef.Namespace != "" && endpoint.TargetRef.Namespace != serviceNamespace) {
-				return fmt.Errorf("AgentRuntime endpoint Service %s/%s routes to a backend that is not a same-namespace Pod; only same-namespace Pod backends are permitted", serviceNamespace, serviceName)
+			ref := endpoint.TargetRef
+			if ref == nil || ref.Kind != "Pod" || (ref.Namespace != "" && ref.Namespace != serviceNamespace) {
+				return deny("routes to a backend that is not a same-namespace Pod")
+			}
+			var pod corev1.Pod
+			if err := r.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: ref.Name}, &pod); err != nil {
+				if apierrors.IsNotFound(err) {
+					return deny(fmt.Sprintf("references a backend Pod %q that does not exist", ref.Name))
+				}
+				return fmt.Errorf("get AgentRuntime endpoint backend Pod %s/%s: %w", serviceNamespace, ref.Name, err)
+			}
+			if !selector.Matches(labels.Set(pod.Labels)) {
+				return deny(fmt.Sprintf("references a backend Pod %q that the Service selector does not select", ref.Name))
+			}
+			podIPs := map[string]struct{}{}
+			for _, podIP := range pod.Status.PodIPs {
+				podIPs[podIP.IP] = struct{}{}
+			}
+			if pod.Status.PodIP != "" {
+				podIPs[pod.Status.PodIP] = struct{}{}
+			}
+			for _, address := range endpoint.Addresses {
+				if _, ok := podIPs[address]; !ok {
+					return deny(fmt.Sprintf("advertises address %q that is not an IP of backend Pod %q", address, ref.Name))
+				}
 			}
 		}
 	}
@@ -783,14 +809,14 @@ func isLoopbackAgentRuntimeEndpoint(host string) bool {
 }
 
 func parseAgentRuntimeServiceNamespaceHost(host string) (serviceName, serviceNamespace string, ok bool) {
-	labels := strings.Split(strings.TrimSuffix(strings.ToLower(host), "."), ".")
+	segments := strings.Split(strings.TrimSuffix(strings.ToLower(host), "."), ".")
 	switch {
-	case len(labels) == 3 && labels[2] == k8sServiceDNSLabel:
-		return labels[0], labels[1], labels[0] != "" && labels[1] != ""
-	case len(labels) == 4 && labels[2] == k8sServiceDNSLabel && labels[3] == k8sClusterDNSLabel:
-		return labels[0], labels[1], labels[0] != "" && labels[1] != ""
-	case len(labels) == 5 && labels[2] == "svc" && labels[3] == "cluster" && labels[4] == "local":
-		return labels[0], labels[1], labels[0] != "" && labels[1] != ""
+	case len(segments) == 3 && segments[2] == k8sServiceDNSLabel:
+		return segments[0], segments[1], segments[0] != "" && segments[1] != ""
+	case len(segments) == 4 && segments[2] == k8sServiceDNSLabel && segments[3] == k8sClusterDNSLabel:
+		return segments[0], segments[1], segments[0] != "" && segments[1] != ""
+	case len(segments) == 5 && segments[2] == "svc" && segments[3] == "cluster" && segments[4] == "local":
+		return segments[0], segments[1], segments[0] != "" && segments[1] != ""
 	default:
 		return "", "", false
 	}

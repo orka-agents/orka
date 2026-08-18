@@ -2,6 +2,7 @@ package v2
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -153,14 +154,38 @@ const DefaultStatusCapabilityTTL = time.Minute
 // components (boot ID, instance ID), so exact per-operation fences remain a
 // mutation-only requirement, and the capability secret is already scoped to
 // exactly one pool or external runtime by construction.
-type StatusCapabilityClaims struct {
-	Version   string    `json:"version"`
-	Audience  string    `json:"audience"`
-	ExpiresAt time.Time `json:"expiresAt"`
+// StatusCapabilityBinding is the subset of fence identity every status caller
+// knows before contact. The capability secret is already per-pool and
+// per-epoch (auth-e<epoch>), so registration and epoch are bound by the
+// signing key itself; the profile digest is bound here as defense in depth,
+// and the boot ID and instance ID remain the values status discovers.
+type StatusCapabilityBinding struct {
+	RuntimeProfileDigest ProfileDigest `json:"runtimeProfileDigest"`
 }
 
-func NewStatusCapabilityClaims(expiresAt time.Time) StatusCapabilityClaims {
-	return StatusCapabilityClaims{Version: OperationCapabilityVersion, Audience: StatusCapabilityAudience, ExpiresAt: expiresAt}
+type StatusCapabilityClaims struct {
+	Version   string                  `json:"version"`
+	Audience  string                  `json:"audience"`
+	Binding   StatusCapabilityBinding `json:"binding"`
+	Nonce     string                  `json:"nonce"`
+	ExpiresAt time.Time               `json:"expiresAt"`
+}
+
+// NewCapabilityNonce returns a fresh random nonce that scopes a status
+// capability to a single request, defeating replay of a captured token.
+func NewCapabilityNonce() (string, error) {
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", fmt.Errorf("generate capability nonce: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buffer), nil
+}
+
+func NewStatusCapabilityClaims(binding StatusCapabilityBinding, nonce string, expiresAt time.Time) StatusCapabilityClaims {
+	return StatusCapabilityClaims{
+		Version: OperationCapabilityVersion, Audience: StatusCapabilityAudience,
+		Binding: binding, Nonce: nonce, ExpiresAt: expiresAt,
+	}
 }
 
 func (c StatusCapabilityClaims) ValidateAt(now time.Time) error {
@@ -169,6 +194,12 @@ func (c StatusCapabilityClaims) ValidateAt(now time.Time) error {
 	}
 	if c.Audience != StatusCapabilityAudience {
 		return fmt.Errorf("capability audience %q is invalid", c.Audience)
+	}
+	if strings.TrimSpace(string(c.Binding.RuntimeProfileDigest)) == "" {
+		return fmt.Errorf("status capability profile binding is required")
+	}
+	if strings.TrimSpace(c.Nonce) == "" {
+		return fmt.Errorf("status capability nonce is required")
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -186,16 +217,25 @@ func SignStatusCapability(secret []byte, claims StatusCapabilityClaims) (string,
 	return signCapabilityClaims(secret, claims)
 }
 
-func VerifyStatusCapability(secret []byte, token string, now time.Time) error {
+// VerifyStatusCapability verifies the token, checks the profile binding against
+// the supervisor's own fence, and returns the single-use nonce so the caller
+// can reject replays.
+func VerifyStatusCapability(secret []byte, token string, expected StatusCapabilityBinding, now time.Time) (string, error) {
 	payload, err := verifyCapabilityToken(secret, token)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var claims StatusCapabilityClaims
 	dec := json.NewDecoder(strings.NewReader(string(payload)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&claims); err != nil {
-		return fmt.Errorf("decode status capability claims: %w", err)
+		return "", fmt.Errorf("decode status capability claims: %w", err)
 	}
-	return claims.ValidateAt(now)
+	if err := claims.ValidateAt(now); err != nil {
+		return "", err
+	}
+	if claims.Binding.RuntimeProfileDigest != expected.RuntimeProfileDigest {
+		return "", fmt.Errorf("status capability profile binding does not match this runtime")
+	}
+	return claims.Nonce, nil
 }

@@ -41,6 +41,7 @@ type Client struct {
 	controlTimeout       time.Duration
 	controllerBearer     string
 	capabilitySecret     []byte
+	statusBinding        StatusCapabilityBinding
 	maxJSONResponseBytes int64
 	maxErrorBodyBytes    int64
 	traceReliable        bool
@@ -87,6 +88,18 @@ func WithControllerBearerToken(token string) ClientOption {
 			return fmt.Errorf("controller bearer token contains invalid header bytes")
 		}
 		c.controllerBearer = token
+		return nil
+	}
+}
+
+// WithStatusCapabilityBinding sets the profile digest the client binds into
+// every status capability. Required before Status can be called.
+func WithStatusCapabilityBinding(binding StatusCapabilityBinding) ClientOption {
+	return func(c *Client) error {
+		if strings.TrimSpace(string(binding.RuntimeProfileDigest)) == "" {
+			return fmt.Errorf("status capability binding requires a profile digest")
+		}
+		c.statusBinding = binding
 		return nil
 	}
 }
@@ -201,7 +214,14 @@ func (c *Client) Status(ctx context.Context) (*StatusResponse, error) {
 	if len(c.capabilitySecret) < MinCapabilitySecretBytes {
 		return nil, clientError(operation, ClientErrorConfiguration, "status requires the operation capability secret", ErrClientConfiguration)
 	}
-	capability, err := SignStatusCapability(c.capabilitySecret, NewStatusCapabilityClaims(time.Now().UTC().Add(DefaultStatusCapabilityTTL)))
+	if strings.TrimSpace(string(c.statusBinding.RuntimeProfileDigest)) == "" {
+		return nil, clientError(operation, ClientErrorConfiguration, "status requires the profile binding", ErrClientConfiguration)
+	}
+	nonce, err := NewCapabilityNonce()
+	if err != nil {
+		return nil, clientError(operation, ClientErrorConfiguration, "generate status nonce", err)
+	}
+	capability, err := SignStatusCapability(c.capabilitySecret, NewStatusCapabilityClaims(c.statusBinding, nonce, time.Now().UTC().Add(DefaultStatusCapabilityTTL)))
 	if err != nil {
 		return nil, clientError(operation, ClientErrorConfiguration, "sign status capability", err)
 	}

@@ -96,7 +96,12 @@ func TestSupervisorCreateAndPrompt(t *testing.T) {
 
 	statusReq := httptest.NewRequest(http.MethodGet, harnessv2.StatusPath, nil)
 	statusReq.Header.Set("Authorization", "Bearer "+cfg.ControllerBearerToken)
-	statusCapability, err := harnessv2.SignStatusCapability(cfg.CapabilitySecret, harnessv2.NewStatusCapabilityClaims(time.Now().UTC().Add(time.Minute)))
+	statusNonce, err := harnessv2.NewCapabilityNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusBinding := harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: cfg.Fence.RuntimeProfileDigest}
+	statusCapability, err := harnessv2.SignStatusCapability(cfg.CapabilitySecret, harnessv2.NewStatusCapabilityClaims(statusBinding, statusNonce, time.Now().UTC().Add(time.Minute)))
 	if err != nil {
 		t.Fatal(err)
 	}
