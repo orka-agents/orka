@@ -63,8 +63,30 @@ type mcpProxySession struct {
 }
 
 type mcpApprovalGrant struct {
-	evidence   harnessv2.MCPApprovalEvidence
-	usedCallID string
+	evidence harnessv2.MCPApprovalEvidence
+}
+
+// approvedCallMatches reports whether an MCP call ID corresponds to the tool
+// call the user approved. The approved ToolCallID is compared after the same
+// canonicalization the MCP call ID already went through, so a JSON string
+// request ID and the ACP tool call ID normalize consistently.
+func approvedCallMatches(approvedToolCallID, callID string) bool {
+	if approvedToolCallID == "" {
+		return false
+	}
+	canonical, err := canonicalMCPCallID(mustJSONString(approvedToolCallID))
+	if err != nil {
+		return false
+	}
+	return canonical == callID
+}
+
+func mustJSONString(value string) json.RawMessage {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return json.RawMessage(`""`)
+	}
+	return encoded
 }
 
 type mcpJSONRPCRequest struct {
@@ -372,22 +394,22 @@ func (s *mcpProxySession) authorizeCall(toolName, callID string, now time.Time) 
 	}
 	var reservation *MCPApprovalEvidenceReservation
 	if s.authorization.ApprovalPolicy.Requires(toolName) {
-		grants := s.approvals[toolName]
-		for index := range grants {
-			grant := &grants[index]
+		for index := range s.approvals[toolName] {
+			grant := &s.approvals[toolName][index]
 			if !grant.evidence.ExpiresAt.After(now) {
 				continue
 			}
-			if grant.evidence.Reusable || grant.usedCallID == "" || grant.usedCallID == callID {
-				if !grant.evidence.Reusable && grant.usedCallID == "" {
-					grant.usedCallID = callID
-				}
+			// A reusable (allow-always) grant covers any call of the tool; a
+			// non-reusable (allow-once) grant is bound to the exact tool call
+			// the user approved, so a child cannot approve a benign call and
+			// then execute a different one. Idempotent retries of the approved
+			// call are deduplicated by the operation journal.
+			if grant.evidence.Reusable || approvedCallMatches(grant.evidence.ToolCallID, callID) {
 				evidence := grant.evidence
 				reservation = &MCPApprovalEvidenceReservation{Evidence: evidence}
 				break
 			}
 		}
-		s.approvals[toolName] = grants
 		if reservation == nil {
 			return nil, harnessv2.PromptMCPAuthorization{}, harnessv2.PromptLease{}, nil, fmt.Errorf("MCP tool approval is missing")
 		}

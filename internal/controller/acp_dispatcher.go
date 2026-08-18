@@ -3093,7 +3093,16 @@ func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *core
 	if strings.TrimSpace(observed.RuntimePoolUID) == "" || observed.RuntimePoolGeneration < 1 || strings.TrimSpace(observed.SupervisorBootID) == "" {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external AgentRuntime did not advertise the required immutable fence")
 	}
-	auth, err := (&AgentRuntimeReconciler{Client: d.Client}).agentRuntimeAuthMaterial(ctx, runtime)
+	reconciler := &AgentRuntimeReconciler{Client: d.Client, APIReader: d.APIReader}
+	// Readiness was established at conformance time, but the endpoint Service,
+	// EndpointSlices, and backend Pods are mutable between reconciles; revalidate
+	// the endpoint policy immediately before sending the bearer and signed
+	// capabilities so a backend swapped after Ready cannot steer authenticated
+	// controller traffic at an internal address.
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
+		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
+	}
+	auth, err := reconciler.agentRuntimeAuthMaterial(ctx, runtime)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}

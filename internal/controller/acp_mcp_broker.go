@@ -556,6 +556,9 @@ func (r KubernetesACPMCPBrokerCredentialResolver) resolveRuntimePoolCredentials(
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("active MCP task is bound to a different runtime pool")
 	}
 	active := pool.Status.ActiveInstance
+	if active == nil {
+		return ACPMCPBrokerCredentials{}, fmt.Errorf("runtime pool has no active instance")
+	}
 	if active.ControllerEpoch != controllerFence.Epoch || active.ProfileDigest != pool.Spec.Runtime.Profile.Digest ||
 		active.ProtocolVersion != corev1alpha1.RuntimePoolProtocolHarnessV2 {
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("runtime pool active instance is stale")

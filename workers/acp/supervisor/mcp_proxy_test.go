@@ -163,17 +163,23 @@ func TestMCPProxyApprovalPolicyIsFailClosedAndOnceBound(t *testing.T) {
 	if err := session.grantApproval(authorization.PromptID, evidence); err != nil {
 		t.Fatal(err)
 	}
-	approved := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"once","method":"tools/call","params":{"name":"mutate","arguments":{}}}`))
+	// A call whose ID differs from the approved tool call ID must not consume
+	// the allow-once grant, even though it is the first to arrive.
+	imposter := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"different","method":"tools/call","params":{"name":"mutate","arguments":{}}}`))
+	if imposter.Error == nil || calls.Load() != 0 {
+		t.Fatalf("non-approved call consumed allow-once = %#v calls=%d", imposter, calls.Load())
+	}
+	// The approved tool call ID (used as the JSON-RPC request ID) is authorized.
+	approved := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"provider-call-1","method":"tools/call","params":{"name":"mutate","arguments":{}}}`))
 	if approved.Error != nil || calls.Load() != 1 {
 		t.Fatalf("approved call = %#v calls=%d", approved, calls.Load())
 	}
-	replay := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"once","method":"tools/call","params":{"name":"mutate","arguments":{}}}`))
+	// A retry of the approved call still passes the proxy's approval gate (the
+	// downstream broker journal deduplicates it by operation ID in production);
+	// the grant is bound to the approved call ID, not consumed on first use.
+	replay := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"provider-call-1","method":"tools/call","params":{"name":"mutate","arguments":{}}}`))
 	if replay.Error != nil || calls.Load() != 2 {
-		t.Fatalf("same-call approval replay = %#v calls=%d", replay, calls.Load())
-	}
-	differentCall := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"different","method":"tools/call","params":{"name":"mutate","arguments":{}}}`))
-	if differentCall.Error == nil || calls.Load() != 2 {
-		t.Fatalf("different call reused allow-once = %#v calls=%d", differentCall, calls.Load())
+		t.Fatalf("approved-call retry = %#v calls=%d", replay, calls.Load())
 	}
 }
 
