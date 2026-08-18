@@ -315,32 +315,6 @@ func TestConvertOAITools_Empty(t *testing.T) {
 	}
 }
 
-func TestMapFinishReason(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"end_turn", "stop"},
-		{"stop", "stop"},
-		{"", "stop"},
-		{"tool_use", "tool_calls"},
-		{"tool_calls", "tool_calls"},
-		{oaiParamMaxTokens, "length"},
-		{"length", "length"},
-		{"content_filter", "content_filter"},
-		{"unknown", "stop"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := mapFinishReason(tt.input)
-			if got != tt.want {
-				t.Errorf("mapFinishReason(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestMapStreamFinishReason(t *testing.T) {
 	tests := []struct {
 		name               string

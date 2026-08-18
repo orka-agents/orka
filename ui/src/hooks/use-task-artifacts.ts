@@ -6,7 +6,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 
 // Relative path for the shared api client (prepends API_BASE_URL itself).
-export const taskArtifactsPath = (taskId: string) =>
+const taskArtifactsPath = (taskId: string) =>
   `/tasks/${encodeURIComponent(taskId)}/artifacts`
 
 // Absolute, namespace-safe download URL for a single artifact. Filename and

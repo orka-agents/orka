@@ -121,32 +121,6 @@ type Snapshot struct {
 	totalBytes     int64
 }
 
-// ManifestDigest returns the content digest of the normalized snapshot.
-func (s *Snapshot) ManifestDigest() string {
-	if s == nil {
-		return ""
-	}
-	return s.manifestDigest
-}
-
-// EntryCount returns the number of validated entries, including protected
-// entries excluded from publication.
-func (s *Snapshot) EntryCount() int {
-	if s == nil {
-		return 0
-	}
-	return s.entryCount
-}
-
-// TotalBytes returns the validated regular-file bytes in the snapshot,
-// including protected entries excluded from publication.
-func (s *Snapshot) TotalBytes() int64 {
-	if s == nil {
-		return 0
-	}
-	return s.totalBytes
-}
-
 type entry struct {
 	path       string
 	kind       EntryKind

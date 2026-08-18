@@ -731,11 +731,6 @@ func checkDenyPatterns(code string, patterns []denyPattern) string {
 	return ""
 }
 
-// runCommand executes a command and captures output.
-func (t *CodeExecTool) runCommand(cmd *exec.Cmd) CodeExecResult {
-	return (&InProcessCodeExecutor{}).runCommand(context.Background(), cmd, t.workDir, t.codeExecOutputLimitBytes())
-}
-
 func (e *InProcessCodeExecutor) runCommand(ctx context.Context, cmd *exec.Cmd, workDir string, outputLimitBytes int64) CodeExecResult {
 	stdout := newCappedBuffer(outputLimitBytes)
 	stderr := newCappedBuffer(outputLimitBytes)

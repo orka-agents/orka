@@ -332,10 +332,12 @@ but no provider or prompt-scoped MCP access.
 
 ## Controller configuration
 
-At minimum, enable ACP and configure immutable images:
+ACP is active when the controller runs in `harness-v2` mode; there is no
+separate ACP enablement flag. At minimum, set the controller mode and configure
+immutable images:
 
 ```text
---acp-runtime-enabled=true
+--controller-mode=harness-v2
 --acp-runtime-namespace=orka-runtimes
 --acp-provider-proxy-namespace=vekil-system
 --acp-provider-proxy-base-url=http://provider-auth-proxy.orka-system.svc:8080

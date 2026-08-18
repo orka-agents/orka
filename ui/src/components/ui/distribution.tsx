@@ -2,7 +2,7 @@ import { cn } from '@/lib/utils'
 import { phaseStyle } from '@/lib/task-status'
 import type { TaskPhase } from '@/schemas/task'
 
-export interface DistributionSegment {
+interface DistributionSegment {
   phase: TaskPhase | string
   count: number
 }

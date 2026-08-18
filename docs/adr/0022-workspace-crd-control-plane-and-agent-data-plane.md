@@ -1,4 +1,4 @@
-# ADR 0012: Use generic CRDs for control and a versioned workspace agent for data
+# ADR 0022: Use generic CRDs for control and a versioned workspace agent for data
 
 Date: 2026-07-16
 

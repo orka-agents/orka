@@ -31,6 +31,7 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/internal/workspace"
+	"github.com/orka-agents/orka/internal/workspace/workspacetest"
 )
 
 const (
@@ -2801,7 +2802,7 @@ func assertOperationOrder(t *testing.T, got []string, want ...string) {
 }
 
 type recordingWorkspaceExecutor struct {
-	fake *workspace.FakeExecutor
+	fake *workspacetest.FakeExecutor
 
 	mu            sync.Mutex
 	ops           []string
@@ -2828,7 +2829,7 @@ type recordingWorkspaceExecutor struct {
 
 func newRecordingWorkspaceExecutor() *recordingWorkspaceExecutor {
 	return &recordingWorkspaceExecutor{
-		fake: workspace.NewFakeExecutor(),
+		fake: workspacetest.NewFakeExecutor(),
 	}
 }
 

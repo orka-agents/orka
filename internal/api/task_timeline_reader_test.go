@@ -7,10 +7,11 @@ import (
 
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
+	storetest "github.com/orka-agents/orka/internal/store/storetest"
 )
 
 func TestTaskTimelineReaderListMatchingReturnsEmptySlice(t *testing.T) {
-	reader := newTaskTimelineReader(store.NewFakeExecutionEventStore(), "default", "task-a")
+	reader := newTaskTimelineReader(storetest.NewFakeExecutionEventStore(), "default", "task-a")
 	listed, err := reader.listMatching(context.Background(), []string{events.ExecutionEventTypeApprovalRequested})
 	if err != nil {
 		t.Fatalf("listMatching error = %v", err)
@@ -22,7 +23,7 @@ func TestTaskTimelineReaderListMatchingReturnsEmptySlice(t *testing.T) {
 
 func TestTaskTimelineReaderListThroughAllowsExactLimitAndRejectsNext(t *testing.T) {
 	ctx := context.Background()
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeModelMessage, 3)
 	reader := newTaskTimelineReader(eventStore, "default", "task-a")
 
@@ -41,7 +42,7 @@ func TestTaskTimelineReaderListThroughAllowsExactLimitAndRejectsNext(t *testing.
 
 func TestTaskTimelineReaderListRecentThroughPreservesForkOverflowEvent(t *testing.T) {
 	ctx := context.Background()
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeModelMessage, 5)
 	reader := newTaskTimelineReader(eventStore, "default", "task-a")
 
@@ -56,7 +57,7 @@ func TestTaskTimelineReaderListRecentThroughPreservesForkOverflowEvent(t *testin
 
 func TestTaskTimelineReaderSeqExistsValidatesCheckpointRanges(t *testing.T) {
 	ctx := context.Background()
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeModelMessage, 2)
 	reader := newTaskTimelineReader(eventStore, "default", "task-a")
 
@@ -80,7 +81,7 @@ func TestTaskTimelineReaderSeqExistsValidatesCheckpointRanges(t *testing.T) {
 
 func TestTaskTimelineReaderTerminalForCompletionScansPastFilteredCursor(t *testing.T) {
 	ctx := context.Background()
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeToolCallCompleted, 1)
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeTaskSucceeded, 1)
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeToolCallCompleted, 1)

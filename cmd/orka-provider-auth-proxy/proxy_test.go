@@ -6,7 +6,25 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+func newStaticBearerTokenStore(token []byte) (*bearerTokenStore, error) {
+	if err := validateBearerToken(token); err != nil {
+		return nil, err
+	}
+	store := newBearerTokenStore(time.Now)
+	store.activate(token, nil, time.Time{})
+	return store, nil
+}
+
+func newProviderAuthProxy(cfg proxyConfig, bearerToken []byte) (*providerAuthProxy, error) {
+	tokens, err := newStaticBearerTokenStore(bearerToken)
+	if err != nil {
+		return nil, err
+	}
+	return newProviderAuthProxyWithTokenStore(cfg, tokens)
+}
 
 const testSharedProviderToken = "0123456789abcdef0123456789abcdef"
 

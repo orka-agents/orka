@@ -1,4 +1,4 @@
-# ADR 0011: Keep external conversation history in Orka Sessions
+# ADR 0020: Keep external conversation history in Orka Sessions
 
 Date: 2026-07-16
 

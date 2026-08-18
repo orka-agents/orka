@@ -132,26 +132,9 @@ promote-staging-manifest: ## Promote committed staging manifests into release sn
 verify-release-manifest: ## Validate promoted release snapshots and the harness-v2 Helm render contract.
 	scripts/validate-release-manifest.sh "$(if $(NEWVERSION),$(NEWVERSION),$(VERSION))"
 
-.PHONY: test-release-manifest
-test-release-manifest: ## Test release versioning, image matrices, and the harness-v2 render policy.
-	bash scripts/tests/release-manifest-test.sh
-
 .PHONY: sync-helm-crds
 sync-helm-crds: ## Synchronize generated CRDs into the promoted Helm chart while preserving non-CRD files.
 	scripts/sync-helm-crds.sh
-
-.PHONY: verify-helm-crds
-verify-helm-crds: ## Verify generated and promoted Helm chart CRDs are identical.
-	scripts/sync-helm-crds.sh --check
-
-.PHONY: test-helm-crd-sync
-test-helm-crd-sync: ## Test Helm CRD synchronization and drift detection.
-	bash scripts/tests/sync-helm-crds-test.sh
-
-.PHONY: test-static-mode-deploy-gate
-test-static-mode-deploy-gate: ## Test the static harness-mode CRD deployment gate.
-	bash scripts/tests/static-mode-deploy-gate-test.sh
-
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -232,10 +215,6 @@ test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and 
 	set -e; for img in $(ACP_RUNTIME_IMGS); do $(KIND) load docker-image $$img --name $(KIND_CLUSTER); done
 	$(KIND) load docker-image $(WORKSPACE_PUBLISHER_IMG) --name $(KIND_CLUSTER)
 
-.PHONY: test-e2e-run-only
-test-e2e-run-only: manifests generate fmt vet ## Run e2e tests without rebuilding images (for fast iteration).
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG)
-
 .PHONY: lint
 lint: ensure-ui-embed golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run
@@ -243,10 +222,6 @@ lint: ensure-ui-embed golangci-lint ## Run golangci-lint linter
 .PHONY: lint-fix
 lint-fix: ensure-ui-embed golangci-lint ## Run golangci-lint linter and perform fixes
 	"$(GOLANGCI_LINT)" run --fix
-
-.PHONY: lint-config
-lint-config: golangci-lint ## Verify golangci-lint linter configuration
-	"$(GOLANGCI_LINT)" config verify
 
 ##@ Demos
 
@@ -321,11 +296,6 @@ ui-test-coverage: ## Run UI unit tests with coverage.
 build: manifests generate fmt vet ui-build ## Build manager and admission binaries.
 	go build -o bin/manager ./cmd
 	go build -o bin/orka-admission ./cmd/orka-admission
-
-.PHONY: build-admission
-build-admission: ## Build the stateless admission binary.
-	go build -o bin/orka-admission ./cmd/orka-admission
-
 
 .PHONY: docs-cli
 docs-cli: build-cli ## Generate CLI command reference docs.

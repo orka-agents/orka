@@ -1,4 +1,4 @@
-# ADR 0013: Fence workspace attachments with epochs, rotated tokens, and TLS
+# ADR 0023: Fence workspace attachments with epochs, rotated tokens, and TLS
 
 Date: 2026-07-16
 

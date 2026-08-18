@@ -26,8 +26,9 @@ func TestRunACPExternalEffectWithRetryRetainsLeaseAcrossTransientFailure(t *test
 	request := map[string]string{"source": "immutable"}
 	attempts := 0
 
-	result, err := runACPExternalEffectWithRetryDelay(
+	result, err := runACPExternalEffectWithRetryPolicy(
 		context.Background(), dispatcher, fence, identity, request, time.Millisecond,
+		externalEffectCallTimeout(identity),
 		func(context.Context) (string, error) {
 			attempts++
 			if attempts == 1 {

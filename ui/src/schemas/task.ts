@@ -48,12 +48,12 @@ export const aiSpecSchema = z.object({
   tools: z.array(z.string()).optional(),
 })
 
-export const repositoryIdentitySchema = z.object({
+const repositoryIdentitySchema = z.object({
   provider: z.string(),
   id: z.string(),
 })
 
-export const workspaceCredentialRefSchema = z.object({
+const workspaceCredentialRefSchema = z.object({
   name: z.string().trim().min(1),
   key: z.string().trim().min(1).optional(),
 }).strict()
@@ -86,7 +86,7 @@ export const workspaceConfigSchema = z.object({
 
 // Legacy harness v1 workspace preserved at spec.agentRuntime.workspace; a
 // read-only compatibility surface for stored v1 Tasks.
-export const legacyAgentWorkspaceConfigSchema = z.object({
+const legacyAgentWorkspaceConfigSchema = z.object({
   gitRepo: z.string().optional(),
   branch: z.string().optional(),
   ref: z.string().optional(),
@@ -107,7 +107,7 @@ export const agentRuntimeSpecSchema = z.object({
 
 export const harnessContractVersionSchema = z.enum(['orka.harness.v1', 'orka.harness.v2'])
 
-export const taskExecutionStateSchema = z.enum([
+const taskExecutionStateSchema = z.enum([
   'Queued',
   'Reserved',
   'SessionStarting',
@@ -123,7 +123,7 @@ export const taskExecutionStateSchema = z.enum([
   'OutcomeUnknown',
 ])
 
-export const taskExecutionOutcomeSchema = z.enum(['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown'])
+const taskExecutionOutcomeSchema = z.enum(['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown'])
 
 export const taskExecutionStatusSchema = z.object({
   state: taskExecutionStateSchema.optional(),
@@ -142,7 +142,7 @@ export const taskExecutionStatusSchema = z.object({
   lastTransitionTime: z.string().optional(),
 })
 
-export const taskDeliveryStateSchema = z.enum([
+const taskDeliveryStateSchema = z.enum([
   'NotRequested',
   'Validating',
   'Preparing',
@@ -160,7 +160,7 @@ export const taskDeliveryStateSchema = z.enum([
   'PublicationOutcomeUnknown',
 ])
 
-export const taskDeliveryOutcomeSchema = z.enum([
+const taskDeliveryOutcomeSchema = z.enum([
   'NotRequested',
   'VerifiedExact',
   'DeliveredSuperseded',
@@ -173,7 +173,7 @@ export const taskDeliveryOutcomeSchema = z.enum([
   'PublicationOutcomeUnknown',
 ])
 
-export const taskPullRequestReceiptSchema = z.object({
+const taskPullRequestReceiptSchema = z.object({
   id: z.string(),
   number: z.number().optional(),
   url: z.string().optional(),
@@ -221,13 +221,13 @@ export const childTaskStatusSchema = z.object({
 // Mirrors the safe, non-secret surface of api/v1alpha1 ExecutionWorkspaceStatus.
 // Provider credentials and unsafe identifiers are deliberately excluded — only
 // provider-neutral lifecycle/placement/density metadata is parsed for UI.
-export const executionWorkspacePlacementSchema = z.object({
+const executionWorkspacePlacementSchema = z.object({
   workerNamespace: z.string().optional(),
   workerPool: z.string().optional(),
   workerPodName: z.string().optional(),
 })
 
-export const executionWorkspaceDensitySchema = z.object({
+const executionWorkspaceDensitySchema = z.object({
   workerCount: z.number().optional(),
   actorCount: z.number().optional(),
   runningActorCount: z.number().optional(),
@@ -235,7 +235,7 @@ export const executionWorkspaceDensitySchema = z.object({
   actorsPerWorker: z.string().optional(),
 })
 
-export const executionWorkspaceStatusSchema = z.object({
+const executionWorkspaceStatusSchema = z.object({
   provider: z.string().optional(),
   templateRef: z.object({ name: z.string().optional() }).optional(),
   phase: z.string().optional(),
@@ -288,7 +288,7 @@ export const harnessRuntimeStatusSchema = z.object({
 
 // The authoritative execution route. Snapshot metadata and abbreviated
 // digests only — snapshot bodies are never exposed through ordinary surfaces.
-export const agentExecutionBindingSchema = z.object({
+const agentExecutionBindingSchema = z.object({
   schemaVersion: z.number(),
   contractVersion: harnessContractVersionSchema,
   backend: z.enum(['harness-wrapper', 'runtime-pool', 'external-endpoint']),
@@ -362,13 +362,8 @@ export type TaskStatus = z.infer<typeof taskStatusSchema>
 export type TaskType = z.infer<typeof taskTypeSchema>
 export type TaskPhase = z.infer<typeof taskPhaseSchema>
 export type WorkspaceIntent = z.infer<typeof workspaceIntentSchema>
-export type WorkspaceConfig = z.infer<typeof workspaceConfigSchema>
 export type TaskExecutionStatus = z.infer<typeof taskExecutionStatusSchema>
 export type TaskDeliveryStatus = z.infer<typeof taskDeliveryStatusSchema>
-export type ExecutionWorkspaceStatus = z.infer<typeof executionWorkspaceStatusSchema>
-export type HarnessContractVersion = z.infer<typeof harnessContractVersionSchema>
-export type HarnessRuntimeStatus = z.infer<typeof harnessRuntimeStatusSchema>
-export type AgentExecutionBinding = z.infer<typeof agentExecutionBindingSchema>
 
 export const planStateSchema = z.object({
   summary: z.string().optional(),
@@ -378,14 +373,9 @@ export const planStateSchema = z.object({
   iteration: z.number().optional(),
 })
 
-export const taskWithPlanSchema = taskSchema.extend({
-  plan: planStateSchema.optional(),
-})
-
 export type PlanState = z.infer<typeof planStateSchema>
-export type TaskWithPlan = z.infer<typeof taskWithPlanSchema>
 
-export const executionEventSchema = z.object({
+const executionEventSchema = z.object({
   id: z.string(),
   namespace: z.string(),
   streamType: z.string(),

@@ -13,6 +13,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/harness/harnesstest"
 	"github.com/orka-agents/orka/internal/store"
+	storetest "github.com/orka-agents/orka/internal/store/storetest"
 )
 
 func TestTurnRunnerAppendsMappedEventsForSuccessfulTurn(t *testing.T) {
@@ -83,7 +84,7 @@ func TestTurnRunnerRejectsMismatchedHarnessFrameIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	runner := harness.TurnRunner{Client: client, EventStore: eventStore, MapContext: harness.EventMapContext{Namespace: "default", TaskName: "task-a"}}
 	_, err = runner.Run(context.Background(), harness.StartTurnRequest{
 		Version:          harness.ProtocolVersion,
@@ -144,7 +145,7 @@ func TestTurnRunnerRejectsNonMonotonicHarnessFrameSeq(t *testing.T) {
 	}
 	runner := harness.TurnRunner{
 		Client:     client,
-		EventStore: store.NewFakeExecutionEventStore(),
+		EventStore: storetest.NewFakeExecutionEventStore(),
 		MapContext: harness.EventMapContext{Namespace: "default", TaskName: "task-a"},
 	}
 	_, err = runner.Run(context.Background(), harness.StartTurnRequest{
@@ -209,7 +210,7 @@ func TestTurnRunnerUnknownFrameAppendsDiagnostic(t *testing.T) {
 func TestTurnRunnerPropagatesAppendFailure(t *testing.T) {
 	runner, request, _, cleanup := newRunner(t, harnesstest.BehaviorSuccess)
 	defer cleanup()
-	runner.EventStore = &failingExecutionEventStore{failAfter: 1, delegate: store.NewFakeExecutionEventStore()}
+	runner.EventStore = &failingExecutionEventStore{failAfter: 1, delegate: storetest.NewFakeExecutionEventStore()}
 	_, err := runner.Run(context.Background(), request)
 	if err == nil || !strings.Contains(err.Error(), "append mapped harness event") {
 		t.Fatalf("Run() error = %v, want append failure", err)
@@ -229,7 +230,7 @@ func TestTurnRunnerTimeout(t *testing.T) {
 func newRunner(
 	t *testing.T,
 	behavior harnesstest.FakeBehavior,
-) (harness.TurnRunner, harness.StartTurnRequest, *store.FakeExecutionEventStore, func()) {
+) (harness.TurnRunner, harness.StartTurnRequest, *storetest.FakeExecutionEventStore, func()) {
 	t.Helper()
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{Behavior: behavior})
 	client, err := harness.NewClient(server.URL())
@@ -237,7 +238,7 @@ func newRunner(
 		server.Close()
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	request := harness.StartTurnRequest{
 		Version:           harness.ProtocolVersion,
 		Namespace:         "default",

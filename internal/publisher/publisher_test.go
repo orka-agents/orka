@@ -168,7 +168,7 @@ func TestPreparePrefixesRelativeRootWithoutOverwritingRootCollision(t *testing.T
 	if err := os.Symlink("new.txt", filepath.Join(workspaceRoot, "latest")); err != nil {
 		t.Fatalf("recreate nested symlink: %v", err)
 	}
-	delta, err := workspacedelta.Build(baseline, workspaceRoot, workspacedelta.IntentWrite)
+	delta, err := workspacedelta.BuildWithLimits(baseline, workspaceRoot, workspacedelta.IntentWrite, workspacedelta.BuildLimits{})
 	if err != nil {
 		t.Fatalf("Build subpath delta: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestExactLeaseRejectsRaceThatRemainsFastForward(t *testing.T) {
 		t.Fatalf("Capture advanced baseline: %v", err)
 	}
 	mustWriteFile(t, filepath.Join(advancedWorkspace, "keep.txt"), "candidate after advanced baseline\n", 0o644)
-	advancedDelta, err := workspacedelta.Build(advancedBaseline, advancedWorkspace, workspacedelta.IntentWrite)
+	advancedDelta, err := workspacedelta.BuildWithLimits(advancedBaseline, advancedWorkspace, workspacedelta.IntentWrite, workspacedelta.BuildLimits{})
 	if err != nil {
 		t.Fatalf("Build advanced delta: %v", err)
 	}
@@ -787,7 +787,7 @@ func newRepositoryFixtureWithFormat(t *testing.T, attributes bool, objectFormat 
 	if err := os.Symlink("keep.txt", filepath.Join(baselineRoot, "latest")); err != nil {
 		t.Fatalf("create workspace symlink: %v", err)
 	}
-	delta, err := workspacedelta.Build(baseline, baselineRoot, workspacedelta.IntentWrite)
+	delta, err := workspacedelta.BuildWithLimits(baseline, baselineRoot, workspacedelta.IntentWrite, workspacedelta.BuildLimits{})
 	if err != nil {
 		t.Fatalf("Build delta: %v", err)
 	}

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { harnessContractVersionSchema } from './task'
 
-export const sessionExecutionLineageSchema = z.object({
+const sessionExecutionLineageSchema = z.object({
   namespaceUID: z.string(),
   sessionUID: z.string(),
   contractVersion: harnessContractVersionSchema,
@@ -11,7 +11,7 @@ export const sessionExecutionLineageSchema = z.object({
   establishedAt: z.string(),
 })
 
-export const sessionExecutionControlSchema = z.object({
+const sessionExecutionControlSchema = z.object({
   resourceVersion: z.string().optional(),
   sessionUID: z.string(),
   runtimePoolRef: z.string().optional(),
@@ -62,5 +62,3 @@ export const transcriptMessageSchema = z.object({
 export type Session = z.infer<typeof sessionSchema>
 export type SessionListItem = z.infer<typeof sessionListItemSchema>
 export type TranscriptMessage = z.infer<typeof transcriptMessageSchema>
-export type SessionExecutionControl = z.infer<typeof sessionExecutionControlSchema>
-export type SessionExecutionLineage = z.infer<typeof sessionExecutionLineageSchema>

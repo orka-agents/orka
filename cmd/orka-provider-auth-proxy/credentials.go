@@ -56,15 +56,6 @@ func newBearerTokenStore(now func() time.Time) *bearerTokenStore {
 	return store
 }
 
-func newStaticBearerTokenStore(token []byte) (*bearerTokenStore, error) {
-	if err := validateBearerToken(token); err != nil {
-		return nil, err
-	}
-	store := newBearerTokenStore(time.Now)
-	store.activate(token, nil, time.Time{})
-	return store, nil
-}
-
 func (s *bearerTokenStore) activate(current, previous []byte, previousValidUntil time.Time) {
 	next := &bearerTokenSnapshot{
 		currentDigest: sha256.Sum256(current),

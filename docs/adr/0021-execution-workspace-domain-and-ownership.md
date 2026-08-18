@@ -1,4 +1,4 @@
-# ADR 0011: Model execution workspaces as provider-neutral owned resources
+# ADR 0021: Model execution workspaces as provider-neutral owned resources
 
 Date: 2026-07-16
 

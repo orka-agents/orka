@@ -24,7 +24,6 @@ on:
       - "internal/executionmode/**"
       - "internal/harness/**"
       - "internal/store/**"
-      - "pkg/harness/**"
       # The script jobs syntax-check every script and execute every
       # scripts/tests/*-test.sh suite, so any script change is relevant.
       - "scripts/**"
@@ -52,7 +51,6 @@ on:
       - "internal/executionmode/**"
       - "internal/harness/**"
       - "internal/store/**"
-      - "pkg/harness/**"
       # The script jobs syntax-check every script and execute every
       # scripts/tests/*-test.sh suite, so any script change is relevant.
       - "scripts/**"

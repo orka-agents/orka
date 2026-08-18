@@ -105,16 +105,6 @@ type TurnOutput struct {
 	Data []byte
 }
 
-// Settled reports whether the record needs no further settlement work.
-func (r TurnRecord) Settled() bool {
-	switch r.State {
-	case TurnRejected, TurnTerminal, TurnOutcomeUnknown:
-		return true
-	default:
-		return false
-	}
-}
-
 // AdmitOutcome describes the result of an admission request.
 type AdmitOutcome string
 
@@ -129,11 +119,6 @@ const (
 // Ledger is the wrapper-local durable admission ledger.
 type Ledger struct {
 	db *sql.DB
-}
-
-// Open opens (creating if needed) the ledger database at path.
-func Open(path string) (*Ledger, error) {
-	return OpenWithGeneration(path, "1")
 }
 
 // OpenWithGeneration opens the ledger and initializes a newly created control
@@ -1037,16 +1022,6 @@ func isRetiredGeneration(value string) bool {
 	}
 	_, err := hex.DecodeString(digest)
 	return err == nil
-}
-
-// Generation returns the ledger generation watermark for inventory reports.
-func (l *Ledger) Generation(ctx context.Context) (string, error) {
-	var value string
-	err := l.db.QueryRowContext(ctx, `SELECT value FROM ledger_control WHERE key = 'generation'`).Scan(&value)
-	if err != nil {
-		return "", fmt.Errorf("read ledger generation: %w", err)
-	}
-	return value, nil
 }
 
 func validateGeneration(value string) error {
