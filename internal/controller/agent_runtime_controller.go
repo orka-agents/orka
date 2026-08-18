@@ -669,6 +669,17 @@ func agentRuntimeWorkspaceGovernance(spec corev1alpha1.AgentRuntimeWorkspaceGove
 	return claims, nil
 }
 
+// endpointReader prefers the uncached APIReader for endpoint-policy reads so
+// a Service, EndpointSlice, or backend Pod mutated just before dispatch is
+// observed exactly, not at manager-cache latency. It falls back to the cached
+// client when no APIReader is configured.
+func (r *AgentRuntimeReconciler) endpointReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.Context, runtime *corev1alpha1.AgentRuntime) error {
 	parsed, err := url.Parse(strings.TrimSpace(runtime.Spec.Deployment.Endpoint))
 	if err != nil {
@@ -690,7 +701,7 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 			return fmt.Errorf("AgentRuntime service endpoint namespace %q must match AgentRuntime namespace %q", serviceNamespace, runtime.Namespace)
 		}
 		var service corev1.Service
-		if err := r.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: serviceName}, &service); err != nil {
+		if err := r.endpointReader().Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: serviceName}, &service); err != nil {
 			return fmt.Errorf("get AgentRuntime endpoint Service %s/%s: %w", serviceNamespace, serviceName, err)
 		}
 		// An ExternalName Service is a CNAME alias to an arbitrary hostname:
@@ -740,8 +751,9 @@ func isPublicAgentRuntimeAddress(address netip.Addr) bool {
 func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context.Context, service *corev1.Service) error {
 	serviceNamespace, serviceName := service.Namespace, service.Name
 	selector := labels.SelectorFromSet(service.Spec.Selector)
+	reader := r.endpointReader()
 	var endpointSlices discoveryv1.EndpointSliceList
-	if err := r.List(ctx, &endpointSlices, client.InNamespace(serviceNamespace), client.MatchingLabels{
+	if err := reader.List(ctx, &endpointSlices, client.InNamespace(serviceNamespace), client.MatchingLabels{
 		discoveryv1.LabelServiceName: serviceName,
 	}); err != nil {
 		return fmt.Errorf("list AgentRuntime endpoint Service %s/%s EndpointSlices: %w", serviceNamespace, serviceName, err)
@@ -757,7 +769,7 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context
 				return deny("routes to a backend that is not a same-namespace Pod")
 			}
 			var pod corev1.Pod
-			if err := r.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: ref.Name}, &pod); err != nil {
+			if err := reader.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: ref.Name}, &pod); err != nil {
 				if apierrors.IsNotFound(err) {
 					return deny(fmt.Sprintf("references a backend Pod %q that does not exist", ref.Name))
 				}

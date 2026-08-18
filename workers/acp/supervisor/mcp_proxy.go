@@ -67,26 +67,20 @@ type mcpApprovalGrant struct {
 }
 
 // approvedCallMatches reports whether an MCP call ID corresponds to the tool
-// call the user approved. The approved ToolCallID is compared after the same
-// canonicalization the MCP call ID already went through, so a JSON string
-// request ID and the ACP tool call ID normalize consistently.
+// call the user approved. The approved ToolCallID stored in the evidence is
+// already the canonical ACP tool-call digest (mapPermission applies
+// canonicalACPToolCallID), so the incoming MCP call ID is canonicalized the
+// same way before comparison — a normal JSON-RPC string ID and the ACP tool
+// call ID therefore normalize to the same digest.
 func approvedCallMatches(approvedToolCallID, callID string) bool {
-	if approvedToolCallID == "" {
+	if approvedToolCallID == "" || callID == "" {
 		return false
 	}
-	canonical, err := canonicalMCPCallID(mustJSONString(approvedToolCallID))
+	canonical, err := canonicalACPToolCallID(callID)
 	if err != nil {
 		return false
 	}
-	return canonical == callID
-}
-
-func mustJSONString(value string) json.RawMessage {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return json.RawMessage(`""`)
-	}
-	return encoded
+	return canonical == approvedToolCallID
 }
 
 type mcpJSONRPCRequest struct {

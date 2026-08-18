@@ -59,6 +59,40 @@ func TestSafeErrorExposesOnlySessionCreationStage(t *testing.T) {
 	}
 }
 
+func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	create := testCreateSessionRequest(t, cfg, profile)
+	now := time.Now().UTC()
+
+	// Simulate a create that allocated its identity and then failed during
+	// session initialization.
+	server.mu.Lock()
+	server.sessions[create.RuntimeSessionID] = &sessionState{id: create.RuntimeSessionID, creating: true}
+	server.tombstoneFailedCreateLocked(create.RuntimeSessionID, create.Metadata, now)
+	_, resident := server.sessions[create.RuntimeSessionID]
+	tombstone, tombstoned := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
+	server.mu.Unlock()
+	if resident {
+		t.Fatal("failed create left the session resident")
+	}
+	if !tombstoned || tombstone.RuntimeSessionGeneration != create.Metadata.Fence.RuntimeSessionGeneration {
+		t.Fatalf("failed create did not record a matching tombstone: %#v", tombstone)
+	}
+
+	// Replaying the same create must not allocate another identity; it is
+	// classified against the tombstone rather than recreated.
+	replay := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if replay.Code == http.StatusCreated {
+		t.Fatalf("replayed failed create allocated a new session: body=%s", replay.Body.String())
+	}
+	server.mu.Lock()
+	_, residentAfterReplay := server.sessions[create.RuntimeSessionID]
+	server.mu.Unlock()
+	if residentAfterReplay {
+		t.Fatal("replayed failed create became resident")
+	}
+}
+
 func TestSupervisorCreateAndPrompt(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)

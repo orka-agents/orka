@@ -262,6 +262,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.status())
 }
 
+// tombstoneFailedCreateLocked records a tombstone for a create that failed
+// after identity allocation so a replay of the same request is classified as
+// a duplicate rather than allocating another non-reused identity. It must be
+// called with s.mu held.
+func (s *Server) tombstoneFailedCreateLocked(sessionID harnessv2.RuntimeSessionID, metadata harnessv2.MutationMetadata, recordedAt time.Time) {
+	state, ok := s.sessions[sessionID]
+	if !ok || !state.creating {
+		return
+	}
+	delete(s.sessions, sessionID)
+	s.tombstones[metadata.Fence.RuntimeSessionUID] = harnessv2.RuntimeSessionTombstone{
+		RuntimeSessionUID:        metadata.Fence.RuntimeSessionUID,
+		RuntimeSessionGeneration: metadata.Fence.RuntimeSessionGeneration,
+		RuntimeProfileDigest:     s.cfg.Fence.RuntimeProfileDigest,
+		DeletedAt:                time.Now().UTC(),
+		Operations:               []harnessv2.OperationRecord{operationRecord(metadata, harnessv2.OperationPhaseRecorded, "", recordedAt)},
+	}
+}
+
 // rejectTombstonedSessionCreateLocked classifies a create against the deletion
 // tombstone for its session UID/generation. It must be called with s.mu held;
 // when it handles the request it unlocks s.mu, writes the response, and
@@ -514,8 +533,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, createErr := s.createSession(r.Context(), request, now, uid, gid)
 	if createErr != nil {
+		// The allocated UID/GID is permanently consumed (identities are never
+		// reused). Tombstone the failed create so a replay of the same request
+		// is classified as a duplicate instead of allocating another identity
+		// on every retry and exhausting the pool's identity range; a genuine
+		// new attempt advances the session generation and is not blocked.
 		s.mu.Lock()
-		delete(s.sessions, request.RuntimeSessionID)
+		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now)
 		s.mu.Unlock()
 		slog.Error("ACP runtime session creation failed", "stage", sessionCreationStage(createErr))
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, safeError(createErr), nil, true)

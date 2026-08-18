@@ -24,6 +24,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -3110,8 +3111,7 @@ func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *core
 		runtime.Status.ObservedOperationCapabilityRefResourceVersion != auth.capabilityResourceVersion {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external AgentRuntime authentication material changed after conformance")
 	}
-	runtimeClient, err := harnessv2.NewClient(
-		runtime.Spec.Deployment.Endpoint,
+	clientOptions := []harnessv2.ClientOption{
 		harnessv2.WithControlTimeout(runtimeSessionCreateTimeout(acpDispatchTarget{external: runtime})),
 		harnessv2.WithControllerBearerToken(auth.controllerBearerToken),
 		harnessv2.WithOperationCapabilitySecret(auth.operationCapabilitySecret),
@@ -3119,7 +3119,18 @@ func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *core
 			RuntimeProfileDigest: harnessv2.ProfileDigest(runtime.Spec.Capabilities.Profile.Digest),
 			RuntimeInstanceID:    harnessv2.RuntimeInstanceID(runtime.Spec.Capabilities.RuntimeInstanceID),
 		}),
-	)
+	}
+	// A non-Service external endpoint is dialed from the controller's
+	// privileged network position, and a hostname that resolved publicly at
+	// conformance can rebind to an internal address; enforce the same
+	// per-dial public-address control conformance uses on every request.
+	if agentRuntimeEndpointRequiresPublicDial(runtime.Spec.Deployment.Endpoint) {
+		clientOptions = append(clientOptions, harnessv2.WithHTTPClient(&http.Client{
+			Timeout:   runtimeSessionCreateTimeout(acpDispatchTarget{external: runtime}),
+			Transport: v2conformance.PublicAddressDialTransport(),
+		}))
+	}
+	runtimeClient, err := harnessv2.NewClient(runtime.Spec.Deployment.Endpoint, clientOptions...)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}

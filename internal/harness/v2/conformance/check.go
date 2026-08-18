@@ -82,6 +82,26 @@ func PublicAddressAllowed(addr netip.Addr) bool {
 	return true
 }
 
+// PublicAddressDialTransport returns a proxy-disabled transport whose every
+// connection attempt is rejected unless the resolved address is a public
+// global unicast address. The control hook runs per dial after DNS
+// resolution, so it also defeats DNS rebinding between validation and dial.
+// Non-Service external runtime traffic must use it so a hostname that
+// resolves publicly at conformance cannot later rebind to an internal
+// controller-reachable address.
+func PublicAddressDialTransport() *http.Transport {
+	transport := harnessv2.NewProxylessTransport()
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			return requirePublicDialAddress(address)
+		},
+	}
+	transport.DialContext = dialer.DialContext
+	return transport
+}
+
 // requirePublicDialAddress rejects dial targets that are not public global
 // unicast addresses outside every special-use range.
 func requirePublicDialAddress(address string) error {
@@ -128,18 +148,7 @@ func Check(ctx context.Context, target Target) Result {
 		},
 	}
 	if target.RequirePublicAddresses {
-		transport := harnessv2.NewProxylessTransport()
-		dialer := &net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-			// The control hook runs per connection attempt after DNS
-			// resolution, so it also rejects rebinding to internal targets.
-			Control: func(_, address string, _ syscall.RawConn) error {
-				return requirePublicDialAddress(address)
-			},
-		}
-		transport.DialContext = dialer.DialContext
-		httpClient.Transport = transport
+		httpClient.Transport = PublicAddressDialTransport()
 	}
 	expectedProfileDigest, err := harnessv2.CanonicalProfileDigest(target.Profile)
 	if err != nil {

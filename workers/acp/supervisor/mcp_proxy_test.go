@@ -156,8 +156,12 @@ func TestMCPProxyApprovalPolicyIsFailClosedAndOnceBound(t *testing.T) {
 	if withoutApproval.Error == nil || calls.Load() != 0 {
 		t.Fatalf("unapproved call = %#v calls=%d", withoutApproval, calls.Load())
 	}
+	approvedToolCallID, err := canonicalACPToolCallID("provider-call-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	evidence := harnessv2.MCPApprovalEvidence{
-		PermissionRequestID: "permission-1", ToolCallID: "provider-call-1", ToolName: "mutate",
+		PermissionRequestID: "permission-1", ToolCallID: approvedToolCallID, ToolName: "mutate",
 		GrantedAt: now, ExpiresAt: now.Add(time.Minute),
 	}
 	if err := session.grantApproval(authorization.PromptID, evidence); err != nil {
