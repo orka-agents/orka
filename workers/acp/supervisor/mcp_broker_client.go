@@ -100,6 +100,10 @@ func (c *controllerMCPBrokerClient) Call(ctx context.Context, request harnessv2.
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+c.controllerBearer)
 	httpRequest.Header.Set(harnessv2.OperationCapabilityHeader, capability)
+	// Carry the non-secret pool identity so the broker can verify the bearer
+	// before reading the body.
+	httpRequest.Header.Set(harnessv2.MCPBrokerPoolNamespaceHeader, request.Namespace)
+	httpRequest.Header.Set(harnessv2.MCPBrokerPoolUIDHeader, string(request.Metadata.Fence.RuntimePoolUID))
 	response, err := c.client.Do(httpRequest)
 	if err != nil {
 		return harnessv2.MCPBrokerCallResponse{}, fmt.Errorf("MCP broker transport failed")

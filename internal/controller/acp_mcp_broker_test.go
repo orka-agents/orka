@@ -489,6 +489,19 @@ func TestKubernetesACPMCPBrokerCredentialResolverChecksTaskSessionGeneration(t *
 	epochs.current = &store.ControllerEpoch{Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "controller-a"}
 	close(epochs.ready)
 	resolver := KubernetesACPMCPBrokerCredentialResolver{Reader: reader, Epochs: epochs}
+
+	// Header pre-authentication accepts the pool bearer and rejects a wrong
+	// bearer or missing pool identity before any body is read.
+	if err := resolver.PreAuthenticateACPMCPBroker(context.Background(), request.Namespace, string(pool.UID), "Bearer "+strings.Repeat("b", 32)); err != nil {
+		t.Fatalf("valid pre-auth error = %v", err)
+	}
+	if err := resolver.PreAuthenticateACPMCPBroker(context.Background(), request.Namespace, string(pool.UID), "Bearer "+strings.Repeat("z", 32)); err == nil {
+		t.Fatal("wrong-bearer pre-auth unexpectedly accepted")
+	}
+	if err := resolver.PreAuthenticateACPMCPBroker(context.Background(), request.Namespace, "", "Bearer "+strings.Repeat("b", 32)); err == nil {
+		t.Fatal("missing pool identity pre-auth unexpectedly accepted")
+	}
+
 	credentials, err := resolver.ResolveACPMCPBrokerCredentials(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)

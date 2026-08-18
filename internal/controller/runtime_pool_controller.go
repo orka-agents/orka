@@ -556,12 +556,28 @@ func validateRuntimePoolProfile(pool *corev1alpha1.RuntimePool) (harnessv2.Runti
 }
 
 func (r *RuntimePoolReconciler) runtimePoolNamespace(pool *corev1alpha1.RuntimePool) (string, error) {
-	namespace := strings.TrimSpace(pool.Spec.RuntimeNamespace)
+	requested := strings.TrimSpace(pool.Spec.RuntimeNamespace)
+	configured := strings.TrimSpace(r.RuntimeNamespace)
+	// The controller creates the pool's Deployment, Secrets, Service,
+	// NetworkPolicy, and PDB in the physical runtime namespace on the caller's
+	// behalf. A caller with only namespaced RuntimePool-create rights must not
+	// be able to steer those controller-owned resources into an arbitrary
+	// namespace, so an explicit spec.runtimeNamespace is accepted only when it
+	// matches the controller-configured runtime namespace or the pool's own
+	// namespace; anything else is rejected rather than reconciled.
+	allowed := map[string]struct{}{pool.Namespace: {}}
+	if configured != "" {
+		allowed[configured] = struct{}{}
+	}
+	namespace := requested
 	if namespace == "" {
-		namespace = strings.TrimSpace(r.RuntimeNamespace)
+		namespace = configured
 	}
 	if namespace == "" {
 		namespace = pool.Namespace
+	}
+	if _, ok := allowed[namespace]; !ok {
+		return "", fmt.Errorf("spec.runtimeNamespace %q is not permitted; use the pool namespace or the controller-configured runtime namespace", requested)
 	}
 	if errs := validation.IsDNS1123Label(namespace); len(errs) != 0 {
 		return "", fmt.Errorf("runtime namespace is invalid")

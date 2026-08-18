@@ -653,6 +653,15 @@ func TestAgentRuntimeReconcilerRejectsMissingCapabilitySecretKey(t *testing.T) {
 	}
 }
 
+func expectAgentRuntimeEndpointPolicyError(t *testing.T, r *AgentRuntimeReconciler, runtimeObject *corev1alpha1.AgentRuntime, endpoint, wantSubstr string) {
+	t.Helper()
+	runtimeObject.Spec.Deployment.Endpoint = endpoint
+	err := r.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject)
+	if err == nil || !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf("endpoint %q error = %v, want %q", endpoint, err, wantSubstr)
+	}
+}
+
 func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
 	config := conformancetest.Config{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims}
@@ -671,6 +680,7 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
 		},
 		AddressType: discoveryv1.AddressTypeIPv4,
+		Ports:       []discoveryv1.EndpointPort{{Port: new(int32(8080))}},
 		Endpoints: []discoveryv1.Endpoint{{
 			Addresses: []string{"10.0.0.9"},
 			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-pod"},
@@ -680,24 +690,23 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err != nil {
 		t.Fatalf("same-namespace Service endpoint: %v", err)
 	}
+	// Dispatch pins to the verified backend Pod IP:port, not the Service.
+	pins, err := reconciler.AgentRuntimeServiceBackendPins(t.Context(), runtimeObject)
+	if err != nil {
+		t.Fatalf("backend pins error: %v", err)
+	}
+	if len(pins) != 1 || pins[0] != "10.0.0.9:8080" {
+		t.Fatalf("backend pins = %v, want [10.0.0.9:8080]", pins)
+	}
 	if err := reconciler.Delete(t.Context(), validSlice); err != nil {
 		t.Fatal(err)
 	}
-	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.other.svc.cluster.local:8080"
-	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "must match") {
-		t.Fatalf("cross-namespace endpoint error = %v", err)
-	}
-	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.example.com"
-	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("external HTTP endpoint error = %v", err)
-	}
+	expectAgentRuntimeEndpointPolicyError(t, reconciler, runtimeObject, "http://runtime.other.svc.cluster.local:8080", "must match")
+	expectAgentRuntimeEndpointPolicyError(t, reconciler, runtimeObject, "http://runtime.example.com", "https")
 	for _, endpoint := range []string{
 		"https://100.64.0.1", "https://198.18.0.5", "https://192.0.2.9", "https://[2002::1]",
 	} {
-		runtimeObject.Spec.Deployment.Endpoint = endpoint
-		if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "non-public IP") {
-			t.Fatalf("special-use endpoint %s error = %v", endpoint, err)
-		}
+		expectAgentRuntimeEndpointPolicyError(t, reconciler, runtimeObject, endpoint, "non-public IP")
 	}
 	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
 	// A forged address that is not one of the backing Pod's IPs is rejected

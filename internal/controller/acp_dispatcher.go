@@ -3098,9 +3098,11 @@ func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *core
 	// Readiness was established at conformance time, but the endpoint Service,
 	// EndpointSlices, and backend Pods are mutable between reconciles; revalidate
 	// the endpoint policy immediately before sending the bearer and signed
-	// capabilities so a backend swapped after Ready cannot steer authenticated
-	// controller traffic at an internal address.
-	if err := reconciler.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
+	// capabilities, and for a Service endpoint capture the verified backend Pod
+	// addresses so the authenticated connection is pinned to one of them rather
+	// than routed through the still-mutable Service ClusterIP.
+	serviceBackendPins, err := reconciler.AgentRuntimeServiceBackendPins(ctx, runtime)
+	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
 	auth, err := reconciler.agentRuntimeAuthMaterial(ctx, runtime)
@@ -3120,13 +3122,20 @@ func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *core
 			RuntimeInstanceID:    harnessv2.RuntimeInstanceID(runtime.Spec.Capabilities.RuntimeInstanceID),
 		}),
 	}
-	// A non-Service external endpoint is dialed from the controller's
-	// privileged network position, and a hostname that resolved publicly at
-	// conformance can rebind to an internal address; enforce the same
-	// per-dial public-address control conformance uses on every request.
-	if agentRuntimeEndpointRequiresPublicDial(runtime.Spec.Deployment.Endpoint) {
+	// Pin the connection: a Service endpoint dials only its verified backend
+	// Pod IPs; a non-Service endpoint dialed from the controller's privileged
+	// position enforces the same per-dial public-address control conformance
+	// uses (a hostname that resolved publicly at conformance can rebind to an
+	// internal address).
+	dialTimeout := runtimeSessionCreateTimeout(acpDispatchTarget{external: runtime})
+	if len(serviceBackendPins) > 0 {
 		clientOptions = append(clientOptions, harnessv2.WithHTTPClient(&http.Client{
-			Timeout:   runtimeSessionCreateTimeout(acpDispatchTarget{external: runtime}),
+			Timeout:   dialTimeout,
+			Transport: PinnedBackendDialTransport(serviceBackendPins),
+		}))
+	} else if agentRuntimeEndpointRequiresPublicDial(runtime.Spec.Deployment.Endpoint) {
+		clientOptions = append(clientOptions, harnessv2.WithHTTPClient(&http.Client{
+			Timeout:   dialTimeout,
 			Transport: v2conformance.PublicAddressDialTransport(),
 		}))
 	}

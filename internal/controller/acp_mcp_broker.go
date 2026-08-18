@@ -60,6 +60,13 @@ type ACPMCPBrokerCredentialResolver interface {
 	ResolveACPMCPBrokerCredentials(context.Context, harnessv2.MCPBrokerCallRequest) (ACPMCPBrokerCredentials, error)
 }
 
+// ACPMCPBrokerPreAuthenticator resolves and verifies the controller bearer
+// from the non-secret pool identity carried in request headers, so the broker
+// can reject unauthenticated callers before consuming their request bodies.
+type ACPMCPBrokerPreAuthenticator interface {
+	PreAuthenticateACPMCPBroker(ctx context.Context, poolNamespace, poolUID, authorizationHeader string) error
+}
+
 type ACPMCPBrokerCredentialResolverFunc func(context.Context, harnessv2.MCPBrokerCallRequest) (ACPMCPBrokerCredentials, error)
 
 func (f ACPMCPBrokerCredentialResolverFunc) ResolveACPMCPBrokerCredentials(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (ACPMCPBrokerCredentials, error) {
@@ -344,6 +351,19 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusServiceUnavailable, "MCP broker is unavailable")
 		return
 	}
+	// Authenticate the controller bearer against the pool identity carried in
+	// non-secret headers before reading the body, so an untrusted Pod cannot
+	// occupy request handlers by drip-feeding chunked bodies without knowing a
+	// bearer. Resolvers that do not support header pre-authentication (test
+	// fakes) fall through to the post-decode bearer check below.
+	if preAuth, ok := b.Credentials.(ACPMCPBrokerPreAuthenticator); ok {
+		poolNamespace := r.Header.Get(harnessv2.MCPBrokerPoolNamespaceHeader)
+		poolUID := r.Header.Get(harnessv2.MCPBrokerPoolUIDHeader)
+		if err := preAuth.PreAuthenticateACPMCPBroker(r.Context(), poolNamespace, poolUID, r.Header.Get("Authorization")); err != nil {
+			writeACPMCPError(w, http.StatusUnauthorized, "MCP broker authentication failed")
+			return
+		}
+	}
 	limit := b.MaxBodyBytes
 	if limit <= 0 || limit > harnessv2.MaxCanonicalJSONBytes {
 		limit = harnessv2.MaxCanonicalJSONBytes
@@ -367,6 +387,15 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeACPMCPError(w, http.StatusBadRequest, "invalid MCP broker request")
 		return
+	}
+	// The body must match the pre-authenticated pool identity so a caller
+	// cannot pre-authenticate as one pool and act as another.
+	if _, ok := b.Credentials.(ACPMCPBrokerPreAuthenticator); ok {
+		if request.Namespace != r.Header.Get(harnessv2.MCPBrokerPoolNamespaceHeader) ||
+			string(request.Metadata.Fence.RuntimePoolUID) != r.Header.Get(harnessv2.MCPBrokerPoolUIDHeader) {
+			writeACPMCPError(w, http.StatusBadRequest, "MCP broker request does not match its authenticated pool identity")
+			return
+		}
 	}
 	credentials, err := b.Credentials.ResolveACPMCPBrokerCredentials(r.Context(), request)
 	if err != nil || !constantTimeBearerMatch(r.Header.Get("Authorization"), credentials.ControllerBearerToken) {
@@ -500,6 +529,33 @@ func (a DurableACPMCPPromptAuthorizer) AuthorizeACPMCPPrompt(ctx context.Context
 type KubernetesACPMCPBrokerCredentialResolver struct {
 	Reader client.Reader
 	Epochs *ControllerEpochManager
+}
+
+// PreAuthenticateACPMCPBroker resolves the pool's controller bearer from the
+// non-secret namespace + pool UID headers and constant-time compares it to the
+// presented Authorization header, before any request body is read.
+func (r KubernetesACPMCPBrokerCredentialResolver) PreAuthenticateACPMCPBroker(
+	ctx context.Context,
+	poolNamespace, poolUID, authorizationHeader string,
+) error {
+	if r.Reader == nil {
+		return fmt.Errorf("kubernetes MCP credential resolver is not configured")
+	}
+	if strings.TrimSpace(poolNamespace) == "" || strings.TrimSpace(poolUID) == "" {
+		return fmt.Errorf("MCP broker pool identity headers are required")
+	}
+	pool, err := findACPMCPRuntimePool(ctx, r.Reader, poolNamespace, harnessv2.RuntimePoolUID(poolUID))
+	if err != nil {
+		return err
+	}
+	bearer, _, err := runtimePoolACPMCPAuthMaterial(ctx, r.Reader, pool)
+	if err != nil {
+		return err
+	}
+	if !constantTimeBearerMatch(authorizationHeader, bearer) {
+		return fmt.Errorf("MCP broker bearer does not match the pool")
+	}
+	return nil
 }
 
 func (r KubernetesACPMCPBrokerCredentialResolver) ResolveACPMCPBrokerCredentials(

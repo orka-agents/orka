@@ -10,12 +10,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"slices"
-
+	"sort"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -749,6 +752,17 @@ func isPublicAgentRuntimeAddress(address netip.Addr) bool {
 // ownership; only the Pod's own status and labels are. This runs on every
 // reconcile immediately before probing.
 func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context.Context, service *corev1.Service) error {
+	_, err := r.verifiedAgentRuntimeServiceBackends(ctx, service)
+	return err
+}
+
+// verifiedAgentRuntimeServiceBackends validates the Service's backends and
+// returns the set of verified backend Pod IPs. Dispatch pins the authenticated
+// connection to one of these IPs so a Service or EndpointSlice swapped between
+// this check and the dial cannot route the request to an arbitrary address
+// (the validate-then-dial TOCTOU cannot be closed while routing through the
+// still-mutable Service ClusterIP).
+func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context.Context, service *corev1.Service) ([]string, error) {
 	serviceNamespace, serviceName := service.Namespace, service.Name
 	selector := labels.SelectorFromSet(service.Spec.Selector)
 	reader := r.endpointReader()
@@ -756,27 +770,28 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context
 	if err := reader.List(ctx, &endpointSlices, client.InNamespace(serviceNamespace), client.MatchingLabels{
 		discoveryv1.LabelServiceName: serviceName,
 	}); err != nil {
-		return fmt.Errorf("list AgentRuntime endpoint Service %s/%s EndpointSlices: %w", serviceNamespace, serviceName, err)
+		return nil, fmt.Errorf("list AgentRuntime endpoint Service %s/%s EndpointSlices: %w", serviceNamespace, serviceName, err)
 	}
 	deny := func(detail string) error {
 		return fmt.Errorf("AgentRuntime endpoint Service %s/%s %s; only same-namespace Pods selected by the Service are permitted", serviceNamespace, serviceName, detail)
 	}
+	verified := map[string]struct{}{}
 	for i := range endpointSlices.Items {
 		slice := &endpointSlices.Items[i]
 		for _, endpoint := range slice.Endpoints {
 			ref := endpoint.TargetRef
 			if ref == nil || ref.Kind != "Pod" || (ref.Namespace != "" && ref.Namespace != serviceNamespace) {
-				return deny("routes to a backend that is not a same-namespace Pod")
+				return nil, deny("routes to a backend that is not a same-namespace Pod")
 			}
 			var pod corev1.Pod
 			if err := reader.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: ref.Name}, &pod); err != nil {
 				if apierrors.IsNotFound(err) {
-					return deny(fmt.Sprintf("references a backend Pod %q that does not exist", ref.Name))
+					return nil, deny(fmt.Sprintf("references a backend Pod %q that does not exist", ref.Name))
 				}
-				return fmt.Errorf("get AgentRuntime endpoint backend Pod %s/%s: %w", serviceNamespace, ref.Name, err)
+				return nil, fmt.Errorf("get AgentRuntime endpoint backend Pod %s/%s: %w", serviceNamespace, ref.Name, err)
 			}
 			if !selector.Matches(labels.Set(pod.Labels)) {
-				return deny(fmt.Sprintf("references a backend Pod %q that the Service selector does not select", ref.Name))
+				return nil, deny(fmt.Sprintf("references a backend Pod %q that the Service selector does not select", ref.Name))
 			}
 			podIPs := map[string]struct{}{}
 			for _, podIP := range pod.Status.PodIPs {
@@ -787,12 +802,68 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context
 			}
 			for _, address := range endpoint.Addresses {
 				if _, ok := podIPs[address]; !ok {
-					return deny(fmt.Sprintf("advertises address %q that is not an IP of backend Pod %q", address, ref.Name))
+					return nil, deny(fmt.Sprintf("advertises address %q that is not an IP of backend Pod %q", address, ref.Name))
+				}
+				for _, port := range slice.Ports {
+					if port.Port == nil || *port.Port <= 0 {
+						continue
+					}
+					verified[net.JoinHostPort(address, strconv.Itoa(int(*port.Port)))] = struct{}{}
 				}
 			}
 		}
 	}
-	return nil
+	addresses := make([]string, 0, len(verified))
+	for address := range verified {
+		addresses = append(addresses, address)
+	}
+	sort.Strings(addresses)
+	return addresses, nil
+}
+
+// AgentRuntimeServiceBackendPins validates the endpoint policy and, for a
+// same-namespace Service endpoint, returns the verified backend addresses to
+// pin the dial to. It returns nil for non-Service endpoints (which the
+// public-address dial control governs instead). The reader must be uncached
+// for a dispatch-time revalidation.
+func (r *AgentRuntimeReconciler) AgentRuntimeServiceBackendPins(ctx context.Context, runtime *corev1alpha1.AgentRuntime) ([]string, error) {
+	if err := r.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
+		return nil, err
+	}
+	parsed, err := url.Parse(strings.TrimSpace(runtime.Spec.Deployment.Endpoint))
+	if err != nil {
+		return nil, fmt.Errorf("parse AgentRuntime endpoint: %w", err)
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	serviceName, serviceNamespace, serviceEndpoint := parseAgentRuntimeServiceNamespaceHost(host)
+	if !serviceEndpoint {
+		return nil, nil
+	}
+	var service corev1.Service
+	if err := r.endpointReader().Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: serviceName}, &service); err != nil {
+		return nil, fmt.Errorf("get AgentRuntime endpoint Service %s/%s: %w", serviceNamespace, serviceName, err)
+	}
+	return r.verifiedAgentRuntimeServiceBackends(ctx, &service)
+}
+
+// PinnedBackendDialTransport returns a proxy-disabled transport that dials only
+// the given verified backend addresses, ignoring the Service ClusterIP the URL
+// would otherwise resolve to. Pinning the authenticated connection to a
+// verified Pod backend closes the validate-then-dial TOCTOU that routing
+// through the still-mutable Service would leave open.
+func PinnedBackendDialTransport(addresses []string) *http.Transport {
+	pinned := append([]string(nil), addresses...)
+	transport := harnessv2.NewProxylessTransport()
+	base := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	var next atomic.Uint64
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		if len(pinned) == 0 {
+			return nil, fmt.Errorf("no verified AgentRuntime backend to dial")
+		}
+		target := pinned[int(next.Add(1)-1)%len(pinned)]
+		return base.DialContext(ctx, network, target)
+	}
+	return transport
 }
 
 // agentRuntimeEndpointRequiresPublicDial reports whether conformance dials to
