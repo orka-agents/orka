@@ -1970,11 +1970,11 @@ func TestHandlers_ListTasks(t *testing.T) {
 	}
 }
 
-func TestHandlers_ListTasks_WithPagination(t *testing.T) {
+func TestHandlers_ListTasks_WithExplicitPagination(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Get("/tasks", handlers.ListTasks)
 
-	req := httptest.NewRequest(http.MethodGet, "/tasks?limit=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/tasks?limit=10&paginate=true", nil)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
@@ -2406,13 +2406,17 @@ func TestParseDuration(t *testing.T) {
 func TestNewHandlers(t *testing.T) {
 	scheme := runtime.NewScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "test-ns"})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: apiReader, WatchNamespace: "test-ns"})
 	if handlers == nil {
 		t.Fatal("NewHandlers returned nil")
 	}
 	if handlers.watchNamespace != "test-ns" {
 		t.Errorf("watchNamespace = %s, want test-ns", handlers.watchNamespace)
+	}
+	if handlers.apiReader != apiReader {
+		t.Error("apiReader was not configured")
 	}
 }
 

@@ -598,11 +598,17 @@ func (h *Handlers) authorizeContextTokenLoadedTaskWithIdentity(c fiber.Ctx, acti
 	return h.handleContextTokenAuthorizationFailures(ui.ContextToken, action, failures)
 }
 
-func (h *Handlers) contextTokenAllowsLoadedTask(c fiber.Ctx, action string, task *corev1alpha1.Task) (bool, error) {
-	return h.contextTokenAllowsLoadedTaskWithIdentity(c, action, task, true)
+func (h *Handlers) contextTokenAllowsLoadedTaskWithIdentity(c fiber.Ctx, action string, task *corev1alpha1.Task, includeTaskIdentity bool) (bool, error) {
+	return h.contextTokenAllowsLoadedTaskWithReader(c, action, task, includeTaskIdentity, h.client)
 }
 
-func (h *Handlers) contextTokenAllowsLoadedTaskWithIdentity(c fiber.Ctx, action string, task *corev1alpha1.Task, includeTaskIdentity bool) (bool, error) {
+func (h *Handlers) contextTokenAllowsLoadedTaskWithReader(
+	c fiber.Ctx,
+	action string,
+	task *corev1alpha1.Task,
+	includeTaskIdentity bool,
+	k8sReader client.Reader,
+) (bool, error) {
 	if !h.contextTokenAuthorization.Enabled() {
 		return true, nil
 	}
@@ -611,7 +617,7 @@ func (h *Handlers) contextTokenAllowsLoadedTaskWithIdentity(c fiber.Ctx, action 
 		return true, nil
 	}
 
-	failures, err := h.contextTokenLoadedTaskContextFailures(c.Context(), ui.ContextToken, task, includeTaskIdentity)
+	failures, err := contextTokenLoadedTaskContextFailures(c.Context(), k8sReader, ui.ContextToken, task, includeTaskIdentity)
 	if err != nil {
 		return false, err
 	}
@@ -628,7 +634,7 @@ func (h *Handlers) contextTokenLoadedTaskContextFailures(ctx context.Context, to
 	return contextTokenLoadedTaskContextFailures(ctx, h.client, token, task, includeTaskIdentity)
 }
 
-func contextTokenLoadedTaskContextFailures(ctx context.Context, k8sClient client.Client, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
+func contextTokenLoadedTaskContextFailures(ctx context.Context, k8sClient client.Reader, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
 	if token == nil || task == nil {
 		return nil, nil
 	}
@@ -1109,7 +1115,7 @@ func (h *Handlers) resolveContextTokenTaskCreateAuthorizationContext(ctx context
 	return resolveContextTokenTaskCreateAuthorizationContext(ctx, h.client, req, namespace)
 }
 
-func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c client.Client, req CreateTaskRequest, namespace string) (contextTokenTaskCreateAuthorizationContext, error) {
+func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c client.Reader, req CreateTaskRequest, namespace string) (contextTokenTaskCreateAuthorizationContext, error) {
 	authzCtx := contextTokenTaskCreateAuthorizationContext{
 		Request:   req,
 		Namespace: namespace,
@@ -1164,7 +1170,7 @@ func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c cl
 	return authzCtx, nil
 }
 
-func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, c client.Client, namespace string, agent *corev1alpha1.Agent) []contextTokenProviderModel {
+func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, c client.Reader, namespace string, agent *corev1alpha1.Agent) []contextTokenProviderModel {
 	if c == nil || agent == nil || agent.Spec.Model == nil || len(agent.Spec.Model.Fallbacks) == 0 {
 		return nil
 	}
@@ -1314,7 +1320,7 @@ func contextTokenTaskCreateEffectiveRuntimeAllowBash(req CreateTaskRequest, agen
 
 func contextTokenTaskToolCredentialFailures(
 	ctx context.Context,
-	k8sClient client.Client,
+	k8sClient client.Reader,
 	token *ContextToken,
 	cfg ContextTokenAuthorizationConfig,
 	authzCtx contextTokenTaskCreateAuthorizationContext,
