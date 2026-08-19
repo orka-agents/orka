@@ -93,6 +93,11 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, "runtime session is not idle", nil, false)
 		return
 	}
+	if err := ensureSessionOperationCapacityLocked(state, sessionDeletionOperationReserve); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
+		return
+	}
 	content, err := promptContentToACP(request.Input.Content)
 	if err != nil {
 		s.mu.Unlock()
@@ -108,10 +113,11 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prompt := &promptState{
-		request:   request,
-		operation: operationRecord(request.Metadata, harnessv2.OperationPhaseRecorded, "", now),
-		lease:     request.Lease,
-		startedAt: now,
+		request:              request,
+		operation:            operationRecord(request.Metadata, harnessv2.OperationPhaseRecorded, "", now),
+		lease:                request.Lease,
+		startedAt:            now,
+		permissionRequestIDs: make(map[harnessv2.PermissionRequestID]struct{}),
 	}
 	state.prompt = prompt
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
@@ -534,6 +540,11 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
 		return
 	}
+	if err := ensureSessionOperationCapacityLocked(state, sessionDeletionOperationReserve); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
+		return
+	}
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
@@ -612,6 +623,11 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 		} else {
 			writeClassificationError(w, classification)
 		}
+		return
+	}
+	if err := ensureSessionOperationCapacityLocked(state, sessionDeletionOperationReserve); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
 		return
 	}
 	if !pending {
@@ -733,6 +749,11 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 	if !promptMetadataMatches(request.Metadata, state.prompt.request.Metadata) {
 		s.mu.Unlock()
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "cancellation prompt identity does not match the active prompt", nil, false)
+		return
+	}
+	if err := ensureSessionOperationCapacityLocked(state, sessionDeletionOperationReserve); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
 		return
 	}
 	invalidated := uint32(len(state.permissions))
@@ -920,18 +941,9 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 		}
 		return
 	}
-	if state.workspaceIntent != harnessv2.WorkspaceIntentWrite || state.prompt == nil || state.prompt.settlement == nil ||
-		!promptMetadataMatches(request.Metadata, state.prompt.request.Metadata) {
+	if failure := publicationFinalizationPreconditionFailure(state, request); failure != nil {
 		s.mu.Unlock()
-		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "runtime session is not ready for publication finalization", nil, false)
-		return
-	}
-	deltaResponse, ok := state.deltas[request.WorkspaceDeltaID]
-	if !ok || deltaResponse.Delta.State != harnessv2.WorkspaceDeltaPrepared || !deltaResponse.Delta.PublicationSafe ||
-		deltaResponse.Delta.RuntimeSessionUID != state.descriptor.RuntimeSessionUID ||
-		deltaResponse.Delta.SessionGeneration != state.descriptor.Generation {
-		s.mu.Unlock()
-		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "publication finalization does not match the prepared workspace delta", nil, false)
+		writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
 		return
 	}
 	receipt := harnessv2.PublicationFinalizationReceipt{
@@ -979,6 +991,32 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 	if drainCleanup {
 		go s.cleanupDrainedSession(sessionID, state)
 	}
+}
+
+func publicationFinalizationPreconditionFailure(
+	state *sessionState,
+	request harnessv2.FinalizeRuntimeSessionPublicationRequest,
+) *operationFailure {
+	if state.workspaceIntent != harnessv2.WorkspaceIntentWrite || state.prompt == nil || state.prompt.settlement == nil ||
+		!promptMetadataMatches(request.Metadata, state.prompt.request.Metadata) {
+		return &operationFailure{
+			status: http.StatusConflict, code: harnessv2.ErrorCodeSessionPoisoned,
+			message: "runtime session is not ready for publication finalization",
+		}
+	}
+	deltaResponse, ok := state.deltas[request.WorkspaceDeltaID]
+	if !ok || deltaResponse.Delta.State != harnessv2.WorkspaceDeltaPrepared || !deltaResponse.Delta.PublicationSafe ||
+		deltaResponse.Delta.RuntimeSessionUID != state.descriptor.RuntimeSessionUID ||
+		deltaResponse.Delta.SessionGeneration != state.descriptor.Generation {
+		return &operationFailure{
+			status: http.StatusConflict, code: harnessv2.ErrorCodeDigestConflict,
+			message: "publication finalization does not match the prepared workspace delta",
+		}
+	}
+	if err := ensureSessionOperationCapacityLocked(state, sessionDeletionOperationReserve); err != nil {
+		return &operationFailure{status: http.StatusConflict, code: harnessv2.ErrorCodeSessionPoisoned, message: err.Error()}
+	}
+	return nil
 }
 
 func publicationFinalizationMatches(a, b harnessv2.PublicationFinalizationReceipt) bool {
@@ -1053,6 +1091,11 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		} else {
 			writeClassificationError(w, classification)
 		}
+		return
+	}
+	if err := ensureSessionOperationCapacityLocked(state, 0); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
 		return
 	}
 	ready, transitionErr := prepareSessionDeletionLocked(state, publicationFinalized, now)
@@ -1311,7 +1354,18 @@ func buildWorkspaceDelta(
 	intent workspacedelta.Intent,
 	limits harnessv2.WorkspaceDeltaLimits,
 ) (workspacedelta.Result, error) {
-	return workspacedelta.BuildWithLimits(
+	return buildWorkspaceDeltaContext(context.Background(), baseline, workspace, intent, limits)
+}
+
+func buildWorkspaceDeltaContext(
+	ctx context.Context,
+	baseline *workspacedelta.Snapshot,
+	workspace string,
+	intent workspacedelta.Intent,
+	limits harnessv2.WorkspaceDeltaLimits,
+) (workspacedelta.Result, error) {
+	return workspacedelta.BuildWithLimitsContext(
+		ctx,
 		baseline,
 		workspace,
 		intent,
@@ -1320,11 +1374,18 @@ func buildWorkspaceDelta(
 }
 
 func workspaceDeltaContentPolicyViolation(artifact []byte, limits harnessv2.WorkspaceDeltaLimits) (string, error) {
+	return workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, limits)
+}
+
+func workspaceDeltaContentPolicyViolationContext(ctx context.Context, artifact []byte, limits harnessv2.WorkspaceDeltaLimits) (string, error) {
 	if len(artifact) == 0 || (!limits.RejectBinaryFiles && !limits.RejectSecretLikeContent) {
 		return "", nil
 	}
 	reader := tar.NewReader(bytes.NewReader(artifact))
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
 			return "", nil
@@ -1340,8 +1401,14 @@ func workspaceDeltaContentPolicyViolation(artifact []byte, limits harnessv2.Work
 		if header.Size < 0 || header.Size > limits.MaxBytes {
 			return "", fmt.Errorf("workspace delta file size is invalid")
 		}
-		content, err := io.ReadAll(io.LimitReader(reader, header.Size+1))
-		if err != nil || int64(len(content)) != header.Size {
+		content, err := io.ReadAll(io.LimitReader(&workspaceDeltaContextReader{ctx: ctx, reader: reader}, header.Size+1))
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
+			return "", fmt.Errorf("workspace delta file content is incomplete")
+		}
+		if int64(len(content)) != header.Size {
 			return "", fmt.Errorf("workspace delta file content is incomplete")
 		}
 		if fileContent && limits.RejectBinaryFiles && (bytes.IndexByte(content, 0) >= 0 || !utf8.Valid(content)) {
@@ -1351,6 +1418,18 @@ func workspaceDeltaContentPolicyViolation(artifact []byte, limits harnessv2.Work
 			return "workspace delta contains secret-like file content", nil
 		}
 	}
+}
+
+type workspaceDeltaContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *workspaceDeltaContextReader) Read(value []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(value)
 }
 
 func workspaceDeltaContainsSessionCredential(artifact []byte, state *sessionState) bool {
@@ -1445,6 +1524,11 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "workspace intent or verified baseline does not match the runtime session", nil, false)
 		return
 	}
+	if err := ensureSessionOperationCapacityLocked(state, sessionDeletionOperationReserve); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
+		return
+	}
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
 	runtimeSession, baseline, paths := state.runtime, state.baseline, state.paths
 	s.mu.Unlock()
@@ -1469,7 +1553,7 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership reclaim failed", nil, false)
 		return
 	}
-	result, buildErr := buildWorkspaceDelta(baseline, paths.Workspace, intent, request.Limits)
+	result, buildErr := buildWorkspaceDeltaContext(r.Context(), baseline, paths.Workspace, intent, request.Limits)
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		slog.Error("ACP workspace validation failed", "stage", "ownership restore")
 		s.poisonSession(state, "workspace ownership restore failed")
@@ -1511,7 +1595,7 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta path looks secret-like", nil, false)
 		return
 	}
-	if violation, policyErr := workspaceDeltaContentPolicyViolation(result.Artifact, request.Limits); policyErr != nil {
+	if violation, policyErr := workspaceDeltaContentPolicyViolationContext(r.Context(), result.Artifact, request.Limits); policyErr != nil {
 		s.poisonSession(state, "workspace delta content policy could not be verified")
 		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta content policy could not be verified", nil, false)
 		return
@@ -1666,8 +1750,14 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		if err != nil {
 			return nil, err
 		}
-		if _, exists := state.permissions[permission.RequestID]; exists {
-			return nil, fmt.Errorf("permission request %q is already pending", permission.RequestID)
+		if prompt.permissionRequestIDs == nil {
+			prompt.permissionRequestIDs = make(map[harnessv2.PermissionRequestID]struct{})
+		}
+		if _, exists := prompt.permissionRequestIDs[permission.RequestID]; exists {
+			return nil, fmt.Errorf("permission request %q was already used by this prompt", permission.RequestID)
+		}
+		if len(prompt.permissionRequestIDs) >= harnessv2.MaxRuntimeSessionTombstoneOperations-sessionDeletionOperationReserve {
+			return nil, fmt.Errorf("permission request limit %d exceeded", harnessv2.MaxRuntimeSessionTombstoneOperations-sessionDeletionOperationReserve)
 		}
 		if uint32(len(state.permissions)) >= s.cfg.Capabilities.Limits.MaxPendingPermissions {
 			return nil, fmt.Errorf("pending permission limit %d exceeded", s.cfg.Capabilities.Limits.MaxPendingPermissions)
@@ -1676,6 +1766,7 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		for _, option := range permission.Options {
 			options[option.OptionID] = option.Kind
 		}
+		prompt.permissionRequestIDs[permission.RequestID] = struct{}{}
 		state.permissions[permission.RequestID] = permissionState{
 			requestID: permission.RequestID, toolCallID: permission.ToolCallID, toolName: permission.ToolName,
 			title: permission.Title, requestedAt: event.Timestamp, expiresAt: permission.ExpiresAt, options: options,

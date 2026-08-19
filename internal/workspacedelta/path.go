@@ -1,6 +1,7 @@
 package workspacedelta
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -85,8 +86,11 @@ func validateSymlinkTarget(linkPath, target string, options normalizedOptions) (
 	return resolved, nil
 }
 
-func validateSymlinkGraph(entries map[string]entry, options normalizedOptions) error {
+func validateSymlinkGraph(ctx context.Context, entries map[string]entry, options normalizedOptions) error {
 	for start, current := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if current.kind != EntrySymlink {
 			continue
 		}
@@ -100,14 +104,17 @@ func validateSymlinkGraph(entries map[string]entry, options normalizedOptions) e
 				return pathError("validate symlink", start, ErrUnsafeSymlink)
 			}
 		}
-		if err := resolveSymlinkPath(start, resolved, entries, options, map[string]struct{}{start: {}}); err != nil {
+		if err := resolveSymlinkPath(ctx, start, resolved, entries, options, map[string]struct{}{start: {}}); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func resolveSymlinkPath(start, value string, entries map[string]entry, options normalizedOptions, visiting map[string]struct{}) error {
+func resolveSymlinkPath(ctx context.Context, start, value string, entries map[string]entry, options normalizedOptions, visiting map[string]struct{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	prefix, remainder, found := firstSymlinkPrefix(value, entries)
 	if !found {
 		return nil
@@ -130,7 +137,7 @@ func resolveSymlinkPath(start, value string, entries map[string]entry, options n
 	if err := validateResolvedSymlinkPath(start, resolved, options); err != nil {
 		return err
 	}
-	return resolveSymlinkPath(start, resolved, entries, options, visiting)
+	return resolveSymlinkPath(ctx, start, resolved, entries, options, visiting)
 }
 
 func validateResolvedSymlinkPath(start, value string, options normalizedOptions) error {

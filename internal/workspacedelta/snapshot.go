@@ -2,6 +2,7 @@ package workspacedelta
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,14 +19,26 @@ const snapshotVersion uint32 = 1
 // Capture validates and fingerprints a workspace tree without following
 // symlinks. The returned Snapshot is suitable as a trusted pre-prompt baseline.
 func Capture(root string, options Options) (*Snapshot, error) {
+	return CaptureContext(context.Background(), root, options)
+}
+
+// CaptureContext is Capture with cancellation propagated through workspace
+// traversal and regular-file hashing.
+func CaptureContext(ctx context.Context, root string, options Options) (*Snapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	normalized, err := normalizeOptions(options)
 	if err != nil {
 		return nil, fmt.Errorf("workspace delta options: %w", err)
 	}
-	return capture(root, normalized, false)
+	return capture(ctx, root, normalized, false)
 }
 
-func capture(root string, options normalizedOptions, retainContent bool) (*Snapshot, error) {
+func capture(ctx context.Context, root string, options normalizedOptions, retainContent bool) (*Snapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	root = filepath.Clean(root)
 	if root == "." || root == "" {
 		return nil, ErrInvalidRoot
@@ -55,6 +68,9 @@ func capture(root string, options normalizedOptions, retainContent bool) (*Snaps
 	seenFiles := make(map[fileIdentity]string)
 
 	err = filepath.WalkDir(absolute, func(filePath string, dirEntry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return pathError("walk", relativeForError(absolute, filePath), walkErr)
 		}
@@ -84,7 +100,7 @@ func capture(root string, options normalizedOptions, retainContent bool) (*Snaps
 			current.mode = normalizedMode(EntryDirectory, mode)
 			current.sourceMode = uint32(mode.Perm())
 		case mode.IsRegular():
-			current, err = captureRegular(filePath, relative, info, protected, options, retainContent, snapshot.totalBytes, seenFiles)
+			current, err = captureRegular(ctx, filePath, relative, info, protected, options, retainContent, snapshot.totalBytes, seenFiles)
 			if err != nil {
 				return err
 			}
@@ -104,14 +120,14 @@ func capture(root string, options normalizedOptions, retainContent bool) (*Snaps
 	if err != nil {
 		return nil, err
 	}
-	if err := validateSymlinkGraph(snapshot.entries, options); err != nil {
+	if err := validateSymlinkGraph(ctx, snapshot.entries, options); err != nil {
 		return nil, err
 	}
 	rootAfter, err := os.Lstat(absolute)
 	if err != nil || rootAfter.Mode()&os.ModeSymlink != 0 || !rootAfter.IsDir() || !os.SameFile(rootInfo, rootAfter) {
 		return nil, pathError("revalidate root", "", ErrInvalidRoot)
 	}
-	snapshot.manifestDigest, err = snapshotDigest(snapshot)
+	snapshot.manifestDigest, err = snapshotDigest(ctx, snapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +136,7 @@ func capture(root string, options normalizedOptions, retainContent bool) (*Snaps
 
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func captureRegular(
+	ctx context.Context,
 	filePath, relative string,
 	initial os.FileInfo,
 	protected bool,
@@ -128,6 +145,9 @@ func captureRegular(
 	currentTotal int64,
 	seen map[fileIdentity]string,
 ) (entry, error) {
+	if err := ctx.Err(); err != nil {
+		return entry{}, err
+	}
 	initialIdentity, links, err := identityAndLinks(initial)
 	if err != nil {
 		return entry{}, pathError("inspect hardlinks", relative, err)
@@ -168,7 +188,7 @@ func captureRegular(
 	if retainContent {
 		writer = io.MultiWriter(hash, &content)
 	}
-	read, err := io.Copy(writer, io.LimitReader(file, options.limits.MaxFileBytes+1))
+	read, err := io.Copy(writer, io.LimitReader(&contextReader{ctx: ctx, reader: file}, options.limits.MaxFileBytes+1))
 	if err != nil {
 		return entry{}, pathError("read", relative, err)
 	}
@@ -205,6 +225,18 @@ func captureRegular(
 		result.content = append([]byte(nil), content.Bytes()...)
 	}
 	return result, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(value []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(value)
 }
 
 func captureSymlink(filePath, relative string, initial os.FileInfo, protected bool, options normalizedOptions) (entry, error) {
@@ -276,14 +308,20 @@ type snapshotManifestEntry struct {
 	SourceMode uint32    `json:"sourceMode"`
 }
 
-func snapshotDigest(snapshot *Snapshot) (string, error) {
+func snapshotDigest(ctx context.Context, snapshot *Snapshot) (string, error) {
 	paths := make([]string, 0, len(snapshot.entries))
 	for entryPath := range snapshot.entries {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		paths = append(paths, entryPath)
 	}
 	sort.Strings(paths)
 	entries := make([]snapshotManifestEntry, 0, len(paths))
 	for _, entryPath := range paths {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		current := snapshot.entries[entryPath]
 		entries = append(entries, snapshotManifestEntry{
 			Path: current.path, Kind: current.kind, Mode: current.mode, Size: current.size,
@@ -295,6 +333,9 @@ func snapshotDigest(snapshot *Snapshot) (string, error) {
 		PolicyDigest string                  `json:"policyDigest"`
 		Entries      []snapshotManifestEntry `json:"entries"`
 	}{Schema: ManifestSchema, PolicyDigest: snapshot.optionsDigest, Entries: entries}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
 		return "", fmt.Errorf("encode snapshot manifest: %w", err)

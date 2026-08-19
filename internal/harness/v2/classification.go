@@ -181,6 +181,8 @@ type RuntimeSessionTombstone struct {
 	Operations               []OperationRecord `json:"operations,omitempty"`
 }
 
+const MaxRuntimeSessionTombstoneOperations = 4096
+
 func (t RuntimeSessionTombstone) Validate() error {
 	if err := requireIdentifier("runtime session UID", string(t.RuntimeSessionUID)); err != nil {
 		return err
@@ -194,8 +196,8 @@ func (t RuntimeSessionTombstone) Validate() error {
 	if t.DeletedAt.IsZero() {
 		return fmt.Errorf("deleted timestamp is required")
 	}
-	if len(t.Operations) > 4096 {
-		return fmt.Errorf("tombstoned operation count exceeds 4096")
+	if len(t.Operations) > MaxRuntimeSessionTombstoneOperations {
+		return fmt.Errorf("tombstoned operation count exceeds %d", MaxRuntimeSessionTombstoneOperations)
 	}
 	seen := make(map[OperationID]struct{}, len(t.Operations))
 	for i := range t.Operations {

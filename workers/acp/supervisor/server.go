@@ -49,6 +49,8 @@ const statusNonceRetentionSlack = 30 * time.Second
 // capabilities for the lifetime of a resident session.
 const operationReplayRetentionSlack = 30 * time.Second
 
+const sessionDeletionOperationReserve = 1
+
 // tombstoneRetention bounds how long a deleted or failed session's replay
 // tombstone is retained. It must exceed the maximum operation-capability
 // lifetime plus clock skew so a legitimate replay whose capability is still
@@ -121,19 +123,20 @@ type sessionState struct {
 }
 
 type promptState struct {
-	request             harnessv2.StartPromptRequest
-	operation           harnessv2.OperationRecord
-	lease               harnessv2.PromptLease
-	startedAt           time.Time
-	acceptedAt          time.Time
-	sequence            uint64
-	assistant           strings.Builder
-	assistantOverflow   bool
-	finalAnswer         strings.Builder
-	finalAnswerSeen     bool
-	finalAnswerOverflow bool
-	settlement          *harnessv2.PromptSettlement
-	settlementDigest    string
+	request              harnessv2.StartPromptRequest
+	operation            harnessv2.OperationRecord
+	lease                harnessv2.PromptLease
+	startedAt            time.Time
+	acceptedAt           time.Time
+	sequence             uint64
+	assistant            strings.Builder
+	assistantOverflow    bool
+	finalAnswer          strings.Builder
+	finalAnswerSeen      bool
+	finalAnswerOverflow  bool
+	settlement           *harnessv2.PromptSettlement
+	settlementDigest     string
+	permissionRequestIDs map[harnessv2.PermissionRequestID]struct{}
 }
 
 type promptMutationExecutor interface {
@@ -196,6 +199,20 @@ func pruneSessionOperationsLocked(state *sessionState, now time.Time) {
 func sessionOperationPtrLocked(state *sessionState, operationID harnessv2.OperationID, now time.Time) *harnessv2.OperationRecord {
 	pruneSessionOperationsLocked(state, now)
 	return operationPtr(state.operations, operationID)
+}
+
+// ensureSessionOperationCapacityLocked preserves one final journal slot for
+// explicit deletion. Tombstones retain every still-replayable operation, so a
+// live session must stop accepting fresh mutations before the protocol limit
+// is reached rather than evicting valid replay records.
+func ensureSessionOperationCapacityLocked(state *sessionState, reservedSlots int) error {
+	if state == nil || reservedSlots < 0 || reservedSlots >= harnessv2.MaxRuntimeSessionTombstoneOperations {
+		return fmt.Errorf("invalid runtime session operation capacity request")
+	}
+	if len(state.operations) >= harnessv2.MaxRuntimeSessionTombstoneOperations-reservedSlots {
+		return fmt.Errorf("runtime session operation journal is full and the session must be retired")
+	}
+	return nil
 }
 
 type permissionState struct {

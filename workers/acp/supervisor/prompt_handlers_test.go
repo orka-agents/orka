@@ -566,6 +566,43 @@ func TestSessionOperationRecordsPruneAfterCapabilityExpiry(t *testing.T) {
 	}
 }
 
+func TestSessionOperationCapacityReservesDeletionTombstoneSlot(t *testing.T) {
+	now := time.Now().UTC()
+	state := &sessionState{operations: make(map[harnessv2.OperationID]harnessv2.OperationRecord)}
+	for index := range harnessv2.MaxRuntimeSessionTombstoneOperations - sessionDeletionOperationReserve {
+		operationID := harnessv2.OperationID(fmt.Sprintf("operation-%04d", index))
+		state.operations[operationID] = harnessv2.OperationRecord{
+			OperationID: operationID, RequestDigest: harnessv2.RequestDigest(testDigest(string(operationID))),
+			Phase: harnessv2.OperationPhaseApplied, RecordedAt: now, UpdatedAt: now,
+		}
+	}
+	if err := ensureSessionOperationCapacityLocked(state, sessionDeletionOperationReserve); err == nil {
+		t.Fatal("fresh non-deletion operation was accepted after consuming the deletion reserve")
+	}
+	if err := ensureSessionOperationCapacityLocked(state, 0); err != nil {
+		t.Fatalf("reserved deletion operation was rejected: %v", err)
+	}
+	deleteID := harnessv2.OperationID("delete-session")
+	state.operations[deleteID] = harnessv2.OperationRecord{
+		OperationID: deleteID, RequestDigest: harnessv2.RequestDigest(testDigest(string(deleteID))),
+		Phase: harnessv2.OperationPhaseDeleted, RecordedAt: now, UpdatedAt: now,
+	}
+	operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
+	for _, operation := range state.operations {
+		operations = append(operations, operation)
+	}
+	tombstone := harnessv2.RuntimeSessionTombstone{
+		RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 1,
+		RuntimeProfileDigest: harnessv2.ProfileDigest(testDigest("profile")), DeletedAt: now, Operations: operations,
+	}
+	if err := tombstone.Validate(); err != nil {
+		t.Fatalf("maximum-sized deletion tombstone is invalid: %v", err)
+	}
+	if err := ensureSessionOperationCapacityLocked(state, 0); err == nil {
+		t.Fatal("operation journal accepted an entry beyond the tombstone protocol limit")
+	}
+}
+
 func TestMapRuntimeEventEnforcesPendingPermissionLimit(t *testing.T) {
 	limits := harnessv2.DefaultProtocolLimits()
 	limits.MaxPendingPermissions = 1
@@ -610,6 +647,14 @@ func TestMapRuntimeEventEnforcesPendingPermissionLimit(t *testing.T) {
 	}
 	if _, ok := state.permissions["permission-2"]; ok {
 		t.Fatal("over-limit permission was inserted")
+	}
+	delete(state.permissions, "permission-1")
+	if _, err := server.mapRuntimeEvent(state, prompt, permissionEvent("permission-1")); err == nil ||
+		!strings.Contains(err.Error(), "already used by this prompt") {
+		t.Fatalf("reused resolved permission event error = %v, want request-ID reuse rejection", err)
+	}
+	if len(state.permissions) != 0 {
+		t.Fatalf("reused permission request was reinserted: %#v", state.permissions)
 	}
 }
 
