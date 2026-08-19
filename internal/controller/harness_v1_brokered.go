@@ -78,11 +78,15 @@ func harnessV1AuthenticatedTaskFromContext(ctx context.Context) (harnessV1Authen
 }
 
 // KubernetesHarnessV1BrokeredToolExecutor executes brokered harness v1 Tool
-// calls through the shared worker Tool executor. When context-token credential
-// authorization is enforced, every execution binds the authenticated Task's
-// transaction and credential authority per request, mirroring
-// RegistryACPMCPToolExecutor for the v2 ACP MCP broker; with enforcement off
-// its behavior is identical to an unbound executor.
+// calls through the shared worker Tool executor. Every execution binds the
+// authenticated Task's transaction token and scopes per request in every
+// authorization mode, mirroring the transaction environment and
+// owner-referenced token Secret the controller stamps into worker Jobs and
+// disabling the executor's process-global token-file fallback inside the
+// controller. Secret-backed credential authorization is additionally enforced
+// when EnforceTransactionCredentialAuth is set, mirroring
+// RegistryACPMCPToolExecutor for the v2 ACP MCP broker; missing Task authority
+// always fails closed.
 type KubernetesHarnessV1BrokeredToolExecutor struct {
 	Reader              client.Reader
 	KubeClient          kubernetes.Interface
