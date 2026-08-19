@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
@@ -142,6 +143,32 @@ func TestContextTokenTaskCreateFailures(t *testing.T) {
 		failures := contextTokenTaskCreateFailures(token, cfg, authzCtx)
 		require.Contains(t, strings.Join(failures, "\n"), `tool "Bash" is not allowed by token context`)
 	})
+}
+
+func TestContextTokenTaskToolFailuresKeepsExplicitChildCoordinationFailClosed(t *testing.T) {
+	req := CreateTaskRequest{
+		Type: corev1alpha1.TaskTypeAI,
+		Metadata: MetadataRequest{
+			Labels: map[string]string{labels.LabelParentTask: "parent-task"},
+		},
+		Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: queryTrue},
+		AI:          &corev1alpha1.AISpec{Tools: []string{"send_message"}},
+	}
+	authzCtx := contextTokenTaskCreateAuthorizationContext{
+		Request:          req,
+		EffectiveAITools: contextTokenTaskCreateEffectiveAITools(req, nil),
+	}
+	allowedWithoutExplicit := make([]any, 0, len(aitools.MemoryToolNames()))
+	for _, name := range aitools.MemoryToolNames() {
+		allowedWithoutExplicit = append(allowedWithoutExplicit, name)
+	}
+	token := &ContextToken{TransactionContext: map[string]any{"allowedTools": allowedWithoutExplicit}}
+
+	failures := contextTokenTaskToolFailures(token, authzCtx)
+	require.Equal(t, []string{`tool "send_message" is not allowed by token context`}, failures)
+
+	token.TransactionContext["allowedTools"] = append(allowedWithoutExplicit, "send_message")
+	require.Empty(t, contextTokenTaskToolFailures(token, authzCtx))
 }
 
 func TestAuthorizeContextTokenToolAgentCreateRejectsSpecOutsideTokenConstraints(t *testing.T) {
@@ -573,11 +600,12 @@ func testTaskCreateAuthorizationContext() contextTokenTaskCreateAuthorizationCon
 func TestContextTokenTaskCreateEffectiveAIToolsSkipsDisabledCoordinationInjection(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
-			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
 		},
 	}
 	req := CreateTaskRequest{
 		Type:        corev1alpha1.TaskTypeAI,
+		Metadata:    MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}},
 		Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: "true"},
 		AI: &corev1alpha1.AISpec{
 			Tools: []string{"list_pull_requests", "check_pr_review_marker"},
@@ -592,6 +620,9 @@ func TestContextTokenTaskCreateEffectiveAIToolsSkipsDisabledCoordinationInjectio
 	require.Contains(t, got, "propose_memory")
 	require.Contains(t, got, "search_transcript")
 	require.NotContains(t, got, "delegate_task")
+	require.NotContains(t, got, "send_message")
+	require.NotContains(t, got, "check_messages")
+	require.NotContains(t, got, "request_approval")
 	require.NotContains(t, got, "merge_pull_request")
 	require.NotContains(t, got, "auto_merge_pull_request")
 }
@@ -975,6 +1006,10 @@ func TestContextTokenTaskToolCredentialFailuresUsesToolProvenance(t *testing.T) 
 		{name: "AI name matching native tool still resolves", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"Read"}}, wantFailure: "Read"},
 		{name: "AI coordination tool is builtin when coordination is enabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}, EffectiveAITools: []string{"list_issues"}}},
 		{name: "AI coordination name resolves as custom without coordination", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"list_issues"}}, wantFailure: "list_issues"},
+		{name: "implicit child messaging is builtin without agent coordination", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, Metadata: MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}}}, EffectiveAITools: []string{"send_message", "check_messages"}}},
+		{name: "explicit child coordination is builtin when injection is disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, Metadata: MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}}, Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: queryTrue}}, EffectiveAITools: []string{"send_message", "list_pull_requests"}}},
+		{name: "explicit child custom tool still resolves when injection is disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, Metadata: MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}}, Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: queryTrue}}, EffectiveAITools: []string{"custom-search"}}, wantFailure: "custom-search"},
+		{name: "explicit child messaging name resolves as custom without child identity", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAI}, EffectiveAITools: []string{"send_message"}}, wantFailure: "send_message"},
 		{name: "AI explicit coordination tool remains builtin when injection disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}, Request: CreateTaskRequest{Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: queryTrue}}, EffectiveAITools: []string{"list_pull_requests"}}},
 		{name: "controller proxy coordination name resolves as custom when coordination disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"create_pull_request"}}, wantFailure: "create_pull_request"},
 		{name: "dual-registered coordination name remains builtin when coordination disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"cancel_task"}}},
@@ -1013,4 +1048,60 @@ func TestContextTokenTaskToolCredentialFailuresAllowsLowercaseBrokeredBashWithSy
 	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx)
 	require.NoError(t, err)
 	require.Empty(t, failures)
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsIncludesAutonomousApproval(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+	}}
+
+	got := contextTokenTaskCreateEffectiveAITools(CreateTaskRequest{Type: corev1alpha1.TaskTypeAI}, agent)
+	require.Contains(t, got, "request_approval")
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsIncludesChildMessaging(t *testing.T) {
+	req := CreateTaskRequest{
+		Type: corev1alpha1.TaskTypeAI,
+		Metadata: MetadataRequest{
+			Labels: map[string]string{labels.LabelParentTask: "parent-task"},
+		},
+	}
+
+	got := contextTokenTaskCreateEffectiveAITools(req, nil)
+	require.Contains(t, got, "send_message")
+	require.Contains(t, got, "check_messages")
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsExcludesImplicitAgentCoordination(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Tools:        []corev1alpha1.ToolReference{{Name: "agent_tool"}},
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+	}}
+	req := CreateTaskRequest{
+		Type:     corev1alpha1.TaskTypeAgent,
+		Metadata: MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}},
+		AI:       &corev1alpha1.AISpec{Tools: []string{"brokered_tool"}},
+	}
+
+	require.Equal(t, []string{"agent_tool", "brokered_tool"}, contextTokenTaskCreateEffectiveAITools(req, agent))
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsMatchesSharedResolver(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Tools:        []corev1alpha1.ToolReference{{Name: "agent_tool"}},
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+	}}
+	req := CreateTaskRequest{
+		Type: corev1alpha1.TaskTypeAI,
+		Metadata: MetadataRequest{
+			Labels: map[string]string{labels.LabelParentTask: "parent-task"},
+		},
+		AI: &corev1alpha1.AISpec{Tools: []string{"task_tool"}},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Labels: req.Metadata.Labels},
+		Spec:       corev1alpha1.TaskSpec{Type: req.Type, AI: req.AI},
+	}
+
+	require.Equal(t, aitools.Resolve(task, agent), contextTokenTaskCreateEffectiveAITools(req, agent))
 }

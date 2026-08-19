@@ -16,6 +16,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
@@ -676,32 +677,7 @@ func ChatToolNames() []string {
 // CoordinationToolNames returns the names of all coordination tools registered by
 // RegisterCoordinationTools in worker processes.
 func CoordinationToolNames() []string {
-	return []string{
-		delegateTaskToolName,
-		waitForTasksToolName,
-		createContainerTaskToolName,
-		cancelTaskToolName,
-		sendMessageToolName,
-		checkMessagesToolName,
-		createPullRequestToolName,
-		checkPullRequestCIToolName,
-		mergePullRequestToolName,
-		autoMergePullRequestToolName,
-		reviewPullRequestToolName,
-		postReviewCommentToolName,
-		checkPRReviewMarkerToolName,
-		listIssuesToolName,
-		listPullRequestsToolName,
-		getIssueToolName,
-		commentOnIssueToolName,
-		createAgentToolName,
-		deleteAgentToolName,
-		updatePlanToolName,
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
-	}
+	return aitools.CoordinationToolNames()
 }
 
 func init() {

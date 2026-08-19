@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -2374,14 +2376,106 @@ func TestAddAIEnvVars_ChildTaskMessagingDisabled(t *testing.T) {
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
 	}
-	if tools := envMap[workerenv.AITools]; tools != "" {
-		t.Fatalf("%s = %q, want no auto-injected child messaging tools", workerenv.AITools, tools)
+	tools := workerenv.SplitCSV(envMap[workerenv.AITools])
+	for _, tool := range []string{"recall_memory", "remember", "propose_memory", "search_transcript"} {
+		if !slices.Contains(tools, tool) {
+			t.Fatalf("%s = %#v, want memory tool %q", workerenv.AITools, tools, tool)
+		}
+	}
+	for _, tool := range []string{"send_message", "check_messages", "delegate_task", "request_approval"} {
+		if slices.Contains(tools, tool) {
+			t.Fatalf("%s = %#v, want no implicitly injected coordination tool %q", workerenv.AITools, tools, tool)
+		}
 	}
 	// Disabling coordination tool injection should not change the existing child-task
 	// coordination mode marker; it only prevents implicit messaging tools from being
 	// exposed to the LLM.
 	if enabled := envMap[workerenv.CoordinationEnabled]; enabled != scheduledRunLabelValue {
 		t.Fatalf("%s = %q, want %q", workerenv.CoordinationEnabled, enabled, scheduledRunLabelValue)
+	}
+}
+
+func TestAddAIEnvVars_ChildTaskExplicitCoordinationWithInjectionDisabled(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        testTask,
+			Namespace:   defaultNS,
+			Labels:      map[string]string{labels.LabelParentTask: "parent"},
+			Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: scheduledRunLabelValue},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{
+				Prompt: "test",
+				Tools:  []string{"send_message", "list_pull_requests"},
+			},
+		},
+	}
+
+	envVars := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
+	envMap := make(map[string]string)
+	for _, envVar := range envVars {
+		envMap[envVar.Name] = envVar.Value
+	}
+	if enabled := envMap[workerenv.CoordinationEnabled]; enabled != scheduledRunLabelValue {
+		t.Fatalf("%s = %q, want %q", workerenv.CoordinationEnabled, enabled, scheduledRunLabelValue)
+	}
+	tools := workerenv.SplitCSV(envMap[workerenv.AITools])
+	for _, tool := range []string{"send_message", "list_pull_requests"} {
+		if !slices.Contains(tools, tool) {
+			t.Fatalf("%s = %#v, want explicitly selected coordination tool %q", workerenv.AITools, tools, tool)
+		}
+	}
+	for _, tool := range []string{"delegate_task", "check_messages", "merge_pull_request"} {
+		if slices.Contains(tools, tool) {
+			t.Fatalf("%s = %#v, want no implicitly injected coordination tool %q", workerenv.AITools, tools, tool)
+		}
+	}
+}
+
+func TestJobBuilderEffectiveAIToolsMatchAuthorizationResolver(t *testing.T) {
+	jb := setupJobBuilder()
+	tests := []struct {
+		name         string
+		labels       map[string]string
+		annotations  map[string]string
+		tools        []string
+		coordination *corev1alpha1.CoordinationConfig
+	}{
+		{name: "memory only"},
+		{name: "autonomous coordinator", coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true}},
+		{name: "child label", labels: map[string]string{labels.LabelParentTask: "parent-task"}},
+		{name: "child annotation", annotations: map[string]string{labels.AnnotationParentTaskName: "long-parent-task-name"}},
+		{
+			name:         "disabled implicit injection",
+			labels:       map[string]string{labels.LabelParentTask: "parent-task"},
+			annotations:  map[string]string{labels.AnnotationDisableCoordinationToolInject: scheduledRunLabelValue},
+			tools:        []string{"explicit_tool"},
+			coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: testTask, Namespace: defaultNS, Labels: tt.labels, Annotations: tt.annotations,
+				},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AI: &corev1alpha1.AISpec{Tools: tt.tools}},
+			}
+			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: tt.coordination}}
+			envVars := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+			env, found := findEnvVar(envVars, workerenv.AITools)
+			if !found {
+				t.Fatalf("missing %s", workerenv.AITools)
+			}
+			got := workerenv.SplitCSV(env.Value)
+			want := aitools.Resolve(task, agent)
+			if !slices.Equal(got, want) {
+				t.Fatalf("%s = %#v, authorization resolver = %#v", workerenv.AITools, got, want)
+			}
+		})
 	}
 }
 
@@ -2780,6 +2874,34 @@ func TestJobBuilder_buildEnvVars_KeepsEmptyResolvedApprovalsEnvOverride(t *testi
 	}
 }
 
+func TestJobBuilder_buildEnvVars_ChildAgentDoesNotEnableAIWorkerCoordination(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+			Labels:    map[string]string{labels.LabelParentTask: "parent-task"},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "Do work"},
+	}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Runtime:      &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex, DefaultAllowedTools: []string{"Read"}},
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+	}}
+
+	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
+	for _, name := range []string{workerenv.AITools, workerenv.CoordinationEnabled} {
+		env, found := findEnvVar(envVars, name)
+		if !found || env.Value != "" {
+			t.Fatalf("%s = %#v, found=%t; want explicit empty AI-worker value", name, env, found)
+		}
+	}
+	allowedTools, found := findEnvVar(envVars, workerenv.AllowedTools)
+	if !found || allowedTools.Value != "Read" {
+		t.Fatalf("%s = %#v, found=%t; want explicit runtime tools", workerenv.AllowedTools, allowedTools, found)
+	}
+}
+
 func TestJobBuilder_buildEnvVars_AutonomousCoordinationIncludesRequestApprovalTool(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -2829,8 +2951,10 @@ func TestJobBuilder_buildEnvVars_TaskEnvCannotSpoofApprovalState(t *testing.T) {
 	if env, ok := findEnvVar(envVars, workerenv.AgentName); !ok || env.Value != "real-agent" {
 		t.Fatalf("%s = %#v, found=%t; want real-agent", workerenv.AgentName, env, ok)
 	}
+	if env, ok := findEnvVar(envVars, workerenv.AITools); !ok || !slices.Equal(workerenv.SplitCSV(env.Value), aitools.Resolve(task, agent)) {
+		t.Fatalf("%s = %#v, found=%t; want %#v", workerenv.AITools, env, ok, aitools.Resolve(task, agent))
+	}
 	for _, name := range []string{
-		workerenv.AITools,
 		workerenv.CoordinationEnabled,
 		workerenv.AutonomousMode,
 		workerenv.ResolvedApprovals,

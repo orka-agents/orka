@@ -301,6 +301,122 @@ func TestValidateContextToken_TransactionToken(t *testing.T) {
 	}
 }
 
+func TestValidateContextToken_TransactionAuthorizationClaimCompatibility(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	profile := testContextTokenConfig(t, provider, "").Profiles[0]
+
+	tests := []struct {
+		name string
+		tctx map[string]any
+	}{
+		{
+			name: "string list and numeric forms",
+			tctx: map[string]any{
+				"namespace":        "team-a",
+				"taskType":         "agent",
+				"taskName":         "task-1",
+				"task":             "team-a/task-1",
+				"agent":            "team-a/coder",
+				"repo":             "https://github.com/orka-agents/orka",
+				"branch":           "main",
+				"ref":              "refs/heads/main",
+				"configMap":        "agent-policy",
+				"provider":         "openai",
+				"model":            "gpt-5.4",
+				"maxDepth":         3,
+				"allowedAgents":    "team-a/coder,team-a/reviewer",
+				"allowedTools":     []any{"file_read", "web_search"},
+				"allowedProviders": "openai,anthropic",
+				"allowedModels":    []any{"gpt-5.4", "claude-sonnet-4"},
+			},
+		},
+		{
+			name: "empty deny-all lists and unknown extensions",
+			tctx: map[string]any{
+				"allowedAgents":    []any{},
+				"allowedTools":     []any{},
+				"allowedProviders": []any{},
+				"allowedModels":    []any{},
+				"customPolicy": map[string]any{
+					"mixed": []any{"value", 42, true},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token := issueTestContextToken(t, provider, nil, map[string]any{"tctx": tt.tctx})
+			ctxToken, err := validateContextToken(context.Background(), token, profile)
+			if err != nil {
+				t.Fatalf("validateContextToken returned error: %v", err)
+			}
+			if _, ok := tt.tctx["customPolicy"]; ok {
+				if _, ok := ctxToken.TransactionContext["customPolicy"]; !ok {
+					t.Fatal("validateContextToken dropped unknown transaction-context extension")
+				}
+			}
+		})
+	}
+}
+
+func TestValidateContextToken_TransactionRejectsMalformedAuthorizationClaims(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	profile := testContextTokenConfig(t, provider, "").Profiles[0]
+
+	for _, claim := range []string{
+		"namespace", "taskType", "taskName", "task", "agent", "repo", "branch", "ref",
+		"configMap", "secret", "provider", "model",
+	} {
+		t.Run("wrong type "+claim, func(t *testing.T) {
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"tctx": map[string]any{claim: 42},
+			})
+			_, err := validateContextToken(context.Background(), token, profile)
+			if err == nil || !strings.Contains(err.Error(), claim) {
+				t.Fatalf("validateContextToken error = %v, want invalid %s claim", err, claim)
+			}
+		})
+	}
+
+	for _, claim := range []string{"allowedAgents", "allowedTools", "allowedProviders", "allowedModels"} {
+		t.Run("mixed type "+claim, func(t *testing.T) {
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"tctx": map[string]any{claim: []any{"allowed", 42}},
+			})
+			_, err := validateContextToken(context.Background(), token, profile)
+			if err == nil || !strings.Contains(err.Error(), claim) {
+				t.Fatalf("validateContextToken error = %v, want invalid %s claim", err, claim)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name  string
+		claim string
+		value any
+	}{
+		{name: "blank scalar", claim: "namespace", value: " "},
+		{name: "blank list string", claim: "allowedTools", value: " "},
+		{name: "invalid secret name", claim: "secret", value: "Invalid_Secret"},
+		{name: "fractional max depth", claim: "maxDepth", value: 1.5},
+		{name: "negative max depth", claim: "maxDepth", value: -1},
+		{name: "object transaction context", claim: "tctx", value: []any{"not-an-object"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			claims := map[string]any{"tctx": map[string]any{tt.claim: tt.value}}
+			if tt.claim == "tctx" {
+				claims["tctx"] = tt.value
+			}
+			token := issueTestContextToken(t, provider, nil, claims)
+			_, err := validateContextToken(context.Background(), token, profile)
+			if err == nil || !strings.Contains(err.Error(), tt.claim) {
+				t.Fatalf("validateContextToken error = %v, want invalid %s claim", err, tt.claim)
+			}
+		})
+	}
+}
+
 func TestValidateContextToken_TransactionTokenUsesDefaultJWKSURL(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	cfg, err := NewContextTokenConfig(ContextTokenProfileTransactionToken, provider.server.URL, provider.aud, "", "")
