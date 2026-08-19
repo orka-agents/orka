@@ -18,7 +18,18 @@ function timeAgo(ts?: string): string {
 }
 
 export function TaskList() {
-  const { data, isLoading } = useTaskList()
+  const {
+    data,
+    isLoading,
+    isLoadingError,
+    isFetching,
+    hasNextPage,
+    fetchNextPage,
+    isFetchingNextPage,
+    isFetchNextPageError,
+    refetch,
+    paginationError,
+  } = useTaskList()
   const deleteTask = useDeleteTask()
 
   return (
@@ -56,6 +67,28 @@ export function TaskList() {
                   ))}
                 </TableRow>
               ))
+            ) : isLoadingError ? (
+              <TableRow>
+                <TableCell colSpan={6} className="py-8 text-center">
+                  <div className="flex flex-col items-center gap-3">
+                    <p
+                      role="alert"
+                      aria-label="Failed to load tasks"
+                      className="text-sm text-destructive"
+                    >
+                      Failed to load tasks.
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void refetch()}
+                      disabled={isFetching}
+                    >
+                      {isFetching ? 'Retrying…' : 'Retry loading tasks'}
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
             ) : (data?.items ?? []).length === 0 ? (
               <TableRow>
                 <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
@@ -78,6 +111,7 @@ export function TaskList() {
                     <Button
                       variant="ghost"
                       size="icon"
+                      aria-label={`Delete task ${task.metadata.name}`}
                       onClick={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
@@ -92,6 +126,44 @@ export function TaskList() {
             )}
           </TableBody>
         </Table>
+        {(hasNextPage || isFetchNextPageError || paginationError) && (
+          <div className="flex flex-col items-center justify-between gap-3 border-t p-3 sm:flex-row">
+            {paginationError ? (
+              <p
+                role="alert"
+                aria-label="Task inventory is incomplete"
+                className="text-sm text-destructive"
+              >
+                Task inventory is incomplete. {paginationError.message}.
+              </p>
+            ) : isFetchNextPageError ? (
+              <p
+                role="alert"
+                aria-label="Failed to load more tasks"
+                className="text-sm text-destructive"
+              >
+                Failed to load more tasks. Try again.
+              </p>
+            ) : null}
+            {!paginationError && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="sm:ml-auto"
+                onClick={() => void fetchNextPage()}
+                disabled={isFetching}
+              >
+                {isFetchingNextPage
+                  ? 'Loading more tasks…'
+                  : isFetching
+                    ? 'Refreshing tasks…'
+                    : isFetchNextPageError
+                      ? 'Retry loading more tasks'
+                      : 'Load more tasks'}
+              </Button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

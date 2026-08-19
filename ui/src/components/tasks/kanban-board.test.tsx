@@ -1,5 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor } from '@/test/test-utils'
+import {
+  act,
+  createTestQueryClient,
+  render,
+  screen,
+  waitFor,
+} from '@/test/test-utils'
+import { render as rawRender } from '@testing-library/react'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
 
@@ -118,6 +126,135 @@ describe('KanbanBoard', () => {
     expect(screen.getByText('running-task')).toBeInTheDocument()
     expect(screen.getByText('done-task')).toBeInTheDocument()
     expect(screen.getByText('fail-task')).toBeInTheDocument()
+  })
+
+  it('loads every task page before populating the board', async () => {
+    const requests: Array<string | null> = []
+    server.use(
+      http.get('/api/v1/tasks', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('continue')
+        requests.push(cursor)
+        if (!cursor) {
+          return HttpResponse.json({
+            items: [],
+            metadata: { continue: 'page-2' },
+          })
+        }
+        return HttpResponse.json({
+          items: [
+            {
+              metadata: {
+                name: 'second-page-running',
+                namespace: 'default',
+                uid: 'second-page-running',
+              },
+              spec: { type: 'agent' },
+              status: { phase: 'Running' },
+            },
+          ],
+          metadata: {},
+        })
+      }),
+    )
+
+    render(<KanbanBoard />)
+
+    expect(await screen.findByText('second-page-running')).toBeInTheDocument()
+    expect(requests).toEqual([null, 'page-2'])
+  })
+
+  it('keeps the board loading until the final task page arrives', async () => {
+    let releaseFinalPage: () => void = () => {}
+    const finalPageGate = new Promise<void>((resolve) => {
+      releaseFinalPage = resolve
+    })
+    let requests = 0
+    server.use(
+      http.get('/api/v1/tasks', async ({ request }) => {
+        requests += 1
+        const cursor = new URL(request.url).searchParams.get('continue')
+        if (!cursor) {
+          return HttpResponse.json({
+            items: [],
+            metadata: { continue: 'page-2' },
+          })
+        }
+        await finalPageGate
+        return HttpResponse.json({ items: [], metadata: {} })
+      }),
+    )
+
+    render(<KanbanBoard />)
+
+    await waitFor(() => expect(requests).toBe(2))
+    expect(
+      screen.getByRole('status', {
+        name: /loading complete task inventory/i,
+      }),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('No pending tasks')).not.toBeInTheDocument()
+
+    releaseFinalPage()
+
+    expect(await screen.findByText('No pending tasks')).toBeInTheDocument()
+  })
+
+  it('does not render empty columns when complete inventory pagination fails', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({
+          items: [],
+          metadata: { continue: 'same-cursor' },
+        }),
+      ),
+    )
+
+    render(<KanbanBoard />)
+
+    expect(
+      await screen.findByRole('alert', {
+        name: /unable to load complete task inventory/i,
+      }),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('No pending tasks')).not.toBeInTheDocument()
+  })
+
+  it('hides cached columns when a complete-inventory refetch fails', async () => {
+    let calls = 0
+    server.use(
+      http.get('/api/v1/tasks', () => {
+        calls += 1
+        if (calls === 1) {
+          return HttpResponse.json({ items: [], metadata: {} })
+        }
+        return HttpResponse.json({
+          items: [],
+          metadata: { continue: 'same-cursor' },
+        })
+      }),
+    )
+    const queryClient = createTestQueryClient()
+
+    rawRender(
+      <QueryClientProvider client={queryClient}>
+        <KanbanBoard />
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByText('No pending tasks')).toBeInTheDocument()
+    await act(async () => {
+      await queryClient.refetchQueries({
+        queryKey: ['tasks', 'all', 'default', '100'],
+      })
+    })
+
+    expect(
+      await screen.findByRole('alert', {
+        name: /unable to load complete task inventory/i,
+      }),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('No pending tasks')).not.toBeInTheDocument()
+    expect(calls).toBe(3)
   })
 
   it('column headers show correct titles', async () => {

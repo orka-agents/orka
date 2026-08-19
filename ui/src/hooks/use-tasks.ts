@@ -1,4 +1,10 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import {
+  useInfiniteQuery,
+  useQuery,
+  useMutation,
+  useQueryClient,
+  type InfiniteData,
+} from '@tanstack/react-query'
 import { ApiError, api } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import type { ExecutionEvent, Task, TaskEventsResponse } from '@/schemas/task'
@@ -8,19 +14,117 @@ interface ListResponse<T> {
   metadata: { continue?: string; remainingItemCount?: number }
 }
 
-function fetchTaskListPage(namespace: string, limit: string, continueToken?: string) {
-  const params: Record<string, string> = { namespace, limit }
-  if (continueToken) params.continue = continueToken
+const maxTaskListPages = 1000
+
+interface TaskListPaginationState {
+  nextCursor?: string
+  error?: TaskListPaginationError
+}
+
+class TaskListPaginationError extends Error {}
+
+function fetchTaskListPage(namespace: string, limit: string, cursor?: string) {
+  const params: Record<string, string> = { namespace, limit, paginate: 'true' }
+  if (cursor) params.continue = cursor
   return api.get<ListResponse<Task>>('/tasks', params)
+}
+
+function flattenUniqueTasks(pages: ListResponse<Task>[], namespace: string) {
+  const items: Task[] = []
+  const seenUIDs = new Set<string>()
+  const seenNames = new Set<string>()
+
+  for (const page of pages) {
+    for (const task of page.items) {
+      const uid = task.metadata.uid
+      const namespacedName = `${task.metadata.namespace ?? namespace}/${task.metadata.name}`
+      if ((uid && seenUIDs.has(uid)) || seenNames.has(namespacedName)) {
+        continue
+      }
+      if (uid) seenUIDs.add(uid)
+      seenNames.add(namespacedName)
+      items.push(task)
+    }
+  }
+
+  return items
+}
+
+function getTaskListPaginationState(
+  lastPage: ListResponse<Task>,
+  pages: ListResponse<Task>[],
+  lastPageParam: string | undefined,
+  pageParams: Array<string | undefined>,
+): TaskListPaginationState {
+  const nextCursor = lastPage.metadata?.continue
+  if (!nextCursor) return {}
+  if (pages.length >= maxTaskListPages) {
+    return {
+      error: new TaskListPaginationError(
+        `Task list pagination page limit (${maxTaskListPages}) reached`,
+      ),
+    }
+  }
+  if (nextCursor === lastPageParam) {
+    return {
+      error: new TaskListPaginationError(
+        'Task list pagination continuation did not advance',
+      ),
+    }
+  }
+  if (pageParams.includes(nextCursor)) {
+    return {
+      error: new TaskListPaginationError(
+        'Task list pagination continuation cycle detected',
+      ),
+    }
+  }
+  return { nextCursor }
 }
 
 export function useTaskList(limit = '25', refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
-  return useQuery({
+  const query = useInfiniteQuery<
+    ListResponse<Task>,
+    Error,
+    InfiniteData<ListResponse<Task>, string | undefined>,
+    readonly ['tasks', string, string],
+    string | undefined
+  >({
     queryKey: ['tasks', namespace, limit],
-    queryFn: () => fetchTaskListPage(namespace, limit),
+    queryFn: ({ pageParam }) => fetchTaskListPage(namespace, limit, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage, pages, lastPageParam, pageParams) =>
+      getTaskListPaginationState(
+        lastPage,
+        pages,
+        lastPageParam,
+        pageParams,
+      ).nextCursor,
     refetchInterval,
   })
+
+  const paginationData = query.data
+  const lastPage = paginationData?.pages[paginationData.pages.length - 1]
+  const paginationError = paginationData && lastPage
+    ? getTaskListPaginationState(
+        lastPage,
+        paginationData.pages,
+        paginationData.pageParams[paginationData.pageParams.length - 1],
+        paginationData.pageParams,
+      ).error
+    : undefined
+
+  return {
+    ...query,
+    data: paginationData
+      ? {
+          items: flattenUniqueTasks(paginationData.pages, namespace),
+          metadata: lastPage?.metadata ?? {},
+        }
+      : undefined,
+    paginationError,
+  }
 }
 
 export function useTaskListAll(pageLimit = '100', refetchInterval: number | false = 10000) {
@@ -28,17 +132,33 @@ export function useTaskListAll(pageLimit = '100', refetchInterval: number | fals
   return useQuery({
     queryKey: ['tasks', 'all', namespace, pageLimit],
     queryFn: async () => {
-      const items: Task[] = []
+      const pages: ListResponse<Task>[] = []
+      const pageParams: Array<string | undefined> = []
       let metadata: ListResponse<Task>['metadata'] = {}
-      let continueToken: string | undefined
-      do {
-        const page = await fetchTaskListPage(namespace, pageLimit, continueToken)
-        items.push(...page.items)
+      let cursor: string | undefined
+
+      for (;;) {
+        const page = await fetchTaskListPage(namespace, pageLimit, cursor)
+        pages.push(page)
+        pageParams.push(cursor)
         metadata = page.metadata ?? {}
-        continueToken = metadata.continue
-      } while (continueToken)
-      return { items, metadata }
+
+        const pagination = getTaskListPaginationState(
+          page,
+          pages,
+          cursor,
+          pageParams,
+        )
+        if (pagination.error) throw pagination.error
+        if (!pagination.nextCursor) {
+          return { items: flattenUniqueTasks(pages, namespace), metadata }
+        }
+
+        cursor = pagination.nextCursor
+      }
     },
+    retry: (failureCount, error) =>
+      !(error instanceof TaskListPaginationError) && failureCount < 1,
     refetchInterval,
   })
 }

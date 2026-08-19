@@ -1,9 +1,10 @@
 import { Skeleton } from '@/components/ui/skeleton'
-import { useTaskList } from '@/hooks/use-tasks'
+import { useTaskListAll } from '@/hooks/use-tasks'
 import { phaseStyle } from '@/lib/task-status'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/layout/page-header'
 import { KanbanCard } from './kanban-card'
+import { TaskInventoryError } from './task-inventory-error'
 import type { Task, TaskPhase } from '@/schemas/task'
 
 // One column per backend task phase, in lifecycle order, so every task lands in
@@ -34,9 +35,38 @@ function groupByPhase(tasks: Task[]): Record<string, Task[]> {
 }
 
 export function KanbanBoard() {
-  const { data, isLoading } = useTaskList('100', 5000)
-  const tasks = data?.items ?? []
-  const grouped = groupByPhase(tasks)
+  const { data, error, isFetching, refetch } = useTaskListAll('100', 5000)
+
+  if (error) {
+    return (
+      <div className="space-y-4">
+        <PageHeader title="Board" description="Kanban view of task execution" />
+        <TaskInventoryError
+          isRetrying={isFetching}
+          onRetry={() => void refetch()}
+        />
+      </div>
+    )
+  }
+
+  if (!data) {
+    return (
+      <div className="space-y-4">
+        <PageHeader title="Board" description="Kanban view of task execution" />
+        <div
+          role="status"
+          aria-label="Loading complete task inventory"
+          className="flex gap-4 overflow-x-auto pb-4"
+        >
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-40 min-w-[280px] flex-1" />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  const grouped = groupByPhase(data.items)
 
   return (
     <div className="space-y-4">
@@ -69,15 +99,11 @@ export function KanbanBoard() {
                   style.textClass,
                 )}
               >
-                {isLoading ? '…' : grouped[phase].length}
+                {grouped[phase].length}
               </span>
             </div>
             <div className="flex flex-col gap-2 min-h-[120px] pb-2">
-              {isLoading ? (
-                Array.from({ length: 2 }).map((_, i) => (
-                  <Skeleton key={i} className="h-20 w-full rounded-xl" />
-                ))
-              ) : grouped[phase].length === 0 ? (
+              {grouped[phase].length === 0 ? (
                 <p className="text-xs text-muted-foreground text-center py-8">No {label.toLowerCase()} tasks</p>
               ) : (
                 grouped[phase].map((task) => (

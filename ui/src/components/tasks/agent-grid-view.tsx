@@ -5,9 +5,10 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
 import { EmptyState } from '@/components/ui/empty-state'
 import { SonarPing } from '@/components/ui/sonar-ping'
-import { useTaskList } from '@/hooks/use-tasks'
+import { useTaskListAll } from '@/hooks/use-tasks'
 import { useFreshness } from '@/hooks/use-freshness'
 import { cn } from '@/lib/utils'
+import { TaskInventoryError } from './task-inventory-error'
 import { TaskStatusBadge } from './task-status-badge'
 import type { Task } from '@/schemas/task'
 
@@ -61,15 +62,29 @@ function AgentMiniPanel({ task }: { task: Task }) {
 }
 
 export function AgentGridView() {
-  const { data, isLoading } = useTaskList()
+  const { data, error, isFetching, refetch } = useTaskListAll('100')
 
-  const runningTasks = (data?.items ?? []).filter(t => t.status?.phase === 'Running')
+  if (error) {
+    return (
+      <div className="space-y-4">
+        <PageHeader title="Live Agents" description="Task inventory unavailable" />
+        <TaskInventoryError
+          isRetrying={isFetching}
+          onRetry={() => void refetch()}
+        />
+      </div>
+    )
+  }
 
-  if (isLoading) {
+  if (!data) {
     return (
       <div className="space-y-4">
         <PageHeader title="Live Agents" description="Active task execution overview" />
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div
+          role="status"
+          aria-label="Loading complete task inventory"
+          className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+        >
           {Array.from({ length: 4 }).map((_, i) => (
             <Skeleton key={i} className="h-32 w-full" />
           ))}
@@ -77,6 +92,8 @@ export function AgentGridView() {
       </div>
     )
   }
+
+  const runningTasks = data.items.filter(t => t.status?.phase === 'Running')
 
   return (
     <div className="space-y-4">
