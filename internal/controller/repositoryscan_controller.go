@@ -19,6 +19,7 @@ import (
 
 	cron "github.com/robfig/cron/v3"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1230,7 +1231,7 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		switch task.Status.Phase {
-		case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed:
+		case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
 		default:
 			continue
 		}
@@ -1276,7 +1277,7 @@ func isTerminalScanTask(task corev1alpha1.Task) bool {
 		return false
 	}
 	switch task.Status.Phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed:
+	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
 		return true
 	default:
 		return false
@@ -1309,7 +1310,7 @@ func taskPhaseToSecurityPhase(phase corev1alpha1.TaskPhase) string {
 	if phase == corev1alpha1.TaskPhaseSucceeded {
 		return scanRunPhaseSucceeded
 	}
-	if phase == corev1alpha1.TaskPhaseFailed {
+	if phase == corev1alpha1.TaskPhaseFailed || phase == corev1alpha1.TaskPhaseCancelled {
 		return scanRunPhaseFailed
 	}
 	if phase == corev1alpha1.TaskPhaseRunning {
@@ -1662,7 +1663,7 @@ func (r *RepositoryScanReconciler) collectScanRunProgress(
 			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 				progress.hasThreatModelReady = true
 			}
-			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+			if task.Status.Phase == corev1alpha1.TaskPhaseFailed || task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
 				recordScanProgressFailure(&progress, task, r.pipelineTaskSummary(ctx, task, "threat model stage failed"))
 			}
 		case security.StageMapper:
@@ -1670,7 +1671,7 @@ func (r *RepositoryScanReconciler) collectScanRunProgress(
 			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 				progress.hasMapperReady = true
 			}
-			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+			if task.Status.Phase == corev1alpha1.TaskPhaseFailed || task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
 				recordScanProgressFailure(&progress, task, r.pipelineTaskSummary(ctx, task, "mapper stage failed"))
 			}
 		case security.StageReview:
@@ -1679,7 +1680,7 @@ func (r *RepositoryScanReconciler) collectScanRunProgress(
 			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 				progress.reviewSucceeded++
 			}
-			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+			if task.Status.Phase == corev1alpha1.TaskPhaseFailed || task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
 				recordScanProgressFailure(&progress, task, r.pipelineTaskSummary(ctx, task, "review stage failed"))
 			}
 		}
@@ -2915,8 +2916,17 @@ func (r *RepositoryScanReconciler) updateStatusWithRetry(ctx context.Context, sc
 		if err := r.Get(ctx, types.NamespacedName{Name: scan.Name, Namespace: scan.Namespace}, current); err != nil {
 			return err
 		}
+		original := current.Status.DeepCopy()
 		mutate(current)
-		return r.Status().Update(ctx, current)
+		if apiequality.Semantic.DeepEqual(*original, current.Status) {
+			scan.Status = *current.Status.DeepCopy()
+			return nil
+		}
+		if err := r.Status().Update(ctx, current); err != nil {
+			return err
+		}
+		scan.Status = *current.Status.DeepCopy()
+		return nil
 	})
 }
 

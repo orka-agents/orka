@@ -472,96 +472,129 @@ func executionEventTypeForTaskPhase(phase corev1alpha1.TaskPhase) string {
 func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:unparam // Result is always nil but kept for interface consistency
 	log := logf.FromContext(ctx)
 
-	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
-		// Clean up result data from store
-		if r.ResultStore != nil {
-			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete result from store", "task", task.Name)
-				// Continue with finalizer removal anyway
-			}
-		}
-
-		// Clean up artifacts
-		if r.ArtifactStore != nil {
-			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete artifacts", "task", task.Name)
-			}
-		}
-
-		// Clean up plan state if any
-		if r.PlanStore != nil {
-			if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete plan state", "task", task.Name)
-				// Continue with finalizer removal anyway
-			}
-		}
-
-		// Clean up inter-agent messages
-		if r.MessageStore != nil {
-			if err := r.MessageStore.DeleteTaskMessages(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete task messages", "task", task.Name)
-			}
-			// If this is a coordinator, clean up all children's messages
-			if err := r.MessageStore.DeleteParentMessages(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete parent messages", "task", task.Name)
-			}
-		}
-
-		// Clean up execution timeline events before allowing a future task with the
-		// same namespace/name to expose stale history.
-		if r.ExecutionEventStore != nil {
-			if err := r.ExecutionEventStore.DeleteExecutionEvents(ctx, task.Namespace, store.ExecutionEventStreamTypeTask, task.Name); err != nil {
-				log.Error(err, "failed to delete execution events", "task", task.Name)
-				return ctrl.Result{}, err
-			}
-		}
-
-		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task deleted"); cancelErr != nil {
-			if isAgentRuntimeDependencyNotReady(cancelErr) {
-				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-					return ctrl.Result{}, waitErr
-				} else if shouldWait {
-					log.Info("waiting to cancel deleted harness runtime turn", "error", cancelErr)
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-			}
-			log.Error(cancelErr, "failed to cancel deleted harness runtime turn")
-		}
-
-		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
-		if err != nil {
-			log.Error(err, "failed to delete Job")
+	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		if err := r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(ctx, task.Namespace); err != nil {
+			log.Error(err, "failed to clean up trusted Service RBAC after Task removal")
 			return ctrl.Result{}, err
 		}
-		if waitingForJob {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-		}
-		releasedPoolLeases, err := r.releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx, task)
-		if err != nil {
-			log.Error(err, "failed to release substrate pool actor leases")
-			return ctrl.Result{}, err
-		}
-		if !releasedPoolLeases {
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
+		return ctrl.Result{}, nil
+	}
 
-		// Release session lock if held
-		if task.Spec.SessionRef != nil {
-			if err := r.SessionManager.ReleaseLock(ctx, task); err != nil {
-				log.Error(err, "failed to release session lock")
-				// Continue with finalizer removal anyway
-			}
+	var cleanupErrs []error
+	appendCleanupErr := func(operation string, err error) {
+		if err == nil {
+			return
 		}
+		log.Error(err, operation, "task", task.Name)
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("%s: %w", operation, err))
+	}
 
-		// Remove finalizer
-		controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
-		if err := r.Update(ctx, task); err != nil && !apierrors.IsNotFound(err) {
-			log.Error(err, "failed to remove finalizer")
-			return ctrl.Result{}, err
+	// Durable stores are retried until every cleanup succeeds. Their failures do
+	// not prevent the controller from first revoking execution authority below.
+	if r.ResultStore != nil {
+		appendCleanupErr("deleting result from store", r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name))
+	}
+	if r.ArtifactStore != nil {
+		appendCleanupErr("deleting artifacts", r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name))
+	}
+	if r.PlanStore != nil {
+		appendCleanupErr("deleting plan state", r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name))
+	}
+	if r.MessageStore != nil {
+		appendCleanupErr("deleting task messages", r.MessageStore.DeleteTaskMessages(ctx, task.Namespace, task.Name))
+		appendCleanupErr("deleting parent messages", r.MessageStore.DeleteParentMessages(ctx, task.Namespace, task.Name))
+	}
+	if r.ExecutionEventStore != nil {
+		appendCleanupErr(
+			"deleting execution events",
+			r.ExecutionEventStore.DeleteExecutionEvents(ctx, task.Namespace, store.ExecutionEventStreamTypeTask, task.Name),
+		)
+	}
+
+	var requeueAfter time.Duration
+	setRequeueAfter := func(delay time.Duration) {
+		if requeueAfter == 0 || delay < requeueAfter {
+			requeueAfter = delay
 		}
 	}
-	if err := r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(ctx, task.Namespace); err != nil {
-		log.Error(err, "failed to clean up trusted Service RBAC after Task removal")
+	quiescenceBlocked := false
+	runtimeCancellationPending := false
+	markRuntimeCancellationPending := func(delay time.Duration) {
+		quiescenceBlocked = true
+		runtimeCancellationPending = true
+		setRequeueAfter(delay)
+	}
+
+	// A successful harness-v1 CancelTurn response is the execution-authority
+	// fence. Persist that acknowledgement before later fallible cleanup so retries
+	// never need the runtime endpoint or auth Secret after quiescence is confirmed.
+	if taskHasPlannedHarnessWrapperTurn(task) && !harnessWrapperCancelAcknowledged(task) {
+		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task deleted"); cancelErr != nil {
+			if isAgentRuntimeDependencyNotReady(cancelErr) {
+				shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task)
+				if waitErr != nil {
+					appendCleanupErr("recording deleted harness runtime cancellation retry", waitErr)
+					markRuntimeCancellationPending(time.Second)
+				} else if shouldWait {
+					log.Info("waiting to cancel deleted harness runtime turn", "error", cancelErr)
+					markRuntimeCancellationPending(time.Second)
+				} else {
+					log.Error(cancelErr, "failed to cancel deleted harness runtime turn after dependency retries; retaining finalizer")
+					markRuntimeCancellationPending(30 * time.Second)
+				}
+			} else {
+				// Any unconfirmed started or planned harness turn can remain active,
+				// including built-in runtimes whose wrapper Job is not retained in status.
+				log.Error(cancelErr, "failed to cancel deleted harness runtime turn; retaining finalizer")
+				markRuntimeCancellationPending(30 * time.Second)
+			}
+		} else if ackErr := r.patchHarnessWrapperCancelAcknowledged(ctx, task); ackErr != nil {
+			appendCleanupErr("recording deleted harness runtime cancellation acknowledgement", ackErr)
+			markRuntimeCancellationPending(time.Second)
+		}
+	}
+
+	waitingForJob, jobCleanupErr := r.cleanupDeletedTaskJob(ctx, task)
+	if jobCleanupErr != nil {
+		appendCleanupErr("deleting Task Job", jobCleanupErr)
+		quiescenceBlocked = true
+	} else if waitingForJob {
+		quiescenceBlocked = true
+		setRequeueAfter(2 * time.Second)
+	} else if !runtimeCancellationPending {
+		releasedPoolLeases, leaseCleanupErr := r.releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx, task)
+		if leaseCleanupErr != nil {
+			appendCleanupErr("releasing substrate pool actor leases", leaseCleanupErr)
+			quiescenceBlocked = true
+		} else if !releasedPoolLeases {
+			quiescenceBlocked = true
+			setRequeueAfter(30 * time.Second)
+		}
+	}
+
+	// Do not release session ownership while a runtime, Job, or pooled workspace
+	// may still be active. Once quiesced, lock release is durable cleanup too.
+	if !quiescenceBlocked && task.Spec.SessionRef != nil {
+		appendCleanupErr("releasing session lock", r.SessionManager.ReleaseLock(ctx, task))
+	}
+
+	// Cross-namespace read grants are execution authority. Revoke them before
+	// allowing finalizer removal, and retry any failure while the Task remains.
+	appendCleanupErr(
+		"cleaning up trusted Service RBAC after Task removal",
+		r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(ctx, task.Namespace),
+	)
+
+	if err := errors.Join(cleanupErrs...); err != nil {
+		return ctrl.Result{}, err
+	}
+	if quiescenceBlocked {
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	}
+
+	controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
+	if err := r.Update(ctx, task); err != nil && !apierrors.IsNotFound(err) {
+		log.Error(err, "failed to remove finalizer")
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
@@ -730,7 +763,7 @@ func (r *TaskReconciler) handleScheduledTask(ctx context.Context, task *corev1al
 	log := logf.FromContext(ctx)
 
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-	sched, err := parser.Parse(task.Spec.Schedule)
+	sched, err := parseTaskSchedule(parser, task.Spec.Schedule)
 	if err != nil {
 		return r.failTask(ctx, task, fmt.Sprintf("invalid cron expression: %v", err))
 	}
@@ -2172,18 +2205,17 @@ func (r *TaskReconciler) cleanupDeletedTaskJob(ctx context.Context, task *corev1
 		return false, fmt.Errorf("getting deleted task Job %q: %w", task.Status.JobName, err)
 	}
 
-	holdsPoolActor, err := r.taskHasSubstratePoolActorLeases(ctx, task)
-	if err != nil {
-		return false, err
-	}
-	propagationPolicy := metav1.DeletePropagationBackground
-	if holdsPoolActor {
-		propagationPolicy = metav1.DeletePropagationForeground
-	}
-	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
+	// Foreground deletion keeps the Job observable until its Pods are gone. The
+	// caller must requeue until a subsequent Get returns NotFound so no worker can
+	// recreate durable Task data after the final cleanup pass.
+	propagationPolicy := metav1.DeletePropagationForeground
+	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("deleting deleted task Job %q: %w", task.Status.JobName, err)
 	}
-	return holdsPoolActor, nil
+	return true, nil
 }
 
 func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
@@ -3146,24 +3178,237 @@ func approvalRequiredBuiltInToolSet() map[string]bool {
 	return builtIns
 }
 
+const (
+	maxSkippedScheduleCatchUpSteps    = 1000
+	scheduleSuspendedMarkerAnnotation = "orka.ai/schedule-suspended"
+)
+
+func coalesceOverdueSchedule(
+	sched cron.Schedule,
+	firstDue time.Time,
+	now time.Time,
+) (lastConsumed time.Time, next time.Time) {
+	lastConsumed = firstDue
+	for range maxSkippedScheduleCatchUpSteps {
+		next = sched.Next(lastConsumed)
+		if next.After(now) {
+			return lastConsumed, next
+		}
+		if !next.After(lastConsumed) {
+			break
+		}
+		lastConsumed = next
+	}
+
+	// Bound custom Schedule implementations that cannot be inspected directly.
+	// Parsed cron schedules use mostRecentDueSchedule's constant-time or binary
+	// search paths below and retain an exact scheduled cursor.
+	lastConsumed = now
+	return lastConsumed, sched.Next(lastConsumed)
+}
+
+func mostRecentDueSchedule(sched cron.Schedule, firstDue, now time.Time) (time.Time, time.Time) {
+	switch typed := sched.(type) {
+	case cron.ConstantDelaySchedule:
+		if typed.Delay > 0 {
+			steps := now.Sub(firstDue) / typed.Delay
+			latest := firstDue.Add(steps * typed.Delay)
+			return latest, typed.Next(latest)
+		}
+	case *cron.ConstantDelaySchedule:
+		if typed != nil && typed.Delay > 0 {
+			steps := now.Sub(firstDue) / typed.Delay
+			latest := firstDue.Add(steps * typed.Delay)
+			return latest, typed.Next(latest)
+		}
+	case *cron.SpecSchedule:
+		if typed != nil {
+			latest := firstDue
+			low, high := firstDue, now
+			for range 64 {
+				span := high.Sub(low)
+				if span <= time.Second {
+					break
+				}
+				mid := low.Add(span / 2)
+				candidate := typed.Next(mid)
+				if candidate.IsZero() || candidate.After(now) {
+					high = mid
+					continue
+				}
+				latest = candidate
+				low = mid
+			}
+			next := typed.Next(latest)
+			if !next.IsZero() && !next.After(now) {
+				latest = next
+				next = typed.Next(latest)
+			}
+			return latest, next
+		}
+	}
+	return coalesceOverdueSchedule(sched, firstDue, now)
+}
+
+func (r *TaskReconciler) persistScheduleCursor(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	lastConsumed time.Time,
+	next time.Time,
+) error {
+	lastSchedule := metav1.NewTime(lastConsumed)
+	nextSchedule := metav1.NewTime(next)
+	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		t.Status.LastScheduleTime = &lastSchedule
+		t.Status.NextScheduleTime = &nextSchedule
+	})
+}
+
+func (r *TaskReconciler) advanceSkippedSchedule(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	sched cron.Schedule,
+	firstDue time.Time,
+	now time.Time,
+) (time.Time, error) {
+	lastConsumed, next := mostRecentDueSchedule(sched, firstDue, now)
+	if err := r.persistScheduleCursor(ctx, task, lastConsumed, next); err != nil {
+		return time.Time{}, err
+	}
+	return next, nil
+}
+
+func (r *TaskReconciler) handleSuspendedSchedule(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	sched cron.Schedule,
+	scheduledTime time.Time,
+	now time.Time,
+) (ctrl.Result, error) {
+	logf.FromContext(ctx).Info("Task is suspended, skipping overdue scheduled runs")
+	if now.Before(scheduledTime) {
+		nextSchedule := metav1.NewTime(scheduledTime)
+		if task.Status.NextScheduleTime == nil || !task.Status.NextScheduleTime.Equal(&nextSchedule) {
+			if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+				t.Status.NextScheduleTime = &nextSchedule
+			}); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
+	if _, err := r.advanceSkippedSchedule(ctx, task, sched, scheduledTime, now); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: time.Minute}, nil
+}
+
+func taskHasScheduleSuspensionMarker(task *corev1alpha1.Task) bool {
+	return task != nil && task.Annotations != nil &&
+		task.Annotations[scheduleSuspendedMarkerAnnotation] == scheduledRunLabelValue
+}
+
+func (r *TaskReconciler) ensureScheduleSuspensionMarker(ctx context.Context, task *corev1alpha1.Task) error {
+	if taskHasScheduleSuspensionMarker(task) {
+		return nil
+	}
+	patch := client.MergeFrom(task.DeepCopy())
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[scheduleSuspendedMarkerAnnotation] = scheduledRunLabelValue
+	return r.Patch(ctx, task, patch)
+}
+
+func (r *TaskReconciler) clearScheduleSuspensionMarker(ctx context.Context, task *corev1alpha1.Task) error {
+	if !taskHasScheduleSuspensionMarker(task) {
+		return nil
+	}
+	patch := client.MergeFrom(task.DeepCopy())
+	delete(task.Annotations, scheduleSuspendedMarkerAnnotation)
+	return r.Patch(ctx, task, patch)
+}
+
+func (r *TaskReconciler) finishScheduleResume(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	sched cron.Schedule,
+	scheduledTime time.Time,
+	now time.Time,
+) (ctrl.Result, bool, error) {
+	if !taskHasScheduleSuspensionMarker(task) {
+		return ctrl.Result{}, false, nil
+	}
+	if now.Before(scheduledTime) {
+		if err := r.clearScheduleSuspensionMarker(ctx, task); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		return ctrl.Result{}, false, nil
+	}
+	next, err := r.advanceSkippedSchedule(ctx, task, sched, scheduledTime, now)
+	if err != nil {
+		return ctrl.Result{}, true, err
+	}
+	if err := r.clearScheduleSuspensionMarker(ctx, task); err != nil {
+		return ctrl.Result{}, true, err
+	}
+	return ctrl.Result{RequeueAfter: time.Until(next)}, true, nil
+}
+
+func (r *TaskReconciler) ensureScheduleSuspensionMarkerIfNeeded(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	suspended bool,
+) error {
+	if !suspended {
+		return nil
+	}
+	return r.ensureScheduleSuspensionMarker(ctx, task)
+}
+
+func parseTaskSchedule(parser cron.Parser, spec string) (schedule cron.Schedule, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			schedule = nil
+			err = fmt.Errorf("cron parser panic: %v", recovered)
+		}
+	}()
+	return parser.Parse(spec)
+}
+
+func (r *TaskReconciler) parseScheduledTaskSchedule(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	suspended bool,
+) (cron.Schedule, ctrl.Result, bool) {
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	sched, err := parseTaskSchedule(parser, task.Spec.Schedule)
+	if err == nil {
+		return sched, ctrl.Result{}, false
+	}
+	if suspended {
+		logf.FromContext(ctx).Info("Task is suspended, deferring invalid schedule validation")
+		return nil, ctrl.Result{RequeueAfter: time.Minute}, true
+	}
+	task.Status.Phase = corev1alpha1.TaskPhaseFailed
+	task.Status.Message = fmt.Sprintf("invalid cron expression: %v", err)
+	_ = r.Status().Update(ctx, task)
+	return nil, ctrl.Result{}, true
+}
+
 // handleScheduled manages the scheduling loop for recurring tasks.
 func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-
-	// Check if suspended
-	if task.Spec.Suspend != nil && *task.Spec.Suspend {
-		log.Info("Task is suspended, skipping schedule check")
-		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	suspended := task.Spec.Suspend != nil && *task.Spec.Suspend
+	if err := r.ensureScheduleSuspensionMarkerIfNeeded(ctx, task, suspended); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	// Parse schedule
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-	sched, err := parser.Parse(task.Spec.Schedule)
-	if err != nil {
-		task.Status.Phase = corev1alpha1.TaskPhaseFailed
-		task.Status.Message = fmt.Sprintf("invalid cron expression: %v", err)
-		_ = r.Status().Update(ctx, task)
-		return ctrl.Result{}, nil
+	// Parse schedule. Preserve the existing behavior that an invalid suspended
+	// schedule is not failed until the Task is resumed.
+	sched, parseResult, parseHandled := r.parseScheduledTaskSchedule(ctx, task, suspended)
+	if parseHandled {
+		return parseResult, nil
 	}
 
 	// Determine time zone
@@ -3184,14 +3429,22 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 		scheduledTime = sched.Next(task.CreationTimestamp.In(loc))
 	}
 
+	if suspended {
+		return r.handleSuspendedSchedule(ctx, task, sched, scheduledTime, now)
+	}
+	if result, handled, err := r.finishScheduleResume(ctx, task, sched, scheduledTime, now); handled || err != nil {
+		return result, err
+	}
+
 	// Not yet time
 	if now.Before(scheduledTime) {
 		nextSchedule := metav1.NewTime(scheduledTime)
 		if task.Status.NextScheduleTime == nil || !task.Status.NextScheduleTime.Equal(&nextSchedule) {
-			nextScheduleCopy := nextSchedule
-			_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-				t.Status.NextScheduleTime = &nextScheduleCopy
-			})
+			if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+				t.Status.NextScheduleTime = &nextSchedule
+			}); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		return ctrl.Result{RequeueAfter: time.Until(scheduledTime)}, nil
 	}
@@ -3201,17 +3454,21 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	if task.Spec.StartingDeadlineSeconds != nil {
 		deadlineSeconds = *task.Spec.StartingDeadlineSeconds
 	}
-	if now.Sub(scheduledTime) > time.Duration(deadlineSeconds)*time.Second {
+	deadline := time.Duration(deadlineSeconds) * time.Second
+	if now.Sub(scheduledTime) > deadline {
 		log.Info("Missed schedule beyond deadline, skipping", "scheduledTime", scheduledTime, "deadline", deadlineSeconds)
 		r.Recorder.Eventf(task, "Warning", "MissedSchedule", "Missed scheduled run at %s (deadline %ds exceeded)", scheduledTime.Format(time.RFC3339), deadlineSeconds)
-		// Advance to next schedule time
-		next := sched.Next(now)
-		nextSchedule := metav1.NewTime(next)
-		nextScheduleCopy := nextSchedule
-		_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-			t.Status.NextScheduleTime = &nextScheduleCopy
-		})
-		return ctrl.Result{RequeueAfter: time.Until(next)}, nil
+		latestDue, next := mostRecentDueSchedule(sched, scheduledTime, now)
+		if now.Sub(latestDue) > deadline {
+			if err := r.persistScheduleCursor(ctx, task, latestDue, next); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: time.Until(next)}, nil
+		}
+		// Retain the most recent occurrence that is still inside the starting
+		// deadline. Older expired ticks are coalesced by the status update after
+		// this occurrence is either created or skipped by ForbidConcurrent.
+		scheduledTime = latestDue
 	}
 
 	// Check concurrency policy
@@ -3225,12 +3482,10 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 		for i := range childList.Items {
 			if taskPhaseCountsTowardConcurrency(childList.Items[i].Status.Phase) {
 				log.Info("Concurrency policy Forbid: active child task exists, skipping", "activeChild", childList.Items[i].Name)
-				next := sched.Next(now)
-				nextSchedule := metav1.NewTime(next)
-				nextScheduleCopy := nextSchedule
-				_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-					t.Status.NextScheduleTime = &nextScheduleCopy
-				})
+				next, err := r.advanceSkippedSchedule(ctx, task, sched, scheduledTime, now)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
 				return ctrl.Result{RequeueAfter: time.Until(next)}, nil
 			}
 		}

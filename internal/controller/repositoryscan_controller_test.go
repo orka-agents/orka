@@ -81,6 +81,160 @@ func TestIngestMapperTaskSkipsFailedRun(t *testing.T) {
 	}
 }
 
+func TestRepositoryScanIngestsCancelledPipelineTaskAsTerminalFailure(t *testing.T) {
+	ctx := context.Background()
+	securityStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1.AddToScheme() error = %v", err)
+	}
+
+	const runID = "scan_cancelled"
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "cancelled-scan", Namespace: defaultNS},
+		Status: corev1alpha1.RepositoryScanStatus{
+			Phase:      repositoryScanPhaseScanning,
+			LastScanID: runID,
+		},
+	}
+	completed := metav1.Now()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cancelled-scan-threat-model",
+			Namespace: defaultNS,
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: scan.Name,
+				labels.LabelSecurityScanID: runID,
+				labels.LabelSecurityStage:  security.StageThreatModel,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:          corev1alpha1.TaskPhaseCancelled,
+			CompletionTime: &completed,
+			Message:        "cancelled by user",
+		},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
+		WithObjects(scan, task).
+		Build()
+	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: securityStore}
+	if err := securityStore.CreateScanRun(ctx, &storepkg.ScanRun{
+		ID:             runID,
+		Namespace:      defaultNS,
+		RepositoryScan: scan.Name,
+		TaskName:       task.Name,
+		Mode:           "initial",
+		Phase:          scanRunPhaseRunning,
+		StartedAt:      time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
+
+	if err := reconciler.ingestOwnedTasks(ctx, scan); err != nil {
+		t.Fatalf("ingestOwnedTasks() error = %v", err)
+	}
+
+	run, err := securityStore.GetScanRun(ctx, defaultNS, runID)
+	if err != nil {
+		t.Fatalf("GetScanRun() error = %v", err)
+	}
+	if run.Phase != scanRunPhaseFailed || !strings.Contains(run.ErrorMessage, "cancelled") {
+		t.Fatalf("scan run phase/error = %q/%q, want cancelled terminal failure", run.Phase, run.ErrorMessage)
+	}
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("Get(RepositoryScan) error = %v", err)
+	}
+	if current.Status.Phase != repositoryScanPhaseError {
+		t.Fatalf("RepositoryScan phase = %q, want %q", current.Status.Phase, repositoryScanPhaseError)
+	}
+	ready := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+	if ready == nil || ready.Reason != readyReasonScanFailed {
+		t.Fatalf("Ready condition = %#v, want reason %q", ready, readyReasonScanFailed)
+	}
+}
+
+func TestRepositoryScanTaskPhasePredicates(t *testing.T) {
+	for _, tc := range []struct {
+		phase  corev1alpha1.TaskPhase
+		active bool
+	}{
+		{phase: corev1alpha1.TaskPhasePending, active: true},
+		{phase: corev1alpha1.TaskPhaseScheduled, active: true},
+		{phase: corev1alpha1.TaskPhaseRunning, active: true},
+		{phase: corev1alpha1.TaskPhaseFinalizing, active: true},
+		{phase: corev1alpha1.TaskPhaseSucceeded, active: false},
+		{phase: corev1alpha1.TaskPhaseFailed, active: false},
+		{phase: corev1alpha1.TaskPhaseCancelled, active: false},
+	} {
+		t.Run(string(tc.phase), func(t *testing.T) {
+			if got := isActiveTaskPhase(tc.phase); got != tc.active {
+				t.Fatalf("isActiveTaskPhase(%q) = %t, want %t", tc.phase, got, tc.active)
+			}
+		})
+	}
+
+	task := corev1alpha1.Task{Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled}}
+	if !isTerminalScanTask(task) {
+		t.Fatal("isTerminalScanTask(Cancelled) = false, want true")
+	}
+	if got := taskPhaseToSecurityPhase(corev1alpha1.TaskPhaseCancelled); got != scanRunPhaseFailed {
+		t.Fatalf("taskPhaseToSecurityPhase(Cancelled) = %q, want %q", got, scanRunPhaseFailed)
+	}
+
+	progress := (&RepositoryScanReconciler{}).collectScanRunProgress(context.Background(), []corev1alpha1.Task{{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labels.LabelSecurityStage: security.StageMapper}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled, Message: "cancelled by user"},
+	}})
+	run := &storepkg.ScanRun{Phase: scanRunPhaseRunning}
+	applyScanRunProgress(run, progress)
+	if run.Phase != scanRunPhaseFailed {
+		t.Fatalf("cancelled pipeline progress phase = %q, want %q", run.Phase, scanRunPhaseFailed)
+	}
+}
+
+func TestRepositoryScanStatusUpdateSkipsNoopAndRetriesConflict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "status-stable-scan", Namespace: defaultNS},
+		Status:     corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhasePending},
+	}
+	countingClient := &statusUpdateCountingClient{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scan).WithObjects(scan).Build(),
+	}
+	reconciler := &RepositoryScanReconciler{Client: countingClient, Scheme: scheme}
+
+	if err := reconciler.updateStatusWithRetry(context.Background(), scan, func(current *corev1alpha1.RepositoryScan) {
+		current.Status.Phase = repositoryScanPhasePending
+	}); err != nil {
+		t.Fatalf("no-op updateStatusWithRetry() error = %v", err)
+	}
+	if countingClient.statusUpdateCount != 0 {
+		t.Fatalf("no-op status update attempts = %d, want 0", countingClient.statusUpdateCount)
+	}
+
+	countingClient.conflictsRemaining = 1
+	if err := reconciler.updateStatusWithRetry(context.Background(), scan, func(current *corev1alpha1.RepositoryScan) {
+		current.Status.Phase = repositoryScanPhaseScanning
+	}); err != nil {
+		t.Fatalf("conflicting updateStatusWithRetry() error = %v", err)
+	}
+	if countingClient.statusUpdateCount != 2 {
+		t.Fatalf("conflicting status update attempts = %d, want 2", countingClient.statusUpdateCount)
+	}
+	if scan.Status.Phase != repositoryScanPhaseScanning {
+		t.Fatalf("RepositoryScan phase = %q, want %q", scan.Status.Phase, repositoryScanPhaseScanning)
+	}
+}
+
 func TestLatestTerminalScanTaskPrefersNewestCompletedScan(t *testing.T) {
 	tasks := []corev1alpha1.Task{
 		{

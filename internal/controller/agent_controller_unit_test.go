@@ -633,6 +633,22 @@ func TestCountActiveTasks(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
 	}
+	finalizingTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-finalizing", Namespace: testNS},
+		Spec: corev1alpha1.TaskSpec{
+			AgentRef: &corev1alpha1.AgentReference{Name: "count-agent"},
+			Prompt:   "do something",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFinalizing},
+	}
+	cancelledTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-cancelled", Namespace: testNS},
+		Spec: corev1alpha1.TaskSpec{
+			AgentRef: &corev1alpha1.AgentReference{Name: "count-agent"},
+			Prompt:   "do something",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
+	}
 	otherAgentTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "task-other", Namespace: testNS},
 		Spec: corev1alpha1.TaskSpec{
@@ -659,9 +675,9 @@ func TestCountActiveTasks(t *testing.T) {
 			want: 0,
 		},
 		{
-			name: "only pending and running count",
-			objs: []runtime.Object{pendingTask, runningTask, succeededTask, failedTask},
-			want: 2,
+			name: "pending running and finalizing count",
+			objs: []runtime.Object{pendingTask, runningTask, finalizingTask, succeededTask, failedTask, cancelledTask},
+			want: 3,
 		},
 		{
 			name: "other agent tasks not counted",
@@ -675,7 +691,7 @@ func TestCountActiveTasks(t *testing.T) {
 		},
 		{
 			name: "all terminal - zero active",
-			objs: []runtime.Object{succeededTask, failedTask},
+			objs: []runtime.Object{succeededTask, failedTask, cancelledTask},
 			want: 0,
 		},
 	}
@@ -711,8 +727,8 @@ func TestUpdateStatus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if result.RequeueAfter != 0 {
-			t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+		if result.RequeueAfter != agentDependencyValidationRequeueAfter {
+			t.Errorf("RequeueAfter = %v, want %v", result.RequeueAfter, agentDependencyValidationRequeueAfter)
 		}
 		if agent.Status.ActiveTasks != 0 {
 			t.Errorf("ActiveTasks = %d, want 0", agent.Status.ActiveTasks)
@@ -720,7 +736,7 @@ func TestUpdateStatus(t *testing.T) {
 		if !agent.Status.Ready {
 			t.Error("Ready = false, want true")
 		}
-		cond := findCondition(agent.Status.Conditions, "Ready")
+		cond := findReadyCondition(agent.Status.Conditions)
 		if cond == nil {
 			t.Fatal("Ready condition not found")
 		}
@@ -742,7 +758,7 @@ func TestUpdateStatus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		cond := findCondition(agent.Status.Conditions, "Ready")
+		cond := findReadyCondition(agent.Status.Conditions)
 		if cond == nil {
 			t.Fatal("Ready condition not found")
 		}
@@ -938,7 +954,7 @@ func TestAgentReconcile_ValidationFailure(t *testing.T) {
 	// Re-fetch agent and check status condition
 	updated := &corev1alpha1.Agent{}
 	_ = fc.Get(context.Background(), types.NamespacedName{Name: "reconcile-invalid", Namespace: testNS}, updated)
-	cond := findCondition(updated.Status.Conditions, "Ready")
+	cond := findReadyCondition(updated.Status.Conditions)
 	if cond != nil && cond.Status != metav1.ConditionFalse {
 		t.Errorf("expected Ready=False, got %s", cond.Status)
 	}
@@ -999,6 +1015,161 @@ func TestAgentReconcile_WithActiveTasks(t *testing.T) {
 	}
 }
 
+func TestAgentReconcileSkipsUnchangedActiveStatusUpdate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("reconcile-active-stable")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "active-stable-task", Namespace: testNS},
+		Spec: corev1alpha1.TaskSpec{
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFinalizing},
+	}
+	countingClient := &statusUpdateCountingClient{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(agent, task).
+			WithStatusSubresource(agent).
+			Build(),
+	}
+	reconciler := &AgentReconciler{Client: countingClient, Scheme: scheme}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}}
+
+	firstResult, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+	if firstResult.RequeueAfter != agentDependencyValidationRequeueAfter {
+		t.Fatalf("first Reconcile() RequeueAfter = %v, want %v", firstResult.RequeueAfter, agentDependencyValidationRequeueAfter)
+	}
+	if countingClient.statusUpdateCount != 1 {
+		t.Fatalf("status updates after first reconcile = %d, want 1", countingClient.statusUpdateCount)
+	}
+
+	secondResult, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+	if secondResult.RequeueAfter != agentDependencyValidationRequeueAfter {
+		t.Fatalf("second Reconcile() RequeueAfter = %v, want %v", secondResult.RequeueAfter, agentDependencyValidationRequeueAfter)
+	}
+	if countingClient.statusUpdateCount != 1 {
+		t.Fatalf("status updates after second reconcile = %d, want no additional update", countingClient.statusUpdateCount)
+	}
+}
+
+func TestAgentPeriodicRevalidationDetectsDeletedSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("periodic-secret-agent")
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "periodic-agent-secret"}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: agent.Spec.SecretRef.Name, Namespace: agent.Namespace}}
+	fc := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(agent, secret).
+		WithStatusSubresource(agent).
+		Build()
+	reconciler := &AgentReconciler{Client: fc, Scheme: scheme}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter != agentDependencyValidationRequeueAfter {
+		t.Fatalf("first Reconcile() RequeueAfter = %v, want %v", result.RequeueAfter, agentDependencyValidationRequeueAfter)
+	}
+	current := &corev1alpha1.Agent{}
+	if err := fc.Get(context.Background(), req.NamespacedName, current); err != nil {
+		t.Fatalf("Get Agent after validation: %v", err)
+	}
+	if !current.Status.Ready {
+		t.Fatal("Agent Ready = false before Secret deletion")
+	}
+	if err := fc.Delete(context.Background(), secret); err != nil {
+		t.Fatalf("Delete Secret: %v", err)
+	}
+
+	result, err = reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("periodic Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter != agentDependencyValidationRequeueAfter {
+		t.Fatalf("periodic Reconcile() RequeueAfter = %v, want %v", result.RequeueAfter, agentDependencyValidationRequeueAfter)
+	}
+	if err := fc.Get(context.Background(), req.NamespacedName, current); err != nil {
+		t.Fatalf("Get Agent after Secret deletion: %v", err)
+	}
+	if current.Status.Ready {
+		t.Fatal("Agent Ready remained true after referenced Secret deletion")
+	}
+	condition := findReadyCondition(current.Status.Conditions)
+	if condition == nil || condition.Status != metav1.ConditionFalse || !strContains(condition.Message, "referenced secret") {
+		t.Fatalf("Ready condition after Secret deletion = %#v, want missing Secret validation", condition)
+	}
+}
+
+func TestAgentReconcileFinalActiveTaskTransitionStartsIdleTTL(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("reconcile-idle-transition")
+	agent.Spec.TTLAfterLastTask = &metav1.Duration{Duration: 10 * time.Minute}
+	staleLastUsed := metav1.NewTime(time.Now().Add(-time.Hour))
+	agent.Status.ActiveTasks = 1
+	agent.Status.LastUsed = &staleLastUsed
+	fc := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(agent).
+		WithStatusSubresource(agent).
+		Build()
+	reconciler := &AgentReconciler{Client: fc, Scheme: scheme}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("RequeueAfter = %v, want idle TTL requeue", result.RequeueAfter)
+	}
+	updated := &corev1alpha1.Agent{}
+	if err := fc.Get(context.Background(), req.NamespacedName, updated); err != nil {
+		t.Fatalf("Get(Agent) error = %v, want Agent retained for idle TTL", err)
+	}
+	if updated.Status.ActiveTasks != 0 {
+		t.Fatalf("ActiveTasks = %d, want 0", updated.Status.ActiveTasks)
+	}
+	if updated.Status.LastUsed == nil || !updated.Status.LastUsed.After(staleLastUsed.Time) {
+		t.Fatalf("LastUsed = %v, want timestamp after stale active value %v", updated.Status.LastUsed, staleLastUsed.Time)
+	}
+}
+
+func TestAgentUpdateStatusRetriesConflict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("status-conflict")
+	countingClient := &statusUpdateCountingClient{
+		Client:             fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(agent).WithStatusSubresource(agent).Build(),
+		conflictsRemaining: 1,
+	}
+	reconciler := &AgentReconciler{Client: countingClient, Scheme: scheme}
+
+	if _, err := reconciler.updateStatus(context.Background(), agent, 1, nil); err != nil {
+		t.Fatalf("updateStatus() error = %v", err)
+	}
+	if countingClient.statusUpdateCount != 2 {
+		t.Fatalf("status update attempts = %d, want 2", countingClient.statusUpdateCount)
+	}
+	if agent.Status.ActiveTasks != 1 || !agent.Status.Ready {
+		t.Fatalf("Agent status = %#v, want active and ready", agent.Status)
+	}
+}
+
 // ---------- updateStatus additional ----------
 
 func TestUpdateStatus_TTLExpiredNoRequeue(t *testing.T) {
@@ -1019,9 +1190,10 @@ func TestUpdateStatus_TTLExpiredNoRequeue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// TTL already expired, remaining <= 0, no requeue
-	if result.RequeueAfter != 0 {
-		t.Errorf("expected no requeue for expired TTL, got %v", result.RequeueAfter)
+	// Reconcile handles actual TTL deletion before updateStatus; direct status
+	// updates still retain bounded dependency validation.
+	if result.RequeueAfter != agentDependencyValidationRequeueAfter {
+		t.Errorf("RequeueAfter = %v, want %v", result.RequeueAfter, agentDependencyValidationRequeueAfter)
 	}
 }
 
@@ -1039,8 +1211,8 @@ func TestUpdateStatus_NoTTLNoLastUsed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.RequeueAfter != 0 {
-		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	if result.RequeueAfter != agentDependencyValidationRequeueAfter {
+		t.Errorf("RequeueAfter = %v, want %v", result.RequeueAfter, agentDependencyValidationRequeueAfter)
 	}
 }
 
@@ -1059,9 +1231,9 @@ func strContains(s, substr string) bool {
 	return false
 }
 
-func findCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
+func findReadyCondition(conditions []metav1.Condition) *metav1.Condition {
 	for i := range conditions {
-		if conditions[i].Type == condType {
+		if conditions[i].Type == testConditionReady {
 			return &conditions[i]
 		}
 	}

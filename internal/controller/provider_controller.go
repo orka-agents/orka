@@ -8,12 +8,17 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -22,9 +27,12 @@ import (
 )
 
 const (
-	reasonValidationSucceeded = "ValidationSucceeded"
-	reasonValidationFailed    = "ValidationFailed"
+	reasonValidationSucceeded                = "ValidationSucceeded"
+	reasonValidationFailed                   = "ValidationFailed"
+	providerDependencyValidationRequeueAfter = 5 * time.Minute
 )
+
+var errProviderGenerationChanged = errors.New("provider generation changed during validation")
 
 // ProviderReconciler reconciles a Provider object
 type ProviderReconciler struct {
@@ -43,7 +51,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Fetch the Provider
 	provider := &corev1alpha1.Provider{}
 	if err := r.Get(ctx, req.NamespacedName, provider); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -71,7 +79,7 @@ func (r *ProviderReconciler) validateProvider(ctx context.Context, provider *cor
 	}
 
 	if err := r.Get(ctx, secretKey, secret); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return &ValidationError{Message: "referenced secret not found: " + provider.Spec.SecretRef.Name}
 		}
 		return err
@@ -112,38 +120,60 @@ func (e *ValidationError) Error() string {
 // updateStatus updates the provider status
 func (r *ProviderReconciler) updateStatus(ctx context.Context, provider *corev1alpha1.Provider, ready bool, message string) (ctrl.Result, error) {
 	now := metav1.Now()
+	observedGeneration := provider.Generation
 
-	provider.Status.Ready = ready
-	provider.Status.Message = message
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Provider{}
+		if err := r.Get(ctx, types.NamespacedName{Name: provider.Name, Namespace: provider.Namespace}, current); err != nil {
+			return err
+		}
+		if current.Generation != observedGeneration {
+			return errProviderGenerationChanged
+		}
 
-	if ready {
-		provider.Status.LastValidated = &now
-	}
+		desired := current.Status.DeepCopy()
+		desired.Ready = ready
+		desired.Message = message
+		condition := metav1.Condition{
+			Type:               "Ready",
+			LastTransitionTime: now,
+			ObservedGeneration: observedGeneration,
+		}
+		if ready {
+			condition.Status = metav1.ConditionTrue
+			condition.Reason = reasonValidationSucceeded
+			condition.Message = message
+		} else {
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = reasonValidationFailed
+			condition.Message = message
+		}
+		meta.SetStatusCondition(&desired.Conditions, condition)
 
-	// Update condition
-	condition := metav1.Condition{
-		Type:               "Ready",
-		LastTransitionTime: now,
-		ObservedGeneration: provider.Generation,
-	}
-
-	if ready {
-		condition.Status = metav1.ConditionTrue
-		condition.Reason = reasonValidationSucceeded
-		condition.Message = message
-	} else {
-		condition.Status = metav1.ConditionFalse
-		condition.Reason = reasonValidationFailed
-		condition.Message = message
-	}
-
-	meta.SetStatusCondition(&provider.Status.Conditions, condition)
-
-	if err := r.Status().Update(ctx, provider); err != nil {
+		refreshLastValidated := ready && (current.Status.LastValidated == nil ||
+			now.Sub(current.Status.LastValidated.Time) >= providerDependencyValidationRequeueAfter/2)
+		if refreshLastValidated {
+			desired.LastValidated = &now
+		}
+		semanticChange := !apiequality.Semantic.DeepEqual(current.Status, *desired)
+		if !semanticChange {
+			provider.Status = *current.Status.DeepCopy()
+			return nil
+		}
+		current.Status = *desired
+		if err := r.Status().Update(ctx, current); err != nil {
+			return err
+		}
+		provider.Status = *current.Status.DeepCopy()
+		return nil
+	}); err != nil {
+		if errors.Is(err, errProviderGenerationChanged) {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: providerDependencyValidationRequeueAfter}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager

@@ -216,14 +216,36 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Delete(ctx, task)).To(Succeed())
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 
-			// Reconcile to handle deletion
-			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			// First reconcile starts foreground Job deletion and retains the Task
+			// finalizer until the Job and its worker Pods are actually gone.
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(2 * time.Second))
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(task, labels.TaskFinalizer)).To(BeTrue())
 
-			// Job should be deleted
+			// envtest does not run the garbage collector, so emulate completion of
+			// foreground deletion by removing the API-server foreground finalizer.
+			jobKey := types.NamespacedName{Name: taskName + "-job", Namespace: ns}
+			deletingJob := &batchv1.Job{}
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName + "-job", Namespace: ns}, &batchv1.Job{})
-				return errors.IsNotFound(err)
+				if getErr := k8sClient.Get(ctx, jobKey, deletingJob); getErr != nil {
+					return false
+				}
+				return !deletingJob.DeletionTimestamp.IsZero()
+			}, 5*time.Second, 200*time.Millisecond).Should(BeTrue())
+			deletingJob.Finalizers = nil
+			Expect(k8sClient.Update(ctx, deletingJob)).To(Succeed())
+			Eventually(func() bool {
+				return errors.IsNotFound(k8sClient.Get(ctx, jobKey, &batchv1.Job{}))
+			}, 5*time.Second, 200*time.Millisecond).Should(BeTrue())
+
+			// A later reconcile performs the final durable cleanup pass and only then
+			// removes the Task finalizer.
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() bool {
+				return errors.IsNotFound(k8sClient.Get(ctx, nn, &corev1alpha1.Task{}))
 			}, 5*time.Second, 200*time.Millisecond).Should(BeTrue())
 		})
 
