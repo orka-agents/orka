@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -42,7 +44,16 @@ import (
 
 var chatLog = logf.Log.WithName("chat-handler")
 
-const defaultNamespace = "default"
+const (
+	defaultNamespace      = "default"
+	chatDurabilityTimeout = 10 * time.Second
+)
+
+const (
+	chatStreamUnclaimed uint32 = iota
+	chatStreamOwned
+	chatStreamFinalized
+)
 
 // ChatConfig holds configuration for the chat handler.
 type ChatConfig struct {
@@ -115,10 +126,46 @@ type ChatHandler struct {
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	sessionStore              store.SessionStore
+	sessionTurnCommitter      store.SessionTurnCommitter
 	resultStore               store.ResultStore
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 	cooldownTracker           *llm.CooldownTracker
 	resolver                  *ProviderResolver
+	activeChatTurnsMu         sync.Mutex
+	activeChatTurns           map[chatTurnKey]*activeChatTurn
+}
+
+type chatTurnKey struct {
+	namespace string
+	sessionID string
+}
+
+type activeChatTurn struct {
+	turnID     string
+	cancel     context.CancelFunc
+	done       chan struct{}
+	expiresAt  time.Time
+	cancellers int
+}
+
+type chatStreamRequest struct {
+	parentCtx      context.Context
+	turnCancelCtx  context.Context
+	turnDeadline   time.Time
+	finalizeTurn   func()
+	provider       llm.Provider
+	messages       []llm.Message
+	systemPrompt   string
+	tools          []llm.Tool
+	executor       *ToolExecutor
+	sessionID      string
+	namespace      string
+	model          string
+	temperature    float64
+	maxTokens      int
+	persistedCount int
+	turnID         string
+	span           trace.Span
 }
 
 // NewChatHandler creates a new ChatHandler.
@@ -128,7 +175,7 @@ func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatC
 		kubeClient = kubeClientOpt[0]
 	}
 
-	return &ChatHandler{
+	handler := &ChatHandler{
 		client:                    c,
 		kubeClient:                kubeClient,
 		sessionManager:            sm,
@@ -140,7 +187,12 @@ func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatC
 		resultStore:               rs,
 		cooldownTracker:           llm.NewCooldownTracker(),
 		resolver:                  resolver,
+		activeChatTurns:           make(map[chatTurnKey]*activeChatTurn),
 	}
+	if committer, ok := ss.(store.SessionTurnCommitter); ok {
+		handler.sessionTurnCommitter = committer
+	}
+	return handler
 }
 
 // blockedNamespaces that cannot be targeted by chat requests.
@@ -255,14 +307,26 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to build system prompt")
 	}
 
-	// Load session history
-	messages, err := ch.loadChatSession(ctx, namespace, sessionID)
+	turnID, turnDeadline, sessionCreated, turnCancelCtx, err := ch.beginChatTurn(ctx, namespace, sessionID)
 	if err != nil {
-		if errors.Is(err, store.ErrGatewayOwnedSession) {
-			return fiber.NewError(fiber.StatusNotFound, "chat session not found")
+		return err
+	}
+	stopTurnCancellation := context.AfterFunc(turnCancelCtx, cancel)
+	defer stopTurnCancellation()
+	finalizeTurn := sync.OnceFunc(func() {
+		ch.releaseChatTurn(namespace, sessionID, turnID, sessionCreated)
+		ch.finishActiveChatTurn(namespace, sessionID, turnID)
+	})
+	defer func() {
+		if !sseMode {
+			finalizeTurn()
 		}
-		chatLog.Info("no existing session, starting fresh", "sessionId", sessionID, "error", err)
-		messages = []llm.Message{}
+	}()
+
+	// Load session history only after reserving its observed revision.
+	messages, err := ch.loadReservedChatSession(ctx, namespace, sessionID)
+	if err != nil {
+		return err
 	}
 	persistedCount := len(messages)
 
@@ -350,7 +414,10 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	accept := c.Get("Accept")
 	if accept == "application/json" {
 		// JSON mode: run tool loop, collect all content, return JSON
-		content, usage, toolCalls, err := ch.runToolLoop(ctx, provider, messages, systemPrompt, tools, executor, sessionID, namespace, model, temperature, maxTokens, persistedCount, nil)
+		content, usage, toolCalls, err := ch.runToolLoop(
+			ctx, provider, messages, systemPrompt, tools, executor,
+			sessionID, namespace, model, temperature, maxTokens, persistedCount, nil, turnID,
+		)
 		if err != nil {
 			chatLog.Error(err, "tool loop error")
 			span.RecordError(err)
@@ -366,58 +433,272 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		})
 	}
 
-	// SSE mode
+	streamErr := ch.sendChatStream(c, chatStreamRequest{
+		parentCtx:      ctx,
+		turnCancelCtx:  turnCancelCtx,
+		turnDeadline:   turnDeadline,
+		finalizeTurn:   finalizeTurn,
+		provider:       provider,
+		messages:       messages,
+		systemPrompt:   systemPrompt,
+		tools:          tools,
+		executor:       executor,
+		sessionID:      sessionID,
+		namespace:      namespace,
+		model:          model,
+		temperature:    temperature,
+		maxTokens:      maxTokens,
+		persistedCount: persistedCount,
+		turnID:         turnID,
+		span:           span,
+	})
+	if streamErr == nil {
+		sseMode = true
+	}
+	return streamErr
+}
+
+func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error {
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
 
-	// Capture values for the streaming closure (ctx from outer scope is cancelled
-	// when HandleChat returns, so we create a new context inside the callback)
-	sseProvider := provider
-	sseMessages := messages
-	sseSystemPrompt := systemPrompt
-	sseTools := tools
-	sseExecutor := executor
+	// SendStreamWriter outlives the handler, so capture only trace and baggage
+	// state from the recyclable Fiber request context.
 	sseParentCtx := baggage.ContextWithBaggage(
-		trace.ContextWithSpanContext(context.Background(), span.SpanContext()),
-		baggage.FromContext(ctx),
+		trace.ContextWithSpanContext(context.Background(), req.span.SpanContext()),
+		baggage.FromContext(req.parentCtx),
 	)
+	var streamOwnership atomic.Uint32
+	finalizeStream := sync.OnceFunc(func() {
+		req.finalizeTurn()
+		req.span.End()
+		<-ch.semaphore
+	})
+	stopUnclaimedCancellation := context.AfterFunc(req.turnCancelCtx, func() {
+		if streamOwnership.CompareAndSwap(chatStreamUnclaimed, chatStreamFinalized) {
+			finalizeStream()
+		}
+	})
+	streamWatchdog := time.AfterFunc(max(time.Until(req.turnDeadline), time.Duration(0)), func() {
+		if streamOwnership.CompareAndSwap(chatStreamUnclaimed, chatStreamFinalized) {
+			finalizeStream()
+		}
+	})
 
-	sseMode = true
-	return c.SendStreamWriter(func(w *bufio.Writer) {
-		defer span.End()
-		defer func() { <-ch.semaphore }()
-		// SendStreamWriter outlives the handler, so use a background context
-		// seeded with the originating chat span context rather than Fiber's
-		// recycled request context.
-		sseCtx, sseCancel := context.WithTimeout(sseParentCtx, ch.config.MaxDuration)
+	streamErr := c.SendStreamWriter(func(w *bufio.Writer) {
+		if !streamOwnership.CompareAndSwap(chatStreamUnclaimed, chatStreamOwned) {
+			return
+		}
+		stopUnclaimedCancellation()
+		streamWatchdog.Stop()
+		defer finalizeStream()
+
+		sseCtx, sseCancel := context.WithDeadline(sseParentCtx, req.turnDeadline)
+		stopSSECancellation := context.AfterFunc(req.turnCancelCtx, sseCancel)
+		defer stopSSECancellation()
 		defer sseCancel()
 
 		emitSSE := func(event, data string) {
 			_ = writeSSE(w, event, data)
 		}
-
-		// Emit status event
 		statusData, _ := json.Marshal(map[string]string{
-			"sessionId": sessionID,
-			"provider":  sseProvider.Name(),
-			"model":     model,
+			"sessionId": req.sessionID,
+			"provider":  req.provider.Name(),
+			"model":     req.model,
 		})
 		emitSSE("status", string(statusData))
 
-		content, usage, _, err := ch.runToolLoop(sseCtx, sseProvider, sseMessages, sseSystemPrompt, sseTools, sseExecutor, sessionID, namespace, model, temperature, maxTokens, persistedCount, emitSSE)
+		content, usage, _, err := ch.runToolLoop(
+			sseCtx, req.provider, req.messages, req.systemPrompt, req.tools, req.executor,
+			req.sessionID, req.namespace, req.model, req.temperature, req.maxTokens,
+			req.persistedCount, emitSSE, req.turnID,
+		)
 		if err != nil {
 			errData, _ := json.Marshal(map[string]string{"error": err.Error()})
 			emitSSE("error", string(errData))
+			return
 		}
 
 		_ = content // content already emitted via SSE
-
-		// Emit done event
 		doneData, _ := json.Marshal(map[string]any{"usage": usage})
 		emitSSE("done", string(doneData))
 	})
+	if streamErr != nil {
+		stopUnclaimedCancellation()
+		streamWatchdog.Stop()
+	}
+	return streamErr
+}
+
+func (ch *ChatHandler) beginChatTurn(
+	ctx context.Context,
+	namespace, sessionID string,
+) (string, time.Time, bool, context.Context, error) {
+	key := chatTurnKey{namespace: namespace, sessionID: sessionID}
+	ch.activeChatTurnsMu.Lock()
+	defer ch.activeChatTurnsMu.Unlock()
+	if ch.activeChatTurns == nil {
+		ch.activeChatTurns = make(map[chatTurnKey]*activeChatTurn)
+	}
+	if active := ch.activeChatTurns[key]; active != nil {
+		if active.turnID == "" || active.cancellers > 0 || active.expiresAt.After(time.Now().UTC()) {
+			return "", time.Time{}, false, nil, fiber.NewError(fiber.StatusConflict, "chat session is busy")
+		}
+		delete(ch.activeChatTurns, key)
+		active.cancel()
+		close(active.done)
+	}
+
+	turnID, turnDeadline, sessionCreated, err := ch.reserveChatTurn(ctx, namespace, sessionID)
+	if err != nil {
+		return "", time.Time{}, false, nil, err
+	}
+	turnCancelCtx, cancel := context.WithCancel(context.Background())
+	ch.activeChatTurns[key] = &activeChatTurn{
+		turnID:    turnID,
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		expiresAt: turnDeadline.Add(chatDurabilityTimeout),
+	}
+	return turnID, turnDeadline, sessionCreated, turnCancelCtx, nil
+}
+
+func (ch *ChatHandler) reserveChatTurn(
+	ctx context.Context,
+	namespace, sessionID string,
+) (string, time.Time, bool, error) {
+	if ch.sessionTurnCommitter == nil {
+		return "", time.Time{}, false, fiber.NewError(
+			fiber.StatusInternalServerError,
+			"session store does not support atomic chat turns",
+		)
+	}
+
+	turnLifetime := ch.config.MaxDuration
+	if turnLifetime <= 0 {
+		turnLifetime = 5 * time.Minute
+	}
+	turnID := fmt.Sprintf("chat-turn-%s", generateChatID())
+	now := time.Now().UTC()
+	turnDeadline := now.Add(turnLifetime)
+	created, err := ch.sessionTurnCommitter.AcquireChatTurn(ctx, &store.SessionRecord{
+		Namespace:   namespace,
+		Name:        sessionID,
+		SessionType: store.SessionTypeChat,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}, turnID, turnDeadline.Add(chatDurabilityTimeout))
+	if errors.Is(err, store.ErrGatewayOwnedSession) {
+		return "", time.Time{}, false, fiber.NewError(fiber.StatusNotFound, "chat session not found")
+	}
+	if errors.Is(err, store.ErrConflict) {
+		return "", time.Time{}, false, fiber.NewError(fiber.StatusConflict, "chat session is busy")
+	}
+	if err != nil {
+		return "", time.Time{}, false, fiber.NewError(
+			fiber.StatusInternalServerError,
+			fmt.Sprintf("failed to reserve chat session: %v", err),
+		)
+	}
+	return turnID, turnDeadline, created, nil
+}
+
+func (ch *ChatHandler) releaseChatTurn(namespace, sessionID, turnID string, deleteEmptyCreatedSession bool) {
+	if ch.sessionTurnCommitter == nil || turnID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), chatDurabilityTimeout)
+	defer cancel()
+	if err := ch.sessionTurnCommitter.ReleaseChatTurn(
+		ctx,
+		namespace,
+		sessionID,
+		turnID,
+		deleteEmptyCreatedSession,
+	); err != nil {
+		chatLog.Error(err, "failed to release chat turn", "namespace", namespace, "sessionId", sessionID)
+	}
+}
+
+func (ch *ChatHandler) finishActiveChatTurn(namespace, sessionID, turnID string) {
+	key := chatTurnKey{namespace: namespace, sessionID: sessionID}
+
+	ch.activeChatTurnsMu.Lock()
+	active := ch.activeChatTurns[key]
+	if active == nil || active.turnID != turnID {
+		ch.activeChatTurnsMu.Unlock()
+		return
+	}
+	cancel := active.cancel
+	done := active.done
+	if active.cancellers > 0 {
+		active.turnID = ""
+		active.cancel = nil
+		active.done = nil
+	} else {
+		delete(ch.activeChatTurns, key)
+	}
+	ch.activeChatTurnsMu.Unlock()
+
+	cancel()
+	close(done)
+}
+
+func (ch *ChatHandler) startSessionCancellation(namespace, sessionID string) (<-chan struct{}, bool) {
+	key := chatTurnKey{namespace: namespace, sessionID: sessionID}
+
+	ch.activeChatTurnsMu.Lock()
+	if ch.activeChatTurns == nil {
+		ch.activeChatTurns = make(map[chatTurnKey]*activeChatTurn)
+	}
+	active := ch.activeChatTurns[key]
+	if active == nil {
+		active = &activeChatTurn{}
+		ch.activeChatTurns[key] = active
+	}
+	active.cancellers++
+	cancel := active.cancel
+	done := active.done
+	hasActiveTurn := active.turnID != ""
+	ch.activeChatTurnsMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return done, hasActiveTurn
+}
+
+func (ch *ChatHandler) finishSessionCancellation(namespace, sessionID string) {
+	key := chatTurnKey{namespace: namespace, sessionID: sessionID}
+
+	ch.activeChatTurnsMu.Lock()
+	defer ch.activeChatTurnsMu.Unlock()
+	active := ch.activeChatTurns[key]
+	if active == nil || active.cancellers == 0 {
+		return
+	}
+	active.cancellers--
+	if active.cancellers == 0 && active.turnID == "" {
+		delete(ch.activeChatTurns, key)
+	}
+}
+
+func (ch *ChatHandler) loadReservedChatSession(
+	ctx context.Context,
+	namespace, sessionID string,
+) ([]llm.Message, error) {
+	messages, err := ch.loadChatSession(ctx, namespace, sessionID)
+	if errors.Is(err, store.ErrGatewayOwnedSession) {
+		return nil, fiber.NewError(fiber.StatusNotFound, "chat session not found")
+	}
+	if err != nil {
+		return nil, fiber.NewError(
+			fiber.StatusInternalServerError,
+			fmt.Sprintf("failed to load chat session: %v", err),
+		)
+	}
+	return messages, nil
 }
 
 // runToolLoop executes the agentic tool loop until the LLM produces a final text response.
@@ -433,6 +714,7 @@ func (ch *ChatHandler) runToolLoop(
 	maxTokens int,
 	persistedCount int,
 	emitSSE func(event, data string),
+	turnID string,
 ) (string, ChatUsage, []ToolCallInfo, error) {
 	var usage ChatUsage
 	var allToolCalls []ToolCallInfo
@@ -452,15 +734,25 @@ func (ch *ChatHandler) runToolLoop(
 		select {
 		case <-iterCtx.Done():
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
+			err := fmt.Errorf("chat turn interrupted: %w", iterCtx.Err())
+			iterSpan.RecordError(err)
+			iterSpan.SetStatus(codes.Error, err.Error())
 			iterSpan.End()
-			return "I ran out of time. Here's what I accomplished so far.", usage, allToolCalls, nil
+			return "", usage, allToolCalls, err
 		default:
 		}
 
-		if content, hit := ch.handleIterationLimit(iterCtx, iteration, provider, messages, systemPrompt, model, namespace, sessionID, maxTokens, persistedCount, temperature, emitSSE, executor, &usage, start); hit {
+		if content, hit, err := ch.handleIterationLimit(
+			iterCtx, iteration, provider, messages, systemPrompt, model, namespace, sessionID,
+			maxTokens, persistedCount, temperature, emitSSE, executor, &usage, turnID, start,
+		); hit {
 			setUsageSpanAttributes(iterSpan, usage)
+			if err != nil {
+				iterSpan.RecordError(err)
+				iterSpan.SetStatus(codes.Error, err.Error())
+			}
 			iterSpan.End()
-			return content, usage, allToolCalls, nil
+			return content, usage, allToolCalls, err
 		}
 
 		if iteration > 0 && iteration%5 == 0 {
@@ -504,10 +796,17 @@ func (ch *ChatHandler) runToolLoop(
 				iterSpan.End()
 				continue
 			}
-			content := ch.handleFinalResponse(iterCtx, resp.Content, messages, namespace, sessionID, persistedCount, emitSSE, executor, &usage, start)
+			content, err := ch.handleFinalResponse(
+				iterCtx, resp.Content, messages, namespace, sessionID, persistedCount,
+				emitSSE, executor, &usage, turnID, start,
+			)
 			setUsageSpanAttributes(iterSpan, usage)
+			if err != nil {
+				iterSpan.RecordError(err)
+				iterSpan.SetStatus(codes.Error, err.Error())
+			}
 			iterSpan.End()
-			return content, usage, allToolCalls, nil
+			return content, usage, allToolCalls, err
 		}
 
 		var newToolCalls []ToolCallInfo
@@ -533,10 +832,11 @@ func (ch *ChatHandler) handleIterationLimit(
 	emitSSE func(event, data string),
 	executor *ToolExecutor,
 	usage *ChatUsage,
+	turnID string,
 	start time.Time,
-) (string, bool) {
+) (string, bool, error) {
 	if iteration < ch.config.MaxIterations {
-		return "", false
+		return "", false, nil
 	}
 
 	messages = append(messages, llm.Message{
@@ -553,26 +853,27 @@ func (ch *ChatHandler) handleIterationLimit(
 	})
 	if err != nil {
 		usage.Duration = time.Since(start).Round(time.Millisecond).String()
-		return "Reached iteration limit.", true
+		return "", true, fmt.Errorf("final LLM completion after iteration limit failed: %w", err)
 	}
 	usage.LLMCalls++
 	usage.InputTokens += resp.InputTokens
 	usage.OutputTokens += resp.OutputTokens
+
+	finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
+	usage.Duration = time.Since(start).Round(time.Millisecond).String()
+	usage.TasksCreated = executor.tasksCreated
+	if err := ch.saveChatSession(
+		ctx, namespace, sessionID, finalMessages, persistedCount, *usage, turnID,
+	); err != nil {
+		return "", true, fmt.Errorf("failed to commit chat turn: %w", err)
+	}
 
 	if emitSSE != nil && resp.Content != "" {
 		msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
 		emitSSE("message", string(msgData))
 	}
 
-	finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
-	usage.Duration = time.Since(start).Round(time.Millisecond).String()
-	usage.TasksCreated = executor.tasksCreated
-	_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, *usage)
-	if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
-		chatLog.Error(err, "failed to update token counts")
-	}
-
-	return resp.Content, true
+	return resp.Content, true, nil
 }
 
 // callLLMWithRetry calls the LLM provider and retries once with truncated messages
@@ -706,22 +1007,24 @@ func (ch *ChatHandler) handleFinalResponse(
 	emitSSE func(event, data string),
 	executor *ToolExecutor,
 	usage *ChatUsage,
+	turnID string,
 	start time.Time,
-) string {
+) (string, error) {
+	finalMessages := append(messages, llm.Message{Role: "assistant", Content: content})
+	usage.Duration = time.Since(start).Round(time.Millisecond).String()
+	usage.TasksCreated = executor.tasksCreated
+	if err := ch.saveChatSession(
+		ctx, namespace, sessionID, finalMessages, persistedCount, *usage, turnID,
+	); err != nil {
+		return "", fmt.Errorf("failed to commit chat turn: %w", err)
+	}
+
 	if emitSSE != nil && content != "" {
 		msgData, _ := json.Marshal(map[string]string{"content": content})
 		emitSSE("message", string(msgData))
 	}
 
-	finalMessages := append(messages, llm.Message{Role: "assistant", Content: content})
-	usage.Duration = time.Since(start).Round(time.Millisecond).String()
-	usage.TasksCreated = executor.tasksCreated
-	_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, *usage)
-	if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
-		chatLog.Error(err, "failed to update token counts")
-	}
-
-	return content
+	return content, nil
 }
 
 func setUsageSpanAttributes(span trace.Span, usage ChatUsage) {
@@ -773,37 +1076,29 @@ func (ch *ChatHandler) loadChatSession(ctx context.Context, namespace, sessionID
 	return llmMessages, nil
 }
 
-// saveChatSession saves chat session messages to the session store.
-func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID string, messages []llm.Message, persistedCount int, _ ChatUsage) error {
-	// Check if session exists
-	_, err := ch.sessionStore.GetSession(ctx, namespace, sessionID)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("failed to get session: %w", err)
-		}
-		// Create new session
-		now := time.Now()
-		session := &store.SessionRecord{
-			Namespace:   namespace,
-			Name:        sessionID,
-			SessionType: "chat",
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		if err := ch.sessionStore.CreateSession(ctx, session); err != nil {
-			return fmt.Errorf("failed to create session: %w", err)
-		}
+// saveChatSession atomically commits new transcript messages and their usage.
+func (ch *ChatHandler) saveChatSession(
+	ctx context.Context,
+	namespace, sessionID string,
+	messages []llm.Message,
+	persistedCount int,
+	usage ChatUsage,
+	turnID string,
+) error {
+	if persistedCount < 0 || persistedCount > len(messages) {
+		return fmt.Errorf("invalid persisted message count %d for %d messages", persistedCount, len(messages))
 	}
 
-	// Only append messages that haven't been persisted yet
 	newMessages := messages[persistedCount:]
 	if len(newMessages) == 0 {
+		if usage.InputTokens != 0 || usage.OutputTokens != 0 {
+			return fmt.Errorf("cannot commit token usage without new transcript messages")
+		}
 		return nil
 	}
 
-	// Convert llm.Message to store.SessionMessage
 	storeMessages := make([]store.SessionMessage, 0, len(newMessages))
-	now := time.Now()
+	now := time.Now().UTC()
 	for _, msg := range newMessages {
 		sm := store.SessionMessage{
 			Role:       msg.Role,
@@ -818,7 +1113,31 @@ func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID
 		storeMessages = append(storeMessages, sm)
 	}
 
-	return ch.sessionStore.AppendMessages(ctx, namespace, sessionID, storeMessages)
+	if ch.sessionTurnCommitter == nil {
+		return fmt.Errorf("session store does not support atomic chat turns")
+	}
+
+	// The provider and tool loop remain bound to the request/turn context, but
+	// once a final response exists its atomic persistence owns the durability
+	// handoff. Detach cancellation here and bound the commit to the same grace
+	// window added to the chat-turn lease.
+	durabilityCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatDurabilityTimeout)
+	defer cancel()
+	return ch.sessionTurnCommitter.CommitSessionTurn(
+		durabilityCtx,
+		&store.SessionRecord{
+			Namespace:   namespace,
+			Name:        sessionID,
+			SessionType: "chat",
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+		turnID,
+		persistedCount,
+		storeMessages,
+		usage.InputTokens,
+		usage.OutputTokens,
+	)
 }
 
 // HandleChatConfig handles GET /api/v1/chat/config.
@@ -862,6 +1181,17 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 	}
 	if sessionType == store.SessionTypeGateway {
 		return fiber.NewError(fiber.StatusNotFound, "chat session not found")
+	}
+	done, active := ch.startSessionCancellation(namespace, sessionID)
+	defer ch.finishSessionCancellation(namespace, sessionID)
+	if active {
+		waitCtx, waitCancel := context.WithTimeout(c.Context(), chatDurabilityTimeout)
+		defer waitCancel()
+		select {
+		case <-done:
+		case <-waitCtx.Done():
+			return fiber.NewError(fiber.StatusGatewayTimeout, "timed out waiting for active chat turn to stop")
+		}
 	}
 
 	// Delete the session to cancel it

@@ -18,7 +18,27 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
+
+const sessionRoleUser = "user"
+
+type countingSessionResultStore struct {
+	reads int
+}
+
+func (s *countingSessionResultStore) SaveResult(context.Context, string, string, []byte) error {
+	return nil
+}
+
+func (s *countingSessionResultStore) GetResult(context.Context, string, string) ([]byte, error) {
+	s.reads++
+	return []byte("generic finalization must not project this result"), nil
+}
+
+func (s *countingSessionResultStore) DeleteResult(context.Context, string, string) error {
+	return nil
+}
 
 func setupSessionManager() (*SessionManager, *sqlite.Store) {
 	db, err := sqlite.NewDB(":memory:")
@@ -390,7 +410,7 @@ func TestSessionManager_LoadTranscript_WithMessages(t *testing.T) {
 		SessionType: "task",
 	}))
 	require.NoError(t, ss.AppendMessages(ctx, "default", "test-session", []store.SessionMessage{
-		{Role: "user", Content: "hello"},
+		{Role: sessionRoleUser, Content: "hello"},
 		{Role: "assistant", Content: "hi"},
 	}))
 
@@ -426,11 +446,11 @@ func TestSessionManager_LoadTranscript_MaxMessages(t *testing.T) {
 		SessionType: "task",
 	}))
 	require.NoError(t, ss.AppendMessages(ctx, "default", "test-session", []store.SessionMessage{
-		{Role: "user", Content: "msg1"},
+		{Role: sessionRoleUser, Content: "msg1"},
 		{Role: "assistant", Content: "msg2"},
-		{Role: "user", Content: "msg3"},
+		{Role: sessionRoleUser, Content: "msg3"},
 		{Role: "assistant", Content: "msg4"},
-		{Role: "user", Content: "msg5"},
+		{Role: sessionRoleUser, Content: "msg5"},
 	}))
 
 	task := &corev1alpha1.Task{
@@ -619,7 +639,7 @@ func TestSessionManager_AppendMessages_WithPromptAndResult(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
-	if msgs[0].Role != "user" || msgs[0].Content != "What is the answer?" {
+	if msgs[0].Role != sessionRoleUser || msgs[0].Content != "What is the answer?" {
 		t.Errorf("user message = %v, want user/What is the answer?", msgs[0])
 	}
 	if msgs[1].Role != "assistant" || msgs[1].Content != "Here is the answer" {
@@ -634,7 +654,7 @@ func TestSessionManager_AppendMessages_PromptIncludedSkipsDuplicateUserMessage(t
 		Namespace: "default", Name: "prompt-included-session", SessionType: "task",
 	}))
 	require.NoError(t, ss.AppendMessages(ctx, "default", "prompt-included-session", []store.SessionMessage{{
-		Role: "user", Content: "canonical transcript prompt", Timestamp: time.Now(),
+		Role: sessionRoleUser, Content: "canonical transcript prompt", Timestamp: time.Now(),
 	}}))
 	require.NoError(t, ss.SaveResult(ctx, defaultNS, testTask, []byte("assistant result")))
 	task := &corev1alpha1.Task{
@@ -702,7 +722,7 @@ func TestSessionManager_AppendMessages_NilResultStore(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected only the user message to be appended, got %d messages", len(msgs))
 	}
-	if msgs[0].Role != "user" || msgs[0].Content != "What is the answer?" {
+	if msgs[0].Role != sessionRoleUser || msgs[0].Content != "What is the answer?" {
 		t.Errorf("user message = %v, want user/What is the answer?", msgs[0])
 	}
 }
@@ -770,10 +790,10 @@ func TestSessionManagerLoadsTranscriptThroughStableMessageID(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := ss.AppendMessages(ctx, "default", "cutoff-session", []store.SessionMessage{
-		{ID: "prior-user", Order: 2, Role: "user", Content: "first"},
+		{ID: "prior-user", Order: 2, Role: sessionRoleUser, Content: "first"},
 		{ID: "prior-assistant", Order: 3, Role: "assistant", Content: "reply"},
-		{ID: store.GatewayUserMessageID("gateway-event"), Order: 4, Role: "user", Content: "current"},
-		{ID: "future-user", Order: 6, Role: "user", Content: "future"},
+		{ID: store.GatewayUserMessageID("gateway-event"), Order: 4, Role: sessionRoleUser, Content: "current"},
+		{ID: "future-user", Order: 6, Role: sessionRoleUser, Content: "future"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -791,5 +811,78 @@ func TestSessionManagerLoadsTranscriptThroughStableMessageID(t *testing.T) {
 	}
 	if len(messages) != 3 || messages[0].Content != "first" || messages[1].Content != "reply" || messages[2].Content != "current" {
 		t.Fatalf("cutoff transcript = %#v", messages)
+	}
+}
+
+func TestSessionManagerDefersGatewayTranscriptAndLockFinalization(t *testing.T) {
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ss := sqlite.NewStore(db, ":memory:")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	event := store.GatewayEvent{
+		ID: "gateway-finalize-event", Namespace: "default", NamespaceUID: "namespace-uid",
+		GatewayUID: "gateway-uid", GatewayGeneration: 1, GatewayName: "chat",
+		BindingName: "room", BindingUID: "binding-uid", ExternalEventID: "gateway-finalize-external",
+		ProtocolVersion: "orka.gateway.v1", EventType: "text", AccountID: "acct", ContextID: "room",
+		SenderID: "sender", Text: "current", ReplyTarget: "room", SessionName: "gateway-finalize-session",
+		TaskName: "gateway-finalize-task", ReceivedAt: now, NextAttemptAt: now,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+	}
+	if _, _, err := ss.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{
+		Event: event, AppendUserMessage: true, PendingLimit: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := ss.ClaimNextGatewayEvent(ctx, event.Namespace, "dispatcher", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const taskUID = "gateway-finalize-task-uid"
+	if err := ss.MarkGatewayEventTaskCreated(
+		ctx, event.Namespace, event.ID, claimed.TaskName, taskUID, "dispatcher", now,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewSessionManager(ss)
+	manager.SetGatewayEventStore(ss)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: claimed.TaskName, Namespace: event.Namespace, UID: types.UID(taskUID),
+		},
+		// Use an admitted but malformed policy to prove generic finalization does
+		// not revalidate the policy before deferring to Gateway projection.
+		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{
+			Name: event.SessionName, Create: true, Append: true, MaxMessages: 1,
+		}},
+		Status: corev1alpha1.TaskStatus{ResultRef: &corev1alpha1.ResultReference{Available: true}},
+	}
+	results := &countingSessionResultStore{}
+	if err := manager.AppendMessages(ctx, task, results); err != nil {
+		t.Fatalf("AppendMessages() error = %v", err)
+	}
+	if err := manager.ReleaseLock(ctx, task); err != nil {
+		t.Fatalf("ReleaseLock() error = %v", err)
+	}
+	if results.reads != 0 {
+		t.Fatalf("generic finalization read the Gateway result %d times", results.reads)
+	}
+
+	session, err := ss.GetSession(ctx, event.Namespace, event.SessionName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.ActiveTask != task.Name || session.ActiveTaskUID != string(task.UID) {
+		t.Fatalf(
+			"gateway session lock = (%q, %q), want (%q, %q)",
+			session.ActiveTask, session.ActiveTaskUID, task.Name, task.UID,
+		)
+	}
+	if len(session.Messages) != 1 || session.Messages[0].Role != sessionRoleUser {
+		t.Fatalf("gateway transcript was generically finalized: %#v", session.Messages)
 	}
 }

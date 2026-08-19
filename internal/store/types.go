@@ -2,8 +2,12 @@ package store
 
 import "time"
 
-// SessionTypeGateway identifies canonical Sessions exclusively owned by gateway admission/projection.
-const SessionTypeGateway = "gateway"
+const (
+	// SessionTypeChat identifies Sessions owned by the interactive chat API.
+	SessionTypeChat = "chat"
+	// SessionTypeGateway identifies canonical Sessions exclusively owned by gateway admission/projection.
+	SessionTypeGateway = "gateway"
+)
 
 // SessionRecord represents a full session.
 type SessionRecord struct {
