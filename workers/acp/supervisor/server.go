@@ -43,6 +43,12 @@ type Server struct {
 // expiry.
 const statusNonceRetentionSlack = 30 * time.Second
 
+// operationReplayRetentionSlack keeps a session operation and any stored
+// response briefly past the request capability expiry. This preserves replay
+// classification across the allowed clock-skew edge without retaining expired
+// capabilities for the lifetime of a resident session.
+const operationReplayRetentionSlack = 30 * time.Second
+
 // tombstoneRetention bounds how long a deleted or failed session's replay
 // tombstone is retained. It must exceed the maximum operation-capability
 // lifetime plus clock skew so a legitimate replay whose capability is still
@@ -96,6 +102,7 @@ type sessionState struct {
 	promptMutations         promptMutationExecutor
 	descriptor              harnessv2.RuntimeSessionDescriptor
 	operations              map[harnessv2.OperationID]harnessv2.OperationRecord
+	operationRetention      map[harnessv2.OperationID]time.Time
 	operationReplays        map[harnessv2.OperationID]*operationReplay
 	prompt                  *promptState
 	permissions             map[harnessv2.PermissionRequestID]permissionState
@@ -149,6 +156,48 @@ type operationFailure struct {
 	retryable bool
 }
 
+// recordSessionOperationLocked records a session operation and the deadline
+// after which neither its classification record nor response replay is useful.
+// The caller must hold s.mu when the state belongs to a live Server.
+func recordSessionOperationLocked(
+	state *sessionState,
+	metadata harnessv2.MutationMetadata,
+	phase harnessv2.OperationPhase,
+	terminal harnessv2.EventType,
+	at time.Time,
+) {
+	if state.operations == nil {
+		state.operations = make(map[harnessv2.OperationID]harnessv2.OperationRecord)
+	}
+	if state.operationRetention == nil {
+		state.operationRetention = make(map[harnessv2.OperationID]time.Time)
+	}
+	state.operations[metadata.OperationID] = operationRecord(metadata, phase, terminal, at)
+	state.operationRetention[metadata.OperationID] = metadata.ExpiresAt.Add(operationReplayRetentionSlack)
+}
+
+// pruneSessionOperationsLocked drops operations whose capability expiry and
+// replay-skew window have elapsed. The caller must hold s.mu when the state
+// belongs to a live Server.
+func pruneSessionOperationsLocked(state *sessionState, now time.Time) {
+	if state == nil {
+		return
+	}
+	for operationID, retainUntil := range state.operationRetention {
+		if retainUntil.After(now) {
+			continue
+		}
+		delete(state.operationRetention, operationID)
+		delete(state.operations, operationID)
+		delete(state.operationReplays, operationID)
+	}
+}
+
+func sessionOperationPtrLocked(state *sessionState, operationID harnessv2.OperationID, now time.Time) *harnessv2.OperationRecord {
+	pruneSessionOperationsLocked(state, now)
+	return operationPtr(state.operations, operationID)
+}
+
 type permissionState struct {
 	requestID   harnessv2.PermissionRequestID
 	toolCallID  string
@@ -157,7 +206,6 @@ type permissionState struct {
 	requestedAt time.Time
 	expiresAt   time.Time
 	options     map[string]harnessv2.PermissionOptionKind
-	decision    *harnessv2.PermissionDecision
 }
 
 type drainCleanupCandidate struct {
@@ -376,6 +424,7 @@ func (s *Server) status() harnessv2.StatusResponse {
 		Timestamp:               now,
 	}
 	for _, state := range s.sessions {
+		pruneSessionOperationsLocked(state, now)
 		status := harnessv2.RuntimeSessionStatus{
 			RuntimeSessionID:        state.descriptor.RuntimeSessionID,
 			RuntimeSessionUID:       state.descriptor.RuntimeSessionUID,
@@ -489,7 +538,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	if existing := s.sessions[request.RuntimeSessionID]; existing != nil {
-		classification, classifyErr := harnessv2.ClassifyOperation(expected, request.Metadata, operationPtr(existing.operations, request.Metadata.OperationID), true, now)
+		classification, classifyErr := harnessv2.ClassifyOperation(expected, request.Metadata, sessionOperationPtrLocked(existing, request.Metadata.OperationID, now), true, now)
 		if classifyErr != nil {
 			s.mu.Unlock()
 			writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, classifyErr.Error(), nil, false)
@@ -542,11 +591,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			State: harnessv2.RuntimeSessionStateCreating, WorkspaceBaseline: request.Workspace.Baseline,
 			CreatedAt: now, LastTransitionAt: now,
 		},
-		operations:       map[harnessv2.OperationID]harnessv2.OperationRecord{request.Metadata.OperationID: operationRecord(request.Metadata, harnessv2.OperationPhaseRecorded, "", now)},
-		operationReplays: make(map[harnessv2.OperationID]*operationReplay),
-		permissions:      make(map[harnessv2.PermissionRequestID]permissionState),
-		deltas:           make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
+		operations:         make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		operationRetention: make(map[harnessv2.OperationID]time.Time),
+		operationReplays:   make(map[harnessv2.OperationID]*operationReplay),
+		permissions:        make(map[harnessv2.PermissionRequestID]permissionState),
+		deltas:             make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
 	}
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
 	s.sessions[request.RuntimeSessionID] = state
 	if s.sessionIdentityCapacity().RotationRequired() {
 		s.drain.AcceptingNewSessions = false
@@ -580,7 +631,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	state.profile = request.Profile
 	state.agentConfiguration = *request.AgentConfiguration
 	state.creating = false
-	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", now)
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
 	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled && isDrainCleanupState(state)
 	if drainCleanup {
 		state.drainCleanupScheduled = true
@@ -964,6 +1015,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
 	if s.sessions[sessionID] == state {
+		pruneSessionOperationsLocked(state, deletedAt)
 		operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
 		for _, operation := range state.operations {
 			operations = append(operations, operation)

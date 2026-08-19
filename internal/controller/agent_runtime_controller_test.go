@@ -675,7 +675,10 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	}
 	backendPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-pod", Labels: map[string]string{"app": "runtime"}},
-		Status:     corev1.PodStatus{PodIP: "10.0.0.9", PodIPs: []corev1.PodIP{{IP: "10.0.0.9"}}},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.9", PodIPs: []corev1.PodIP{{IP: "10.0.0.9"}},
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
 	}
 	validSlice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
@@ -843,7 +846,10 @@ func TestAgentRuntimeServiceBackendPinsSelectsMatchingPort(t *testing.T) {
 	}
 	backendPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-pod", Labels: map[string]string{"app": "runtime"}},
-		Status:     corev1.PodStatus{PodIP: "10.0.0.9", PodIPs: []corev1.PodIP{{IP: "10.0.0.9"}}},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.9", PodIPs: []corev1.PodIP{{IP: "10.0.0.9"}},
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
 	}
 	slice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
@@ -884,15 +890,18 @@ func TestAgentRuntimeServiceBackendPinsExcludesUnreadyEndpoints(t *testing.T) {
 			Ports:    []corev1.ServicePort{{Port: 8080}},
 		},
 	}
-	pod := func(name, ip string) *corev1.Pod {
+	pod := func(name, ip string, ready corev1.ConditionStatus) *corev1.Pod {
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name, Labels: map[string]string{"app": "runtime"}},
-			Status:     corev1.PodStatus{PodIP: ip, PodIPs: []corev1.PodIP{{IP: ip}}},
+			Status: corev1.PodStatus{
+				PodIP: ip, PodIPs: []corev1.PodIP{{IP: ip}},
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: ready}},
+			},
 		}
 	}
-	readyPod := pod("runtime-ready", "10.0.0.9")
-	unreadyPod := pod("runtime-unready", "10.0.0.10")
-	terminatingPod := pod("runtime-terminating", "10.0.0.11")
+	readyPod := pod("runtime-ready", "10.0.0.9", corev1.ConditionTrue)
+	unreadyPod := pod("runtime-unready", "10.0.0.10", corev1.ConditionFalse)
+	terminatingPod := pod("runtime-terminating", "10.0.0.11", corev1.ConditionTrue)
 	slice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default", Name: "runtime-mixed",
@@ -902,7 +911,7 @@ func TestAgentRuntimeServiceBackendPinsExcludesUnreadyEndpoints(t *testing.T) {
 		Ports:       []discoveryv1.EndpointPort{{Port: new(int32(8080))}},
 		Endpoints: []discoveryv1.Endpoint{
 			{Addresses: []string{"10.0.0.9"}, Conditions: discoveryv1.EndpointConditions{Ready: new(true)}, TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-ready"}},
-			{Addresses: []string{"10.0.0.10"}, Conditions: discoveryv1.EndpointConditions{Ready: new(false)}, TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-unready"}},
+			{Addresses: []string{"10.0.0.10"}, Conditions: discoveryv1.EndpointConditions{Ready: new(true)}, TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-unready"}},
 			{Addresses: []string{"10.0.0.11"}, Conditions: discoveryv1.EndpointConditions{Ready: new(true), Terminating: new(true)}, TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-terminating"}},
 		},
 	}
@@ -911,9 +920,9 @@ func TestAgentRuntimeServiceBackendPinsExcludesUnreadyEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mixed-readiness pins error: %v", err)
 	}
-	// Only the ready, non-terminating backend is pinned; the explicitly unready
-	// and the terminating endpoints are validated but excluded from the
-	// round-robin pin set so dispatch is never steered at a dead backend.
+	// Only the ready, non-terminating backend is pinned; the Pod-unready backend
+	// is excluded even though its EndpointSlice condition says Ready, and the
+	// terminating endpoint is also excluded from the round-robin pin set.
 	if len(pins) != 1 || pins[0] != "10.0.0.9:8080" {
 		t.Fatalf("mixed-readiness pins = %v, want [10.0.0.9:8080]", pins)
 	}

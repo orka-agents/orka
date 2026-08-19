@@ -71,7 +71,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	classification, err := harnessv2.ClassifyOperation(
 		s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata,
-		operationPtr(state.operations, request.Metadata.OperationID), true, now,
+		sessionOperationPtrLocked(state, request.Metadata.OperationID, now), true, now,
 	)
 	if err != nil {
 		s.mu.Unlock()
@@ -114,7 +114,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		startedAt: now,
 	}
 	state.prompt = prompt
-	state.operations[request.Metadata.OperationID] = prompt.operation
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
@@ -497,7 +497,7 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	}
 	classification, err := harnessv2.ClassifyOperation(
 		s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata,
-		operationPtr(state.operations, request.Metadata.OperationID), true, now,
+		sessionOperationPtrLocked(state, request.Metadata.OperationID, now), true, now,
 	)
 	if err != nil {
 		s.mu.Unlock()
@@ -563,7 +563,7 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	response := harnessv2.PromptLeaseResponse{
 		Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, Lease: request.Lease,
 	}
-	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", now)
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
 	if state.operationReplays == nil {
 		state.operationReplays = make(map[harnessv2.OperationID]*operationReplay)
 	}
@@ -596,7 +596,7 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 	}
 	classification, err := harnessv2.ClassifyOperation(
 		s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata,
-		operationPtr(state.operations, request.Metadata.OperationID), true, now,
+		sessionOperationPtrLocked(state, request.Metadata.OperationID, now), true, now,
 	)
 	if err != nil {
 		s.mu.Unlock()
@@ -609,11 +609,6 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 		s.mu.Unlock()
 		if replay != nil && classification.Class == harnessv2.RequestClassificationDuplicate {
 			writePermissionOperationReplay(w, r, replay, classification)
-		} else if classification.Class == harnessv2.RequestClassificationDuplicate && permission.decision != nil {
-			writeJSON(w, http.StatusOK, harnessv2.PermissionResolutionResponse{
-				Protocol: harnessv2.ProtocolVersion, Classification: classification, State: harnessv2.PermissionResolutionAlreadyResolved,
-				Decision: *permission.decision, ResolvedAt: now,
-			})
 		} else {
 			writeClassificationError(w, classification)
 		}
@@ -683,11 +678,8 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 		State: harnessv2.PermissionResolutionApplied, Decision: request.Decision, ResolvedAt: resolvedAt,
 	}
 	s.mu.Lock()
-	if current, ok := state.permissions[request.RequestID]; ok {
-		current.decision = &request.Decision
-		state.permissions[request.RequestID] = current
-	}
-	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", resolvedAt)
+	delete(state.permissions, request.RequestID)
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", resolvedAt)
 	replay.permission = &response
 	close(replay.done)
 	s.mu.Unlock()
@@ -716,7 +708,7 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	classification, err := harnessv2.ClassifyOperation(
 		s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata,
-		operationPtr(state.operations, request.Metadata.OperationID), true, now,
+		sessionOperationPtrLocked(state, request.Metadata.OperationID, now), true, now,
 	)
 	if err != nil {
 		s.mu.Unlock()
@@ -776,7 +768,7 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 	if state.prompt == prompt {
 		state.permissions = make(map[harnessv2.PermissionRequestID]permissionState)
 	}
-	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseSettled, settlement.TerminalEvent, settlement.SettledAt)
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseSettled, settlement.TerminalEvent, settlement.SettledAt)
 	response := cancellationResponse(harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, settlement, invalidated, forced)
 	replay.cancellation = &response
 	close(replay.done)
@@ -794,7 +786,7 @@ func reserveOperationReplayLocked(
 	}
 	replay := &operationReplay{done: make(chan struct{})}
 	state.operationReplays[metadata.OperationID] = replay
-	state.operations[metadata.OperationID] = operationRecord(metadata, harnessv2.OperationPhaseRecorded, "", at)
+	recordSessionOperationLocked(state, metadata, harnessv2.OperationPhaseRecorded, "", at)
 	return replay
 }
 
@@ -909,7 +901,7 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 	}
 	classification, err := harnessv2.ClassifyOperation(
 		s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata,
-		operationPtr(state.operations, request.Metadata.OperationID), true, now,
+		sessionOperationPtrLocked(state, request.Metadata.OperationID, now), true, now,
 	)
 	if err != nil {
 		s.mu.Unlock()
@@ -969,7 +961,7 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 		state.publicationFinalization = &receipt
 	}
 	state.descriptor.LastTransitionAt = now
-	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", now)
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
 	descriptor := state.descriptor
 	mcpProxy := state.mcpProxy
 	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled
@@ -1053,7 +1045,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	publicationFinalized := state.descriptor.State == harnessv2.RuntimeSessionStateFinalizing && state.publicationFinalization != nil
-	classification, err := harnessv2.ClassifyOperation(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata, operationPtr(state.operations, request.Metadata.OperationID), true, now)
+	classification, err := harnessv2.ClassifyOperation(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata, sessionOperationPtrLocked(state, request.Metadata.OperationID, now), true, now)
 	if err != nil || classification.Class != harnessv2.RequestClassificationFresh {
 		s.mu.Unlock()
 		if err != nil {
@@ -1132,7 +1124,8 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
-	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseDeleted, "", deletedAt)
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseDeleted, "", deletedAt)
+	pruneSessionOperationsLocked(state, deletedAt)
 	operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
 	for _, operation := range state.operations {
 		operations = append(operations, operation)
@@ -1410,7 +1403,7 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
 		return
 	}
-	classification, err := harnessv2.ClassifyOperation(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata, operationPtr(state.operations, request.Metadata.OperationID), true, now)
+	classification, err := harnessv2.ClassifyOperation(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata, sessionOperationPtrLocked(state, request.Metadata.OperationID, now), true, now)
 	if err != nil {
 		s.mu.Unlock()
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
@@ -1452,7 +1445,7 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeDigestConflict, "workspace intent or verified baseline does not match the runtime session", nil, false)
 		return
 	}
-	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
 	runtimeSession, baseline, paths := state.runtime, state.baseline, state.paths
 	s.mu.Unlock()
 
@@ -1590,7 +1583,7 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	state.deltas[request.DeltaID] = response
-	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", time.Now().UTC())
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", time.Now().UTC())
 	nextMCPState := harnessv2.RuntimeSessionStatePoisoned
 	switch descriptor.State {
 	case harnessv2.WorkspaceDeltaNoChange:
@@ -1650,7 +1643,7 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		}
 		prompt.acceptedAt = event.Timestamp
 		prompt.operation = operationRecord(prompt.request.Metadata, harnessv2.OperationPhaseAccepted, "", event.Timestamp)
-		state.operations[prompt.request.Metadata.OperationID] = prompt.operation
+		recordSessionOperationLocked(state, prompt.request.Metadata, harnessv2.OperationPhaseAccepted, "", event.Timestamp)
 		state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
 		state.descriptor.LastTransitionAt = event.Timestamp
 		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
@@ -1672,6 +1665,12 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout))
 		if err != nil {
 			return nil, err
+		}
+		if _, exists := state.permissions[permission.RequestID]; exists {
+			return nil, fmt.Errorf("permission request %q is already pending", permission.RequestID)
+		}
+		if uint32(len(state.permissions)) >= s.cfg.Capabilities.Limits.MaxPendingPermissions {
+			return nil, fmt.Errorf("pending permission limit %d exceeded", s.cfg.Capabilities.Limits.MaxPendingPermissions)
 		}
 		options := make(map[string]harnessv2.PermissionOptionKind, len(permission.Options))
 		for _, option := range permission.Options {
@@ -1848,7 +1847,7 @@ func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result a
 	settlement := settlementFromResult(result, settledAt)
 	s.mu.Lock()
 	settlement = settlePromptLocked(prompt, settlement)
-	state.operations[prompt.request.Metadata.OperationID] = operationRecord(prompt.request.Metadata, harnessv2.OperationPhaseSettled, settlement.TerminalEvent, settlement.SettledAt)
+	recordSessionOperationLocked(state, prompt.request.Metadata, harnessv2.OperationPhaseSettled, settlement.TerminalEvent, settlement.SettledAt)
 	state.permissions = make(map[harnessv2.PermissionRequestID]permissionState)
 	next := harnessv2.RuntimeSessionStatePoisoned
 	if settlement.TerminalEvent == harnessv2.EventCompleted {
