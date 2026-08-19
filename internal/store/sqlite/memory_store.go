@@ -226,6 +226,15 @@ func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSea
 		query.WriteString(` AND message.session_name = ?`)
 		args = append(args, filter.SessionName)
 	}
+	sessionNames := compactStrings(filter.SessionNames)
+	if len(sessionNames) > 0 {
+		encodedSessionNames, err := json.Marshal(sessionNames)
+		if err != nil {
+			return nil, fmt.Errorf("encode transcript session filter: %w", err)
+		}
+		query.WriteString(` AND message.session_name IN (SELECT value FROM json_each(?))`)
+		args = append(args, string(encodedSessionNames))
+	}
 	if filter.ExcludeSessionName != "" {
 		query.WriteString(` AND message.session_name <> ?`)
 		args = append(args, filter.ExcludeSessionName)

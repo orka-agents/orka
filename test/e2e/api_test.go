@@ -11,6 +11,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -202,10 +203,19 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 			_, _ = utils.Run(cmd)
 		})
 
-		By("creating a task via POST /api/v1/tasks")
-		taskBody := fmt.Sprintf(`{"name":"%s","type":"container","image":"busybox:latest","command":["echo"],"args":["artifact-source"]}`,
-			taskName)
-		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/tasks", strings.NewReader(taskBody))
+		By("creating a managed worker task that uploads its artifact while active")
+		taskBody, err := json.Marshal(map[string]any{
+			"name":    taskName,
+			"type":    "container",
+			"command": []string{"sh", "-c"},
+			"args": []string{fmt.Sprintf(
+				"mkdir -p /tmp/artifacts && printf '%s' > /tmp/artifacts/%s && printf 'artifact-source'",
+				artifactContent,
+				artifactName,
+			)},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/tasks", strings.NewReader(string(taskBody)))
 		Expect(err).NotTo(HaveOccurred())
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
@@ -218,18 +228,6 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 		By("waiting for task completion")
 		phase := waitForTaskCompletion(taskName, 3*time.Minute)
 		Expect(phase).To(Equal("Succeeded"))
-
-		By("uploading an artifact via POST /internal/v1/artifacts/{namespace}/{taskName}/{filename}")
-		uploadURL := fmt.Sprintf("%s/internal/v1/artifacts/%s/%s/%s", apiBaseURL, namespace, taskName, artifactName)
-		req, err = http.NewRequest("POST", uploadURL, strings.NewReader(artifactContent))
-		Expect(err).NotTo(HaveOccurred())
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "text/plain")
-
-		resp, err = http.DefaultClient.Do(req)
-		Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
-		Expect(resp.StatusCode).To(Equal(http.StatusCreated))
 
 		By("listing artifacts via GET /api/v1/tasks/{id}/artifacts")
 		req, err = http.NewRequest("GET", apiBaseURL+"/api/v1/tasks/"+taskName+"/artifacts", nil)

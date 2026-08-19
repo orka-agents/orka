@@ -13,12 +13,11 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gofiber/fiber/v3"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,15 +27,10 @@ import (
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
 
-const maxResultSize = 10 << 20 // 10MB
-
 const (
-	harnessWrapperStartedAnnotation = "orka.ai/harness-wrapper-started"
-	harnessWrapperTurnIDAnnotation  = "orka.ai/harness-wrapper-turn-id"
-	harnessWrapperRuntimeAnnotation = "orka.ai/harness-wrapper-runtime-session-id"
-	harnessWrapperPlannedAtAnno     = "orka.ai/harness-wrapper-planned-at"
-	harnessWrapperServiceAccountEnv = "ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME"
-	harnessWrapperPlannedTurnTTL    = 5 * time.Minute
+	maxResultSize                        = 10 << 20 // 10MB
+	defaultInternalTranscriptSearchLimit = 10
+	maxInternalTranscriptSearchLimit     = 50
 )
 
 // InternalHandlers contains handlers for internal worker endpoints.
@@ -94,8 +88,7 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	// Verify caller namespace matches the URL namespace
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
+	if _, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName); err != nil {
 		return err
 	}
 
@@ -150,11 +143,12 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 	if namespace == "" || taskName == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
-		return err
-	}
 	if h.k8sClient == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "task status updates not enabled")
+	}
+	authorizer := h.internalCallerAuthorizer()
+	if _, err := authorizer.verifyTaskCaller(c, namespace, taskName); err != nil {
+		return err
 	}
 
 	var req statusrules.Update
@@ -171,12 +165,16 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		status := req.Status()
+		authorizedTask, err := authorizer.verifyTaskCaller(c, namespace, taskName)
+		if err != nil {
+			return err
+		}
 		task := &corev1alpha1.Task{}
 		if err := h.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
 			return err
 		}
-		if err := h.internalCallerAuthorizer().verifyTaskWorker(c.Context(), GetUserInfo(c), task); err != nil {
-			return err
+		if task.UID == "" || task.UID != authorizedTask.UID {
+			return fiber.NewError(fiber.StatusForbidden, "task identity changed")
 		}
 		statusrules.PreserveReadyTelemetry(status, task.Status.ExecutionWorkspace)
 		task.Status.ExecutionWorkspace = status
@@ -258,17 +256,42 @@ func (h *InternalHandlers) GetSessionTranscript(c fiber.Ctx) error {
 	if namespace == "" || name == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and name are required")
 	}
-
-	authorizer := h.internalCallerAuthorizer()
-	if err := authorizer.verifyNamespace(c, namespace); err != nil {
-		return err
-	}
-
 	if h.sessionStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "session storage not enabled")
 	}
 
+	authorizer := h.internalCallerAuthorizer()
+	callerTask, err := authorizer.resolveActiveTaskCaller(c, namespace)
+	if err != nil {
+		return err
+	}
+	taskHint := strings.TrimSpace(c.Query("taskName", ""))
+	if taskHint != "" && taskHint != callerTask.Name {
+		return fiber.NewError(fiber.StatusForbidden, "task identity does not match caller")
+	}
+
 	ctx := c.Context()
+	callerOwnsSession := callerTask.Spec.SessionRef != nil && callerTask.Spec.SessionRef.Name == name
+	gatewayOwned := false
+	var gatewayEvent *store.GatewayEvent
+	if h.gatewayEventStore != nil {
+		event, eventErr := h.gatewayEventStore.GetGatewayEventForTask(ctx, namespace, callerTask.Name, string(callerTask.UID))
+		switch {
+		case eventErr == nil:
+			gatewayOwned = true
+			gatewayEvent = event
+			if strings.TrimSpace(event.SessionName) == "" || event.SessionName != name {
+				return fiber.NewError(fiber.StatusForbidden, "task does not own this gateway session")
+			}
+		case errors.Is(eventErr, store.ErrNotFound):
+		default:
+			return fiber.NewError(fiber.StatusInternalServerError, "failed to load gateway transcript ownership")
+		}
+	}
+	if !gatewayOwned && !callerOwnsSession {
+		return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
+	}
+
 	sessionType, err := transcriptSessionType(ctx, h.sessionStore, namespace, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -276,56 +299,28 @@ func (h *InternalHandlers) GetSessionTranscript(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to load session transcript policy")
 	}
-	maxMessages := 0
-	throughMessageID := ""
-	taskName := strings.TrimSpace(c.Query("taskName", ""))
-	if sessionType == store.SessionTypeGateway && taskName == "" {
-		return fiber.NewError(fiber.StatusForbidden, "gateway session transcript requires authenticated task identity")
-	}
-	if taskName != "" {
-		taskReader := authorizer.k8sReader
-		if taskReader == nil {
-			return fiber.NewError(fiber.StatusInternalServerError, "task-aware transcript loading is unavailable")
+	if sessionType == store.SessionTypeGateway {
+		if taskHint == "" {
+			return fiber.NewError(fiber.StatusForbidden, "gateway session transcript requires authenticated task identity")
 		}
-		task := &corev1alpha1.Task{}
-		if err := taskReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: taskName}, task); err != nil {
-			if apierrors.IsNotFound(err) {
-				return fiber.NewError(fiber.StatusNotFound, "task not found")
-			}
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to load task transcript policy")
-		}
-		if err := authorizer.verifyTaskWorker(ctx, GetUserInfo(c), task); err != nil {
-			return err
-		}
-		gatewayOwned := false
-		if h.gatewayEventStore != nil {
-			event, eventErr := h.gatewayEventStore.GetGatewayEventForTask(ctx, namespace, task.Name, string(task.UID))
-			switch {
-			case eventErr == nil:
-				gatewayOwned = true
-				if event.SessionName != name {
-					return fiber.NewError(fiber.StatusForbidden, "task does not own this gateway session")
-				}
-				maxMessages = store.GatewayTranscriptMessageLimit
-				throughMessageID = store.GatewayUserMessageID(event.ID)
-			case errors.Is(eventErr, store.ErrNotFound):
-			default:
-				return fiber.NewError(fiber.StatusInternalServerError, "failed to load gateway transcript ownership")
-			}
-		} else if sessionType == store.SessionTypeGateway {
+		if h.gatewayEventStore == nil {
 			return fiber.NewError(fiber.StatusInternalServerError, "gateway transcript ownership lookup is unavailable")
 		}
 		if !gatewayOwned {
-			if sessionType == store.SessionTypeGateway {
-				return fiber.NewError(fiber.StatusForbidden, "task does not own this gateway session")
-			}
-			if task.Spec.SessionRef == nil || task.Spec.SessionRef.Name != name {
-				return fiber.NewError(fiber.StatusForbidden, "task does not reference this session")
-			}
-			maxMessages = int(task.Spec.SessionRef.MaxMessages)
-			throughMessageID = task.Spec.SessionRef.ThroughMessageID
+			return fiber.NewError(fiber.StatusForbidden, "task does not own this gateway session")
 		}
 	}
+
+	maxMessages := 0
+	throughMessageID := ""
+	if gatewayOwned {
+		maxMessages = store.GatewayTranscriptMessageLimit
+		throughMessageID = store.GatewayUserMessageID(gatewayEvent.ID)
+	} else if callerTask.Spec.SessionRef != nil && callerTask.Spec.SessionRef.Name == name {
+		maxMessages = int(callerTask.Spec.SessionRef.MaxMessages)
+		throughMessageID = callerTask.Spec.SessionRef.ThroughMessageID
+	}
+
 	var messages []store.SessionMessage
 	if throughMessageID != "" {
 		messages, err = h.sessionStore.LoadTranscriptThrough(ctx, namespace, name, throughMessageID, maxMessages)
@@ -375,13 +370,43 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 	if namespace == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace is required")
 	}
+	if h.sessionStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "session storage not enabled")
+	}
 
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
+	authorizer := h.internalCallerAuthorizer()
+	callerTask, err := authorizer.resolveActiveTaskCaller(c, namespace)
+	if err != nil {
+		return err
+	}
+	allowedSessions, err := authorizer.coordinationTreeSessionNames(c.Context(), callerTask)
+	if err != nil {
+		return err
+	}
+	if h.gatewayEventStore != nil {
+		_, eventErr := h.gatewayEventStore.GetGatewayEventForTask(c.Context(), namespace, callerTask.Name, string(callerTask.UID))
+		switch {
+		case eventErr == nil:
+			// Gateway turns are authorized against an event-specific transcript
+			// cutoff. Transcript search has no cutoff field, so fail closed
+			// instead of searching the full canonical session.
+			return fiber.NewError(fiber.StatusForbidden, "gateway session transcript search is unavailable")
+		case errors.Is(eventErr, store.ErrNotFound):
+		default:
+			return fiber.NewError(fiber.StatusInternalServerError, "failed to load gateway transcript ownership")
+		}
+	}
+	allowedSessions, err = searchableTranscriptSessionNames(c.Context(), h.sessionStore, namespace, allowedSessions)
+	if err != nil {
 		return err
 	}
 
-	if h.sessionStore == nil {
-		return fiber.NewError(fiber.StatusNotImplemented, "session storage not enabled")
+	sessionName := strings.TrimSpace(c.Query("sessionName", ""))
+	excludeSessionName := strings.TrimSpace(c.Query("excludeSessionName", ""))
+	if sessionName != "" {
+		if _, ok := allowedSessions[sessionName]; !ok {
+			return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
+		}
 	}
 
 	query := strings.TrimSpace(c.Query("query", ""))
@@ -398,15 +423,15 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 		return err
 	}
 
-	results, err := h.sessionStore.SearchTranscript(c.Context(), store.TranscriptSearchFilter{
+	results, err := searchAuthorizedTranscriptResults(c.Context(), h.sessionStore, store.TranscriptSearchFilter{
 		Namespace:          namespace,
 		Query:              query,
-		SessionName:        strings.TrimSpace(c.Query("sessionName", "")),
-		ExcludeSessionName: strings.TrimSpace(c.Query("excludeSessionName", "")),
+		SessionName:        sessionName,
+		ExcludeSessionName: excludeSessionName,
 		Roles:              splitCSV(c.Query("roles", "")),
 		Limit:              limit,
 		MaxSnippetLength:   maxSnippetLength,
-	})
+	}, allowedSessions)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to search transcript: %v", err))
 	}
@@ -414,6 +439,63 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 		results = []store.TranscriptSearchResult{}
 	}
 	return c.JSON(results)
+}
+
+func searchableTranscriptSessionNames(
+	ctx context.Context,
+	sessionStore store.SessionStore,
+	namespace string,
+	allowedSessions map[string]struct{},
+) (map[string]struct{}, error) {
+	searchable := make(map[string]struct{}, len(allowedSessions))
+	for sessionName := range allowedSessions {
+		sessionType, err := transcriptSessionType(ctx, sessionStore, namespace, sessionName)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			continue
+		case err != nil:
+			return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to load session transcript policy")
+		case sessionType == store.SessionTypeGateway:
+			continue
+		default:
+			searchable[sessionName] = struct{}{}
+		}
+	}
+	return searchable, nil
+}
+
+func searchAuthorizedTranscriptResults(
+	ctx context.Context,
+	sessionStore store.SessionStore,
+	filter store.TranscriptSearchFilter,
+	allowedSessions map[string]struct{},
+) ([]store.TranscriptSearchResult, error) {
+	if filter.SessionName != "" {
+		return sessionStore.SearchTranscript(ctx, filter)
+	}
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = defaultInternalTranscriptSearchLimit
+	}
+	if limit > maxInternalTranscriptSearchLimit {
+		limit = maxInternalTranscriptSearchLimit
+	}
+	sessionNames := make([]string, 0, len(allowedSessions))
+	for sessionName := range allowedSessions {
+		if sessionName != filter.ExcludeSessionName {
+			sessionNames = append(sessionNames, sessionName)
+		}
+	}
+	sort.Strings(sessionNames)
+
+	if len(sessionNames) == 0 {
+		return []store.TranscriptSearchResult{}, nil
+	}
+	filter.SessionNames = sessionNames
+	filter.ExcludeSessionName = ""
+	filter.Limit = limit
+	return sessionStore.SearchTranscript(ctx, filter)
 }
 
 func parseOptionalNonNegativeQueryInt(raw, name string) (int, error) {
@@ -437,7 +519,7 @@ func (h *InternalHandlers) SubmitPlan(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
+	if _, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName); err != nil {
 		return err
 	}
 
@@ -482,7 +564,7 @@ func (h *InternalHandlers) GetPlan(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
+	if _, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName); err != nil {
 		return err
 	}
 
@@ -510,10 +592,6 @@ func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace is required")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
-		return err
-	}
-
 	if h.messageStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "messaging not enabled")
 	}
@@ -530,6 +608,15 @@ func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 
 	if req.FromTask == "" || req.ToTask == "" || req.Content == "" || req.ParentTask == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "fromTask, toTask, parentTask, and content are required")
+	}
+	if err := h.internalCallerAuthorizer().verifyMessageSender(
+		c,
+		namespace,
+		req.FromTask,
+		req.ToTask,
+		req.ParentTask,
+	); err != nil {
+		return err
 	}
 
 	msg := &store.Message{
@@ -558,10 +645,6 @@ func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
-		return err
-	}
-
 	if h.messageStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "messaging not enabled")
 	}
@@ -569,6 +652,9 @@ func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
 	parentTask := c.Query("parentTask")
 	if parentTask == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "parentTask query parameter is required")
+	}
+	if err := h.internalCallerAuthorizer().verifyMessageInbox(c, namespace, taskName, parentTask); err != nil {
+		return err
 	}
 
 	markRead := c.Query("markRead", queryTrue) == queryTrue

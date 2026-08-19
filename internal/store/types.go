@@ -113,6 +113,7 @@ type TranscriptSearchFilter struct {
 	Namespace          string
 	Query              string
 	SessionName        string
+	SessionNames       []string
 	ExcludeSessionName string
 	Roles              []string
 	Limit              int

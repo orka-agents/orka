@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -540,9 +541,8 @@ func TestEventNamespaceIsolationPublicAndInternal(t *testing.T) {
 		t.Fatalf("cross-namespace public list status = %d, want 403", resp.StatusCode)
 	}
 
-	internalApp := setupInternalExecutionEventApp(
-		eventStore,
-		&UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default"},
+	internalApp := setupOwnedInternalExecutionEventApp(
+		t, eventStore, "task-other", "worker-pod", "worker-pod-uid",
 	)
 	internalResp := doJSONRequest(
 		t,
@@ -673,13 +673,36 @@ func setupExecutionEventIntegrationApp(
 	t.Helper()
 	h, app := setupTaskEventHandlers(t, eventStore, objs...)
 	configureShortTaskEventStream(h)
+	workerClient := h.client
+	for _, obj := range objs {
+		task, ok := obj.(*corev1alpha1.Task)
+		if !ok {
+			continue
+		}
+		workerTask := task.DeepCopy()
+		if workerTask.UID == "" {
+			workerTask.UID = types.UID(workerTask.Name + "-uid")
+		}
+		if workerTask.Status.JobName == "" {
+			workerTask.Status.JobName = workerTask.Name + "-job"
+		}
+		job := internalCallerAuthJob(workerTask, workerTask.Status.JobName, workerTask.Name+"-job-uid")
+		pod := internalCallerAuthPod(workerTask, workerTask.Name+"-pod", workerTask.Name+"-pod-uid", job)
+		workerClient = testInternalExecutionEventClient(t, workerTask, job, pod)
+		if userInfo != nil {
+			userInfo = internalCallerAuthWorkerUser(pod.Name, string(pod.UID))
+		}
+		break
+	}
 	if userInfo != nil {
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, userInfo)
 			return c.Next()
 		})
 	}
-	internal := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{ExecutionEventStore: eventStore})
+	internal := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{
+		Client: workerClient, APIReader: workerClient, ExecutionEventStore: eventStore,
+	})
 	app.Post("/internal/v1/events/:namespace/:streamType/:streamID", internal.SubmitExecutionEvent)
 	app.Get("/api/v1/tasks/:id/events", h.ListTaskEvents)
 	app.Get("/api/v1/tasks/:id/stream", h.StreamTaskEvents)
