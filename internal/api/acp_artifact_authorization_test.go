@@ -759,6 +759,25 @@ func TestAuthorizePublisherParentEffectRequiresLiveLease(t *testing.T) {
 	}
 }
 
+func TestControllerEpochStoreFenceSourceReadsDurableAuthority(t *testing.T) {
+	epochStore := &fixedControllerEpochStore{epoch: &store.ControllerEpoch{
+		Name: store.DefaultControllerEpochName, Epoch: 7, HolderID: "controller-7",
+	}}
+	source := NewControllerEpochStoreFenceSource(epochStore)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	fence, err := source.CurrentFence(ctx)
+	if err != nil {
+		t.Fatalf("CurrentFence() error = %v", err)
+	}
+	if epochStore.requestedName != store.DefaultControllerEpochName {
+		t.Fatalf("requested epoch name = %q", epochStore.requestedName)
+	}
+	if fence.Name != store.DefaultControllerEpochName || fence.Epoch != 7 || fence.HolderID != "controller-7" {
+		t.Fatalf("CurrentFence() = %#v", fence)
+	}
+}
+
 func publisherEffectForTest(name, kind, aggregateID, operationID string) *corev1alpha1.ExternalEffect {
 	return &corev1alpha1.ExternalEffect{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name},
@@ -778,6 +797,17 @@ func publisherEffectForTest(name, kind, aggregateID, operationID string) *corev1
 type fixedControllerEpochFenceSource struct {
 	fence store.ControllerEpochFence
 	err   error
+}
+
+type fixedControllerEpochStore struct {
+	epoch         *store.ControllerEpoch
+	err           error
+	requestedName string
+}
+
+func (s *fixedControllerEpochStore) GetControllerEpoch(_ context.Context, name string) (*store.ControllerEpoch, error) {
+	s.requestedName = name
+	return s.epoch, s.err
 }
 
 func (s fixedControllerEpochFenceSource) CurrentFence(context.Context) (store.ControllerEpochFence, error) {

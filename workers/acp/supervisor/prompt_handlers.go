@@ -1069,11 +1069,18 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, transitionErr.Error(), nil, false)
 		return
 	}
+	promptCancellation, cancellationErr := promptCancellationForDeletionLocked(state)
+	if cancellationErr != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, cancellationErr.Error(), nil, false)
+		return
+	}
 	if !ready {
 		s.mu.Unlock()
+		s.cancelPromptForDeletion(r.Context(), promptCancellation)
 		writeError(
 			w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted,
-			"runtime session cancellation must settle before deletion", nil, true,
+			"runtime session cancellation must settle before deletion; retry after settlement", nil, true,
 		)
 		return
 	}
@@ -1142,6 +1149,40 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
 		State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone,
 	})
+}
+
+type promptDeletionCancellation struct {
+	state     *sessionState
+	mutations promptMutationExecutor
+	promptID  harnessv2.PromptID
+}
+
+// promptCancellationForDeletionLocked returns the active prompt cancellation
+// surface while the caller holds s.mu. Runtime settlement remains owned by the
+// prompt handler; deletion requests cancellation, then leaves that owner to
+// advance the session before a retry can perform destructive cleanup.
+func promptCancellationForDeletionLocked(state *sessionState) (*promptDeletionCancellation, error) {
+	if state == nil || state.prompt == nil || state.prompt.settlement != nil {
+		return nil, nil
+	}
+	if state.promptMutations == nil {
+		return nil, fmt.Errorf("runtime cancellation is unavailable")
+	}
+	return &promptDeletionCancellation{
+		state: state, mutations: state.promptMutations, promptID: state.prompt.request.Metadata.PromptID,
+	}, nil
+}
+
+func (s *Server) cancelPromptForDeletion(ctx context.Context, cancellation *promptDeletionCancellation) {
+	if cancellation == nil {
+		return
+	}
+	deactivatePromptCapabilities(cancellation.state, cancellation.promptID, harnessv2.RuntimeSessionStateCancelling)
+	cancelCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)*2,
+	)
+	defer cancel()
+	_, _ = cancellation.mutations.CancelPrompt(cancelCtx, string(cancellation.promptID))
 }
 
 // prepareSessionDeletionLocked advances only to a state where destructive

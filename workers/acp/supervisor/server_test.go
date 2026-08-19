@@ -95,15 +95,16 @@ func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.
 
 func TestDeleteSessionDefersCleanupUntilCancellationSettles(t *testing.T) {
 	tests := []struct {
-		name      string
-		state     harnessv2.RuntimeSessionState
-		creating  bool
-		prompt    bool
-		wantState harnessv2.RuntimeSessionState
+		name            string
+		state           harnessv2.RuntimeSessionState
+		creating        bool
+		prompt          bool
+		wantCancelCalls int
+		wantState       harnessv2.RuntimeSessionState
 	}{
 		{name: "creating", state: harnessv2.RuntimeSessionStateCreating, creating: true, wantState: harnessv2.RuntimeSessionStateCreating},
-		{name: "prompt before acceptance", state: harnessv2.RuntimeSessionStateIdle, prompt: true, wantState: harnessv2.RuntimeSessionStateIdle},
-		{name: "prompt running", state: harnessv2.RuntimeSessionStatePromptRunning, prompt: true, wantState: harnessv2.RuntimeSessionStateCancelling},
+		{name: "prompt before acceptance", state: harnessv2.RuntimeSessionStateIdle, prompt: true, wantCancelCalls: 1, wantState: harnessv2.RuntimeSessionStateIdle},
+		{name: "prompt running", state: harnessv2.RuntimeSessionStatePromptRunning, prompt: true, wantCancelCalls: 1, wantState: harnessv2.RuntimeSessionStateCancelling},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -120,8 +121,12 @@ func TestDeleteSessionDefersCleanupUntilCancellationSettles(t *testing.T) {
 				},
 				operations: map[harnessv2.OperationID]harnessv2.OperationRecord{},
 			}
+			mutations := &recordingPromptMutator{}
 			if test.prompt {
-				state.prompt = &promptState{}
+				promptMetadata := create.Metadata
+				promptMetadata.PromptID = "prompt-1"
+				state.prompt = &promptState{request: harnessv2.StartPromptRequest{Metadata: promptMetadata}}
+				state.promptMutations = mutations
 			}
 			server.mu.Lock()
 			server.sessions[create.RuntimeSessionID] = state
@@ -154,8 +159,24 @@ func TestDeleteSessionDefersCleanupUntilCancellationSettles(t *testing.T) {
 			if state.descriptor.State != test.wantState {
 				t.Fatalf("session state=%s, want %s", state.descriptor.State, test.wantState)
 			}
+			if got := mutations.cancelCalls; got != test.wantCancelCalls {
+				t.Fatalf("CancelPrompt calls=%d, want %d", got, test.wantCancelCalls)
+			}
 		})
 	}
+}
+
+type recordingPromptMutator struct {
+	cancelCalls int
+}
+
+func (*recordingPromptMutator) ResolvePermission(string, string, acp.RequestPermissionOutcome) error {
+	return nil
+}
+
+func (m *recordingPromptMutator) CancelPrompt(context.Context, string) (acp.PromptResult, error) {
+	m.cancelCalls++
+	return acp.PromptResult{Outcome: acp.PromptOutcomeCancelled}, nil
 }
 
 func TestSupervisorCreateAndPrompt(t *testing.T) {
