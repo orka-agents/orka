@@ -16,8 +16,19 @@ mkdir -p "${source_dir}" "${destination_dir}"
 
 printf '%s\n' 'kind: First' >"${source_dir}/core.orka.ai_firsts.yaml"
 printf '%s\n' 'kind: Second' >"${source_dir}/core.orka.ai_seconds.yaml"
+cat >"${source_dir}/fake.workspace.orka.ai_fakeproviders.yaml" <<'EOF_FAKE_CRD'
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: fakeproviders.fake.workspace.orka.ai
+spec:
+  group: fake.workspace.orka.ai
+  names:
+    kind: FakeProvider
+EOF_FAKE_CRD
 printf '%s\n' 'outdated' >"${destination_dir}/core.orka.ai_firsts.yaml"
 printf '%s\n' 'stale' >"${destination_dir}/core.orka.ai_stale.yaml"
+printf '%s\n' 'development CRD must be removed' >"${destination_dir}/fakeprovider-customresourcedefinition.yaml"
 mkdir -p "${destination_dir}/legacy/nested"
 printf '%s\n' 'stale yml' >"${destination_dir}/legacy/stale.yml"
 printf '%s\n' '{"kind":"Stale"}' >"${destination_dir}/legacy/nested/stale.json"
@@ -30,6 +41,7 @@ printf '%s\n' 'preserve nested docs' >"${destination_dir}/legacy/README.md"
 cmp -s "${source_dir}/core.orka.ai_firsts.yaml" "${destination_dir}/core.orka.ai_firsts.yaml"
 cmp -s "${source_dir}/core.orka.ai_seconds.yaml" "${destination_dir}/core.orka.ai_seconds.yaml"
 [[ ! -e "${destination_dir}/core.orka.ai_stale.yaml" ]]
+[[ ! -e "${destination_dir}/fakeprovider-customresourcedefinition.yaml" ]]
 [[ ! -e "${destination_dir}/legacy/stale.yml" ]]
 [[ ! -e "${destination_dir}/legacy/nested/stale.json" ]]
 grep -Fx 'preserve this documentation' "${destination_dir}/README.md" >/dev/null

@@ -131,6 +131,11 @@ metadata:
     orka.ai/controller-mode: harness-v2
 EOF
 
+# For local evaluation only, generate a seven-day self-signed serving
+# certificate and provision the admission runtime's required TLS Secret.
+# Production installations should provision an operator-managed certificate.
+bash scripts/lib/e2e-admission-tls.sh
+
 # Deploy controller
 make deploy \
   IMG=docker.io/sozercan/orka@sha256:<controller-digest> \
