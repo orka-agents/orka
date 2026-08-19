@@ -1748,6 +1748,7 @@ func main() {
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		APIReader:                 mgr.GetAPIReader(),
+		ControllerEpochs:          controllerEpochManager,
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,

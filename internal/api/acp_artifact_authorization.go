@@ -385,6 +385,13 @@ func (s *Server) authorizePublisherParentEffect(
 	operation publisherservice.Operation,
 	metadata publisherservice.OperationMetadata,
 ) error {
+	if s.config.ControllerEpochs == nil {
+		return fmt.Errorf("publisher controller epoch authority is unavailable")
+	}
+	currentFence, err := s.config.ControllerEpochs.CurrentFence(ctx)
+	if err != nil || strings.TrimSpace(currentFence.Name) == "" || currentFence.Epoch <= 0 || strings.TrimSpace(currentFence.HolderID) == "" {
+		return fmt.Errorf("publisher controller epoch authority is unavailable")
+	}
 	kind := ""
 	aggregateID := metadata.PublicationID
 	switch operation {
@@ -419,7 +426,7 @@ func (s *Server) authorizePublisherParentEffect(
 		if effect.Spec.Kind == kind && effect.Spec.IdentityNamespace == metadata.Namespace &&
 			effect.Spec.AggregateID == aggregateID && effect.Spec.OperationID == metadata.OperationID &&
 			effect.Status.State == corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight) &&
-			externalEffectLeaseActive(effect.Status, now) {
+			externalEffectLeaseActive(effect.Status, currentFence, now) {
 			matches++
 		}
 	}
@@ -430,15 +437,15 @@ func (s *Server) authorizePublisherParentEffect(
 }
 
 // externalEffectLeaseActive reports whether an in-flight external effect still
-// holds a live lease: a non-empty owner, a recorded controller epoch, and an
-// unexpired lease expiry. The publisher broker paths authenticate on a shared
-// bearer with no per-request epoch capability, so without this check a request
-// arriving after the lease expired — but before reconciliation moves the record
-// out of InFlight — would keep retrieving frozen credentials and artifact
-// capabilities past the point its operation authority should have ended.
-func externalEffectLeaseActive(status corev1alpha1.ExternalEffectStatus, now time.Time) bool {
+// holds a live lease under the controller's current durable fence. The
+// publisher broker paths authenticate on a shared bearer with no per-request
+// epoch capability, so a lease from a superseded controller epoch must stop
+// authorizing broker access immediately even when its wall-clock expiry has not
+// elapsed yet.
+func externalEffectLeaseActive(status corev1alpha1.ExternalEffectStatus, fence store.ControllerEpochFence, now time.Time) bool {
 	if strings.TrimSpace(status.LeaseOwner) == "" || status.ControllerEpoch <= 0 {
 		return false
 	}
-	return status.LeaseExpiresAt != nil && status.LeaseExpiresAt.After(now)
+	return status.ControllerEpochName == fence.Name && status.ControllerEpoch == fence.Epoch &&
+		status.LeaseExpiresAt != nil && status.LeaseExpiresAt.After(now)
 }

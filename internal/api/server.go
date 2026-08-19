@@ -35,6 +35,12 @@ import (
 
 var log = logf.Log.WithName("api-server")
 
+// ControllerEpochFenceSource exposes the controller's current durable fence to
+// internal broker authorization paths.
+type ControllerEpochFenceSource interface {
+	CurrentFence(context.Context) (store.ControllerEpochFence, error)
+}
+
 // ServerConfig holds configuration for the API server
 type ServerConfig struct {
 	Port                      int
@@ -63,6 +69,7 @@ type ServerConfig struct {
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 	APIReader                 client.Reader
+	ControllerEpochs          ControllerEpochFenceSource
 }
 
 // Server is the REST API server

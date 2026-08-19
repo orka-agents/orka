@@ -1053,13 +1053,6 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	publicationFinalized := state.descriptor.State == harnessv2.RuntimeSessionStateFinalizing && state.publicationFinalization != nil
-	if !publicationFinalized {
-		if _, err := harnessv2.DeletionTransition(state.descriptor.State); err != nil {
-			s.mu.Unlock()
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
-			return
-		}
-	}
 	classification, err := harnessv2.ClassifyOperation(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata, operationPtr(state.operations, request.Metadata.OperationID), true, now)
 	if err != nil || classification.Class != harnessv2.RequestClassificationFresh {
 		s.mu.Unlock()
@@ -1070,10 +1063,22 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	ready, transitionErr := prepareSessionDeletionLocked(state, publicationFinalized, now)
+	if transitionErr != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, transitionErr.Error(), nil, false)
+		return
+	}
+	if !ready {
+		s.mu.Unlock()
+		writeError(
+			w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted,
+			"runtime session cancellation must settle before deletion", nil, true,
+		)
+		return
+	}
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
-	state.descriptor.State = harnessv2.RuntimeSessionStateDeleting
-	state.descriptor.LastTransitionAt = now
 	s.mu.Unlock()
 	var providerCleanupErr error
 	if state.mcpProxy != nil {
@@ -1137,6 +1142,32 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
 		State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone,
 	})
+}
+
+// prepareSessionDeletionLocked advances only to a state where destructive
+// cleanup is safe. Creating sessions have no runtime cancellation surface yet,
+// and an active prompt must settle through CancelPrompt before descendant
+// cleanup can be proven. The caller must hold s.mu.
+func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool, now time.Time) (bool, error) {
+	nextState := harnessv2.RuntimeSessionStateDeleting
+	if !publicationFinalized {
+		var err error
+		nextState, err = harnessv2.DeletionTransition(state.descriptor.State)
+		if err != nil {
+			return false, err
+		}
+	}
+	promptSettled := state.prompt == nil || state.prompt.settlement != nil
+	if state.creating || state.runtime == nil || !promptSettled || nextState != harnessv2.RuntimeSessionStateDeleting {
+		if !state.creating && nextState == harnessv2.RuntimeSessionStateCancelling && state.descriptor.State != nextState {
+			state.descriptor.State = nextState
+			state.descriptor.LastTransitionAt = now
+		}
+		return false, nil
+	}
+	state.descriptor.State = nextState
+	state.descriptor.LastTransitionAt = now
+	return true, nil
 }
 
 func tombstoneOperation(tombstone harnessv2.RuntimeSessionTombstone, operationID harnessv2.OperationID) *harnessv2.OperationRecord {
