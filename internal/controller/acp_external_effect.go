@@ -247,20 +247,6 @@ func runACPExternalEffectWithRetry[T any](
 	)
 }
 
-func runACPExternalEffectWithRetryDelay[T any](
-	ctx context.Context,
-	d *ACPDispatcher,
-	fence store.ControllerEpochFence,
-	identity store.ExternalEffectIdentity,
-	request any,
-	retryDelay time.Duration,
-	call func(context.Context) (T, error),
-) (T, error) {
-	return runACPExternalEffectWithRetryPolicy(
-		ctx, d, fence, identity, request, retryDelay, externalEffectCallTimeout(identity), call,
-	)
-}
-
 func runACPExternalEffectWithRetryPolicy[T any](
 	ctx context.Context,
 	d *ACPDispatcher,

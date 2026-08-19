@@ -98,70 +98,6 @@ func TestIngestMapperTaskSkipsFailedRun(t *testing.T) {
 	}
 }
 
-func TestLatestTerminalScanTaskPrefersNewestCompletedScan(t *testing.T) {
-	tasks := []corev1alpha1.Task{
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:              "older-failed-scan",
-				CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T04:45:33Z")),
-				Labels: map[string]string{
-					labels.LabelSecurityTarget: "kaset",
-				},
-			},
-			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:              "patch-task",
-				CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T04:58:00Z")),
-				Labels: map[string]string{
-					labels.LabelSecurityTarget:    "kaset",
-					labels.LabelSecurityFindingID: "fnd_123",
-				},
-			},
-			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:              "newest-succeeded-scan",
-				CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T04:59:05Z")),
-				Labels: map[string]string{
-					labels.LabelSecurityTarget: "kaset",
-				},
-			},
-			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:              "newest-cancelled-scan",
-				CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T05:00:00Z")),
-				Labels: map[string]string{
-					labels.LabelSecurityTarget: "kaset",
-				},
-			},
-			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:              "running-scan",
-				CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T05:01:00Z")),
-				Labels: map[string]string{
-					labels.LabelSecurityTarget: "kaset",
-				},
-			},
-			Status: corev1alpha1.TaskStatus{},
-		},
-	}
-
-	got := latestTerminalScanTask(tasks)
-	if got == nil {
-		t.Fatal("latestTerminalScanTask() = nil, want newest terminal scan task")
-	}
-	if got.Name != "newest-cancelled-scan" {
-		t.Fatalf("latestTerminalScanTask() = %q, want %q", got.Name, "newest-cancelled-scan")
-	}
-}
-
 //nolint:gocyclo // This table-driven regression intentionally verifies terminal state across the run, scan, slice, and retry paths.
 func TestRepositoryScanReconcileTreatsCancelledPipelineTasksAsTerminalFailures(t *testing.T) {
 	tests := []struct {
@@ -2747,38 +2683,6 @@ func TestPersistThreatModelIfChangedPromotesNewerGeneratedRun(t *testing.T) {
 	}
 }
 
-func TestLoadThreatModelArtifactRejectsToolTranscript(t *testing.T) {
-	ctx := context.Background()
-	store := setupControllerSQLiteStore(t)
-
-	reconciler := &RepositoryScanReconciler{ArtifactStore: store}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "kaset-threat-model-transcript",
-			Namespace: defaultNS,
-		},
-	}
-
-	transcript := `<tool_call><tool_name>shell</tool_name><parameters><command>cat > /workspace/.orka-artifacts/security-threat-model.md <<'EOF'
-# Threat Model
-EOF
-</command></parameters></tool_call>`
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel, "text/markdown", []byte(transcript)); err != nil {
-		t.Fatalf("SaveArtifact() error = %v", err)
-	}
-
-	content, validationProblem, err := reconciler.loadThreatModelArtifact(ctx, task)
-	if err != nil {
-		t.Fatalf("loadThreatModelArtifact() error = %v", err)
-	}
-	if content != "" {
-		t.Fatalf("content = %q, want empty for invalid threat model artifact", content)
-	}
-	if !strings.Contains(validationProblem, "tool transcript") {
-		t.Fatalf("validationProblem = %q, want tool transcript warning", validationProblem)
-	}
-}
-
 func TestIngestValidationTaskUpdatesFindingValidationDetails(t *testing.T) {
 	ctx := context.Background()
 	store := setupControllerSQLiteStore(t)
@@ -3048,7 +2952,7 @@ func TestCreateScanRunIsIdempotentWhenTaskAlreadyExists(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &scan.Spec.AnalysisAgentRef,
-			Prompt:   security.BuildThreatModelPrompt(scan, "initial", "", "", ""),
+			Prompt:   security.BuildThreatModelResultPrompt(scan, "initial", "", "", "", security.AgentResultBinding{RepositoryScan: scan.Name, ScanID: scanID}),
 			Timeout:  &timeout,
 			Priority: &priority,
 		},

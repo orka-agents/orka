@@ -1206,18 +1206,6 @@ func (c *Client) resolve(rel string) *url.URL {
 	return &copy
 }
 
-func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
-	return readSSEFramesWithSanitizers(r, func(frame HarnessEventFrame, _ int) error {
-		return emit(frame)
-	}, nil, nil)
-}
-
-func readSSEFramesWithSanitizer(r io.Reader, emit func(HarnessEventFrame) error, sanitize func(error) error) error {
-	return readSSEFramesWithSanitizers(r, func(frame HarnessEventFrame, _ int) error {
-		return emit(frame)
-	}, sanitize, nil)
-}
-
 func readSSEFramesWithSanitizers(
 	r io.Reader,
 	emit func(HarnessEventFrame, int) error,

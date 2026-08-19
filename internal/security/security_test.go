@@ -228,7 +228,7 @@ func TestEffectiveWorkspaceBranch(t *testing.T) {
 	}
 }
 
-func TestBuildThreatModelPromptRequiresThreatModelOnly(t *testing.T) {
+func TestBuildThreatModelResultPromptRequiresThreatModelOnly(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{
 		Spec: corev1alpha1.RepositoryScanSpec{
 			RepoURL: "https://github.com/example/project",
@@ -236,19 +236,42 @@ func TestBuildThreatModelPromptRequiresThreatModelOnly(t *testing.T) {
 		},
 	}
 
-	got := BuildThreatModelPrompt(scan, "manual", "", "", "# Existing")
+	got := BuildThreatModelResultPrompt(scan, "manual", "", "", "# Existing", testResultBinding())
 	if !strings.Contains(got, "Your only job in this stage is to understand the repository and produce a strong, reusable threat model.") {
-		t.Fatalf("BuildThreatModelPrompt() missing stage instruction:\n%s", got)
+		t.Fatalf("BuildThreatModelResultPrompt() missing stage instruction:\n%s", got)
 	}
-	if !strings.Contains(got, "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md") {
-		t.Fatalf("BuildThreatModelPrompt() missing required artifacts directive:\n%s", got)
+	if !strings.Contains(got, "TERMINAL RESULT CONTRACT") {
+		t.Fatalf("BuildThreatModelResultPrompt() missing terminal result contract:\n%s", got)
+	}
+	if !strings.Contains(got, "Existing threat model context") {
+		t.Fatalf("BuildThreatModelResultPrompt() missing existing threat model context:\n%s", got)
 	}
 	if strings.Contains(got, "security-findings") {
-		t.Fatalf("BuildThreatModelPrompt() unexpectedly references findings artifact:\n%s", got)
+		t.Fatalf("BuildThreatModelResultPrompt() unexpectedly references findings artifact:\n%s", got)
 	}
 }
 
-func TestBuildValidationPromptIncludesAttackPathAnalysis(t *testing.T) {
+func testResultBinding() AgentResultBinding {
+	return AgentResultBinding{
+		RepositoryScan: "project",
+		ScanID:         "scan_123",
+		PolicyDigest:   "sha256:policy",
+		ContextDigest:  "sha256:context",
+	}
+}
+
+func testReviewContextManifest(sliceID string) ReviewContextManifest {
+	prompt := "bounded context\n"
+	return ReviewContextManifest{
+		SchemaVersion:     SchemaVersionReviewContext,
+		SliceID:           sliceID,
+		Prompt:            prompt,
+		PromptBytes:       len(prompt),
+		ApproximateTokens: 4,
+	}
+}
+
+func TestBuildValidationResultPromptIncludesAttackPathAnalysis(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{
 		Spec: corev1alpha1.RepositoryScanSpec{
 			RepoURL: "https://github.com/example/project",
@@ -265,22 +288,22 @@ func TestBuildValidationPromptIncludesAttackPathAnalysis(t *testing.T) {
 		Line:       42,
 	}
 
-	got := BuildValidationPrompt(scan, finding)
-	if !strings.Contains(got, "REQUIRED_SECURITY_ARTIFACTS: security-validation.json") {
-		t.Fatalf("BuildValidationPrompt() missing validation directive:\n%s", got)
+	got := BuildValidationResultPrompt(scan, finding, testResultBinding())
+	if !strings.Contains(got, "TERMINAL RESULT CONTRACT") {
+		t.Fatalf("BuildValidationResultPrompt() missing terminal result contract:\n%s", got)
 	}
-	if !strings.Contains(got, "attack_path_analysis") {
-		t.Fatalf("BuildValidationPrompt() missing attack path schema:\n%s", got)
+	if !strings.Contains(got, "attack-path analysis") {
+		t.Fatalf("BuildValidationResultPrompt() missing attack path requirement:\n%s", got)
 	}
 }
 
 func TestBuildReviewPromptIncludesFindingQualityPolicy(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
 	slice := store.ReviewSlice{ID: "slice_api", Title: "API", Kind: "package", RepositoryScan: "repo", Source: "mapper"}
-	got := BuildReviewPrompt(scan, "initial", "", "", "", slice)
+	got := BuildReviewResultPrompt(scan, "initial", "", "", "", slice, testResultBinding(), testReviewContextManifest(slice.ID), FindingsV2Repository{RepoURL: scan.Spec.RepoURL, Branch: "main"})
 	for _, want := range []string{"FINDING QUALITY POLICY", "attacker-controlled source", "trust boundary", "docs-only", "dependency version", "React/TSX XSS", "shell-script command injection"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("BuildReviewPrompt() missing %q:\n%s", want, got)
+			t.Fatalf("BuildReviewResultPrompt() missing %q:\n%s", want, got)
 		}
 	}
 }
@@ -291,34 +314,34 @@ func TestBuildReviewPromptIncludesOrkaSpecificThreatCategories(t *testing.T) {
 		ID: "slice_api", Title: "API", Kind: "package", RepositoryScan: "repo", Source: "mapper",
 		ChangedFiles: []string{"internal/api/security.go"},
 	}
-	got := BuildReviewPrompt(scan, "manual", "base", "head", "", slice)
+	got := BuildReviewResultPrompt(scan, "manual", "base", "head", "", slice, testResultBinding(), testReviewContextManifest(slice.ID), FindingsV2Repository{RepoURL: scan.Spec.RepoURL, Branch: "main"})
 	for _, want := range []string{"Kubernetes RBAC", "task and pod execution isolation", "workspace write boundaries", "artifact and result ingestion", "Git credentials", "context-token and TxToken", "AI-agent prompt", "tenant and namespace isolation", "raw token or transcript persistence", "INCREMENTAL/MANUAL CHANGE-FOCUS POLICY"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("BuildReviewPrompt() missing %q:\n%s", want, got)
+			t.Fatalf("BuildReviewResultPrompt() missing %q:\n%s", want, got)
 		}
 	}
 }
 
-func TestBuildReviewPromptPreservesFindingsV2Contract(t *testing.T) {
+func TestBuildReviewResultPromptPreservesFindingsV2Contract(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
 	slice := store.ReviewSlice{ID: "slice_api", Title: "API", Kind: "package", RepositoryScan: "repo", Source: "mapper"}
-	got := BuildReviewPrompt(scan, "initial", "", "", "", slice)
-	if !strings.Contains(got, ArtifactFindingsV2) || !strings.Contains(got, `"findings":[]`) || !strings.Contains(got, "empty findings array") {
-		t.Fatalf("BuildReviewPrompt() missing v2 artifact contract:\n%s", got)
+	got := BuildReviewResultPrompt(scan, "initial", "", "", "", slice, testResultBinding(), testReviewContextManifest(slice.ID), FindingsV2Repository{RepoURL: scan.Spec.RepoURL, Branch: "main"})
+	if !strings.Contains(got, `"findings":[]`) || !strings.Contains(got, "empty array when no supported finding exists") {
+		t.Fatalf("BuildReviewResultPrompt() missing v2 findings contract:\n%s", got)
 	}
 }
 
-func TestBuildValidationPromptIncludesFindingQualityPolicy(t *testing.T) {
+func TestBuildValidationResultPromptIncludesFindingQualityPolicy(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
 	finding := &store.Finding{ID: "fnd_1", Title: "Finding", Severity: "high", Confidence: "high"}
-	got := BuildValidationPrompt(scan, finding)
+	got := BuildValidationResultPrompt(scan, finding, testResultBinding())
 	for _, want := range []string{"FINDING QUALITY POLICY", "theoretical, stale, docs-only, test-only, client-only", "status=failed"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("BuildValidationPrompt() missing %q:\n%s", want, got)
+			t.Fatalf("BuildValidationResultPrompt() missing %q:\n%s", want, got)
 		}
 	}
 	if strings.Contains(got, "write security-findings.v2.json") {
-		t.Fatalf("BuildValidationPrompt() contains review-stage findings artifact instruction:\n%s", got)
+		t.Fatalf("BuildValidationResultPrompt() contains review-stage findings artifact instruction:\n%s", got)
 	}
 }
 
@@ -332,19 +355,19 @@ func TestBuildReviewPromptIncludesCustomPolicyButPreservesDefaultPolicy(t *testi
 		CustomScanSource:       "scan-policy/policy (sha256:scan)",
 		FalsePositiveSource:    "fp-policy/policy (sha256:fp)",
 	}
-	got := BuildReviewPrompt(scan, "initial", "", "", "", slice, policy)
+	got := BuildReviewResultPrompt(scan, "initial", "", "", "", slice, testResultBinding(), testReviewContextManifest(slice.ID), FindingsV2Repository{RepoURL: scan.Spec.RepoURL, Branch: "main"}, policy)
 	for _, want := range []string{"CONFIGMAP-BACKED SCANNER POLICY", "webhook signature bypasses", "public demo endpoints", "Default Orka security policy", "prompt/tool-injection handling remain mandatory"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("BuildReviewPrompt() missing %q:\n%s", want, got)
+			t.Fatalf("BuildReviewResultPrompt() missing %q:\n%s", want, got)
 		}
 	}
 }
 
-func TestBuildThreatModelPromptIncludesCustomPolicy(t *testing.T) {
+func TestBuildThreatModelResultPromptIncludesCustomPolicy(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
-	got := BuildThreatModelPrompt(scan, "initial", "", "", "", PromptPolicy{CustomScanInstructions: "Focus on operator RBAC drift."})
+	got := BuildThreatModelResultPrompt(scan, "initial", "", "", "", testResultBinding(), PromptPolicy{CustomScanInstructions: "Focus on operator RBAC drift."})
 	if !strings.Contains(got, "Focus on operator RBAC drift") || !strings.Contains(got, "Default Orka security policy") {
-		t.Fatalf("BuildThreatModelPrompt() missing custom policy:\n%s", got)
+		t.Fatalf("BuildThreatModelResultPrompt() missing custom policy:\n%s", got)
 	}
 }
 
@@ -463,7 +486,6 @@ func TestGeneratedSecurityTaskNamesStayLabelSafe(t *testing.T) {
 	scanName := "demo-security-repository-security1-1776034262"
 
 	names := []string{
-		ScanTaskName(scanName, "initial"),
 		ScanStageTaskName(scanName, "initial", "threat-model", ""),
 		ScanStageTaskName(scanName, "initial", "discovery", "ci-cd-supply-chain"),
 		ScanStageTaskName(scanName, "initial", "discovery", "ci-cd-supply-chain-4"),

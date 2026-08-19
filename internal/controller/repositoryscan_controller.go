@@ -39,7 +39,6 @@ import (
 )
 
 const (
-	maxThreatModelFallbackBytes  = 1 << 20
 	repositoryScanPhasePending   = "Pending"
 	repositoryScanPhaseScanning  = "Scanning"
 	repositoryScanPhaseReady     = "Ready"
@@ -1325,35 +1324,6 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 	return nil
 }
 
-func isTerminalScanTask(task corev1alpha1.Task) bool {
-	if task.Labels[labels.LabelSecurityFindingID] != "" {
-		return false
-	}
-	return isTerminalScanTaskPhase(task.Status.Phase)
-}
-
-func latestTerminalScanTask(tasks []corev1alpha1.Task) *corev1alpha1.Task {
-	var latest *corev1alpha1.Task
-	for i := range tasks {
-		task := &tasks[i]
-		if !isTerminalScanTask(*task) {
-			continue
-		}
-		if latest == nil {
-			latest = task
-			continue
-		}
-		if task.CreationTimestamp.After(latest.CreationTimestamp.Time) {
-			latest = task
-			continue
-		}
-		if task.CreationTimestamp.Equal(&latest.CreationTimestamp) && task.Name > latest.Name {
-			latest = task
-		}
-	}
-	return latest
-}
-
 func taskPhaseToSecurityPhase(phase corev1alpha1.TaskPhase) string {
 	if phase == corev1alpha1.TaskPhaseSucceeded {
 		return scanRunPhaseSucceeded
@@ -1410,24 +1380,6 @@ func (r *RepositoryScanReconciler) persistThreatModelIfChanged(
 	return nil
 }
 
-func threatModelLooksLikeToolTranscript(content string) bool {
-	for _, marker := range []string{
-		"<tool_call>",
-		"</tool_call>",
-		"<tool_name>",
-		"</tool_name>",
-		"<parameters>",
-		"</parameters>",
-		"<command>",
-		"</command>",
-	} {
-		if strings.Contains(content, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 func (r *RepositoryScanReconciler) getArtifactWithRetry(ctx context.Context, namespace, taskName, filename string) ([]byte, error) {
 	var lastErr error
 	for range 5 {
@@ -1446,57 +1398,6 @@ func (r *RepositoryScanReconciler) getArtifactWithRetry(ctx context.Context, nam
 		}
 	}
 	return nil, lastErr
-}
-
-func (r *RepositoryScanReconciler) loadThreatModelArtifact(ctx context.Context, task *corev1alpha1.Task) (string, string, error) {
-	if r.ArtifactStore == nil {
-		return "", "", nil
-	}
-
-	threatModelData, err := r.getArtifactWithRetry(ctx, task.Namespace, task.Name, security.ArtifactThreatModel)
-	switch {
-	case err == nil:
-		content := strings.TrimSpace(string(threatModelData))
-		if content == "" {
-			return "", fmt.Sprintf("%s is empty", security.ArtifactThreatModel), nil
-		}
-		if threatModelLooksLikeToolTranscript(content) {
-			return "", fmt.Sprintf("%s looks like tool transcript, not markdown", security.ArtifactThreatModel), nil
-		}
-		return content, "", nil
-	case errors.Is(err, store.ErrNotFound):
-		content, ok, resultErr := r.threatModelFromTaskResult(ctx, task)
-		if resultErr != nil {
-			return "", "", resultErr
-		}
-		if ok {
-			return content, "", nil
-		}
-		return "", fmt.Sprintf("%s is missing", security.ArtifactThreatModel), nil
-	default:
-		return "", "", err
-	}
-}
-
-func (r *RepositoryScanReconciler) threatModelFromTaskResult(ctx context.Context, task *corev1alpha1.Task) (string, bool, error) {
-	if r.ResultStore == nil || task == nil {
-		return "", false, nil
-	}
-	data, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
-	if errors.Is(err, store.ErrNotFound) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	if len(data) > maxThreatModelFallbackBytes {
-		return "", false, nil
-	}
-	content := strings.TrimSpace(string(data))
-	if !strings.HasPrefix(content, "#") || threatModelLooksLikeToolTranscript(content) {
-		return "", false, nil
-	}
-	return content, true, nil
 }
 
 func (r *RepositoryScanReconciler) loadReviewSlicesArtifact(ctx context.Context, task *corev1alpha1.Task) (*security.ReviewSlicesArtifact, string, error) {

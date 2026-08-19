@@ -24,6 +24,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storetest "github.com/orka-agents/orka/internal/store/storetest"
 )
 
 func TestHarnessV1RetryDelayCapsBeforeDurationOverflow(t *testing.T) {
@@ -2461,7 +2462,7 @@ func newHarnessV1DispatcherPreparedFixture(t *testing.T) *harnessV1DispatcherSta
 	dispatcher := &HarnessV1Dispatcher{
 		Client: reconciler.Client, APIReader: reconciler.Client,
 		Attempts: durable, Snapshots: durable,
-		ResultStore: durable, EventStore: store.NewFakeExecutionEventStore(),
+		ResultStore: durable, EventStore: storetest.NewFakeExecutionEventStore(),
 	}
 	return &harnessV1DispatcherStateFixture{
 		ctx: ctx, dispatcher: dispatcher, durable: durable, task: task,

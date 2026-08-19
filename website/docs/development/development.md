@@ -231,9 +231,15 @@ and pick a short or long request body via
 
 ## Generate Installer YAML
 
+The installer manifest is generated into `manifest_staging/deploy/orka.yaml` by
+the staged manifest flow:
+
 ```bash
-make build-installer IMG=ghcr.io/orka-agents/orka:latest
+make manifests
 ```
+
+See [Helm Chart Generation and Releases](#helm-chart-generation-and-releases)
+for how staging output is promoted into `deploy/` at release time.
 
 ## Build Gotchas
 

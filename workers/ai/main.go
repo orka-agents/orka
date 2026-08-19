@@ -1181,30 +1181,6 @@ func loadPlanContext() string {
 		plan.ProgressPct, plan.Iteration, plan.Summary, plan.PlanDocument)
 }
 
-// executeAgentLoop runs the agent loop with tool execution
-func executeAgentLoop(
-	ctx context.Context,
-	provider llm.Provider,
-	messages []llm.Message,
-	systemPrompt string,
-	model string,
-	llmTools []llm.Tool,
-	customTools map[string]*corev1alpha1.Tool,
-	toolExecutor *worker.ToolExecutor,
-) (string, error) {
-	return executeAgentLoopWithEvents(
-		ctx,
-		provider,
-		messages,
-		systemPrompt,
-		model,
-		llmTools,
-		customTools,
-		toolExecutor,
-		common.NoopEventRecorder{},
-	)
-}
-
 func executeAgentLoopWithEvents(
 	ctx context.Context,
 	provider llm.Provider,

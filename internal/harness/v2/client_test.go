@@ -15,6 +15,16 @@ import (
 	"time"
 )
 
+func WithResponseBodyLimit(maxBytes int64) ClientOption {
+	return func(c *Client) error {
+		if maxBytes <= 0 || maxBytes > int64(MaxCanonicalJSONBytes) {
+			return fmt.Errorf("JSON response limit must be in range 1..%d", MaxCanonicalJSONBytes)
+		}
+		c.maxJSONResponseBytes = maxBytes
+		return nil
+	}
+}
+
 const clientTestBearer = "controller-bearer-token-0123456789abcdef"
 
 var clientTestCapabilitySecret = []byte("capability-secret-0123456789abcdef")

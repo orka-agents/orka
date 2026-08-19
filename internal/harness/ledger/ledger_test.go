@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,31 @@ const (
 	testRuntimeSessionID = "runtime-session-1"
 	testCorrelationID    = "correlation-1"
 )
+
+// Open opens (creating if needed) the ledger database at path.
+func Open(path string) (*Ledger, error) {
+	return OpenWithGeneration(path, "1")
+}
+
+// Settled reports whether the record needs no further settlement work.
+func (r TurnRecord) Settled() bool {
+	switch r.State {
+	case TurnRejected, TurnTerminal, TurnOutcomeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Generation returns the ledger generation watermark for inventory reports.
+func (l *Ledger) Generation(ctx context.Context) (string, error) {
+	var value string
+	err := l.db.QueryRowContext(ctx, `SELECT value FROM ledger_control WHERE key = 'generation'`).Scan(&value)
+	if err != nil {
+		return "", fmt.Errorf("read ledger generation: %w", err)
+	}
+	return value, nil
+}
 
 func openTestLedger(t *testing.T) (*Ledger, string) {
 	t.Helper()

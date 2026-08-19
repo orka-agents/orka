@@ -16,6 +16,18 @@ import (
 	"time"
 )
 
+func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
+	return readSSEFramesWithSanitizers(r, func(frame HarnessEventFrame, _ int) error {
+		return emit(frame)
+	}, nil, nil)
+}
+
+func readSSEFramesWithSanitizer(r io.Reader, emit func(HarnessEventFrame) error, sanitize func(error) error) error {
+	return readSSEFramesWithSanitizers(r, func(frame HarnessEventFrame, _ int) error {
+		return emit(frame)
+	}, sanitize, nil)
+}
+
 func TestClientDecodesJSONEscapesBeforeBearerSanitization(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

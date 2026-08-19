@@ -22,7 +22,7 @@ func TestSessionIdentityHighWaterSurvivesSupervisorRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstUID, firstGID, err := cfg.UIDAllocator.Allocate()
+	firstUID, firstGID, err := cfg.UIDAllocator.AllocateAboveReserve(0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestSessionIdentityHighWaterSurvivesSupervisorRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { closeIdentityTestSupervisor(t, restarted) })
-	secondUID, secondGID, err := restartedCfg.UIDAllocator.Allocate()
+	secondUID, secondGID, err := restartedCfg.UIDAllocator.AllocateAboveReserve(0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestSessionIdentityStateRecoversOrphanedInitializationFile(t *testing.T) {
 
 func TestNewRejectsNonFreshSessionIdentityAllocator(t *testing.T) {
 	cfg, _ := newSessionIdentityTestConfig(t)
-	if _, _, err := cfg.UIDAllocator.Allocate(); err != nil {
+	if _, _, err := cfg.UIDAllocator.AllocateAboveReserve(0); err != nil {
 		t.Fatal(err)
 	}
 	server, err := New(cfg)

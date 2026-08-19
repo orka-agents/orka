@@ -1,4 +1,4 @@
-# ADR 0009: Hand-roll GenAI semantic-convention constants
+# ADR 0019: Hand-roll GenAI semantic-convention constants
 
 Date: 2026-06-23
 

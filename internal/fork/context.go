@@ -138,28 +138,6 @@ func truncateForkContextText(value string, maxChars int) string {
 	return string(runes[:maxChars]) + "...[truncated]"
 }
 
-func ValidateAfterSeq(afterSeq int64, events []store.ExecutionEvent) bool {
-	if afterSeq == 0 {
-		return true
-	}
-	for _, event := range events {
-		if event.Seq == afterSeq {
-			return true
-		}
-	}
-	return false
-}
-
-func LatestSeq(events []store.ExecutionEvent) int64 {
-	var latest int64
-	for _, event := range events {
-		if event.Seq > latest {
-			latest = event.Seq
-		}
-	}
-	return latest
-}
-
 func cloneRaw(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {
 		return nil

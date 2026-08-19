@@ -22,7 +22,6 @@ on:
       - "internal/**"
       - "pkg/**"
       - "scripts/apply-acp-production.sh"
-      - "scripts/check-acp-crd-cutover.sh"
       - "scripts/lib/e2e-admission-tls.sh"
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/lib/kind-local-registry.sh"

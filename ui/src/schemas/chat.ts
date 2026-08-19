@@ -85,12 +85,8 @@ export interface SSEDoneEvent {
   usage: ChatUsage
 }
 
-export interface SSEErrorEvent {
-  error: string
-}
-
 // UI message types for the chat store
-export type ChatMessageRole = 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'status' | 'error'
+type ChatMessageRole = 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'status' | 'error'
 
 export interface ChatMessage {
   id: string

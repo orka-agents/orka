@@ -38,7 +38,6 @@ export const externalAgentRuntimeSchema = z.object({
 }).strict()
 
 export const agentRuntimeSchema = z.union([builtInAgentRuntimeSchema, externalAgentRuntimeSchema])
-export const agentCLIRuntimeSchema = agentRuntimeSchema
 
 export const agentSpecSchema = z.object({
   providerRef: z.object({ name: z.string(), namespace: z.string().optional() }).optional(),

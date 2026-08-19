@@ -720,11 +720,11 @@ Key configuration values for the Helm chart:
 | `scmEgressProxy.auth.rolloutNonce` | `""` | Non-secret revision marker that restarts Publisher and SCM proxy during coordinated proxy-auth Secret rotation. |
 | `scmEgressProxy.maxTunnelBytes` | `1073741824` | Maximum bytes allowed in each CONNECT tunnel direction. |
 | `scmEgressProxy.maxConcurrent` | `8` | Maximum concurrent forward requests and CONNECT tunnels. |
-| `controller.workspaceProvider.apiEnabled` | `false` | Enable provider-neutral `workspace.orka.ai` coordination controllers |
-| `controller.workspaceProvider.fakeProviderEnabled` | `false` | Enable the development-only fake workspace adapter; its CRDs must be installed separately |
-| `controller.workspaceProvider.classUseAdmission.enabled` | `false` | Install and enable fail-closed Task/Tool class-use admission; required when `apiEnabled=true` |
-| `controller.workspaceProvider.classUseAdmission.existingSecret` | `""` | Existing TLS Secret containing `tls.crt` and `tls.key` for the chart webhook Service DNS name |
-| `controller.workspaceProvider.classUseAdmission.caBundle` | `""` | Base64-encoded PEM CA bundle for the class-use ValidatingWebhookConfiguration |
+| `webhooks.tls.existingSecret` | `""` | Required existing TLS Secret for the controller-served admission webhooks; the chart never generates webhook certificates. |
+| `webhooks.tls.certKey` / `webhooks.tls.privateKeyKey` | `tls.crt` / `tls.key` | Certificate and private-key keys inside the webhook TLS Secret. |
+| `webhooks.caBundle` | `""` | Base64-encoded PEM CA bundle for the chart ValidatingWebhookConfiguration. Leave empty when `webhooks.caInjectionAnnotations` configures an injector. |
+| `webhooks.caInjectionAnnotations` | `{}` | CA-injection annotations (for example cert-manager) placed on the chart ValidatingWebhookConfiguration. Rendering fails unless this or `webhooks.caBundle` is set. |
+| `webhooks.timeoutSeconds` | `10` | Admission webhook timeout. |
 | `controller.agentSandbox.enabled` | `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
 | `controller.agentSandbox.routerUrl` | `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
 | `controller.agentSandbox.defaultTemplate` | `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
@@ -736,7 +736,6 @@ Key configuration values for the Helm chart:
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
-| `monitoring.enabled` | `false` | Enable Prometheus ServiceMonitor |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
 | `client.namespace` | `""` | Client ServiceAccount namespace override. Empty defaults to `controller.watchNamespace` when namespace isolation is enforced and `watchNamespace` is set, otherwise the release namespace. |
@@ -963,11 +962,11 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 
 ### Provider-neutral Workspace Controller Settings
 
-The `workspace.orka.ai/v1alpha1` control plane is installed additively and its controllers are disabled by default during rollout. Enable the generic provider, class, pool, and workspace reconcilers with `--enable-workspace-provider-api` (or `ORKA_ENABLE_WORKSPACE_PROVIDER_API=true`). The development-only fake adapter additionally requires `--enable-fake-workspace-provider` (or `ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER=true`). In Helm these map to `controller.workspaceProvider.apiEnabled` and `controller.workspaceProvider.fakeProviderEnabled`. The release chart intentionally excludes the fake adapter's two CRDs; before enabling it, install the development package from a matching source checkout with `bin/kustomize build --load-restrictor LoadRestrictionsNone config/development/fake-workspace-provider | kubectl apply -f -`.
+The `workspace.orka.ai/v1alpha1` control plane is installed additively and its controllers are disabled by default during rollout. Enable the generic provider, class, pool, and workspace reconcilers with `--enable-workspace-provider-api` (or `ORKA_ENABLE_WORKSPACE_PROVIDER_API=true`). The development-only fake adapter additionally requires `--enable-fake-workspace-provider` (or `ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER=true`). These are controller flags/environment variables only; the Helm chart does not expose values for them. The release chart intentionally excludes the fake adapter's two CRDs; before enabling it, install the development package from a matching source checkout with `bin/kustomize build --load-restrictor LoadRestrictionsNone config/development/fake-workspace-provider | kubectl apply -f -`.
 
-Helm installs files from a chart's `crds/` directory on a fresh install but does not upgrade an existing CRD schema. Before enabling `controller.workspaceProvider.apiEnabled=true` during an upgrade, apply the current chart CRDs explicitly, for example with `helm show crds <chart> | kubectl apply --server-side -f -`. The chart checks the live `ExecutionWorkspace` schema and fails before rolling out workspace controllers when the required admission fields are absent. Offline `helm template --is-upgrade` cannot perform that lookup; after independently verifying the schema, set `controller.workspaceProvider.crdUpgradeSchemaVerified=true` only for the offline render.
+Helm installs files from a chart's `crds/` directory on a fresh install but does not upgrade an existing CRD schema. Before enabling the workspace provider API on an upgraded cluster, apply the current chart CRDs explicitly, for example with `helm show crds <chart> | kubectl apply --server-side -f -`, so the `workspace.orka.ai` schemas match the controller.
 
-Task and Tool `classRef` selection is always protected by shipped `ValidatingAdmissionPolicy` resources that perform a live Kubernetes `use` authorization check, even while workspace execution gates are disabled. When the workspace provider API is enabled, the manager also requires the TLS-backed `--workspace-class-use-admission-enabled` webhook as defense in depth. The webhooks submit a Kubernetes `SubjectAccessReview` for the live admission caller using verb `use` on the selected namespaced `ExecutionWorkspaceClass`; requests are denied when the SAR is denied or unavailable. Kustomize users enable `config/webhook` plus `manager_webhook_patch.yaml` after provisioning TLS and CA injection. Helm users set `controller.workspaceProvider.classUseAdmission.enabled=true`, provide an existing TLS Secret, and supply the base64-encoded CA bundle; the chart installs the Service and fail-closed ValidatingWebhookConfiguration.
+Task and Tool `classRef` selection is always protected by shipped `ValidatingAdmissionPolicy` resources that perform a live Kubernetes `use` authorization check, even while workspace execution gates are disabled. When the workspace provider API is enabled, the manager also requires the TLS-backed `--workspace-class-use-admission-enabled` webhook as defense in depth. The webhooks submit a Kubernetes `SubjectAccessReview` for the live admission caller using verb `use` on the selected namespaced `ExecutionWorkspaceClass`; requests are denied when the SAR is denied or unavailable. How the class-use webhooks are installed depends on the installation method. A `harness-v2` Helm release installs them automatically: the chart renders the fail-closed `task-workspace-class.harness-v2.orka.ai` and `tool-workspace-class.harness-v2.orka.ai` webhooks against the release-local controller webhook Service and runs the controller with `--workspace-class-use-admission-enabled=true`; rendering requires `webhooks.tls.existingSecret` plus either `webhooks.caBundle` or `webhooks.caInjectionAnnotations`. Do not additionally apply the Kustomize admission packages to a Helm release; that installs a duplicate second set of validating webhooks. Kustomize installations instead serve the class-use webhooks (`taskworkspaceclassuse.core.orka.ai` and `toolworkspaceclassuse.core.orka.ai`) from the dedicated admission runtime: install `config/orka-admission` first, then apply the fail-closed `config/orka-admission-webhooks` configuration after the readiness and TLS prerequisites in its README are met.
 
 Task and Tool users select namespaced `ExecutionWorkspaceClass` objects. Provider identity, provider-specific parameters, pool implementation, and provider versions remain operator-owned. The legacy direct Agent Sandbox and Substrate settings below remain available during migration.
 
@@ -1070,17 +1069,18 @@ The REST API rejects client-supplied `requestedBy` and `transaction` fields and 
 
 The webhook denies untrusted `CREATE` or `UPDATE` requests that set or modify Orka-managed provenance fields: `spec.requestedBy`, `spec.transaction`, `orka.ai/transaction-*` labels/annotations, `orka.ai/context-token-profile`, and the child token Secret annotation. By default, trusted writers are the Orka controller ServiceAccount usernames in the controller namespace and the `orka-ai-worker` ServiceAccount name in the target Task namespace; override them with `--task-provenance-admission-trusted-users` and `--task-provenance-admission-trusted-service-accounts`.
 
-Admission deployment is opt-in. To install the manifests, uncomment the `[WEBHOOK]` resource and patch in `config/default/kustomization.yaml`, provide a `webhook-server-cert` TLS Secret for the manager, and set the webhook `caBundle` (or configure certificate-manager CA injection) before applying the webhook configuration. The bundled webhook manifest defaults to `failurePolicy: Ignore`; switch it to `Fail` only after webhook TLS and availability are configured.
+How admission is deployed depends on the installation method. Helm releases install and enable Task-provenance admission automatically: the chart renders `task-provenance.<mode>.orka.ai` with `failurePolicy: Fail` against the release-local controller webhook Service and runs the controller with `--task-provenance-admission-enabled=true`, trusting the release controller identity. For Kustomize installations, admission deployment is opt-in and served by the dedicated admission runtime, not the controller manager: install `config/orka-admission` (Deployment, Service, NetworkPolicy, and RBAC for the admission runtime), then apply `config/orka-admission-webhooks` — which includes `taskprovenance.core.orka.ai` with `failurePolicy: Fail` — only after the readiness, TLS Secret, and CA-injection prerequisites in `config/orka-admission-webhooks/README.md` are met and the trusted identities embedded in `validating_webhook.yaml` match the admission-runtime arguments.
 
 ## Prometheus Metrics
 
-Orka registers the following Prometheus metrics on the controller-runtime registry. Enable monitoring with the Helm chart:
+Orka registers the following Prometheus metrics on the controller-runtime registry. The metrics endpoint is disabled by default (`--metrics-bind-address=0`); enable it by setting an explicit bind address, for example:
 
-```yaml
-monitoring:
-  enabled: true
-  interval: 30s
+```bash
+--metrics-bind-address=:8443   # HTTPS (default when --metrics-secure=true)
+--metrics-bind-address=:8080   # HTTP, with --metrics-secure=false
 ```
+
+Scrape configuration (for example a Prometheus Operator ServiceMonitor) is not shipped with the chart; point your monitoring stack at the metrics port directly.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|

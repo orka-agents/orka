@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,10 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
+
+func parseChangedLineRangesFromUnifiedDiff(diff []byte) ([]security.ChangedLineRange, error) {
+	return parseChangedLineRangesFromUnifiedDiffReader(bytes.NewReader(diff))
+}
 
 func TestRun_Success(t *testing.T) {
 	os.Args = []string{"worker", "echo", "hello"}

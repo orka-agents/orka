@@ -37,6 +37,10 @@ import (
 
 const typeObject = "object"
 
+func (e *KubernetesJobCodeExecutor) buildResources(req CodeExecutionRequest) (*kubernetesCodeExecResources, error) {
+	return e.buildResourcesWithJobName(testNamespace, req, e.jobNameForRequest(req))
+}
+
 func newInProcessCodeExecTestTool(workDir string, timeout time.Duration, allowed map[string]bool) *CodeExecTool {
 	if allowed == nil {
 		allowed = defaultCodeExecAllowedLangs()
@@ -663,7 +667,7 @@ func TestCodeExecTool_RunCommand_NonExecError(t *testing.T) {
 
 	// Command that doesn't exist — produces a non-ExitError
 	cmd := exec.CommandContext(context.Background(), "nonexistent-binary-xyz")
-	result := tool.runCommand(cmd)
+	result := (&InProcessCodeExecutor{}).runCommand(context.Background(), cmd, tool.workDir, tool.codeExecOutputLimitBytes())
 	if result.ExitCode != -1 {
 		t.Errorf("expected exit code -1, got %d", result.ExitCode)
 	}
@@ -1558,7 +1562,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesRuntimeClassName(t *testing.T) 
 	t.Setenv(codeExecKubernetesRuntimeClassNameEnv, "  gvisor  ")
 
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "runtime-class" }}
-	resources, err := executor.buildResources(testNamespace, CodeExecutionRequest{
+	resources, err := executor.buildResources(CodeExecutionRequest{
 		Language:         codeLanguagePython,
 		Code:             "print('runtime')",
 		Timeout:          time.Second,
@@ -1579,7 +1583,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesOmitsAppArmorByDefault(t *testi
 	setKubernetesCodeExecTestEnv(t)
 
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "apparmor-default" }}
-	resources, err := executor.buildResources(testNamespace, CodeExecutionRequest{
+	resources, err := executor.buildResources(CodeExecutionRequest{
 		Language:         codeLanguagePython,
 		Code:             "print('apparmor default')",
 		Timeout:          time.Second,
@@ -1603,7 +1607,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesAppArmorRuntimeDefaultOptIn(t *
 	t.Setenv(codeExecKubernetesAppArmorProfileEnv, " runtime/default ")
 
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "apparmor-runtime" }}
-	resources, err := executor.buildResources(testNamespace, CodeExecutionRequest{
+	resources, err := executor.buildResources(CodeExecutionRequest{
 		Language:         codeLanguagePython,
 		Code:             "print('apparmor runtime default')",
 		Timeout:          time.Second,
@@ -1637,7 +1641,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesUsesRunIdentityAnnotations(t *t
 	}
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "should-not-be-used" }}
 
-	resources, err := executor.buildResources(testNamespace, req)
+	resources, err := executor.buildResources(req)
 	if err != nil {
 		t.Fatalf("buildResources() error = %v", err)
 	}
@@ -1692,7 +1696,7 @@ func TestKubernetesJobCodeExecutor_CreateResourcesReusesOnlyMatchingRunIdentity(
 		InputHash:        "matching-input-hash",
 	}
 
-	resources, err := executor.buildResources(testNamespace, req)
+	resources, err := executor.buildResources(req)
 	if err != nil {
 		t.Fatalf("buildResources() error = %v", err)
 	}
@@ -1704,7 +1708,7 @@ func TestKubernetesJobCodeExecutor_CreateResourcesReusesOnlyMatchingRunIdentity(
 		t.Fatalf("first createResources() created = %+v, want all resources", created)
 	}
 
-	replayResources, err := executor.buildResources(testNamespace, req)
+	replayResources, err := executor.buildResources(req)
 	if err != nil {
 		t.Fatalf("second buildResources() error = %v", err)
 	}
@@ -1718,7 +1722,7 @@ func TestKubernetesJobCodeExecutor_CreateResourcesReusesOnlyMatchingRunIdentity(
 
 	mismatchReq := req
 	mismatchReq.InputHash = "different-input-hash"
-	mismatchResources, err := executor.buildResources(testNamespace, mismatchReq)
+	mismatchResources, err := executor.buildResources(mismatchReq)
 	if err != nil {
 		t.Fatalf("mismatch buildResources() error = %v", err)
 	}

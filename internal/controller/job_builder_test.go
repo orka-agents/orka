@@ -116,6 +116,11 @@ func setupJobBuilder() *JobBuilder {
 	return b
 }
 
+// buildEnvVars builds the environment variables for the container
+func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
+	return b.buildEnvVarsWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+}
+
 func assertServiceAccountName(t *testing.T, got, want string) {
 	t.Helper()
 	if got != want {
@@ -1401,7 +1406,7 @@ func TestJobBuilder_buildContainer_ContainerWithoutImage(t *testing.T) {
 		},
 	}
 
-	container := builder.buildContainer(context.Background(), task, nil, nil)
+	container := builder.buildContainerWithOptions(context.Background(), task, nil, nil, JobBuildOptions{})
 	if container.Image != DefaultGeneralWorkerImage {
 		t.Errorf("Image = %s, want %s", container.Image, DefaultGeneralWorkerImage)
 	}

@@ -8,18 +8,6 @@ import (
 	"sort"
 )
 
-// Build compares a trusted pre-prompt baseline with a frozen post-prompt tree.
-// It returns no artifact for no-change and read-only-modified classifications.
-func Build(baseline *Snapshot, postRoot string, intent Intent) (Result, error) {
-	return BuildContext(context.Background(), baseline, postRoot, intent)
-}
-
-// BuildContext is Build with cancellation propagated through workspace
-// capture, comparison, content retention, and archive construction.
-func BuildContext(ctx context.Context, baseline *Snapshot, postRoot string, intent Intent) (Result, error) {
-	return BuildWithLimitsContext(ctx, baseline, postRoot, intent, BuildLimits{})
-}
-
 // BuildWithLimits compares a trusted baseline with a frozen post-prompt tree
 // while applying limits that may only narrow the baseline's captured limits.
 func BuildWithLimits(baseline *Snapshot, postRoot string, intent Intent, limits BuildLimits) (Result, error) {
@@ -204,29 +192,6 @@ func entryEqual(left, right entry) bool {
 
 func protectedEntryEqual(left, right entry) bool {
 	return entryEqual(left, right) && left.sourceMode == right.sourceMode
-}
-
-func (r Result) Validate() error {
-	switch r.Classification {
-	case ClassificationNoChange:
-		if len(r.Changes) != 0 || len(r.Deletions) != 0 || len(r.Symlinks) != 0 || len(r.Manifest) != 0 ||
-			r.ManifestDigest != "" || len(r.Artifact) != 0 || r.ArtifactDigest != "" {
-			return fmt.Errorf("no-change result carries delta data")
-		}
-	case ClassificationReadOnlyModified:
-		if len(r.Changes)+len(r.Deletions) == 0 || len(r.Manifest) != 0 || r.ManifestDigest != "" ||
-			len(r.Artifact) != 0 || r.ArtifactDigest != "" {
-			return fmt.Errorf("read-only-modified result is inconsistent")
-		}
-	case ClassificationWriteDelta:
-		if len(r.Changes)+len(r.Deletions) == 0 || len(r.Manifest) == 0 || r.ManifestDigest == "" ||
-			len(r.Artifact) == 0 || r.ArtifactDigest == "" {
-			return fmt.Errorf("write-delta result is incomplete")
-		}
-	default:
-		return fmt.Errorf("unsupported classification %q", r.Classification)
-	}
-	return nil
 }
 
 func retainChangedContents(ctx context.Context, postRoot string, post *Snapshot, changes []Change, maxContentBytes int64) error {

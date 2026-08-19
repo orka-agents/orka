@@ -115,7 +115,7 @@ func TestUIDAllocatorAllocatesDistinctPairsAndExhausts(t *testing.T) {
 	seenUIDs := make(map[int]struct{}, allocator.Capacity())
 	seenGIDs := make(map[int]struct{}, allocator.Capacity())
 	for offset := range allocator.Capacity() {
-		uid, gid, err := allocator.Allocate()
+		uid, gid, err := allocator.AllocateAboveReserve(0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +136,7 @@ func TestUIDAllocatorAllocatesDistinctPairsAndExhausts(t *testing.T) {
 		t.Fatalf("remaining = %d, want 0", allocator.Remaining())
 	}
 	for range 2 {
-		uid, gid, err := allocator.Allocate()
+		uid, gid, err := allocator.AllocateAboveReserve(0)
 		if !errors.Is(err, ErrUIDRangeExhausted) {
 			t.Fatalf("exhausted allocation error = %v, want ErrUIDRangeExhausted", err)
 		}
@@ -190,7 +190,7 @@ func TestUIDAllocatorPersistsHighWaterBeforeReturningIdentity(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	uid, gid, err := allocator.Allocate()
+	uid, gid, err := allocator.AllocateAboveReserve(0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestUIDAllocatorPersistsHighWaterBeforeReturningIdentity(t *testing.T) {
 	if err := failing.ConfigurePersistence(0, func(int) error { return persistErr }); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := failing.Allocate(); !errors.Is(err, persistErr) {
+	if _, _, err := failing.AllocateAboveReserve(0); !errors.Is(err, persistErr) {
 		t.Fatalf("allocation error = %v, want persistence failure", err)
 	}
 	if failing.Remaining() != failing.Capacity() {

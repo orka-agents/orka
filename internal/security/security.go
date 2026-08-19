@@ -333,15 +333,6 @@ func PatchProposalID(taskName string) string {
 	return "patch_" + shortHash(taskName)
 }
 
-// ScanTaskName returns a task name for a scan run.
-func ScanTaskName(repositoryScanName, mode string) string {
-	return boundedTaskName(
-		sanitizeName(repositoryScanName),
-		sanitizeName(mode),
-		fmt.Sprintf("%d", time.Now().Unix()),
-	)
-}
-
 // ScanStageTaskName returns a task name for a specific scan stage and optional scope.
 func ScanStageTaskName(repositoryScanName, mode, stage, scope string) string {
 	parts := []string{sanitizeName(repositoryScanName), sanitizeName(mode), sanitizeName(stage)}
@@ -542,20 +533,10 @@ func ArtifactWorkspacePath(subPath string) string {
 	return strings.Repeat("../", depth) + ArtifactWorkspaceDir
 }
 
-// BuildThreatModelPrompt returns the prompt for the threat-model-first stage of a scan run.
-func BuildThreatModelPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, policies ...PromptPolicy) string {
-	return buildThreatModelPrompt(scan, mode, baseCommit, headCommit, threatModel, nil, policies...)
-}
-
 // BuildThreatModelResultPrompt returns the harness-v2 prompt whose only output
 // is a bounded, identity-bound terminal result.
 func BuildThreatModelResultPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, binding AgentResultBinding, policies ...PromptPolicy) string {
-	return buildThreatModelPrompt(scan, mode, baseCommit, headCommit, threatModel, &binding, policies...)
-}
-
-func buildThreatModelPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, resultBinding *AgentResultBinding, policies ...PromptPolicy) string {
 	var prompt strings.Builder
-	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
 	hasExistingThreatModel := strings.TrimSpace(threatModel) != ""
 
 	fmt.Fprintf(&prompt, "You are generating the canonical repository threat model for %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
@@ -591,39 +572,26 @@ func buildThreatModelPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit,
 	if hasExistingThreatModel {
 		prompt.WriteString("- Treat the existing threat model as baseline context to refine and extend. Do not replace it with a shorter version unless the repository is genuinely tiny.\n")
 	}
-	if resultBinding == nil {
-		fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
-		fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactThreatModel)
-		appendRequiredArtifactsDirective(&prompt, ArtifactThreatModel)
-		prompt.WriteString("The stage will be treated as failed if the threat model artifact is missing or empty.\n")
-		prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
-	} else {
-		result := ThreatModelResultEnvelope{
-			SchemaVersion:  AgentResultSchemaVersion,
-			Kind:           AgentResultKindThreatModel,
-			RepositoryScan: resultBinding.RepositoryScan,
-			ScanID:         resultBinding.ScanID,
-			PolicyDigest:   resultBinding.PolicyDigest,
-			ThreatModel:    "# Threat Model\n\n...",
-		}
-		resultJSON, _ := json.Marshal(result)
-		prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
-		prompt.WriteString("Do not write artifacts. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
-		prompt.WriteString("Use this exact envelope and identity values; replace only threatModel with the complete markdown document:\n")
-		prompt.Write(resultJSON)
-		prompt.WriteString("\n")
+	result := ThreatModelResultEnvelope{
+		SchemaVersion:  AgentResultSchemaVersion,
+		Kind:           AgentResultKindThreatModel,
+		RepositoryScan: binding.RepositoryScan,
+		ScanID:         binding.ScanID,
+		PolicyDigest:   binding.PolicyDigest,
+		ThreatModel:    "# Threat Model\n\n...",
 	}
+	resultJSON, _ := json.Marshal(result)
+	prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
+	prompt.WriteString("Do not write artifacts. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
+	prompt.WriteString("Use this exact envelope and identity values; replace only threatModel with the complete markdown document:\n")
+	prompt.Write(resultJSON)
+	prompt.WriteString("\n")
 	if hasExistingThreatModel {
 		prompt.WriteString("\nExisting threat model context:\n")
 		prompt.WriteString(threatModel)
 		prompt.WriteString("\n")
 	}
 	return prompt.String()
-}
-
-// BuildReviewPrompt returns the prompt for one deterministic review slice.
-func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, slice store.ReviewSlice, policies ...PromptPolicy) string {
-	return buildReviewPrompt(scan, mode, baseCommit, headCommit, threatModel, slice, nil, nil, FindingsV2Repository{}, policies...)
 }
 
 // BuildReviewResultPrompt returns the harness-v2 prompt with mapper-owned
@@ -637,21 +605,7 @@ func BuildReviewResultPrompt(
 	repository FindingsV2Repository,
 	policies ...PromptPolicy,
 ) string {
-	return buildReviewPrompt(scan, mode, baseCommit, headCommit, threatModel, slice, &binding, &manifest, repository, policies...)
-}
-
-func buildReviewPrompt(
-	scan *corev1alpha1.RepositoryScan,
-	mode, baseCommit, headCommit, threatModel string,
-	slice store.ReviewSlice,
-	resultBinding *AgentResultBinding,
-	trustedContext *ReviewContextManifest,
-	repository FindingsV2Repository,
-	policies ...PromptPolicy,
-) string {
 	var prompt strings.Builder
-	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
-	contextArtifact := ReviewContextArtifactName(slice.ID)
 	sliceJSON, err := json.MarshalIndent(slice, "", "  ")
 	if err != nil {
 		sliceJSON = []byte("{}")
@@ -686,48 +640,32 @@ func buildReviewPrompt(
 	}
 	appendCustomPolicyPrompt(&prompt, firstPromptPolicy(policies))
 
-	if resultBinding == nil {
-		fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
-		fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactFindingsV2)
-		appendRequiredArtifactsDirective(&prompt, ArtifactFindingsV2)
-		prompt.WriteString("The stage will be treated as failed if the findings artifact is missing, empty, or invalid.\n")
-		prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
-
-		fmt.Fprintf(&prompt, "\nOrka generated and will upload %s before and after model execution.\n", contextArtifact)
-		prompt.WriteString("Do not create, edit, or replace the review context manifest. Findings that cite paths or line ranges outside the generated manifest will be dropped.\n")
-
-		prompt.WriteString("\nsecurity-findings.v2.json must be valid JSON with this top-level shape:\n")
-		prompt.WriteString(`{"schemaVersion":2,"repository":{"repoURL":"...","branch":"...","subPath":"...","baseSHA":"...","headSHA":"..."},"scan":{"mode":"initial|incremental|manual","sliceId":"...","summary":"..."},"findings":[]}` + "\n")
-	} else {
-		result := FindingsResultEnvelope{
-			SchemaVersion:  AgentResultSchemaVersion,
-			Kind:           AgentResultKindFindings,
-			RepositoryScan: resultBinding.RepositoryScan,
-			ScanID:         resultBinding.ScanID,
-			SliceID:        slice.ID,
-			PolicyDigest:   resultBinding.PolicyDigest,
-			ContextDigest:  resultBinding.ContextDigest,
-			Findings: FindingsV2Artifact{
-				SchemaVersion: SchemaVersionFindingsV2,
-				Repository:    repository,
-				Scan:          FindingsV2Scan{Mode: mode, SliceID: slice.ID, Summary: "..."},
-				Findings:      []FindingsV2Finding{},
-			},
-		}
-		resultJSON, _ := json.Marshal(result)
-		prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
-		prompt.WriteString("Do not write artifacts or edit the workspace. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
-		prompt.WriteString("Use this exact envelope, repository identity, and binding values. Populate findings.findings; keep it an empty array when no supported finding exists:\n")
-		prompt.Write(resultJSON)
+	result := FindingsResultEnvelope{
+		SchemaVersion:  AgentResultSchemaVersion,
+		Kind:           AgentResultKindFindings,
+		RepositoryScan: binding.RepositoryScan,
+		ScanID:         binding.ScanID,
+		SliceID:        slice.ID,
+		PolicyDigest:   binding.PolicyDigest,
+		ContextDigest:  binding.ContextDigest,
+		Findings: FindingsV2Artifact{
+			SchemaVersion: SchemaVersionFindingsV2,
+			Repository:    repository,
+			Scan:          FindingsV2Scan{Mode: mode, SliceID: slice.ID, Summary: "..."},
+			Findings:      []FindingsV2Finding{},
+		},
+	}
+	resultJSON, _ := json.Marshal(result)
+	prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
+	prompt.WriteString("Do not write artifacts or edit the workspace. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
+	prompt.WriteString("Use this exact envelope, repository identity, and binding values. Populate findings.findings; keep it an empty array when no supported finding exists:\n")
+	prompt.Write(resultJSON)
+	prompt.WriteString("\n")
+	prompt.WriteString("\nTRUSTED MAPPER-OWNED REVIEW CONTEXT:\n")
+	prompt.WriteString("The context below is the complete evidence boundary. Cite only its included paths and line ranges.\n")
+	prompt.WriteString(manifest.Prompt)
+	if !strings.HasSuffix(manifest.Prompt, "\n") {
 		prompt.WriteString("\n")
-		if trustedContext != nil {
-			prompt.WriteString("\nTRUSTED MAPPER-OWNED REVIEW CONTEXT:\n")
-			prompt.WriteString("The context below is the complete evidence boundary. Cite only its included paths and line ranges.\n")
-			prompt.WriteString(trustedContext.Prompt)
-			if !strings.HasSuffix(trustedContext.Prompt, "\n") {
-				prompt.WriteString("\n")
-			}
-		}
 	}
 	prompt.WriteString("Each finding object must use these keys: title, category, severity, confidence, triage, evidence, summary, rootCause, reproduction, remediation, suggestedAction, whyTestsDoNotAlreadyCoverThis, suggestedRegressionTest, minimumFixScope.\n")
 	prompt.WriteString("Use severity exactly one of: critical, high, medium, low. Use confidence exactly one of: high, medium, low.\n")
@@ -744,20 +682,10 @@ func buildReviewPrompt(
 	return prompt.String()
 }
 
-// BuildValidationPrompt returns the prompt for the dedicated validator/repro stage for a finding.
-func BuildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding, policies ...PromptPolicy) string {
-	return buildValidationPrompt(scan, finding, nil, policies...)
-}
-
 // BuildValidationResultPrompt returns the harness-v2 validation prompt whose
 // terminal result is bound to the finding and scanner policy.
 func BuildValidationResultPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding, binding AgentResultBinding, policies ...PromptPolicy) string {
-	return buildValidationPrompt(scan, finding, &binding, policies...)
-}
-
-func buildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding, resultBinding *AgentResultBinding, policies ...PromptPolicy) string {
 	var prompt strings.Builder
-	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
 
 	fmt.Fprintf(&prompt, "You are validating and, when safe, attempting to reproduce a single security finding for %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
 	fmt.Fprintf(&prompt, "Finding ID: %s\n", finding.ID)
@@ -788,40 +716,30 @@ func buildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Fin
 	prompt.WriteString("\n")
 	appendCustomPolicyPrompt(&prompt, firstPromptPolicy(policies))
 
-	if resultBinding == nil {
-		fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
-		fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactValidation)
-		fmt.Fprintf(&prompt, "- %s/%s (optional but strongly preferred)\n", artifactDir, ArtifactValidationText)
-		appendRequiredArtifactsDirective(&prompt, ArtifactValidation)
-		prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
-		prompt.WriteString("security-validation.json must be valid JSON with this shape:\n")
-		prompt.WriteString(`{"version":1,"finding_id":"fnd_...","status":"validated|failed|skipped","summary":"...","validation_steps":["..."],"reproduction":"...","attack_path_analysis":"...","likelihood":"...","impact":"...","assumptions":["..."],"controls":["..."],"blindspots":["..."],"evidence":[]}` + "\n")
-	} else {
-		result := ValidationResultEnvelope{
-			SchemaVersion:  AgentResultSchemaVersion,
-			Kind:           AgentResultKindValidation,
-			RepositoryScan: resultBinding.RepositoryScan,
-			ScanID:         resultBinding.ScanID,
-			FindingID:      finding.ID,
-			PolicyDigest:   resultBinding.PolicyDigest,
-			Validation: ValidationArtifact{
-				Version:   1,
-				FindingID: finding.ID,
-				Status:    "validated",
-				Summary:   "...",
-			},
-		}
-		resultJSON, _ := json.Marshal(result)
-		prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
-		prompt.WriteString("Do not write artifacts or edit the workspace. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
-		prompt.WriteString("Use this exact envelope and binding values. Complete validation and use only file ranges already present in the accepted finding evidence boundary:\n")
-		prompt.Write(resultJSON)
-		prompt.WriteString("\n")
-		evidenceJSON, _ := json.Marshal(finding.Evidence)
-		prompt.WriteString("Accepted finding evidence boundary:\n")
-		prompt.Write(evidenceJSON)
-		prompt.WriteString("\n")
+	result := ValidationResultEnvelope{
+		SchemaVersion:  AgentResultSchemaVersion,
+		Kind:           AgentResultKindValidation,
+		RepositoryScan: binding.RepositoryScan,
+		ScanID:         binding.ScanID,
+		FindingID:      finding.ID,
+		PolicyDigest:   binding.PolicyDigest,
+		Validation: ValidationArtifact{
+			Version:   1,
+			FindingID: finding.ID,
+			Status:    "validated",
+			Summary:   "...",
+		},
 	}
+	resultJSON, _ := json.Marshal(result)
+	prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
+	prompt.WriteString("Do not write artifacts or edit the workspace. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
+	prompt.WriteString("Use this exact envelope and binding values. Complete validation and use only file ranges already present in the accepted finding evidence boundary:\n")
+	prompt.Write(resultJSON)
+	prompt.WriteString("\n")
+	evidenceJSON, _ := json.Marshal(finding.Evidence)
+	prompt.WriteString("Accepted finding evidence boundary:\n")
+	prompt.Write(evidenceJSON)
+	prompt.WriteString("\n")
 	prompt.WriteString("Use status=validated when the code path and validation strongly support the issue.\n")
 	prompt.WriteString("Use status=failed when the original claim does not hold after review or reproduction attempts.\n")
 	prompt.WriteString("Use status=skipped when the environment or safety constraints prevent meaningful validation.\n")

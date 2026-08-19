@@ -882,7 +882,7 @@ func buildDelta(t *testing.T, seed string) workspacedelta.Result {
 	}
 	writeFile(t, filepath.Join(workspace, "keep.txt"), "changed\n", 0o644)
 	writeFile(t, filepath.Join(workspace, "new.txt"), "new\n", 0o644)
-	result, err := workspacedelta.Build(baseline, workspace, workspacedelta.IntentWrite)
+	result, err := workspacedelta.BuildWithLimits(baseline, workspace, workspacedelta.IntentWrite, workspacedelta.BuildLimits{})
 	if err != nil {
 		t.Fatal(err)
 	}

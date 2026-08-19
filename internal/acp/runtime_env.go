@@ -193,10 +193,6 @@ func NewUIDAllocator(firstUID, lastUID, firstGID int) (*UIDAllocator, error) {
 	}, nil
 }
 
-func (a *UIDAllocator) Allocate() (uid, gid int, err error) {
-	return a.AllocateAboveReserve(0)
-}
-
 // AllocateAboveReserve returns the next never-reused UID/GID pair only when
 // doing so leaves at least reserve pairs unused. The check and allocation use a
 // single shared offset in one critical section, so UID and primary GID cannot be

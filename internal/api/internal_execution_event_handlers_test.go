@@ -24,11 +24,12 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	storetest "github.com/orka-agents/orka/internal/store/storetest"
 )
 
 func TestInternalSubmitExecutionEvent(t *testing.T) {
 	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
-	eventStore := store.NewFakeExecutionEventStoreWithClock(func() time.Time { return now })
+	eventStore := storetest.NewFakeExecutionEventStoreWithClock(func() time.Time { return now })
 	app := setupOwnedInternalExecutionEventApp(t, eventStore, "task-1", "worker-pod", "worker-pod-uid")
 
 	redactionValue := strings.Join([]string{"bearer", "value", "for", "redaction"}, "-")
@@ -91,7 +92,7 @@ func TestInternalSubmitExecutionEvent(t *testing.T) {
 func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
 	task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-owned"}
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	app := setupInternalExecutionEventAppWithClient(
 		eventStore,
 		testInternalExecutionEventClient(t, task, job, pod),
@@ -144,7 +145,7 @@ func TestInternalSubmitExecutionEventRejectsWrongOrDeletingTask(t *testing.T) {
 	deletingTask.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	terminalTask, terminalJob, terminalPod := testInternalExecutionEventOwnedWorkerObjects("terminal-task")
 	terminalTask.Status.Phase = corev1alpha1.TaskPhaseSucceeded
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	k8sClient := testInternalExecutionEventClient(
 		t,
 		task, job, pod,
@@ -220,7 +221,7 @@ func TestInternalSubmitExecutionEventRejectsWrongOrDeletingTask(t *testing.T) {
 }
 
 func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	authenticatedApp := setupInternalExecutionEventApp(eventStore, &UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default"})
 
 	tests := []struct {
@@ -294,7 +295,7 @@ func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
 }
 
 func TestInternalSubmitExecutionEventRequiresCurrentTaskWorker(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	app := setupOwnedInternalExecutionEventApp(t, eventStore, "task-1", "other-pod", "other-pod-uid")
 	resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-1", map[string]any{"type": events.ExecutionEventTypeTaskStarted})
 	if resp.StatusCode != http.StatusForbidden {

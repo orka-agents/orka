@@ -51,14 +51,6 @@ type providerAuthProxy struct {
 	requestSlots     chan struct{}
 }
 
-func newProviderAuthProxy(cfg proxyConfig, bearerToken []byte) (*providerAuthProxy, error) {
-	tokens, err := newStaticBearerTokenStore(bearerToken)
-	if err != nil {
-		return nil, err
-	}
-	return newProviderAuthProxyWithTokenStore(cfg, tokens)
-}
-
 func newProviderAuthProxyWithTokenStore(cfg proxyConfig, tokens *bearerTokenStore) (*providerAuthProxy, error) {
 	normalized, upstream, err := normalizeProxyConfig(cfg)
 	if err != nil {

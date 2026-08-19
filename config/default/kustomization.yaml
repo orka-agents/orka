@@ -4,10 +4,6 @@ resources:
 - ../crd
 - ../acp-workload
 
-# [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
-# crd/kustomization.yaml
-#- ../webhook
-
 # Webhook CA injection replacements are intentionally not configured here.
 # Future webhook CA bundle injection should be wired into the manager runtime.
 # +kubebuilder:scaffold:crdkustomizecainjectionns

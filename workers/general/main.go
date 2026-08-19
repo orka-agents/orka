@@ -452,10 +452,6 @@ func defaultChangedLineRangesForSecurityScan(
 
 var unifiedDiffHunkRE = regexp.MustCompile(`^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@`)
 
-func parseChangedLineRangesFromUnifiedDiff(diff []byte) ([]security.ChangedLineRange, error) {
-	return parseChangedLineRangesFromUnifiedDiffReader(bytes.NewReader(diff))
-}
-
 func parseChangedLineRangesFromUnifiedDiffReader(r io.Reader) ([]security.ChangedLineRange, error) {
 	reader := bufio.NewReaderSize(r, 64*1024)
 	currentPath := ""

@@ -54,6 +54,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storetest "github.com/orka-agents/orka/internal/store/storetest"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -6768,7 +6769,7 @@ func TestHandleCompletedRecordsMissingCancelledExecutionEvent(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	r.ExecutionEventStore = eventStore
 
 	_, err := r.handleCompleted(context.Background(), task)
@@ -6800,7 +6801,7 @@ func TestCompleteTaskRecordsTerminalExecutionEvent(t *testing.T) {
 		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	r := newUnitReconciler(scheme, task)
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	r.ExecutionEventStore = eventStore
 
 	_, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "done")
@@ -6835,7 +6836,7 @@ func TestHandleCompletedRecordsCancelledExecutionEventOnce(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	r.ExecutionEventStore = eventStore
 
 	for range 2 {
@@ -7023,7 +7024,7 @@ func TestCreateTaskJob_DoesNotOverwriteCancelledStatus(t *testing.T) {
 	stale.Status = corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}
 
 	r := newUnitReconciler(scheme, current)
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	r.ExecutionEventStore = eventStore
 	result, err := r.createTaskJob(context.Background(), stale, nil, nil)
 	if err != nil {
@@ -7662,7 +7663,7 @@ func TestTaskReconcilerRecordsTaskCreatedEventOnStatusInitialization(t *testing.
 	}
 	controllerutil.AddFinalizer(task, labels.TaskFinalizer)
 	reconciler := newUnitReconciler(scheme, task)
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	reconciler.ExecutionEventStore = eventStore
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "event-task"}})
@@ -7707,7 +7708,7 @@ func TestTaskControllerLifecycleEvents(t *testing.T) {
 		},
 	}
 	reconciler := newUnitReconciler(scheme, task)
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	reconciler.ExecutionEventStore = eventStore
 
 	if _, err := reconciler.createTaskJob(context.Background(), task, nil, nil); err != nil {
@@ -7773,7 +7774,7 @@ func TestTaskLifecycleEventOmitsMissingSessionName(t *testing.T) {
 		},
 	}
 	reconciler := newUnitReconciler(scheme, task)
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	reconciler.ExecutionEventStore = eventStore
 
 	_ = reconciler.recordTaskLifecycleEvent(
@@ -7809,7 +7810,7 @@ func TestTaskLifecycleEventKeepsSessionNameOnLookupFailure(t *testing.T) {
 	}
 	reconciler := newUnitReconciler(scheme, task)
 	reconciler.SessionManager = NewSessionManager(failingGetSessionStore{err: errors.New("session store unavailable")})
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	reconciler.ExecutionEventStore = eventStore
 
 	_ = reconciler.recordTaskLifecycleEvent(
@@ -7854,7 +7855,7 @@ func TestTaskLifecycleEventKeepsExistingSessionName(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	reconciler.ExecutionEventStore = eventStore
 
 	_ = reconciler.recordTaskLifecycleEvent(
@@ -7892,7 +7893,7 @@ func TestTaskDeletionDeletesExecutionEvents(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 	}
 	reconciler := newUnitReconciler(scheme, task)
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	reconciler.ExecutionEventStore = eventStore
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
 		Namespace:  "default",

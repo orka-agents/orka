@@ -232,7 +232,7 @@ func TestDurableAdmissionReconcilesOrphansOnWrapperRestart(t *testing.T) {
 	cfg.Generic.Command = testEchoCommand
 	digest := "sha256:" + strings.Repeat("a", 64)
 
-	l, err := ledger.Open(cfg.AdmissionLedgerPath)
+	l, err := ledger.OpenWithGeneration(cfg.AdmissionLedgerPath, "1")
 	if err != nil {
 		t.Fatal(err)
 	}

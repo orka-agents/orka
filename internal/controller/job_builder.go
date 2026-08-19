@@ -454,11 +454,6 @@ func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// buildContainer builds the main container for the Job
-func (b *JobBuilder) buildContainer(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) corev1.Container {
-	return b.buildContainerWithOptions(ctx, task, agent, provider, JobBuildOptions{})
-}
-
 // buildContainerWithOptions builds the main container for the Job.
 func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) corev1.Container {
 	container := corev1.Container{
@@ -603,11 +598,6 @@ func (b *JobBuilder) buildResources(task *corev1alpha1.Task, agent *corev1alpha1
 	// and silently OOMKilled workers. Agents/tasks can still override via
 	// agent.spec.resources or task.spec.resources (checked above).
 	return defaultTaskResourceRequirements()
-}
-
-// buildEnvVars builds the environment variables for the container
-func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
-	return b.buildEnvVarsWithOptions(ctx, task, agent, provider, JobBuildOptions{})
 }
 
 // buildEnvVarsWithOptions builds the environment variables for the container using additional options.

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { conditionSchema, k8sMetadataSchema, workspaceIntentSchema } from './task'
 
-export const runtimePoolLifecycleSchema = z.enum([
+const runtimePoolLifecycleSchema = z.enum([
   'Stopped',
   'Starting',
   'Serving',
@@ -12,9 +12,9 @@ export const runtimePoolLifecycleSchema = z.enum([
   'Ambiguous',
 ])
 
-export const runtimePoolAdmissionSchema = z.enum(['Closed', 'Accepting', 'Draining', 'Ambiguous'])
+const runtimePoolAdmissionSchema = z.enum(['Closed', 'Accepting', 'Draining', 'Ambiguous'])
 
-export const runtimeProfileSchema = z.object({
+const runtimeProfileSchema = z.object({
   protocolVersion: z.literal('orka.harness.v2').optional(),
   digest: z.string(),
   digestSchemaVersion: z.string(),
@@ -100,7 +100,7 @@ const agentRuntimeDeploymentSchema = z.object({
 const agentRuntimeToolExecutionModeSchema = z.enum(['observed', 'brokered'])
 const agentRuntimeBrokeredToolClassSchema = z.enum(['read', 'write', 'coordination'])
 
-export const agentRuntimeLimitsSchema = z.object({
+const agentRuntimeLimitsSchema = z.object({
   maxResidentSessions: z.number(),
   maxConcurrentPrompts: z.number(),
   maxRequestBytes: z.number(),
@@ -114,7 +114,7 @@ export const agentRuntimeLimitsSchema = z.object({
   maxWorkspaceDeltaBytes: z.number(),
 })
 
-export const workspaceGovernanceSchema = z.object({
+const workspaceGovernanceSchema = z.object({
   mode: z.enum(['strict-governed', 'trusted-non-governed']),
   trusted: z.boolean(),
   orkaOwnedWorkspaceDeltas: z.boolean(),
@@ -126,7 +126,7 @@ export const workspaceGovernanceSchema = z.object({
   cancellationSettlement: z.boolean(),
 })
 
-export const agentRuntimeProfileSchema = z.object({
+const agentRuntimeProfileSchema = z.object({
   digest: z.string(),
   digestSchemaVersion: z.number(),
   acpProfile: z.string(),
@@ -187,7 +187,7 @@ const agentRuntimeUnclassifiedSpecSchema = z.object({
   capabilities: z.record(z.string(), z.unknown()).optional(),
 }).strict()
 
-export const agentRuntimeSpecSchema = z.union([
+const agentRuntimeSpecSchema = z.union([
   agentRuntimeV1SpecSchema,
   agentRuntimeV2SpecSchema,
   agentRuntimeUnclassifiedSpecSchema,
@@ -258,5 +258,3 @@ export const agentRuntimeListSchema = z.object({
 
 export type RuntimePool = z.infer<typeof runtimePoolSchema>
 export type AgentRuntime = z.infer<typeof agentRuntimeSchema>
-export type RuntimePoolList = z.infer<typeof runtimePoolListSchema>
-export type AgentRuntimeList = z.infer<typeof agentRuntimeListSchema>
