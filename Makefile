@@ -477,8 +477,6 @@ verify-static-mode-crds: ## Refuse workload deployment until the platform-owned 
 		executionworkspaceproviders.workspace.orka.ai \
 		executionworkspaces.workspace.orka.ai \
 		externaleffects.core.orka.ai \
-		fakepoolparameters.fake.workspace.orka.ai \
-		fakeproviderconfigs.fake.workspace.orka.ai \
 		gatewaybindings.gateway.orka.ai \
 		gatewayclasses.gateway.orka.ai \
 		gateways.gateway.orka.ai \
