@@ -3,6 +3,7 @@ package workspacedelta
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -35,12 +36,16 @@ type archiveEntry struct {
 }
 
 func buildArtifact(
+	ctx context.Context,
 	changes []Change,
 	deletions []Deletion,
 	symlinks []Symlink,
 	post map[string]entry,
 	limits Limits,
 ) ([]byte, string, []byte, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", nil, "", err
+	}
 	deletionBytes, err := marshalCanonical(deletionDocument{Schema: ManifestSchema, Deletions: deletions})
 	if err != nil {
 		return nil, "", nil, "", fmt.Errorf("encode deletion manifest: %w", err)
@@ -64,6 +69,9 @@ func buildArtifact(
 		{name: symlinksArchivePath, mode: 0o644, data: symlinkBytes},
 	}
 	for _, change := range changes {
+		if err := ctx.Err(); err != nil {
+			return nil, "", nil, "", err
+		}
 		if change.Kind != EntryFile {
 			continue
 		}
@@ -83,6 +91,10 @@ func buildArtifact(
 	writer := tar.NewWriter(buffer)
 	fixedTime := time.Unix(0, 0).UTC()
 	for _, current := range archiveEntries {
+		if err := ctx.Err(); err != nil {
+			_ = writer.Close()
+			return nil, "", nil, "", err
+		}
 		header := &tar.Header{
 			Name: current.name, Mode: current.mode, Size: int64(len(current.data)),
 			ModTime: fixedTime, Typeflag: tar.TypeReg, Format: tar.FormatPAX,

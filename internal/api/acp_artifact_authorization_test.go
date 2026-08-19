@@ -440,7 +440,13 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			app := fiber.New()
-			server := &Server{app: app, client: kubeClient, config: ServerConfig{ArtifactReservations: &recordingCapabilityReservations{}}}
+			server := &Server{
+				app: app, client: kubeClient,
+				config: ServerConfig{
+					ArtifactReservations: &recordingCapabilityReservations{},
+					ControllerEpochs:     publisherEpochSourceForTest(),
+				},
+			}
 			server.installACPArtifactAuthorizationBroker()
 			body, err := json.Marshal(test.request)
 			if err != nil {
@@ -526,7 +532,10 @@ func TestPublisherArtifactAuthorizationBrokerUsesFreshTaskState(t *testing.T) {
 	app := fiber.New()
 	server := &Server{
 		app: app, client: cachedClient,
-		config: ServerConfig{APIReader: apiReader, ArtifactReservations: &recordingCapabilityReservations{}},
+		config: ServerConfig{
+			APIReader: apiReader, ArtifactReservations: &recordingCapabilityReservations{},
+			ControllerEpochs: publisherEpochSourceForTest(),
+		},
 	}
 	server.installACPArtifactAuthorizationBroker()
 	body, err := json.Marshal(request)
@@ -593,7 +602,10 @@ func TestPublisherArtifactAuthorizationBrokerUsesFreshPublicationState(t *testin
 	app := fiber.New()
 	server := &Server{
 		app: app, client: cachedClient,
-		config: ServerConfig{APIReader: apiReader, ArtifactReservations: &recordingCapabilityReservations{}},
+		config: ServerConfig{
+			APIReader: apiReader, ArtifactReservations: &recordingCapabilityReservations{},
+			ControllerEpochs: publisherEpochSourceForTest(),
+		},
 	}
 	server.installACPArtifactAuthorizationBroker()
 	body, err := json.Marshal(request)
@@ -653,7 +665,7 @@ func TestAuthorizePublisherParentEffectUsesFreshReaderWithFallback(t *testing.T)
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cachedClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(test.cachedObjects...).Build()
-			server := &Server{client: cachedClient}
+			server := &Server{client: cachedClient, config: ServerConfig{ControllerEpochs: publisherEpochSourceForTest()}}
 			if test.useAPIReader {
 				server.config.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(test.freshObjects...).Build()
 			}
@@ -683,39 +695,57 @@ func TestAuthorizePublisherParentEffectRequiresLiveLease(t *testing.T) {
 		return publisherEffectForTest("workspace-effect", "workspace.prepare", metadata.TaskID, metadata.OperationID)
 	}
 	tests := []struct {
-		name    string
-		mutate  func(*corev1alpha1.ExternalEffect)
-		wantErr bool
+		name        string
+		mutate      func(*corev1alpha1.ExternalEffect)
+		epochSource ControllerEpochFenceSource
+		wantErr     bool
 	}{
-		{name: "live lease authorizes", mutate: func(*corev1alpha1.ExternalEffect) {}},
+		{name: "live lease authorizes", mutate: func(*corev1alpha1.ExternalEffect) {}, epochSource: publisherEpochSourceForTest()},
 		{
 			name: "expired lease is rejected",
 			mutate: func(e *corev1alpha1.ExternalEffect) {
 				e.Status.LeaseExpiresAt = &metav1.Time{Time: time.Now().UTC().Add(-time.Minute)}
 			},
+			epochSource: publisherEpochSourceForTest(),
+			wantErr:     true,
+		},
+		{
+			name: "missing lease expiry is rejected", mutate: func(e *corev1alpha1.ExternalEffect) { e.Status.LeaseExpiresAt = nil },
+			epochSource: publisherEpochSourceForTest(), wantErr: true,
+		},
+		{
+			name: "missing lease owner is rejected", mutate: func(e *corev1alpha1.ExternalEffect) { e.Status.LeaseOwner = "" },
+			epochSource: publisherEpochSourceForTest(), wantErr: true,
+		},
+		{
+			name: "missing controller epoch is rejected", mutate: func(e *corev1alpha1.ExternalEffect) { e.Status.ControllerEpoch = 0 },
+			epochSource: publisherEpochSourceForTest(), wantErr: true,
+		},
+		{
+			name: "stale controller epoch is rejected", mutate: func(*corev1alpha1.ExternalEffect) {},
+			epochSource: fixedControllerEpochFenceSource{fence: store.ControllerEpochFence{
+				Name: store.DefaultControllerEpochName, Epoch: 2, HolderID: "controller-2",
+			}},
 			wantErr: true,
 		},
 		{
-			name:    "missing lease expiry is rejected",
-			mutate:  func(e *corev1alpha1.ExternalEffect) { e.Status.LeaseExpiresAt = nil },
-			wantErr: true,
+			name:        "missing controller epoch name is rejected",
+			mutate:      func(e *corev1alpha1.ExternalEffect) { e.Status.ControllerEpochName = "" },
+			epochSource: publisherEpochSourceForTest(), wantErr: true,
 		},
 		{
-			name:    "missing lease owner is rejected",
-			mutate:  func(e *corev1alpha1.ExternalEffect) { e.Status.LeaseOwner = "" },
-			wantErr: true,
-		},
-		{
-			name:    "missing controller epoch is rejected",
-			mutate:  func(e *corev1alpha1.ExternalEffect) { e.Status.ControllerEpoch = 0 },
-			wantErr: true,
+			name: "unavailable controller authority is rejected", mutate: func(*corev1alpha1.ExternalEffect) {},
+			epochSource: fixedControllerEpochFenceSource{err: context.Canceled}, wantErr: true,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			effect := base()
 			test.mutate(effect)
-			server := &Server{client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(effect).Build()}
+			server := &Server{
+				client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(effect).Build(),
+				config: ServerConfig{ControllerEpochs: test.epochSource},
+			}
 			err := server.authorizePublisherParentEffect(
 				context.Background(), publisherservice.OperationWorkspacePrepare, metadata,
 			)
@@ -726,6 +756,25 @@ func TestAuthorizePublisherParentEffectRequiresLiveLease(t *testing.T) {
 				t.Fatalf("expected authorization to succeed: %v", err)
 			}
 		})
+	}
+}
+
+func TestControllerEpochStoreFenceSourceReadsDurableAuthority(t *testing.T) {
+	epochStore := &fixedControllerEpochStore{epoch: &store.ControllerEpoch{
+		Name: store.DefaultControllerEpochName, Epoch: 7, HolderID: "controller-7",
+	}}
+	source := NewControllerEpochStoreFenceSource(epochStore)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	fence, err := source.CurrentFence(ctx)
+	if err != nil {
+		t.Fatalf("CurrentFence() error = %v", err)
+	}
+	if epochStore.requestedName != store.DefaultControllerEpochName {
+		t.Fatalf("requested epoch name = %q", epochStore.requestedName)
+	}
+	if fence.Name != store.DefaultControllerEpochName || fence.Epoch != 7 || fence.HolderID != "controller-7" {
+		t.Fatalf("CurrentFence() = %#v", fence)
 	}
 }
 
@@ -740,9 +789,35 @@ func publisherEffectForTest(name, kind, aggregateID, operationID string) *corev1
 			State:                       corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight),
 			LeaseOwner:                  "controller-epoch-1",
 			LeaseExpiresAt:              &metav1.Time{Time: time.Now().UTC().Add(2 * time.Minute)},
-			ControlRecordMutationStatus: corev1alpha1.ControlRecordMutationStatus{ControllerEpoch: 1},
+			ControlRecordMutationStatus: corev1alpha1.ControlRecordMutationStatus{ControllerEpochName: store.DefaultControllerEpochName, ControllerEpoch: 1},
 		},
 	}
+}
+
+type fixedControllerEpochFenceSource struct {
+	fence store.ControllerEpochFence
+	err   error
+}
+
+type fixedControllerEpochStore struct {
+	epoch         *store.ControllerEpoch
+	err           error
+	requestedName string
+}
+
+func (s *fixedControllerEpochStore) GetControllerEpoch(_ context.Context, name string) (*store.ControllerEpoch, error) {
+	s.requestedName = name
+	return s.epoch, s.err
+}
+
+func (s fixedControllerEpochFenceSource) CurrentFence(context.Context) (store.ControllerEpochFence, error) {
+	return s.fence, s.err
+}
+
+func publisherEpochSourceForTest() ControllerEpochFenceSource {
+	return fixedControllerEpochFenceSource{fence: store.ControllerEpochFence{
+		Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "controller-1",
+	}}
 }
 
 func writeAPISecretFile(t *testing.T, env, name string, value []byte) {

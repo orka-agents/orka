@@ -10,9 +10,10 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/sync-helm-crds.sh [--check] [--source DIR] [--destination DIR]
 
-Synchronize generated CRD YAML files into the Helm chart. Every Helm-recognized
-manifest below the destination (*.yaml, *.yml, and *.json) is managed; README.md
-and other non-manifest files are preserved.
+Synchronize production generated CRD YAML files into the Helm chart. The
+development-only fake.workspace.orka.ai API group is excluded. Every
+Helm-recognized manifest below the destination (*.yaml, *.yml, and *.json) is
+managed; README.md and other non-manifest files are preserved.
 
 Options:
   --check             Verify that source and destination CRDs are identical.
@@ -80,18 +81,28 @@ done
 }
 
 shopt -s nullglob
-source_files=("${source_dir}"/*.yaml)
-if [[ ${#source_files[@]} -eq 0 ]]; then
+source_candidates=("${source_dir}"/*.yaml)
+if [[ ${#source_candidates[@]} -eq 0 ]]; then
   echo "generated CRD directory contains no YAML files: ${source_dir}" >&2
   exit 1
 fi
 
-for source_file in "${source_files[@]}"; do
+source_files=()
+for source_file in "${source_candidates[@]}"; do
   if [[ ! -f "${source_file}" || -L "${source_file}" ]]; then
     echo "generated CRD is not a regular file: ${source_file}" >&2
     exit 1
   fi
+  group="$(awk '$1 == "group:" { print $2; exit }' "${source_file}")"
+  if [[ "${group}" == "fake.workspace.orka.ai" ]]; then
+    continue
+  fi
+  source_files+=("${source_file}")
 done
+if [[ ${#source_files[@]} -eq 0 ]]; then
+  echo "generated CRD directory contains no production YAML files: ${source_dir}" >&2
+  exit 1
+fi
 
 
 destination_name_for_source() {

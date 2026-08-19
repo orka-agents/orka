@@ -901,10 +901,10 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(ctx context
 }
 
 // agentRuntimeEndpointPinnable reports whether an EndpointSlice endpoint is
-// currently serving and may be pinned. A nil Ready condition is treated as
-// ready (older EndpointSlices and controllers omit it), but an explicitly
-// unready or terminating endpoint, or a Pod carrying a deletion timestamp, is
-// excluded so the pinned set contains only live backends.
+// currently serving and may be pinned. A nil EndpointSlice Ready condition is
+// tolerated for older controllers, but the backing Pod must independently be
+// Ready so publishNotReadyAddresses or a forged slice cannot put an unready Pod
+// in the authenticated dial set.
 func agentRuntimeEndpointPinnable(endpoint discoveryv1.Endpoint, pod *corev1.Pod) bool {
 	if endpoint.Conditions.Ready != nil && !*endpoint.Conditions.Ready {
 		return false
@@ -912,7 +912,15 @@ func agentRuntimeEndpointPinnable(endpoint discoveryv1.Endpoint, pod *corev1.Pod
 	if endpoint.Conditions.Terminating != nil && *endpoint.Conditions.Terminating {
 		return false
 	}
-	return pod == nil || pod.DeletionTimestamp == nil
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // agentRuntimeEndpointPortName dereferences an EndpointSlice port name, treating

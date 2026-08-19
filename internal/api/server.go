@@ -35,6 +35,41 @@ import (
 
 var log = logf.Log.WithName("api-server")
 
+// ControllerEpochFenceSource exposes the controller's current durable fence to
+// internal broker authorization paths.
+type ControllerEpochFenceSource interface {
+	CurrentFence(context.Context) (store.ControllerEpochFence, error)
+}
+
+type ControllerEpochReader interface {
+	GetControllerEpoch(context.Context, string) (*store.ControllerEpoch, error)
+}
+
+// ControllerEpochStoreFenceSource reads the current fence directly from the
+// durable epoch store. Unlike ControllerEpochManager, it is safe for API
+// handlers on non-leader replicas because it has no leader-readiness barrier.
+type ControllerEpochStoreFenceSource struct {
+	epochs ControllerEpochReader
+}
+
+func NewControllerEpochStoreFenceSource(epochs ControllerEpochReader) *ControllerEpochStoreFenceSource {
+	return &ControllerEpochStoreFenceSource{epochs: epochs}
+}
+
+func (s *ControllerEpochStoreFenceSource) CurrentFence(ctx context.Context) (store.ControllerEpochFence, error) {
+	if s == nil || s.epochs == nil {
+		return store.ControllerEpochFence{}, fmt.Errorf("controller epoch store is unavailable")
+	}
+	epoch, err := s.epochs.GetControllerEpoch(ctx, store.DefaultControllerEpochName)
+	if err != nil {
+		return store.ControllerEpochFence{}, err
+	}
+	if epoch == nil {
+		return store.ControllerEpochFence{}, fmt.Errorf("controller epoch is unavailable")
+	}
+	return store.ControllerEpochFence{Name: epoch.Name, Epoch: epoch.Epoch, HolderID: epoch.HolderID}, nil
+}
+
 // ServerConfig holds configuration for the API server
 type ServerConfig struct {
 	Port                      int
@@ -63,6 +98,7 @@ type ServerConfig struct {
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 	APIReader                 client.Reader
+	ControllerEpochs          ControllerEpochFenceSource
 }
 
 // Server is the REST API server

@@ -1717,6 +1717,10 @@ func main() {
 	tools.RegisterProxyPRTools(mgr.GetClient())
 
 	// Start REST API server
+	var publisherControllerEpochs api.ControllerEpochFenceSource
+	if kubeControlStore != nil {
+		publisherControllerEpochs = api.NewControllerEpochStoreFenceSource(kubeControlStore)
+	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:                      apiPort,
 		WatchNamespace:            watchNamespace,
@@ -1748,6 +1752,7 @@ func main() {
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		APIReader:                 mgr.GetAPIReader(),
+		ControllerEpochs:          publisherControllerEpochs,
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,

@@ -179,7 +179,10 @@ func TestPublisherCredentialBrokerUsesFreshSucceededTaskAndPromptAttemptState(t 
 	}
 
 	app := fiber.New()
-	server := &Server{app: app, client: cachedClient, config: ServerConfig{APIReader: apiReader}}
+	server := &Server{
+		app: app, client: cachedClient,
+		config: ServerConfig{APIReader: apiReader, ControllerEpochs: publisherEpochSourceForTest()},
+	}
 	server.installACPArtifactAuthorizationBroker()
 	body, err := json.Marshal(request)
 	if err != nil {
@@ -213,7 +216,10 @@ func callPublisherCredentialBroker(
 ) publisherservice.CredentialMaterialResponse {
 	t.Helper()
 	app := fiber.New()
-	server := &Server{app: app, client: kubeClient}
+	server := &Server{
+		app: app, client: kubeClient,
+		config: ServerConfig{ControllerEpochs: publisherEpochSourceForTest()},
+	}
 	server.installACPArtifactAuthorizationBroker()
 	body, err := json.Marshal(request)
 	if err != nil {

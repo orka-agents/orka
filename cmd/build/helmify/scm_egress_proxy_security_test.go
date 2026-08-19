@@ -98,30 +98,74 @@ func TestSCMEgressProxyStandaloneNetworkPolicyRetainsDirectPrivateAddressDefense
 		t.Fatalf("decode SCM proxy NetworkPolicy: %v", err)
 	}
 
-	for _, rule := range policy.Spec.Egress {
-		for _, peer := range rule.To {
-			if peer.IPBlock == nil || peer.IPBlock.CIDR != "0.0.0.0/0" {
-				continue
-			}
-			exclusions := make(map[string]bool, len(peer.IPBlock.Except))
-			for _, exclusion := range peer.IPBlock.Except {
-				exclusions[exclusion] = true
-			}
-			for _, required := range []string{
+	for _, test := range []struct {
+		name     string
+		cidr     string
+		required []string
+	}{
+		{
+			name: "IPv4",
+			cidr: "0.0.0.0/0",
+			required: []string{
 				"10.0.0.0/8",
 				"127.0.0.0/8",
 				"169.254.0.0/16",
 				"172.16.0.0/12",
+				"192.88.99.0/24",
 				"192.168.0.0/16",
-			} {
-				if !exclusions[required] {
-					t.Errorf("SCM proxy IPv4 egress exclusions are missing %s", required)
+			},
+		},
+		{
+			name: "IPv6",
+			cidr: "::/0",
+			required: []string{
+				"100:0:0:1::/64",
+				"2001:2::/48",
+				"2001:10::/28",
+				"2001:20::/28",
+				"3fff::/20",
+				"5f00::/16",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, rule := range policy.Spec.Egress {
+				for _, peer := range rule.To {
+					if peer.IPBlock == nil || peer.IPBlock.CIDR != test.cidr {
+						continue
+					}
+					exclusions := make(map[string]bool, len(peer.IPBlock.Except))
+					for _, exclusion := range peer.IPBlock.Except {
+						exclusions[exclusion] = true
+					}
+					for _, required := range test.required {
+						if !exclusions[required] {
+							t.Errorf("SCM proxy %s egress exclusions are missing %s", test.name, required)
+						}
+					}
+					return
 				}
 			}
-			return
+			t.Fatalf("SCM proxy NetworkPolicy is missing its public %s egress block", test.name)
+		})
+	}
+}
+
+func TestStaticChartSCMEgressProxyNetworkPolicyRejectsSpecialUseRanges(t *testing.T) {
+	rendered := requireHelmRender(t, "--show-only", "templates/scm-egress-proxy-networkpolicy.yaml")
+	for _, required := range []string{
+		"192.88.99.0/24",
+		"100:0:0:1::/64",
+		"2001:2::/48",
+		"2001:10::/28",
+		"2001:20::/28",
+		"3fff::/20",
+		"5f00::/16",
+	} {
+		if !strings.Contains(rendered, required) {
+			t.Fatalf("SCM proxy chart NetworkPolicy is missing special-use exclusion %q:\n%s", required, rendered)
 		}
 	}
-	t.Fatal("SCM proxy NetworkPolicy is missing its public IPv4 egress block")
 }
 
 func TestStaticChartSCMEgressProxyWorkloadHasNoKubernetesCredential(t *testing.T) {

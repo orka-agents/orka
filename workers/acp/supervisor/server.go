@@ -12,7 +12,6 @@ import (
 	"maps"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -44,46 +43,32 @@ type Server struct {
 // expiry.
 const statusNonceRetentionSlack = 30 * time.Second
 
-const (
-	// tombstoneRetention bounds how long a deleted or failed session's replay
-	// tombstone is retained. It must exceed the maximum operation-capability
-	// lifetime plus clock skew so a legitimate replay whose capability is still
-	// valid is still classified against its tombstone; past this window the
-	// capability itself has expired and the replay is rejected at the capability
-	// layer, so the tombstone is no longer needed. Without this bound a
-	// long-lived supervisor serving many sessions accumulates one record per
-	// historical session until restart or OOM.
-	tombstoneRetention = time.Hour
-	// maxRetainedTombstones is a hard backstop on tombstone memory under
-	// sustained session churn within the retention window; the oldest records
-	// are evicted first.
-	maxRetainedTombstones = 4096
-)
+// operationReplayRetentionSlack keeps a session operation and any stored
+// response briefly past the request capability expiry. This preserves replay
+// classification across the allowed clock-skew edge without retaining expired
+// capabilities for the lifetime of a resident session.
+const operationReplayRetentionSlack = 30 * time.Second
 
-// pruneTombstonesLocked bounds s.tombstones by dropping records older than
-// tombstoneRetention and, as a backstop, evicting the oldest until at most
-// maxRetainedTombstones remain. It must be called with s.mu held, before a new
-// tombstone is inserted.
+const sessionDeletionOperationReserve = 1
+
+// tombstoneRetention bounds how long a deleted or failed session's replay
+// tombstone is retained. It must exceed the maximum operation-capability
+// lifetime plus clock skew so a legitimate replay whose capability is still
+// valid is still classified against its tombstone; past this window the
+// capability itself has expired and the replay is rejected at the capability
+// layer, so the tombstone is no longer needed. Retain every tombstone inside
+// this window: the finite, never-reused UID/GID allocator already bounds their
+// count, while count-based eviction would reopen valid create capabilities for
+// replay.
+const tombstoneRetention = time.Hour
+
+// pruneTombstonesLocked drops only records older than tombstoneRetention. It
+// must be called with s.mu held, before a new tombstone is inserted.
 func (s *Server) pruneTombstonesLocked(now time.Time) {
 	for uid, tombstone := range s.tombstones {
 		if now.Sub(tombstone.DeletedAt) > tombstoneRetention {
 			delete(s.tombstones, uid)
 		}
-	}
-	if len(s.tombstones) <= maxRetainedTombstones {
-		return
-	}
-	type agedTombstone struct {
-		uid       harnessv2.RuntimeSessionUID
-		deletedAt time.Time
-	}
-	entries := make([]agedTombstone, 0, len(s.tombstones))
-	for uid, tombstone := range s.tombstones {
-		entries = append(entries, agedTombstone{uid: uid, deletedAt: tombstone.DeletedAt})
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].deletedAt.Before(entries[j].deletedAt) })
-	for i := 0; i < len(entries)-maxRetainedTombstones; i++ {
-		delete(s.tombstones, entries[i].uid)
 	}
 }
 
@@ -119,6 +104,7 @@ type sessionState struct {
 	promptMutations         promptMutationExecutor
 	descriptor              harnessv2.RuntimeSessionDescriptor
 	operations              map[harnessv2.OperationID]harnessv2.OperationRecord
+	operationRetention      map[harnessv2.OperationID]time.Time
 	operationReplays        map[harnessv2.OperationID]*operationReplay
 	prompt                  *promptState
 	permissions             map[harnessv2.PermissionRequestID]permissionState
@@ -137,19 +123,20 @@ type sessionState struct {
 }
 
 type promptState struct {
-	request             harnessv2.StartPromptRequest
-	operation           harnessv2.OperationRecord
-	lease               harnessv2.PromptLease
-	startedAt           time.Time
-	acceptedAt          time.Time
-	sequence            uint64
-	assistant           strings.Builder
-	assistantOverflow   bool
-	finalAnswer         strings.Builder
-	finalAnswerSeen     bool
-	finalAnswerOverflow bool
-	settlement          *harnessv2.PromptSettlement
-	settlementDigest    string
+	request              harnessv2.StartPromptRequest
+	operation            harnessv2.OperationRecord
+	lease                harnessv2.PromptLease
+	startedAt            time.Time
+	acceptedAt           time.Time
+	sequence             uint64
+	assistant            strings.Builder
+	assistantOverflow    bool
+	finalAnswer          strings.Builder
+	finalAnswerSeen      bool
+	finalAnswerOverflow  bool
+	settlement           *harnessv2.PromptSettlement
+	settlementDigest     string
+	permissionRequestIDs map[harnessv2.PermissionRequestID]struct{}
 }
 
 type promptMutationExecutor interface {
@@ -172,6 +159,62 @@ type operationFailure struct {
 	retryable bool
 }
 
+// recordSessionOperationLocked records a session operation and the deadline
+// after which neither its classification record nor response replay is useful.
+// The caller must hold s.mu when the state belongs to a live Server.
+func recordSessionOperationLocked(
+	state *sessionState,
+	metadata harnessv2.MutationMetadata,
+	phase harnessv2.OperationPhase,
+	terminal harnessv2.EventType,
+	at time.Time,
+) {
+	if state.operations == nil {
+		state.operations = make(map[harnessv2.OperationID]harnessv2.OperationRecord)
+	}
+	if state.operationRetention == nil {
+		state.operationRetention = make(map[harnessv2.OperationID]time.Time)
+	}
+	state.operations[metadata.OperationID] = operationRecord(metadata, phase, terminal, at)
+	state.operationRetention[metadata.OperationID] = metadata.ExpiresAt.Add(operationReplayRetentionSlack)
+}
+
+// pruneSessionOperationsLocked drops operations whose capability expiry and
+// replay-skew window have elapsed. The caller must hold s.mu when the state
+// belongs to a live Server.
+func pruneSessionOperationsLocked(state *sessionState, now time.Time) {
+	if state == nil {
+		return
+	}
+	for operationID, retainUntil := range state.operationRetention {
+		if retainUntil.After(now) {
+			continue
+		}
+		delete(state.operationRetention, operationID)
+		delete(state.operations, operationID)
+		delete(state.operationReplays, operationID)
+	}
+}
+
+func sessionOperationPtrLocked(state *sessionState, operationID harnessv2.OperationID, now time.Time) *harnessv2.OperationRecord {
+	pruneSessionOperationsLocked(state, now)
+	return operationPtr(state.operations, operationID)
+}
+
+// ensureSessionOperationCapacityLocked preserves one final journal slot for
+// explicit deletion. Tombstones retain every still-replayable operation, so a
+// live session must stop accepting fresh mutations before the protocol limit
+// is reached rather than evicting valid replay records.
+func ensureSessionOperationCapacityLocked(state *sessionState, reservedSlots int) error {
+	if state == nil || reservedSlots < 0 || reservedSlots >= harnessv2.MaxRuntimeSessionTombstoneOperations {
+		return fmt.Errorf("invalid runtime session operation capacity request")
+	}
+	if len(state.operations) >= harnessv2.MaxRuntimeSessionTombstoneOperations-reservedSlots {
+		return fmt.Errorf("runtime session operation journal is full and the session must be retired")
+	}
+	return nil
+}
+
 type permissionState struct {
 	requestID   harnessv2.PermissionRequestID
 	toolCallID  string
@@ -180,7 +223,6 @@ type permissionState struct {
 	requestedAt time.Time
 	expiresAt   time.Time
 	options     map[string]harnessv2.PermissionOptionKind
-	decision    *harnessv2.PermissionDecision
 }
 
 type drainCleanupCandidate struct {
@@ -399,6 +441,7 @@ func (s *Server) status() harnessv2.StatusResponse {
 		Timestamp:               now,
 	}
 	for _, state := range s.sessions {
+		pruneSessionOperationsLocked(state, now)
 		status := harnessv2.RuntimeSessionStatus{
 			RuntimeSessionID:        state.descriptor.RuntimeSessionID,
 			RuntimeSessionUID:       state.descriptor.RuntimeSessionUID,
@@ -512,7 +555,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	if existing := s.sessions[request.RuntimeSessionID]; existing != nil {
-		classification, classifyErr := harnessv2.ClassifyOperation(expected, request.Metadata, operationPtr(existing.operations, request.Metadata.OperationID), true, now)
+		classification, classifyErr := harnessv2.ClassifyOperation(expected, request.Metadata, sessionOperationPtrLocked(existing, request.Metadata.OperationID, now), true, now)
 		if classifyErr != nil {
 			s.mu.Unlock()
 			writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, classifyErr.Error(), nil, false)
@@ -565,11 +608,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			State: harnessv2.RuntimeSessionStateCreating, WorkspaceBaseline: request.Workspace.Baseline,
 			CreatedAt: now, LastTransitionAt: now,
 		},
-		operations:       map[harnessv2.OperationID]harnessv2.OperationRecord{request.Metadata.OperationID: operationRecord(request.Metadata, harnessv2.OperationPhaseRecorded, "", now)},
-		operationReplays: make(map[harnessv2.OperationID]*operationReplay),
-		permissions:      make(map[harnessv2.PermissionRequestID]permissionState),
-		deltas:           make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
+		operations:         make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		operationRetention: make(map[harnessv2.OperationID]time.Time),
+		operationReplays:   make(map[harnessv2.OperationID]*operationReplay),
+		permissions:        make(map[harnessv2.PermissionRequestID]permissionState),
+		deltas:             make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
 	}
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
 	s.sessions[request.RuntimeSessionID] = state
 	if s.sessionIdentityCapacity().RotationRequired() {
 		s.drain.AcceptingNewSessions = false
@@ -603,7 +648,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	state.profile = request.Profile
 	state.agentConfiguration = *request.AgentConfiguration
 	state.creating = false
-	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", now)
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
 	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled && isDrainCleanupState(state)
 	if drainCleanup {
 		state.drainCleanupScheduled = true
@@ -987,6 +1032,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
 	if s.sessions[sessionID] == state {
+		pruneSessionOperationsLocked(state, deletedAt)
 		operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
 		for _, operation := range state.operations {
 			operations = append(operations, operation)

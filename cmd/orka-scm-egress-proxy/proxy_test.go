@@ -56,6 +56,27 @@ func TestSCMEgressProxyRejectsPrivateAndRebindingAnswers(t *testing.T) {
 		"metadata": {
 			netip.MustParseAddr("169.254.169.254"),
 		},
+		"deprecated-6to4-relay": {
+			netip.MustParseAddr("192.88.99.1"),
+		},
+		"discard-only-v2": {
+			netip.MustParseAddr("100:0:0:1::1"),
+		},
+		"benchmarking-v6": {
+			netip.MustParseAddr("2001:2::1"),
+		},
+		"orchid-v1": {
+			netip.MustParseAddr("2001:10::1"),
+		},
+		"orchid-v2": {
+			netip.MustParseAddr("2001:20::1"),
+		},
+		"documentation-v6": {
+			netip.MustParseAddr("3fff::1"),
+		},
+		"segment-routing-srv6": {
+			netip.MustParseAddr("5f00::1"),
+		},
 		"mixed-public-private": {
 			netip.MustParseAddr("1.1.1.1"),
 			netip.MustParseAddr("192.168.1.7"),

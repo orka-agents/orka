@@ -440,14 +440,16 @@ func copilotSessionProjection(
 	if request.AgentConfiguration.ReasoningEffort != "" {
 		return ProviderSessionProjection{}, fmt.Errorf("copilot ACP runtime cannot enforce reasoning effort")
 	}
-	projection := ProviderSessionProjection{}
+	excluded := append([]string(nil), copilotAlwaysExcludedToolIDs...)
+	projection := ProviderSessionProjection{
+		AdditionalArgs: []string{"--excluded-tools=" + strings.Join(excluded, ",")},
+	}
 	if policy.unrestricted {
 		return projection, nil
 	}
 	if policy.allows(providerToolWebSearch) {
 		return ProviderSessionProjection{}, fmt.Errorf("copilot ACP runtime cannot exactly enforce the WebSearch provider-native tool")
 	}
-	excluded := append([]string(nil), copilotAlwaysExcludedToolIDs...)
 	for _, name := range providerNativeToolNames {
 		if policy.allows(name) {
 			continue
