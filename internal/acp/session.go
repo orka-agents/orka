@@ -364,9 +364,14 @@ func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (Pro
 	done := active.done
 	s.mu.Unlock()
 
-	if err := s.process.Client().Cancel(ctx, s.providerSessionID); err != nil && !errors.Is(err, ErrClosed) {
-		return PromptResult{}, err
-	}
+	// Best-effort courtesy cancel: the notification write can block when the
+	// adapter stops reading stdin, and cancellation must reach the bounded
+	// grace/stop escalation below regardless. A healthy adapter settles the
+	// prompt (closing done); a dead or wedged transport is escalated to the
+	// bounded process stop after the grace window.
+	go func() {
+		_ = s.process.Client().Cancel(ctx, s.providerSessionID)
+	}()
 	timer := time.NewTimer(s.config.CancelGrace)
 	defer timer.Stop()
 	select {
@@ -409,7 +414,13 @@ func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 	}
 	s.mu.Unlock()
 	if active != nil {
-		_ = s.process.Client().Cancel(context.Background(), s.providerSessionID)
+		// Best-effort courtesy cancel: the notification is a blocking pipe write,
+		// and a wedged adapter that stopped reading stdin would otherwise block
+		// Delete forever before the bounded process stop. Adapter exit closes
+		// stdin, which unblocks the write and ends the goroutine.
+		go func() {
+			_ = s.process.Client().Cancel(context.Background(), s.providerSessionID)
+		}()
 	}
 	status, err := s.process.Stop(ctx, s.config.CancelGrace)
 	s.mu.Lock()
@@ -562,7 +573,7 @@ func (s *RuntimeSession) handleRequest(ctx context.Context, request IncomingRequ
 func (s *RuntimeSession) emitLocked(active *activePrompt, event PromptEvent) {
 	if !active.accepted && event.Type != PromptEventAccepted {
 		if len(active.preAccepted) >= s.config.MaxBufferedEvents {
-			active.overflowed = true
+			s.markOverflowedLocked(active)
 			return
 		}
 		active.preAccepted = append(active.preAccepted, event)
@@ -574,15 +585,24 @@ func (s *RuntimeSession) emitLocked(active *activePrompt, event PromptEvent) {
 	select {
 	case active.events <- event:
 	default:
-		if !active.overflowed {
-			active.overflowed = true
-			go func(promptID string) {
-				ctx, cancel := context.WithTimeout(context.Background(), s.config.CancelGrace*2)
-				defer cancel()
-				_, _ = s.CancelPrompt(ctx, promptID)
-			}(active.id)
-		}
+		s.markOverflowedLocked(active)
 	}
+}
+
+// markOverflowedLocked records event loss and schedules the bounded prompt
+// cancellation exactly once. Pre-acceptance overflow must escalate the same
+// way as post-acceptance overflow: a prompt that permanently lost events must
+// not keep occupying a global prompt slot until settlement or lease expiry.
+func (s *RuntimeSession) markOverflowedLocked(active *activePrompt) {
+	if active.overflowed {
+		return
+	}
+	active.overflowed = true
+	go func(promptID string) {
+		ctx, cancel := context.WithTimeout(context.Background(), s.config.CancelGrace*2)
+		defer cancel()
+		_, _ = s.CancelPrompt(ctx, promptID)
+	}(active.id)
 }
 
 func (s *RuntimeSession) expirePrompt(promptID string) {

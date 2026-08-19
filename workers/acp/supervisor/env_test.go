@@ -251,6 +251,29 @@ func TestCopilotProviderSessionProjection(t *testing.T) {
 	}
 }
 
+func TestCopilotUnrestrictedProjectionKeepsPermanentExclusions(t *testing.T) {
+	paths := acp.SessionPaths{Home: "/sessions/private/home"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
+	copilot, err := providerProfile(providerKindCopilot, "copilot-test", harnessv2.WorkspaceIntentRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "", "", nil, nil, true)
+	projection, err := copilot.ProjectSession(request, paths, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.AdditionalArgs) != 1 {
+		t.Fatalf("Copilot unrestricted projection args = %v", projection.AdditionalArgs)
+	}
+	excluded := strings.Split(strings.TrimPrefix(projection.AdditionalArgs[0], "--excluded-tools="), ",")
+	for _, excludedID := range copilotAlwaysExcludedToolIDs {
+		if !slices.Contains(excluded, excludedID) {
+			t.Fatalf("Copilot unrestricted projection omitted permanent exclusion %q: %v", excludedID, excluded)
+		}
+	}
+}
+
 func TestProviderSessionProjectionFailsClosed(t *testing.T) {
 	paths := acp.SessionPaths{Home: "/sessions/private/home"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}

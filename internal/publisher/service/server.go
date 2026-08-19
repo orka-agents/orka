@@ -181,13 +181,6 @@ func (s *Server) serveOperation(writer http.ResponseWriter, request *http.Reques
 		s.writePublicJSON(writer, http.StatusUnauthorized, ErrorResponse{Code: "unauthorized", Message: "authorization failed", Retryable: false})
 		return
 	}
-	select {
-	case s.semaphore <- struct{}{}:
-		defer func() { <-s.semaphore }()
-	default:
-		s.writePublicJSON(writer, http.StatusTooManyRequests, ErrorResponse{Code: "busy", Message: "publisher concurrency limit reached", Retryable: true})
-		return
-	}
 	body, err := s.readBody(writer, request)
 	if err != nil {
 		s.writeOperationError(writer, OperationMetadata{}, "", err)
@@ -216,6 +209,16 @@ func (s *Server) serveOperation(writer http.ResponseWriter, request *http.Reques
 	if err := VerifyCapability(s.config.OperationCapabilitySecret, request.Header.Get(OperationCapabilityHeader), expected, s.config.Now()); err != nil ||
 		!constantEqual(request.Header.Get(OperationRequestDigestHeader), requestDigest) {
 		s.writeOperationError(writer, metadata, requestDigest, apiError(ErrUnauthorized, "unauthorized", "authorization failed", http.StatusForbidden, false, nil))
+		return
+	}
+	// Acquire the global operation slot only after the operation capability is
+	// verified: an unauthenticated peer must not be able to hold slots (and
+	// starve legitimate operations with 429s) by drip-feeding request bodies.
+	select {
+	case s.semaphore <- struct{}{}:
+		defer func() { <-s.semaphore }()
+	default:
+		s.writePublicJSON(writer, http.StatusTooManyRequests, ErrorResponse{Code: "busy", Message: "publisher concurrency limit reached", Retryable: true})
 		return
 	}
 	lock := s.operationLock(metadata.OperationID)

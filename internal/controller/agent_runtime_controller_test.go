@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -241,7 +242,10 @@ func TestAgentRuntimeReconcilerRechecksHostileCycleAfterAuthRotation(t *testing.
 		t.Fatal(err)
 	}
 	updated := getAgentRuntime(t, reconciler, runtimeObject)
-	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "operation capability") {
+	// The rotated key now fails closed at the earliest capability-guarded
+	// surface: the status probe itself rejects the stale capability secret.
+	if updated.Status.Ready ||
+		(!strings.Contains(updated.Status.Message, "operation capability") && !strings.Contains(updated.Status.Message, "status authorization failed")) {
 		t.Fatalf("rotated mismatched capability key did not fail closed: %#v", updated.Status)
 	}
 }
@@ -649,22 +653,278 @@ func TestAgentRuntimeReconcilerRejectsMissingCapabilitySecretKey(t *testing.T) {
 	}
 }
 
+func expectAgentRuntimeEndpointPolicyError(t *testing.T, r *AgentRuntimeReconciler, runtimeObject *corev1alpha1.AgentRuntime, endpoint, wantSubstr string) {
+	t.Helper()
+	runtimeObject.Spec.Deployment.Endpoint = endpoint
+	err := r.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject)
+	if err == nil || !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf("endpoint %q error = %v, want %q", endpoint, err, wantSubstr)
+	}
+}
+
 func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
 	config := conformancetest.Config{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims}
 	runtimeObject, _ := testAgentRuntimeAndSecret(t, "http://runtime.default.svc.cluster.local:8080", config)
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"}}
-	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service)
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "runtime"},
+			Ports:    []corev1.ServicePort{{Port: 8080}},
+		},
+	}
+	backendPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-pod", Labels: map[string]string{"app": "runtime"}},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.9", PodIPs: []corev1.PodIP{{IP: "10.0.0.9"}},
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	validSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-valid",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Ports:       []discoveryv1.EndpointPort{{Port: new(int32(8080))}},
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"10.0.0.9"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-pod"},
+		}},
+	}
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service, backendPod, validSlice)
 	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err != nil {
 		t.Fatalf("same-namespace Service endpoint: %v", err)
 	}
-	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.other.svc.cluster.local:8080"
-	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "must match") {
-		t.Fatalf("cross-namespace endpoint error = %v", err)
+	// Dispatch pins to the verified backend Pod IP:port, not the Service.
+	pins, err := reconciler.AgentRuntimeServiceBackendPins(t.Context(), runtimeObject)
+	if err != nil {
+		t.Fatalf("backend pins error: %v", err)
 	}
-	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.example.com"
-	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("external HTTP endpoint error = %v", err)
+	if len(pins) != 1 || pins[0] != "10.0.0.9:8080" {
+		t.Fatalf("backend pins = %v, want [10.0.0.9:8080]", pins)
+	}
+	if err := reconciler.Delete(t.Context(), validSlice); err != nil {
+		t.Fatal(err)
+	}
+	expectAgentRuntimeEndpointPolicyError(t, reconciler, runtimeObject, "http://runtime.other.svc.cluster.local:8080", "must match")
+	expectAgentRuntimeEndpointPolicyError(t, reconciler, runtimeObject, "http://runtime.example.com", "https")
+	for _, endpoint := range []string{
+		"https://100.64.0.1", "https://198.18.0.5", "https://192.0.2.9", "https://[2002::1]",
+	} {
+		expectAgentRuntimeEndpointPolicyError(t, reconciler, runtimeObject, endpoint, "non-public IP")
+	}
+	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
+	// A forged address that is not one of the backing Pod's IPs is rejected
+	// even though the slice claims a same-namespace Pod TargetRef.
+	forgedAddressSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-forged",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"169.254.169.254"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-pod"},
+		}},
+	}
+	if err := reconciler.Create(t.Context(), forgedAddressSlice); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "not an IP of backend Pod") {
+		t.Fatalf("forged EndpointSlice address error = %v", err)
+	}
+	if err := reconciler.Delete(t.Context(), forgedAddressSlice); err != nil {
+		t.Fatal(err)
+	}
+	// A slice whose TargetRef Pod does not match the Service selector is
+	// rejected even if the address matches that Pod's real IP.
+	strayPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "stray-pod", Labels: map[string]string{"app": "other"}},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.20", PodIPs: []corev1.PodIP{{IP: "10.0.0.20"}}},
+	}
+	if err := reconciler.Create(t.Context(), strayPod); err != nil {
+		t.Fatal(err)
+	}
+	straySlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-stray",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"10.0.0.20"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "stray-pod"},
+		}},
+	}
+	if err := reconciler.Create(t.Context(), straySlice); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "selector does not select") {
+		t.Fatalf("stray-pod EndpointSlice error = %v", err)
+	}
+	if err := reconciler.Delete(t.Context(), straySlice); err != nil {
+		t.Fatal(err)
+	}
+	// A cross-namespace TargetRef is rejected outright.
+	crossNamespaceSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-mirrored",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"10.0.0.9"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "other-namespace", Name: "victim"},
+		}},
+	}
+	if err := reconciler.Create(t.Context(), crossNamespaceSlice); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "same-namespace Pod") {
+		t.Fatalf("cross-namespace backend error = %v", err)
+	}
+	if err := reconciler.Delete(t.Context(), crossNamespaceSlice); err != nil {
+		t.Fatal(err)
+	}
+	service.Spec.Selector = nil
+	if err := reconciler.Update(t.Context(), service); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "no selector") {
+		t.Fatalf("selectorless Service endpoint error = %v", err)
+	}
+	service.Spec.Selector = map[string]string{"app": "runtime"}
+	service.Spec.Type = corev1.ServiceTypeExternalName
+	service.Spec.ExternalName = "internal.other-namespace.svc.cluster.local"
+	if err := reconciler.Update(t.Context(), service); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil || !strings.Contains(err.Error(), "ExternalName") {
+		t.Fatalf("ExternalName Service endpoint error = %v", err)
+	}
+}
+
+func TestAgentRuntimeServiceBackendPinsFailClosedWithoutEndpoints(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims}
+	runtimeObject, _ := testAgentRuntimeAndSecret(t, "http://runtime.default.svc.cluster.local:8080", config)
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "runtime"},
+			Ports:    []corev1.ServicePort{{Port: 8080}},
+		},
+	}
+	// A selector-backed Service with no EndpointSlices (a rollout gap) must fail
+	// closed instead of yielding zero pins that degrade to an unpinned Service
+	// ClusterIP dial exempt from the public-address control.
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service)
+	if _, err := reconciler.AgentRuntimeServiceBackendPins(t.Context(), runtimeObject); err == nil ||
+		!strings.Contains(err.Error(), "no verified backend endpoint for port 8080") {
+		t.Fatalf("empty-backend pins error = %v", err)
+	}
+	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err == nil ||
+		!strings.Contains(err.Error(), "no verified backend endpoint for port 8080") {
+		t.Fatalf("empty-backend policy error = %v", err)
+	}
+}
+
+func TestAgentRuntimeServiceBackendPinsSelectsMatchingPort(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims}
+	runtimeObject, _ := testAgentRuntimeAndSecret(t, "http://runtime.default.svc.cluster.local:8080", config)
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "runtime"},
+			Ports: []corev1.ServicePort{
+				{Name: "acp", Port: 8080},
+				{Name: "metrics", Port: 9090},
+			},
+		},
+	}
+	backendPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-pod", Labels: map[string]string{"app": "runtime"}},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.9", PodIPs: []corev1.PodIP{{IP: "10.0.0.9"}},
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	slice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-multiport",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Ports: []discoveryv1.EndpointPort{
+			{Name: new("acp"), Port: new(int32(8443))},
+			{Name: new("metrics"), Port: new(int32(9090))},
+		},
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"10.0.0.9"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-pod"},
+		}},
+	}
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service, backendPod, slice)
+	pins, err := reconciler.AgentRuntimeServiceBackendPins(t.Context(), runtimeObject)
+	if err != nil {
+		t.Fatalf("multi-port pins error: %v", err)
+	}
+	// The endpoint URL targets ServicePort 8080 ("acp"), which maps to the
+	// EndpointSlice "acp" target 8443; the metrics listener (9090) must never be
+	// pinned or receive controller bearer/capability traffic.
+	if len(pins) != 1 || pins[0] != "10.0.0.9:8443" {
+		t.Fatalf("multi-port pins = %v, want [10.0.0.9:8443]", pins)
+	}
+}
+
+func TestAgentRuntimeServiceBackendPinsExcludesUnreadyEndpoints(t *testing.T) {
+	profile, claims, limits := testAgentRuntimeProfileClaimsAndLimits()
+	config := conformancetest.Config{RuntimeInstanceID: "runtime-1", Profile: profile, Limits: limits, WorkspaceGovernance: claims}
+	runtimeObject, _ := testAgentRuntimeAndSecret(t, "http://runtime.default.svc.cluster.local:8080", config)
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime"},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "runtime"},
+			Ports:    []corev1.ServicePort{{Port: 8080}},
+		},
+	}
+	pod := func(name, ip string, ready corev1.ConditionStatus) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name, Labels: map[string]string{"app": "runtime"}},
+			Status: corev1.PodStatus{
+				PodIP: ip, PodIPs: []corev1.PodIP{{IP: ip}},
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: ready}},
+			},
+		}
+	}
+	readyPod := pod("runtime-ready", "10.0.0.9", corev1.ConditionTrue)
+	unreadyPod := pod("runtime-unready", "10.0.0.10", corev1.ConditionFalse)
+	terminatingPod := pod("runtime-terminating", "10.0.0.11", corev1.ConditionTrue)
+	slice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "runtime-mixed",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "runtime"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Ports:       []discoveryv1.EndpointPort{{Port: new(int32(8080))}},
+		Endpoints: []discoveryv1.Endpoint{
+			{Addresses: []string{"10.0.0.9"}, Conditions: discoveryv1.EndpointConditions{Ready: new(true)}, TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-ready"}},
+			{Addresses: []string{"10.0.0.10"}, Conditions: discoveryv1.EndpointConditions{Ready: new(true)}, TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-unready"}},
+			{Addresses: []string{"10.0.0.11"}, Conditions: discoveryv1.EndpointConditions{Ready: new(true), Terminating: new(true)}, TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "runtime-terminating"}},
+		},
+	}
+	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service, readyPod, unreadyPod, terminatingPod, slice)
+	pins, err := reconciler.AgentRuntimeServiceBackendPins(t.Context(), runtimeObject)
+	if err != nil {
+		t.Fatalf("mixed-readiness pins error: %v", err)
+	}
+	// Only the ready, non-terminating backend is pinned; the Pod-unready backend
+	// is excluded even though its EndpointSlice condition says Ready, and the
+	// terminating endpoint is also excluded from the round-robin pin set.
+	if len(pins) != 1 || pins[0] != "10.0.0.9:8080" {
+		t.Fatalf("mixed-readiness pins = %v, want [10.0.0.9:8080]", pins)
 	}
 }
 
@@ -867,6 +1127,9 @@ func newAgentRuntimeUnitReconciler(t *testing.T, objects ...client.Object) *Agen
 		t.Fatal(err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := discoveryv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.AgentRuntime{}).WithObjects(objects...).Build()

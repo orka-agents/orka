@@ -2,7 +2,9 @@
 
 This chart is generated from `cmd/build/helmify`; edit the generator inputs and
 run `make manifests` rather than editing generated chart copies directly. It
-packages all 26 canonical Orka CRDs under `crds/`.
+packages all 24 production Orka CRDs under `crds/`. The development-only
+`fake.workspace.orka.ai` CRDs are available separately from a matching source
+checkout at `config/development/fake-workspace-provider`.
 
 ## Fresh install
 
@@ -63,6 +65,9 @@ helm install orka charts/orka \
   --wait
 ```
 
+The chart defaults new installations to `harness-v2`. Controller mode remains
+an immutable installation identity and cannot be changed during an upgrade.
+
 The chart installs the exact cross-namespace ingress policy for Vekil. The
 chart-managed provider proxy itself always runs in the Helm release namespace. Leave
 `controller.acpRuntime.providerProxyNamespace` empty or set it to that release
@@ -115,9 +120,10 @@ Orka CRDs for the cluster.
 ## Static harness mode
 
 Every release selects exactly one controller mode: `harness-v1` or
-`harness-v2`. `dual`, `auto`, and `harness-v1-drain` are rejected. Each release
-also requires a distinct, non-empty `controller.watchNamespace` labeled with
-the matching mode:
+`harness-v2`. Fresh installs default to `harness-v2`; select `harness-v1`
+explicitly only for a compatibility release. `dual`, `auto`, and
+`harness-v1-drain` are rejected. Each release also requires a distinct,
+non-empty `controller.watchNamespace` labeled with the matching mode:
 
 ```bash
 kubectl create -f - <<'EOF'
@@ -214,7 +220,7 @@ A matching Orka source checkout provides the same guarded flow as
 competing CRD apply workflows for the same cluster.
 
 If another system owns the CRDs, perform the CRD-first step through that system,
-wait for all 26 CRDs to become `Established`, and then upgrade Orka.
+wait for all 24 production CRDs to become `Established`, and then upgrade Orka.
 
 If a previous release was uninstalled, update its retained CRDs first and install
 the replacement release with `--skip-crds`.

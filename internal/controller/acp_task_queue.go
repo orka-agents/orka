@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -971,6 +972,12 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 		if _, err := workspaceRepository(workspace); err != nil {
 			return err
 		}
+	}
+	// Apply the RuntimeSession relative-root rule here so an unsafe subPath
+	// fails preflight before repository resolution and archive preparation
+	// spend SCM and artifact work on a Task session creation must reject.
+	if err := harnessv2.ValidateWorkspaceRelativeRoot(workspace.SubPath); err != nil {
+		return fmt.Errorf("subPath is invalid: %w", err)
 	}
 	if workspace.MaxChangedFiles != nil && *workspace.MaxChangedFiles <= 0 {
 		return fmt.Errorf("maxChangedFiles must be positive when configured")

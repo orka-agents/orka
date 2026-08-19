@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"path"
 	"strings"
@@ -139,11 +140,18 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 		return result, nil
 	}
 
+	// The operation ID must be unique per session creation attempt: a
+	// RuntimeSession recreated after a completed or ambiguously-failed first
+	// download (capacity loss, post-download creation failure) needs a fresh
+	// ledger operation, or the replacement session hits ErrReplay and can
+	// never materialize its workspace. Bind the ID to the execution attempt
+	// and session generation, which advance across recreations.
 	binding := artifactcap.OperationRequest{
 		Operation: artifactcap.OperationDownload, ObjectDigest: prepared.Artifact.Digest,
 		Identity:      artifactcap.Identity{Namespace: task.Namespace, TaskID: string(task.UID)},
 		ContentLength: prepared.Artifact.SizeBytes, MediaType: prepared.Artifact.MediaType,
-		OperationID: "runtime-workspace-download-" + task.Status.Execution.PromptID,
+		OperationID: fmt.Sprintf("runtime-workspace-download-%s-a%d-g%d",
+			task.Status.Execution.PromptID, task.Status.Execution.Attempt, task.Status.Execution.RuntimeSessionGeneration),
 	}
 	authorizedAt := time.Now().UTC()
 	const capabilityTTL = artifactcap.MaxCapabilityTTL
@@ -290,6 +298,13 @@ func canonicalWorkspaceRepositoryURL(rawURL string) (*url.URL, string, error) {
 	}
 	if port := parsed.Port(); port != "" && port != "443" {
 		return nil, "", errWorkspaceRepositoryHTTPSPort
+	}
+	// Mirror the Publisher's validateRepository IP-literal rule so a Task the
+	// Publisher would unconditionally reject fails preflight instead of
+	// settling as WorkspaceUnsupported after creation.
+	if ip := net.ParseIP(strings.ToLower(parsed.Hostname())); ip != nil &&
+		(ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+		return nil, "", fmt.Errorf("repository URL uses a forbidden IP literal")
 	}
 	if parsed.RawPath != "" && parsed.EscapedPath() != parsed.Path {
 		return nil, "", fmt.Errorf("repository URL escaped path is non-canonical")

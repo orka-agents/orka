@@ -116,6 +116,31 @@ func TestRunACPExternalEffectWithRetryRejectsSuccessAfterBudgetExpiry(t *testing
 	assertInFlightExternalEffectWithOneLease(t, controlStore, identity)
 }
 
+func TestRunExternalEffectRejectsSuccessReturnedAfterCallDeadline(t *testing.T) {
+	controlStore, fence, closeStore := newACPSessionTestStore(
+		t, filepath.Join(t.TempDir(), "external-effect-late-call.db"),
+	)
+	defer closeStore()
+	identity := store.ExternalEffectIdentity{
+		Kind: "acp-mcp-tool", Namespace: "default", AggregateID: "session-late", OperationID: "mcp-call-late",
+	}
+	// An effect that ignores cancellation and returns success after its bounded
+	// call deadline must not be committed as Succeeded; the configured timeout
+	// expired, so the effect is left in flight for explicit reconciliation.
+	result, replayed, err := runExternalEffectWithReplayCallTimeout(
+		context.Background(), controlStore, fence, identity, map[string]string{"call": "custom"},
+		time.Millisecond,
+		func(context.Context) (string, error) {
+			time.Sleep(20 * time.Millisecond)
+			return testBrokeredEffectCommittedResult, nil
+		},
+	)
+	if result != "" || replayed || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("late call result = %q replayed=%v error = %v; want no result and deadline exceeded", result, replayed, err)
+	}
+	assertInFlightExternalEffectWithOneLease(t, controlStore, identity)
+}
+
 func TestRunACPExternalEffectWithRetryStopsOnCallerCancellation(t *testing.T) {
 	controlStore, fence, closeStore := newACPSessionTestStore(
 		t, filepath.Join(t.TempDir(), "external-effect-cancel.db"),

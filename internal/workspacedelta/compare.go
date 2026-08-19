@@ -1,6 +1,7 @@
 package workspacedelta
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,30 +11,47 @@ import (
 // Build compares a trusted pre-prompt baseline with a frozen post-prompt tree.
 // It returns no artifact for no-change and read-only-modified classifications.
 func Build(baseline *Snapshot, postRoot string, intent Intent) (Result, error) {
-	return BuildWithLimits(baseline, postRoot, intent, BuildLimits{})
+	return BuildContext(context.Background(), baseline, postRoot, intent)
+}
+
+// BuildContext is Build with cancellation propagated through workspace
+// capture, comparison, content retention, and archive construction.
+func BuildContext(ctx context.Context, baseline *Snapshot, postRoot string, intent Intent) (Result, error) {
+	return BuildWithLimitsContext(ctx, baseline, postRoot, intent, BuildLimits{})
 }
 
 // BuildWithLimits compares a trusted baseline with a frozen post-prompt tree
 // while applying limits that may only narrow the baseline's captured limits.
 func BuildWithLimits(baseline *Snapshot, postRoot string, intent Intent, limits BuildLimits) (Result, error) {
+	return BuildWithLimitsContext(context.Background(), baseline, postRoot, intent, limits)
+}
+
+// BuildWithLimitsContext is BuildWithLimits with request cancellation.
+func BuildWithLimitsContext(ctx context.Context, baseline *Snapshot, postRoot string, intent Intent, limits BuildLimits) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	if err := intent.validate(); err != nil {
 		return Result{}, err
 	}
-	if err := validateBaseline(baseline); err != nil {
+	if err := validateBaseline(ctx, baseline); err != nil {
 		return Result{}, err
 	}
 	artifactLimit, err := effectiveArtifactLimit(baseline.options.limits.MaxArtifactBytes, limits.MaxArtifactBytes)
 	if err != nil {
 		return Result{}, err
 	}
-	post, err := capture(postRoot, baseline.options, false)
+	post, err := capture(ctx, postRoot, baseline.options, false)
 	if err != nil {
 		return Result{}, err
 	}
-	if err := compareProtectedEntries(baseline.entries, post.entries); err != nil {
+	if err := compareProtectedEntries(ctx, baseline.entries, post.entries); err != nil {
 		return Result{}, err
 	}
-	changes, deletions, symlinks := compareEntries(baseline.entries, post.entries)
+	changes, deletions, symlinks, err := compareEntries(ctx, baseline.entries, post.entries)
+	if err != nil {
+		return Result{}, err
+	}
 	if len(changes) == 0 && len(deletions) == 0 {
 		return Result{Classification: ClassificationNoChange}, nil
 	}
@@ -43,12 +61,12 @@ func BuildWithLimits(baseline *Snapshot, postRoot string, intent Intent, limits 
 		return result, nil
 	}
 	result.Classification = ClassificationWriteDelta
-	if err := retainChangedContents(postRoot, post, changes, artifactLimit); err != nil {
+	if err := retainChangedContents(ctx, postRoot, post, changes, artifactLimit); err != nil {
 		return Result{}, err
 	}
 	artifactLimits := baseline.options.limits
 	artifactLimits.MaxArtifactBytes = artifactLimit
-	manifest, manifestDigest, artifact, artifactDigest, err := buildArtifact(changes, deletions, symlinks, post.entries, artifactLimits)
+	manifest, manifestDigest, artifact, artifactDigest, err := buildArtifact(ctx, changes, deletions, symlinks, post.entries, artifactLimits)
 	if err != nil {
 		return Result{}, err
 	}
@@ -69,7 +87,7 @@ func effectiveArtifactLimit(baselineLimit, requestedLimit int64) (int64, error) 
 	return baselineLimit, nil
 }
 
-func validateBaseline(baseline *Snapshot) error {
+func validateBaseline(ctx context.Context, baseline *Snapshot) error {
 	if baseline == nil || baseline.version != snapshotVersion || baseline.entries == nil || baseline.optionsDigest == "" || baseline.manifestDigest == "" {
 		return ErrInvalidBaseline
 	}
@@ -77,21 +95,27 @@ func validateBaseline(baseline *Snapshot) error {
 	if err != nil || optionsDigest != baseline.optionsDigest {
 		return ErrInvalidBaseline
 	}
-	manifestDigest, err := snapshotDigest(baseline)
+	manifestDigest, err := snapshotDigest(ctx, baseline)
 	if err != nil || manifestDigest != baseline.manifestDigest {
 		return ErrInvalidBaseline
 	}
 	return nil
 }
 
-func compareProtectedEntries(baseline, post map[string]entry) error {
+func compareProtectedEntries(ctx context.Context, baseline, post map[string]entry) error {
 	paths := make(map[string]struct{})
 	for entryPath, current := range baseline {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if current.protected {
 			paths[entryPath] = struct{}{}
 		}
 	}
 	for entryPath, current := range post {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if current.protected {
 			paths[entryPath] = struct{}{}
 		}
@@ -102,6 +126,9 @@ func compareProtectedEntries(baseline, post map[string]entry) error {
 	}
 	sort.Strings(ordered)
 	for _, entryPath := range ordered {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		before, hadBefore := baseline[entryPath]
 		after, hasAfter := post[entryPath]
 		if !hadBefore || !hasAfter || !protectedEntryEqual(before, after) {
@@ -111,14 +138,20 @@ func compareProtectedEntries(baseline, post map[string]entry) error {
 	return nil
 }
 
-func compareEntries(baseline, post map[string]entry) ([]Change, []Deletion, []Symlink) {
+func compareEntries(ctx context.Context, baseline, post map[string]entry) ([]Change, []Deletion, []Symlink, error) {
 	paths := make(map[string]struct{}, len(baseline)+len(post))
 	for entryPath, current := range baseline {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, err
+		}
 		if !current.protected {
 			paths[entryPath] = struct{}{}
 		}
 	}
 	for entryPath, current := range post {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, err
+		}
 		if !current.protected {
 			paths[entryPath] = struct{}{}
 		}
@@ -133,6 +166,9 @@ func compareEntries(baseline, post map[string]entry) ([]Change, []Deletion, []Sy
 	deletions := make([]Deletion, 0)
 	symlinks := make([]Symlink, 0)
 	for _, entryPath := range ordered {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, err
+		}
 		before, hadBefore := baseline[entryPath]
 		after, hasAfter := post[entryPath]
 		if hadBefore && (!hasAfter || before.kind != after.kind) {
@@ -158,7 +194,7 @@ func compareEntries(baseline, post map[string]entry) ([]Change, []Deletion, []Sy
 			symlinks = append(symlinks, Symlink{Path: entryPath, Target: after.target, Mode: after.mode})
 		}
 	}
-	return changes, deletions, symlinks
+	return changes, deletions, symlinks, nil
 }
 
 func entryEqual(left, right entry) bool {
@@ -193,9 +229,12 @@ func (r Result) Validate() error {
 	return nil
 }
 
-func retainChangedContents(postRoot string, post *Snapshot, changes []Change, maxContentBytes int64) error {
+func retainChangedContents(ctx context.Context, postRoot string, post *Snapshot, changes []Change, maxContentBytes int64) error {
 	var changedBytes int64
 	for _, change := range changes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if change.Kind != EntryFile {
 			continue
 		}
@@ -223,6 +262,9 @@ func retainChangedContents(postRoot string, post *Snapshot, changes []Change, ma
 	seen := make(map[fileIdentity]string)
 	var retainedBytes int64
 	for _, change := range changes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if change.Kind != EntryFile {
 			continue
 		}
@@ -235,7 +277,7 @@ func retainChangedContents(postRoot string, post *Snapshot, changes []Change, ma
 		if err != nil {
 			return pathError("retain changed content", change.Path, err)
 		}
-		captured, err := captureRegular(filePath, change.Path, initial, false, retentionOptions, true, retainedBytes, seen)
+		captured, err := captureRegular(ctx, filePath, change.Path, initial, false, retentionOptions, true, retainedBytes, seen)
 		if err != nil {
 			return err
 		}

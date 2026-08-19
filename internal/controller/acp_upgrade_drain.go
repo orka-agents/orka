@@ -753,7 +753,7 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 		return err
 	}
 	supervisor := c.supervisorClient()
-	probe, err := supervisor.Probe(ctx, runtimePoolPodEndpoint(pod), string(auth.Data[runtimePoolControllerTokenKey]))
+	probe, err := supervisor.Probe(ctx, runtimePoolPodEndpoint(pod), string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		return fmt.Errorf("authenticated supervisor probe failed: %w", err)
 	}

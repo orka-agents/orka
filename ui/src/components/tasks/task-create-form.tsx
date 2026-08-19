@@ -12,6 +12,17 @@ import { useAgentList } from '@/hooks/use-agents'
 import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
 import { workspaceConfigSchema, type WorkspaceIntent } from '@/schemas/task'
+import {
+  sameWorkspaceRepositoryIdentity,
+  validateWorkspaceRepositoryUrl,
+  workspaceRepositoryIdentity,
+  workspaceSubPathError,
+} from '@/lib/workspace-repository'
+import {
+  workspacePublicationBranchError,
+  workspaceSourceBranchError,
+  workspaceSourceRefError,
+} from '@/lib/workspace-source-ref'
 import { builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
 
 function optionalRepositoryIdentity(provider: string, id: string) {
@@ -129,8 +140,104 @@ export function TaskCreateForm() {
         return
       }
 
+      // The controller workspace preflight rejects source selectors and read
+      // credentials without a repository; fail here instead of after creation.
+      if (!gitRepo.trim()) {
+        const dependentField = [
+          { label: 'Source branch', value: branch },
+          { label: 'Source ref', value: gitRef },
+          { label: 'Source subpath', value: subPath },
+          { label: 'Read credential Secret', value: readCredentialName },
+          { label: 'Source repository provider', value: sourceProvider },
+          { label: 'Source repository URL identity', value: sourceRepositoryID },
+        ].find((field) => field.value.trim())
+        if (dependentField) {
+          toast.error(`${dependentField.label} requires a source repository URL`)
+          return
+        }
+      }
+      // Mirror the controller's canonical source-ref validation so malformed
+      // selectors fail here instead of after the Task is created.
+      if (gitRef.trim()) {
+        const refError = workspaceSourceRefError(gitRef.trim())
+        if (refError) {
+          toast.error(`Source ref is invalid: ${refError}`)
+          return
+        }
+      }
+      if (branch.trim()) {
+        const branchError = workspaceSourceBranchError(branch.trim())
+        if (branchError) {
+          toast.error(`Source branch is invalid: ${branchError}`)
+          return
+        }
+      }
+      if (subPath.trim()) {
+        const subPathError = workspaceSubPathError(subPath)
+        if (subPathError) {
+          toast.error(`Source subpath is invalid: ${subPathError}`)
+          return
+        }
+      }
+
+      const sourceRepoResult = validateWorkspaceRepositoryUrl('Source repository URL', gitRepo)
+      if ('error' in sourceRepoResult) {
+        toast.error(sourceRepoResult.error)
+        return
+      }
+      const publicationRepoResult = validateWorkspaceRepositoryUrl('Publication repository URL', publicationGitRepo)
+      if ('error' in publicationRepoResult) {
+        toast.error(publicationRepoResult.error)
+        return
+      }
+
+      // Mirror the controller's canonical repository identity checks: a
+      // supplied identity must use the github provider and match the
+      // canonical credential-free URL identity, with the publication
+      // identity's URL falling back to the source URL.
+      const identityError = (label: string, provider: string, id: string, canonicalUrl: string): string | null => {
+        if (!provider.trim() && !id.trim()) return null
+        if (provider.trim().toLowerCase() !== 'github') return `${label} provider must be github`
+        const derived = workspaceRepositoryIdentity(canonicalUrl)
+        if (!derived) return `${label} identity requires a valid repository URL`
+        if (!sameWorkspaceRepositoryIdentity(id, derived)) {
+          return `${label} identity must match the canonical credential-free URL identity "${derived}"`
+        }
+        return null
+      }
+      const sourceIdentityError = identityError('Source repository', sourceProvider, sourceRepositoryID, sourceRepoResult.url)
+      if (sourceIdentityError) {
+        toast.error(sourceIdentityError)
+        return
+      }
+      if (workspaceIntent === 'write') {
+        const publicationIdentityError = identityError(
+          'Publication repository',
+          publicationProvider,
+          publicationRepositoryID,
+          publicationRepoResult.url || sourceRepoResult.url,
+        )
+        if (publicationIdentityError) {
+          toast.error(publicationIdentityError)
+          return
+        }
+        // Mirror the controller's publication branch validation.
+        for (const field of [
+          { label: 'Publication branch', value: pushBranch },
+          { label: 'Pull request base branch', value: prBaseBranch },
+        ]) {
+          if (field.value.trim()) {
+            const branchError = workspacePublicationBranchError(field.value.trim())
+            if (branchError) {
+              toast.error(`${field.label} is invalid: ${branchError}`)
+              return
+            }
+          }
+        }
+      }
+
       const workspace: Record<string, unknown> = { intent: workspaceIntent }
-      if (gitRepo.trim()) workspace.gitRepo = gitRepo.trim()
+      if (sourceRepoResult.url) workspace.gitRepo = sourceRepoResult.url
       const sourceRepository = optionalRepositoryIdentity(sourceProvider, sourceRepositoryID)
       if (sourceRepository) workspace.sourceRepository = sourceRepository
       if (branch.trim()) workspace.branch = branch.trim()
@@ -140,7 +247,7 @@ export function TaskCreateForm() {
       if (readCredentialRef) workspace.readCredentialRef = readCredentialRef
 
       if (workspaceIntent === 'write') {
-        if (publicationGitRepo.trim()) workspace.publicationGitRepo = publicationGitRepo.trim()
+        if (publicationRepoResult.url) workspace.publicationGitRepo = publicationRepoResult.url
         const publicationRepository = optionalRepositoryIdentity(publicationProvider, publicationRepositoryID)
         if (publicationRepository) workspace.publicationRepository = publicationRepository
         const publicationReadCredentialRef = optionalCredentialReference(
@@ -156,12 +263,18 @@ export function TaskCreateForm() {
         if (prBaseBranch.trim()) workspace.prBaseBranch = prBaseBranch.trim()
         if (createPR) workspace.createPR = true
       }
-      const workspaceResult = workspaceConfigSchema.safeParse(workspace)
-      if (!workspaceResult.success) {
-        toast.error(workspaceResult.error.issues[0]?.message ?? 'Invalid workspace configuration')
-        return
+      // Only serialize workspace when a workspace field is actually configured:
+      // a bare {intent: "read"} would make an otherwise valid prompt-only Task
+      // fail preflight in harness-v1 mode, which requires gitRepo on any
+      // non-nil workspace.
+      if (Object.keys(workspace).length > 1) {
+        const workspaceResult = workspaceConfigSchema.safeParse(workspace)
+        if (!workspaceResult.success) {
+          toast.error(workspaceResult.error.issues[0]?.message ?? 'Invalid workspace configuration')
+          return
+        }
+        body.workspace = workspaceResult.data
       }
-      body.workspace = workspaceResult.data
     }
 
     if (priority) body.priority = parseInt(priority)

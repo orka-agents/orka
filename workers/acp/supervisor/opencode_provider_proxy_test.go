@@ -126,6 +126,57 @@ func TestProviderProxyClassifiesOpenCodeChatAsInference(t *testing.T) {
 	}
 }
 
+func TestNormalizeProviderRequestClampsOutputLimitForAllProviders(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		provider  string
+		path      string
+		limit     int64
+		body      string
+		wantField string
+		want      int64
+		wantErr   bool
+		unchanged bool
+	}{
+		{name: "claude clamps oversized max_tokens", provider: "claude", path: "/v1/messages", limit: 4096, body: `{"model":"m","max_tokens":900000}`, wantField: "max_tokens", want: 4096},
+		{name: "claude preserves lower max_tokens", provider: "claude", path: "/v1/messages", limit: 4096, body: `{"model":"m","max_tokens":1024}`, wantField: "max_tokens", want: 1024},
+		{name: "claude injects missing max_tokens", provider: "claude", path: "/v1/messages", limit: 4096, body: `{"model":"m"}`, wantField: "max_tokens", want: 4096},
+		{name: "codex clamps responses max_output_tokens", provider: providerKindCodex, path: providerOpenAIResponsesV1Path, limit: 2048, body: `{"model":"m","max_output_tokens":900000}`, wantField: "max_output_tokens", want: 2048},
+		{name: "codex injects responses limit", provider: providerKindCodex, path: "/responses", limit: 2048, body: `{"model":"m"}`, wantField: "max_output_tokens", want: 2048},
+		{name: "copilot clamps chat completions", provider: providerKindCopilot, path: providerOpenAIChatCompletionsV1Path, limit: 2048, body: `{"model":"m","max_completion_tokens":900000}`, wantField: "max_completion_tokens", want: 2048},
+		{name: "copilot injects chat completions limit", provider: providerKindCopilot, path: providerOpenAIChatCompletionsPath, limit: 2048, body: `{"model":"m"}`, wantField: "max_tokens", want: 2048},
+		{name: "claude rejects non-positive max_tokens", provider: "claude", path: "/v1/messages", limit: 4096, body: `{"model":"m","max_tokens":0}`, wantErr: true},
+		{name: "claude count_tokens is untouched", provider: "claude", path: "/v1/messages/count_tokens", limit: 4096, body: `{"model":"m"}`, unchanged: true},
+		{name: "no configured limit is untouched", provider: providerKindCodex, path: providerOpenAIResponsesV1Path, limit: 0, body: `{"model":"m","max_output_tokens":900000}`, unchanged: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := normalizeProviderRequestBody(test.provider, "m", test.path, test.limit, []byte(test.body))
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("normalizeProviderRequestBody() error = nil, want rejection")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.unchanged {
+				if string(got) != test.body {
+					t.Fatalf("body = %s, want unchanged %s", got, test.body)
+				}
+				return
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(got, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload[test.wantField] != float64(test.want) {
+				t.Fatalf("%s = %#v, want %d", test.wantField, payload[test.wantField], test.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeOpenCodeProviderRequestEnforcesOutputLimit(t *testing.T) {
 	for _, test := range []struct {
 		name      string

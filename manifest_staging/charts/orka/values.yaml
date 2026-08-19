@@ -2,9 +2,10 @@
 
 # Controller configuration
 controller:
-  # Required immutable execution contract for this installation. Install v1
-  # and v2 as separate releases; one release never serves both contracts.
-  mode: ""
+  # Immutable execution contract for this installation. Fresh installs default
+  # to v2; select v1 explicitly only for a separate compatibility release.
+  # One release never serves both contracts or changes mode in place.
+  mode: harness-v2
 
   # Number of controller replicas
   replicas: 1

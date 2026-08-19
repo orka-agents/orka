@@ -129,7 +129,9 @@ func newBrokerArtifactAuthorizer(rawURL string, client *http.Client, bearer []by
 	parsed.Path = ArtifactAuthorizationBrokerPath
 	parsed.RawPath = ""
 	if client == nil {
-		client = &http.Client{Timeout: timeout}
+		// Authenticated in-cluster controller traffic must never traverse an
+		// inherited environment proxy.
+		client = &http.Client{Timeout: timeout, Transport: harnessv2.NewProxylessTransport()}
 	} else {
 		clone := *client
 		client = &clone

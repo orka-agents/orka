@@ -566,6 +566,22 @@ spec:
 {{- printf "%s-workspace-publisher-auth" (include "orka.fullname" . | trunc 38 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{/*
+The publisher bearer is transmitted on every request; the operation-capability
+secret is a signing key that must never transit. Sharing keys or values would
+let a bearer holder mint valid operation capabilities.
+*/}}
+{{- define "orka.validatePublisherAuth" -}}
+{{- if .Values.publisher.enabled -}}
+{{- if eq (trim .Values.publisher.auth.controllerTokenKey) (trim .Values.publisher.auth.capabilitySecretKey) -}}
+{{- fail "publisher.auth.controllerTokenKey and publisher.auth.capabilitySecretKey must reference distinct Secret keys" -}}
+{{- end -}}
+{{- if and .Values.publisher.auth.controllerToken (eq .Values.publisher.auth.controllerToken .Values.publisher.auth.capabilitySecret) -}}
+{{- fail "publisher.auth.controllerToken and publisher.auth.capabilitySecret must be distinct values" -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "orka.acpArtifactSecretName" -}}
 {{- printf "%s-acp-artifact-capability" (include "orka.fullname" . | trunc 39 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}

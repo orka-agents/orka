@@ -136,9 +136,12 @@ if grep -Fq 'agent-harness-wrapper' "${rendered_chart}"; then
   die "harness-v2 release render unexpectedly contains the harness-v1 wrapper"
 fi
 
-expected_crds="$(find config/crd/bases -maxdepth 1 -type f -name '*.yaml' | wc -l | tr -d ' ')"
+expected_crds="$(find "${staging_chart}/crds" -maxdepth 1 -type f -name '*.yaml' | wc -l | tr -d ' ')"
 rendered_crds="$(helm show crds "${promoted_chart}" | grep -c '^kind: CustomResourceDefinition$')"
 [[ "${rendered_crds}" == "${expected_crds}" ]] || \
-  die "promoted chart CRD count ${rendered_crds} does not match config/crd/bases ${expected_crds}"
+  die "promoted chart CRD count ${rendered_crds} does not match staging chart ${expected_crds}"
+if helm show crds "${promoted_chart}" | grep -F 'fake.workspace.orka.ai' >/dev/null; then
+  die "promoted chart must not contain development-only fake workspace CRDs"
+fi
 
 printf 'Validated harness-v2 release manifest contract for %s.\n' "${release_tag}"

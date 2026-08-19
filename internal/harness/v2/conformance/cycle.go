@@ -547,20 +547,39 @@ func (s *lifecycleProbeState) cleanup(ctx context.Context) {
 	if !s.sessionCreated {
 		return
 	}
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
+	// Cancel and delete each get a full control-timeout budget rather than
+	// sharing one fixed 5s window, so a slow cancellation cannot starve the
+	// deletion and leak a resident probe session until capacity is exhausted.
+	budget := s.target.ControlTimeout
+	if budget <= 0 {
+		budget = defaultControlTimeout
+	}
 	if s.promptStarted && !s.cancelAttempted {
-		request, err := s.cancelPromptRequest("cleanup-cancel-"+string(s.promptID), newMetadata(s.sessionFence, s.taskUID, 1, s.promptID, "placeholder", time.Now().UTC().Add(5*time.Second)))
+		cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+		request, err := s.cancelPromptRequest("cleanup-cancel-"+string(s.promptID), newMetadata(s.sessionFence, s.taskUID, 1, s.promptID, "placeholder", time.Now().UTC().Add(budget)))
 		if err == nil {
 			s.cancelAttempted = true
-			_, _ = s.client.CancelPrompt(cleanupCtx, s.sessionID, request)
+			_, _ = s.client.CancelPrompt(cancelCtx, s.sessionID, request)
 		}
+		cancel()
 	}
 	if !s.deleteAttempted {
-		request, err := s.deleteSessionRequest("cleanup-delete-" + string(s.sessionID))
-		if err == nil {
-			s.deleteAttempted = true
-			_, _ = s.client.DeleteRuntimeSession(cleanupCtx, s.sessionID, request)
+		// Verify deletion succeeded and retry once on a transient failure, so a
+		// runtime that needs more than one attempt to release the session does
+		// not leave it resident.
+		for attempt := range 2 {
+			deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+			request, err := s.deleteSessionRequest(fmt.Sprintf("cleanup-delete-%s-%d", s.sessionID, attempt))
+			if err != nil {
+				cancel()
+				return
+			}
+			_, deleteErr := s.client.DeleteRuntimeSession(deleteCtx, s.sessionID, request)
+			cancel()
+			if deleteErr == nil {
+				s.deleteAttempted = true
+				return
+			}
 		}
 	}
 }

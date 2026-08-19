@@ -85,7 +85,7 @@ Global Flags:
 ## `orka run`
 
 ```text
-Ollama-style chat interface.
+Chat interface backed by Orka chat and provider configuration.
 
   One-shot:    orka run "explain kubernetes pods"
   Interactive: orka run

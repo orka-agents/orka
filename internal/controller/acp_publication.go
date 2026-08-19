@@ -354,12 +354,12 @@ func (d *ACPDispatcher) publishWorkspaceDelta(
 		publishReceipt.RequestDigest = publishResponse.Receipt.RequestDigest
 		publishReceipt.AcknowledgementUnknown = publishResponse.Receipt.Outcome == publisher.PublishOutcomeUnknown
 	}
-	publication, err = d.transitionPublication(ctx, publication, fence, store.PublicationVerifying,
+	publication, err = d.transitionPublication(settlementCtx, publication, fence, store.PublicationVerifying,
 		publishReceipt.OperationID, publishReceipt.RequestDigest, nil, publishReceipt, nil, "")
 	if err != nil {
 		return acpPublicationResult{}, err
 	}
-	if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryPublishing, store.PromptDeliveryVerifying, "publication-verifying", ""); err != nil {
+	if err := d.transitionDelivery(settlementCtx, attemptID, fence, store.PromptDeliveryPublishing, store.PromptDeliveryVerifying, "publication-verifying", ""); err != nil {
 		return acpPublicationResult{}, err
 	}
 
@@ -496,12 +496,12 @@ func (d *ACPDispatcher) publishWorkspaceDelta(
 			prReceipt = taskPullRequestReceipt(prResponse.Receipt, workspace, branch)
 		}
 	}
-	publication, err = d.transitionPublication(ctx, publication, fence, verification.Outcome,
+	publication, err = d.transitionPublication(settlementCtx, publication, fence, verification.Outcome,
 		verification.OperationID, verification.RequestDigest, nil, nil, verification, terminalReason)
 	if err != nil {
 		return acpPublicationResult{}, err
 	}
-	if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryVerifying, promptDeliveryForPublication(publication.State),
+	if err := d.transitionDelivery(settlementCtx, attemptID, fence, store.PromptDeliveryVerifying, promptDeliveryForPublication(publication.State),
 		"publication-verified", terminalReason); err != nil {
 		return acpPublicationResult{}, err
 	}
@@ -513,7 +513,7 @@ func (d *ACPDispatcher) publishWorkspaceDelta(
 		status.Message = "cancellation was requested after publication won the durable CAS; delivery reconciliation completed"
 	}
 	result := acpPublicationResult{PublicationID: publication.ID, Status: status}
-	if err := d.reclaimStandaloneTaskBranchClaim(ctx, task, attemptID, fence, publication); err != nil {
+	if err := d.reclaimStandaloneTaskBranchClaim(settlementCtx, task, attemptID, fence, publication); err != nil {
 		return acpPublicationResult{}, err
 	}
 	switch publication.State {

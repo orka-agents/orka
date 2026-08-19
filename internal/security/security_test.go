@@ -156,6 +156,45 @@ func TestCanonicalRepositoryCloneURL(t *testing.T) {
 	}
 }
 
+func TestCanonicalWorkspaceRepositoryCloneURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		repoURL string
+		want    string
+		wantErr string
+	}{
+		{name: "empty URL is allowed", repoURL: "  ", want: ""},
+		{name: "GitHub SSH root canonicalized", repoURL: "git@github.com:example/project.git", want: "https://github.com/example/project"},
+		{name: "non-GitHub HTTPS URL accepted", repoURL: "https://git.example.com/example/project.git", want: "https://git.example.com/example/project.git"},
+		{name: "plain HTTP rejected", repoURL: "http://github.com/example/project", wantErr: "credential-free HTTPS URL"},
+		{name: "credentialed URL rejected", repoURL: "https://user:token@git.example.com/example/project", wantErr: "credential-free HTTPS URL"},
+		{name: "non-GitHub SSH rejected", repoURL: "git@git.example.com:example/project.git", wantErr: "credential-free HTTPS URL"},
+		{name: "query rejected", repoURL: "https://git.example.com/example/project?x=1", wantErr: "credential-free HTTPS URL"},
+		{name: "non-default port rejected", repoURL: "https://git.example.com:8443/example/project", wantErr: "default HTTPS port"},
+		{name: "escaped path separator rejected", repoURL: "https://git.example.com/example%2Fproject", wantErr: "non-canonical escaped path"},
+		{name: "trailing slash rejected", repoURL: "https://git.example.com/example/project/", wantErr: "path is invalid"},
+		{name: "empty path rejected", repoURL: "https://git.example.com/", wantErr: "path is invalid"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := CanonicalWorkspaceRepositoryCloneURL(tt.repoURL)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("CanonicalWorkspaceRepositoryCloneURL(%q) error = %v, want %q", tt.repoURL, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CanonicalWorkspaceRepositoryCloneURL(%q) error = %v", tt.repoURL, err)
+			}
+			if got != tt.want {
+				t.Fatalf("CanonicalWorkspaceRepositoryCloneURL(%q) = %q, want %q", tt.repoURL, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEffectiveWorkspaceBranch(t *testing.T) {
 	tests := []struct {
 		name string

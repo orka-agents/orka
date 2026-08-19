@@ -21,6 +21,8 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
+const acpTestRuntimeNamespace = "orka-runtimes"
+
 func TestQueueACPRuntimeTaskCreatesPoolAndDurableAttempt(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -58,7 +60,7 @@ func TestQueueACPRuntimeTaskCreatesPoolAndDurableAttempt(t *testing.T) {
 	}
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
+		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
@@ -69,7 +71,7 @@ func TestQueueACPRuntimeTaskCreatesPoolAndDurableAttempt(t *testing.T) {
 	if err := kubeClient.List(ctx, &pools); err != nil {
 		t.Fatal(err)
 	}
-	if len(pools.Items) != 1 || pools.Items[0].Spec.DesiredReplicas != 1 || pools.Items[0].Spec.RuntimeNamespace != "orka-runtimes" {
+	if len(pools.Items) != 1 || pools.Items[0].Spec.DesiredReplicas != 1 || pools.Items[0].Spec.RuntimeNamespace != acpTestRuntimeNamespace {
 		t.Fatalf("unexpected pools: %#v", pools.Items)
 	}
 	queued := &corev1alpha1.Task{}
@@ -237,7 +239,7 @@ func TestQueueACPRuntimeTaskRejectsUnsafeRepositoryBeforePoolDemand(t *testing.T
 			}
 			reconciler := &TaskReconciler{
 				Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-				ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
+				ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 				ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 			}
 			bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
@@ -316,7 +318,7 @@ func TestQueueACPRuntimeTaskReportsInvalidWorkspaceWhenReadCredentialDoesNotExis
 	}
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
+		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
@@ -419,7 +421,7 @@ func TestQueueACPRuntimeTaskReportsInvalidRuntimeProfile(t *testing.T) {
 	}
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
+		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	current := configureAgentExecutionBindingTest(t, ctx, reconciler, task)
@@ -498,6 +500,30 @@ func TestValidateACPWorkspacePreflightRejectsUnsafeRepositoriesBeforeDemand(t *t
 				PublicationCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "publish"},
 			},
 			want: errWorkspaceRepositoryHTTPSPort.Error(),
+		},
+		{
+			name: "traversal subPath",
+			workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/orka-agents/orka.git",
+				SubPath: "../private",
+			},
+			want: "subPath is invalid",
+		},
+		{
+			name: "absolute subPath",
+			workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/orka-agents/orka.git",
+				SubPath: "/absolute",
+			},
+			want: "subPath is invalid",
+		},
+		{
+			name: "empty subPath segment",
+			workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/orka-agents/orka.git",
+				SubPath: "a//b",
+			},
+			want: "subPath is invalid",
 		},
 	}
 	for _, test := range tests {

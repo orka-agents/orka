@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,6 +56,13 @@ type ACPMCPBrokerCredentials struct {
 
 type ACPMCPBrokerCredentialResolver interface {
 	ResolveACPMCPBrokerCredentials(context.Context, harnessv2.MCPBrokerCallRequest) (ACPMCPBrokerCredentials, error)
+}
+
+// ACPMCPBrokerPreAuthenticator resolves and verifies the controller bearer
+// from the non-secret pool identity carried in request headers, so the broker
+// can reject unauthenticated callers before consuming their request bodies.
+type ACPMCPBrokerPreAuthenticator interface {
+	PreAuthenticateACPMCPBroker(ctx context.Context, poolNamespace, poolUID, authorizationHeader string) error
 }
 
 type ACPMCPBrokerCredentialResolverFunc func(context.Context, harnessv2.MCPBrokerCallRequest) (ACPMCPBrokerCredentials, error)
@@ -281,6 +289,19 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusServiceUnavailable, "MCP broker is unavailable")
 		return
 	}
+	// Authenticate the controller bearer against the pool identity carried in
+	// non-secret headers before reading the body, so an untrusted Pod cannot
+	// occupy request handlers by drip-feeding chunked bodies without knowing a
+	// bearer. Resolvers that do not support header pre-authentication (test
+	// fakes) fall through to the post-decode bearer check below.
+	if preAuth, ok := b.Credentials.(ACPMCPBrokerPreAuthenticator); ok {
+		poolNamespace := r.Header.Get(harnessv2.MCPBrokerPoolNamespaceHeader)
+		poolUID := r.Header.Get(harnessv2.MCPBrokerPoolUIDHeader)
+		if err := preAuth.PreAuthenticateACPMCPBroker(r.Context(), poolNamespace, poolUID, r.Header.Get("Authorization")); err != nil {
+			writeACPMCPError(w, http.StatusUnauthorized, "MCP broker authentication failed")
+			return
+		}
+	}
 	limit := b.MaxBodyBytes
 	if limit <= 0 || limit > harnessv2.MaxCanonicalJSONBytes {
 		limit = harnessv2.MaxCanonicalJSONBytes
@@ -305,6 +326,15 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusBadRequest, "invalid MCP broker request")
 		return
 	}
+	// The body must match the pre-authenticated pool identity so a caller
+	// cannot pre-authenticate as one pool and act as another.
+	if _, ok := b.Credentials.(ACPMCPBrokerPreAuthenticator); ok {
+		if request.Namespace != r.Header.Get(harnessv2.MCPBrokerPoolNamespaceHeader) ||
+			string(request.Metadata.Fence.RuntimePoolUID) != r.Header.Get(harnessv2.MCPBrokerPoolUIDHeader) {
+			writeACPMCPError(w, http.StatusBadRequest, "MCP broker request does not match its authenticated pool identity")
+			return
+		}
+	}
 	credentials, err := b.Credentials.ResolveACPMCPBrokerCredentials(r.Context(), request)
 	if err != nil || !constantTimeBearerMatch(r.Header.Get("Authorization"), credentials.ControllerBearerToken) {
 		writeACPMCPError(w, http.StatusUnauthorized, "MCP broker authentication failed")
@@ -318,8 +348,11 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusGone, "MCP broker policy is stale")
 		return
 	}
+	// Verify with a fresh timestamp: credential resolution above performs
+	// Kubernetes I/O, and a capability that expired while it ran must not be
+	// accepted against the stale pre-resolution clock.
 	if err := harnessv2.VerifyOperationCapability(
-		credentials.CapabilitySecret, r.Header.Get(harnessv2.OperationCapabilityHeader), request.Metadata, true, now,
+		credentials.CapabilitySecret, r.Header.Get(harnessv2.OperationCapabilityHeader), request.Metadata, true, time.Now().UTC(),
 	); err != nil {
 		writeACPMCPError(w, http.StatusForbidden, "MCP broker operation authorization failed")
 		return
@@ -436,6 +469,33 @@ type KubernetesACPMCPBrokerCredentialResolver struct {
 	Epochs *ControllerEpochManager
 }
 
+// PreAuthenticateACPMCPBroker resolves the pool's controller bearer from the
+// non-secret namespace + pool UID headers and constant-time compares it to the
+// presented Authorization header, before any request body is read.
+func (r KubernetesACPMCPBrokerCredentialResolver) PreAuthenticateACPMCPBroker(
+	ctx context.Context,
+	poolNamespace, poolUID, authorizationHeader string,
+) error {
+	if r.Reader == nil {
+		return fmt.Errorf("kubernetes MCP credential resolver is not configured")
+	}
+	if strings.TrimSpace(poolNamespace) == "" || strings.TrimSpace(poolUID) == "" {
+		return fmt.Errorf("MCP broker pool identity headers are required")
+	}
+	pool, err := findACPMCPRuntimePool(ctx, r.Reader, poolNamespace, harnessv2.RuntimePoolUID(poolUID))
+	if err != nil {
+		return err
+	}
+	bearer, _, err := runtimePoolACPMCPAuthMaterial(ctx, r.Reader, pool)
+	if err != nil {
+		return err
+	}
+	if !constantTimeBearerMatch(authorizationHeader, bearer) {
+		return fmt.Errorf("MCP broker bearer does not match the pool")
+	}
+	return nil
+}
+
 func (r KubernetesACPMCPBrokerCredentialResolver) ResolveACPMCPBrokerCredentials(
 	ctx context.Context,
 	request harnessv2.MCPBrokerCallRequest,
@@ -490,6 +550,9 @@ func (r KubernetesACPMCPBrokerCredentialResolver) resolveRuntimePoolCredentials(
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("active MCP task is bound to a different runtime pool")
 	}
 	active := pool.Status.ActiveInstance
+	if active == nil {
+		return ACPMCPBrokerCredentials{}, fmt.Errorf("runtime pool has no active instance")
+	}
 	if active.ControllerEpoch != controllerFence.Epoch || active.ProfileDigest != pool.Spec.Runtime.Profile.Digest ||
 		active.ProtocolVersion != corev1alpha1.RuntimePoolProtocolHarnessV2 {
 		return ACPMCPBrokerCredentials{}, fmt.Errorf("runtime pool active instance is stale")
@@ -697,16 +760,36 @@ func runtimePoolACPMCPAuthMaterial(
 	}); err != nil {
 		return "", nil, err
 	}
-	if len(secrets.Items) != 1 {
-		return "", nil, fmt.Errorf("runtime pool requires exactly one auth Secret")
+	// During graceful epoch replacement both the draining instance's Secret
+	// and the next epoch's Secret exist; select the one mounted by the pool's
+	// exact active instance instead of requiring one Secret globally.
+	secret, err := runtimePoolAuthSecretForEpoch(secrets.Items, active.ControllerEpoch)
+	if err != nil {
+		return "", nil, err
 	}
-	secret := secrets.Items[0]
 	bearer := strings.TrimSpace(string(secret.Data[runtimePoolControllerTokenKey]))
 	capability := append([]byte(nil), secret.Data[runtimePoolCapabilitySecretKey]...)
 	if len(bearer) < 32 || len(capability) < harnessv2.MinCapabilitySecretBytes {
 		return "", nil, fmt.Errorf("runtime pool auth Secret is incomplete")
 	}
 	return bearer, capability, nil
+}
+
+// runtimePoolAuthSecretForEpoch selects the auth Secret bound to the given
+// controller epoch (name suffix auth-e<epoch>) from the pool's labeled
+// Secrets.
+func runtimePoolAuthSecretForEpoch(secrets []corev1.Secret, epoch int64) (*corev1.Secret, error) {
+	suffix := "auth-e" + strconv.FormatInt(epoch, 10)
+	var matched []*corev1.Secret
+	for i := range secrets {
+		if strings.HasSuffix(secrets[i].Name, suffix) {
+			matched = append(matched, &secrets[i])
+		}
+	}
+	if len(matched) != 1 {
+		return nil, fmt.Errorf("runtime pool requires exactly one auth Secret for controller epoch %d", epoch)
+	}
+	return matched[0], nil
 }
 
 func writeACPMCPError(w http.ResponseWriter, status int, message string) {

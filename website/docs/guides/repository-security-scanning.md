@@ -4,7 +4,7 @@ slug: /repository-security-scanning
 
 # Repository Security Scanning
 
-Repository security scanning gives Orka a Codex Security-like workflow: register a GitHub
+Repository security scanning provides a human-in-the-loop workflow: register a GitHub
 repository, generate an editable threat model, scan history and new commits for likely
 vulnerabilities, validate findings in an isolated worker, and remediate with generated
 patches and pull requests — all human-in-the-loop.

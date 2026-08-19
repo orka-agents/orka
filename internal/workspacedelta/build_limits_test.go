@@ -1,10 +1,24 @@
 package workspacedelta
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 )
+
+func TestBuildWithLimitsContextHonorsCancellation(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "file.txt", "before\n", 0o644)
+	baseline := captureTestBaseline(t, root, Options{})
+	writeTestFile(t, root, "file.txt", "after\n", 0o644)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := BuildWithLimitsContext(ctx, baseline, root, IntentWrite, BuildLimits{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("BuildWithLimitsContext error = %v, want context.Canceled", err)
+	}
+}
 
 func TestBuildWithLimitsRejectsCumulativeChangedContentBeforeRetention(t *testing.T) {
 	root := t.TempDir()

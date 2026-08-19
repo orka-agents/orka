@@ -63,7 +63,7 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen kustomize ## Generate canonical and Gatekeeper-style staging manifests.
+manifests: controller-gen kustomize ## Generate canonical and staged manifests.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	@set -euo pipefail; \
 		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \
@@ -477,8 +477,6 @@ verify-static-mode-crds: ## Refuse workload deployment until the platform-owned 
 		executionworkspaceproviders.workspace.orka.ai \
 		executionworkspaces.workspace.orka.ai \
 		externaleffects.core.orka.ai \
-		fakepoolparameters.fake.workspace.orka.ai \
-		fakeproviderconfigs.fake.workspace.orka.ai \
 		gatewaybindings.gateway.orka.ai \
 		gatewayclasses.gateway.orka.ai \
 		gateways.gateway.orka.ai \

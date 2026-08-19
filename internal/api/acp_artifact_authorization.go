@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,9 +41,33 @@ func (s *Server) installACPArtifactAuthorizationBroker() {
 }
 
 func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
+	// Authenticate on the pool bearer resolved from the non-secret pool
+	// namespace/UID headers before consuming the body: runtime Pods can reach
+	// this endpoint, so an unauthenticated peer must be rejected without being
+	// allowed to stream — or drip-feed a declared-length — request body and
+	// occupy controller handlers.
+	poolNamespace := strings.TrimSpace(string(c.Request().Header.Peek(harnessv2.MCPBrokerPoolNamespaceHeader)))
+	poolUID := strings.TrimSpace(string(c.Request().Header.Peek(harnessv2.MCPBrokerPoolUIDHeader)))
+	if poolNamespace == "" || poolUID == "" {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	pool, secret, err := s.resolveArtifactRuntimePoolByIdentity(c.Context(), poolNamespace, poolUID)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	bearer := strings.TrimSpace(strings.TrimPrefix(string(c.Request().Header.Peek("Authorization")), "Bearer "))
+	expectedBearer := strings.TrimSpace(string(secret.Data[runtimePoolControllerTokenKeyAPI]))
+	if !constantAPIStringEqual(bearer, expectedBearer) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
 	var request acpArtifactAuthorizationRequest
 	if err := json.Unmarshal(c.Body(), &request); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+	}
+	// The body's pool identity must match the pre-authenticated headers so a
+	// valid bearer for one pool cannot authorize an artifact for another.
+	if request.Namespace != poolNamespace || string(request.Metadata.Fence.RuntimePoolUID) != poolUID {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
 	}
 	now := time.Now().UTC()
 	if request.Namespace == "" || request.Metadata.PromptID == "" || request.Metadata.TaskUID == "" ||
@@ -52,17 +77,11 @@ func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
 	if got, err := harnessv2.CanonicalRequestDigest(request); err != nil || got != request.Metadata.RequestDigest {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
 	}
-	pool, secret, err := s.resolveArtifactRuntimePool(c.Context(), request)
-	if err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
-	}
-	bearer := strings.TrimSpace(strings.TrimPrefix(string(c.Request().Header.Peek("Authorization")), "Bearer "))
-	expectedBearer := strings.TrimSpace(string(secret.Data[runtimePoolControllerTokenKeyAPI]))
-	if !constantAPIStringEqual(bearer, expectedBearer) {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
-	}
 	capabilitySecret := secret.Data[runtimePoolCapabilitySecretKeyAPI]
-	if err := harnessv2.VerifyOperationCapability(capabilitySecret, string(c.Request().Header.Peek(harnessv2.OperationCapabilityHeader)), request.Metadata, true, now); err != nil {
+	// Verify with a fresh timestamp: runtime-pool resolution above performs
+	// Kubernetes I/O, and a capability that expired while it ran must not be
+	// accepted against the stale pre-resolution clock.
+	if err := harnessv2.VerifyOperationCapability(capabilitySecret, string(c.Request().Header.Peek(harnessv2.OperationCapabilityHeader)), request.Metadata, true, time.Now().UTC()); err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
 	}
 	if pool.Status.ActiveInstance == nil || pool.Status.ActiveInstance.RuntimeInstanceID != string(request.Metadata.Fence.RuntimeInstanceID) {
@@ -111,16 +130,20 @@ func (s *Server) authorizationReader() client.Reader {
 	return s.client
 }
 
-func (s *Server) resolveArtifactRuntimePool(ctx context.Context, request acpArtifactAuthorizationRequest) (*corev1alpha1.RuntimePool, *corev1.Secret, error) {
+// resolveArtifactRuntimePoolByIdentity resolves the RuntimePool and its exact
+// active-instance controller-auth Secret from a non-secret pool namespace and
+// UID. It is called with header-supplied identity so the caller's bearer can be
+// authenticated before the request body is read.
+func (s *Server) resolveArtifactRuntimePoolByIdentity(ctx context.Context, poolNamespace, poolUID string) (*corev1alpha1.RuntimePool, *corev1.Secret, error) {
 	reader := s.authorizationReader()
 	var pools corev1alpha1.RuntimePoolList
-	if err := reader.List(ctx, &pools, client.InNamespace(request.Namespace)); err != nil {
+	if err := reader.List(ctx, &pools, client.InNamespace(poolNamespace)); err != nil {
 		return nil, nil, err
 	}
 	var pool *corev1alpha1.RuntimePool
 	for i := range pools.Items {
 		candidate := &pools.Items[i]
-		if string(candidate.UID) == string(request.Metadata.Fence.RuntimePoolUID) {
+		if string(candidate.UID) == poolUID {
 			pool = candidate.DeepCopy()
 			break
 		}
@@ -134,10 +157,20 @@ func (s *Server) resolveArtifactRuntimePool(ctx context.Context, request acpArti
 	}); err != nil {
 		return nil, nil, err
 	}
-	if len(secrets.Items) != 1 {
-		return nil, nil, fmt.Errorf("runtime pool auth secret is ambiguous")
+	// During graceful epoch replacement both the draining instance's Secret
+	// and the next epoch's Secret exist; select the one mounted by the
+	// pool's exact active instance instead of requiring one Secret globally.
+	suffix := "auth-e" + strconv.FormatInt(pool.Status.ActiveInstance.ControllerEpoch, 10)
+	var matched []*corev1.Secret
+	for i := range secrets.Items {
+		if strings.HasSuffix(secrets.Items[i].Name, suffix) {
+			matched = append(matched, &secrets.Items[i])
+		}
 	}
-	return pool, secrets.Items[0].DeepCopy(), nil
+	if len(matched) != 1 {
+		return nil, nil, fmt.Errorf("runtime pool auth secret is ambiguous for controller epoch %d", pool.Status.ActiveInstance.ControllerEpoch)
+	}
+	return pool, matched[0].DeepCopy(), nil
 }
 
 func (s *Server) findTaskByUID(ctx context.Context, namespace, uid string) (*corev1alpha1.Task, error) {
@@ -187,12 +220,9 @@ func constantAPIStringEqual(left, right string) bool {
 const envWorkspacePublisherControllerTokenFile = "ORKA_WORKSPACE_PUBLISHER_CONTROLLER_TOKEN_FILE"
 
 func (s *Server) issuePublisherArtifactAuthorization(c fiber.Ctx) error {
-	var request publisherservice.ArtifactAuthorizationRequest
-	decoder := json.NewDecoder(strings.NewReader(string(c.Body())))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) == nil || request.Validate() != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
-	}
+	// Authenticate from headers before consuming the body: runtime Pods can
+	// reach this endpoint, so unauthenticated peers must be rejected without
+	// being allowed to stream request bodies.
 	expectedBearer, err := readSecretAtEnvPath(envWorkspacePublisherControllerTokenFile, 16)
 	if err != nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_authorization_unavailable"})
@@ -200,6 +230,12 @@ func (s *Server) issuePublisherArtifactAuthorization(c fiber.Ctx) error {
 	bearer := strings.TrimSpace(strings.TrimPrefix(string(c.Request().Header.Peek("Authorization")), "Bearer "))
 	if !constantAPIStringEqual(bearer, string(expectedBearer)) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+	}
+	var request publisherservice.ArtifactAuthorizationRequest
+	decoder := json.NewDecoder(strings.NewReader(string(c.Body())))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) == nil || request.Validate() != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
 	}
 	if err := s.authorizePublisherArtifactRequest(c.Context(), request); err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
@@ -349,6 +385,13 @@ func (s *Server) authorizePublisherParentEffect(
 	operation publisherservice.Operation,
 	metadata publisherservice.OperationMetadata,
 ) error {
+	if s.config.ControllerEpochs == nil {
+		return fmt.Errorf("publisher controller epoch authority is unavailable")
+	}
+	currentFence, err := s.config.ControllerEpochs.CurrentFence(ctx)
+	if err != nil || strings.TrimSpace(currentFence.Name) == "" || currentFence.Epoch <= 0 || strings.TrimSpace(currentFence.HolderID) == "" {
+		return fmt.Errorf("publisher controller epoch authority is unavailable")
+	}
 	kind := ""
 	aggregateID := metadata.PublicationID
 	switch operation {
@@ -376,12 +419,14 @@ func (s *Server) authorizePublisherParentEffect(
 	if err := s.authorizationReader().List(ctx, &effects, client.InNamespace(metadata.Namespace)); err != nil {
 		return err
 	}
+	now := time.Now().UTC()
 	matches := 0
 	for i := range effects.Items {
 		effect := &effects.Items[i]
 		if effect.Spec.Kind == kind && effect.Spec.IdentityNamespace == metadata.Namespace &&
 			effect.Spec.AggregateID == aggregateID && effect.Spec.OperationID == metadata.OperationID &&
-			effect.Status.State == corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight) {
+			effect.Status.State == corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight) &&
+			externalEffectLeaseActive(effect.Status, currentFence, now) {
 			matches++
 		}
 	}
@@ -389,4 +434,18 @@ func (s *Server) authorizePublisherParentEffect(
 		return fmt.Errorf("publisher parent effect is not uniquely in flight")
 	}
 	return nil
+}
+
+// externalEffectLeaseActive reports whether an in-flight external effect still
+// holds a live lease under the controller's current durable fence. The
+// publisher broker paths authenticate on a shared bearer with no per-request
+// epoch capability, so a lease from a superseded controller epoch must stop
+// authorizing broker access immediately even when its wall-clock expiry has not
+// elapsed yet.
+func externalEffectLeaseActive(status corev1alpha1.ExternalEffectStatus, fence store.ControllerEpochFence, now time.Time) bool {
+	if strings.TrimSpace(status.LeaseOwner) == "" || status.ControllerEpoch <= 0 {
+		return false
+	}
+	return status.ControllerEpochName == fence.Name && status.ControllerEpoch == fence.Epoch &&
+		status.LeaseExpiresAt != nil && status.LeaseExpiresAt.After(now)
 }

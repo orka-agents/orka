@@ -36,8 +36,13 @@ func main() {
 		Addr:              cfg.ListenAddress,
 		Handler:           runtimeServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-		MaxHeaderBytes:    32 << 10,
+		// Control requests carry small bounded JSON bodies; a full-request
+		// read deadline stops an untrusted Pod-local peer from holding
+		// connections open by dripping chunked bodies. Response streaming
+		// (prompt events) is unaffected by the read deadline.
+		ReadTimeout:    30 * time.Second,
+		IdleTimeout:    2 * time.Minute,
+		MaxHeaderBytes: 32 << 10,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

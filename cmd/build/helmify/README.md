@@ -3,7 +3,7 @@
 This directory is derived from Gatekeeper's `cmd/build/helmify` flow at
 `c9b67657102032a460a28e7f3b9c88ec0c193453` and adapted for Orka.
 
-`make manifests` performs the same staged generation pattern used by Gatekeeper:
+`make manifests` performs the staged generation flow:
 
 1. `controller-gen` refreshes the canonical CRDs under `config/crd/bases`.
 2. Kustomize renders `config/acp-production` as the next-release raw installer.

@@ -59,6 +59,126 @@ func TestSafeErrorExposesOnlySessionCreationStage(t *testing.T) {
 	}
 }
 
+func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	create := testCreateSessionRequest(t, cfg, profile)
+	now := time.Now().UTC()
+
+	// Simulate a create that allocated its identity and then failed during
+	// session initialization.
+	server.mu.Lock()
+	server.sessions[create.RuntimeSessionID] = &sessionState{id: create.RuntimeSessionID, creating: true}
+	server.tombstoneFailedCreateLocked(create.RuntimeSessionID, create.Metadata, now)
+	_, resident := server.sessions[create.RuntimeSessionID]
+	tombstone, tombstoned := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
+	server.mu.Unlock()
+	if resident {
+		t.Fatal("failed create left the session resident")
+	}
+	if !tombstoned || tombstone.RuntimeSessionGeneration != create.Metadata.Fence.RuntimeSessionGeneration {
+		t.Fatalf("failed create did not record a matching tombstone: %#v", tombstone)
+	}
+
+	// Replaying the same create must not allocate another identity; it is
+	// classified against the tombstone rather than recreated.
+	replay := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if replay.Code == http.StatusCreated {
+		t.Fatalf("replayed failed create allocated a new session: body=%s", replay.Body.String())
+	}
+	server.mu.Lock()
+	_, residentAfterReplay := server.sessions[create.RuntimeSessionID]
+	server.mu.Unlock()
+	if residentAfterReplay {
+		t.Fatal("replayed failed create became resident")
+	}
+}
+
+func TestDeleteSessionDefersCleanupUntilCancellationSettles(t *testing.T) {
+	tests := []struct {
+		name            string
+		state           harnessv2.RuntimeSessionState
+		creating        bool
+		prompt          bool
+		wantCancelCalls int
+		wantState       harnessv2.RuntimeSessionState
+	}{
+		{name: "creating", state: harnessv2.RuntimeSessionStateCreating, creating: true, wantState: harnessv2.RuntimeSessionStateCreating},
+		{name: "prompt before acceptance", state: harnessv2.RuntimeSessionStateIdle, prompt: true, wantCancelCalls: 1, wantState: harnessv2.RuntimeSessionStateIdle},
+		{name: "prompt running", state: harnessv2.RuntimeSessionStatePromptRunning, prompt: true, wantCancelCalls: 1, wantState: harnessv2.RuntimeSessionStateCancelling},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, cfg, profile := newTestServer(t, "immediate")
+			create := testCreateSessionRequest(t, cfg, profile)
+			now := time.Now().UTC()
+			state := &sessionState{
+				id: create.RuntimeSessionID, creating: test.creating,
+				descriptor: harnessv2.RuntimeSessionDescriptor{
+					RuntimeSessionID: create.RuntimeSessionID, RuntimeSessionUID: create.Metadata.Fence.RuntimeSessionUID,
+					Generation: create.Metadata.Fence.RuntimeSessionGeneration, RuntimeInstanceID: cfg.Fence.RuntimeInstanceID,
+					SupervisorBootID: cfg.Fence.SupervisorBootID, RuntimeProfileDigest: cfg.Fence.RuntimeProfileDigest,
+					State: test.state, CreatedAt: now, LastTransitionAt: now,
+				},
+				operations: map[harnessv2.OperationID]harnessv2.OperationRecord{},
+			}
+			mutations := &recordingPromptMutator{}
+			if test.prompt {
+				promptMetadata := create.Metadata
+				promptMetadata.PromptID = "prompt-1"
+				state.prompt = &promptState{request: harnessv2.StartPromptRequest{Metadata: promptMetadata}}
+				state.promptMutations = mutations
+			}
+			server.mu.Lock()
+			server.sessions[create.RuntimeSessionID] = state
+			server.mu.Unlock()
+
+			metadata := create.Metadata
+			metadata.OperationID = harnessv2.OperationID("delete-" + strings.ReplaceAll(test.name, " ", "-"))
+			metadata.ExpiresAt = now.Add(time.Minute)
+			request := harnessv2.DeleteRuntimeSessionRequest{
+				Protocol: harnessv2.ProtocolVersion, Metadata: metadata, Reason: "race cleanup",
+			}
+			sealRequest(t, &request.Metadata.RequestDigest, request)
+			response := performMutation(t, server.Handler(), http.MethodDelete, "/v2/runtime-sessions/session-1", request, cfg)
+			if response.Code != http.StatusConflict {
+				t.Fatalf("delete status=%d body=%s", response.Code, response.Body.String())
+			}
+			var apiError harnessv2.ErrorResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &apiError); err != nil {
+				t.Fatal(err)
+			}
+			if apiError.Code != harnessv2.ErrorCodeAlreadyAccepted || !apiError.Retryable {
+				t.Fatalf("delete error=%#v, want retryable already_accepted", apiError)
+			}
+			server.mu.Lock()
+			resident := server.sessions[create.RuntimeSessionID]
+			server.mu.Unlock()
+			if resident != state {
+				t.Fatal("delete removed the unsettled runtime session")
+			}
+			if state.descriptor.State != test.wantState {
+				t.Fatalf("session state=%s, want %s", state.descriptor.State, test.wantState)
+			}
+			if got := mutations.cancelCalls; got != test.wantCancelCalls {
+				t.Fatalf("CancelPrompt calls=%d, want %d", got, test.wantCancelCalls)
+			}
+		})
+	}
+}
+
+type recordingPromptMutator struct {
+	cancelCalls int
+}
+
+func (*recordingPromptMutator) ResolvePermission(string, string, acp.RequestPermissionOutcome) error {
+	return nil
+}
+
+func (m *recordingPromptMutator) CancelPrompt(context.Context, string) (acp.PromptResult, error) {
+	m.cancelCalls++
+	return acp.PromptResult{Outcome: acp.PromptOutcomeCancelled}, nil
+}
+
 func TestSupervisorCreateAndPrompt(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)
@@ -96,6 +216,16 @@ func TestSupervisorCreateAndPrompt(t *testing.T) {
 
 	statusReq := httptest.NewRequest(http.MethodGet, harnessv2.StatusPath, nil)
 	statusReq.Header.Set("Authorization", "Bearer "+cfg.ControllerBearerToken)
+	statusNonce, err := harnessv2.NewCapabilityNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusBinding := harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: cfg.Fence.RuntimeProfileDigest}
+	statusCapability, err := harnessv2.SignStatusCapability(cfg.CapabilitySecret, harnessv2.NewStatusCapabilityClaims(statusBinding, statusNonce, time.Now().UTC().Add(time.Minute)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusReq.Header.Set(OperationCapabilityHeader, statusCapability)
 	statusResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(statusResponse, statusReq)
 	if statusResponse.Code != http.StatusOK {
@@ -1382,6 +1512,17 @@ func TestSupervisorFinalizesPreparedPublicationBeforeDeletion(t *testing.T) {
 	if freshError.Classification != nil {
 		t.Fatalf("fresh delete after tombstone carried classification=%#v", freshError.Classification)
 	}
+
+	// Replaying the original still-valid create after deletion must not
+	// resurrect the session and re-run its prompt; the deletion tombstone
+	// classifies the create as a duplicate.
+	replayedCreate := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if replayedCreate.Code == http.StatusOK {
+		t.Fatalf("replayed create after deletion recreated the session: body=%s", replayedCreate.Body.String())
+	}
+	if _, resident := server.sessions["session-1"]; resident {
+		t.Fatal("replayed create after deletion made the session resident again")
+	}
 }
 
 func TestCleanupDrainedSessionClearsDeferredSchedule(t *testing.T) {
@@ -1593,5 +1734,36 @@ func TestSupervisorRejectsFreshPromptWhenDrainCleanupIsScheduled(t *testing.T) {
 	defer server.mu.Unlock()
 	if state.prompt != nil {
 		t.Fatal("fresh prompt was admitted while drain cleanup was scheduled")
+	}
+}
+
+func TestPruneTombstonesLockedRetainsEveryUnexpiredReplay(t *testing.T) {
+	server := &Server{tombstones: map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone{}}
+	now := time.Now().UTC()
+	server.tombstones["fresh"] = harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "fresh", DeletedAt: now.Add(-time.Minute)}
+	server.tombstones["stale"] = harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "stale", DeletedAt: now.Add(-2 * tombstoneRetention)}
+	server.pruneTombstonesLocked(now)
+	if _, ok := server.tombstones["stale"]; ok {
+		t.Fatal("tombstone older than the retention window was retained")
+	}
+	if _, ok := server.tombstones["fresh"]; !ok {
+		t.Fatal("in-window tombstone was dropped")
+	}
+
+	// Sustained churn within the capability window must not evict an older
+	// tombstone while its create operation can still be replayed.
+	const inWindowTombstones = 4352
+	for i := range inWindowTombstones {
+		uid := harnessv2.RuntimeSessionUID(fmt.Sprintf("session-%05d", i))
+		server.tombstones[uid] = harnessv2.RuntimeSessionTombstone{
+			RuntimeSessionUID: uid, DeletedAt: now.Add(-time.Duration(i) * time.Millisecond),
+		}
+	}
+	server.pruneTombstonesLocked(now)
+	if got, want := len(server.tombstones), inWindowTombstones+1; got != want {
+		t.Fatalf("tombstone count = %d, want %d unexpired records", got, want)
+	}
+	if _, ok := server.tombstones["session-04351"]; !ok {
+		t.Fatal("oldest in-window tombstone was evicted")
 	}
 }

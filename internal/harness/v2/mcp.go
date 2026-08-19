@@ -18,6 +18,11 @@ const (
 	MaxMCPResultBytes    = 1 << 20
 
 	MCPBrokerCallPath = "/internal/v2/acp/mcp/tools/call"
+	// MCPBrokerPoolNamespaceHeader and MCPBrokerPoolUIDHeader carry the
+	// non-secret pool identity so the broker can resolve and verify the
+	// controller bearer before consuming the request body.
+	MCPBrokerPoolNamespaceHeader = "X-Orka-ACP-Pool-Namespace"
+	MCPBrokerPoolUIDHeader       = "X-Orka-ACP-Pool-UID"
 )
 
 type MCPToolSource string

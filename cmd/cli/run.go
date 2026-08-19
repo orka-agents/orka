@@ -28,7 +28,7 @@ func newRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run [prompt]",
 		Short: "Chat with the Orka AI assistant",
-		Long: `Ollama-style chat interface.
+		Long: `Chat interface backed by Orka chat and provider configuration.
 
   One-shot:    orka run "explain kubernetes pods"
   Interactive: orka run

@@ -519,6 +519,143 @@ func TestConcurrentDuplicatePermissionResolutionExecutesOnce(t *testing.T) {
 	if got := mutations.resolveCalls.Load(); got != 1 {
 		t.Fatalf("permission side-effect calls after replay = %d, want 1", got)
 	}
+	server.mu.Lock()
+	_, stillPending := state.permissions[request.RequestID]
+	server.mu.Unlock()
+	if stillPending {
+		t.Fatal("resolved permission remained in the pending-permission map")
+	}
+}
+
+func TestSessionOperationRecordsPruneAfterCapabilityExpiry(t *testing.T) {
+	now := time.Now().UTC()
+	state := &sessionState{
+		operations:       make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		operationReplays: make(map[harnessv2.OperationID]*operationReplay),
+	}
+	add := func(operation string, expiresAt time.Time) harnessv2.OperationID {
+		metadata := testMetadata(harnessv2.Fence{}, operation, false)
+		metadata.ExpiresAt = expiresAt
+		metadata.RequestDigest = harnessv2.RequestDigest(testDigest(operation))
+		recordSessionOperationLocked(state, metadata, harnessv2.OperationPhaseApplied, "", now)
+		state.operationReplays[metadata.OperationID] = &operationReplay{done: make(chan struct{})}
+		return metadata.OperationID
+	}
+
+	expired := add("expired-operation", now.Add(-operationReplayRetentionSlack-time.Second))
+	withinSkew := add("within-skew-operation", now.Add(-operationReplayRetentionSlack+time.Second))
+	active := add("active-operation", now.Add(time.Minute))
+	pruneSessionOperationsLocked(state, now)
+
+	if _, ok := state.operations[expired]; ok {
+		t.Fatal("expired operation record was retained")
+	}
+	if _, ok := state.operationReplays[expired]; ok {
+		t.Fatal("expired operation replay was retained")
+	}
+	if _, ok := state.operationRetention[expired]; ok {
+		t.Fatal("expired operation retention deadline was retained")
+	}
+	for _, operationID := range []harnessv2.OperationID{withinSkew, active} {
+		if _, ok := state.operations[operationID]; !ok {
+			t.Fatalf("operation %q was pruned before its retention deadline", operationID)
+		}
+		if _, ok := state.operationReplays[operationID]; !ok {
+			t.Fatalf("operation replay %q was pruned before its retention deadline", operationID)
+		}
+	}
+}
+
+func TestSessionOperationCapacityReservesDeletionTombstoneSlot(t *testing.T) {
+	now := time.Now().UTC()
+	state := &sessionState{operations: make(map[harnessv2.OperationID]harnessv2.OperationRecord)}
+	for index := range harnessv2.MaxRuntimeSessionTombstoneOperations - sessionDeletionOperationReserve {
+		operationID := harnessv2.OperationID(fmt.Sprintf("operation-%04d", index))
+		state.operations[operationID] = harnessv2.OperationRecord{
+			OperationID: operationID, RequestDigest: harnessv2.RequestDigest(testDigest(string(operationID))),
+			Phase: harnessv2.OperationPhaseApplied, RecordedAt: now, UpdatedAt: now,
+		}
+	}
+	if err := ensureSessionOperationCapacityLocked(state, sessionDeletionOperationReserve); err == nil {
+		t.Fatal("fresh non-deletion operation was accepted after consuming the deletion reserve")
+	}
+	if err := ensureSessionOperationCapacityLocked(state, 0); err != nil {
+		t.Fatalf("reserved deletion operation was rejected: %v", err)
+	}
+	deleteID := harnessv2.OperationID("delete-session")
+	state.operations[deleteID] = harnessv2.OperationRecord{
+		OperationID: deleteID, RequestDigest: harnessv2.RequestDigest(testDigest(string(deleteID))),
+		Phase: harnessv2.OperationPhaseDeleted, RecordedAt: now, UpdatedAt: now,
+	}
+	operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
+	for _, operation := range state.operations {
+		operations = append(operations, operation)
+	}
+	tombstone := harnessv2.RuntimeSessionTombstone{
+		RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 1,
+		RuntimeProfileDigest: harnessv2.ProfileDigest(testDigest("profile")), DeletedAt: now, Operations: operations,
+	}
+	if err := tombstone.Validate(); err != nil {
+		t.Fatalf("maximum-sized deletion tombstone is invalid: %v", err)
+	}
+	if err := ensureSessionOperationCapacityLocked(state, 0); err == nil {
+		t.Fatal("operation journal accepted an entry beyond the tombstone protocol limit")
+	}
+}
+
+func TestMapRuntimeEventEnforcesPendingPermissionLimit(t *testing.T) {
+	limits := harnessv2.DefaultProtocolLimits()
+	limits.MaxPendingPermissions = 1
+	server := &Server{cfg: Config{Capabilities: harnessv2.CapabilitiesResponse{Limits: limits}}}
+	now := time.Now().UTC()
+	prompt := &promptState{request: harnessv2.StartPromptRequest{Metadata: harnessv2.MutationMetadata{PromptID: testPromptOneID}}}
+	state := &sessionState{
+		descriptor:  harnessv2.RuntimeSessionDescriptor{RuntimeSessionUID: "session-uid", Generation: 1},
+		permissions: make(map[harnessv2.PermissionRequestID]permissionState),
+	}
+	permissionEvent := func(requestID string) acp.PromptEvent {
+		toolCall, err := json.Marshal(map[string]any{
+			"toolCallId": "tool-call-" + requestID,
+			"name":       "Write",
+			"title":      "Write file",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return acp.PromptEvent{
+			Type:      acp.PromptEventPermissionRequested,
+			Timestamp: now,
+			Permission: &acp.PermissionRequestEvent{
+				RequestID: requestID,
+				Request: acp.RequestPermissionRequest{
+					ToolCall: toolCall,
+					Options:  []acp.PermissionOption{{OptionID: "deny", Name: "Deny", Kind: string(harnessv2.PermissionOptionRejectOnce)}},
+				},
+			},
+		}
+	}
+
+	if _, err := server.mapRuntimeEvent(state, prompt, permissionEvent("permission-1")); err != nil {
+		t.Fatalf("first permission event: %v", err)
+	}
+	if _, err := server.mapRuntimeEvent(state, prompt, permissionEvent("permission-2")); err == nil ||
+		!strings.Contains(err.Error(), "pending permission limit 1 exceeded") {
+		t.Fatalf("second permission event error = %v, want pending-limit rejection", err)
+	}
+	if len(state.permissions) != 1 {
+		t.Fatalf("pending permission count = %d, want 1", len(state.permissions))
+	}
+	if _, ok := state.permissions["permission-2"]; ok {
+		t.Fatal("over-limit permission was inserted")
+	}
+	delete(state.permissions, "permission-1")
+	if _, err := server.mapRuntimeEvent(state, prompt, permissionEvent("permission-1")); err == nil ||
+		!strings.Contains(err.Error(), "already used by this prompt") {
+		t.Fatalf("reused resolved permission event error = %v, want request-ID reuse rejection", err)
+	}
+	if len(state.permissions) != 0 {
+		t.Fatalf("reused permission request was reinserted: %#v", state.permissions)
+	}
 }
 
 func TestConcurrentDuplicateCancellationExecutesOnceAndPreservesSettlement(t *testing.T) {

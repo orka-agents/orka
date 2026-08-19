@@ -207,15 +207,15 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 				"properties": {
 					"gitRepo": {
 						"type": "string",
-						"description": "Git repository URL"
+						"description": "Git repository URL as a credential-free HTTPS URL, e.g. https://github.com/owner/repo (GitHub SSH roots are converted automatically). Required for write intent."
 					},
 					"branch": {
 						"type": "string",
-						"description": "Git branch name. Omit with ref to resolve and freeze the repository's advertised default branch."
+						"description": "Git branch name (short name or refs/heads/... ref). Omit with ref to resolve and freeze the repository's advertised default branch."
 					},
 					"ref": {
 						"type": "string",
-						"description": "Git ref (commit SHA or tag)"
+						"description": "Exact source selector: a full commit SHA, refs/heads/... branch, refs/tags/... tag, or short ref name. Other refs/ namespaces are rejected."
 					},
 					"intent": {
 						"type": "string",
@@ -228,7 +228,7 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 					},
 					"publicationGitRepo": {
 						"type": "string",
-						"description": "Publication repository URL for write Tasks."
+						"description": "Publication repository URL for write Tasks as a credential-free HTTPS URL."
 					},
 					"publicationReadCredentialRef": {
 						"type": "string",
@@ -240,7 +240,7 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 					},
 					"forgeCredentialRef": {
 						"type": "string",
-						"description": "Optional Secret name for forge API credentials used to reconcile pull requests."
+						"description": "Secret name for forge API credentials used to reconcile pull requests. Required when createPR is true."
 					},
 					"pushBranch": {
 						"type": "string",
@@ -248,11 +248,11 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 					},
 					"prBaseBranch": {
 						"type": "string",
-						"description": "Pull request base branch."
+						"description": "Pull request base branch. Required when createPR is true."
 					},
 					"createPR": {
 						"type": "boolean",
-						"description": "Reconcile a pull request after publication."
+						"description": "Reconcile a pull request after publication. Requires prBaseBranch and forgeCredentialRef."
 					}
 				}
 			},
@@ -646,45 +646,53 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 		if intent != corev1alpha1.WorkspaceIntentRead && intent != corev1alpha1.WorkspaceIntentWrite {
 			return fmt.Errorf("workspace intent must be read or write")
 		}
+		gitRepo, repoErr := canonicalAgentWorkspaceRepositoryArg("gitRepo", dc.args.Workspace.GitRepo)
+		if repoErr != nil {
+			return fmt.Errorf("%s (%s)", repoErr.Message, repoErr.Suggestion)
+		}
+		publicationGitRepo, repoErr := canonicalAgentWorkspaceRepositoryArg("publicationGitRepo", dc.args.Workspace.PublicationGitRepo)
+		if repoErr != nil {
+			return fmt.Errorf("%s (%s)", repoErr.Message, repoErr.Suggestion)
+		}
 		workspace := &corev1alpha1.WorkspaceConfig{
 			Intent:             intent,
-			GitRepo:            dc.args.Workspace.GitRepo,
+			GitRepo:            gitRepo,
 			Branch:             dc.args.Workspace.Branch,
 			Ref:                dc.args.Workspace.Ref,
-			PublicationGitRepo: dc.args.Workspace.PublicationGitRepo,
+			PublicationGitRepo: publicationGitRepo,
 			PushBranch:         dc.args.Workspace.PushBranch,
 			PRBaseBranch:       dc.args.Workspace.PRBaseBranch,
 			CreatePR:           dc.args.Workspace.CreatePR,
 		}
-		if workspace.PublicationGitRepo != "" || workspace.PushBranch != "" || workspace.PRBaseBranch != "" || workspace.CreatePR {
+		if workspaceRequestsPublication(workspace) {
 			workspace.Intent = corev1alpha1.WorkspaceIntentWrite
 		}
+		readCredential := strings.TrimSpace(dc.args.Workspace.ReadCredentialRef)
+		publicationReadCredential := strings.TrimSpace(dc.args.Workspace.PublicationReadCredentialRef)
 		publicationCredential := strings.TrimSpace(dc.args.Workspace.PublicationCredentialRef)
-		if workspace.Intent == corev1alpha1.WorkspaceIntentWrite && publicationCredential == "" {
-			return fmt.Errorf("workspace publicationCredentialRef is required for write intent")
+		forgeCredential := strings.TrimSpace(dc.args.Workspace.ForgeCredentialRef)
+		// Mirror the controller's workspace preflight before creating the child
+		// Task so a doomed configuration fails here instead of after creation.
+		if wsErr := agentWorkspaceArgError(workspace, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
+			return fmt.Errorf("%s (%s)", wsErr.Message, wsErr.Suggestion)
 		}
 		// Only attach read credentials alongside a gitRepo: the controller
 		// workspace preflight rejects readCredentialRef without gitRepo, so
 		// auto-discovery must not doom a repository-free workspace.
-		readCredential := strings.TrimSpace(dc.args.Workspace.ReadCredentialRef)
-		if strings.TrimSpace(workspace.GitRepo) == "" {
-			if readCredential != "" {
-				return fmt.Errorf("workspace readCredentialRef requires gitRepo")
-			}
-		} else {
+		if strings.TrimSpace(workspace.GitRepo) != "" {
 			readRef, err := resolveWorkspaceCredentialRef(ctx, t.k8sClient, dc.namespace, dc.targetAgent, readCredential)
 			if err != nil {
 				return err
 			}
 			workspace.ReadCredentialRef = readRef
 		}
-		if publicationReadCredential := strings.TrimSpace(dc.args.Workspace.PublicationReadCredentialRef); publicationReadCredential != "" {
+		if publicationReadCredential != "" {
 			workspace.PublicationReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: publicationReadCredential}
 		}
 		if publicationCredential != "" {
 			workspace.PublicationCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: publicationCredential}
 		}
-		if forgeCredential := strings.TrimSpace(dc.args.Workspace.ForgeCredentialRef); forgeCredential != "" {
+		if forgeCredential != "" {
 			workspace.ForgeCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: forgeCredential}
 		}
 		childTask.Spec.Workspace = workspace
@@ -777,6 +785,9 @@ func (t *DelegateTaskTool) prepareBrokeredChildTransactionToken(
 	if parentTask.UID == "" {
 		return fmt.Errorf("parent task UID is required for child transaction token exchange")
 	}
+	if err := requireSameNamespaceChildTokenExchange(parentTask, childTask); err != nil {
+		return err
+	}
 	if config.Exchanger == nil {
 		return fmt.Errorf("brokered delegate_task transaction-token exchanger is not configured")
 	}
@@ -837,7 +848,7 @@ func (t *DelegateTaskTool) prepareBrokeredChildTransactionToken(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            secretName,
 			Namespace:       childTask.Namespace,
-			OwnerReferences: taskOwnerReference(parentTask),
+			OwnerReferences: childTokenSecretOwnerReferences(parentTask, childTask),
 			Labels: map[string]string{
 				labels.LabelParentTask: labels.SelectorValue(parentTask.Name),
 			},

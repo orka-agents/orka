@@ -1072,6 +1072,19 @@ func TestWorkspaceJournalSurvivesServiceRestart(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsSharedBearerAndCapabilitySecret(t *testing.T) {
+	shared := []byte(strings.Repeat("s", MinSecretBytes))
+	if _, err := normalizeConfig(Config{ControllerBearerToken: shared, OperationCapabilitySecret: shared}); err == nil ||
+		!strings.Contains(err.Error(), "must be distinct") {
+		t.Fatalf("shared bearer/operation-capability secret error = %v, want distinct-values rejection", err)
+	}
+	bearer := []byte(strings.Repeat("b", MinSecretBytes))
+	if _, err := normalizeConfig(Config{ControllerBearerToken: bearer, OperationCapabilitySecret: shared, ArtifactCapabilitySecret: bearer}); err == nil ||
+		!strings.Contains(err.Error(), "must be distinct") {
+		t.Fatalf("shared bearer/artifact-capability secret error = %v, want distinct-values rejection", err)
+	}
+}
+
 func TestBoundedConcurrencyAndRequestBody(t *testing.T) {
 	t.Parallel()
 	repository := newRepositoryFixture(t, false)

@@ -5,6 +5,7 @@
 {{- include "orka.validateSQLiteController" . }}
 {{- include "orka.validateAgentExecutionSnapshot" . }}
 {{- include "orka.validateWebhooks" . }}
+{{- include "orka.validatePublisherAuth" . }}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) }}
 {{- fail "controller.image.digest must be a sha256 digest" }}
 {{- end }}

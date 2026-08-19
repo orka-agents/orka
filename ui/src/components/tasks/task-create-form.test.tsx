@@ -310,6 +310,103 @@ describe('TaskCreateForm', () => {
     expect(screen.getByLabelText('Forge credential Secret')).toBeRequired()
   })
 
+  it('omits workspace from prompt-only agent tasks', async () => {
+    useStateTypeOverride = 'agent'
+    let submitted: any
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({ items: [] })),
+      http.post('/api/v1/tasks', async ({ request }) => {
+        submitted = await request.json()
+        return HttpResponse.json({ metadata: { name: submitted.name }, spec: submitted })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'prompt-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Answer a question')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Task created'))
+    expect(submitted.workspace).toBeUndefined()
+  })
+
+  it('rejects a source branch without a repository URL before mutation', async () => {
+    useStateTypeOverride = 'agent'
+    let submitted = false
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({ items: [] })),
+      http.post('/api/v1/tasks', () => {
+        submitted = true
+        return HttpResponse.json({ metadata: { name: 'never' } })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'branch-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Review the repository')
+    await user.click(screen.getByText(/Advanced Options/))
+    await user.click(screen.getByText(/Workspace policy/))
+    await user.type(screen.getByLabelText('Source branch'), 'main')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith('Source branch requires a source repository URL'),
+    )
+    expect(submitted).toBe(false)
+  })
+
+  it('canonicalizes a GitHub SSH source repository URL before submitting', async () => {
+    useStateTypeOverride = 'agent'
+    let submitted: any
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({ items: [] })),
+      http.post('/api/v1/tasks', async ({ request }) => {
+        submitted = await request.json()
+        return HttpResponse.json({ metadata: { name: submitted.name }, spec: submitted })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'ssh-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Review the repository')
+    await user.click(screen.getByText(/Advanced Options/))
+    await user.click(screen.getByText(/Workspace policy/))
+    await user.type(screen.getByLabelText('Source repository URL'), 'git@github.com:owner/repo.git')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Task created'))
+    expect(submitted.workspace.gitRepo).toBe('https://github.com/owner/repo')
+  })
+
+  it('rejects an invalid source repository URL before mutation', async () => {
+    useStateTypeOverride = 'agent'
+    let submitted = false
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({ items: [] })),
+      http.post('/api/v1/tasks', () => {
+        submitted = true
+        return HttpResponse.json({ metadata: { name: 'never' } })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'bad-url-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Review the repository')
+    await user.click(screen.getByText(/Advanced Options/))
+    await user.click(screen.getByText(/Workspace policy/))
+    await user.type(screen.getByLabelText('Source repository URL'), 'http://github.com/owner/repo')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('credential-free HTTPS URL')),
+    )
+    expect(submitted).toBe(false)
+  })
+
   it('submits top-level write workspace with distinct credential roles and keys', async () => {
     useStateTypeOverride = 'agent'
     let submitted: any

@@ -137,8 +137,6 @@ for crd in \
   executionworkspaceproviders.workspace.orka.ai \
   executionworkspaces.workspace.orka.ai \
   externaleffects.core.orka.ai \
-  fakepoolparameters.fake.workspace.orka.ai \
-  fakeproviderconfigs.fake.workspace.orka.ai \
   gatewaybindings.gateway.orka.ai \
   gatewayclasses.gateway.orka.ai \
   gateways.gateway.orka.ai \
@@ -261,4 +259,4 @@ if grep -Fq 'claimName: controller-manager-store' <<<"${rendered_default}"; then
   exit 1
 fi
 
-printf '%s\n' 'ok - static-mode deployment requires the Established 26-CRD shared bundle, dual AgentRuntime/Agent/Task selectors, and no superseded coexistence CRDs'
+printf '%s\n' 'ok - static-mode deployment requires the Established 24-CRD shared bundle, dual AgentRuntime/Agent/Task selectors, and no superseded coexistence CRDs'

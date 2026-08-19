@@ -1692,6 +1692,12 @@ func contextTokenWorkspaceFailures(token *ContextToken, workspace *corev1alpha1.
 		if !refOnlyWorkspaceMatches && gotBranch != want {
 			failures = append(failures, fmt.Sprintf("workspace branch %q does not match token context %q", gotBranch, want))
 		}
+		// Execution gives workspace.ref precedence over branch, so a
+		// branch-only token constraint must not be bypassed by submitting the
+		// allowed branch together with an unconstrained ref selector.
+		if !hasWantRef && gotRef != "" {
+			failures = append(failures, fmt.Sprintf("workspace ref %q overrides the branch constrained by token context", gotRef))
+		}
 	}
 	if hasWantRef && gotRef != wantRef {
 		failures = append(failures, fmt.Sprintf("workspace ref %q does not match token context %q", gotRef, wantRef))

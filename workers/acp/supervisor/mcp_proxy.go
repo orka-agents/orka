@@ -63,8 +63,24 @@ type mcpProxySession struct {
 }
 
 type mcpApprovalGrant struct {
-	evidence   harnessv2.MCPApprovalEvidence
-	usedCallID string
+	evidence harnessv2.MCPApprovalEvidence
+}
+
+// approvedCallMatches reports whether an MCP call ID corresponds to the tool
+// call the user approved. The approved ToolCallID stored in the evidence is
+// already the canonical ACP tool-call digest (mapPermission applies
+// canonicalACPToolCallID), so the incoming MCP call ID is canonicalized the
+// same way before comparison — a normal JSON-RPC string ID and the ACP tool
+// call ID therefore normalize to the same digest.
+func approvedCallMatches(approvedToolCallID, callID string) bool {
+	if approvedToolCallID == "" || callID == "" {
+		return false
+	}
+	canonical, err := canonicalACPToolCallID(callID)
+	if err != nil {
+		return false
+	}
+	return canonical == approvedToolCallID
 }
 
 type mcpJSONRPCRequest struct {
@@ -372,22 +388,35 @@ func (s *mcpProxySession) authorizeCall(toolName, callID string, now time.Time) 
 	}
 	var reservation *MCPApprovalEvidenceReservation
 	if s.authorization.ApprovalPolicy.Requires(toolName) {
-		grants := s.approvals[toolName]
-		for index := range grants {
-			grant := &grants[index]
+		for index := range s.approvals[toolName] {
+			grant := &s.approvals[toolName][index]
 			if !grant.evidence.ExpiresAt.After(now) {
 				continue
 			}
-			if grant.evidence.Reusable || grant.usedCallID == "" || grant.usedCallID == callID {
-				if !grant.evidence.Reusable && grant.usedCallID == "" {
-					grant.usedCallID = callID
-				}
-				evidence := grant.evidence
-				reservation = &MCPApprovalEvidenceReservation{Evidence: evidence}
-				break
+			// A reusable (allow-always) grant covers any call of the tool; a
+			// non-reusable (allow-once) grant is bound to the exact tool call
+			// the user approved, so a child cannot approve a benign call and
+			// then execute a different one.
+			if !grant.evidence.Reusable && !approvedCallMatches(grant.evidence.ToolCallID, callID) {
+				continue
 			}
+			evidence := grant.evidence
+			reservation = &MCPApprovalEvidenceReservation{Evidence: evidence}
+			// Consume a non-reusable (allow-once) grant for a read-only tool on
+			// reservation. Consequential tools are deduplicated and replay-bound
+			// by the operation journal (runExternalEffectWithReplay returns the
+			// originally approved outcome for a repeated operation identity and
+			// rejects a changed payload), so their grant must survive an
+			// idempotent retry. Read-only tools bypass that journal entirely, so
+			// an unconsumed allow-once grant would let a child re-drive the same
+			// approved call ID with new arguments while the evidence is
+			// unexpired; spend it here so a single approval authorizes exactly
+			// one read-only call.
+			if !grant.evidence.Reusable && descriptor.Effect != harnessv2.MCPToolEffectConsequential {
+				s.approvals[toolName] = append(s.approvals[toolName][:index], s.approvals[toolName][index+1:]...)
+			}
+			break
 		}
-		s.approvals[toolName] = grants
 		if reservation == nil {
 			return nil, harnessv2.PromptMCPAuthorization{}, harnessv2.PromptLease{}, nil, fmt.Errorf("MCP tool approval is missing")
 		}

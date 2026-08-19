@@ -28,13 +28,48 @@ type Server struct {
 	mcpProxy      *mcpProxy
 	identityLock  io.Closer
 
-	mu          sync.Mutex
-	lifecycle   harnessv2.SupervisorLifecycle
-	drain       harnessv2.DrainStatus
-	sessions    map[harnessv2.RuntimeSessionID]*sessionState
-	tombstones  map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone
-	poolOps     map[harnessv2.OperationID]harnessv2.OperationRecord
-	promptSlots chan struct{}
+	mu           sync.Mutex
+	lifecycle    harnessv2.SupervisorLifecycle
+	drain        harnessv2.DrainStatus
+	sessions     map[harnessv2.RuntimeSessionID]*sessionState
+	tombstones   map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone
+	poolOps      map[harnessv2.OperationID]harnessv2.OperationRecord
+	statusNonces map[string]time.Time
+	promptSlots  chan struct{}
+}
+
+// statusNonceRetentionSlack keeps a consumed status nonce past its capability
+// TTL by a clock-skew margin so a token cannot be replayed at the edge of
+// expiry.
+const statusNonceRetentionSlack = 30 * time.Second
+
+// operationReplayRetentionSlack keeps a session operation and any stored
+// response briefly past the request capability expiry. This preserves replay
+// classification across the allowed clock-skew edge without retaining expired
+// capabilities for the lifetime of a resident session.
+const operationReplayRetentionSlack = 30 * time.Second
+
+const sessionDeletionOperationReserve = 1
+
+// tombstoneRetention bounds how long a deleted or failed session's replay
+// tombstone is retained. It must exceed the maximum operation-capability
+// lifetime plus clock skew so a legitimate replay whose capability is still
+// valid is still classified against its tombstone; past this window the
+// capability itself has expired and the replay is rejected at the capability
+// layer, so the tombstone is no longer needed. Retain every tombstone inside
+// this window: the finite, never-reused UID/GID allocator already bounds their
+// count, while count-based eviction would reopen valid create capabilities for
+// replay.
+const tombstoneRetention = time.Hour
+
+// pruneTombstonesLocked drops only records older than tombstoneRetention. It
+// must be called with s.mu held, before a new tombstone is inserted.
+func (s *Server) pruneTombstonesLocked(now time.Time) {
+	for uid, tombstone := range s.tombstones {
+		if now.Sub(tombstone.DeletedAt) > tombstoneRetention {
+			delete(s.tombstones, uid)
+		}
+	}
 }
 
 type sessionCreationError struct {
@@ -69,6 +104,7 @@ type sessionState struct {
 	promptMutations         promptMutationExecutor
 	descriptor              harnessv2.RuntimeSessionDescriptor
 	operations              map[harnessv2.OperationID]harnessv2.OperationRecord
+	operationRetention      map[harnessv2.OperationID]time.Time
 	operationReplays        map[harnessv2.OperationID]*operationReplay
 	prompt                  *promptState
 	permissions             map[harnessv2.PermissionRequestID]permissionState
@@ -87,19 +123,20 @@ type sessionState struct {
 }
 
 type promptState struct {
-	request             harnessv2.StartPromptRequest
-	operation           harnessv2.OperationRecord
-	lease               harnessv2.PromptLease
-	startedAt           time.Time
-	acceptedAt          time.Time
-	sequence            uint64
-	assistant           strings.Builder
-	assistantOverflow   bool
-	finalAnswer         strings.Builder
-	finalAnswerSeen     bool
-	finalAnswerOverflow bool
-	settlement          *harnessv2.PromptSettlement
-	settlementDigest    string
+	request              harnessv2.StartPromptRequest
+	operation            harnessv2.OperationRecord
+	lease                harnessv2.PromptLease
+	startedAt            time.Time
+	acceptedAt           time.Time
+	sequence             uint64
+	assistant            strings.Builder
+	assistantOverflow    bool
+	finalAnswer          strings.Builder
+	finalAnswerSeen      bool
+	finalAnswerOverflow  bool
+	settlement           *harnessv2.PromptSettlement
+	settlementDigest     string
+	permissionRequestIDs map[harnessv2.PermissionRequestID]struct{}
 }
 
 type promptMutationExecutor interface {
@@ -122,6 +159,62 @@ type operationFailure struct {
 	retryable bool
 }
 
+// recordSessionOperationLocked records a session operation and the deadline
+// after which neither its classification record nor response replay is useful.
+// The caller must hold s.mu when the state belongs to a live Server.
+func recordSessionOperationLocked(
+	state *sessionState,
+	metadata harnessv2.MutationMetadata,
+	phase harnessv2.OperationPhase,
+	terminal harnessv2.EventType,
+	at time.Time,
+) {
+	if state.operations == nil {
+		state.operations = make(map[harnessv2.OperationID]harnessv2.OperationRecord)
+	}
+	if state.operationRetention == nil {
+		state.operationRetention = make(map[harnessv2.OperationID]time.Time)
+	}
+	state.operations[metadata.OperationID] = operationRecord(metadata, phase, terminal, at)
+	state.operationRetention[metadata.OperationID] = metadata.ExpiresAt.Add(operationReplayRetentionSlack)
+}
+
+// pruneSessionOperationsLocked drops operations whose capability expiry and
+// replay-skew window have elapsed. The caller must hold s.mu when the state
+// belongs to a live Server.
+func pruneSessionOperationsLocked(state *sessionState, now time.Time) {
+	if state == nil {
+		return
+	}
+	for operationID, retainUntil := range state.operationRetention {
+		if retainUntil.After(now) {
+			continue
+		}
+		delete(state.operationRetention, operationID)
+		delete(state.operations, operationID)
+		delete(state.operationReplays, operationID)
+	}
+}
+
+func sessionOperationPtrLocked(state *sessionState, operationID harnessv2.OperationID, now time.Time) *harnessv2.OperationRecord {
+	pruneSessionOperationsLocked(state, now)
+	return operationPtr(state.operations, operationID)
+}
+
+// ensureSessionOperationCapacityLocked preserves one final journal slot for
+// explicit deletion. Tombstones retain every still-replayable operation, so a
+// live session must stop accepting fresh mutations before the protocol limit
+// is reached rather than evicting valid replay records.
+func ensureSessionOperationCapacityLocked(state *sessionState, reservedSlots int) error {
+	if state == nil || reservedSlots < 0 || reservedSlots >= harnessv2.MaxRuntimeSessionTombstoneOperations {
+		return fmt.Errorf("invalid runtime session operation capacity request")
+	}
+	if len(state.operations) >= harnessv2.MaxRuntimeSessionTombstoneOperations-reservedSlots {
+		return fmt.Errorf("runtime session operation journal is full and the session must be retired")
+	}
+	return nil
+}
+
 type permissionState struct {
 	requestID   harnessv2.PermissionRequestID
 	toolCallID  string
@@ -130,7 +223,6 @@ type permissionState struct {
 	requestedAt time.Time
 	expiresAt   time.Time
 	options     map[string]harnessv2.PermissionOptionKind
-	decision    *harnessv2.PermissionDecision
 }
 
 type drainCleanupCandidate struct {
@@ -237,7 +329,103 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeController(w, r) {
 		return
 	}
+	// Status discloses Task, prompt, permission, and fence identifiers, so it
+	// requires proof of the operation-capability secret in addition to the
+	// controller bearer; a disclosed bearer alone must not read it. The
+	// capability is bound to this runtime's profile and carries a single-use
+	// nonce so a captured token cannot be replayed within its TTL.
+	if s.cfg.RequireCapabilities {
+		binding := harnessv2.StatusCapabilityBinding{
+			RuntimeProfileDigest: s.cfg.Fence.RuntimeProfileDigest,
+			RuntimeInstanceID:    s.cfg.Fence.RuntimeInstanceID,
+		}
+		nonce, err := harnessv2.VerifyStatusCapability(s.cfg.CapabilitySecret, r.Header.Get(OperationCapabilityHeader), binding, time.Now().UTC())
+		if err != nil || !s.consumeStatusNonce(nonce) {
+			writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "status authorization failed", nil, false)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, s.status())
+}
+
+// tombstoneFailedCreateLocked records a tombstone for a create that failed
+// after identity allocation so a replay of the same request is classified as
+// a duplicate rather than allocating another non-reused identity. It must be
+// called with s.mu held.
+func (s *Server) tombstoneFailedCreateLocked(sessionID harnessv2.RuntimeSessionID, metadata harnessv2.MutationMetadata, recordedAt time.Time) {
+	state, ok := s.sessions[sessionID]
+	if !ok || !state.creating {
+		return
+	}
+	delete(s.sessions, sessionID)
+	s.pruneTombstonesLocked(time.Now().UTC())
+	s.tombstones[metadata.Fence.RuntimeSessionUID] = harnessv2.RuntimeSessionTombstone{
+		RuntimeSessionUID:        metadata.Fence.RuntimeSessionUID,
+		RuntimeSessionGeneration: metadata.Fence.RuntimeSessionGeneration,
+		RuntimeProfileDigest:     s.cfg.Fence.RuntimeProfileDigest,
+		DeletedAt:                time.Now().UTC(),
+		Operations:               []harnessv2.OperationRecord{operationRecord(metadata, harnessv2.OperationPhaseRecorded, "", recordedAt)},
+	}
+}
+
+// rejectTombstonedSessionCreateLocked classifies a create against the deletion
+// tombstone for its session UID/generation. It must be called with s.mu held;
+// when it handles the request it unlocks s.mu, writes the response, and
+// returns true, so the caller must return immediately.
+func (s *Server) rejectTombstonedSessionCreateLocked(
+	w http.ResponseWriter,
+	metadata harnessv2.MutationMetadata,
+	expected harnessv2.Fence,
+	now time.Time,
+) bool {
+	tombstone, ok := s.tombstones[metadata.Fence.RuntimeSessionUID]
+	if !ok || tombstone.RuntimeSessionGeneration < metadata.Fence.RuntimeSessionGeneration {
+		return false
+	}
+	operations := make(map[harnessv2.OperationID]harnessv2.OperationRecord, len(tombstone.Operations))
+	for i := range tombstone.Operations {
+		operations[tombstone.Operations[i].OperationID] = tombstone.Operations[i]
+	}
+	classification, classifyErr := harnessv2.ClassifyOperation(expected, metadata, operationPtr(operations, metadata.OperationID), true, now)
+	s.mu.Unlock()
+	if classifyErr != nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, classifyErr.Error(), nil, false)
+		return true
+	}
+	if classification.Class == harnessv2.RequestClassificationFresh {
+		// The session UID/generation is tombstoned but this operation was never
+		// recorded on it: fail closed rather than resurrect it.
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, "runtime session was deleted", nil, false)
+		return true
+	}
+	writeClassificationError(w, classification)
+	return true
+}
+
+// consumeStatusNonce records a status capability nonce and reports whether it
+// was previously unseen. Expired nonces are pruned opportunistically; the map
+// stays bounded because nonces live only for the capability TTL.
+func (s *Server) consumeStatusNonce(nonce string) bool {
+	if nonce == "" {
+		return false
+	}
+	now := time.Now().UTC()
+	expiry := now.Add(harnessv2.DefaultStatusCapabilityTTL + statusNonceRetentionSlack)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.statusNonces == nil {
+		s.statusNonces = make(map[string]time.Time)
+	}
+	for seen, seenExpiry := range s.statusNonces {
+		if !seenExpiry.After(now) {
+			delete(s.statusNonces, seen)
+		}
+	}
+	if _, replayed := s.statusNonces[nonce]; replayed {
+		return false
+	}
+	s.statusNonces[nonce] = expiry
+	return true
 }
 
 func (s *Server) status() harnessv2.StatusResponse {
@@ -253,6 +441,7 @@ func (s *Server) status() harnessv2.StatusResponse {
 		Timestamp:               now,
 	}
 	for _, state := range s.sessions {
+		pruneSessionOperationsLocked(state, now)
 		status := harnessv2.RuntimeSessionStatus{
 			RuntimeSessionID:        state.descriptor.RuntimeSessionID,
 			RuntimeSessionUID:       state.descriptor.RuntimeSessionUID,
@@ -334,7 +523,7 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.CreateRuntimeSessionRequest
-	if !decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, &request) {
+	if !s.decodeAuthenticatedJSON(w, r, &request) {
 		return
 	}
 	now := time.Now().UTC()
@@ -366,7 +555,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	if existing := s.sessions[request.RuntimeSessionID]; existing != nil {
-		classification, classifyErr := harnessv2.ClassifyOperation(expected, request.Metadata, operationPtr(existing.operations, request.Metadata.OperationID), true, now)
+		classification, classifyErr := harnessv2.ClassifyOperation(expected, request.Metadata, sessionOperationPtrLocked(existing, request.Metadata.OperationID, now), true, now)
 		if classifyErr != nil {
 			s.mu.Unlock()
 			writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, classifyErr.Error(), nil, false)
@@ -380,6 +569,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		writeClassificationError(w, classification)
+		return
+	}
+	// A create replayed after the session was deleted must not recreate it and
+	// re-run the prompt: consult the deletion tombstone before admitting a new
+	// OS identity.
+	if handled := s.rejectTombstonedSessionCreateLocked(w, request.Metadata, expected, now); handled {
 		return
 	}
 	if !s.drain.AcceptingNewSessions || s.lifecycle != harnessv2.SupervisorLifecycleReady {
@@ -413,11 +608,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			State: harnessv2.RuntimeSessionStateCreating, WorkspaceBaseline: request.Workspace.Baseline,
 			CreatedAt: now, LastTransitionAt: now,
 		},
-		operations:       map[harnessv2.OperationID]harnessv2.OperationRecord{request.Metadata.OperationID: operationRecord(request.Metadata, harnessv2.OperationPhaseRecorded, "", now)},
-		operationReplays: make(map[harnessv2.OperationID]*operationReplay),
-		permissions:      make(map[harnessv2.PermissionRequestID]permissionState),
-		deltas:           make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
+		operations:         make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		operationRetention: make(map[harnessv2.OperationID]time.Time),
+		operationReplays:   make(map[harnessv2.OperationID]*operationReplay),
+		permissions:        make(map[harnessv2.PermissionRequestID]permissionState),
+		deltas:             make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
 	}
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
 	s.sessions[request.RuntimeSessionID] = state
 	if s.sessionIdentityCapacity().RotationRequired() {
 		s.drain.AcceptingNewSessions = false
@@ -426,8 +623,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, createErr := s.createSession(r.Context(), request, now, uid, gid)
 	if createErr != nil {
+		// The allocated UID/GID is permanently consumed (identities are never
+		// reused). Tombstone the failed create so a replay of the same request
+		// is classified as a duplicate instead of allocating another identity
+		// on every retry and exhausting the pool's identity range; a genuine
+		// new attempt advances the session generation and is not blocked.
 		s.mu.Lock()
-		delete(s.sessions, request.RuntimeSessionID)
+		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now)
 		s.mu.Unlock()
 		slog.Error("ACP runtime session creation failed", "stage", sessionCreationStage(createErr))
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, safeError(createErr), nil, true)
@@ -446,7 +648,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	state.profile = request.Profile
 	state.agentConfiguration = *request.AgentConfiguration
 	state.creating = false
-	state.operations[request.Metadata.OperationID] = operationRecord(request.Metadata, harnessv2.OperationPhaseApplied, "", now)
+	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
 	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled && isDrainCleanupState(state)
 	if drainCleanup {
 		state.drainCleanupScheduled = true
@@ -610,6 +812,19 @@ func (s *Server) expectedFence(sessionUID harnessv2.RuntimeSessionUID, generatio
 
 func (s *Server) decodeMutation(w http.ResponseWriter, r *http.Request, target any, requireSession bool, _ harnessv2.MutationMetadata) bool {
 	_ = requireSession
+	return s.decodeAuthenticatedJSON(w, r, target)
+}
+
+// decodeAuthenticatedJSON verifies the controller bearer token before reading
+// the request body. An untrusted ACP child shares the Pod network namespace
+// and can reach this listener, so unauthenticated peers must be rejected on
+// headers alone instead of being allowed to drip-feed mutation bodies. The
+// operation-capability check still runs after decoding because it needs the
+// mutation metadata from the body.
+func (s *Server) decodeAuthenticatedJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	if !s.authorizeController(w, r) {
+		return false
+	}
 	return decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, target)
 }
 
@@ -817,6 +1032,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
 	if s.sessions[sessionID] == state {
+		pruneSessionOperationsLocked(state, deletedAt)
 		operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
 		for _, operation := range state.operations {
 			operations = append(operations, operation)
@@ -826,6 +1042,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 			RuntimeProfileDigest: state.descriptor.RuntimeProfileDigest, DeletedAt: deletedAt, Operations: operations,
 		}
 		delete(s.sessions, sessionID)
+		s.pruneTombstonesLocked(deletedAt)
 		s.tombstones[tombstone.RuntimeSessionUID] = tombstone
 	}
 	s.mu.Unlock()

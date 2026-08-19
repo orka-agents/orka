@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
@@ -33,6 +34,41 @@ import (
 )
 
 var log = logf.Log.WithName("api-server")
+
+// ControllerEpochFenceSource exposes the controller's current durable fence to
+// internal broker authorization paths.
+type ControllerEpochFenceSource interface {
+	CurrentFence(context.Context) (store.ControllerEpochFence, error)
+}
+
+type ControllerEpochReader interface {
+	GetControllerEpoch(context.Context, string) (*store.ControllerEpoch, error)
+}
+
+// ControllerEpochStoreFenceSource reads the current fence directly from the
+// durable epoch store. Unlike ControllerEpochManager, it is safe for API
+// handlers on non-leader replicas because it has no leader-readiness barrier.
+type ControllerEpochStoreFenceSource struct {
+	epochs ControllerEpochReader
+}
+
+func NewControllerEpochStoreFenceSource(epochs ControllerEpochReader) *ControllerEpochStoreFenceSource {
+	return &ControllerEpochStoreFenceSource{epochs: epochs}
+}
+
+func (s *ControllerEpochStoreFenceSource) CurrentFence(ctx context.Context) (store.ControllerEpochFence, error) {
+	if s == nil || s.epochs == nil {
+		return store.ControllerEpochFence{}, fmt.Errorf("controller epoch store is unavailable")
+	}
+	epoch, err := s.epochs.GetControllerEpoch(ctx, store.DefaultControllerEpochName)
+	if err != nil {
+		return store.ControllerEpochFence{}, err
+	}
+	if epoch == nil {
+		return store.ControllerEpochFence{}, fmt.Errorf("controller epoch is unavailable")
+	}
+	return store.ControllerEpochFence{Name: epoch.Name, Epoch: epoch.Epoch, HolderID: epoch.HolderID}, nil
+}
 
 // ServerConfig holds configuration for the API server
 type ServerConfig struct {
@@ -62,6 +98,7 @@ type ServerConfig struct {
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 	APIReader                 client.Reader
+	ControllerEpochs          ControllerEpochFenceSource
 }
 
 // Server is the REST API server
@@ -166,12 +203,27 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 	if parsed, err := url.ParseRequestURI(rawTarget); err == nil && parsed.EscapedPath() != "" {
 		path = parsed.EscapedPath()
 	}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) == 6 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
-		strings.EqualFold(parts[2], "gateways") && strings.EqualFold(parts[5], "events") {
+	if isGatewayIngressPath(path) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
 	}
+	// Internal broker endpoints authorize against per-pool secrets that are
+	// only resolvable from the request body, so unauthenticated peers cannot
+	// be rejected on headers alone. Bound both the body size and the full
+	// request read so a Pod-local peer cannot hold controller connections
+	// open by dripping chunked bodies.
+	if strings.HasPrefix(path, "/internal/v2/acp/") {
+		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
+	}
 	return fasthttp.RequestConfig{}
+}
+
+// isGatewayIngressPath matches /api/v1/gateways/{gateway}/{channel}/events,
+// the adapter ingress route with its own bounded request configuration and
+// streaming body reader.
+func isGatewayIngressPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	return len(parts) == 6 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
+		strings.EqualFold(parts[2], "gateways") && strings.EqualFold(parts[5], "events")
 }
 
 // setupMiddleware configures middleware for the server

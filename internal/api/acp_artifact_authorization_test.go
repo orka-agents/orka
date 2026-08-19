@@ -38,11 +38,11 @@ func TestACPArtifactAuthorizationBrokerIssuesExactUploadCapability(t *testing.T)
 	poolUID := types.UID("pool-uid")
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: poolUID, Generation: 1},
-		Status:     corev1alpha1.RuntimePoolStatus{ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{PodNamespace: "orka-runtimes", RuntimeInstanceID: "runtime-1"}},
+		Status:     corev1alpha1.RuntimePoolStatus{ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{PodNamespace: "orka-runtimes", RuntimeInstanceID: "runtime-1", ControllerEpoch: 1}},
 	}
 	controllerToken := strings.Repeat("t", 32)
 	operationSecret := []byte(strings.Repeat("s", 32))
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "auth", Labels: map[string]string{"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(poolUID)}}, Data: map[string][]byte{runtimePoolControllerTokenKeyAPI: []byte(controllerToken), runtimePoolCapabilitySecretKeyAPI: operationSecret}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1", Labels: map[string]string{"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(poolUID)}}, Data: map[string][]byte{runtimePoolControllerTokenKeyAPI: []byte(controllerToken), runtimePoolCapabilitySecretKeyAPI: operationSecret}}
 	taskUID := types.UID("task-uid")
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: taskUID}, Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{State: corev1alpha1.TaskExecutionStateSettling, PromptID: "prompt-1", RuntimeSessionUID: "session-1", RuntimeInstanceID: "runtime-1"}}}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, secret, task).Build()
@@ -79,6 +79,8 @@ func TestACPArtifactAuthorizationBrokerIssuesExactUploadCapability(t *testing.T)
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+controllerToken)
 	httpRequest.Header.Set(harnessv2.OperationCapabilityHeader, capability)
+	httpRequest.Header.Set(harnessv2.MCPBrokerPoolNamespaceHeader, "default")
+	httpRequest.Header.Set(harnessv2.MCPBrokerPoolUIDHeader, string(poolUID))
 	reservationStart := time.Now().UTC()
 	response, err := app.Test(httpRequest)
 	if err != nil {
@@ -106,6 +108,60 @@ func TestACPArtifactAuthorizationBrokerIssuesExactUploadCapability(t *testing.T)
 	minimumExpiry := reservationStart.Add(2*time.Minute + artifactcap.MaxClockSkew)
 	if reservations.expiresAt[0].Before(minimumExpiry) {
 		t.Fatalf("capability reservation expiry = %s, want at least %s", reservations.expiresAt[0], minimumExpiry)
+	}
+}
+
+func TestACPArtifactAuthorizationBrokerAuthenticatesBeforeBody(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	poolUID := types.UID("pool-uid")
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: poolUID, Generation: 1},
+		Status:     corev1alpha1.RuntimePoolStatus{ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{PodNamespace: "orka-runtimes", RuntimeInstanceID: "runtime-1", ControllerEpoch: 1}},
+	}
+	controllerToken := strings.Repeat("t", 32)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1", Labels: map[string]string{"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(poolUID)}},
+		Data:       map[string][]byte{runtimePoolControllerTokenKeyAPI: []byte(controllerToken), runtimePoolCapabilitySecretKeyAPI: []byte(strings.Repeat("s", 32))},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, secret).Build()
+	app := fiber.New()
+	server := &Server{app: app, client: kubeClient, config: ServerConfig{ArtifactReservations: &recordingCapabilityReservations{}}}
+	server.installACPArtifactAuthorizationBroker()
+
+	cases := []struct {
+		name           string
+		bearer         string
+		setPoolHeaders bool
+		body           string
+	}{
+		{name: "missing pool identity headers", bearer: controllerToken, setPoolHeaders: false, body: "{}"},
+		// An invalid-JSON body would yield 400 if the handler parsed it first;
+		// rejecting the wrong bearer with 403 proves pre-auth precedes the body.
+		{name: "wrong bearer before body parse", bearer: strings.Repeat("x", 32), setPoolHeaders: true, body: "not-json{"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			httpRequest := httptest.NewRequest(http.MethodPost, acpArtifactAuthorizationPath, strings.NewReader(tc.body))
+			httpRequest.Header.Set("Content-Type", "application/json")
+			httpRequest.Header.Set("Authorization", "Bearer "+tc.bearer)
+			if tc.setPoolHeaders {
+				httpRequest.Header.Set(harnessv2.MCPBrokerPoolNamespaceHeader, "default")
+				httpRequest.Header.Set(harnessv2.MCPBrokerPoolUIDHeader, string(poolUID))
+			}
+			response, err := app.Test(httpRequest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != fiber.StatusForbidden {
+				t.Fatalf("status = %d, want %d", response.StatusCode, fiber.StatusForbidden)
+			}
+		})
 	}
 }
 
@@ -137,14 +193,14 @@ func TestACPArtifactAuthorizationBrokerRejectsStaleCachedRevocationState(t *test
 	pool := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: poolUID, Generation: 1},
 		Status: corev1alpha1.RuntimePoolStatus{ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
-			PodNamespace: "orka-runtimes", RuntimeInstanceID: "runtime-1",
+			PodNamespace: "orka-runtimes", RuntimeInstanceID: "runtime-1", ControllerEpoch: 1,
 		}},
 	}
 	controllerToken := strings.Repeat("t", 32)
 	operationSecret := []byte(strings.Repeat("s", 32))
 	authSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "orka-runtimes", Name: "auth", UID: "old-secret-uid",
+			Namespace: "orka-runtimes", Name: "pool-auth-e1", UID: "old-secret-uid",
 			Labels: map[string]string{"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(poolUID)},
 		},
 		Data: map[string][]byte{
@@ -384,7 +440,13 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			app := fiber.New()
-			server := &Server{app: app, client: kubeClient, config: ServerConfig{ArtifactReservations: &recordingCapabilityReservations{}}}
+			server := &Server{
+				app: app, client: kubeClient,
+				config: ServerConfig{
+					ArtifactReservations: &recordingCapabilityReservations{},
+					ControllerEpochs:     publisherEpochSourceForTest(),
+				},
+			}
 			server.installACPArtifactAuthorizationBroker()
 			body, err := json.Marshal(test.request)
 			if err != nil {
@@ -470,7 +532,10 @@ func TestPublisherArtifactAuthorizationBrokerUsesFreshTaskState(t *testing.T) {
 	app := fiber.New()
 	server := &Server{
 		app: app, client: cachedClient,
-		config: ServerConfig{APIReader: apiReader, ArtifactReservations: &recordingCapabilityReservations{}},
+		config: ServerConfig{
+			APIReader: apiReader, ArtifactReservations: &recordingCapabilityReservations{},
+			ControllerEpochs: publisherEpochSourceForTest(),
+		},
 	}
 	server.installACPArtifactAuthorizationBroker()
 	body, err := json.Marshal(request)
@@ -537,7 +602,10 @@ func TestPublisherArtifactAuthorizationBrokerUsesFreshPublicationState(t *testin
 	app := fiber.New()
 	server := &Server{
 		app: app, client: cachedClient,
-		config: ServerConfig{APIReader: apiReader, ArtifactReservations: &recordingCapabilityReservations{}},
+		config: ServerConfig{
+			APIReader: apiReader, ArtifactReservations: &recordingCapabilityReservations{},
+			ControllerEpochs: publisherEpochSourceForTest(),
+		},
 	}
 	server.installACPArtifactAuthorizationBroker()
 	body, err := json.Marshal(request)
@@ -597,7 +665,7 @@ func TestAuthorizePublisherParentEffectUsesFreshReaderWithFallback(t *testing.T)
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cachedClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(test.cachedObjects...).Build()
-			server := &Server{client: cachedClient}
+			server := &Server{client: cachedClient, config: ServerConfig{ControllerEpochs: publisherEpochSourceForTest()}}
 			if test.useAPIReader {
 				server.config.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(test.freshObjects...).Build()
 			}
@@ -615,6 +683,101 @@ func TestAuthorizePublisherParentEffectUsesFreshReaderWithFallback(t *testing.T)
 	}
 }
 
+func TestAuthorizePublisherParentEffectRequiresLiveLease(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	metadata := publisherservice.OperationMetadata{
+		Namespace: "default", TaskID: "task-uid", OperationID: "workspace-prepare-prompt",
+	}
+	base := func() *corev1alpha1.ExternalEffect {
+		return publisherEffectForTest("workspace-effect", "workspace.prepare", metadata.TaskID, metadata.OperationID)
+	}
+	tests := []struct {
+		name        string
+		mutate      func(*corev1alpha1.ExternalEffect)
+		epochSource ControllerEpochFenceSource
+		wantErr     bool
+	}{
+		{name: "live lease authorizes", mutate: func(*corev1alpha1.ExternalEffect) {}, epochSource: publisherEpochSourceForTest()},
+		{
+			name: "expired lease is rejected",
+			mutate: func(e *corev1alpha1.ExternalEffect) {
+				e.Status.LeaseExpiresAt = &metav1.Time{Time: time.Now().UTC().Add(-time.Minute)}
+			},
+			epochSource: publisherEpochSourceForTest(),
+			wantErr:     true,
+		},
+		{
+			name: "missing lease expiry is rejected", mutate: func(e *corev1alpha1.ExternalEffect) { e.Status.LeaseExpiresAt = nil },
+			epochSource: publisherEpochSourceForTest(), wantErr: true,
+		},
+		{
+			name: "missing lease owner is rejected", mutate: func(e *corev1alpha1.ExternalEffect) { e.Status.LeaseOwner = "" },
+			epochSource: publisherEpochSourceForTest(), wantErr: true,
+		},
+		{
+			name: "missing controller epoch is rejected", mutate: func(e *corev1alpha1.ExternalEffect) { e.Status.ControllerEpoch = 0 },
+			epochSource: publisherEpochSourceForTest(), wantErr: true,
+		},
+		{
+			name: "stale controller epoch is rejected", mutate: func(*corev1alpha1.ExternalEffect) {},
+			epochSource: fixedControllerEpochFenceSource{fence: store.ControllerEpochFence{
+				Name: store.DefaultControllerEpochName, Epoch: 2, HolderID: "controller-2",
+			}},
+			wantErr: true,
+		},
+		{
+			name:        "missing controller epoch name is rejected",
+			mutate:      func(e *corev1alpha1.ExternalEffect) { e.Status.ControllerEpochName = "" },
+			epochSource: publisherEpochSourceForTest(), wantErr: true,
+		},
+		{
+			name: "unavailable controller authority is rejected", mutate: func(*corev1alpha1.ExternalEffect) {},
+			epochSource: fixedControllerEpochFenceSource{err: context.Canceled}, wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			effect := base()
+			test.mutate(effect)
+			server := &Server{
+				client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(effect).Build(),
+				config: ServerConfig{ControllerEpochs: test.epochSource},
+			}
+			err := server.authorizePublisherParentEffect(
+				context.Background(), publisherservice.OperationWorkspacePrepare, metadata,
+			)
+			if test.wantErr && err == nil {
+				t.Fatal("expected authorization to fail for a non-live lease")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("expected authorization to succeed: %v", err)
+			}
+		})
+	}
+}
+
+func TestControllerEpochStoreFenceSourceReadsDurableAuthority(t *testing.T) {
+	epochStore := &fixedControllerEpochStore{epoch: &store.ControllerEpoch{
+		Name: store.DefaultControllerEpochName, Epoch: 7, HolderID: "controller-7",
+	}}
+	source := NewControllerEpochStoreFenceSource(epochStore)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	fence, err := source.CurrentFence(ctx)
+	if err != nil {
+		t.Fatalf("CurrentFence() error = %v", err)
+	}
+	if epochStore.requestedName != store.DefaultControllerEpochName {
+		t.Fatalf("requested epoch name = %q", epochStore.requestedName)
+	}
+	if fence.Name != store.DefaultControllerEpochName || fence.Epoch != 7 || fence.HolderID != "controller-7" {
+		t.Fatalf("CurrentFence() = %#v", fence)
+	}
+}
+
 func publisherEffectForTest(name, kind, aggregateID, operationID string) *corev1alpha1.ExternalEffect {
 	return &corev1alpha1.ExternalEffect{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name},
@@ -622,8 +785,39 @@ func publisherEffectForTest(name, kind, aggregateID, operationID string) *corev1
 			ID: name, Kind: kind, IdentityNamespace: "default", AggregateID: aggregateID,
 			OperationID: operationID, RequestDigest: "sha256:" + strings.Repeat("9", 64),
 		},
-		Status: corev1alpha1.ExternalEffectStatus{State: corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight)},
+		Status: corev1alpha1.ExternalEffectStatus{
+			State:                       corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight),
+			LeaseOwner:                  "controller-epoch-1",
+			LeaseExpiresAt:              &metav1.Time{Time: time.Now().UTC().Add(2 * time.Minute)},
+			ControlRecordMutationStatus: corev1alpha1.ControlRecordMutationStatus{ControllerEpochName: store.DefaultControllerEpochName, ControllerEpoch: 1},
+		},
 	}
+}
+
+type fixedControllerEpochFenceSource struct {
+	fence store.ControllerEpochFence
+	err   error
+}
+
+type fixedControllerEpochStore struct {
+	epoch         *store.ControllerEpoch
+	err           error
+	requestedName string
+}
+
+func (s *fixedControllerEpochStore) GetControllerEpoch(_ context.Context, name string) (*store.ControllerEpoch, error) {
+	s.requestedName = name
+	return s.epoch, s.err
+}
+
+func (s fixedControllerEpochFenceSource) CurrentFence(context.Context) (store.ControllerEpochFence, error) {
+	return s.fence, s.err
+}
+
+func publisherEpochSourceForTest() ControllerEpochFenceSource {
+	return fixedControllerEpochFenceSource{fence: store.ControllerEpochFence{
+		Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "controller-1",
+	}}
 }
 
 func writeAPISecretFile(t *testing.T, env, name string, value []byte) {

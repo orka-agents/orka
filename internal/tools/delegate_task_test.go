@@ -889,8 +889,8 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 	if childTask.Spec.Workspace == nil {
 		t.Fatal("spec.agentRuntime.workspace is nil")
 	}
-	if childTask.Spec.Workspace.GitRepo != "https://github.com/myorg/myrepo.git" {
-		t.Errorf("workspace.gitRepo = %q, want %q", childTask.Spec.Workspace.GitRepo, "https://github.com/myorg/myrepo.git")
+	if childTask.Spec.Workspace.GitRepo != "https://github.com/myorg/myrepo" {
+		t.Errorf("workspace.gitRepo = %q, want %q", childTask.Spec.Workspace.GitRepo, "https://github.com/myorg/myrepo")
 	}
 	if childTask.Spec.Workspace.Branch != testBranch {
 		t.Errorf("workspace.branch = %q, want %q", childTask.Spec.Workspace.Branch, testBranch)
@@ -1447,8 +1447,8 @@ func TestDelegateTaskTool_Execute_ExplicitReadCredentialRequiresGitRepo(t *testi
 		"prompt": "Summarize the design",
 		"workspace": {"readCredentialRef": "my-secret"}
 	}`))
-	if err == nil || !strings.Contains(err.Error(), "readCredentialRef requires gitRepo") {
-		t.Fatalf("Execute() error = %v, want readCredentialRef requires gitRepo", err)
+	if err == nil || !strings.Contains(err.Error(), "readCredentialRef requires workspace.gitRepo") {
+		t.Fatalf("Execute() error = %v, want readCredentialRef requires workspace.gitRepo", err)
 	}
 	taskList := &corev1alpha1.TaskList{}
 	if err := k8sClient.List(context.Background(), taskList); err != nil {
@@ -1458,6 +1458,123 @@ func TestDelegateTaskTool_Execute_ExplicitReadCredentialRequiresGitRepo(t *testi
 		if task.Name != parentTaskName {
 			t.Fatalf("unexpected child Task %q created", task.Name)
 		}
+	}
+}
+
+func TestDelegateTaskTool_Execute_CanonicalizesSSHWorkspaceRepository(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, "copilot-coder")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	agentWithRuntime := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "copilot-coder", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+		},
+	}
+	k8sClient := newFakeClient(parentTask(), agentWithRuntime)
+	tool := NewDelegateTaskTool(k8sClient)
+
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"agent": "copilot-coder",
+		"prompt": "Summarize the design",
+		"workspace": {"gitRepo": "git@github.com:myorg/myrepo.git"}
+	}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var delegateResult DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
+		t.Fatal(err)
+	}
+	childTask := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: delegateResult.TaskName, Namespace: defaultNamespace,
+	}, childTask); err != nil {
+		t.Fatalf("failed to get child task: %v", err)
+	}
+	if childTask.Spec.Workspace == nil {
+		t.Fatal("expected workspace to be set")
+	}
+	if got, want := childTask.Spec.Workspace.GitRepo, "https://github.com/myorg/myrepo"; got != want {
+		t.Fatalf("workspace.gitRepo = %q, want canonical %q", got, want)
+	}
+}
+
+func TestDelegateTaskTool_Execute_RejectsDoomedWriteWorkspaces(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, "copilot-coder")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	tests := []struct {
+		name      string
+		workspace string
+		want      string
+	}{
+		{
+			name:      "write intent without gitRepo",
+			workspace: `{"intent": "write", "publicationCredentialRef": "repo-write"}`,
+			want:      "gitRepo is required for write intent",
+		},
+		{
+			name:      "createPR without prBaseBranch",
+			workspace: `{"gitRepo": "https://github.com/myorg/myrepo", "createPR": true, "publicationCredentialRef": "repo-write", "forgeCredentialRef": "repo-forge"}`,
+			want:      "createPR requires workspace.prBaseBranch",
+		},
+		{
+			name:      "createPR without forgeCredentialRef",
+			workspace: `{"gitRepo": "https://github.com/myorg/myrepo", "createPR": true, "prBaseBranch": "main", "publicationCredentialRef": "repo-write"}`,
+			want:      "createPR requires workspace.forgeCredentialRef",
+		},
+		{
+			name:      "non-HTTPS repository URL",
+			workspace: `{"gitRepo": "http://github.com/myorg/myrepo"}`,
+			want:      "credential-free HTTPS URL",
+		},
+		{
+			name:      "unsupported source ref namespace",
+			workspace: `{"gitRepo": "https://github.com/myorg/myrepo", "ref": "refs/remotes/origin/main"}`,
+			want:      "workspace.ref is invalid",
+		},
+		{
+			name:      "malformed source branch",
+			workspace: `{"gitRepo": "https://github.com/myorg/myrepo", "branch": "bad..branch"}`,
+			want:      "workspace.branch is invalid",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agentWithRuntime := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "copilot-coder", Namespace: defaultNamespace},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+				},
+			}
+			k8sClient := newFakeClient(parentTask(), agentWithRuntime)
+			tool := NewDelegateTaskTool(k8sClient)
+
+			_, err := tool.Execute(context.Background(), json.RawMessage(`{
+				"agent": "copilot-coder",
+				"prompt": "Make the change",
+				"workspace": `+tt.workspace+`
+			}`))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Execute() error = %v, want %q", err, tt.want)
+			}
+			taskList := &corev1alpha1.TaskList{}
+			if err := k8sClient.List(context.Background(), taskList); err != nil {
+				t.Fatal(err)
+			}
+			for _, task := range taskList.Items {
+				if task.Name != parentTaskName {
+					t.Fatalf("unexpected child Task %q created", task.Name)
+				}
+			}
+		})
 	}
 }
 

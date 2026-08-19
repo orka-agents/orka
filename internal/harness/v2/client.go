@@ -41,6 +41,7 @@ type Client struct {
 	controlTimeout       time.Duration
 	controllerBearer     string
 	capabilitySecret     []byte
+	statusBinding        StatusCapabilityBinding
 	maxJSONResponseBytes int64
 	maxErrorBodyBytes    int64
 	traceReliable        bool
@@ -91,6 +92,18 @@ func WithControllerBearerToken(token string) ClientOption {
 	}
 }
 
+// WithStatusCapabilityBinding sets the profile digest the client binds into
+// every status capability. Required before Status can be called.
+func WithStatusCapabilityBinding(binding StatusCapabilityBinding) ClientOption {
+	return func(c *Client) error {
+		if strings.TrimSpace(string(binding.RuntimeProfileDigest)) == "" {
+			return fmt.Errorf("status capability binding requires a profile digest")
+		}
+		c.statusBinding = binding
+		return nil
+	}
+}
+
 func WithOperationCapabilitySecret(secret []byte) ClientOption {
 	return func(c *Client) error {
 		if len(secret) < MinCapabilitySecretBytes {
@@ -124,12 +137,24 @@ func WithProtocolLimits(limits ProtocolLimits) ClientOption {
 	}
 }
 
+// NewProxylessTransport returns a clone of http.DefaultTransport with
+// environment proxy resolution disabled. Supervisor control traffic targets
+// exact in-cluster Pod endpoints; routing it through an inherited HTTP(S)_PROXY
+// would either expose authenticated control headers to an intermediary or
+// leave pools unreachable when the proxy cannot reach Pod IPs.
+func NewProxylessTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return transport
+}
+
 func NewClient(baseURL string, options ...ClientOption) (*Client, error) {
 	parsed, prefix, err := parseClientBaseURL(baseURL)
 	if err != nil {
 		return nil, clientError("new_client", ClientErrorConfiguration, err.Error(), err)
 	}
 	defaultHTTPClient := *http.DefaultClient
+	defaultHTTPClient.Transport = NewProxylessTransport()
 	defaultHTTPClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
@@ -186,8 +211,22 @@ func (c *Client) Status(ctx context.Context) (*StatusResponse, error) {
 	if err := c.requireControllerAuth(operation); err != nil {
 		return nil, err
 	}
+	if len(c.capabilitySecret) < MinCapabilitySecretBytes {
+		return nil, clientError(operation, ClientErrorConfiguration, "status requires the operation capability secret", ErrClientConfiguration)
+	}
+	if strings.TrimSpace(string(c.statusBinding.RuntimeProfileDigest)) == "" {
+		return nil, clientError(operation, ClientErrorConfiguration, "status requires the profile binding", ErrClientConfiguration)
+	}
+	nonce, err := NewCapabilityNonce()
+	if err != nil {
+		return nil, clientError(operation, ClientErrorConfiguration, "generate status nonce", err)
+	}
+	capability, err := SignStatusCapability(c.capabilitySecret, NewStatusCapabilityClaims(c.statusBinding, nonce, time.Now().UTC().Add(DefaultStatusCapabilityTTL)))
+	if err != nil {
+		return nil, clientError(operation, ClientErrorConfiguration, "sign status capability", err)
+	}
 	var response StatusResponse
-	if err := c.getJSON(ctx, operation, StatusPath, true, &response); err != nil {
+	if err := c.getJSONWithCapability(ctx, operation, StatusPath, true, capability, &response); err != nil {
 		return nil, err
 	}
 	if err := response.Validate(); err != nil {
@@ -382,6 +421,10 @@ func (c *Client) Drain(ctx context.Context, request DrainRequest) (*DrainRespons
 }
 
 func (c *Client) getJSON(ctx context.Context, operation, relative string, authenticated bool, out any) error {
+	return c.getJSONWithCapability(ctx, operation, relative, authenticated, "", out)
+}
+
+func (c *Client) getJSONWithCapability(ctx context.Context, operation, relative string, authenticated bool, capability string, out any) error {
 	if c == nil {
 		return clientError(operation, ClientErrorConfiguration, "client is nil", ErrClientConfiguration)
 	}
@@ -398,6 +441,9 @@ func (c *Client) getJSON(ctx context.Context, operation, relative string, authen
 	setCommonHeaders(req, "application/json")
 	if authenticated {
 		req.Header.Set("Authorization", "Bearer "+c.controllerBearer)
+	}
+	if capability != "" {
+		req.Header.Set(OperationCapabilityHeader, capability)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

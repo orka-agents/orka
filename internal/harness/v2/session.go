@@ -283,6 +283,13 @@ func (w WorkspaceSpec) Validate() error {
 	return validateWorkspaceRelativeRoot(w.RelativeRoot)
 }
 
+// ValidateWorkspaceRelativeRoot exposes the RuntimeSession workspace
+// relative-root rule so the controller preflight can reject unsafe subPath
+// values with exactly the semantics session creation enforces.
+func ValidateWorkspaceRelativeRoot(value string) error {
+	return validateWorkspaceRelativeRoot(value)
+}
+
 func validateWorkspaceRelativeRoot(value string) error {
 	root := strings.TrimSpace(value)
 	if root == "" || root == "." {

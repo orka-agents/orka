@@ -138,6 +138,48 @@ func TestValidateChildTaskAgainstParentTransactionRejectsDisallowedProviderModel
 	}
 }
 
+func TestValidateChildTaskAgainstParentTransactionRejectsCrossNamespaceDependencies(t *testing.T) {
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{"namespace": defaultNamespace}
+
+	crossAgent := researcherAgent()
+	crossAgent.Namespace = "other-namespace"
+	child := childTaskForResearcherAgent()
+	child.Spec.AgentRef = &corev1alpha1.AgentReference{Name: testResearcherAgentName, Namespace: "other-namespace"}
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(crossAgent), parent, child, "")
+	if err == nil || !strings.Contains(err.Error(), `agent namespace "other-namespace" does not match transaction context`) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want cross-namespace agent denial", err)
+	}
+
+	crossProviderAgent := researcherAgent()
+	crossProviderAgent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: "remote-provider", Namespace: "other-namespace"}
+	child = childTaskForResearcherAgent()
+	err = validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(crossProviderAgent), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), `provider namespace "other-namespace" does not match transaction context`) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want cross-namespace provider denial", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionRejectsRefOverridingBranchConstraint(t *testing.T) {
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace": defaultNamespace,
+		"branch":    "main",
+	}
+	agent := researcherAgent()
+	child := childTaskForResearcherAgent()
+	child.Spec.Workspace = &corev1alpha1.WorkspaceConfig{
+		GitRepo: "https://github.com/example/repo",
+		Branch:  "main",
+		Ref:     "refs/heads/attacker-selected",
+	}
+
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), "overrides the branch constrained by transaction context") {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want ref-overrides-branch denial", err)
+	}
+}
+
 func TestValidateChildTaskAgainstParentTransactionRejectsProviderlessChildUnderProviderConstraints(t *testing.T) {
 	parent := parentTask()
 	parent.Spec.Transaction.Context = map[string]string{

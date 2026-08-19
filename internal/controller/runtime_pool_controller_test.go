@@ -97,7 +97,7 @@ func (c *runtimePoolPodDeleteRecordingClient) Delete(ctx context.Context, object
 	return c.Client.Delete(ctx, object, options...)
 }
 
-func (f *fakeRuntimePoolSupervisorClient) Probe(_ context.Context, _, _ string) (RuntimePoolProbeResult, error) {
+func (f *fakeRuntimePoolSupervisorClient) Probe(_ context.Context, _, _ string, _ []byte) (RuntimePoolProbeResult, error) {
 	f.probeCalls++
 	return f.probe, f.probeErr
 }
@@ -137,9 +137,32 @@ func TestRuntimePoolReconcilerScalesZeroToOneWithHardenedResources(t *testing.T)
 	}
 }
 
+func TestRuntimePoolNamespaceRejectsArbitraryOverride(t *testing.T) {
+	reconciler := &RuntimePoolReconciler{RuntimeNamespace: acpTestRuntimeNamespace}
+	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "pool"}}
+
+	for _, allowed := range []string{"", acpTestRuntimeNamespace, "team-a"} {
+		pool.Spec.RuntimeNamespace = allowed
+		if _, err := reconciler.runtimePoolNamespace(pool); err != nil {
+			t.Fatalf("runtimeNamespace %q rejected: %v", allowed, err)
+		}
+	}
+	pool.Spec.RuntimeNamespace = "victim-namespace"
+	if _, err := reconciler.runtimePoolNamespace(pool); err == nil || !strings.Contains(err.Error(), "not permitted") {
+		t.Fatalf("arbitrary runtimeNamespace error = %v, want not-permitted rejection", err)
+	}
+
+	// With no configured runtime namespace, only the pool's own namespace is allowed.
+	unconfigured := &RuntimePoolReconciler{}
+	pool.Spec.RuntimeNamespace = acpTestRuntimeNamespace
+	if _, err := unconfigured.runtimePoolNamespace(pool); err == nil {
+		t.Fatal("unconfigured controller accepted a non-pool runtime namespace")
+	}
+}
+
 func TestRuntimePoolReconcilerReadsRuntimeNamespaceUncached(t *testing.T) {
 	scheme := runtimePoolTestScheme(t)
-	runtimeNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "orka-runtimes"}}
+	runtimeNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: acpTestRuntimeNamespace}}
 	cachedClient := &runtimePoolNamespaceReadClient{
 		Client:               fake.NewClientBuilder().WithScheme(scheme).Build(),
 		rejectNamespaceReads: true,
@@ -1031,7 +1054,7 @@ func TestRuntimePoolReconcilerCleanupOnlySkipsActivePool(t *testing.T) {
 func TestRuntimePoolReconcilerCleanupOnlyFinalizerCleansCrossNamespaceChildren(t *testing.T) {
 	scheme := runtimePoolTestScheme(t)
 	pool := runtimePoolTestObject(0)
-	pool.Spec.RuntimeNamespace = "orka-runtimes"
+	pool.Spec.RuntimeNamespace = acpTestRuntimeNamespace
 	pool.Finalizers = []string{runtimePoolFinalizer}
 	deletedAt := metav1.NewTime(runtimePoolTestNow)
 	pool.DeletionTimestamp = &deletedAt

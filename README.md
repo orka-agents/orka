@@ -106,6 +106,9 @@ helm install orka charts/orka \
   --set controller.acpRuntime.opencodeImage=docker.io/sozercan/orka-acp-opencode@sha256:<opencode-digest>
 ```
 
+The chart defaults new installations to `harness-v2`. Controller mode remains
+an immutable installation identity and cannot be changed during an upgrade.
+
 For direct Kustomize deployments, use `config/acp-production`, not
 `config/default`. The production overlay includes the cross-namespace Vekil
 ingress policy that permits model traffic only through Orka's authenticated

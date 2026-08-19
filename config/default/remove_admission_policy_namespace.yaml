@@ -9,4 +9,3 @@ target:
   group: admissionregistration.k8s.io
   version: v1
   kind: ValidatingAdmissionPolicy
-  name: gateway-task-protection

@@ -183,7 +183,10 @@ func TestPublisherCredentialBrokerUsesUncachedReaderForCredentialVersion(t *test
 	}
 
 	app := fiber.New()
-	server := &Server{app: app, client: cachedClient, config: ServerConfig{APIReader: uncachedReader}}
+	server := &Server{
+		app: app, client: cachedClient,
+		config: ServerConfig{APIReader: uncachedReader, ControllerEpochs: publisherEpochSourceForTest()},
+	}
 	server.installACPArtifactAuthorizationBroker()
 	body, err := json.Marshal(request)
 	if err != nil {

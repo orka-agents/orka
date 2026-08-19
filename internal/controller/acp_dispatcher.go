@@ -24,6 +24,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -3048,6 +3049,10 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 		harnessv2.WithControlTimeout(runtimeSessionCreateTimeout(acpDispatchTarget{pool: pool})),
 		harnessv2.WithControllerBearerToken(controllerToken),
 		harnessv2.WithOperationCapabilitySecret(capabilitySecret),
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{
+			RuntimeProfileDigest: harnessv2.ProfileDigest(pool.Spec.Runtime.Profile.Digest),
+			RuntimeInstanceID:    harnessv2.RuntimeInstanceID(active.RuntimeInstanceID),
+		}),
 	)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
@@ -3089,7 +3094,18 @@ func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *core
 	if strings.TrimSpace(observed.RuntimePoolUID) == "" || observed.RuntimePoolGeneration < 1 || strings.TrimSpace(observed.SupervisorBootID) == "" {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external AgentRuntime did not advertise the required immutable fence")
 	}
-	auth, err := (&AgentRuntimeReconciler{Client: d.Client}).agentRuntimeAuthMaterial(ctx, runtime)
+	reconciler := &AgentRuntimeReconciler{Client: d.Client, APIReader: d.APIReader}
+	// Readiness was established at conformance time, but the endpoint Service,
+	// EndpointSlices, and backend Pods are mutable between reconciles; revalidate
+	// the endpoint policy immediately before sending the bearer and signed
+	// capabilities, and for a Service endpoint capture the verified backend Pod
+	// addresses so the authenticated connection is pinned to one of them rather
+	// than routed through the still-mutable Service ClusterIP.
+	serviceBackendPins, err := reconciler.AgentRuntimeServiceBackendPins(ctx, runtime)
+	if err != nil {
+		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
+	}
+	auth, err := reconciler.agentRuntimeAuthMaterial(ctx, runtime)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
@@ -3097,12 +3113,33 @@ func (d *ACPDispatcher) externalRuntimeClient(ctx context.Context, runtime *core
 		runtime.Status.ObservedOperationCapabilityRefResourceVersion != auth.capabilityResourceVersion {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external AgentRuntime authentication material changed after conformance")
 	}
-	runtimeClient, err := harnessv2.NewClient(
-		runtime.Spec.Deployment.Endpoint,
+	clientOptions := []harnessv2.ClientOption{
 		harnessv2.WithControlTimeout(runtimeSessionCreateTimeout(acpDispatchTarget{external: runtime})),
 		harnessv2.WithControllerBearerToken(auth.controllerBearerToken),
 		harnessv2.WithOperationCapabilitySecret(auth.operationCapabilitySecret),
-	)
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{
+			RuntimeProfileDigest: harnessv2.ProfileDigest(runtime.Spec.Capabilities.Profile.Digest),
+			RuntimeInstanceID:    harnessv2.RuntimeInstanceID(runtime.Spec.Capabilities.RuntimeInstanceID),
+		}),
+	}
+	// Pin the connection: a Service endpoint dials only its verified backend
+	// Pod IPs; a non-Service endpoint dialed from the controller's privileged
+	// position enforces the same per-dial public-address control conformance
+	// uses (a hostname that resolved publicly at conformance can rebind to an
+	// internal address).
+	dialTimeout := runtimeSessionCreateTimeout(acpDispatchTarget{external: runtime})
+	if len(serviceBackendPins) > 0 {
+		clientOptions = append(clientOptions, harnessv2.WithHTTPClient(&http.Client{
+			Timeout:   dialTimeout,
+			Transport: PinnedBackendDialTransport(serviceBackendPins),
+		}))
+	} else if agentRuntimeEndpointRequiresPublicDial(runtime.Spec.Deployment.Endpoint) {
+		clientOptions = append(clientOptions, harnessv2.WithHTTPClient(&http.Client{
+			Timeout:   dialTimeout,
+			Transport: v2conformance.PublicAddressDialTransport(),
+		}))
+	}
+	runtimeClient, err := harnessv2.NewClient(runtime.Spec.Deployment.Endpoint, clientOptions...)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}
@@ -3143,16 +3180,23 @@ func (d *ACPDispatcher) runtimeAuthSecret(ctx context.Context, pool *corev1alpha
 	if namespace == "" && pool.Status.ActiveInstance != nil {
 		namespace = pool.Status.ActiveInstance.PodNamespace
 	}
+	if pool.Status.ActiveInstance == nil {
+		return nil, fmt.Errorf("RuntimePool has no active instance")
+	}
 	var secrets corev1.SecretList
 	if err := d.APIReader.List(ctx, &secrets, client.InNamespace(namespace), client.MatchingLabels{
 		runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
 	}); err != nil {
 		return nil, err
 	}
-	if len(secrets.Items) != 1 {
-		return nil, fmt.Errorf("RuntimePool requires exactly one auth Secret, found %d", len(secrets.Items))
+	// During graceful epoch replacement the draining instance's Secret and the
+	// next epoch's Secret coexist; select the one bound to the active
+	// instance's epoch instead of requiring exactly one globally.
+	secret, err := runtimePoolAuthSecretForEpoch(secrets.Items, pool.Status.ActiveInstance.ControllerEpoch)
+	if err != nil {
+		return nil, err
 	}
-	return secrets.Items[0].DeepCopy(), nil
+	return secret.DeepCopy(), nil
 }
 
 func runtimeProfileFromPool(profile corev1alpha1.RuntimePoolProfileSpec) harnessv2.RuntimeProfile {

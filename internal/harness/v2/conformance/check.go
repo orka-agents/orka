@@ -9,10 +9,14 @@ import (
 	"io"
 	"maps"
 	"mime"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -23,6 +27,143 @@ const (
 	defaultControlTimeout = 60 * time.Second
 	maxProbeResponseBytes = int64(harnessv2.MaxCanonicalJSONBytes)
 )
+
+// deniedSpecialUsePrefixes mirrors the SCM egress proxy's special-use deny
+// list. Go's IsGlobalUnicast/IsPrivate predicates alone miss internally
+// routable special-use ranges such as CGNAT 100.64/10, benchmarking
+// 198.18/15, TEST-NETs, and 6to4/Teredo relays.
+var deniedSpecialUsePrefixes = mustPrefixes(
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.0.0.0/24",
+	"192.0.2.0/24",
+	"192.168.0.0/16",
+	"198.18.0.0/15",
+	"198.51.100.0/24",
+	"203.0.113.0/24",
+	"224.0.0.0/4",
+	"240.0.0.0/4",
+	"::/128",
+	"::1/128",
+	"64:ff9b::/96",
+	"64:ff9b:1::/48",
+	"100::/64",
+	"2001::/32",
+	"2001:db8::/32",
+	"2002::/16",
+	"fc00::/7",
+	"fe80::/10",
+	"ff00::/8",
+)
+
+func mustPrefixes(values ...string) []netip.Prefix {
+	result := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		result = append(result, netip.MustParsePrefix(value))
+	}
+	return result
+}
+
+// PublicAddressAllowed reports whether addr is a public global unicast
+// address outside every special-use range.
+func PublicAddressAllowed(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	if !addr.IsValid() || !addr.IsGlobalUnicast() {
+		return false
+	}
+	for _, prefix := range deniedSpecialUsePrefixes {
+		if prefix.Contains(addr) {
+			return false
+		}
+	}
+	return true
+}
+
+// PublicAddressDialTransport returns a proxy-disabled transport whose every
+// connection attempt is rejected unless the resolved address is a public
+// global unicast address. The control hook runs per dial after DNS
+// resolution, so it also defeats DNS rebinding between validation and dial.
+// Non-Service external runtime traffic must use it so a hostname that
+// resolves publicly at conformance cannot later rebind to an internal
+// controller-reachable address.
+func PublicAddressDialTransport() *http.Transport {
+	transport := harnessv2.NewProxylessTransport()
+	ApplyPublicAddressDialControl(transport)
+	return transport
+}
+
+// ApplyPublicAddressDialControl installs the per-dial public-address control on
+// an existing transport, preserving its TLS configuration and any other
+// settings. Use it when a conformance dial must keep configured TLS roots (the
+// harness v1 client) yet still reject a hostname that resolves or rebinds to a
+// non-public, cross-namespace, or link-local address.
+func ApplyPublicAddressDialControl(transport *http.Transport) {
+	if transport == nil {
+		return
+	}
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			return requirePublicDialAddress(address)
+		},
+	}
+	transport.DialContext = dialer.DialContext
+}
+
+// PinnedBackendDialTransport returns a proxy-disabled transport that dials only
+// the given verified backend ip:port targets, ignoring the address the endpoint
+// URL would otherwise resolve to (a Service ClusterIP). Pinning the
+// authenticated connection to verified Pod backends closes the validate-then-dial
+// TOCTOU that routing conformance probes through the still-mutable Service would
+// leave open. It round-robins across the pins and fails closed when none remain.
+func PinnedBackendDialTransport(addresses []string) *http.Transport {
+	transport := harnessv2.NewProxylessTransport()
+	ApplyPinnedBackendDial(transport, addresses)
+	return transport
+}
+
+// ApplyPinnedBackendDial forces every dial on an existing transport to one of
+// the given verified backend ip:port targets, preserving the transport's TLS
+// configuration. Use it when a conformance dial must keep configured TLS roots
+// (the harness v1 client) yet still pin to verified Service backends rather than
+// the mutable Service ClusterIP.
+func ApplyPinnedBackendDial(transport *http.Transport, addresses []string) {
+	if transport == nil {
+		return
+	}
+	pinned := append([]string(nil), addresses...)
+	base := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	var next atomic.Uint64
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		if len(pinned) == 0 {
+			return nil, fmt.Errorf("no verified backend to dial")
+		}
+		target := pinned[int(next.Add(1)-1)%len(pinned)]
+		return base.DialContext(ctx, network, target)
+	}
+}
+
+// requirePublicDialAddress rejects dial targets that are not public global
+// unicast addresses outside every special-use range.
+func requirePublicDialAddress(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("conformance dial address is invalid")
+	}
+	parsed, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("conformance dial address is invalid")
+	}
+	if !PublicAddressAllowed(parsed) {
+		return fmt.Errorf("conformance dial target is not a public address")
+	}
+	return nil
+}
 
 // Check probes one external runtime. It is deliberately single-attempt: no
 // control request is retried, and the lifecycle probe opens exactly one prompt
@@ -45,9 +186,26 @@ func Check(ctx context.Context, target Target) Result {
 
 	httpClient := &http.Client{
 		Timeout: timeout,
+		// Conformance traffic targets a declared runtime endpoint; it must
+		// never traverse an inherited environment proxy.
+		Transport: harnessv2.NewProxylessTransport(),
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+	}
+	// A Service endpoint pins to the verified backends; a non-Service endpoint
+	// restricts every dial to a public address. The two are mutually exclusive,
+	// and pinning takes precedence so verified backends are never re-resolved
+	// through the mutable Service.
+	if len(target.PinnedBackendAddresses) > 0 {
+		httpClient.Transport = PinnedBackendDialTransport(target.PinnedBackendAddresses)
+	} else if target.RequirePublicAddresses {
+		httpClient.Transport = PublicAddressDialTransport()
+	}
+	expectedProfileDigest, err := harnessv2.CanonicalProfileDigest(target.Profile)
+	if err != nil {
+		result.Message = boundedMessage(fmt.Errorf("compute expected profile digest: %w", err))
+		return result
 	}
 	client, err := harnessv2.NewClient(
 		target.BaseURL,
@@ -55,6 +213,9 @@ func Check(ctx context.Context, target Target) Result {
 		harnessv2.WithControlTimeout(timeout),
 		harnessv2.WithControllerBearerToken(target.ControllerBearerToken),
 		harnessv2.WithOperationCapabilitySecret(target.OperationCapabilitySecret),
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{
+			RuntimeProfileDigest: expectedProfileDigest, RuntimeInstanceID: target.ExpectedRuntimeInstanceID,
+		}),
 		harnessv2.WithProtocolLimits(target.Limits),
 	)
 	if err != nil {
@@ -291,6 +452,11 @@ func probeStatusAuthNegatives(ctx context.Context, client *http.Client, target T
 	}
 	if err := expectAuthRejected(ctx, client, target.BaseURL, http.MethodGet, harnessv2.StatusPath, wrongToken, "", nil); err != nil {
 		return fmt.Errorf("wrong-token status negative probe: %w", err)
+	}
+	// The bearer alone must not read status: without a valid status
+	// capability the runtime must reject the request.
+	if err := expectAuthRejected(ctx, client, target.BaseURL, http.MethodGet, harnessv2.StatusPath, target.ControllerBearerToken, "", nil); err != nil {
+		return fmt.Errorf("bearer-without-capability status negative probe: %w", err)
 	}
 	return nil
 }

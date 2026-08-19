@@ -35,7 +35,18 @@ For development, you also need:
 
 ### Using Helm
 
+A harness-v2 installation requires operator-managed secret material before
+`helm install`: a 32-byte agent-execution snapshot key, a webhook serving
+certificate with its CA, and the Vekil-backed provider proxy enabled. Set the
+file paths first, then run the block; Helm fails rendering if any of these
+values are missing:
+
 ```bash
+: "${SNAPSHOT_KEY_FILE:?set SNAPSHOT_KEY_FILE to a 32-byte key file, e.g. from: openssl rand 32 > snapshot.key}"
+: "${WEBHOOK_CERT_FILE:?set WEBHOOK_CERT_FILE to the webhook serving certificate}"
+: "${WEBHOOK_PRIVATE_KEY_FILE:?set WEBHOOK_PRIVATE_KEY_FILE to the webhook private key}"
+: "${WEBHOOK_CA_FILE:?set WEBHOOK_CA_FILE to the CA certificate}"
+
 kubectl create -f - <<'EOF'
 apiVersion: v1
 kind: Namespace
@@ -44,6 +55,17 @@ metadata:
   labels:
     orka.ai/controller-mode: harness-v2
 EOF
+
+kubectl -n orka-system create secret generic agent-execution-snapshot-key \
+  --from-file=snapshot-key="${SNAPSHOT_KEY_FILE}"
+kubectl -n orka-system create secret generic orka-webhook-tls \
+  --type=kubernetes.io/tls \
+  --from-file=tls.crt="${WEBHOOK_CERT_FILE}" \
+  --from-file=tls.key="${WEBHOOK_PRIVATE_KEY_FILE}" \
+  --from-file=ca.crt="${WEBHOOK_CA_FILE}"
+
+WEBHOOK_CA_BUNDLE="$(kubectl -n orka-system get secret orka-webhook-tls \
+  -o jsonpath='{.data.ca\.crt}')"
 
 helm install orka charts/orka \
   --namespace orka-system \
@@ -56,8 +78,19 @@ helm install orka charts/orka \
   --set controller.acpRuntime.codexImage=docker.io/sozercan/orka-acp-codex@sha256:<codex-digest> \
   --set controller.acpRuntime.claudeImage=docker.io/sozercan/orka-acp-claude@sha256:<claude-digest> \
   --set controller.acpRuntime.copilotImage=docker.io/sozercan/orka-acp-copilot@sha256:<copilot-digest> \
-  --set controller.acpRuntime.opencodeImage=docker.io/sozercan/orka-acp-opencode@sha256:<opencode-digest>
+  --set controller.acpRuntime.opencodeImage=docker.io/sozercan/orka-acp-opencode@sha256:<opencode-digest> \
+  --set-string controller.agentExecutionSnapshot.existingSecret=agent-execution-snapshot-key \
+  --set-string controller.agentExecutionSnapshot.key=snapshot-key \
+  --set-string webhooks.tls.existingSecret=orka-webhook-tls \
+  --set-string webhooks.caBundle="${WEBHOOK_CA_BUNDLE}" \
+  --set providerProxy.enabled=true
 ```
+
+The provider proxy requires Vekil reachable at
+`http://vekil.vekil-system.svc:1337`; alternate upstreams are rejected.
+
+The chart defaults new installations to `harness-v2`. Controller mode remains
+an immutable installation identity and cannot be changed during an upgrade.
 
 A normal fresh install creates Orka's 26 cluster-scoped CRDs before the
 controller resources. Use `--skip-crds` only when one designated platform or
@@ -97,6 +130,11 @@ metadata:
   labels:
     orka.ai/controller-mode: harness-v2
 EOF
+
+# For local evaluation only, generate a seven-day self-signed serving
+# certificate and provision the admission runtime's required TLS Secret.
+# Production installations should provision an operator-managed certificate.
+bash scripts/lib/e2e-admission-tls.sh
 
 # Deploy controller
 make deploy \

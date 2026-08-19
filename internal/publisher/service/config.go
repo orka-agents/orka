@@ -36,6 +36,16 @@ func normalizeConfig(config Config) (Config, error) {
 	if len(config.OperationCapabilitySecret) < MinSecretBytes {
 		return Config{}, fmt.Errorf("operation capability secret must be at least %d bytes", MinSecretBytes)
 	}
+	// The bearer is transmitted on every request; the capability secrets are
+	// signing keys that must never transit. Sharing bytes between them would
+	// let anyone holding the bearer mint valid operation capabilities,
+	// collapsing the authentication-plus-authorization boundary.
+	if bytes.Equal(bytes.TrimSpace(config.ControllerBearerToken), bytes.TrimSpace(config.OperationCapabilitySecret)) {
+		return Config{}, fmt.Errorf("controller bearer token and operation capability secret must be distinct values")
+	}
+	if len(config.ArtifactCapabilitySecret) > 0 && bytes.Equal(bytes.TrimSpace(config.ControllerBearerToken), bytes.TrimSpace(config.ArtifactCapabilitySecret)) {
+		return Config{}, fmt.Errorf("controller bearer token and artifact capability secret must be distinct values")
+	}
 	hasArtifactSecret := len(config.ArtifactCapabilitySecret) >= MinSecretBytes
 	hasArtifactBroker := strings.TrimSpace(config.ArtifactAuthorizationBrokerURL) != ""
 	if hasArtifactSecret == hasArtifactBroker {

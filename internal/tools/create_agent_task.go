@@ -10,13 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
-	"path"
 	"strings"
+	"unicode/utf8"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -35,8 +35,8 @@ func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
 	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, promptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The prompt/instruction for the agent"}, agentRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent name with runtime configured"}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, "maxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: minMaxTurns, jsonSchemaMaximumField: maxMaxTurns, jsonSchemaDescriptionField: "Maximum agent loop iterations"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
 		"intent":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaEnumField: []string{"read", "write"}, jsonSchemaDescriptionField: "Workspace intent. Defaults to read; publication fields require write. Write intent requires gitRepo and publicationCredentialRef."},
 		"gitRepo":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source Git repository URL as a credential-free HTTPS URL, e.g. https://github.com/owner/repo. GitHub SSH roots (git@github.com:owner/repo) are converted automatically; other schemes and embedded credentials are rejected. Required for write intent."},
-		"branch":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist). Omit with ref to resolve and freeze the repository's advertised default branch. Requires gitRepo."},
-		"ref":                          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact source commit, tag, or ref. Requires gitRepo."},
+		"branch":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist), as a short branch name or refs/heads/... ref. Omit with ref to resolve and freeze the repository's advertised default branch. Requires gitRepo."},
+		"ref":                          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact source selector: a full commit SHA, refs/heads/... branch, refs/tags/... tag, or short ref name. Other refs/ namespaces (e.g. refs/remotes/...) are rejected. Requires gitRepo."},
 		"readCredentialRef":            map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for clone/read credentials. Omit to auto-discover a read credential when available. Requires gitRepo."},
 		"publicationGitRepo":           map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication repository URL for write Tasks as a credential-free HTTPS URL, e.g. https://github.com/owner/repo. GitHub SSH roots (git@github.com:owner/repo) are converted automatically; other schemes and embedded credentials are rejected."},
 		"publicationReadCredentialRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for target-repository preflight and verification credentials. Write intent only."},
@@ -45,7 +45,7 @@ func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
 		"pushBranch":                   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication branch name (write intent)"},
 		"prBaseBranch":                 map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Pull request base branch. Required when createPR is true."},
 		"createPR":                     map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Reconcile a pull request after publication. Requires prBaseBranch and forgeCredentialRef."},
-		"subPath":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo. Requires gitRepo."},
+		"subPath":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo as a relative slash-separated path (no leading /, no . or .. segments, max 1024 bytes). Requires gitRepo."},
 	},
 	}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
 	}, jsonSchemaRequiredField: []string{nameField, promptField, agentRefField},
@@ -152,7 +152,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		publicationReadCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationReadCredentialRef"))
 		publicationCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationCredentialRef"))
 		forgeCredential := strings.TrimSpace(chatGetStringArg(wsMap, "forgeCredentialRef"))
-		if wsErr := agentWorkspacePreflightError(wsCfg, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
+		if wsErr := agentWorkspaceArgError(wsCfg, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
 			return ChatToolErrorResult(wsErr.Type, wsErr.Message, wsErr.Suggestion)
 		}
 		// Only attach read credentials alongside a gitRepo: the controller
@@ -200,6 +200,19 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 
 	tc.IncrementTasks()
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(schedule)})
+}
+
+// agentWorkspaceArgError runs the full workspace-argument preflight mirror:
+// credential/publication prerequisites, canonical source selectors, and the
+// harness-v2 subPath rule.
+func agentWorkspaceArgError(wsCfg *corev1alpha1.WorkspaceConfig, readCredential, publicationReadCredential, publicationCredential, forgeCredential string) *ChatToolError {
+	if wsErr := agentWorkspacePreflightError(wsCfg, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
+		return wsErr
+	}
+	if wsErr := agentWorkspaceSourceSelectorError(wsCfg); wsErr != nil {
+		return wsErr
+	}
+	return agentWorkspaceSubPathError(wsCfg.SubPath)
 }
 
 // agentWorkspacePreflightError mirrors the tool-expressible subset of the
@@ -260,44 +273,86 @@ func agentWorkspacePreflightError(wsCfg *corev1alpha1.WorkspaceConfig, readCrede
 }
 
 // canonicalAgentWorkspaceRepositoryArg canonicalizes a workspace repository
-// argument to the only form the controller's workspace preflight accepts: a
-// credential-free HTTPS URL without query or fragment. GitHub-style SSH roots
-// (git@github.com:owner/repo[.git]) are first converted with
-// security.CanonicalRepositoryCloneURL, consistent with the repository-scan
-// path. The reject conditions mirror the RULE enforced by the controller's
-// canonicalWorkspaceRepositoryURL — keep them in exact behavior parity (not
-// stricter and not looser) so an accepted URL never fails the controller
-// preflight after the Task is created.
+// argument through security.CanonicalWorkspaceRepositoryCloneURL, the shared
+// mirror of the controller's canonicalWorkspaceRepositoryURL rule, and wraps
+// rejections into tool errors carrying the offending field name.
 func canonicalAgentWorkspaceRepositoryArg(field, raw string) (string, *ChatToolError) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return "", nil
-	}
-	invalid := func(detail string) *ChatToolError {
-		return &ChatToolError{
+	canonical, err := security.CanonicalWorkspaceRepositoryCloneURL(raw)
+	if err != nil {
+		return "", &ChatToolError{
 			Type:    "invalid_arguments",
-			Message: fmt.Sprintf("workspace.%s %s", field, detail),
+			Message: fmt.Sprintf("workspace.%s %s", field, err.Error()),
 			Suggestion: "Use a credential-free HTTPS URL such as https://github.com/owner/repo" +
 				" (GitHub SSH roots like git@github.com:owner/repo are converted automatically)",
 		}
 	}
-	canonical := security.CanonicalRepositoryCloneURL(trimmed)
-	parsed, err := url.Parse(canonical)
-	if err != nil || parsed.User != nil || parsed.Scheme != "https" || parsed.Host == "" ||
-		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
-		return "", invalid("must be a credential-free HTTPS URL without query or fragment")
-	}
-	if port := parsed.Port(); port != "" && port != "443" {
-		return "", invalid("must use the default HTTPS port")
-	}
-	if parsed.RawPath != "" && parsed.EscapedPath() != parsed.Path {
-		return "", invalid("has a non-canonical escaped path")
-	}
-	cleaned := strings.TrimSuffix(strings.TrimPrefix(path.Clean(parsed.Path), "/"), ".git")
-	if cleaned == "" || cleaned == "." || parsed.Path == "/" || path.Clean(parsed.Path) != parsed.Path {
-		return "", invalid("path is invalid")
-	}
 	return canonical, nil
+}
+
+// agentWorkspaceSourceSelectorError mirrors the controller's
+// runtimeWorkspaceSourceRef selector validation with the same canonical
+// source-ref validator, so a Task with a malformed branch or ref selector is
+// rejected before creation instead of failing preflight afterwards. Keep the
+// mirrored conditions in exact behavior parity with the controller (not
+// stricter and not looser).
+func agentWorkspaceSourceSelectorError(wsCfg *corev1alpha1.WorkspaceConfig) *ChatToolError {
+	if ref := strings.TrimSpace(wsCfg.Ref); ref != "" {
+		if _, err := publisherservice.CanonicalWorkspaceSourceRef(ref); err != nil {
+			return &ChatToolError{
+				Type:       "invalid_arguments",
+				Message:    fmt.Sprintf("workspace.ref is invalid: %v", err),
+				Suggestion: "Use a full commit SHA, refs/heads/... branch, refs/tags/... tag, or short ref name",
+			}
+		}
+	}
+	if branch := strings.TrimSpace(wsCfg.Branch); branch != "" {
+		candidate := branch
+		if !strings.HasPrefix(candidate, "refs/") {
+			candidate = "refs/heads/" + candidate
+		}
+		if _, err := publisherservice.CanonicalWorkspaceSourceRef(candidate); err != nil {
+			return &ChatToolError{
+				Type:       "invalid_arguments",
+				Message:    fmt.Sprintf("workspace.branch is invalid: %v", err),
+				Suggestion: "Use a valid Git branch name or refs/heads/... ref",
+			}
+		}
+	}
+	return nil
+}
+
+// agentWorkspaceSubPathError mirrors the harness-v2 workspace relative-root
+// validation (validateWorkspaceRelativeRoot) so an unsafe subPath is rejected
+// before the Task is created instead of failing RuntimeSession creation. Keep
+// the mirrored conditions in exact behavior parity (not stricter and not
+// looser).
+func agentWorkspaceSubPathError(subPath string) *ChatToolError {
+	root := strings.TrimSpace(subPath)
+	if root == "" || root == "." {
+		return nil
+	}
+	invalid := func(detail string) *ChatToolError {
+		return &ChatToolError{
+			Type:       "invalid_arguments",
+			Message:    "workspace.subPath " + detail,
+			Suggestion: "Use a relative slash-separated path inside the repository, such as services/api",
+		}
+	}
+	if !utf8.ValidString(root) {
+		return invalid("contains invalid UTF-8")
+	}
+	if len(root) > 1024 {
+		return invalid("exceeds 1024 bytes")
+	}
+	if strings.HasPrefix(root, "/") || strings.Contains(root, `\`) {
+		return invalid("must be a relative slash-separated path")
+	}
+	for segment := range strings.SplitSeq(root, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return invalid("contains an unsafe segment")
+		}
+	}
+	return nil
 }
 
 // validateWorkspaceBranchArg mirrors the controller's canonicalWorkspaceBranchRef

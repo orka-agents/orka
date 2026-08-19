@@ -40,6 +40,7 @@ const (
 	providerModelsV1Path                  = "/v1/models"
 	providerMaxTokensField                = "max_tokens"
 	providerMaxCompletionTokensField      = "max_completion_tokens"
+	providerMaxOutputTokensField          = "max_output_tokens"
 	providerReasoningEffortField          = "reasoning_effort"
 	providerToolsField                    = "tools"
 	providerVerbosityField                = "verbosity"
@@ -683,7 +684,7 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 func normalizeProviderRequestBody(providerKind, model, requestPath string, modelOutputLimit int64, body []byte) ([]byte, error) {
 	if providerKind != providerKindOpencode ||
 		(requestPath != providerOpenAIChatCompletionsPath && requestPath != providerOpenAIChatCompletionsV1Path) {
-		return body, nil
+		return clampProviderOutputLimit(providerKind, requestPath, modelOutputLimit, body)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
@@ -736,6 +737,69 @@ func normalizeProviderRequestBody(providerKind, model, requestPath string, model
 	return json.Marshal(payload)
 }
 
+// providerOutputLimitFields maps a provider inference path to the request
+// fields that bound generated output, plus the canonical field to force-set
+// when the caller omitted one.
+func providerOutputLimitFields(providerKind, requestPath string) (fields []string, canonical string) {
+	switch providerKind {
+	case providerKindCodex, providerKindCopilot:
+		switch requestPath {
+		case "/responses", providerOpenAIResponsesV1Path, "/responses/compact", "/v1/responses/compact":
+			return []string{providerMaxOutputTokensField}, providerMaxOutputTokensField
+		case providerOpenAIChatCompletionsPath, providerOpenAIChatCompletionsV1Path:
+			return []string{providerMaxTokensField, providerMaxCompletionTokensField}, providerMaxTokensField
+		}
+	case "claude":
+		if requestPath == "/v1/messages" {
+			return []string{providerMaxTokensField}, providerMaxTokensField
+		}
+	}
+	return nil, ""
+}
+
+// clampProviderOutputLimit enforces the immutable profile's model output
+// limit on Codex, Claude, and Copilot inference requests: an untrusted ACP
+// child holding a prompt-scoped proxy credential must not exceed the reviewed
+// token bound by inflating or omitting the output-limit field. OpenCode
+// requests are normalized separately with the same enforcement.
+func clampProviderOutputLimit(providerKind, requestPath string, modelOutputLimit int64, body []byte) ([]byte, error) {
+	if modelOutputLimit <= 0 {
+		return body, nil
+	}
+	fields, canonical := providerOutputLimitFields(providerKind, requestPath)
+	if len(fields) == 0 {
+		return body, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var payload map[string]any
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode provider request: %w", err)
+	}
+	if err := ensureProviderJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+	outputLimit := modelOutputLimit
+	outputField := canonical
+	for _, field := range fields {
+		value, present, err := positiveProviderOutputLimit(payload, field)
+		if err != nil {
+			return nil, err
+		}
+		if present {
+			outputField = field
+			if value < outputLimit {
+				outputLimit = value
+			}
+		}
+	}
+	for _, field := range fields {
+		delete(payload, field)
+	}
+	payload[outputField] = outputLimit
+	return json.Marshal(payload)
+}
+
 func positiveProviderOutputLimit(payload map[string]any, name string) (int64, bool, error) {
 	value, ok := payload[name]
 	if !ok {
@@ -743,11 +807,11 @@ func positiveProviderOutputLimit(payload map[string]any, name string) (int64, bo
 	}
 	number, ok := value.(json.Number)
 	if !ok {
-		return 0, false, fmt.Errorf("OpenCode %s must be a positive integer", name)
+		return 0, false, fmt.Errorf("provider %s must be a positive integer", name)
 	}
 	parsed, err := strconv.ParseInt(string(number), 10, 64)
 	if err != nil || parsed <= 0 {
-		return 0, false, fmt.Errorf("OpenCode %s must be a positive integer", name)
+		return 0, false, fmt.Errorf("provider %s must be a positive integer", name)
 	}
 	return parsed, true, nil
 }
