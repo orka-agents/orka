@@ -33,7 +33,7 @@ make run RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE=/path/outside-the-repository/orka
 
 ## Helm Chart Generation and Releases
 
-Orka follows Gatekeeper's staged chart flow. The editable Helm generator and static chart inputs live under `cmd/build/helmify/`; canonical Kubernetes resources live under `config/`. Generated and promoted outputs are committed so pull requests and release preparation review the exact manifests that will ship.
+Orka uses a staged chart flow. The editable Helm generator and static chart inputs live under `cmd/build/helmify/`; canonical Kubernetes resources live under `config/`. Generated and promoted outputs are committed so pull requests and release preparation review the exact manifests that will ship.
 
 | Path | Purpose | Edit directly? |
 | --- | --- | --- |
@@ -51,7 +51,7 @@ For a normal manifest or chart contribution:
 
 `make manifests` rebuilds staging from scratch, so direct changes in `manifest_staging/` are clobbered. CI reruns generation and requires a clean diff to detect stale output; run `make manifests` and inspect `git diff` for the same drift check locally.
 
-Release preparation runs the same targets as Gatekeeper's flow:
+Release preparation runs the staged release targets:
 
 ```bash
 make release-manifest NEWVERSION=vX.Y.Z[-beta.N|-rc.N]
@@ -60,7 +60,7 @@ make promote-staging-manifest
 
 The first target updates release inputs and regenerates staging. The second copies the reviewed staging installer and chart into `deploy/` and `charts/orka/`. Normally `.github/workflows/release-pr.yml` runs both and opens the release-preparation PR. A matching `v*` tag packages and publishes those committed root snapshots; tag workflows do not regenerate or promote manifests.
 
-CRDs are generated from the canonical definitions in `config/crd/bases/`. Chart generation makes them available on fresh install, but Helm does not update them during upgrades. Apply the CRDs from the exact target chart before upgrading the controller, as documented in `charts/orka/README.md`.
+CRDs are generated into `config/crd/bases/`, while `config/crd/kustomization.yaml` selects the production APIs packaged in the installer and chart. The development-only fake workspace CRDs and RBAC are kept in the separate `config/development/fake-workspace-provider` package. Helm makes production CRDs available on fresh install but does not update them during upgrades. Apply the CRDs from the exact target chart before upgrading the controller, as documented in `charts/orka/README.md`.
 
 ## Testing
 

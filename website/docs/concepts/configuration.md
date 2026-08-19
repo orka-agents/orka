@@ -721,7 +721,7 @@ Key configuration values for the Helm chart:
 | `scmEgressProxy.maxTunnelBytes` | `1073741824` | Maximum bytes allowed in each CONNECT tunnel direction. |
 | `scmEgressProxy.maxConcurrent` | `8` | Maximum concurrent forward requests and CONNECT tunnels. |
 | `controller.workspaceProvider.apiEnabled` | `false` | Enable provider-neutral `workspace.orka.ai` coordination controllers |
-| `controller.workspaceProvider.fakeProviderEnabled` | `false` | Enable the development-only fake workspace adapter |
+| `controller.workspaceProvider.fakeProviderEnabled` | `false` | Enable the development-only fake workspace adapter; its CRDs must be installed separately |
 | `controller.workspaceProvider.classUseAdmission.enabled` | `false` | Install and enable fail-closed Task/Tool class-use admission; required when `apiEnabled=true` |
 | `controller.workspaceProvider.classUseAdmission.existingSecret` | `""` | Existing TLS Secret containing `tls.crt` and `tls.key` for the chart webhook Service DNS name |
 | `controller.workspaceProvider.classUseAdmission.caBundle` | `""` | Base64-encoded PEM CA bundle for the class-use ValidatingWebhookConfiguration |
@@ -963,7 +963,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 
 ### Provider-neutral Workspace Controller Settings
 
-The `workspace.orka.ai/v1alpha1` control plane is installed additively and its controllers are disabled by default during rollout. Enable the generic provider, class, pool, and workspace reconcilers with `--enable-workspace-provider-api` (or `ORKA_ENABLE_WORKSPACE_PROVIDER_API=true`). The development-only fake adapter additionally requires `--enable-fake-workspace-provider` (or `ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER=true`). In Helm these map to `controller.workspaceProvider.apiEnabled` and `controller.workspaceProvider.fakeProviderEnabled`.
+The `workspace.orka.ai/v1alpha1` control plane is installed additively and its controllers are disabled by default during rollout. Enable the generic provider, class, pool, and workspace reconcilers with `--enable-workspace-provider-api` (or `ORKA_ENABLE_WORKSPACE_PROVIDER_API=true`). The development-only fake adapter additionally requires `--enable-fake-workspace-provider` (or `ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER=true`). In Helm these map to `controller.workspaceProvider.apiEnabled` and `controller.workspaceProvider.fakeProviderEnabled`. The release chart intentionally excludes the fake adapter's two CRDs; before enabling it, install the development package from a matching source checkout with `bin/kustomize build --load-restrictor LoadRestrictionsNone config/development/fake-workspace-provider | kubectl apply -f -`.
 
 Helm installs files from a chart's `crds/` directory on a fresh install but does not upgrade an existing CRD schema. Before enabling `controller.workspaceProvider.apiEnabled=true` during an upgrade, apply the current chart CRDs explicitly, for example with `helm show crds <chart> | kubectl apply --server-side -f -`. The chart checks the live `ExecutionWorkspace` schema and fails before rolling out workspace controllers when the required admission fields are absent. Offline `helm template --is-upgrade` cannot perform that lookup; after independently verifying the schema, set `controller.workspaceProvider.crdUpgradeSchemaVerified=true` only for the offline render.
 

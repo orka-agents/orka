@@ -63,7 +63,7 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen kustomize ## Generate canonical and Gatekeeper-style staging manifests.
+manifests: controller-gen kustomize ## Generate canonical and staged manifests.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	@set -euo pipefail; \
 		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \

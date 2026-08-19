@@ -113,9 +113,42 @@ jobs:
             echo "The raw installer must require pre-created ACP Secrets, not embed credentials." >&2
             exit 1
           fi
+          if ! awk '
+            function finish_resource() {
+              if (kind == "ValidatingAdmissionPolicy" || kind == "ValidatingAdmissionPolicyBinding") {
+                count++
+                if (namespace != "") {
+                  printf "%s %s must not set metadata.namespace (%s)\n", kind, name, namespace > "/dev/stderr"
+                  invalid = 1
+                }
+              }
+            }
+            /^---$/ {
+              finish_resource()
+              kind = ""
+              name = ""
+              namespace = ""
+              next
+            }
+            /^kind: / { kind = $2; next }
+            /^  name: / && name == "" { name = $2; next }
+            /^  namespace: / { namespace = $2; next }
+            END {
+              finish_resource()
+              if (count != 8) {
+                printf "Expected 8 admission policies and bindings, found %d\n", count > "/dev/stderr"
+                invalid = 1
+              }
+              exit invalid
+            }
+          ' manifest_staging/deploy/orka.yaml; then
+            echo "Cluster-scoped admission resources in the raw installer are invalid." >&2
+            exit 1
+          fi
 
           go test ./cmd/build/helmify
 
+          fake_provider_render=$(mktemp)
           default_render=$(mktemp)
           secondary_render=$(mktemp)
           secondary_rbac=$(mktemp)
@@ -128,12 +161,25 @@ jobs:
           long_provider_secret=$(mktemp)
           long_scm_service=$(mktemp)
           long_scm_secret=$(mktemp)
+          long_controller_webhook=$(mktemp)
+          long_controller_webhook_service=$(mktemp)
           harness_v1_render=$(mktemp)
           harness_v1_deployment=$(mktemp)
           harness_v1_network_policy=$(mktemp)
           harness_v1_kustomize=$(mktemp)
           unsafe_render=$(mktemp)
-          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}" "${harness_v1_render}" "${harness_v1_deployment}" "${harness_v1_network_policy}" "${harness_v1_kustomize}" "${unsafe_render}"' EXIT
+          trap 'rm -f "${fake_provider_render}" "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}" "${long_controller_webhook}" "${long_controller_webhook_service}" "${harness_v1_render}" "${harness_v1_deployment}" "${harness_v1_network_policy}" "${harness_v1_kustomize}" "${unsafe_render}"' EXIT
+          "$(pwd)/bin/kustomize" build \
+            --load-restrictor LoadRestrictionsNone \
+            config/development/fake-workspace-provider \
+            > "${fake_provider_render}"
+          test "$(grep -c '^kind: CustomResourceDefinition$' "${fake_provider_render}")" -eq 2
+          grep -Fq 'name: fakepoolparameters.fake.workspace.orka.ai' "${fake_provider_render}"
+          grep -Fq 'name: fakeproviderconfigs.fake.workspace.orka.ai' "${fake_provider_render}"
+          if grep -Fq 'fake.workspace.orka.ai' manifest_staging/deploy/orka.yaml; then
+            echo "The production installer must not contain development-only fake provider resources." >&2
+            exit 1
+          fi
           controller_digest="sha256:$(printf '0%.0s' {1..64})"
           snapshot_args=(
             --set-string controller.mode=harness-v2
@@ -162,6 +208,8 @@ jobs:
           helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --set providerProxy.enabled=true --show-only templates/provider-proxy-secret.yaml > "${long_provider_secret}"
           helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/scm-egress-proxy-service.yaml > "${long_scm_service}"
           helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/scm-egress-proxy-secret.yaml > "${long_scm_secret}"
+          helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/controller-validating-webhook.yaml > "${long_controller_webhook}"
+          helm template "${long_release}" manifest_staging/charts/orka "${snapshot_args[@]}" --namespace "${NAMESPACE}" --show-only templates/controller-webhook-service.yaml > "${long_controller_webhook_service}"
 
           harness_v1_digest="sha256:$(printf '1%.0s' {1..64})"
           harness_v1_args=(
@@ -220,14 +268,16 @@ jobs:
             grep -Fq -- "name: ${account}" "${secondary_rbac}"
             grep -Fq -- ":${account}'" "${secondary_gateway_policy}"
           done
-          for rendered in "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}"; do
+          for rendered in "${long_publisher_service}" "${long_publisher_secret}" "${long_provider_service}" "${long_provider_secret}" "${long_scm_service}" "${long_scm_secret}" "${long_controller_webhook}" "${long_controller_webhook_service}"; do
             resource_name=$(awk '$1 == "name:" { print $2; exit }' "${rendered}")
             [[ -n "${resource_name}" && ${#resource_name} -le 63 ]]
           done
           publisher_name=$(awk '$1 == "name:" { print $2; exit }' "${long_publisher_service}")
           scm_name=$(awk '$1 == "name:" { print $2; exit }' "${long_scm_service}")
+          controller_webhook_service_name=$(awk '$1 == "name:" { print $2; exit }' "${long_controller_webhook_service}")
           grep -Fq -- "http://${publisher_name}:8080" "${long_render}"
           grep -Fq -- "@${scm_name}.${NAMESPACE}.svc:8080" "${long_render}"
+          grep -Fq -- "name: ${controller_webhook_service_name}" "${long_controller_webhook}"
 
           chart_version=$(awk '$1 == "version:" { print $2; exit }' manifest_staging/charts/orka/Chart.yaml)
           grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker:${chart_version}" "${secondary_render}"
@@ -283,7 +333,12 @@ jobs:
             echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
             exit 1
           fi
-          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 26
+          expected_chart_crds=$(find manifest_staging/charts/orka/crds -maxdepth 1 -type f -name '*.yaml' | wc -l | tr -d ' ')
+          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq "${expected_chart_crds}"
+          if helm show crds "${chart_packages[0]}" | grep -F 'fake.workspace.orka.ai' >/dev/null; then
+            echo "The production chart must not contain development-only fake provider CRDs." >&2
+            exit 1
+          fi
 
       - name: Install kind
         uses: ./.github/actions/setup-kind
@@ -318,8 +373,6 @@ jobs:
           executionworkspaceproviders.workspace.orka.ai
           executionworkspaces.workspace.orka.ai
           externaleffects.core.orka.ai
-          fakepoolparameters.fake.workspace.orka.ai
-          fakeproviderconfigs.fake.workspace.orka.ai
           gatewaybindings.gateway.orka.ai
           gatewayclasses.gateway.orka.ai
           gateways.gateway.orka.ai

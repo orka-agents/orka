@@ -115,7 +115,7 @@ jobs:
           body: |
             ## Release preparation
 
-            This PR prepares Orka `${{ env.NEWVERSION }}` using the Gatekeeper-style staged release flow:
+            This PR prepares Orka `${{ env.NEWVERSION }}` using the staged release flow:
 
             - updates release versions in the canonical and static generator inputs
             - regenerates `manifest_staging/`
