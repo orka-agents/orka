@@ -414,6 +414,51 @@ func TestACPTaskDeadlineIncludesTimeBeforeRuntimeAdmission(t *testing.T) {
 	if !ok || !deadline.Equal(now.Add(4*time.Minute)) {
 		t.Fatalf("queue-derived deadline = %s, %v; want %s, true", deadline, ok, now.Add(4*time.Minute))
 	}
+
+	task.Spec.Timeout = nil
+	if deadline, ok = acpTaskDeadline(task, now); ok || !deadline.IsZero() {
+		t.Fatalf("unbound default deadline = %s, %v; want zero, false", deadline, ok)
+	}
+	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+	}
+	if deadline, ok = acpTaskDeadline(task, now); ok || !deadline.IsZero() {
+		t.Fatalf("harness v1 default deadline = %s, %v; want zero, false", deadline, ok)
+	}
+	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
+	deadline, ok = acpTaskDeadline(task, now)
+	if !ok || !deadline.Equal(now.Add(defaultACPTaskTimeout-time.Minute)) {
+		t.Fatalf("default deadline = %s, %v; want %s, true", deadline, ok, now.Add(defaultACPTaskTimeout-time.Minute))
+	}
+	for _, duration := range []time.Duration{0, -time.Minute} {
+		task.Spec.Timeout = &metav1.Duration{Duration: duration}
+		deadline, ok = acpTaskDeadline(task, now)
+		if !ok || !deadline.Equal(now.Add(defaultACPTaskTimeout-time.Minute)) {
+			t.Fatalf("nonpositive %s deadline = %s, %v; want %s, true", duration, deadline, ok, now.Add(defaultACPTaskTimeout-time.Minute))
+		}
+	}
+}
+
+func TestACPTaskRuntimeContextUsesDefaultDeadline(t *testing.T) {
+	t.Parallel()
+	createdAt := time.Now().UTC().Add(-time.Minute)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(createdAt)},
+		Status: corev1alpha1.TaskStatus{
+			AgentExecutionBinding: testACPExecuteBindingForDispatcher(),
+		},
+	}
+	runtimeCtx, cancel := (&ACPDispatcher{}).newTaskRuntimeContext(context.Background(), task)
+	defer cancel()
+
+	deadline, ok := runtimeCtx.Deadline()
+	want := createdAt.Add(defaultACPTaskTimeout)
+	if !ok || !deadline.Equal(want) {
+		t.Fatalf("runtime context deadline = %s, %v; want %s, true", deadline, ok, want)
+	}
+	if err := runtimeCtx.Err(); err != nil {
+		t.Fatalf("runtime context expired before the default deadline: %v", err)
+	}
 }
 
 func TestRuntimeSessionStartFailureMessageAllowsOnlyKnownStages(t *testing.T) {
@@ -1990,7 +2035,9 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
 	}
-	if completed.Status.Phase != corev1alpha1.TaskPhaseCancelled || completed.Status.Execution == nil || completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled {
+	if completed.Status.Phase != corev1alpha1.TaskPhaseCancelled || completed.Status.Execution == nil ||
+		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled ||
+		completed.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("TaskTimeout") {
 		t.Fatalf("unexpected timeout status: %#v", completed.Status)
 	}
 	timeline, err := controlStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
@@ -3228,6 +3275,12 @@ func TestACPDispatcherSettlesExpiredTaskBeforeRuntimePoolAdmission(t *testing.T)
 	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
 		task.CreationTimestamp = metav1.NewTime(time.Now().UTC().Add(-2 * time.Minute))
 		task.Spec.Timeout = &timeout
+	}, corev1alpha1.TaskExecutionReason("TaskTimeout"), "task deadline exceeded before runtime admission", false)
+}
+
+func TestACPDispatcherSettlesDefaultExpiredTaskBeforeRuntimePoolAdmission(t *testing.T) {
+	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
+		task.CreationTimestamp = metav1.NewTime(time.Now().UTC().Add(-defaultACPTaskTimeout - time.Minute))
 	}, corev1alpha1.TaskExecutionReason("TaskTimeout"), "task deadline exceeded before runtime admission", false)
 }
 

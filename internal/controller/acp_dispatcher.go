@@ -37,6 +37,8 @@ const (
 	DefaultACPIdlePoolTTL                                = 15 * time.Minute
 	DefaultACPRuntimePoolReservationTTL                  = 2 * time.Minute
 	DefaultACPRateLimitReconcileInterval                 = time.Second
+	defaultACPTaskTimeout                                = 30 * time.Minute
+	acpTaskTimeoutReason                                 = "TaskTimeout"
 	acpSucceededOperation                                = "succeeded"
 	acpCredentialBlockedOperation                        = "credential-blocked"
 	acpCredentialBlockedMessage                          = "workspace credential changed or became unavailable after queue; refusing to change frozen authority"
@@ -786,7 +788,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				return errors.Join(err, cleanupErr)
 			}
 			if settleErr := d.settlePreSubmissionCancellation(
-				ctx, task, attemptID, fence, "timeout-before-submission", "TaskTimeout", "task deadline exceeded before prompt submission",
+				ctx, task, attemptID, fence, "timeout-before-submission", acpTaskTimeoutReason, "task deadline exceeded before prompt submission",
 			); settleErr != nil {
 				return errors.Join(err, settleErr)
 			}
@@ -2763,9 +2765,21 @@ func runtimeSessionCreateTimeout(target acpDispatchTarget) time.Duration {
 }
 
 func acpTaskDeadline(task *corev1alpha1.Task, now time.Time) (time.Time, bool) {
-	if task == nil || task.Spec.Timeout == nil || task.Spec.Timeout.Duration <= 0 {
+	if task == nil {
 		return time.Time{}, false
 	}
+	timeout := defaultACPTaskTimeout
+	switch {
+	case task.Spec.Timeout != nil && task.Spec.Timeout.Duration > 0:
+		timeout = task.Spec.Timeout.Duration
+	case task.Status.AgentExecutionBinding == nil ||
+		task.Status.AgentExecutionBinding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2:
+		return time.Time{}, false
+	}
+	return taskDeadlineFromTimeout(task, now, timeout), true
+}
+
+func taskDeadlineFromTimeout(task *corev1alpha1.Task, now time.Time, timeout time.Duration) time.Time {
 	now = now.UTC()
 	var startedAt time.Time
 	if !task.CreationTimestamp.IsZero() {
@@ -2776,7 +2790,7 @@ func acpTaskDeadline(task *corev1alpha1.Task, now time.Time) (time.Time, bool) {
 			startedAt = now
 		}
 	}
-	return startedAt.Add(task.Spec.Timeout.Duration), true
+	return startedAt.Add(timeout)
 }
 
 func (d *ACPDispatcher) settleQueuedTaskBeforeAdmission(ctx context.Context, queued *corev1alpha1.Task) (bool, error) {
@@ -2818,7 +2832,7 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	case !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled:
 		operation, reason, message = "cancelled-before-admission", "Cancelled", "task cancelled before runtime admission"
 	case hasDeadline && !now.Before(deadline):
-		operation, reason, message = "timeout-before-admission", "TaskTimeout", "task deadline exceeded before runtime admission"
+		operation, reason, message = "timeout-before-admission", acpTaskTimeoutReason, "task deadline exceeded before runtime admission"
 	default:
 		return false, nil
 	}
@@ -2882,7 +2896,7 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPreSubmissionCleanupTimeout)
 		defer cancel()
 		var terminalErr = context.Canceled
-		if reason == corev1alpha1.TaskExecutionReason("TaskTimeout") {
+		if reason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
 			terminalErr = context.DeadlineExceeded
 		}
 		if err := d.reconcileUnfinalizedTaskSession(cleanupCtx, task, fence, recoveredSession, terminalErr); err != nil {
@@ -3151,7 +3165,7 @@ func (d *ACPDispatcher) handlePreSubmissionContextDone(
 		return false, nil
 	}
 	return true, d.settlePreSubmissionCancellation(
-		ctx, task, attemptID, fence, "timeout-before-submission", "TaskTimeout", "task deadline exceeded before prompt submission",
+		ctx, task, attemptID, fence, "timeout-before-submission", acpTaskTimeoutReason, "task deadline exceeded before prompt submission",
 	)
 }
 
@@ -3991,15 +4005,23 @@ func (d *ACPDispatcher) handlePromptStreamError(
 	}
 	if runtimeContextErr != nil {
 		if !accepted && writeEvidence.SafeToResendSameIdentity() {
-			if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled-before-acceptance"); transitionErr != nil {
+			operation, terminalReason, message := "cancelled-before-acceptance", corev1alpha1.TaskExecutionReason("Cancelled"), "prompt cancelled before acceptance"
+			if errors.Is(runtimeContextErr, context.DeadlineExceeded) {
+				operation, terminalReason, message = "timeout-before-acceptance", acpTaskTimeoutReason, "task deadline exceeded before prompt acceptance"
+			}
+			if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, operation); transitionErr != nil {
 				return transitionErr
 			}
-			return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancelled before acceptance")
+			return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, terminalReason, message)
 		}
 		now := time.Now().UTC()
 		reason := harnessv2.CancelReasonControllerShutdown
+		terminalReason := corev1alpha1.TaskExecutionReason("Cancelled")
+		terminalMessage := "prompt cancellation settled"
 		if errors.Is(runtimeContextErr, context.DeadlineExceeded) {
 			reason = harnessv2.CancelReasonTaskTimeout
+			terminalReason = acpTaskTimeoutReason
+			terminalMessage = "task deadline cancellation settled"
 		}
 		cancelRequest := harnessv2.CancelPromptRequest{
 			Protocol: harnessv2.ProtocolVersion,
@@ -4021,10 +4043,14 @@ func (d *ACPDispatcher) handlePromptStreamError(
 				}
 				switch response.Settlement.TerminalEvent {
 				case harnessv2.EventCancelled:
-					if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled"); transitionErr != nil {
+					operation := "cancelled"
+					if terminalReason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
+						operation = "timeout-cancelled"
+					}
+					if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, operation); transitionErr != nil {
 						return transitionErr
 					}
-					return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancellation settled")
+					return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, terminalReason, terminalMessage)
 				case harnessv2.EventFailed:
 					if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "cancel-failed"); transitionErr != nil {
 						return transitionErr
