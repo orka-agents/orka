@@ -506,7 +506,7 @@ func (r *TaskReconciler) cancelACPTaskBeforeDurableAttempt(ctx context.Context, 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	nowUTC := time.Now().UTC()
-	deadline, expired := acpTaskDeadline(latest, nowUTC)
+	deadline, expired := r.pendingAgentTaskDeadline(ctx, latest, nowUTC)
 	if latest.UID != task.UID || latest.Spec.Type != corev1alpha1.TaskTypeAgent || !expired || nowUTC.Before(deadline) {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
@@ -549,7 +549,7 @@ func (r *TaskReconciler) cancelACPTaskBeforeDurableAttempt(ctx context.Context, 
 				attempt, err = r.DurableControlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
 					ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: store.PromptExecutionQueued,
 					NewState: store.PromptExecutionCancelled, OperationID: operationID, OperationDigest: digest,
-					TerminalReason: "TaskTimeout", OutcomeMarker: message, UpdatedAt: time.Now().UTC(),
+					TerminalReason: acpTaskTimeoutReason, OutcomeMarker: message, UpdatedAt: time.Now().UTC(),
 				})
 				if err != nil {
 					return ctrl.Result{}, err
@@ -568,7 +568,7 @@ func (r *TaskReconciler) cancelACPTaskBeforeDurableAttempt(ctx context.Context, 
 			return err
 		}
 		currentNow := time.Now().UTC()
-		currentDeadline, currentHasDeadline := acpTaskDeadline(current, currentNow)
+		currentDeadline, currentHasDeadline := r.pendingAgentTaskDeadline(ctx, current, currentNow)
 		if current.UID != task.UID || current.Spec.Type != corev1alpha1.TaskTypeAgent ||
 			!currentHasDeadline || currentNow.Before(currentDeadline) {
 			statusBound = true
@@ -584,7 +584,7 @@ func (r *TaskReconciler) cancelACPTaskBeforeDurableAttempt(ctx context.Context, 
 		current.Status.Message = message
 		current.Status.Execution = &corev1alpha1.TaskExecutionStatus{
 			State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeCancelled,
-			Reason: "TaskTimeout", Message: message, LastTransitionTime: &now,
+			Reason: acpTaskTimeoutReason, Message: message, LastTransitionTime: &now,
 		}
 		if attempt != nil {
 			if current.Status.Attempts < int32(attempt.Key.Attempt) {

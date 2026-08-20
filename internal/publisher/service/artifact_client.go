@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -66,7 +67,8 @@ func (c *artifactClient) upload(
 		Artifact: reference, Attempt: attempt,
 	})
 	if err != nil {
-		return apiError(ErrArtifactTransport, "artifact_authorization_failed", "artifact upload could not be authorized", 503, operationErrorIsRetryable(err), err)
+		status, retryable := artifactAuthorizationErrorClassification(err)
+		return apiError(ErrArtifactTransport, "artifact_authorization_failed", "artifact upload could not be authorized", status, retryable, err)
 	}
 	request, err := c.request(ctx, http.MethodPut, reference, authorization, body)
 	if err != nil {
@@ -109,7 +111,8 @@ func (c *artifactClient) download(ctx context.Context, parent Operation, metadat
 		Artifact: reference, Attempt: attempt,
 	})
 	if err != nil {
-		return nil, apiError(ErrArtifactTransport, "artifact_authorization_failed", "artifact download could not be authorized", 503, operationErrorIsRetryable(err), err)
+		status, retryable := artifactAuthorizationErrorClassification(err)
+		return nil, apiError(ErrArtifactTransport, "artifact_authorization_failed", "artifact download could not be authorized", status, retryable, err)
 	}
 	request, err := c.request(ctx, http.MethodGet, reference, authorization, nil)
 	if err != nil {
@@ -137,6 +140,17 @@ func (c *artifactClient) download(ctx context.Context, parent Operation, metadat
 		return nil, apiError(ErrArtifactTransport, "artifact_digest_mismatch", "artifact download digest did not match", 502, false, nil)
 	}
 	return data, nil
+}
+
+func artifactAuthorizationErrorClassification(err error) (int, bool) {
+	var typed *operationError
+	if errors.As(err, &typed) {
+		if typed.status < http.StatusBadRequest || typed.status >= 600 {
+			return http.StatusBadGateway, true
+		}
+		return typed.status, typed.retryable
+	}
+	return http.StatusServiceUnavailable, false
 }
 
 func (c *artifactClient) request(ctx context.Context, method string, reference harnessv2.ArtifactReference, authorization artifactcap.Authorization, body io.Reader) (*http.Request, error) {

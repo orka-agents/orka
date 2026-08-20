@@ -74,6 +74,7 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `spec.agentRuntime.maxTurns` | integer | Agent default | Per-Task prompt-loop limit. |
 | `spec.agentRuntime.allowedTools` / `disallowedTools` | list | Agent defaults | Per-Task tool policy override. |
 | `spec.agentRuntime.allowBash` | boolean | Agent default | Per-Task bash policy override. |
+| `spec.timeout` | duration | `30m` for ACP v2 agent Tasks | Maximum wall-clock duration measured from Task creation, including queue, runtime admission, and prompt execution time. An explicit positive value overrides the default. |
 
 Source read, target read, target write, and forge references are distinct
 credential roles. The selected Secret UID/resourceVersion is frozen for the

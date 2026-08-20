@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
@@ -22,6 +24,11 @@ import (
 )
 
 const acpArtifactAuthorizationPath = "/internal/v2/acp/artifact-authorizations"
+
+var (
+	errPublisherArtifactAuthorizationUnavailable = errors.New("publisher artifact authorization authority is unavailable")
+	errPublisherAuthorizationObjectNotFound      = errors.New("publisher authorization object not found")
+)
 
 type acpArtifactAuthorizationRequest struct {
 	Namespace string                      `json:"namespace"`
@@ -187,7 +194,7 @@ func findTaskByUIDWithReader(ctx context.Context, reader client.Reader, namespac
 			return tasks.Items[i].DeepCopy(), nil
 		}
 	}
-	return nil, fmt.Errorf("task not found")
+	return nil, fmt.Errorf("%w: Task", errPublisherAuthorizationObjectNotFound)
 }
 
 func readACPArtifactCapabilitySecret() ([]byte, error) {
@@ -238,9 +245,15 @@ func (s *Server) issuePublisherArtifactAuthorization(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
 	}
 	if err := s.authorizePublisherArtifactRequest(c.Context(), request); err != nil {
+		if errors.Is(err, errPublisherArtifactAuthorizationUnavailable) {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_authorization_unavailable"})
+		}
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
 	}
 	if err := s.authorizePublisherParentEffect(c.Context(), request.ParentOperation, request.Metadata); err != nil {
+		if errors.Is(err, errPublisherArtifactAuthorizationUnavailable) {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "artifact_authorization_unavailable"})
+		}
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
 	}
 	artifactSecret, err := readACPArtifactCapabilitySecret()
@@ -285,11 +298,18 @@ func (s *Server) authorizePublisherArtifactRequest(ctx context.Context, request 
 }
 
 func (s *Server) authorizePublisherWorkspaceUpload(ctx context.Context, request publisherservice.ArtifactAuthorizationRequest) error {
+	log := logf.FromContext(ctx)
 	if request.ArtifactOperation != artifactcap.OperationUpload || request.Metadata.TaskID == "" || request.Metadata.PublicationID != "" {
+		log.Info("publisher artifact authorization denied", "reason", "workspace_identity_invalid", "parentOperation", request.ParentOperation, "namespace", request.Metadata.Namespace, "operationID", request.Metadata.OperationID)
 		return fmt.Errorf("workspace artifact identity is invalid")
 	}
 	task, err := s.findTaskByUID(ctx, request.Metadata.Namespace, request.Metadata.TaskID)
+	if err != nil && !errors.Is(err, errPublisherAuthorizationObjectNotFound) {
+		log.Info("publisher artifact authorization denied", "reason", "workspace_task_read_failed", "parentOperation", request.ParentOperation, "namespace", request.Metadata.Namespace, "operationID", request.Metadata.OperationID, "error", err)
+		return fmt.Errorf("%w: workspace Task could not be read", errPublisherArtifactAuthorizationUnavailable)
+	}
 	if err != nil || task.Status.Execution == nil {
+		log.Info("publisher artifact authorization denied", "reason", "workspace_task_unavailable", "parentOperation", request.ParentOperation, "namespace", request.Metadata.Namespace, "operationID", request.Metadata.OperationID)
 		return fmt.Errorf("workspace Task is unavailable")
 	}
 	execution := task.Status.Execution
@@ -301,6 +321,7 @@ func (s *Server) authorizePublisherWorkspaceUpload(ctx context.Context, request 
 	// lease for this exact workspace preparation operation.
 	if (!taskStateAllowsWorkspacePreparation(execution.State) && execution.State != corev1alpha1.TaskExecutionStateSubmitting) ||
 		execution.PromptID == "" || request.Metadata.OperationID != "workspace-prepare-"+execution.PromptID {
+		log.Info("publisher artifact authorization denied", "reason", "workspace_task_state_mismatch", "parentOperation", request.ParentOperation, "namespace", request.Metadata.Namespace, "operationID", request.Metadata.OperationID, "executionState", execution.State, "promptIDMatches", request.Metadata.OperationID == "workspace-prepare-"+execution.PromptID)
 		return fmt.Errorf("workspace Task is not in the exact preparation handoff")
 	}
 	return nil
@@ -323,6 +344,9 @@ func (s *Server) authorizePublisherDeltaDownload(ctx context.Context, request pu
 		return fmt.Errorf("publication artifact identity is invalid")
 	}
 	publication, err := s.findPublicationByID(ctx, request.Metadata.Namespace, request.Metadata.PublicationID)
+	if err != nil && !errors.Is(err, errPublisherAuthorizationObjectNotFound) {
+		return fmt.Errorf("%w: Publication could not be read", errPublisherArtifactAuthorizationUnavailable)
+	}
 	if err != nil || string(publication.Status.State) != string(store.PublicationPreparing) {
 		return fmt.Errorf("publication is not preparing")
 	}
@@ -341,6 +365,9 @@ func (s *Server) authorizePublisherBundleUpload(ctx context.Context, request pub
 		return fmt.Errorf("prepared bundle upload identity is invalid")
 	}
 	publication, err := s.findPublicationByID(ctx, request.Metadata.Namespace, request.Metadata.PublicationID)
+	if err != nil && !errors.Is(err, errPublisherAuthorizationObjectNotFound) {
+		return fmt.Errorf("%w: Publication could not be read", errPublisherArtifactAuthorizationUnavailable)
+	}
 	if err != nil || string(publication.Status.State) != string(store.PublicationPreparing) || publication.Status.PreparedReceipt != nil {
 		return fmt.Errorf("publication is not accepting a prepared bundle")
 	}
@@ -353,6 +380,9 @@ func (s *Server) authorizePublisherBundleDownload(ctx context.Context, request p
 		return fmt.Errorf("prepared bundle download identity is invalid")
 	}
 	publication, err := s.findPublicationByID(ctx, request.Metadata.Namespace, request.Metadata.PublicationID)
+	if err != nil && !errors.Is(err, errPublisherAuthorizationObjectNotFound) {
+		return fmt.Errorf("%w: Publication could not be read", errPublisherArtifactAuthorizationUnavailable)
+	}
 	if err != nil || publication.Status.PreparedReceipt == nil {
 		return fmt.Errorf("publication prepared receipt is unavailable")
 	}
@@ -379,7 +409,7 @@ func (s *Server) findPublicationByID(ctx context.Context, namespace, id string) 
 			return publications.Items[i].DeepCopy(), nil
 		}
 	}
-	return nil, fmt.Errorf("publication not found")
+	return nil, fmt.Errorf("%w: Publication", errPublisherAuthorizationObjectNotFound)
 }
 
 func readSecretAtEnvPath(name string, minimum int) ([]byte, error) {
@@ -403,12 +433,15 @@ func (s *Server) authorizePublisherParentEffect(
 	operation publisherservice.Operation,
 	metadata publisherservice.OperationMetadata,
 ) error {
+	log := logf.FromContext(ctx)
 	if s.config.ControllerEpochs == nil || s.config.ExternalEffects == nil {
-		return fmt.Errorf("publisher controller epoch authority is unavailable")
+		log.Info("publisher artifact authorization denied", "reason", "parent_epoch_authority_unavailable", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID)
+		return errPublisherArtifactAuthorizationUnavailable
 	}
 	currentFence, err := s.config.ControllerEpochs.CurrentFence(ctx)
 	if err != nil || strings.TrimSpace(currentFence.Name) == "" || currentFence.Epoch <= 0 || strings.TrimSpace(currentFence.HolderID) == "" {
-		return fmt.Errorf("publisher controller epoch authority is unavailable")
+		log.Info("publisher artifact authorization denied", "reason", "parent_epoch_unavailable", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID, "error", err)
+		return fmt.Errorf("%w: controller epoch could not be read", errPublisherArtifactAuthorizationUnavailable)
 	}
 	kind := ""
 	aggregateID := metadata.PublicationID
@@ -431,6 +464,7 @@ func (s *Server) authorizePublisherParentEffect(
 		return fmt.Errorf("unsupported Publisher parent operation")
 	}
 	if aggregateID == "" || metadata.OperationID == "" {
+		log.Info("publisher artifact authorization denied", "reason", "parent_identity_incomplete", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID)
 		return fmt.Errorf("publisher parent effect identity is incomplete")
 	}
 	identity := store.ExternalEffectIdentity{
@@ -438,11 +472,17 @@ func (s *Server) authorizePublisherParentEffect(
 	}
 	effect, err := s.config.ExternalEffects.GetExternalEffectByIdentity(ctx, identity)
 	if err != nil {
-		return err
+		if errors.Is(err, store.ErrNotFound) {
+			log.Info("publisher artifact authorization denied", "reason", "parent_effect_not_in_flight", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID)
+			return fmt.Errorf("publisher parent effect is not exactly in flight")
+		}
+		log.Info("publisher artifact authorization denied", "reason", "parent_effect_read_failed", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID, "error", err)
+		return fmt.Errorf("%w: parent effect could not be read: %v", errPublisherArtifactAuthorizationUnavailable, err)
 	}
 	now := time.Now().UTC()
 	if effect.Identity != identity || effect.State != store.ExternalEffectInFlight ||
 		!externalEffectLeaseActive(effect, currentFence, now) {
+		log.Info("publisher artifact authorization denied", "reason", "parent_effect_not_exactly_in_flight", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID, "controllerEpoch", currentFence.Epoch)
 		return fmt.Errorf("publisher parent effect is not exactly in flight")
 	}
 	return nil

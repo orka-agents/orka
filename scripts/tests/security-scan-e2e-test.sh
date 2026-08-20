@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 security_script="${root}/scripts/security-scan-e2e.sh"
+security_workflow="${root}/.github/workflows/security-scan-e2e.yml"
 
 for command in cmp jq; do
   command -v "${command}" >/dev/null 2>&1 || {
@@ -47,6 +48,28 @@ apply_repository_scan "${scan_name}"
 grep -F 'repoURL: https://github.com/sozercan/vekil' "${manifest_capture}" >/dev/null
 grep -F 'owner: sozercan' "${manifest_capture}" >/dev/null
 grep -F 'repository: vekil' "${manifest_capture}" >/dev/null
+
+repository_phase="Error"
+kubectl() {
+  if [[ "$*" == *"get repositoryscan ${scan_name} -o jsonpath={.status.phase}"* ]]; then
+    printf '%s' "${repository_phase}"
+    return 0
+  fi
+  if [[ "$*" == *"get repositoryscan ${scan_name} -o json"* ]]; then
+    jq -n '{status:{conditions:[{type:"Ready",message:"runtime pool degraded"}]}}'
+    return 0
+  fi
+  return 1
+}
+set +e
+terminal_wait_error="$(wait_repo_phase "${scan_name}" "Ready" 2>&1)"
+terminal_wait_status=$?
+set -e
+[[ "${terminal_wait_status}" -eq 1 ]]
+grep -Fq 'entered terminal phase Error while waiting for Ready: runtime pool degraded' <<<"${terminal_wait_error}"
+
+repository_phase="Ready"
+wait_repo_phase "${scan_name}" "Ready"
 
 positive="${work_dir}/positive"
 malformed="${work_dir}/malformed"
@@ -441,6 +464,129 @@ set -e
   exit 1
 }
 [[ ! -e "${cleanup_precedence_dir}" ]]
+
+diagnostics_root="${test_root}/diagnostics"
+diagnostics_dir="${diagnostics_root}/fixture-run"
+diagnostics_collected="0"
+api_forward_log="${test_root}/diagnostic-api-forward.log"
+printf '%s\n' 'Authorization: Bearer diagnostic-secret' >"${api_forward_log}"
+kubectl() {
+  case "$*" in
+    *"get repositoryscans -o json"*)
+      jq -n '{items:[{
+        metadata:{name:"security-goof",namespace:"orka-system",uid:"scan-uid",generation:1,annotations:{debug:"must-not-be-captured"}},
+        spec:{repoURL:"https://github.com/sozercan/vekil",branch:"main",ref:"abc",analysisAgentRef:{name:"fixture-agent"},readCredentialRef:{name:"must-not-be-captured"}},
+        status:{phase:"Error",conditions:[{type:"Ready",message:"failed safely"}]}
+      }]}'
+      ;;
+    *"get tasks "*" -o json"*)
+      jq -n '{items:[{
+        metadata:{name:"threat-task",namespace:"orka-system",uid:"task-uid",labels:{"orka.ai/security-target":"security-goof"},annotations:{debug:"must-not-be-captured"}},
+        spec:{type:"agent",prompt:"sensitive prompt",env:[{name:"API_KEY",value:"diagnostic-secret"}],agentRef:{name:"fixture-agent"},workspace:{intent:"read",gitRepo:"https://github.com/sozercan/vekil",branch:"main",ref:"abc",readCredentialRef:{name:"must-not-be-captured"}}},
+        status:{phase:"Failed",message:"runtime failed"}
+      }]}'
+      ;;
+    *"get agents -o json"*)
+      jq -n '{items:[]}'
+      ;;
+    *"get runtimepools -o jsonpath="*)
+      printf '%s\n' 'orka-runtimes'
+      ;;
+    *"get runtimepools -o json"*)
+      jq -n '{items:[{
+        metadata:{name:"pool",namespace:"orka-system",uid:"pool-uid"},
+        spec:{
+          trustDomain:{namespace:"orka-system",identity:"fixture"},
+          runtimeNamespace:"orka-runtimes",
+          runtime:{image:"example.invalid/runtime@sha256:test",profile:{protocolVersion:"orka.harness.v2",digest:"sha256:test",providerKind:"codex",model:"fixture"}},
+          desiredReplicas:1,
+          capacity:{maxResidentSessions:10,maxRunningPrompts:4},
+          credential:"must-not-be-captured"
+        },
+        status:{lifecycle:"Degraded"}
+      }]}'
+      ;;
+    *"get promptattempts -o json"*)
+      jq -n '{items:[{metadata:{name:"attempt"},spec:{id:"attempt-id",taskUid:"task-uid",attempt:1,promptId:"prompt-id",requestDigest:"sha256:test",credentialBindings:[{secretName:"must-not-be-captured",secretKey:"token"}]},status:{executionState:"Failed"}}]}'
+      ;;
+    *"get externaleffects -o json"*)
+      jq -n '{items:[{
+        metadata:{name:"effect",namespace:"orka-system",uid:"effect-uid"},
+        spec:{id:"effect-id",kind:"workspace.prepare",identityNamespace:"orka-system",aggregateId:"task-uid",operationId:"workspace-prepare-prompt-id",requestDigest:"sha256:test",response:{capability:"must-not-be-captured"}},
+        status:{state:"OutcomeUnknown",attempts:1,controllerEpochName:"orka-controller",controllerEpoch:2,version:3,response:{capability:"must-not-be-captured"}}
+      }]}'
+      ;;
+    *"get runtimesessioncontrols -o json"*)
+      jq -n '{items:[{
+        metadata:{name:"session",namespace:"orka-system",uid:"session-object-uid"},
+        spec:{sessionName:"must-not-be-captured",sessionUid:"session-uid",requestDigest:"sha256:test",owner:{kind:"Task",uid:"task-uid"},runtimePoolRef:"pool",credential:"must-not-be-captured"},
+        status:{lifecycle:"Poisoned",availability:"ReconciliationBlocked",blockedReason:"fixture blocked",version:2}
+      }]}'
+      ;;
+    *"get jobs -o jsonpath="*)
+      printf '%s\n' 'mapper-job'
+      ;;
+    *"get pods -o jsonpath="*)
+      printf '%s\n' 'runtime-pod'
+      ;;
+    *"logs "*)
+      printf '%s\n' 'Authorization: Bearer diagnostic-secret'
+      ;;
+    *)
+      printf '%s\n' 'diagnostic fixture output'
+      ;;
+  esac
+}
+
+collect_security_scan_diagnostics
+for expected_file in \
+  metadata.json repository-scans.json tasks.json agents.json runtime-pools.json prompt-attempts.json \
+  external-effects.json runtime-session-controls.json cluster-resources.txt namespace-resources.txt events.txt controller.log \
+  controller-describe.txt api-port-forward.log jobs/mapper-job.log runtime/orka-runtimes-runtime-pod.log; do
+  [[ -f "${diagnostics_dir}/${expected_file}" ]] || {
+    echo "SecurityScan diagnostics omitted ${expected_file}" >&2
+    exit 1
+  }
+done
+if grep -R -Fq 'diagnostic-secret' "${diagnostics_dir}"; then
+  echo "SecurityScan diagnostics retained a credential value" >&2
+  exit 1
+fi
+jq -e '
+  .items[0].status.phase == "Failed" and
+  (.items[0].metadata | has("annotations") | not) and
+  (.items[0].spec | has("prompt") | not) and
+  (.items[0].spec | has("env") | not) and
+  (.items[0].spec.workspace | has("readCredentialRef") | not)
+' "${diagnostics_dir}/tasks.json" >/dev/null
+jq -e '
+  (.items[0].metadata | has("annotations") | not) and
+  (.items[0].spec | has("readCredentialRef") | not)
+' "${diagnostics_dir}/repository-scans.json" >/dev/null
+jq -e '
+  .items[0].spec.runtimeNamespace == "orka-runtimes" and
+  .items[0].spec.runtime.profile.providerKind == "codex" and
+  (.items[0].spec | has("credential") | not)
+' "${diagnostics_dir}/runtime-pools.json" >/dev/null
+jq -e '(.items[0].spec | has("credentialBindings") | not)' \
+  "${diagnostics_dir}/prompt-attempts.json" >/dev/null
+jq -e '
+  .items[0].spec.kind == "workspace.prepare" and
+  .items[0].status.state == "OutcomeUnknown" and
+  (.items[0].spec | has("response") | not) and
+  (.items[0].status | has("response") | not)
+' "${diagnostics_dir}/external-effects.json" >/dev/null
+jq -e '
+  .items[0].spec.sessionUid == "session-uid" and
+  .items[0].status.lifecycle == "Poisoned" and
+  (.items[0].spec | has("sessionName") | not) and
+  (.items[0].spec | has("credential") | not)
+' "${diagnostics_dir}/runtime-session-controls.json" >/dev/null
+
+grep -Fq 'ORKA_SECURITY_SCAN_DIAGNOSTICS_DIR: ${{ runner.temp }}/security-scan-e2e-diagnostics' "${security_workflow}"
+grep -Fq 'if: ${{ failure() }}' "${security_workflow}"
+grep -Fq 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' "${security_workflow}"
+grep -Fq 'path: ${{ runner.temp }}/security-scan-e2e-diagnostics' "${security_workflow}"
 
 preflight_root="${test_root}/preflight-cleanup"
 preflight_bin="${test_root}/preflight-bin"
