@@ -465,6 +465,65 @@ func TestJournalPersistsPromptLifecycleWithRecoveryDeduplication(t *testing.T) {
 	}
 }
 
+func TestJournalPersistsPromptStreamFailureWithRecoveryDeduplication(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	journal := Journal{EventStore: eventStore, MapContext: testMapContext()}
+	state, err := journal.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if appended, isNew, err := state.AppendPromptStreamFailureIfNew(ctx, now, "stream failed"); err != nil || isNew || appended != nil {
+		t.Fatalf("failure before acceptance = %#v new=%t err=%v", appended, isNew, err)
+	}
+	accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
+	accepted.Type = harnessv2.EventAccepted
+	accepted.Update = nil
+	accepted.Accepted = &harnessv2.AcceptedEvent{
+		AcceptedAt: now,
+		Lease: harnessv2.PromptLease{
+			Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+		},
+		ACPVersion: harnessv2.ACPProfileV1,
+	}
+	if appended, isNew, err := state.AppendPromptLifecycleIfNew(ctx, accepted); err != nil || !isNew || appended == nil {
+		t.Fatalf("append accepted lifecycle = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if appended, isNew, err := state.AppendPromptStreamFailureIfNew(
+		ctx, now.Add(time.Second), "runtime prompt transport failed",
+	); err != nil || !isNew || appended == nil {
+		t.Fatalf("append prompt stream failure = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 2 || listed[0].Type != executionevents.ExecutionEventTypeModelRequestStarted ||
+		listed[1].Type != executionevents.ExecutionEventTypeModelRequestFailed {
+		t.Fatalf("prompt stream lifecycle events = %#v", listed)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(listed[1].Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	if content["controllerSynthesized"] != true || content["modelRequestID"] != "prompt-1" ||
+		content["code"] != mappedPromptStreamFailureCode || content["message"] != "runtime prompt transport failed" {
+		t.Fatalf("prompt stream failure content = %#v", content)
+	}
+
+	recovered, err := journal.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate, isNew, err := recovered.AppendPromptStreamFailureIfNew(
+		ctx, now.Add(2*time.Second), "different retry diagnostic",
+	); err != nil || isNew || duplicate != nil {
+		t.Fatalf("recovered prompt stream failure = %#v new=%t err=%v", duplicate, isNew, err)
+	}
+	if listed = listJournalEvents(t, ctx, eventStore); len(listed) != 2 {
+		t.Fatalf("prompt stream lifecycle event count after recovery = %d, want 2", len(listed))
+	}
+}
+
 func TestJournalPersistsAssistantTextOnNonTerminalStreamClosure(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()

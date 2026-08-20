@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	executionevents "github.com/orka-agents/orka/internal/events"
@@ -482,6 +483,33 @@ func (s *State) AppendPromptLifecycleIfNew(
 		return nil, false, err
 	}
 	return s.appendMappedEvent(ctx, identity, kind, mapped, "append mapped harness v2 prompt lifecycle")
+}
+
+// AppendPromptStreamFailureIfNew closes a persisted prompt-acceptance
+// lifecycle when the controller observes a stream failure before a runtime
+// terminal event. The synthetic terminal record is anchored to the accepted
+// event identity so retries and recovery use one stable deduplication key.
+func (s *State) AppendPromptStreamFailureIfNew(
+	ctx context.Context,
+	at time.Time,
+	diagnostic string,
+) (*store.ExecutionEvent, bool, error) {
+	if s == nil {
+		return nil, false, fmt.Errorf("harness v2 journal state is required")
+	}
+	if s.promptAcceptedSequence == 0 || s.promptTerminalSequence > 0 {
+		return nil, false, nil
+	}
+	identity := s.promptIdentity
+	identity.Sequence = s.promptAcceptedSequence
+	mapped, err := mapPromptStreamFailure(identity, at, s.journal.MapContext, diagnostic)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.appendMappedEvent(
+		ctx, identity, mappedJournalRecordPromptTerminal, mapped,
+		"append mapped harness v2 prompt stream failure",
+	)
 }
 
 // AppendAssistantStreamClosureIfNew persists the complete assistant text seen

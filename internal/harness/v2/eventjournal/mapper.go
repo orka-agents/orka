@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -24,6 +25,7 @@ const (
 	mappedTerminalUsageKind          = "terminal_usage"
 	mappedPromptAcceptedKind         = "prompt_accepted"
 	mappedPromptTerminalKind         = "prompt_terminal"
+	mappedPromptStreamFailureCode    = "prompt_stream_error"
 )
 
 type mappedJournalRecordKind uint8
@@ -778,6 +780,64 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 	mapped.Content = encoded
 	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
 		return nil, fmt.Errorf("sanitize mapped harness v2 lifecycle: %w", err)
+	}
+	return mapped, nil
+}
+
+// mapPromptStreamFailure maps a controller-observed stream failure into a
+// terminal model-request lifecycle event. It deliberately uses only the safe
+// mapped prompt identity because controller-synthesized events do not own a
+// runtime request digest or wire-protocol event payload.
+func mapPromptStreamFailure(
+	identity MappedUpdateIdentity,
+	at time.Time,
+	mapCtx MapContext,
+	diagnostic string,
+) (*store.ExecutionEvent, error) {
+	if err := mapCtx.validate(); err != nil {
+		return nil, err
+	}
+	mapCtx = mapCtx.normalized()
+	if !identity.valid() {
+		return nil, fmt.Errorf("valid harness v2 prompt identity is required")
+	}
+	if at.IsZero() {
+		return nil, fmt.Errorf("prompt stream failure timestamp is required")
+	}
+	fields := redactSmallLogicalFieldSet(mappedPromptStreamFailureCode, diagnostic)
+	content := map[string]any{
+		"harnessV2":             identity,
+		"modelRequestID":        string(identity.PromptID),
+		"journalKind":           mappedPromptTerminalKind,
+		"controllerSynthesized": true,
+		"code":                  fields[0],
+		"message":               fields[1],
+	}
+	if mapCtx.Provider != "" {
+		content["provider"] = mapCtx.Provider
+	}
+	if mapCtx.Model != "" {
+		content["model"] = mapCtx.Model
+	}
+	encoded, err := json.Marshal(content)
+	if err != nil {
+		return nil, fmt.Errorf("marshal mapped harness v2 prompt stream failure: %w", err)
+	}
+	mapped := &store.ExecutionEvent{
+		Namespace:   mapCtx.Namespace,
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    mapCtx.StreamID,
+		Type:        executionevents.ExecutionEventTypeModelRequestFailed,
+		Severity:    executionevents.ExecutionEventSeverityError,
+		TaskName:    mapCtx.TaskName,
+		SessionName: mapCtx.SessionName,
+		AgentName:   mapCtx.AgentName,
+		Summary:     compactSummary(fields[0] + ": " + fields[1]),
+		Content:     encoded,
+		CreatedAt:   at.UTC(),
+	}
+	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
+		return nil, fmt.Errorf("sanitize mapped harness v2 prompt stream failure: %w", err)
 	}
 	return mapped, nil
 }

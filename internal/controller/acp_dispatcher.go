@@ -1358,6 +1358,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if persistErr := flushInterruptedOutput(flushCtx); persistErr != nil {
 			streamErr = acpUpdatePersistenceError(persistErr, nil)
 		}
+		var persistenceErr *acpExecutionUpdatePersistenceError
+		if !errors.As(streamErr, &persistenceErr) {
+			if _, _, persistErr := journalState.AppendPromptStreamFailureIfNew(
+				flushCtx, time.Now().UTC(), promptStreamDiagnostic(streamErr),
+			); persistErr != nil {
+				streamErr = acpUpdatePersistenceError(persistErr, nil)
+			}
+		}
 		cancel()
 		return d.handlePromptStreamError(
 			ctx, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence,

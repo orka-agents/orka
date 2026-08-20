@@ -74,6 +74,50 @@ func dispatchQueuedTask(ctx context.Context, t *testing.T, dispatcher *ACPDispat
 	}
 }
 
+func cancelRuntimeContextAfterPromptRunning(
+	ctx context.Context,
+	attempts store.PromptAttemptStore,
+	attemptID string,
+	accepted <-chan struct{},
+	deadlineCancels <-chan context.CancelCauseFunc,
+) <-chan error {
+	result := make(chan error, 1)
+	go func() {
+		select {
+		case <-accepted:
+		case <-ctx.Done():
+			result <- ctx.Err()
+			return
+		}
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			observed, err := attempts.GetPromptAttempt(ctx, attemptID)
+			if err != nil {
+				result <- err
+				return
+			}
+			if observed.ExecutionState == store.PromptExecutionRunning {
+				select {
+				case cancelCause := <-deadlineCancels:
+					cancelCause(context.DeadlineExceeded)
+					result <- nil
+				case <-ctx.Done():
+					result <- ctx.Err()
+				}
+				return
+			}
+			select {
+			case <-ticker.C:
+			case <-ctx.Done():
+				result <- ctx.Err()
+				return
+			}
+		}
+	}()
+	return result
+}
+
 type baseOnlyExecutionEventStore struct {
 	store.ExecutionEventStore
 }
@@ -1503,8 +1547,9 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 	task.Status.Execution.RuntimePoolName = plan.PoolName
 	var deleteCalls atomic.Int32
 	deadlineCancels := make(chan context.CancelCauseFunc, 1)
+	accepted := make(chan struct{})
 	server := newDispatcherTimeoutRuntimeServer(t, profile, profileDigest, &deleteCalls, func() {
-		(<-deadlineCancels)(context.DeadlineExceeded)
+		close(accepted)
 	})
 	defer server.Close()
 	parsed, err := url.Parse(server.URL)
@@ -1572,13 +1617,31 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 			return runtimeCtx, func() { cancelCause(context.Canceled) }
 		},
 	}
+	cancelAfterAcceptance := cancelRuntimeContextAfterPromptRunning(
+		ctx, controlStore, attemptID, accepted, deadlineCancels,
+	)
 	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
+	if err := <-cancelAfterAcceptance; err != nil {
+		t.Fatalf("cancel after prompt acceptance: %v", err)
+	}
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
 	}
 	if completed.Status.Phase != corev1alpha1.TaskPhaseCancelled || completed.Status.Execution == nil || completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled {
 		t.Fatalf("unexpected timeout status: %#v", completed.Status)
+	}
+	timeline, err := controlStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace: task.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name,
+		Limit: store.MaxExecutionEventLimit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := tasktrace.BuildTaskTrace(tasktrace.MetadataFromTask(completed), timeline, time.Now().UTC())
+	if len(trace.ModelRequests) != 1 || trace.ModelRequests[0].Status != tasktrace.StatusFailed ||
+		trace.ModelRequests[0].StartSeq == 0 || trace.ModelRequests[0].EndSeq <= trace.ModelRequests[0].StartSeq {
+		t.Fatalf("timeout ACP trace model requests = %#v; timeline=%#v", trace.ModelRequests, timeline)
 	}
 	if got := deleteCalls.Load(); got != 1 {
 		t.Fatalf("RuntimeSession DELETE calls = %d, want 1", got)
