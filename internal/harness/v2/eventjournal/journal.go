@@ -13,6 +13,15 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const (
+	maxOpenToolAccumulators     = 128
+	maxBufferedToolContentBytes = 1 << 20
+)
+
+// ErrToolBufferLimitExceeded reports that one prompt exceeded the bounded
+// in-memory aggregation budget for streamed tool output.
+var ErrToolBufferLimitExceeded = errors.New("harness v2 tool aggregation buffer limit exceeded")
+
 // Journal owns duplicate-safe persistence of mapped harness v2 updates.
 type Journal struct {
 	EventStore store.ExecutionEventStore
@@ -26,11 +35,13 @@ type Journal struct {
 // Controller takeover deliberately terminalizes accepted prompts as
 // OutcomeUnknown rather than replaying or persisting a raw-content crash buffer.
 type State struct {
-	journal        Journal
-	keys           map[string]struct{}
-	persistedKeys  map[string]struct{}
-	aggregatedKeys map[string]struct{}
-	toolText       map[string]*streamText
+	journal           Journal
+	keys              map[string]struct{}
+	persistedKeys     map[string]struct{}
+	aggregatedKeys    map[string]struct{}
+	toolText          map[string]*streamText
+	toolBufferedBytes int
+	bufferErr         error
 }
 
 type streamText struct {
@@ -137,12 +148,17 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 	if s == nil {
 		return nil, false, fmt.Errorf("harness v2 journal state is required")
 	}
+	if s.bufferErr != nil {
+		return nil, false, s.bufferErr
+	}
 	key := mappedUpdateIdentity(event).Key()
 	mapped, err := MapUpdate(event, s.journal.MapContext)
 	if err != nil {
 		return nil, false, err
 	}
-	s.aggregateToolUpdate(event, key)
+	if err := s.aggregateToolUpdate(event, key); err != nil {
+		return nil, false, err
+	}
 	if s.HasUpdate(event) {
 		s.finishToolUpdate(event)
 		return nil, false, nil
@@ -333,20 +349,27 @@ func (j Journal) hasPersistedIdentity(ctx context.Context, key string) (bool, er
 	}
 }
 
-func (s *State) aggregateToolUpdate(event harnessv2.Event, key string) {
+func (s *State) aggregateToolUpdate(event harnessv2.Event, key string) error {
 	if event.Update == nil || event.Update.ToolCall == nil {
-		return
+		return nil
 	}
 	if _, ok := s.aggregatedKeys[key]; ok {
-		return
+		return nil
 	}
 	s.aggregatedKeys[key] = struct{}{}
 	toolID := event.Update.ToolCall.ToolCallID
 	accumulator := s.toolText[toolID]
 	if accumulator == nil {
+		if len(s.toolText) >= maxOpenToolAccumulators {
+			s.bufferErr = fmt.Errorf(
+				"%w: open tool streams exceed %d", ErrToolBufferLimitExceeded, maxOpenToolAccumulators,
+			)
+			return s.bufferErr
+		}
 		accumulator = &streamText{}
 		s.toolText[toolID] = accumulator
 	}
+	beforeBytes := accumulator.text.Len()
 	tool := event.Update.ToolCall
 	if strings.TrimSpace(tool.Title) != "" {
 		accumulator.title = tool.Title
@@ -359,6 +382,14 @@ func (s *State) aggregateToolUpdate(event harnessv2.Event, key string) {
 	} else if len(tool.Content) > 0 {
 		accumulator.append(toolContentFragment(tool.Content))
 	}
+	s.toolBufferedBytes += accumulator.text.Len() - beforeBytes
+	if s.toolBufferedBytes > maxBufferedToolContentBytes {
+		s.bufferErr = fmt.Errorf(
+			"%w: buffered tool content exceeds %d bytes", ErrToolBufferLimitExceeded, maxBufferedToolContentBytes,
+		)
+		return s.bufferErr
+	}
+	return nil
 }
 
 func (s *State) finishToolUpdate(event harnessv2.Event) (string, bool, string, string, bool) {
@@ -374,6 +405,7 @@ func (s *State) finishToolUpdate(event harnessv2.Event) (string, bool, string, s
 		return "", false, "", "", false
 	}
 	delete(s.toolText, tool.ToolCallID)
+	s.toolBufferedBytes -= accumulator.text.Len()
 	return accumulator.text.String(), accumulator.overflow, accumulator.title, accumulator.kind, true
 }
 

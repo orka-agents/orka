@@ -3,6 +3,7 @@ package eventjournal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -507,6 +508,70 @@ func TestJournalRetainsBoundedOversizedToolStream(t *testing.T) {
 		completed.ContentText != strings.Repeat("x", executionevents.MaxExecutionEventContentTextChars) ||
 		completed.Truncation == nil || !completed.Truncation.ContentTextTruncated {
 		t.Fatalf("oversized completed tool event = %#v", completed)
+	}
+}
+
+func TestJournalRejectsTooManyOpenToolAccumulators(t *testing.T) {
+	ctx := context.Background()
+	state, err := (Journal{EventStore: storetest.NewFakeExecutionEventStore(), MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for index := range maxOpenToolAccumulators {
+		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCall,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: fmt.Sprintf("call-open-%d", index), Status: harnessv2.ToolCallStatusPending,
+			},
+		})
+		if _, _, err := state.AppendUpdateIfNew(ctx, event); err != nil {
+			t.Fatalf("append open tool %d: %v", index, err)
+		}
+	}
+	overflow := testUpdateEvent(uint64(maxOpenToolAccumulators+2), now.Add(time.Second), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCall,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-open-overflow", Status: harnessv2.ToolCallStatusPending,
+		},
+	})
+	for attempt := range 2 {
+		if _, _, err := state.AppendUpdateIfNew(ctx, overflow); !errors.Is(err, ErrToolBufferLimitExceeded) {
+			t.Fatalf("open-tool overflow attempt %d error = %v", attempt, err)
+		}
+	}
+}
+
+func TestJournalRejectsAggregateToolContentOverflow(t *testing.T) {
+	ctx := context.Background()
+	state, err := (Journal{EventStore: storetest.NewFakeExecutionEventStore(), MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("🙂", executionevents.MaxExecutionEventContentTextChars)
+	contentBytes := len(content)
+	now := time.Now().UTC()
+	for index := 0; index < maxBufferedToolContentBytes/contentBytes; index++ {
+		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCallUpdate,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: fmt.Sprintf("call-buffer-%d", index), Status: harnessv2.ToolCallStatusInProgress,
+				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: content}}, ContentReplace: true,
+			},
+		})
+		if _, _, err := state.AppendUpdateIfNew(ctx, event); err != nil {
+			t.Fatalf("append buffered tool %d: %v", index, err)
+		}
+	}
+	overflow := testUpdateEvent(100, now.Add(time.Second), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-buffer-overflow", Status: harnessv2.ToolCallStatusInProgress,
+			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: content}}, ContentReplace: true,
+		},
+	})
+	if _, _, err := state.AppendUpdateIfNew(ctx, overflow); !errors.Is(err, ErrToolBufferLimitExceeded) {
+		t.Fatalf("aggregate tool overflow error = %v", err)
 	}
 }
 
