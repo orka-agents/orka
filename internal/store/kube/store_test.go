@@ -145,6 +145,42 @@ func TestControllerEpochLeaseCAS(t *testing.T) {
 	}
 }
 
+func TestControllerEpochFenceReadToleratesLeaseMutationResourceVersionChurn(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, kubeClient, want := newTestStoreWithEpoch(t)
+	name := controlstore.DefaultControllerEpochName
+	objectKey := client.ObjectKey{Namespace: testControlNamespace, Name: controllerEpochObjectName(name)}
+	before := &corev1alpha1.ControllerEpoch{}
+	if err := kubeClient.Get(ctx, objectKey, before); err != nil {
+		t.Fatalf("get controller epoch mirror before fence read: %v", err)
+	}
+	lease := &coordinationv1.Lease{}
+	leaseKey := client.ObjectKey{Namespace: testControlNamespace, Name: controllerEpochLeaseName(name)}
+	if err := kubeClient.Get(ctx, leaseKey, lease); err != nil {
+		t.Fatalf("get controller epoch Lease before mutation churn: %v", err)
+	}
+	lease.Annotations[annotationMutationToken] = "concurrent-control-store-mutation"
+	lease.Annotations[annotationMutationExpiresAt] = formatTime(time.Now().UTC().Add(time.Minute))
+	if err := kubeClient.Update(ctx, lease); err != nil {
+		t.Fatalf("change controller epoch Lease resourceVersion: %v", err)
+	}
+
+	got, err := kubeStore.GetControllerEpochFence(ctx, name)
+	if err != nil {
+		t.Fatalf("read controller epoch fence during mutation churn: %v", err)
+	}
+	if got != want {
+		t.Fatalf("controller epoch fence = %#v, want %#v", got, want)
+	}
+	after := &corev1alpha1.ControllerEpoch{}
+	if err := kubeClient.Get(ctx, objectKey, after); err != nil {
+		t.Fatalf("get controller epoch mirror after fence read: %v", err)
+	}
+	if after.ResourceVersion != before.ResourceVersion {
+		t.Fatalf("read-only fence lookup changed mirror resourceVersion from %q to %q", before.ResourceVersion, after.ResourceVersion)
+	}
+}
+
 func TestControllerEpochAuthorityRejectsRecreatedLeaseIncarnation(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, fence := newTestStoreWithEpoch(t)
@@ -184,6 +220,9 @@ func TestControllerEpochAuthorityRejectsRecreatedLeaseIncarnation(t *testing.T) 
 	}
 	if _, err := kubeStore.GetControllerEpoch(ctx, name); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "bound to Lease UID") {
 		t.Fatalf("recreated Lease read error = %v, want UID conflict", err)
+	}
+	if _, err := kubeStore.GetControllerEpochFence(ctx, name); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "bound to Lease UID") {
+		t.Fatalf("recreated Lease fence read error = %v, want UID conflict", err)
 	}
 	if _, _, err := kubeStore.requireControllerEpoch(ctx, fence); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "bound to Lease UID") {
 		t.Fatalf("recreated Lease mutation-fence error = %v, want UID conflict", err)

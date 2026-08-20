@@ -88,4 +88,15 @@ jobs:
           bash scripts/tests/security-scan-e2e-test.sh
 
       - name: Run security scan e2e
+        env:
+          ORKA_SECURITY_SCAN_DIAGNOSTICS_DIR: ${{ runner.temp }}/security-scan-e2e-diagnostics
         run: bash scripts/security-scan-e2e.sh
+
+      - name: Upload security scan failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: security-scan-e2e-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/security-scan-e2e-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
