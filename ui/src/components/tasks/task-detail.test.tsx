@@ -381,18 +381,35 @@ describe('TaskDetail', () => {
           streamType: 'task',
           streamID: params.id,
           afterSeq: 0,
-          latestSeq: 1,
-          events: [{
-            id: 'plan-1',
-            namespace: 'default',
-            streamType: 'task',
-            streamID: params.id,
-            seq: 1,
-            type: 'PlanUpdated',
-            severity: 'info',
-            contentText: '# Plan\n- inspect',
-            createdAt: new Date().toISOString(),
-          }],
+          latestSeq: 2,
+          events: [
+            {
+              id: 'plan-1',
+              namespace: 'default',
+              streamType: 'task',
+              streamID: params.id,
+              seq: 1,
+              type: 'PlanUpdated',
+              severity: 'info',
+              summary: 'Plan updated (0/1 steps complete)',
+              content: { progressPct: 0, goalComplete: false },
+              contentText: '# Plan\n- [ ] inspect',
+              createdAt: new Date().toISOString(),
+            },
+            {
+              id: 'plan-2',
+              namespace: 'default',
+              streamType: 'task',
+              streamID: params.id,
+              seq: 2,
+              type: 'PlanUpdated',
+              severity: 'info',
+              summary: 'Plan in progress (1/2 complete): verify',
+              content: { progressPct: 50, goalComplete: false },
+              contentText: '# Plan\n- [x] inspect\n- [ ] verify _(in progress)_',
+              createdAt: new Date().toISOString(),
+            },
+          ],
         }),
       ),
     )
@@ -401,6 +418,11 @@ describe('TaskDetail', () => {
     const planTab = await screen.findByRole('tab', { name: /plan/i })
     await userEvent.click(planTab)
     expect(await screen.findByText('Agent Plan')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: /goal progress/i })).toHaveAttribute('aria-valuenow', '50')
+    expect(screen.getByText('Plan document')).toBeInTheDocument()
+    const document = screen.getByText((_, element) => element?.tagName.toLowerCase() === 'pre')
+    expect(document).toHaveTextContent('- [x] inspect')
+    expect(document).toHaveTextContent('- [ ] verify')
   })
 
   it('shows a persisted plan when iteration is 0', async () => {

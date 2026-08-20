@@ -25,6 +25,7 @@ import { useTaskTrace, useTaskApprovals } from '@/hooks/use-execution-events'
 import { useTaskArtifacts } from '@/hooks/use-task-artifacts'
 import { ApiError } from '@/lib/api-client'
 import { useNavigate, useSearch } from '@tanstack/react-router'
+import type { ExecutionEvent, PlanState } from '@/schemas/task'
 
 function timeAgo(ts?: string): string {
   if (!ts) return '-'
@@ -33,6 +34,28 @@ function timeAgo(ts?: string): string {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`
   return `${Math.floor(s / 86400)}d ago`
+}
+
+function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
+  let latest: ExecutionEvent | undefined
+  for (const event of events) {
+    if (event.type === 'PlanUpdated' && (!latest || event.seq > latest.seq)) {
+      latest = event
+    }
+  }
+  if (!latest) return undefined
+
+  const content = latest.content
+  const fields = content && typeof content === 'object' && !Array.isArray(content)
+    ? content as Record<string, unknown>
+    : undefined
+
+  return {
+    summary: latest.summary,
+    progressPct: typeof fields?.progressPct === 'number' ? fields.progressPct : undefined,
+    goalComplete: typeof fields?.goalComplete === 'boolean' ? fields.goalComplete : undefined,
+    planDocument: latest.contentText,
+  }
 }
 
 
@@ -52,7 +75,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const taskEventsStreamStatus = taskEventsUnsupported ? 'unsupported' : taskEventsFailed ? 'error' : undefined
   const forkSupported = !taskEventsUnsupported && !taskEventsFailed
   const taskEvents = taskEventsResponse?.events ?? []
-  const plan = task?.plan
+  const plan = task?.plan ?? latestEventPlan(taskEvents)
   const hasPlanHistory = Boolean(plan) || (task?.status?.iteration ?? 0) > 0 ||
     taskEvents.some((event) => event.type === 'PlanUpdated')
   const deleteTask = useDeleteTask()
