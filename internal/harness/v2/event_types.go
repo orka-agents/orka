@@ -260,9 +260,6 @@ func (u UsageUpdate) Validate() error {
 	if u.ContextWindowUsed != nil && *u.ContextWindowUsed > *u.ContextWindowSize {
 		return fmt.Errorf("context window used tokens must not exceed size")
 	}
-	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CachedInputTokens == 0 && u.ContextWindowUsed == nil {
-		return fmt.Errorf("usage update must carry token or context-window telemetry")
-	}
 	return nil
 }
 
