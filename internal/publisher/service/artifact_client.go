@@ -66,7 +66,7 @@ func (c *artifactClient) upload(
 		Artifact: reference, Attempt: attempt,
 	})
 	if err != nil {
-		return apiError(ErrArtifactTransport, "artifact_authorization_failed", "artifact upload could not be authorized", 503, false, err)
+		return apiError(ErrArtifactTransport, "artifact_authorization_failed", "artifact upload could not be authorized", 503, operationErrorIsRetryable(err), err)
 	}
 	request, err := c.request(ctx, http.MethodPut, reference, authorization, body)
 	if err != nil {
@@ -109,7 +109,7 @@ func (c *artifactClient) download(ctx context.Context, parent Operation, metadat
 		Artifact: reference, Attempt: attempt,
 	})
 	if err != nil {
-		return nil, apiError(ErrArtifactTransport, "artifact_authorization_failed", "artifact download could not be authorized", 503, false, err)
+		return nil, apiError(ErrArtifactTransport, "artifact_authorization_failed", "artifact download could not be authorized", 503, operationErrorIsRetryable(err), err)
 	}
 	request, err := c.request(ctx, http.MethodGet, reference, authorization, nil)
 	if err != nil {

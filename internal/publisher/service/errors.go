@@ -58,6 +58,11 @@ func invalidRequest(message string, cause error) error {
 	return apiError(ErrInvalidRequest, "invalid_request", message, http.StatusBadRequest, false, cause)
 }
 
+func operationErrorIsRetryable(err error) bool {
+	var typed *operationError
+	return errors.As(err, &typed) && typed.retryable
+}
+
 func errorResponse(err error, metadata OperationMetadata, requestDigest string) (int, ErrorResponse, bool) {
 	var typed *operationError
 	if errors.As(err, &typed) {
