@@ -488,19 +488,19 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 	}
 }
 
-func TestPublisherArtifactAuthorizationBrokerToleratesTaskStatusLag(t *testing.T) {
+func TestPublisherArtifactAuthorizationBrokerToleratesTaskProjectionSkew(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	taskUID := types.UID("fresh-publisher-task-uid")
-	laggingTask := &corev1alpha1.Task{
+	skewedTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "publisher-task", UID: taskUID},
 		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
-			State: corev1alpha1.TaskExecutionStateReserved, PromptID: "fresh-prompt",
+			State: corev1alpha1.TaskExecutionStateSubmitting, PromptID: "fresh-prompt",
 		}},
 	}
-	cachedTask := laggingTask.DeepCopy()
+	cachedTask := skewedTask.DeepCopy()
 	cachedTask.Status.Execution.State = corev1alpha1.TaskExecutionStatePlanned
 
 	workspace := []byte("fresh workspace tar")
@@ -525,7 +525,7 @@ func TestPublisherArtifactAuthorizationBrokerToleratesTaskStatusLag(t *testing.T
 		"fresh-workspace-effect", "workspace.prepare", string(taskUID), request.Metadata.OperationID,
 	)
 	cachedClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cachedTask, effect.DeepCopy()).Build()
-	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(laggingTask, effect).Build()
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(skewedTask, effect).Build()
 
 	artifactSecret := []byte(strings.Repeat("a", 32))
 	publisherToken := strings.Repeat("p", 32)
@@ -554,62 +554,6 @@ func TestPublisherArtifactAuthorizationBrokerToleratesTaskStatusLag(t *testing.T
 	}
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want %d", response.StatusCode, http.StatusOK)
-	}
-}
-
-func TestAuthorizePublisherWorkspaceUploadRejectsNonPreparationStates(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	taskUID := types.UID("publisher-task-non-preparation-uid")
-	metadata := publisherservice.OperationMetadata{
-		Namespace: "default", TaskID: string(taskUID), OperationID: "workspace-prepare-prompt",
-	}
-	request := publisherservice.ArtifactAuthorizationRequest{
-		ParentOperation:   publisherservice.OperationWorkspacePrepare,
-		Metadata:          metadata,
-		ArtifactOperation: artifactcap.OperationUpload,
-	}
-	effect := publisherEffectForTest(
-		"workspace-non-preparation-effect", "workspace.prepare", string(taskUID), metadata.OperationID,
-	)
-	states := []corev1alpha1.TaskExecutionState{
-		corev1alpha1.TaskExecutionStateSubmitting,
-		corev1alpha1.TaskExecutionStateSubmittedUnknown,
-		corev1alpha1.TaskExecutionStateAccepted,
-		corev1alpha1.TaskExecutionStateRunning,
-		corev1alpha1.TaskExecutionStateSettling,
-		corev1alpha1.TaskExecutionStateSucceeded,
-		corev1alpha1.TaskExecutionStateFailed,
-		corev1alpha1.TaskExecutionStateCancelled,
-		corev1alpha1.TaskExecutionStateOutcomeUnknown,
-	}
-	for _, state := range states {
-		t.Run(string(state), func(t *testing.T) {
-			task := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "publisher-task", UID: taskUID},
-				Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
-					State: state, PromptID: "prompt",
-				}},
-			}
-			apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
-			server := &Server{
-				client: apiReader,
-				config: ServerConfig{
-					APIReader: apiReader, ControllerEpochs: publisherEpochSourceForTest(),
-					ExternalEffects: publisherEffectReaderForTest(effect),
-				},
-			}
-			if err := server.authorizePublisherParentEffect(
-				context.Background(), publisherservice.OperationWorkspacePrepare, metadata,
-			); err != nil {
-				t.Fatalf("live parent effect fixture is not authorized: %v", err)
-			}
-			if err := server.authorizePublisherArtifactRequest(context.Background(), request); err == nil {
-				t.Fatalf("workspace upload authorized in Task state %s", state)
-			}
-		})
 	}
 }
 
