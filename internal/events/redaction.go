@@ -87,7 +87,7 @@ func stripExecutionEventURLQuery(candidate string) string {
 	suffix := candidate[len(trimmed):]
 	parsed, err := url.Parse(trimmed)
 	if err != nil {
-		return candidate
+		return ExecutionEventRedactedValue + suffix
 	}
 	if parsed.User == nil && parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "" {
 		return candidate

@@ -233,15 +233,17 @@ func TestRedactExecutionEventTextStripsURLQueriesAndFragments(t *testing.T) {
 	singleRelativeURL := "output?sig=single-relative-secret#download"
 	singleFragmentURL := "callback#single-fragment-secret"
 	queryRelativeURL := "?sig=query-relative-secret#refresh"
+	malformedURL := "https://example.test/%zz?sig=malformed-secret"
 	userinfoURL := "//alice:scheme-relative-password@example.com/output.txt"
 	got := RedactExecutionEventText("download " + capabilityURL + ", mirror " + schemeRelativeURL +
 		"; root " + rootRelativeURL + "; path " + pathRelativeURL + "; file " + singleRelativeURL +
 		"; callback " + singleFragmentURL + "; refresh " + queryRelativeURL +
+		"; malformed " + malformedURL +
 		"; authenticated mirror " + userinfoURL + "; then open https://example.com/docs and /docs/getting-started.")
 	for _, leaked := range []string{
 		"sig=", "usable-secret", "scheme-relative-secret", "root-relative-secret", "path-relative-secret",
 		"single-relative-secret", "single-fragment-secret", "query-relative-secret",
-		"#download", "#refresh", "alice", "scheme-relative-password",
+		"malformed-secret", "%zz", "#download", "#refresh", "alice", "scheme-relative-password",
 	} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("RedactExecutionEventText leaked %q in %q", leaked, got)
@@ -253,6 +255,7 @@ func TestRedactExecutionEventTextStripsURLQueriesAndFragments(t *testing.T) {
 		!strings.Contains(got, "artifacts/output;") ||
 		!strings.Contains(got, "output;") ||
 		!strings.Contains(got, "callback;") ||
+		!strings.Contains(got, "malformed "+ExecutionEventRedactedValue+";") ||
 		!strings.Contains(got, "//example.com/output.txt;") ||
 		!strings.Contains(got, "https://example.com/docs") ||
 		!strings.Contains(got, "/docs/getting-started.") {

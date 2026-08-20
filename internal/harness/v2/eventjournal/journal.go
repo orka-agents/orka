@@ -617,13 +617,29 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 			s.markToolStartPersisted(event)
 		}
 		if event.Update.Kind == harnessv2.UpdatePlan {
-			s.planFieldHistory = append(s.planFieldHistory, planFields...)
+			s.planFieldHistory = boundedLogicalFieldHistory(s.planFieldHistory, planFields)
 		}
 		if event.Update.Kind == harnessv2.UpdateDiagnostic {
-			s.diagnosticFieldHistory = append(s.diagnosticFieldHistory, diagnosticFields...)
+			s.diagnosticFieldHistory = boundedLogicalFieldHistory(s.diagnosticFieldHistory, diagnosticFields)
 		}
 	}
 	return appended, isNew, err
+}
+
+func boundedLogicalFieldHistory(
+	history []logicalFieldBoundaries,
+	published []logicalFieldBoundaries,
+) []logicalFieldBoundaries {
+	if len(published) == 0 {
+		return history
+	}
+	combined := make([]logicalFieldBoundaries, 0, len(history)+len(published))
+	combined = append(combined, history...)
+	combined = append(combined, published...)
+	if len(combined) > maxLogicalFieldPermutationFields {
+		combined = combined[len(combined)-maxLogicalFieldPermutationFields:]
+	}
+	return append([]logicalFieldBoundaries(nil), combined...)
 }
 
 func isBufferedToolContentUpdate(event harnessv2.Event) bool {
@@ -789,8 +805,8 @@ func (s *State) AppendPromptStreamFailureIfNew(
 }
 
 // AppendPromptSettlementIfNew closes a persisted prompt-acceptance lifecycle
-// from a proven cancellation settlement when the terminal stream event was
-// unavailable. The accepted identity supplies a stable deduplication key.
+// from a proven settlement when the terminal stream event was unavailable.
+// The accepted identity supplies a stable deduplication key.
 func (s *State) AppendPromptSettlementIfNew(
 	ctx context.Context,
 	settlement harnessv2.PromptSettlement,

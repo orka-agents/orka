@@ -379,6 +379,81 @@ func TestACPDispatcherRecoversCompletedJournalTerminalOnlyWithExactResult(t *tes
 	}
 }
 
+func TestACPDispatcherRecoversResultSavedBeforeTerminalAppend(t *testing.T) {
+	tests := []struct {
+		name         string
+		storedResult string
+		wantState    store.PromptExecutionState
+	}{
+		{name: "matching attempt-bound result", storedResult: "exact recovered result", wantState: store.PromptExecutionSucceeded},
+		{name: "mismatched result", storedResult: "stale result", wantState: store.PromptExecutionOutcomeUnknown},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+			defer fixture.close(t)
+
+			task := configureRecoveryJournalIdentity(t, fixture)
+			appendRecoveryOpenPrompt(t, fixture, task)
+			const receiptResult = "exact recovered result"
+			if err := fixture.dispatcher.transitionAttemptToSettlingWithResult(
+				fixture.ctx, fixture.attemptID, fixture.fence, []byte(receiptResult),
+			); err != nil {
+				t.Fatal(err)
+			}
+			task.Status.Execution.State = corev1alpha1.TaskExecutionStateSettling
+			if err := fixture.kubeClient.Status().Update(fixture.ctx, task); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.controlStore.SaveResult(
+				fixture.ctx, task.Namespace, task.Name, []byte(test.storedResult),
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if attempt.ExecutionState != test.wantState {
+				t.Fatalf("recovered attempt state = %s, want %s", attempt.ExecutionState, test.wantState)
+			}
+			updated := &corev1alpha1.Task{}
+			if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), updated); err != nil {
+				t.Fatal(err)
+			}
+			if test.wantState == store.PromptExecutionSucceeded {
+				if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateSucceeded ||
+					updated.Status.ResultRef == nil || !updated.Status.ResultRef.Available {
+					t.Fatalf("recovered matching result status = %#v", updated.Status)
+				}
+				identity, ok := mappedPromptRecoveryIdentity(task)
+				if !ok {
+					t.Fatal("recovery identity is incomplete")
+				}
+				evidence, err := (v2eventjournal.Journal{
+					EventStore: fixture.controlStore,
+					MapContext: v2eventjournal.MapContext{
+						Namespace: task.Namespace, TaskName: task.Name, StreamID: task.Name,
+					},
+					RecoveryIdentity: identity,
+				}).FindPromptTerminal(fixture.ctx)
+				if err != nil || evidence == nil || evidence.TerminalEvent != harnessv2.EventCompleted {
+					t.Fatalf("recovered terminal evidence = %#v, err=%v", evidence, err)
+				}
+				return
+			}
+			if updated.Status.Execution == nil || updated.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeOutcomeUnknown ||
+				updated.Status.ResultRef != nil {
+				t.Fatalf("mismatched result status = %#v", updated.Status)
+			}
+		})
+	}
+}
+
 func TestACPDispatcherIgnoresJournaledTerminalForDifferentRuntimeIdentity(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)

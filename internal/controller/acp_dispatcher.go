@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -41,6 +43,7 @@ const (
 	acpTaskTimeoutReason                                 = "TaskTimeout"
 	acpTaskTimeoutCancellationSettledMessage             = "task deadline cancellation settled"
 	acpCancelledOperation                                = "cancelled"
+	acpSettlingOperation                                 = "settling"
 	acpSucceededOperation                                = "succeeded"
 	acpCredentialBlockedOperation                        = "credential-blocked"
 	acpCredentialBlockedMessage                          = "workspace credential changed or became unavailable after queue; refusing to change frozen authority"
@@ -1417,15 +1420,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal)
 	}
-	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionRunning, store.PromptExecutionSettling, "settling", nil); err != nil {
-		return err
-	}
-	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
-		status.State = corev1alpha1.TaskExecutionStateSettling
-		status.LastTransitionTime = nowMeta()
-	}); err != nil {
-		return err
-	}
 	settlement := harnessv2.PromptSettlement{TerminalEvent: terminal.Type, Outcome: harnessv2.PromptOutcomeSucceeded, StopReason: harnessv2.ACPStopReasonEndTurn, SettledAt: terminal.Identity.Timestamp}
 	settlementDigest, err := harnessv2.CanonicalPromptSettlementDigest(settlement)
 	if err != nil {
@@ -1438,6 +1432,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	persistableAssistant, assistantContentOmitted := completedAssistantTranscriptForPersistence(
 		assistant.String(), assistantOverflow, resultText,
 	)
+	if err := d.transitionAttemptToSettlingWithResult(ctx, attemptID, fence, []byte(resultText)); err != nil {
+		return err
+	}
+	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
+		status.State = corev1alpha1.TaskExecutionStateSettling
+		status.LastTransitionTime = nowMeta()
+	}); err != nil {
+		return err
+	}
 	if err := flushTerminalOutput(persistableAssistant, assistantContentOmitted); err != nil {
 		logf.FromContext(ctx).Error(err, "persist terminal ACP buffered streams", "namespace", task.Namespace, "task", task.Name)
 		return d.failPromptForExecutionEventPersistence(
@@ -3252,6 +3255,56 @@ func (d *ACPDispatcher) transitionAttempt(ctx context.Context, id string, fence 
 		transition.SessionLeaseGeneration = binding.SessionGeneration
 	}
 	_, err = d.Store.TransitionPromptAttemptExecution(ctx, transition)
+	return err
+}
+
+func acpPromptResultDigest(result []byte) string {
+	sum := sha256.Sum256(result)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func acpSettlingTransitionDigest(id string, version int64, result []byte) (string, error) {
+	return acpDomainDigest("attempt-transition", map[string]any{
+		"id": id, "from": store.PromptExecutionRunning, "to": store.PromptExecutionSettling,
+		"operation": acpSettlingOperation, "version": version, "resultDigest": acpPromptResultDigest(result),
+	})
+}
+
+func (d *ACPDispatcher) transitionAttemptToSettlingWithResult(
+	ctx context.Context,
+	id string,
+	fence store.ControllerEpochFence,
+	result []byte,
+) error {
+	attempt, err := d.Store.GetPromptAttempt(ctx, id)
+	if err != nil {
+		return err
+	}
+	expectedVersion := attempt.Version
+	if attempt.ExecutionState == store.PromptExecutionSettling {
+		expectedVersion--
+	}
+	if expectedVersion < 1 {
+		return fmt.Errorf("prompt attempt %s has invalid settling receipt version %d", id, expectedVersion)
+	}
+	digest, err := acpSettlingTransitionDigest(id, expectedVersion, result)
+	if err != nil {
+		return err
+	}
+	operationID := acpSettlingOperation + "-" + strconv.FormatInt(expectedVersion, 10)
+	if attempt.ExecutionState == store.PromptExecutionSettling {
+		if attempt.LastOperationID == operationID && attempt.LastOperationDigest == digest {
+			return nil
+		}
+		return fmt.Errorf("prompt attempt %s settling receipt does not match the task result", id)
+	}
+	if attempt.ExecutionState != store.PromptExecutionRunning {
+		return fmt.Errorf("prompt attempt %s state is %s, want %s", id, attempt.ExecutionState, store.PromptExecutionRunning)
+	}
+	_, err = d.Store.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+		ID: id, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: store.PromptExecutionRunning,
+		NewState: store.PromptExecutionSettling, OperationID: operationID, OperationDigest: digest, UpdatedAt: time.Now().UTC(),
+	})
 	return err
 }
 

@@ -773,8 +773,14 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 		},
 		RecoveryIdentity: identity,
 	}).FindPromptTerminal(ctx)
-	if err != nil || evidence == nil {
+	if err != nil {
 		return false, err
+	}
+	if evidence == nil {
+		evidence, err = d.recoverSettlingResultTerminal(ctx, task, attempt, identity)
+		if err != nil || evidence == nil {
+			return false, err
+		}
 	}
 	if evidence.TerminalEvent != harnessv2.EventCompleted {
 		session, err := d.recoveredTaskSession(ctx, task, attempt)
@@ -832,6 +838,59 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 		return true, err
 	}
 	return true, d.patchRecoveredTerminalEpoch(ctx, task, fence.Epoch)
+}
+
+func (d *ACPDispatcher) recoverSettlingResultTerminal(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	identity v2eventjournal.MappedUpdateIdentity,
+) (*v2eventjournal.PromptTerminalEvidence, error) {
+	if attempt.ExecutionState != store.PromptExecutionSettling || attempt.Version < 2 {
+		return nil, nil
+	}
+	result, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	receiptVersion := attempt.Version - 1
+	digest, err := acpSettlingTransitionDigest(attempt.ID, receiptVersion, result)
+	if err != nil {
+		return nil, err
+	}
+	if attempt.LastOperationID != acpSettlingOperation+"-"+strconv.FormatInt(receiptVersion, 10) ||
+		attempt.LastOperationDigest != digest {
+		return nil, nil
+	}
+	if attempt.UpdatedAt.IsZero() {
+		return nil, fmt.Errorf("settling prompt attempt %s has no receipt timestamp", attempt.ID)
+	}
+	journal := v2eventjournal.Journal{
+		EventStore: d.EventStore,
+		MapContext: v2eventjournal.MapContext{
+			Namespace: task.Namespace,
+			TaskName:  task.Name,
+			StreamID:  task.Name,
+		},
+		RecoveryIdentity: identity,
+	}
+	state, err := journal.Open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	settlement := harnessv2.PromptSettlement{
+		TerminalEvent: harnessv2.EventCompleted,
+		Outcome:       harnessv2.PromptOutcomeSucceeded,
+		StopReason:    harnessv2.ACPStopReasonEndTurn,
+		SettledAt:     attempt.UpdatedAt.UTC(),
+	}
+	if _, _, err := state.AppendPromptSettlementIfNew(ctx, settlement, ""); err != nil {
+		return nil, err
+	}
+	return journal.FindPromptTerminal(ctx)
 }
 
 func taskScopedRuntimeSessionCleanupDigest(

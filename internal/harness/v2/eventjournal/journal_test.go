@@ -259,6 +259,50 @@ func TestJournalRedactsCredentialSplitAcrossDiagnosticUpdates(t *testing.T) {
 	}
 }
 
+func TestJournalPreservesBenignPlanUpdatesAfterFieldHistoryCap(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make([]harnessv2.PlanEntry, maxLogicalFieldPermutationFields/2)
+	for index := range entries {
+		entries[index] = harnessv2.PlanEntry{
+			Content:  fmt.Sprintf("step %03d", index),
+			Priority: fmt.Sprintf("priority %03d", index),
+			Status:   harnessv2.PlanEntryPending,
+		}
+	}
+	first := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan, Plan: &harnessv2.PlanUpdate{Entries: entries},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, first); err != nil || !isNew || appended == nil {
+		t.Fatalf("append full plan = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if len(state.planFieldHistory) != maxLogicalFieldPermutationFields {
+		t.Fatalf("plan field history length = %d, want %d", len(state.planFieldHistory), maxLogicalFieldPermutationFields)
+	}
+
+	second := testUpdateEvent(3, first.Identity.Timestamp.Add(time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: "run focused tests", Priority: "normal", Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, second); err != nil || !isNew || appended == nil {
+		t.Fatalf("append plan after history cap = %#v new=%t err=%v", appended, isNew, err)
+	}
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 2 || !strings.Contains(listed[1].ContentText, "run focused tests") ||
+		strings.Contains(listed[1].ContentText, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("plan after history cap = %#v", listed)
+	}
+	if len(state.planFieldHistory) != maxLogicalFieldPermutationFields {
+		t.Fatalf("bounded plan field history length = %d, want %d", len(state.planFieldHistory), maxLogicalFieldPermutationFields)
+	}
+}
+
 func TestJournalRetriesAppendOnlyAfterConfirmedAbsence(t *testing.T) {
 	ctx := context.Background()
 	base := storetest.NewFakeExecutionEventStore()

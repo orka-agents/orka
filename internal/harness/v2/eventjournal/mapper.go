@@ -478,13 +478,12 @@ func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries)
 }
 
 func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool {
-	// PlanUpdate currently permits at most 128 entries with content and priority
-	// fields. Fail closed if that protocol bound grows without this search being
-	// updated. If arbitrary-order proof exceeds the work cap, retain benign plans
-	// only when their fields cannot reconstruct any marker recognized by the
-	// shared credential and capability-URL redactor.
+	// Exact permutation tracking is bounded. Histories can contain one full
+	// 128-entry plan plus a later update, so exceeding the bitset width is not
+	// itself evidence of sensitive content. Fall back to the conservative marker
+	// reachability check used when the candidate work cap is exhausted.
 	if len(fields) > maxLogicalFieldPermutationFields {
-		return true
+		return logicalFieldsMayReconstructSensitiveMarker(fields)
 	}
 	candidates := make([]logicalFieldPermutationCandidate, 0, min(len(fields), maxLogicalFieldSubsetCandidates))
 	seen := make(map[logicalFieldPermutationCandidate]struct{}, min(len(fields), maxLogicalFieldSubsetCandidates))
@@ -1080,8 +1079,8 @@ func mapPromptStreamFailure(
 	return mapped, nil
 }
 
-// mapPromptSettlement maps a cancellation endpoint's proven settlement into
-// the prompt lifecycle taxonomy when the terminal stream event was unavailable.
+// mapPromptSettlement maps a proven settlement into the prompt lifecycle
+// taxonomy when the terminal stream event was unavailable.
 func mapPromptSettlement(
 	identity MappedUpdateIdentity,
 	settlement harnessv2.PromptSettlement,
@@ -1098,7 +1097,7 @@ func mapPromptSettlement(
 	if err := settlement.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid prompt settlement: %w", err)
 	}
-	if !validPromptCancellationReason(cancellationReason) {
+	if cancellationReason != "" && !validPromptCancellationReason(cancellationReason) {
 		return nil, fmt.Errorf("invalid prompt cancellation reason %q", cancellationReason)
 	}
 	content := map[string]any{
@@ -1106,12 +1105,14 @@ func mapPromptSettlement(
 		"modelRequestID":        string(identity.PromptID),
 		"journalKind":           mappedPromptTerminalKind,
 		"terminalEvent":         settlement.TerminalEvent,
-		"cancellationReason":    cancellationReason,
 		"outcome":               settlement.Outcome,
 		"stopReason":            settlement.StopReason,
 		"settledAt":             settlement.SettledAt.UTC(),
 		"controllerSynthesized": true,
 		"settlementProven":      true,
+	}
+	if cancellationReason != "" {
+		content["cancellationReason"] = cancellationReason
 	}
 	mapped := &store.ExecutionEvent{
 		Namespace:   mapCtx.Namespace,
