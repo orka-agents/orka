@@ -33,6 +33,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	kubestore "github.com/orka-agents/orka/internal/store/kube"
@@ -165,6 +166,209 @@ func TestACPDispatcherMakesAcceptedOldEpochAttemptOutcomeUnknown(t *testing.T) {
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhaseFailed || task.Status.Execution == nil || task.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeOutcomeUnknown {
 		t.Fatalf("recovered task status = %#v", task.Status)
+	}
+}
+
+func TestACPDispatcherRecoversMatchedJournaledNonSuccessTerminal(t *testing.T) {
+	tests := []struct {
+		name        string
+		terminal    harnessv2.EventType
+		wantState   store.PromptExecutionState
+		wantTask    corev1alpha1.TaskExecutionState
+		wantOutcome corev1alpha1.TaskExecutionOutcome
+		wantPhase   corev1alpha1.TaskPhase
+	}{
+		{
+			name: "failed", terminal: harnessv2.EventFailed, wantState: store.PromptExecutionFailed,
+			wantTask: corev1alpha1.TaskExecutionStateFailed, wantOutcome: corev1alpha1.TaskExecutionOutcomeFailed,
+			wantPhase: corev1alpha1.TaskPhaseFailed,
+		},
+		{
+			name: "cancelled", terminal: harnessv2.EventCancelled, wantState: store.PromptExecutionCancelled,
+			wantTask: corev1alpha1.TaskExecutionStateCancelled, wantOutcome: corev1alpha1.TaskExecutionOutcomeCancelled,
+			wantPhase: corev1alpha1.TaskPhaseCancelled,
+		},
+		{
+			name: "outcome unknown", terminal: harnessv2.EventOutcomeUnknown, wantState: store.PromptExecutionOutcomeUnknown,
+			wantTask: corev1alpha1.TaskExecutionStateOutcomeUnknown, wantOutcome: corev1alpha1.TaskExecutionOutcomeOutcomeUnknown,
+			wantPhase: corev1alpha1.TaskPhaseFailed,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+			defer fixture.close(t)
+
+			task := configureRecoveryJournalIdentity(t, fixture)
+			appendRecoveryPromptTerminal(t, fixture, task, test.terminal, false)
+			if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if attempt.ExecutionState != test.wantState {
+				t.Fatalf("recovered attempt state = %s, want %s", attempt.ExecutionState, test.wantState)
+			}
+			updated := &corev1alpha1.Task{}
+			if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Phase != test.wantPhase || updated.Status.Execution == nil ||
+				updated.Status.Execution.State != test.wantTask || updated.Status.Execution.Outcome != test.wantOutcome {
+				t.Fatalf("recovered Task status = %#v", updated.Status)
+			}
+		})
+	}
+}
+
+func TestACPDispatcherRecoversCompletedJournalTerminalOnlyWithExactResult(t *testing.T) {
+	tests := []struct {
+		name        string
+		storeResult bool
+	}{
+		{name: "exact result persisted", storeResult: true},
+		{name: "result missing", storeResult: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newACPRecoveryFixture(t, store.PromptExecutionSettling)
+			defer fixture.close(t)
+
+			task := configureRecoveryJournalIdentity(t, fixture)
+			const result = "exact recovered result"
+			if test.storeResult {
+				if err := fixture.controlStore.SaveResult(fixture.ctx, task.Namespace, task.Name, []byte(result)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			appendRecoveryPromptTerminal(t, fixture, task, harnessv2.EventCompleted, false)
+			if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			updated := &corev1alpha1.Task{}
+			if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), updated); err != nil {
+				t.Fatal(err)
+			}
+			if !test.storeResult {
+				if attempt.ExecutionState != store.PromptExecutionOutcomeUnknown || updated.Status.Execution == nil ||
+					updated.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeOutcomeUnknown || updated.Status.ResultRef != nil {
+					t.Fatalf("missing-result recovery = attempt %#v Task %#v", attempt, updated.Status)
+				}
+				return
+			}
+			if attempt.ExecutionState != store.PromptExecutionSucceeded || attempt.DeliveryState != store.PromptDeliveryConflict {
+				t.Fatalf("completed recovery attempt = %#v", attempt)
+			}
+			if updated.Status.Phase != corev1alpha1.TaskPhaseFailed || updated.Status.Execution == nil ||
+				updated.Status.Execution.State != corev1alpha1.TaskExecutionStateSucceeded ||
+				updated.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded ||
+				updated.Status.Delivery == nil || updated.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeDeliveryConflict ||
+				updated.Status.ResultRef == nil || !updated.Status.ResultRef.Available {
+				t.Fatalf("completed recovery Task status = %#v", updated.Status)
+			}
+			persisted, err := fixture.controlStore.GetResult(fixture.ctx, task.Namespace, task.Name)
+			if err != nil || string(persisted) != result {
+				t.Fatalf("recovered result = %q, err=%v", persisted, err)
+			}
+		})
+	}
+}
+
+func TestACPDispatcherIgnoresJournaledTerminalForDifferentRuntimeIdentity(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+
+	task := configureRecoveryJournalIdentity(t, fixture)
+	appendRecoveryPromptTerminal(t, fixture, task, harnessv2.EventFailed, true)
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionOutcomeUnknown {
+		t.Fatalf("mismatched terminal changed attempt to %s, want OutcomeUnknown", attempt.ExecutionState)
+	}
+}
+
+func configureRecoveryJournalIdentity(t *testing.T, fixture *recoveryFixture) *corev1alpha1.Task {
+	t.Helper()
+	task := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, types.NamespacedName{Namespace: "default", Name: "task"}, task); err != nil {
+		t.Fatal(err)
+	}
+	task.Status.Execution.RuntimeInstanceID = "runtime-instance"
+	task.Status.Execution.RuntimeSessionUID = "runtime-session"
+	task.Status.Execution.RuntimeSessionGeneration = 1
+	task.Status.Execution.RuntimeSessionSupervisorBootID = "supervisor-boot"
+	if err := fixture.kubeClient.Status().Update(fixture.ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	fixture.dispatcher.EventStore = fixture.controlStore
+	return task
+}
+
+func appendRecoveryPromptTerminal(
+	t *testing.T,
+	fixture *recoveryFixture,
+	task *corev1alpha1.Task,
+	eventType harnessv2.EventType,
+	mismatchRuntime bool,
+) {
+	t.Helper()
+	execution := task.Status.Execution
+	bootID := execution.RuntimeSessionSupervisorBootID
+	if mismatchRuntime {
+		bootID = "different-supervisor-boot"
+	}
+	event := harnessv2.Event{
+		Protocol: harnessv2.ProtocolVersion,
+		Type:     eventType,
+		Identity: harnessv2.EventIdentity{
+			RuntimeInstanceID:        harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
+			SupervisorBootID:         harnessv2.SupervisorBootID(bootID),
+			RuntimeSessionUID:        harnessv2.RuntimeSessionUID(execution.RuntimeSessionUID),
+			RuntimeSessionGeneration: uint64(execution.RuntimeSessionGeneration),
+			TaskUID:                  harnessv2.TaskUID(task.UID),
+			TaskAttempt:              uint32(execution.Attempt),
+			PromptID:                 harnessv2.PromptID(execution.PromptID),
+			Sequence:                 3,
+			RequestDigest:            harnessv2.RequestDigest(execution.RequestDigest),
+			Timestamp:                time.Now().UTC(),
+		},
+	}
+	switch eventType {
+	case harnessv2.EventCompleted:
+		event.Completed = &harnessv2.CompletedEvent{
+			StopReason: harnessv2.ACPStopReasonEndTurn,
+			Result: harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{
+				Type: harnessv2.ContentBlockText, Text: "exact recovered result",
+			}}},
+		}
+	case harnessv2.EventCancelled:
+		event.Cancelled = &harnessv2.CancelledEvent{StopReason: harnessv2.ACPStopReasonCancelled, Reason: "cancelled"}
+	case harnessv2.EventOutcomeUnknown:
+		event.OutcomeUnknown = &harnessv2.OutcomeUnknownEvent{Code: "runtime_lost", Message: "outcome unknown"}
+	default:
+		event.Failed = &harnessv2.FailedEvent{
+			StopReason: harnessv2.ACPStopReasonRefusal, Code: "prompt_failed", Message: "prompt failed",
+		}
+	}
+	mapped, err := v2eventjournal.MapPromptLifecycle(event, v2eventjournal.MapContext{
+		Namespace: task.Namespace, TaskName: task.Name, StreamID: task.Name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.controlStore.AppendExecutionEvent(fixture.ctx, mapped); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -2509,8 +2713,14 @@ func newACPRecoveryFixture(t *testing.T, target store.PromptExecutionState) *rec
 		t.Fatal(err)
 	}
 	path := []store.PromptExecutionState{store.PromptExecutionReserved, store.PromptExecutionSessionStarting, store.PromptExecutionPlanned}
-	if target == store.PromptExecutionAccepted {
+	if target == store.PromptExecutionAccepted || target == store.PromptExecutionRunning || target == store.PromptExecutionSettling {
 		path = append(path, store.PromptExecutionSubmitting, store.PromptExecutionAccepted)
+	}
+	if target == store.PromptExecutionRunning || target == store.PromptExecutionSettling {
+		path = append(path, store.PromptExecutionRunning)
+	}
+	if target == store.PromptExecutionSettling {
+		path = append(path, store.PromptExecutionSettling)
 	}
 	for _, next := range path {
 		if attempt.ExecutionState == target {

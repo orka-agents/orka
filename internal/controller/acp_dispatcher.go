@@ -1443,6 +1443,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			ctx, task, attemptID, fence, "terminal usage persistence failed",
 		)
 	}
+	if err := d.persistTaskResult(ctx, task, []byte(resultText)); err != nil {
+		return err
+	}
 	if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, *terminal); err != nil {
 		logf.FromContext(ctx).Error(err, "persist terminal ACP prompt lifecycle", "namespace", task.Namespace, "task", task.Name)
 		return d.failPromptForExecutionEventPersistence(
@@ -1476,7 +1479,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			"kind", kind,
 			"serverMessage", boundedRuntimeSessionServerMessage(err),
 		)
-		if saveErr := d.saveTaskResult(ctx, task, []byte(resultText)); saveErr != nil {
+		if saveErr := d.publishTaskResultReference(ctx, task); saveErr != nil {
 			return saveErr
 		}
 		if transitionErr := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionSettling, store.PromptExecutionSucceeded, acpSucceededOperation, nil); transitionErr != nil {
@@ -1504,7 +1507,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.failTaskForDelivery(ctx, task, status, "workspace validation failed")
 	}
 	runtimePublicationFinalizationRequired = delta.Delta.State == harnessv2.WorkspaceDeltaPrepared
-	if err := d.saveTaskResult(ctx, task, []byte(resultText)); err != nil {
+	if err := d.publishTaskResultReference(ctx, task); err != nil {
 		return err
 	}
 	// ACP settlement is authoritative for execution. Delivery may still fail or
@@ -3603,10 +3606,11 @@ func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.T
 	})
 }
 
-func (d *ACPDispatcher) saveTaskResult(ctx context.Context, task *corev1alpha1.Task, result []byte) error {
-	if err := d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
-		return err
-	}
+func (d *ACPDispatcher) persistTaskResult(ctx context.Context, task *corev1alpha1.Task, result []byte) error {
+	return d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result)
+}
+
+func (d *ACPDispatcher) publishTaskResultReference(ctx context.Context, task *corev1alpha1.Task) error {
 	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &corev1alpha1.Task{}

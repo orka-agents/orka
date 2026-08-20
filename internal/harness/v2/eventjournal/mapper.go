@@ -295,18 +295,13 @@ func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 
 func redactPlanEntries(entries []harnessv2.PlanEntry) []harnessv2.PlanEntry {
 	redacted := append([]harnessv2.PlanEntry(nil), entries...)
-	contents := make([]string, len(entries))
-	priorities := make([]string, len(entries))
 	ordered := make([]string, 0, len(entries)*2)
 	for index, entry := range entries {
 		redacted[index].Content = executionevents.RedactExecutionEventText(entry.Content)
 		redacted[index].Priority = executionevents.RedactExecutionEventText(entry.Priority)
-		contents[index] = redacted[index].Content
-		priorities[index] = redacted[index].Priority
 		ordered = append(ordered, redacted[index].Content, redacted[index].Priority)
 	}
-	if logicalSequenceSensitive(contents) || logicalSequenceSensitive(priorities) ||
-		logicalSequenceSensitive(ordered) || logicalFieldPairSensitive(ordered) {
+	if logicalFieldSubsetSensitive(ordered) {
 		for index := range redacted {
 			if redacted[index].Content != "" {
 				redacted[index].Content = executionevents.ExecutionEventRedactedValue
@@ -319,51 +314,80 @@ func redactPlanEntries(entries []harnessv2.PlanEntry) []harnessv2.PlanEntry {
 	return redacted
 }
 
-const maxLogicalFieldBoundaryRunes = 256
+const (
+	maxLogicalFieldBoundaryRunes    = 256
+	maxLogicalFieldSubsetCandidates = 4096
+)
 
-func logicalFieldPairSensitive(values []string) bool {
-	type boundaries struct {
-		prefix string
-		suffix string
-	}
-	fields := make([]boundaries, 0, len(values))
+type logicalFieldBoundaries struct {
+	prefix string
+	suffix string
+	whole  bool
+}
+
+func logicalFieldSubsetSensitive(values []string) bool {
+	fields := make([]logicalFieldBoundaries, 0, len(values))
 	for _, value := range values {
 		if value == "" {
 			continue
 		}
 		runes := []rune(value)
 		if len(runes) <= maxLogicalFieldBoundaryRunes {
-			fields = append(fields, boundaries{prefix: value, suffix: value})
+			fields = append(fields, logicalFieldBoundaries{prefix: value, suffix: value, whole: true})
 			continue
 		}
-		fields = append(fields, boundaries{
+		fields = append(fields, logicalFieldBoundaries{
 			prefix: string(runes[:maxLogicalFieldBoundaryRunes]),
 			suffix: string(runes[len(runes)-maxLogicalFieldBoundaryRunes:]),
 		})
 	}
-	for left := 0; left < len(fields); left++ {
-		for right := left + 1; right < len(fields); right++ {
-			forward := fields[left].suffix + fields[right].prefix
-			reverse := fields[right].suffix + fields[left].prefix
-			if executionevents.RedactExecutionEventText(forward) != forward ||
-				executionevents.RedactExecutionEventText(reverse) != reverse {
+	if len(fields) < 2 {
+		return false
+	}
+	if orderedLogicalFieldSubsetsSensitive(fields) {
+		return true
+	}
+	for left, right := 0, len(fields)-1; left < right; left, right = left+1, right-1 {
+		fields[left], fields[right] = fields[right], fields[left]
+	}
+	return orderedLogicalFieldSubsetsSensitive(fields)
+}
+
+func orderedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool {
+	candidates := make(map[string]struct{}, min(len(fields), maxLogicalFieldSubsetCandidates))
+	for _, field := range fields {
+		next := make(map[string]struct{}, min(len(candidates)*2+1, maxLogicalFieldSubsetCandidates+1))
+		for candidate := range candidates {
+			next[candidate] = struct{}{}
+			joined := candidate + field.prefix
+			if executionevents.RedactExecutionEventText(joined) != joined {
+				return true
+			}
+			if field.whole {
+				joined = logicalFieldSuffix(candidate + field.suffix)
+			} else {
+				joined = field.suffix
+			}
+			next[joined] = struct{}{}
+			if len(next) > maxLogicalFieldSubsetCandidates {
 				return true
 			}
 		}
+		next[field.suffix] = struct{}{}
+		if len(next) > maxLogicalFieldSubsetCandidates {
+			return true
+		}
+		candidates = next
 	}
 	return false
 }
 
-func logicalSequenceSensitive(values []string) bool {
-	var forward, reverse strings.Builder
-	for index, value := range values {
-		forward.WriteString(value)
-		reverse.WriteString(values[len(values)-1-index])
+func logicalFieldSuffix(value string) string {
+	runes := []rune(value)
+	if len(runes) <= maxLogicalFieldBoundaryRunes {
+		return value
 	}
-	forwardText := forward.String()
-	reverseText := reverse.String()
-	return executionevents.RedactExecutionEventText(forwardText) != forwardText ||
-		executionevents.RedactExecutionEventText(reverseText) != reverseText
+	return string(runes[len(runes)-maxLogicalFieldBoundaryRunes:])
 }
 
 type mapUpdateOptions struct {
@@ -717,6 +741,7 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 			model = event.Completed.Result.Model
 		}
 		content["journalKind"] = mappedPromptTerminalKind
+		content["terminalEvent"] = event.Type
 		content["stopReason"] = event.Completed.StopReason
 		mapped.Type = executionevents.ExecutionEventTypeModelRequestCompleted
 		mapped.Summary = "Model request completed"
@@ -728,6 +753,7 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 			return nil, fmt.Errorf("invalid cancelled payload: %w", err)
 		}
 		content["journalKind"] = mappedPromptTerminalKind
+		content["terminalEvent"] = event.Type
 		content["stopReason"] = event.Cancelled.StopReason
 		content["reason"] = executionevents.RedactExecutionEventText(event.Cancelled.Reason)
 		mapped.Type = executionevents.ExecutionEventTypeModelRequestFailed
@@ -742,6 +768,7 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 		}
 		fields := redactSmallLogicalFieldSet(event.Failed.Code, event.Failed.Message)
 		content["journalKind"] = mappedPromptTerminalKind
+		content["terminalEvent"] = event.Type
 		content["stopReason"] = event.Failed.StopReason
 		content["code"] = fields[0]
 		content["message"] = fields[1]
@@ -757,6 +784,7 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 		}
 		fields := redactSmallLogicalFieldSet(event.OutcomeUnknown.Code, event.OutcomeUnknown.Message)
 		content["journalKind"] = mappedPromptTerminalKind
+		content["terminalEvent"] = event.Type
 		content["stopReason"] = event.Type
 		content["code"] = fields[0]
 		content["message"] = fields[1]
@@ -809,6 +837,7 @@ func mapPromptStreamFailure(
 		"harnessV2":             identity,
 		"modelRequestID":        string(identity.PromptID),
 		"journalKind":           mappedPromptTerminalKind,
+		"terminalEvent":         harnessv2.EventOutcomeUnknown,
 		"controllerSynthesized": true,
 		"code":                  fields[0],
 		"message":               fields[1],

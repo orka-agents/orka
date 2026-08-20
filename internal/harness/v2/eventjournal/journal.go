@@ -2,6 +2,7 @@ package eventjournal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -25,6 +26,107 @@ type Journal struct {
 	EventStore       store.ExecutionEventStore
 	MapContext       MapContext
 	RecoveryIdentity MappedUpdateIdentity
+}
+
+// PromptTerminalEvidence is the durable terminal classification for one exact
+// harness v2 prompt identity. Result content remains in ResultStore and is not
+// copied into the public execution-event journal.
+type PromptTerminalEvidence struct {
+	Identity      MappedUpdateIdentity
+	TerminalEvent harnessv2.EventType
+}
+
+// FindPromptTerminal walks the task stream backward and returns the newest
+// prompt-terminal record matching RecoveryIdentity. Records for prior attempts,
+// runtime restarts, or Session generations are ignored.
+func (j Journal) FindPromptTerminal(ctx context.Context) (*PromptTerminalEvidence, error) {
+	if j.EventStore == nil {
+		return nil, fmt.Errorf("execution event store is required")
+	}
+	if err := j.MapContext.validate(); err != nil {
+		return nil, err
+	}
+	if !j.RecoveryIdentity.promptValid() {
+		return nil, fmt.Errorf("valid harness v2 prompt recovery identity is required")
+	}
+	mapCtx := j.MapContext.normalized()
+	pageEnd, err := j.EventStore.GetLatestExecutionEventSeq(
+		ctx, mapCtx.Namespace, store.ExecutionEventStreamTypeTask, mapCtx.StreamID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get latest mapped harness v2 terminal sequence: %w", err)
+	}
+	for pageEnd > 0 {
+		pageStart := max(int64(0), pageEnd-int64(store.MaxExecutionEventLimit))
+		listed, err := j.EventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+			Namespace:  mapCtx.Namespace,
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   mapCtx.StreamID,
+			AfterSeq:   pageStart,
+			Limit:      int(pageEnd - pageStart),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list mapped harness v2 prompt terminals: %w", err)
+		}
+		for index := len(listed) - 1; index >= 0; index-- {
+			event := listed[index]
+			if event.Seq > pageEnd {
+				continue
+			}
+			identity, _, kind, ok := mappedExecutionEventRecord(event)
+			if !ok || kind != mappedJournalRecordPromptTerminal || !identity.samePrompt(j.RecoveryIdentity) {
+				continue
+			}
+			terminalEvent, err := promptTerminalEventType(event)
+			if err != nil {
+				return nil, err
+			}
+			return &PromptTerminalEvidence{Identity: identity, TerminalEvent: terminalEvent}, nil
+		}
+		pageEnd = pageStart
+	}
+	return nil, nil
+}
+
+func promptTerminalEventType(event store.ExecutionEvent) (harnessv2.EventType, error) {
+	var content struct {
+		TerminalEvent         harnessv2.EventType `json:"terminalEvent"`
+		StopReason            string              `json:"stopReason"`
+		ControllerSynthesized bool                `json:"controllerSynthesized"`
+	}
+	if err := json.Unmarshal(event.Content, &content); err != nil {
+		return "", fmt.Errorf("%w: decode mapped harness v2 prompt terminal: %v", store.ErrConflict, err)
+	}
+	terminalEvent := content.TerminalEvent
+	if content.ControllerSynthesized {
+		terminalEvent = harnessv2.EventOutcomeUnknown
+	}
+	if !terminalEvent.IsTerminal() {
+		switch event.Type {
+		case executionevents.ExecutionEventTypeModelRequestCompleted:
+			terminalEvent = harnessv2.EventCompleted
+		case executionevents.ExecutionEventTypeModelRequestFailed:
+			switch content.StopReason {
+			case string(harnessv2.EventOutcomeUnknown):
+				terminalEvent = harnessv2.EventOutcomeUnknown
+			case string(harnessv2.ACPStopReasonCancelled):
+				terminalEvent = harnessv2.EventCancelled
+			default:
+				terminalEvent = harnessv2.EventFailed
+			}
+		}
+	}
+	if !terminalEvent.IsTerminal() {
+		return "", fmt.Errorf("%w: mapped harness v2 prompt terminal has no terminal classification", store.ErrConflict)
+	}
+	wantType := executionevents.ExecutionEventTypeModelRequestFailed
+	if terminalEvent == harnessv2.EventCompleted {
+		wantType = executionevents.ExecutionEventTypeModelRequestCompleted
+	}
+	if event.Type != wantType {
+		return "", fmt.Errorf("%w: mapped harness v2 prompt terminal type %q conflicts with %q", store.ErrConflict, event.Type, terminalEvent)
+	}
+	return terminalEvent, nil
 }
 
 // State is the mutable aggregation state for one non-reconnectable prompt

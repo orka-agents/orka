@@ -266,6 +266,21 @@ func TestProjectPlanUpdateRedactsCredentialSplitAcrossEntrySubset(t *testing.T) 
 	}
 }
 
+func TestProjectPlanUpdateRedactsCredentialSplitAcrossFourFieldSubset(t *testing.T) {
+	fragment := strings.Repeat("a", 7)
+	prefix := "sk-" + fragment
+	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
+		{Content: prefix, Status: harnessv2.PlanEntryCompleted},
+		{Content: "!", Status: harnessv2.PlanEntryPending},
+		{Content: fragment, Status: harnessv2.PlanEntryPending},
+		{Content: fragment, Status: harnessv2.PlanEntryInProgress},
+	}})
+	if strings.Contains(projection.Document, prefix) || strings.Contains(projection.Document, fragment) ||
+		!strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("plan document exposed credential reconstructed from non-contiguous fields: %q", projection.Document)
+	}
+}
+
 func TestMapPromptLifecycle(t *testing.T) {
 	now := time.Now().UTC()
 	accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
