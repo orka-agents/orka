@@ -531,17 +531,16 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 	}
 	identity := mappedUpdateIdentity(event)
 	options := mapUpdateOptions{}
-	var planFields []logicalFieldBoundaries
-	var diagnosticFields []logicalFieldBoundaries
+	var publishedFields []logicalFieldBoundaries
 	if event.Update != nil && event.Update.Plan != nil {
 		projection, fields := s.projectPlanUpdate(*event.Update.Plan)
 		options.planProjection = &projection
-		planFields = fields
+		publishedFields = fields
 	}
 	if event.Update != nil && event.Update.Diagnostic != nil {
 		projection, fields := projectDiagnosticUpdate(*event.Update.Diagnostic, s.logicalFieldHistory)
 		options.diagnosticProjection = &projection
-		diagnosticFields = fields
+		publishedFields = fields
 	}
 	mapped, err := mapUpdate(event, s.journal.MapContext, options)
 	if err != nil {
@@ -587,22 +586,31 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 	}
 	if contentText, truncated, multipleBlocksOmitted, title, kind, ok := s.finishToolUpdate(event); ok {
 		mappedEvent := withBufferedToolMetadata(event, title, kind)
-		mapped, err = mapToolUpdateWithContent(
-			mappedEvent, s.journal.MapContext, contentText, truncated, multipleBlocksOmitted,
+		mapped, publishedFields, err = mapToolUpdateWithHistory(
+			mappedEvent, s.journal.MapContext, &contentText, truncated, multipleBlocksOmitted, "",
+			s.logicalFieldHistory,
 		)
 		if err != nil {
 			return nil, false, err
 		}
 	} else if contentText, truncated, multipleBlocksOmitted, title, kind, ok := transientTerminalToolUpdate(event); ok {
 		mappedEvent := withBufferedToolMetadata(event, title, kind)
-		mapped, err = mapToolUpdateWithContent(
-			mappedEvent, s.journal.MapContext, contentText, truncated, multipleBlocksOmitted,
+		mapped, publishedFields, err = mapToolUpdateWithHistory(
+			mappedEvent, s.journal.MapContext, &contentText, truncated, multipleBlocksOmitted, "",
+			s.logicalFieldHistory,
 		)
 		if err != nil {
 			return nil, false, err
 		}
 	} else if isNonTerminalToolUpdate(event) {
 		mapped, err = mapToolUpdateWithoutMetadata(event, s.journal.MapContext)
+		if err != nil {
+			return nil, false, err
+		}
+	} else if isTerminalToolUpdate(event) {
+		mapped, publishedFields, err = mapToolUpdateWithHistory(
+			event, s.journal.MapContext, nil, false, false, "", s.logicalFieldHistory,
+		)
 		if err != nil {
 			return nil, false, err
 		}
@@ -614,12 +622,7 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		if isNonTerminalToolUpdate(event) {
 			s.markToolStartPersisted(event)
 		}
-		if event.Update.Kind == harnessv2.UpdatePlan {
-			s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, planFields)
-		}
-		if event.Update.Kind == harnessv2.UpdateDiagnostic {
-			s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, diagnosticFields)
-		}
+		s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, publishedFields)
 	}
 	return appended, isNew, err
 }
@@ -654,8 +657,15 @@ func isNonTerminalToolUpdate(event harnessv2.Event) bool {
 	if event.Update == nil || event.Update.ToolCall == nil {
 		return false
 	}
+	return !isTerminalToolUpdate(event)
+}
+
+func isTerminalToolUpdate(event harnessv2.Event) bool {
+	if event.Update == nil || event.Update.ToolCall == nil {
+		return false
+	}
 	status := event.Update.ToolCall.Status
-	return status != harnessv2.ToolCallStatusCompleted && status != harnessv2.ToolCallStatusFailed
+	return status == harnessv2.ToolCallStatusCompleted || status == harnessv2.ToolCallStatusFailed
 }
 
 func (s *State) toolStartPersisted(event harnessv2.Event) bool {
@@ -697,14 +707,33 @@ func (s *State) AppendAssistantTranscriptIfNew(
 	if s.assistantTranscriptSequence == identity.Sequence {
 		return nil, false, nil
 	}
-	mapped, err := MapAssistantTranscript(terminal, s.journal.MapContext, transcript, contentOmitted)
+	mapped, publishedFields, err := s.mapAssistantTranscript(terminal, transcript, contentOmitted)
 	if err != nil {
 		return nil, false, err
 	}
-	return s.appendMappedEvent(
+	appended, isNew, err := s.appendMappedEvent(
 		ctx, identity, mappedJournalRecordAssistantTranscript, mapped,
 		"append mapped harness v2 assistant transcript",
 	)
+	if err == nil {
+		s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, publishedFields)
+	}
+	return appended, isNew, err
+}
+
+func (s *State) mapAssistantTranscript(
+	event harnessv2.Event,
+	transcript string,
+	contentOmitted bool,
+) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
+	var publishedFields []logicalFieldBoundaries
+	if !contentOmitted {
+		values, fields := redactLogicalFields(s.logicalFieldHistory, transcript)
+		transcript = values[0]
+		publishedFields = fields
+	}
+	mapped, err := MapAssistantTranscript(event, s.journal.MapContext, transcript, contentOmitted)
+	return mapped, publishedFields, err
 }
 
 // AppendTerminalUsageIfNew persists usage carried only by a completed result.
@@ -854,14 +883,18 @@ func (s *State) AppendAssistantStreamClosureIfNew(
 	if s.assistantTranscriptSequence == identity.Sequence {
 		return nil, false, nil
 	}
-	mapped, err := MapAssistantTranscript(lastUpdate, s.journal.MapContext, transcript, contentOmitted)
+	mapped, publishedFields, err := s.mapAssistantTranscript(lastUpdate, transcript, contentOmitted)
 	if err != nil {
 		return nil, false, err
 	}
-	return s.appendMappedEvent(
+	appended, isNew, err := s.appendMappedEvent(
 		ctx, identity, mappedJournalRecordAssistantTranscript, mapped,
 		"append mapped harness v2 assistant stream closure",
 	)
+	if err == nil {
+		s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, publishedFields)
+	}
+	return appended, isNew, err
 }
 
 // AppendBufferedStreamsIfNew persists buffered assistant and interrupted tool
@@ -985,9 +1018,10 @@ func (s *State) appendToolStreamClosureIfNew(ctx context.Context, toolID string,
 		return nil
 	}
 	mappedEvent := withInterruptedToolClosure(accumulator.lastEvent, accumulator.title, accumulator.kind)
-	mapped, err := mapToolStreamClosure(
-		mappedEvent, s.journal.MapContext, accumulator.text.String(), accumulator.overflow,
-		accumulator.multipleBlocksOmitted,
+	contentText := accumulator.text.String()
+	mapped, publishedFields, err := mapToolUpdateWithHistory(
+		mappedEvent, s.journal.MapContext, &contentText, accumulator.overflow,
+		accumulator.multipleBlocksOmitted, mappedToolStreamClosureKind, s.logicalFieldHistory,
 	)
 	if err != nil {
 		return err
@@ -998,6 +1032,7 @@ func (s *State) appendToolStreamClosureIfNew(ctx context.Context, toolID string,
 	); err != nil {
 		return err
 	}
+	s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, publishedFields)
 	s.removeToolAccumulator(toolID)
 	return nil
 }

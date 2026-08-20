@@ -325,12 +325,35 @@ type diagnosticProjection struct {
 	message string
 }
 
+type toolProjection struct {
+	title       string
+	kind        string
+	contentText string
+}
+
 func projectDiagnosticUpdate(
 	update harnessv2.DiagnosticUpdate,
 	history []logicalFieldBoundaries,
 ) (diagnosticProjection, []logicalFieldBoundaries) {
 	values, publishedFields := redactLogicalFields(history, update.Code, update.Message)
 	return diagnosticProjection{code: values[0], message: values[1]}, publishedFields
+}
+
+func projectToolUpdate(
+	tool harnessv2.ToolCallUpdate,
+	history []logicalFieldBoundaries,
+	contentText *string,
+) (toolProjection, []logicalFieldBoundaries) {
+	values := []string{tool.Title, tool.Kind}
+	if contentText != nil {
+		values = append(values, *contentText)
+	}
+	values, publishedFields := redactLogicalFields(history, values...)
+	projection := toolProjection{title: values[0], kind: values[1]}
+	if contentText != nil {
+		projection.contentText = values[2]
+	}
+	return projection, publishedFields
 }
 
 func redactLogicalFields(
@@ -541,6 +564,7 @@ type mapUpdateOptions struct {
 	toolContentTruncated             bool
 	toolContentMultipleBlocksOmitted bool
 	omitToolMetadata                 bool
+	toolProjection                   *toolProjection
 	planProjection                   *PlanProjection
 	diagnosticProjection             *diagnosticProjection
 	journalKind                      string
@@ -614,33 +638,31 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 			mapped.Summary = toolCallSummary(metadataFree)
 			content["metadataOmitted"] = "streamed_metadata_pending_completion_redaction"
 		} else {
-			toolContentText := ""
-			if options.toolContentText != nil {
-				toolContentText = *options.toolContentText
+			projection, _ := projectToolUpdate(*tool, nil, options.toolContentText)
+			if options.toolProjection != nil {
+				projection = *options.toolProjection
 			}
-			fields := redactSmallLogicalFieldSet(tool.Title, tool.Kind, toolContentText)
-			title, kind, toolContentText := fields[0], fields[1], fields[2]
 			redactedTool := *tool
-			redactedTool.Title = title
-			redactedTool.Kind = kind
-			mapped.ToolName = strings.TrimSpace(kind)
+			redactedTool.Title = projection.title
+			redactedTool.Kind = projection.kind
+			mapped.ToolName = strings.TrimSpace(projection.kind)
 			mapped.ToolName, _, _ = executionevents.RedactAndTruncateExecutionEventText(mapped.ToolName, 128)
 			mapped.Summary = toolCallSummary(redactedTool)
-			if options.toolContentText != nil && strings.TrimSpace(title) == "" {
-				if summary := compactSummary(toolContentText); summary != "" {
+			if options.toolContentText != nil && strings.TrimSpace(projection.title) == "" {
+				if summary := compactSummary(projection.contentText); summary != "" {
 					mapped.Summary = summary
 				}
 			}
-			content["title"] = title
-			content["toolKind"] = kind
+			content["title"] = projection.title
+			content["toolKind"] = projection.kind
+			if options.toolContentText != nil {
+				mapped.ContentText = projection.contentText
+			}
 		}
 		content["toolCallID"] = mapped.ToolCallID
 		content["status"] = tool.Status
 		content["contentBlockCount"] = len(tool.Content)
-		if options.toolContentText != nil {
-			fields := redactSmallLogicalFieldSet(tool.Title, tool.Kind, *options.toolContentText)
-			mapped.ContentText = fields[2]
-		} else if len(tool.Content) > 0 {
+		if options.toolContentText == nil && len(tool.Content) > 0 {
 			content["contentOmitted"] = "streamed_text_pending_completion_redaction"
 		}
 		if options.toolContentTruncated || tool.ContentOmitted {
@@ -794,26 +816,33 @@ func mapToolUpdateWithContent(
 	contentTruncated bool,
 	contentMultipleBlocksOmitted bool,
 ) (*store.ExecutionEvent, error) {
-	return mapUpdate(event, mapCtx, mapUpdateOptions{
-		toolContentText:                  &contentText,
-		toolContentTruncated:             contentTruncated,
-		toolContentMultipleBlocksOmitted: contentMultipleBlocksOmitted,
-	})
+	mapped, _, err := mapToolUpdateWithHistory(
+		event, mapCtx, &contentText, contentTruncated, contentMultipleBlocksOmitted, "", nil,
+	)
+	return mapped, err
 }
 
-func mapToolStreamClosure(
+func mapToolUpdateWithHistory(
 	event harnessv2.Event,
 	mapCtx MapContext,
-	contentText string,
+	contentText *string,
 	contentTruncated bool,
 	contentMultipleBlocksOmitted bool,
-) (*store.ExecutionEvent, error) {
-	return mapUpdate(event, mapCtx, mapUpdateOptions{
-		toolContentText:                  &contentText,
+	journalKind string,
+	history []logicalFieldBoundaries,
+) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
+	if event.Update == nil || event.Update.ToolCall == nil {
+		return nil, nil, fmt.Errorf("harness v2 tool update is required")
+	}
+	projection, publishedFields := projectToolUpdate(*event.Update.ToolCall, history, contentText)
+	mapped, err := mapUpdate(event, mapCtx, mapUpdateOptions{
+		toolContentText:                  contentText,
 		toolContentTruncated:             contentTruncated,
 		toolContentMultipleBlocksOmitted: contentMultipleBlocksOmitted,
-		journalKind:                      mappedToolStreamClosureKind,
+		toolProjection:                   &projection,
+		journalKind:                      journalKind,
 	})
+	return mapped, publishedFields, err
 }
 
 func mapRecoveredToolStreamClosure(

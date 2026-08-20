@@ -339,6 +339,75 @@ func TestJournalRedactsCredentialSplitAcrossPlanAndDiagnosticUpdates(t *testing.
 	}
 }
 
+func TestJournalRedactsCredentialSplitAcrossPlanAndAssistantTranscript(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := "sk-" + strings.Repeat("a", 10)
+	suffix := strings.Repeat("b", 14)
+	now := time.Now().UTC()
+	plan := testUpdateEvent(2, now, harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: prefix, Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, plan); err != nil || !isNew || appended == nil {
+		t.Fatalf("append plan prefix = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if appended, isNew, err := state.AppendAssistantTranscriptIfNew(
+		ctx, testTerminalEvent(3, now.Add(time.Millisecond)), suffix, false,
+	); err != nil || !isNew || appended == nil {
+		t.Fatalf("append assistant suffix = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 2 || !strings.Contains(listed[0].ContentText, prefix) ||
+		listed[1].ContentText != executionevents.ExecutionEventRedactedValue {
+		t.Fatalf("plan/assistant logical fields = %#v", listed)
+	}
+}
+
+func TestJournalRedactsCredentialSplitAcrossPlanAndToolMetadata(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := "sk-" + strings.Repeat("a", 10)
+	suffix := strings.Repeat("b", 14)
+	now := time.Now().UTC()
+	plan := testUpdateEvent(2, now, harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: prefix, Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, plan); err != nil || !isNew || appended == nil {
+		t.Fatalf("append plan prefix = %#v new=%t err=%v", appended, isNew, err)
+	}
+	tool := testUpdateEvent(3, now.Add(time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-cross-kind", Kind: suffix, Status: harnessv2.ToolCallStatusCompleted,
+		},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, tool); err != nil || !isNew || appended == nil {
+		t.Fatalf("append tool suffix = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 2 || !strings.Contains(listed[0].ContentText, prefix) ||
+		listed[1].ToolName != executionevents.ExecutionEventRedactedValue ||
+		strings.Contains(string(listed[1].Content), suffix) {
+		t.Fatalf("plan/tool logical fields = %#v", listed)
+	}
+}
+
 func TestJournalRetriesAppendOnlyAfterConfirmedAbsence(t *testing.T) {
 	ctx := context.Background()
 	base := storetest.NewFakeExecutionEventStore()
