@@ -503,6 +503,40 @@ func TestJournalPersistsBufferedToolOutputOnStreamClosure(t *testing.T) {
 	}
 }
 
+func TestJournalPersistsBufferedToolClosuresInProtocolOrder(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	for index, tool := range []struct {
+		id      string
+		content string
+	}{{id: "call-z", content: "first"}, {id: "call-a", content: "second"}} {
+		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCallUpdate,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: tool.id, Status: harnessv2.ToolCallStatusInProgress,
+				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: tool.content}},
+			},
+		})
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew || appended != nil {
+			t.Fatalf("append open tool %q = %#v new=%t err=%v", tool.id, appended, isNew, err)
+		}
+	}
+	if err := state.AppendToolStreamClosuresIfNew(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 2 || listed[0].ContentText != "first" || listed[1].ContentText != "second" {
+		t.Fatalf("persisted tool closure order = %#v", listed)
+	}
+}
+
 func TestJournalReplacesACPToolContentSnapshots(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
@@ -726,6 +760,25 @@ func TestToolContentFragmentSanitizesURLShapedResourceName(t *testing.T) {
 	if got != "resource: https://account.blob.core.windows.net/output.txt" || multipleBlocks ||
 		strings.Contains(got, "sig=") || strings.Contains(got, "usable-secret") {
 		t.Fatalf("resource-link name fragment = %q multipleBlocks=%t", got, multipleBlocks)
+	}
+}
+
+func TestToolContentFragmentSanitizesRelativeResourceNames(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		want string
+	}{
+		{name: "//account.blob.core.windows.net/output.txt?sig=usable-secret#download", want: "resource: //account.blob.core.windows.net/output.txt"},
+		{name: "output.txt?sig=usable-secret#download", want: "resource: output.txt"},
+	} {
+		got, multipleBlocks := toolContentFragment([]harnessv2.ContentBlock{{
+			Type: harnessv2.ContentBlockResourceLink,
+			Name: test.name,
+			URI:  "https://fallback.example.com/output.txt",
+		}})
+		if got != test.want || multipleBlocks || strings.Contains(got, "sig=") || strings.Contains(got, "usable-secret") {
+			t.Fatalf("resource-link name %q fragment = %q multipleBlocks=%t", test.name, got, multipleBlocks)
+		}
 	}
 }
 

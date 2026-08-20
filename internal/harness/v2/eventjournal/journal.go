@@ -354,16 +354,28 @@ func (s *State) AppendToolStreamClosuresIfNew(ctx context.Context) error {
 	if s == nil {
 		return fmt.Errorf("harness v2 journal state is required")
 	}
-	toolIDs := make([]string, 0, len(s.toolText))
-	for toolID := range s.toolText {
-		toolIDs = append(toolIDs, toolID)
+	type pendingToolClosure struct {
+		toolID      string
+		accumulator *streamText
 	}
-	sort.Strings(toolIDs)
-	for _, toolID := range toolIDs {
-		accumulator := s.toolText[toolID]
+	closures := make([]pendingToolClosure, 0, len(s.toolText))
+	for toolID, accumulator := range s.toolText {
 		if accumulator == nil || !accumulator.hasContentEvent || !accumulator.hasPersistableContent() {
 			continue
 		}
+		closures = append(closures, pendingToolClosure{toolID: toolID, accumulator: accumulator})
+	}
+	sort.Slice(closures, func(i, j int) bool {
+		left := closures[i].accumulator.lastContentEvent.Identity.Sequence
+		right := closures[j].accumulator.lastContentEvent.Identity.Sequence
+		if left == right {
+			return closures[i].toolID < closures[j].toolID
+		}
+		return left < right
+	})
+	for _, closure := range closures {
+		toolID := closure.toolID
+		accumulator := closure.accumulator
 		key := mappedUpdateIdentity(accumulator.lastContentEvent).Key()
 		if _, ok := s.persistedKeys[key]; ok {
 			s.removeToolAccumulator(toolID)
@@ -602,10 +614,24 @@ func toolContentFragment(blocks []harnessv2.ContentBlock) (string, bool) {
 func safeResourceDisplayName(value string) string {
 	value = strings.TrimSpace(value)
 	parsed, err := url.Parse(value)
-	if err != nil || !parsed.IsAbs() {
+	if err != nil {
+		if suffix := strings.IndexAny(value, "?#"); suffix >= 0 {
+			return strings.TrimSpace(value[:suffix])
+		}
 		return value
 	}
-	return safeResourceDisplayURI(value)
+	if parsed.IsAbs() {
+		return safeResourceDisplayURI(value)
+	}
+	if parsed.User != nil || parsed.Opaque != "" {
+		return ""
+	}
+	if parsed.Host != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		if suffix := strings.IndexAny(value, "?#"); suffix >= 0 {
+			value = strings.TrimSpace(value[:suffix])
+		}
+	}
+	return value
 }
 
 func safeResourceDisplayURI(value string) string {
