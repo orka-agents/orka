@@ -428,6 +428,9 @@ func boundedJSONNumberInt(number json.Number) int {
 	if err != nil {
 		return math.MaxInt
 	}
+	if parsed > uint64(math.MaxInt) {
+		return math.MaxInt
+	}
 	return int(parsed)
 }
 

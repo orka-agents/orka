@@ -136,16 +136,17 @@ func MappedUpdateIdentityFromEvent(event store.ExecutionEvent) (MappedUpdateIden
 // PlanProjection is the durable/public read model derived from one ACP plan
 // update.
 type PlanProjection struct {
-	Summary               string
-	ProgressPct           int
-	GoalComplete          bool
-	Document              string
-	DocumentTruncated     bool
-	DocumentOriginalChars int
-	Total                 int
-	Pending               int
-	InProgress            int
-	Completed             int
+	Summary                    string
+	ProgressPct                int
+	GoalComplete               bool
+	Document                   string
+	EventDocument              string
+	EventDocumentTruncated     bool
+	EventDocumentOriginalChars int
+	Total                      int
+	Pending                    int
+	InProgress                 int
+	Completed                  int
 }
 
 // ProjectPlanUpdate converts structured ACP plan entries into the existing
@@ -198,8 +199,9 @@ func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 	projection.Summary, _, _ = executionevents.RedactAndTruncateExecutionEventText(
 		projection.Summary, executionevents.MaxExecutionEventSummaryChars,
 	)
-	projection.Document, projection.DocumentTruncated, projection.DocumentOriginalChars =
-		executionevents.RedactAndTruncateExecutionEventText(document.String(), executionevents.MaxExecutionEventContentTextChars)
+	projection.Document = executionevents.RedactExecutionEventText(document.String())
+	projection.EventDocument, projection.EventDocumentTruncated, projection.EventDocumentOriginalChars =
+		executionevents.RedactAndTruncateExecutionEventText(projection.Document, executionevents.MaxExecutionEventContentTextChars)
 	return projection
 }
 
@@ -294,17 +296,17 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		projection := ProjectPlanUpdate(*event.Update.Plan)
 		mapped.Type = executionevents.ExecutionEventTypePlanUpdated
 		mapped.Summary = projection.Summary
-		mapped.ContentText = projection.Document
+		mapped.ContentText = projection.EventDocument
 		content["totalEntries"] = projection.Total
 		content["pendingEntries"] = projection.Pending
 		content["inProgressEntries"] = projection.InProgress
 		content["completedEntries"] = projection.Completed
 		content["progressPct"] = projection.ProgressPct
 		content["goalComplete"] = projection.GoalComplete
-		if projection.DocumentTruncated {
+		if projection.EventDocumentTruncated {
 			mapped.Truncation = &executionevents.ExecutionEventTruncation{
 				ContentTextTruncated:     true,
-				ContentTextOriginalChars: projection.DocumentOriginalChars,
+				ContentTextOriginalChars: projection.EventDocumentOriginalChars,
 			}
 		}
 	case harnessv2.UpdateUsage:

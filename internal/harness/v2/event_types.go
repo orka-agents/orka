@@ -173,11 +173,12 @@ const (
 )
 
 type ToolCallUpdate struct {
-	ToolCallID string         `json:"toolCallID"`
-	Title      string         `json:"title,omitempty"`
-	Kind       string         `json:"kind,omitempty"`
-	Status     ToolCallStatus `json:"status"`
-	Content    []ContentBlock `json:"content,omitempty"`
+	ToolCallID     string         `json:"toolCallID"`
+	Title          string         `json:"title,omitempty"`
+	Kind           string         `json:"kind,omitempty"`
+	Status         ToolCallStatus `json:"status"`
+	Content        []ContentBlock `json:"content,omitempty"`
+	ContentReplace bool           `json:"contentReplace,omitempty"`
 }
 
 func (u ToolCallUpdate) Validate() error {

@@ -277,6 +277,31 @@ func TestRedactExecutionEventJSONPreservesTokenUsageFields(t *testing.T) {
 	}
 }
 
+func TestRedactExecutionEventJSONRedactsNonNumericTokenUsageFields(t *testing.T) {
+	content := json.RawMessage(`{
+		"inputTokens":"opaque-value",
+		"outputTokens":true,
+		"cachedInputTokens":{"value":3},
+		"totalTokenCount":17
+	}`)
+	payload, err := SanitizeExecutionEventPayload("", content, "")
+	if err != nil {
+		t.Fatalf("SanitizeExecutionEventPayload() error = %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(payload.Content, &got); err != nil {
+		t.Fatalf("unmarshal sanitized content: %v", err)
+	}
+	for _, key := range []string{"inputTokens", "outputTokens", "cachedInputTokens"} {
+		if got[key] != ExecutionEventRedactedValue {
+			t.Fatalf("%s = %#v, want redacted", key, got[key])
+		}
+	}
+	if got["totalTokenCount"] != float64(17) {
+		t.Fatalf("numeric totalTokenCount = %#v, want 17", got["totalTokenCount"])
+	}
+}
+
 func TestTruncateExecutionEventJSONPayloadBeforeDecode(t *testing.T) {
 	content := json.RawMessage(`{"data":"` + strings.Repeat("x", MaxExecutionEventContentJSONBytes+100))
 	payload, err := SanitizeExecutionEventPayload("", content, "")

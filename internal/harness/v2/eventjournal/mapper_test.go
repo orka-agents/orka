@@ -232,8 +232,32 @@ func TestProjectPlanUpdateBuildsProgressAndRedactsDocument(t *testing.T) {
 	if !strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) || strings.Contains(projection.Document, "top-secret-token") {
 		t.Fatalf("plan document was not redacted: %q", projection.Document)
 	}
+	if !strings.Contains(projection.EventDocument, executionevents.ExecutionEventRedactedValue) || strings.Contains(projection.EventDocument, "top-secret-token") {
+		t.Fatalf("plan event document was not redacted: %q", projection.EventDocument)
+	}
 	if !strings.Contains(projection.Summary, "1/3 complete") {
 		t.Fatalf("plan summary = %q", projection.Summary)
+	}
+}
+
+func TestProjectPlanUpdateKeepsFullPlanForStoreAndBoundsEvent(t *testing.T) {
+	entries := make([]harnessv2.PlanEntry, 9)
+	for index := range entries {
+		content := strings.Repeat("x", harnessv2.MaxProtocolStringBytes)
+		if index == len(entries)-1 {
+			content = strings.Repeat("x", harnessv2.MaxProtocolStringBytes-len("tail")) + "tail"
+		}
+		entries[index] = harnessv2.PlanEntry{Content: content, Status: harnessv2.PlanEntryPending}
+	}
+	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: entries})
+	if !strings.HasSuffix(projection.Document, "tail") {
+		t.Fatalf("full plan document lost trailing content: suffix=%q", projection.Document[len(projection.Document)-16:])
+	}
+	if !projection.EventDocumentTruncated || len([]rune(projection.EventDocument)) > executionevents.MaxExecutionEventContentTextChars {
+		t.Fatalf("event plan document was not bounded: truncated=%t runes=%d", projection.EventDocumentTruncated, len([]rune(projection.EventDocument)))
+	}
+	if strings.Contains(projection.EventDocument, "tail") {
+		t.Fatal("bounded event plan unexpectedly retained trailing content")
 	}
 }
 

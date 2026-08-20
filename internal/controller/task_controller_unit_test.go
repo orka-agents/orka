@@ -126,6 +126,15 @@ func (s failingGetSessionStore) GetSession(context.Context, string, string) (*st
 	return nil, s.err
 }
 
+type failingDeletePlanStore struct {
+	store.PlanStore
+	err error
+}
+
+func (s failingDeletePlanStore) DeletePlan(context.Context, string, string) error {
+	return s.err
+}
+
 type recordingTaskWorkspaceExecutor struct {
 	deleteReqs  []workspace.DeleteRequest
 	deleteErr   error
@@ -3368,6 +3377,27 @@ func TestHandleDeletionKeepsFinalizerWhenExecutionEventCleanupFails(t *testing.T
 	}
 	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		t.Fatal("task finalizer was removed after execution event cleanup failed")
+	}
+}
+
+func TestHandleDeletionKeepsFinalizerWhenPlanCleanupFails(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-plan-fail",
+			Namespace:  "default",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	r.PlanStore = failingDeletePlanStore{PlanStore: r.PlanStore, err: errors.New("store unavailable")}
+
+	_, err := r.handleDeletion(context.Background(), task)
+	if err == nil || !strings.Contains(err.Error(), "delete plan state") {
+		t.Fatalf("handleDeletion() error = %v, want plan cleanup error", err)
+	}
+	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		t.Fatal("task finalizer was removed after plan cleanup failed")
 	}
 }
 

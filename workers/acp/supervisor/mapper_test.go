@@ -122,8 +122,43 @@ func TestMapACPUpdatePreservesContentOnlyToolCallUpdate(t *testing.T) {
 	}
 	if !ok || text != "" || update == nil || update.ToolCall == nil ||
 		update.ToolCall.Status != harnessv2.ToolCallStatusInProgress || len(update.ToolCall.Content) != 1 ||
-		update.ToolCall.Content[0].Text != "streamed output" {
+		update.ToolCall.Content[0].Text != "streamed output" || !update.ToolCall.ContentReplace {
 		t.Fatalf("mapped content-only update = %#v text=%q ok=%v", update, text, ok)
+	}
+}
+
+func TestMapACPUpdatePreservesToolContentPresence(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		wantReplace bool
+	}{
+		{
+			name: "omitted",
+			raw:  `{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"in_progress"}`,
+		},
+		{
+			name:        "null clears",
+			raw:         `{"sessionUpdate":"tool_call_update","toolCallId":"call-1","content":null}`,
+			wantReplace: true,
+		},
+		{
+			name:        "empty collection clears",
+			raw:         `{"sessionUpdate":"tool_call_update","toolCallId":"call-1","content":[]}`,
+			wantReplace: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(test.raw)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ok || text != "" || update == nil || update.ToolCall == nil ||
+				update.ToolCall.ContentReplace != test.wantReplace {
+				t.Fatalf("mapped content presence = %#v text=%q ok=%v", update, text, ok)
+			}
+		})
 	}
 }
 
@@ -137,7 +172,7 @@ func TestMapACPUpdatePreservesWhitespaceToolContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !ok || text != "" || update == nil || update.ToolCall == nil || len(update.ToolCall.Content) != 1 ||
-		update.ToolCall.Content[0].Text != " \n" {
+		update.ToolCall.Content[0].Text != " \n" || !update.ToolCall.ContentReplace {
 		t.Fatalf("mapped whitespace tool content = %#v text=%q ok=%v", update, text, ok)
 	}
 	if err := update.Validate(); err != nil {

@@ -565,8 +565,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		// Clean up plan state if any
 		if r.PlanStore != nil {
 			if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete plan state", "task", task.Name)
-				// Continue with finalizer removal anyway
+				return ctrl.Result{}, fmt.Errorf("delete plan state for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
 

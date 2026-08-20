@@ -158,8 +158,7 @@ func truncateExecutionEventJSON(content []byte, includeSanitizedLength bool) (js
 
 // IsSensitiveExecutionEventKey reports whether a JSON key should have its value replaced.
 func IsSensitiveExecutionEventKey(key string) bool {
-	normalized := strings.ToLower(key)
-	normalized = strings.NewReplacer("-", "", "_", "", ".", "", " ", "").Replace(normalized)
+	normalized := normalizeExecutionEventKey(key)
 	if isExecutionEventTokenUsageKey(normalized) {
 		return false
 	}
@@ -188,6 +187,11 @@ func IsSensitiveExecutionEventKey(key string) bool {
 	return false
 }
 
+func normalizeExecutionEventKey(key string) string {
+	normalized := strings.ToLower(key)
+	return strings.NewReplacer("-", "", "_", "", ".", "", " ", "").Replace(normalized)
+}
+
 func isExecutionEventTokenUsageKey(normalized string) bool {
 	switch normalized {
 	case "prompttokens",
@@ -211,6 +215,10 @@ func sanitizeExecutionEventJSONValue(value any) any {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, child := range typed {
+			if isExecutionEventTokenUsageKey(normalizeExecutionEventKey(key)) && !isExecutionEventNumericValue(child) {
+				out[key] = ExecutionEventRedactedValue
+				continue
+			}
 			if IsSensitiveExecutionEventKey(key) {
 				out[key] = ExecutionEventRedactedValue
 				continue
@@ -228,6 +236,17 @@ func sanitizeExecutionEventJSONValue(value any) any {
 		return RedactExecutionEventText(typed)
 	default:
 		return typed
+	}
+}
+
+func isExecutionEventNumericValue(value any) bool {
+	switch value.(type) {
+	case json.Number, float32, float64,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64:
+		return true
+	default:
+		return false
 	}
 }
 

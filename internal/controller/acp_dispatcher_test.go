@@ -149,6 +149,26 @@ func TestSaveACPPlanUpdateWithRetry(t *testing.T) {
 	})
 }
 
+func TestACPUpdatePersistenceError(t *testing.T) {
+	if err := acpUpdatePersistenceError(nil, nil); err != nil {
+		t.Fatalf("nil persistence errors = %v", err)
+	}
+	journalErr := errors.New("journal unavailable")
+	planErr := errors.New("plan unavailable")
+	err := acpUpdatePersistenceError(journalErr, planErr)
+	if !errors.Is(err, journalErr) || !errors.Is(err, planErr) {
+		t.Fatalf("joined persistence error = %v", err)
+	}
+	var persistenceErr *acpExecutionUpdatePersistenceError
+	if !errors.As(err, &persistenceErr) {
+		t.Fatalf("persistence error type = %T, want *acpExecutionUpdatePersistenceError", err)
+	}
+	if !strings.Contains(err.Error(), "persist ACP execution update") ||
+		!strings.Contains(err.Error(), "persist ACP plan update") {
+		t.Fatalf("persistence error context = %v", err)
+	}
+}
+
 type retryPlanStore struct {
 	saveErrors []error
 	saveCalls  int
@@ -530,6 +550,131 @@ func TestPromptStreamDiagnosticIsBoundedAndClassified(t *testing.T) {
 	}
 	if got := promptStreamDiagnostic(errors.New("provider-secret-must-not-leak")); got != "non-client prompt stream error" {
 		t.Fatalf("generic diagnostic = %q", got)
+	}
+	if got := promptStreamDiagnostic(acpUpdatePersistenceError(errors.New("store unavailable"), nil)); got != "local execution update persistence failed" {
+		t.Fatalf("persistence diagnostic = %q", got)
+	}
+}
+
+func TestPromptUpdatePersistenceFailureCancelsAndFailsWithoutRuntimeLost(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "event-persistence.db"))
+	defer closeStore()
+
+	taskUID := types.UID("96969696-9696-9696-9696-969696969696")
+	promptID := "prompt-event-persistence-1"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "event-persistence", UID: taskUID},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "persist updates"},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1, Execution: &corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateRunning, Attempt: 1, PromptID: promptID,
+			RequestDigest: testControlDigestForDispatcher("event-persistence"), ControllerEpoch: fence.Epoch,
+		}},
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+	}), fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, next := range []store.PromptExecutionState{
+		store.PromptExecutionReserved, store.PromptExecutionSessionStarting, store.PromptExecutionPlanned,
+		store.PromptExecutionSubmitting, store.PromptExecutionAccepted, store.PromptExecutionRunning,
+	} {
+		operation := "event-persistence-" + string(next)
+		attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+			ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+			NewState: next, OperationID: operation, OperationDigest: testControlDigestForDispatcher(operation), UpdatedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var cancelCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || !strings.HasSuffix(r.URL.Path, "/cancel") {
+			http.NotFound(w, r)
+			return
+		}
+		var request harnessv2.CancelPromptRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode cancellation: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if request.Reason != harnessv2.CancelReasonStreamDisconnected {
+			t.Errorf("cancel reason = %q", request.Reason)
+		}
+		cancelCalls.Add(1)
+		writeDispatcherJSON(w, harnessv2.CancelPromptResponse{
+			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+			BarrierState: harnessv2.CancellationBarrierSettled, SettlementProven: true,
+			Settlement: harnessv2.PromptSettlement{
+				TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
+				StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
+			},
+		})
+	}))
+	defer server.Close()
+	runtimeClient, err := harnessv2.NewClient(
+		server.URL,
+		harnessv2.WithControllerBearerToken(strings.Repeat("t", 32)),
+		harnessv2.WithOperationCapabilitySecret([]byte(strings.Repeat("s", 32))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeFence := harnessv2.Fence{
+		RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id", ControllerEpoch: uint64(fence.Epoch),
+		RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1,
+		RuntimeProfileDigest:       harnessv2.ProfileDigest(testControlDigestForDispatcher("event-persistence-profile")),
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+		RuntimeSessionUID:          "runtime-session-uid", RuntimeSessionGeneration: 1,
+	}
+	currentEpoch, err := controlStore.GetControllerEpoch(ctx, fence.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epochs := NewControllerEpochManager(controlStore, fence.HolderID)
+	epochs.current = currentEpoch
+	close(epochs.ready)
+	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore, Epochs: epochs}
+	if err := dispatcher.handlePromptStreamError(
+		ctx, runtimeClient, "runtime-session-1", task.DeepCopy(), attempt.ID, fence, runtimeFence,
+		true, harnessv2.RequestWriteEvidence{}, nil,
+		acpUpdatePersistenceError(errors.New("event store unavailable"), nil),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if cancelCalls.Load() != 1 {
+		t.Fatalf("cancel calls = %d, want 1", cancelCalls.Load())
+	}
+	completed := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status.Execution == nil || completed.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed ||
+		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeFailed ||
+		completed.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("ExecutionEventPersistenceFailed") {
+		t.Fatalf("persistence failure status = %#v", completed.Status.Execution)
+	}
+	if completed.Status.Execution.Reason == corev1alpha1.TaskExecutionReason("RuntimeLost") {
+		t.Fatalf("persistence failure was misclassified as runtime loss: %#v", completed.Status.Execution)
+	}
+	attempt, err = controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionFailed {
+		t.Fatalf("persistence failure attempt state = %s, want %s", attempt.ExecutionState, store.PromptExecutionFailed)
 	}
 }
 

@@ -39,14 +39,27 @@ func (s *streamText) append(value string) {
 		return
 	}
 	runes := utf8.RuneCountInString(value)
-	if runes > executionevents.MaxExecutionEventContentTextChars-s.runes {
-		s.text.Reset()
-		s.runes = 0
+	remaining := executionevents.MaxExecutionEventContentTextChars - s.runes
+	if runes > remaining {
+		if remaining > 0 {
+			s.text.WriteString(string([]rune(value)[:remaining]))
+			s.runes += remaining
+		}
 		s.overflow = true
 		return
 	}
 	s.text.WriteString(value)
 	s.runes += runes
+}
+
+func (s *streamText) replace(value string) {
+	if s == nil {
+		return
+	}
+	s.text.Reset()
+	s.runes = 0
+	s.overflow = false
+	s.append(value)
 }
 
 // HasUpdate reports whether event was already persisted or appended during
@@ -156,7 +169,8 @@ func isContentOnlyToolFragment(event harnessv2.Event) bool {
 		return false
 	}
 	tool := event.Update.ToolCall
-	if len(tool.Content) == 0 || strings.TrimSpace(tool.Title) != "" || strings.TrimSpace(tool.Kind) != "" {
+	if (!tool.ContentReplace && len(tool.Content) == 0) ||
+		strings.TrimSpace(tool.Title) != "" || strings.TrimSpace(tool.Kind) != "" {
 		return false
 	}
 	return tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed
@@ -295,7 +309,9 @@ func (s *State) aggregateToolUpdate(event harnessv2.Event, key string) {
 	if strings.TrimSpace(tool.Kind) != "" {
 		accumulator.kind = tool.Kind
 	}
-	if len(tool.Content) > 0 {
+	if tool.ContentReplace {
+		accumulator.replace(toolContentFragment(tool.Content))
+	} else if len(tool.Content) > 0 {
 		accumulator.append(toolContentFragment(tool.Content))
 	}
 }
@@ -341,7 +357,13 @@ func toolContentFragment(blocks []harnessv2.ContentBlock) string {
 		case harnessv2.ContentBlockText:
 			value = block.Text
 		case harnessv2.ContentBlockResourceLink:
-			value = "resource: " + strings.TrimSpace(block.Name)
+			resource := strings.TrimSpace(block.Name)
+			if resource == "" {
+				resource = strings.TrimSpace(block.URI)
+			}
+			if resource != "" {
+				value = "resource: " + resource
+			}
 		case harnessv2.ContentBlockArtifactRef:
 			if block.Artifact != nil {
 				value = "artifact: " + string(block.Artifact.ArtifactID)

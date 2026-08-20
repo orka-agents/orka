@@ -84,6 +84,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 		if err != nil {
 			return nil, "", false, err
 		}
+		contentPresent := len(envelope.Content) > 0
 		toolContent, err := mapACPToolCallContent(envelope.Content)
 		if err != nil {
 			return nil, "", false, err
@@ -93,7 +94,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 		// with no visible metadata would otherwise become an unbounded series of
 		// synthetic in_progress events carrying identical state.
 		if envelope.SessionUpdate == "tool_call_update" && envelope.Status == "" &&
-			envelope.Title == "" && envelope.Kind == "" && len(toolContent) == 0 {
+			envelope.Title == "" && envelope.Kind == "" && !contentPresent {
 			return nil, "", false, nil
 		}
 		status := envelope.Status
@@ -112,7 +113,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 			Kind: kind,
 			ToolCall: &harnessv2.ToolCallUpdate{
 				ToolCallID: toolCallID, Title: boundACPToolCallTitle(envelope.Title), Kind: envelope.Kind, Status: status,
-				Content: toolContent,
+				Content: toolContent, ContentReplace: contentPresent,
 			},
 		}, "", true, nil
 	case "plan":

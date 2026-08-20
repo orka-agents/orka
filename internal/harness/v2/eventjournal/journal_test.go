@@ -339,6 +339,44 @@ func TestJournalAggregatesContentOnlyToolFragmentsIntoTerminalEvent(t *testing.T
 	}
 }
 
+func TestJournalReplacesACPToolContentSnapshots(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	for index, snapshot := range []string{"a", "ab"} {
+		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCallUpdate,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: "call-snapshot", Status: harnessv2.ToolCallStatusInProgress,
+				Content:        []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: snapshot}},
+				ContentReplace: true,
+			},
+		})
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew || appended != nil {
+			t.Fatalf("content snapshot %d = %#v new=%t err=%v", index, appended, isNew, err)
+		}
+	}
+	completed := testUpdateEvent(4, now.Add(2*time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-snapshot", Status: harnessv2.ToolCallStatusCompleted,
+		},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, completed); err != nil || !isNew || appended == nil {
+		t.Fatalf("completed tool = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 1 || listed[0].ContentText != "ab" {
+		t.Fatalf("persisted tool snapshot events = %#v", listed)
+	}
+}
+
 func TestJournalBuffersToolMetadataUntilTerminalEvent(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
@@ -394,7 +432,7 @@ func TestJournalBuffersToolMetadataUntilTerminalEvent(t *testing.T) {
 	}
 }
 
-func TestJournalOmitsOversizedToolStream(t *testing.T) {
+func TestJournalRetainsBoundedOversizedToolStream(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
 	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
@@ -425,8 +463,20 @@ func TestJournalOmitsOversizedToolStream(t *testing.T) {
 
 	listed := listJournalEvents(t, ctx, eventStore)
 	completed := listed[len(listed)-1]
-	if completed.ContentText != "" || completed.Truncation == nil || !completed.Truncation.ContentTextTruncated {
+	if len([]rune(completed.ContentText)) != executionevents.MaxExecutionEventContentTextChars ||
+		completed.ContentText != strings.Repeat("x", executionevents.MaxExecutionEventContentTextChars) ||
+		completed.Truncation == nil || !completed.Truncation.ContentTextTruncated {
 		t.Fatalf("oversized completed tool event = %#v", completed)
+	}
+}
+
+func TestToolContentFragmentPreservesURIOnlyResourceLink(t *testing.T) {
+	got := toolContentFragment([]harnessv2.ContentBlock{{
+		Type: harnessv2.ContentBlockResourceLink,
+		URI:  "https://example.com/output.txt",
+	}})
+	if got != "resource: https://example.com/output.txt" {
+		t.Fatalf("resource-link fragment = %q", got)
 	}
 }
 
