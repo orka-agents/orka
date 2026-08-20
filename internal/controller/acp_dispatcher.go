@@ -695,6 +695,9 @@ func validateFrozenACPDispatchTarget(
 
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alpha1.Task, target acpDispatchTarget) (retErr error) {
+	ctx, promptTrace := startACPPromptSpan(ctx, task)
+	defer func() { promptTrace.End(retErr) }()
+
 	reservationLease := newACPRuntimePoolReservationLease(d, target.reservation)
 	if reservationLease != nil {
 		defer func() {
@@ -793,6 +796,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, err)
 	}
+	sessionCtx, sessionTrace := startACPSessionSpan(runtimeCtx, task, sessionExecution != nil && sessionExecution.Reused)
+	defer func() { sessionTrace.End(retErr) }()
 	if sessionExecution != nil && sessionExecution.Turn != nil {
 		defer func() {
 			if sessionExecution.finalized || sessionExecution.requeued {
@@ -833,6 +838,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(taskRuntimeSessionUID(task))
 		runtimeFence.RuntimeSessionGeneration = 1
 	}
+	sessionTrace.setRuntimeSession(string(runtimeFence.RuntimeSessionUID), runtimeFence.RuntimeSessionGeneration)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionReserved, store.PromptExecutionSessionStarting, "session-starting", nil); err != nil {
 		return err
 	}
@@ -1067,7 +1073,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 		}
 		created := false
-		if _, err := runtimeClient.CreateRuntimeSession(runtimeCtx, createRequest); err != nil {
+		if _, err := runtimeClient.CreateRuntimeSession(sessionCtx, createRequest); err != nil {
 			if runtimeSessionRetirementRequired && runtimeSessionCreationMayHaveApplied(err) {
 				runtimeSessionCleanupPending = true
 			}
@@ -1151,12 +1157,13 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 	}
 
-	if err := d.openTaskSessionTurn(runtimeCtx, task, attemptID, fence, sessionExecution); err != nil {
+	if err := d.openTaskSessionTurn(sessionCtx, task, attemptID, fence, sessionExecution); err != nil {
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 			return deadlineErr
 		}
 		return err
 	}
+	sessionTrace.End(nil)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionPlanned, store.PromptExecutionSubmitting, "submitting", nil); err != nil {
 		return err
 	}
@@ -1281,11 +1288,21 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		)
 	}
 	if terminal == nil {
+		recordACPPromptOutcome(ctx, acpPromptOutcomeUnknown)
 		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event")
 	}
 	if terminal.Type != harnessv2.EventCompleted {
+		switch terminal.Type {
+		case harnessv2.EventCancelled:
+			recordACPPromptOutcome(ctx, acpPromptOutcomeCancelled)
+		case harnessv2.EventOutcomeUnknown:
+			recordACPPromptOutcome(ctx, acpPromptOutcomeUnknown)
+		default:
+			recordACPPromptOutcome(ctx, acpPromptOutcomeFailed)
+		}
 		return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal)
 	}
+	recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionRunning, store.PromptExecutionSettling, "settling", nil); err != nil {
 		return err
 	}

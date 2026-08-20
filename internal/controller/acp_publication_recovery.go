@@ -39,6 +39,21 @@ func (d *ACPDispatcher) reconcilePersistedPublication(
 	attemptID string,
 	fence store.ControllerEpochFence,
 ) (acpPublicationResult, error) {
+	ctx, promptTrace := startACPPromptSpan(ctx, task)
+	recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
+	ctx, publicationTrace := startACPPublicationSpan(ctx, task, publicationIDForTask(task), true)
+	result, err := d.reconcilePersistedPublicationOperation(ctx, task, attemptID, fence)
+	publicationTrace.End(err)
+	promptTrace.End(err)
+	return result, err
+}
+
+func (d *ACPDispatcher) reconcilePersistedPublicationOperation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+) (acpPublicationResult, error) {
 	publication, recovery, err := d.loadPersistedPublicationRecovery(ctx, task, attemptID, fence)
 	if err != nil {
 		return acpPublicationResult{}, err

@@ -35,9 +35,23 @@ type acpPublicationResult struct {
 // for one immutable, already-durable workspace delta. The ACP child never
 // controls the Git repository, branch, commit, credential, or request identity
 // used by this path.
-//
-//nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func (d *ACPDispatcher) publishWorkspaceDelta(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	baseline harnessv2.WorkspaceBaseline,
+	delta harnessv2.WorkspaceDeltaDescriptor,
+	session *acpTaskSession,
+) (acpPublicationResult, error) {
+	ctx, publicationTrace := startACPPublicationSpan(ctx, task, publicationIDForTask(task), false)
+	result, err := d.publishWorkspaceDeltaOperation(ctx, task, attemptID, fence, baseline, delta, session)
+	publicationTrace.End(err)
+	return result, err
+}
+
+//nolint:gocyclo // The explicit state-machine branches are easier to audit together.
+func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	attemptID string,

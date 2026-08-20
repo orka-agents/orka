@@ -51,6 +51,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	orkametrics "github.com/orka-agents/orka/internal/metrics"
 )
 
 const (
@@ -317,6 +318,7 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	pool := &corev1alpha1.RuntimePool{}
 	if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
 		if apierrors.IsNotFound(err) {
+			orkametrics.DeleteACPRuntimePool(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -2479,14 +2481,53 @@ func (r *RuntimePoolReconciler) finishRuntimePoolStatus(
 ) (ctrl.Result, error) {
 	status.Message = sanitizeRuntimePoolMessage(status.Message)
 	if reflect.DeepEqual(pool.Status, status) {
+		recordRuntimePoolMetrics(pool, status)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
+	scaledToZero := runtimePoolCompletedScaleToZero(pool.Status, status)
 	base := pool.DeepCopy()
 	pool.Status = status
 	if err := r.Status().Patch(ctx, pool, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
+	recordRuntimePoolMetrics(pool, status)
+	if scaledToZero {
+		orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
+	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+func recordRuntimePoolMetrics(pool *corev1alpha1.RuntimePool, status corev1alpha1.RuntimePoolStatus) {
+	if pool == nil {
+		return
+	}
+	readyReplicas := int32(0)
+	if status.ActiveInstance != nil {
+		readyReplicas = 1
+	}
+	orkametrics.RecordACPRuntimePoolStatus(
+		pool.Namespace,
+		pool.Name,
+		status.DesiredReplicas,
+		readyReplicas,
+		status.Capacity.ResidentSessions,
+		status.Capacity.RunningPrompts,
+		status.Capacity.QueuedTasks,
+		string(status.AdmissionState),
+	)
+}
+
+func runtimePoolCompletedScaleToZero(previous, current corev1alpha1.RuntimePoolStatus) bool {
+	if current.DesiredReplicas != 0 || current.CurrentReplicas != 0 ||
+		current.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped {
+		return false
+	}
+	return previous.DesiredReplicas > 0 || previous.CurrentReplicas > 0 || previous.ActiveInstance != nil ||
+		previous.Lifecycle == corev1alpha1.RuntimePoolLifecycleStarting ||
+		previous.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing ||
+		previous.Lifecycle == corev1alpha1.RuntimePoolLifecycleDraining ||
+		previous.Lifecycle == corev1alpha1.RuntimePoolLifecycleQuiescent ||
+		previous.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopping
 }
 
 func (r *RuntimePoolReconciler) setRuntimePoolCondition(
@@ -2526,6 +2567,7 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 	if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
+	orkametrics.DeleteACPRuntimePool(pool.Namespace, pool.Name)
 	return ctrl.Result{}, nil
 }
 

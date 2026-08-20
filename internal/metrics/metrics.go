@@ -7,6 +7,8 @@ MIT License - see LICENSE file for details.
 package metrics
 
 import (
+	"strings"
+
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -89,6 +91,64 @@ var (
 			Buckets: prometheus.DefBuckets,
 		},
 		[]string{"adapter", "grant_class", "result", "reason"},
+	)
+
+	// ACP RuntimePool metrics mirror authoritative controller status. Pool name
+	// and namespace are Kubernetes object identity labels, never Task/session IDs.
+	ACPRuntimePoolDesiredReplicas = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_desired_replicas",
+			Help: "Desired replicas for a controller-owned ACP RuntimePool",
+		},
+		[]string{"namespace", "runtime_pool"},
+	)
+
+	ACPRuntimePoolReadyReplicas = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_ready_replicas",
+			Help: "Authoritatively selected Ready replicas for a controller-owned ACP RuntimePool",
+		},
+		[]string{"namespace", "runtime_pool"},
+	)
+
+	ACPRuntimePoolSessionsActive = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_sessions_active",
+			Help: "Authenticated supervisor count of resident RuntimeSessions",
+		},
+		[]string{"namespace", "runtime_pool"},
+	)
+
+	ACPRuntimePoolPromptsInFlight = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_prompts_in_flight",
+			Help: "Authenticated supervisor count of active prompts",
+		},
+		[]string{"namespace", "runtime_pool"},
+	)
+
+	ACPRuntimePoolQueuedTasks = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_queued_tasks",
+			Help: "Durable unsatisfied Task demand assigned to an ACP RuntimePool",
+		},
+		[]string{"namespace", "runtime_pool"},
+	)
+
+	ACPRuntimePoolAdmissionState = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_admission_state",
+			Help: "Authoritative RuntimePool admission state as a one-hot gauge",
+		},
+		[]string{"namespace", "runtime_pool", "state"},
+	)
+
+	ACPRuntimePoolScaleToZeroTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_acp_runtime_pool_scale_to_zero_total",
+			Help: "Completed RuntimePool scale-to-zero transitions",
+		},
+		[]string{"namespace", "runtime_pool"},
 	)
 
 	// Repository monitor workflow metrics. Labels are low-cardinality intent/action/status values.
@@ -236,6 +296,13 @@ func init() {
 		ContextTokenTTSExchangeDuration,
 		TokenExchangeTotal,
 		TokenExchangeDuration,
+		ACPRuntimePoolDesiredReplicas,
+		ACPRuntimePoolReadyReplicas,
+		ACPRuntimePoolSessionsActive,
+		ACPRuntimePoolPromptsInFlight,
+		ACPRuntimePoolQueuedTasks,
+		ACPRuntimePoolAdmissionState,
+		ACPRuntimePoolScaleToZeroTotal,
 		RepositoryMonitorCommandsTotal,
 		RepositoryMonitorWorkActionsTotal,
 		RepositoryMonitorGitHubMutationsTotal,
@@ -297,6 +364,69 @@ func RecordTokenExchange(adapter, grantClass, result, reason string, durationSec
 	reason = normalizeMetricLabel(reason)
 	TokenExchangeTotal.WithLabelValues(adapter, grantClass, result, reason).Inc()
 	TokenExchangeDuration.WithLabelValues(adapter, grantClass, result, reason).Observe(durationSeconds)
+}
+
+var acpRuntimePoolAdmissionStates = [...]string{"unknown", "closed", "accepting", "draining", "ambiguous"}
+
+// RecordACPRuntimePoolStatus publishes one authoritative RuntimePool status
+// snapshot. Admission state is one-hot so state changes cannot leave a stale 1.
+func RecordACPRuntimePoolStatus(
+	namespace, runtimePool string,
+	desiredReplicas, readyReplicas, sessionsActive, promptsInFlight, queuedTasks int32,
+	admissionState string,
+) {
+	namespace = normalizeMetricLabel(namespace)
+	runtimePool = normalizeMetricLabel(runtimePool)
+	ACPRuntimePoolDesiredReplicas.WithLabelValues(namespace, runtimePool).Set(float64(desiredReplicas))
+	ACPRuntimePoolReadyReplicas.WithLabelValues(namespace, runtimePool).Set(float64(readyReplicas))
+	ACPRuntimePoolSessionsActive.WithLabelValues(namespace, runtimePool).Set(float64(sessionsActive))
+	ACPRuntimePoolPromptsInFlight.WithLabelValues(namespace, runtimePool).Set(float64(promptsInFlight))
+	ACPRuntimePoolQueuedTasks.WithLabelValues(namespace, runtimePool).Set(float64(queuedTasks))
+	admissionState = normalizeACPRuntimePoolAdmissionState(admissionState)
+	for _, state := range acpRuntimePoolAdmissionStates {
+		value := 0.0
+		if state == admissionState {
+			value = 1
+		}
+		ACPRuntimePoolAdmissionState.WithLabelValues(namespace, runtimePool, state).Set(value)
+	}
+}
+
+// RecordACPRuntimePoolScaleToZero records one completed scale-to-zero transition.
+func RecordACPRuntimePoolScaleToZero(namespace, runtimePool string) {
+	ACPRuntimePoolScaleToZeroTotal.WithLabelValues(
+		normalizeMetricLabel(namespace), normalizeMetricLabel(runtimePool),
+	).Inc()
+}
+
+// DeleteACPRuntimePool removes stale gauge series after a RuntimePool is deleted.
+// The transition counter is intentionally retained for the process lifetime.
+func DeleteACPRuntimePool(namespace, runtimePool string) {
+	namespace = normalizeMetricLabel(namespace)
+	runtimePool = normalizeMetricLabel(runtimePool)
+	ACPRuntimePoolDesiredReplicas.DeleteLabelValues(namespace, runtimePool)
+	ACPRuntimePoolReadyReplicas.DeleteLabelValues(namespace, runtimePool)
+	ACPRuntimePoolSessionsActive.DeleteLabelValues(namespace, runtimePool)
+	ACPRuntimePoolPromptsInFlight.DeleteLabelValues(namespace, runtimePool)
+	ACPRuntimePoolQueuedTasks.DeleteLabelValues(namespace, runtimePool)
+	for _, state := range acpRuntimePoolAdmissionStates {
+		ACPRuntimePoolAdmissionState.DeleteLabelValues(namespace, runtimePool, state)
+	}
+}
+
+func normalizeACPRuntimePoolAdmissionState(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "closed":
+		return "closed"
+	case "accepting":
+		return "accepting"
+	case "draining":
+		return "draining"
+	case "ambiguous":
+		return "ambiguous"
+	default:
+		return "unknown"
+	}
 }
 
 // RecordExecutionEventAppend records append success/failure and latency using low-cardinality labels.

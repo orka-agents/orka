@@ -938,6 +938,57 @@ func TestRuntimePoolReconcilerScaleDownRequiresDrainAndQuiescentStatus(t *testin
 	}
 }
 
+func TestRuntimePoolCompletedScaleToZero(t *testing.T) {
+	tests := []struct {
+		name     string
+		previous corev1alpha1.RuntimePoolStatus
+		current  corev1alpha1.RuntimePoolStatus
+		want     bool
+	}{
+		{
+			name: "completed",
+			previous: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 1, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopping,
+			},
+			current: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 0, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped,
+			},
+			want: true,
+		},
+		{
+			name: "initially stopped",
+			current: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 0, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped,
+			},
+		},
+		{
+			name: "already stopped",
+			previous: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 0, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped,
+			},
+			current: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 0, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped,
+			},
+		},
+		{
+			name: "not stopped",
+			previous: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 1, CurrentReplicas: 1, Lifecycle: corev1alpha1.RuntimePoolLifecycleServing,
+			},
+			current: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 0, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopping,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := runtimePoolCompletedScaleToZero(test.previous, test.current); got != test.want {
+				t.Fatalf("runtimePoolCompletedScaleToZero() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRuntimePoolReconcilerClosesAdmissionForTwoReadyPods(t *testing.T) {
 	scheme := runtimePoolTestScheme(t)
 	pool := runtimePoolTestObject(1)

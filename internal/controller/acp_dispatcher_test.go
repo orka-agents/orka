@@ -36,6 +36,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	orkatracing "github.com/orka-agents/orka/internal/tracing"
+	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
 )
 
 // dispatchQueuedTask reserves the queued Task on its RuntimePool and executes
@@ -53,6 +55,19 @@ func dispatchQueuedTask(ctx context.Context, t *testing.T, dispatcher *ACPDispat
 	if err := dispatcher.executeReservedTask(ctx, task, target); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func stampACPTaskTrace(t *testing.T, task *corev1alpha1.Task) (*tracingtest.SpanHarness, string) {
+	t.Helper()
+	if _, err := orkatracing.Init("acp-controller-test", false); err != nil {
+		t.Fatalf("initialize tracing: %v", err)
+	}
+	harness := tracingtest.NewSpanHarness(t)
+	ctx, parent := orkatracing.Tracer("test").Start(context.Background(), "task.creator")
+	parentID := parent.SpanContext().SpanID().String()
+	orkatracing.StampTaskTraceContext(ctx, task)
+	parent.End()
+	return harness, parentID
 }
 
 func TestCompletedPromptResultTextPrefersTerminalContent(t *testing.T) {
@@ -548,6 +563,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 			RequestDigest: testControlDigestForDispatcher("task-request"), ControllerEpoch: 1,
 		}},
 	}
+	spanHarness, parentSpanID := stampACPTaskTrace(t, task)
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
@@ -683,6 +699,31 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	}
 	if len(completedPool.Status.Capacity.Reservations) != 0 || completedPool.Status.Capacity.ReservedSessions != 0 || completedPool.Status.Capacity.ReservedPrompts != 0 {
 		t.Fatalf("capacity reservation leaked after acceptance: %#v", completedPool.Status.Capacity)
+	}
+	spans := spanHarness.Recorder.Ended()
+	promptSpan := tracingtest.SpanNamed(spans, acpPromptSpanName)
+	if promptSpan == nil {
+		t.Fatal("missing acp.prompt span")
+	}
+	if got := promptSpan.Parent().SpanID().String(); got != parentSpanID {
+		t.Fatalf("acp.prompt parent = %s, want Task trace parent %s", got, parentSpanID)
+	}
+	promptAttrs := tracingtest.AttributeMap(promptSpan)
+	if got := promptAttrs[orkatracing.AttrTaskID].AsString(); got != task.Name {
+		t.Fatalf("acp.prompt task id = %q, want %q", got, task.Name)
+	}
+	if got := promptAttrs[acpAttrRuntimePoolName].AsString(); got != plan.PoolName {
+		t.Fatalf("acp.prompt runtime pool = %q, want %q", got, plan.PoolName)
+	}
+	if got := promptAttrs[acpAttrPromptOutcome].AsString(); got != acpPromptOutcomeSucceeded {
+		t.Fatalf("acp.prompt outcome = %q, want %q", got, acpPromptOutcomeSucceeded)
+	}
+	sessionSpan := tracingtest.SpanNamed(spans, acpSessionCreateSpanName)
+	if sessionSpan == nil {
+		t.Fatal("missing acp.session.create span")
+	}
+	if got := sessionSpan.Parent().SpanID(); got != promptSpan.SpanContext().SpanID() {
+		t.Fatalf("acp.session.create parent = %s, want acp.prompt %s", got, promptSpan.SpanContext().SpanID())
 	}
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
@@ -936,6 +977,7 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 			RequestDigest: testControlDigestForDispatcher("write-session-request"), ControllerEpoch: 1,
 		}},
 	}
+	spanHarness, parentSpanID := stampACPTaskTrace(t, task)
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
@@ -1118,6 +1160,25 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 		gotFinalization.PublicationID != publicationIDForTask(completed) ||
 		gotFinalization.TerminalState != harnessv2.PublicationTerminalVerifiedExact || gotFinalization.TerminalReceiptDigest == "" {
 		t.Fatalf("publication finalization request = %#v", gotFinalization)
+	}
+	spans := spanHarness.Recorder.Ended()
+	promptSpan := tracingtest.SpanNamed(spans, acpPromptSpanName)
+	publicationSpan := tracingtest.SpanNamed(spans, acpPublicationSpanName)
+	if promptSpan == nil || publicationSpan == nil {
+		t.Fatalf("ACP spans missing: prompt=%v publication=%v", promptSpan != nil, publicationSpan != nil)
+	}
+	if got := promptSpan.Parent().SpanID().String(); got != parentSpanID {
+		t.Fatalf("acp.prompt parent = %s, want Task trace parent %s", got, parentSpanID)
+	}
+	if got := publicationSpan.Parent().SpanID(); got != promptSpan.SpanContext().SpanID() {
+		t.Fatalf("acp.publication.reconcile parent = %s, want acp.prompt %s", got, promptSpan.SpanContext().SpanID())
+	}
+	publicationAttrs := tracingtest.AttributeMap(publicationSpan)
+	if got := publicationAttrs[acpAttrPublicationID].AsString(); got != publicationIDForTask(completed) {
+		t.Fatalf("publication span id = %q, want %q", got, publicationIDForTask(completed))
+	}
+	if publicationAttrs[acpAttrPublicationRecovery].AsBool() {
+		t.Fatal("live publication span was marked as recovery")
 	}
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
