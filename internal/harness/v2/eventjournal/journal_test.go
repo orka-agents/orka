@@ -256,6 +256,46 @@ func TestJournalRedactsCredentialsSplitAcrossAssistantChunks(t *testing.T) {
 	}
 }
 
+func TestJournalPersistsAssistantTextOnNonTerminalStreamClosure(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	journal := Journal{EventStore: eventStore, MapContext: testMapContext()}
+	state, err := journal.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	credential := "sk-" + strings.Repeat("d", 24)
+	fragments := []string{"before " + credential[:10], credential[10:] + " after"}
+	now := time.Now().UTC()
+	var last harnessv2.Event
+	for index, fragment := range fragments {
+		last = testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
+			Kind:             harnessv2.UpdateAssistantMessageChunk,
+			AssistantMessage: &harnessv2.AssistantMessageChunk{Text: fragment},
+		})
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, last); err != nil || isNew || appended != nil {
+			t.Fatalf("assistant chunk %d = %#v new=%t err=%v", index, appended, isNew, err)
+		}
+	}
+	transcript := strings.Join(fragments, "")
+	if appended, isNew, err := state.AppendAssistantStreamClosureIfNew(ctx, last, transcript); err != nil || !isNew || appended == nil {
+		t.Fatalf("assistant stream closure = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 1 || listed[0].ContentText != "before "+executionevents.ExecutionEventRedactedValue+" after" {
+		t.Fatalf("persisted assistant stream closure = %#v", listed)
+	}
+	recovered, err := journal.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate, isNew, err := recovered.AppendAssistantStreamClosureIfNew(ctx, last, transcript); err != nil || isNew || duplicate != nil {
+		t.Fatalf("recovered assistant stream closure = %#v new=%t err=%v", duplicate, isNew, err)
+	}
+}
+
 func TestJournalRedactsCredentialsSplitAcrossToolUpdates(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
@@ -473,7 +513,7 @@ func TestJournalRetainsBoundedOversizedToolStream(t *testing.T) {
 func TestToolContentFragmentPreservesURIOnlyResourceLink(t *testing.T) {
 	got := toolContentFragment([]harnessv2.ContentBlock{{
 		Type: harnessv2.ContentBlockResourceLink,
-		URI:  "https://example.com/output.txt",
+		URI:  "https://example.com/output.txt?X-Amz-Credential=secret&X-Amz-Signature=value#download",
 	}})
 	if got != "resource: https://example.com/output.txt" {
 		t.Fatalf("resource-link fragment = %q", got)

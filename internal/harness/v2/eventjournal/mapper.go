@@ -390,8 +390,9 @@ func MapAssistantTranscript(event harnessv2.Event, mapCtx MapContext, transcript
 	if event.Protocol != harnessv2.ProtocolVersion {
 		return nil, fmt.Errorf("unsupported protocol %q", event.Protocol)
 	}
-	if !event.Type.IsTerminal() {
-		return nil, fmt.Errorf("terminal harness v2 event is required")
+	if !event.Type.IsTerminal() &&
+		(event.Type != harnessv2.EventUpdate || event.Update == nil || event.Update.AssistantMessage == nil) {
+		return nil, fmt.Errorf("terminal or assistant-update harness v2 event is required")
 	}
 	if err := event.Identity.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid terminal identity: %w", err)

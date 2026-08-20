@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"unicode/utf8"
 
@@ -27,6 +28,7 @@ type Journal struct {
 type State struct {
 	journal        Journal
 	keys           map[string]struct{}
+	persistedKeys  map[string]struct{}
 	aggregatedKeys map[string]struct{}
 	toolText       map[string]*streamText
 }
@@ -86,6 +88,7 @@ func (j Journal) Open(ctx context.Context) (*State, error) {
 		return nil, err
 	}
 	keys := map[string]struct{}{}
+	persistedKeys := map[string]struct{}{}
 	mapCtx := j.MapContext.normalized()
 	var afterSeq int64
 	for {
@@ -107,7 +110,9 @@ func (j Journal) Open(ctx context.Context) (*State, error) {
 				afterSeq = event.Seq
 			}
 			if identity, ok := MappedUpdateIdentityFromEvent(event); ok {
-				keys[identity.Key()] = struct{}{}
+				key := identity.Key()
+				keys[key] = struct{}{}
+				persistedKeys[key] = struct{}{}
 			}
 		}
 		if len(listed) < store.MaxExecutionEventLimit {
@@ -117,6 +122,7 @@ func (j Journal) Open(ctx context.Context) (*State, error) {
 	return &State{
 		journal:        j,
 		keys:           keys,
+		persistedKeys:  persistedKeys,
 		aggregatedKeys: map[string]struct{}{},
 		toolText:       map[string]*streamText{},
 	}, nil
@@ -204,7 +210,7 @@ func (s *State) AppendAssistantTranscriptIfNew(
 		return nil, false, nil
 	}
 	key := mappedUpdateIdentity(terminal).Key()
-	if _, ok := s.keys[key]; ok {
+	if _, ok := s.persistedKeys[key]; ok {
 		return nil, false, nil
 	}
 	mapped, err := MapAssistantTranscript(terminal, s.journal.MapContext, transcript)
@@ -212,6 +218,35 @@ func (s *State) AppendAssistantTranscriptIfNew(
 		return nil, false, err
 	}
 	return s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 assistant transcript")
+}
+
+// AppendAssistantStreamClosureIfNew persists the complete assistant text seen
+// before a non-terminal stream closure. The last assistant update supplies the
+// durable protocol identity; the complete buffered text supplies the redaction
+// boundary that individual chunks cannot provide safely.
+func (s *State) AppendAssistantStreamClosureIfNew(
+	ctx context.Context,
+	lastUpdate harnessv2.Event,
+	transcript string,
+) (*store.ExecutionEvent, bool, error) {
+	if s == nil {
+		return nil, false, fmt.Errorf("harness v2 journal state is required")
+	}
+	if transcript == "" {
+		return nil, false, nil
+	}
+	if lastUpdate.Type != harnessv2.EventUpdate || lastUpdate.Update == nil || lastUpdate.Update.AssistantMessage == nil {
+		return nil, false, fmt.Errorf("last assistant update is required")
+	}
+	key := mappedUpdateIdentity(lastUpdate).Key()
+	if _, ok := s.persistedKeys[key]; ok {
+		return nil, false, nil
+	}
+	mapped, err := MapAssistantTranscript(lastUpdate, s.journal.MapContext, transcript)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 assistant stream closure")
 }
 
 // appendMappedEvent reconciles an append error against the durable stream
@@ -227,7 +262,7 @@ func (s *State) appendMappedEvent(
 ) (*store.ExecutionEvent, bool, error) {
 	appended, err := s.journal.EventStore.AppendExecutionEvent(ctx, mapped)
 	if err == nil {
-		s.keys[key] = struct{}{}
+		s.markPersisted(key)
 		return appended, true, nil
 	}
 	firstErr := fmt.Errorf("%s: %w", operation, err)
@@ -236,13 +271,13 @@ func (s *State) appendMappedEvent(
 		return nil, false, errors.Join(firstErr, fmt.Errorf("reconcile failed append: %w", reconcileErr))
 	}
 	if persisted {
-		s.keys[key] = struct{}{}
+		s.markPersisted(key)
 		return nil, false, nil
 	}
 
 	appended, err = s.journal.EventStore.AppendExecutionEvent(ctx, mapped)
 	if err == nil {
-		s.keys[key] = struct{}{}
+		s.markPersisted(key)
 		return appended, true, nil
 	}
 	retryErr := fmt.Errorf("%s retry: %w", operation, err)
@@ -251,10 +286,15 @@ func (s *State) appendMappedEvent(
 		return nil, false, errors.Join(firstErr, retryErr, fmt.Errorf("reconcile failed append retry: %w", reconcileErr))
 	}
 	if persisted {
-		s.keys[key] = struct{}{}
+		s.markPersisted(key)
 		return nil, false, nil
 	}
 	return nil, false, errors.Join(firstErr, retryErr)
+}
+
+func (s *State) markPersisted(key string) {
+	s.keys[key] = struct{}{}
+	s.persistedKeys[key] = struct{}{}
 }
 
 func (j Journal) hasPersistedIdentity(ctx context.Context, key string) (bool, error) {
@@ -364,7 +404,7 @@ func toolContentFragment(blocks []harnessv2.ContentBlock) string {
 		case harnessv2.ContentBlockResourceLink:
 			resource := strings.TrimSpace(block.Name)
 			if resource == "" {
-				resource = strings.TrimSpace(block.URI)
+				resource = safeResourceDisplayURI(block.URI)
 			}
 			if resource != "" {
 				value = "resource: " + resource
@@ -383,4 +423,16 @@ func toolContentFragment(blocks []harnessv2.ContentBlock) string {
 		text.WriteString(value)
 	}
 	return text.String()
+}
+
+func safeResourceDisplayURI(value string) string {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || !parsed.IsAbs() || parsed.User != nil {
+		return ""
+	}
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	return parsed.String()
 }

@@ -1203,6 +1203,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		userPrompt = sessionExecution.UserPrompt
 	}
 	var terminal *harnessv2.Event
+	var lastAssistantUpdate *harnessv2.Event
 	var assistant strings.Builder
 	assistantOverflow := false
 	accepted := false
@@ -1253,6 +1254,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				}
 			case harnessv2.EventUpdate:
 				if event.Update != nil && event.Update.AssistantMessage != nil {
+					copy := event
+					lastAssistantUpdate = &copy
 					text := event.Update.AssistantMessage.Text
 					if !assistantOverflow {
 						if maxResultBytes < 1 || len(text) > maxResultBytes-assistant.Len() {
@@ -1323,6 +1326,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventFailed})
 			}
 			continue
+		}
+		if lastAssistantUpdate != nil && assistant.Len() > 0 {
+			flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			if _, _, persistErr := journalState.AppendAssistantStreamClosureIfNew(
+				flushCtx, *lastAssistantUpdate, assistant.String(),
+			); persistErr != nil {
+				streamErr = acpUpdatePersistenceError(persistErr, nil)
+			}
+			cancel()
 		}
 		return d.handlePromptStreamError(
 			ctx, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence,
