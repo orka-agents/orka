@@ -161,8 +161,7 @@ type State struct {
 	overflowToolIDs             map[string]struct{}
 	untrackedOverflowTool       bool
 	toolBufferedBytes           int
-	planFieldHistory            []logicalFieldBoundaries
-	diagnosticFieldHistory      []logicalFieldBoundaries
+	logicalFieldHistory         []logicalFieldBoundaries
 }
 
 type streamText struct {
@@ -427,8 +426,7 @@ func (s *State) resetPrompt(identity MappedUpdateIdentity) {
 	clear(s.persistedOpenTools)
 	clear(s.overflowToolIDs)
 	s.untrackedOverflowTool = false
-	s.planFieldHistory = nil
-	s.diagnosticFieldHistory = nil
+	s.logicalFieldHistory = nil
 }
 
 func (s *State) bindPrompt(identity MappedUpdateIdentity) error {
@@ -511,7 +509,7 @@ func (s *State) ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 	if s == nil {
 		return ProjectPlanUpdate(update)
 	}
-	projection, _ := projectPlanUpdate(update, s.planFieldHistory)
+	projection, _ := projectPlanUpdate(update, s.logicalFieldHistory)
 	return projection
 }
 
@@ -519,7 +517,7 @@ func (s *State) projectPlanUpdate(update harnessv2.PlanUpdate) (PlanProjection, 
 	if s == nil {
 		return projectPlanUpdate(update, nil)
 	}
-	return projectPlanUpdate(update, s.planFieldHistory)
+	return projectPlanUpdate(update, s.logicalFieldHistory)
 }
 
 // AppendUpdateIfNew maps and appends event unless its full protocol identity is
@@ -541,7 +539,7 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		planFields = fields
 	}
 	if event.Update != nil && event.Update.Diagnostic != nil {
-		projection, fields := projectDiagnosticUpdate(*event.Update.Diagnostic, s.diagnosticFieldHistory)
+		projection, fields := projectDiagnosticUpdate(*event.Update.Diagnostic, s.logicalFieldHistory)
 		options.diagnosticProjection = &projection
 		diagnosticFields = fields
 	}
@@ -617,10 +615,10 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 			s.markToolStartPersisted(event)
 		}
 		if event.Update.Kind == harnessv2.UpdatePlan {
-			s.planFieldHistory = boundedLogicalFieldHistory(s.planFieldHistory, planFields)
+			s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, planFields)
 		}
 		if event.Update.Kind == harnessv2.UpdateDiagnostic {
-			s.diagnosticFieldHistory = boundedLogicalFieldHistory(s.diagnosticFieldHistory, diagnosticFields)
+			s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, diagnosticFields)
 		}
 	}
 	return appended, isNew, err

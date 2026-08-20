@@ -174,7 +174,15 @@ func TestACPDispatcherClosesRecoveredPromptAndOpenToolsAsOutcomeUnknown(t *testi
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionAccepted)
 	defer fixture.close(t)
 
-	task := configureRecoveryJournalIdentity(t, fixture)
+	task := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, types.NamespacedName{Namespace: "default", Name: "task"}, task); err != nil {
+		t.Fatal(err)
+	}
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "recovery-session"}
+	if err := fixture.kubeClient.Update(fixture.ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	task = configureRecoveryJournalIdentity(t, fixture)
 	appendRecoveryOpenPrompt(t, fixture, task)
 	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
 		t.Fatal(err)
@@ -197,6 +205,9 @@ func TestACPDispatcherClosesRecoveredPromptAndOpenToolsAsOutcomeUnknown(t *testi
 	for index, wantType := range wantTypes {
 		if listed[index].Type != wantType {
 			t.Fatalf("recovered lifecycle event %d type = %q, want %q", index, listed[index].Type, wantType)
+		}
+		if listed[index].SessionName != task.Spec.SessionRef.Name {
+			t.Fatalf("recovered lifecycle event %d session = %q, want %q", index, listed[index].SessionName, task.Spec.SessionRef.Name)
 		}
 	}
 	if listed[1].ToolCallID == "" || listed[2].ToolCallID != listed[1].ToolCallID ||
@@ -379,6 +390,71 @@ func TestACPDispatcherRecoversCompletedJournalTerminalOnlyWithExactResult(t *tes
 	}
 }
 
+func TestACPDispatcherRetriesResultReferenceForSucceededAttempt(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionSucceeded)
+	defer fixture.close(t)
+
+	if err := fixture.controlStore.SaveResult(fixture.ctx, "default", "task", []byte("recovered result")); err != nil {
+		t.Fatal(err)
+	}
+	rawClient, ok := fixture.kubeClient.(client.WithWatch)
+	if !ok {
+		t.Fatal("recovery fake client does not implement client.WithWatch")
+	}
+	injectedErr := errors.New("injected result-reference patch failure")
+	var resultReferencePatches atomic.Int32
+	intercepted := interceptor.NewClient(rawClient, interceptor.Funcs{
+		SubResourcePatch: func(
+			ctx context.Context,
+			c client.Client,
+			subresource string,
+			obj client.Object,
+			patch client.Patch,
+			opts ...client.SubResourcePatchOption,
+		) error {
+			task, isTask := obj.(*corev1alpha1.Task)
+			if subresource == "status" && isTask && task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+				if resultReferencePatches.Add(1) == 1 {
+					return injectedErr
+				}
+			}
+			return c.SubResource(subresource).Patch(ctx, obj, patch, opts...)
+		},
+	})
+	fixture.dispatcher.Client = intercepted
+
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); !errors.Is(err, injectedErr) {
+		t.Fatalf("first recovery error = %v, want injected result-reference failure", err)
+	}
+	committed, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.ExecutionState != store.PromptExecutionSucceeded {
+		t.Fatalf("attempt state after failed result-reference patch = %s, want %s", committed.ExecutionState, store.PromptExecutionSucceeded)
+	}
+	current := &corev1alpha1.Task{}
+	if err := rawClient.Get(fixture.ctx, types.NamespacedName{Namespace: "default", Name: "task"}, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.ResultRef != nil {
+		t.Fatalf("result reference unexpectedly persisted after injected failure: %#v", current.Status.ResultRef)
+	}
+
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := rawClient.Get(fixture.ctx, types.NamespacedName{Namespace: "default", Name: "task"}, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.ResultRef == nil || !current.Status.ResultRef.Available {
+		t.Fatalf("recovered result reference = %#v, want available", current.Status.ResultRef)
+	}
+	if resultReferencePatches.Load() < 2 {
+		t.Fatalf("result-reference patch attempts = %d, want at least 2", resultReferencePatches.Load())
+	}
+}
+
 func TestACPDispatcherRecoversResultSavedBeforeTerminalAppend(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -519,7 +595,7 @@ func appendRecoveryOpenPrompt(t *testing.T, fixture *recoveryFixture, task *core
 	journal := v2eventjournal.Journal{
 		EventStore: fixture.controlStore,
 		MapContext: v2eventjournal.MapContext{
-			Namespace: task.Namespace, TaskName: task.Name, StreamID: task.Name,
+			Namespace: task.Namespace, TaskName: task.Name, StreamID: task.Name, SessionName: taskSessionName(task),
 		},
 	}
 	state, err := journal.Open(fixture.ctx)
@@ -3004,14 +3080,18 @@ func newACPRecoveryFixture(t *testing.T, target store.PromptExecutionState) *rec
 		t.Fatal(err)
 	}
 	path := []store.PromptExecutionState{store.PromptExecutionReserved, store.PromptExecutionSessionStarting, store.PromptExecutionPlanned}
-	if target == store.PromptExecutionAccepted || target == store.PromptExecutionRunning || target == store.PromptExecutionSettling {
+	if target == store.PromptExecutionAccepted || target == store.PromptExecutionRunning ||
+		target == store.PromptExecutionSettling || target == store.PromptExecutionSucceeded {
 		path = append(path, store.PromptExecutionSubmitting, store.PromptExecutionAccepted)
 	}
-	if target == store.PromptExecutionRunning || target == store.PromptExecutionSettling {
+	if target == store.PromptExecutionRunning || target == store.PromptExecutionSettling || target == store.PromptExecutionSucceeded {
 		path = append(path, store.PromptExecutionRunning)
 	}
-	if target == store.PromptExecutionSettling {
+	if target == store.PromptExecutionSettling || target == store.PromptExecutionSucceeded {
 		path = append(path, store.PromptExecutionSettling)
+	}
+	if target == store.PromptExecutionSucceeded {
+		path = append(path, store.PromptExecutionSucceeded)
 	}
 	for _, next := range path {
 		if attempt.ExecutionState == target {

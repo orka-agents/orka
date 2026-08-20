@@ -41,7 +41,7 @@ type EventSummary struct {
 func CoalesceAdjacentModelMessages(values []store.ExecutionEvent) []store.ExecutionEvent {
 	coalesced := make([]store.ExecutionEvent, 0, len(values))
 	for _, event := range values {
-		if len(coalesced) > 0 && sameHarnessV2ModelMessage(coalesced[len(coalesced)-1], event) {
+		if len(coalesced) > 0 && SameHarnessV2ModelMessage(coalesced[len(coalesced)-1], event) {
 			previous := &coalesced[len(coalesced)-1]
 			combinedOriginalChars := executionEventContentTextChars(*previous) + executionEventContentTextChars(event)
 			previous.Seq = event.Seq
@@ -83,7 +83,9 @@ func executionEventContentTextChars(event store.ExecutionEvent) int {
 	return utf8.RuneCountInString(event.ContentText)
 }
 
-func sameHarnessV2ModelMessage(left, right store.ExecutionEvent) bool {
+// SameHarnessV2ModelMessage reports whether two model-message events belong to
+// the same harness v2 prompt and can therefore be adjacent stream chunks.
+func SameHarnessV2ModelMessage(left, right store.ExecutionEvent) bool {
 	if left.Type != executionevents.ExecutionEventTypeModelMessage || right.Type != executionevents.ExecutionEventTypeModelMessage {
 		return false
 	}

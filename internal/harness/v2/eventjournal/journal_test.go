@@ -280,8 +280,8 @@ func TestJournalPreservesBenignPlanUpdatesAfterFieldHistoryCap(t *testing.T) {
 	if appended, isNew, err := state.AppendUpdateIfNew(ctx, first); err != nil || !isNew || appended == nil {
 		t.Fatalf("append full plan = %#v new=%t err=%v", appended, isNew, err)
 	}
-	if len(state.planFieldHistory) != maxLogicalFieldPermutationFields {
-		t.Fatalf("plan field history length = %d, want %d", len(state.planFieldHistory), maxLogicalFieldPermutationFields)
+	if len(state.logicalFieldHistory) != maxLogicalFieldPermutationFields {
+		t.Fatalf("logical field history length = %d, want %d", len(state.logicalFieldHistory), maxLogicalFieldPermutationFields)
 	}
 
 	second := testUpdateEvent(3, first.Identity.Timestamp.Add(time.Millisecond), harnessv2.UpdateEvent{
@@ -298,8 +298,44 @@ func TestJournalPreservesBenignPlanUpdatesAfterFieldHistoryCap(t *testing.T) {
 		strings.Contains(listed[1].ContentText, executionevents.ExecutionEventRedactedValue) {
 		t.Fatalf("plan after history cap = %#v", listed)
 	}
-	if len(state.planFieldHistory) != maxLogicalFieldPermutationFields {
-		t.Fatalf("bounded plan field history length = %d, want %d", len(state.planFieldHistory), maxLogicalFieldPermutationFields)
+	if len(state.logicalFieldHistory) != maxLogicalFieldPermutationFields {
+		t.Fatalf("bounded logical field history length = %d, want %d", len(state.logicalFieldHistory), maxLogicalFieldPermutationFields)
+	}
+}
+
+func TestJournalRedactsCredentialSplitAcrossPlanAndDiagnosticUpdates(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := "sk-" + strings.Repeat("a", 10)
+	suffix := strings.Repeat("b", 14)
+	plan := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: prefix, Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, plan); err != nil || !isNew || appended == nil {
+		t.Fatalf("append plan prefix = %#v new=%t err=%v", appended, isNew, err)
+	}
+	diagnostic := testUpdateEvent(3, plan.Identity.Timestamp.Add(time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateDiagnostic,
+		Diagnostic: &harnessv2.DiagnosticUpdate{
+			Code: "runtime", Message: suffix, Retryable: true,
+		},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, diagnostic); err != nil || !isNew || appended == nil {
+		t.Fatalf("append diagnostic suffix = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 2 || !strings.Contains(listed[0].ContentText, prefix) ||
+		strings.Contains(listed[1].ContentText, suffix) ||
+		!strings.Contains(listed[1].ContentText, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("cross-kind logical fields = %#v", listed)
 	}
 }
 
@@ -1244,7 +1280,7 @@ func TestJournalReplacesACPToolContentSnapshots(t *testing.T) {
 	}
 }
 
-func TestJournalBuffersToolMetadataUntilTerminalEvent(t *testing.T) {
+func TestJournalRedactsToolMetadataSplitAcrossLifecycleUpdates(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
 	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
@@ -1252,17 +1288,18 @@ func TestJournalBuffersToolMetadataUntilTerminalEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	credential := "sk-" + strings.Repeat("c", 24)
+	suffix := strings.Repeat("c", 24)
+	credential := "sk-" + suffix
 	now := time.Now().UTC()
 	updates := []harnessv2.UpdateEvent{
 		{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-metadata", Title: credential[:10], Kind: testToolKindShell, Status: harnessv2.ToolCallStatusPending,
+			ToolCallID: "call-metadata", Title: "sk-", Status: harnessv2.ToolCallStatusPending,
 		}},
 		{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-metadata", Title: credential[10:], Status: harnessv2.ToolCallStatusInProgress,
+			ToolCallID: "call-metadata", Kind: suffix, Status: harnessv2.ToolCallStatusInProgress,
 		}},
 		{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-metadata", Title: "Finished safely", Status: harnessv2.ToolCallStatusCompleted,
+			ToolCallID: "call-metadata", Status: harnessv2.ToolCallStatusCompleted,
 		}},
 	}
 	for index, update := range updates {
@@ -1284,8 +1321,7 @@ func TestJournalBuffersToolMetadataUntilTerminalEvent(t *testing.T) {
 		persisted.WriteString(event.ToolName)
 		persisted.Write(event.Content)
 	}
-	if strings.Contains(persisted.String(), credential) || strings.Contains(persisted.String(), credential[:10]) ||
-		strings.Contains(persisted.String(), credential[10:]) {
+	if strings.Contains(persisted.String(), credential) || strings.Contains(persisted.String(), suffix) {
 		t.Fatalf("streamed tool metadata remained reconstructable: %q", persisted.String())
 	}
 	for _, event := range listed[:2] {
@@ -1294,7 +1330,14 @@ func TestJournalBuffersToolMetadataUntilTerminalEvent(t *testing.T) {
 		}
 	}
 	terminal := listed[2]
-	if terminal.ToolName != testToolKindShell || terminal.Summary != "Finished safely" {
+	var content map[string]any
+	if err := json.Unmarshal(terminal.Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.ToolName != executionevents.ExecutionEventRedactedValue ||
+		terminal.Summary != executionevents.ExecutionEventRedactedValue ||
+		content["title"] != executionevents.ExecutionEventRedactedValue ||
+		content["toolKind"] != executionevents.ExecutionEventRedactedValue {
 		t.Fatalf("terminal tool metadata = %#v", terminal)
 	}
 }

@@ -138,6 +138,37 @@ func TestTaskTimelineReaderListRecentContextThroughMarksCompatibilityScanTruncat
 	}
 }
 
+func TestTaskTimelineReaderListRecentContextThroughKeepsCompleteBoundaryMessage(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	for range taskTimelineContextCompatibilityScanLimit - 1 {
+		appendReaderEvent(t, eventStore, store.ExecutionEvent{
+			Type: events.ExecutionEventTypeToolCallCompleted, Summary: "older tool result",
+		})
+	}
+	appendReaderEvent(t, eventStore, store.ExecutionEvent{
+		Type: events.ExecutionEventTypePlanUpdated, Summary: "boundary plan",
+	})
+	content := json.RawMessage(`{"harnessV2":{"taskUID":"task-uid","taskAttempt":1,"promptID":"prompt-1"}}`)
+	for range taskTimelineContextCompatibilityScanLimit {
+		appendReaderEvent(t, eventStore, store.ExecutionEvent{
+			Type: events.ExecutionEventTypeModelMessage, Content: content, ContentText: "x",
+		})
+	}
+	reader := newTaskTimelineReader(eventStore, defaultNamespace, "task-a")
+
+	listed, scanTruncated, err := reader.listRecentContextThrough(
+		ctx, int64(taskTimelineContextCompatibilityScanLimit*2), 3,
+	)
+	if err != nil {
+		t.Fatalf("listRecentContextThrough error = %v", err)
+	}
+	if !scanTruncated || len(listed) != 1 || listed[0].Type != events.ExecutionEventTypeModelMessage ||
+		listed[0].ContentText != strings.Repeat("x", taskTimelineContextCompatibilityScanLimit) {
+		t.Fatalf("complete boundary context = %#v scanTruncated=%t", listed, scanTruncated)
+	}
+}
+
 func TestTaskTimelineReaderSeqExistsValidatesCheckpointRanges(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()

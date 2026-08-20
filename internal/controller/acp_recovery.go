@@ -713,12 +713,8 @@ func (d *ACPDispatcher) closeRecoveredPromptJournal(
 		return nil
 	}
 	state, err := (v2eventjournal.Journal{
-		EventStore: d.EventStore,
-		MapContext: v2eventjournal.MapContext{
-			Namespace: task.Namespace,
-			TaskName:  task.Name,
-			StreamID:  task.Name,
-		},
+		EventStore:       d.EventStore,
+		MapContext:       mappedPromptRecoveryContext(task),
 		RecoveryIdentity: identity,
 	}).Open(ctx)
 	if err != nil {
@@ -754,6 +750,15 @@ func mappedPromptRecoveryIdentity(task *corev1alpha1.Task) (v2eventjournal.Mappe
 	}, true
 }
 
+func mappedPromptRecoveryContext(task *corev1alpha1.Task) v2eventjournal.MapContext {
+	if task == nil {
+		return v2eventjournal.MapContext{}
+	}
+	return v2eventjournal.MapContext{
+		Namespace: task.Namespace, TaskName: task.Name, StreamID: task.Name, SessionName: taskSessionName(task),
+	}
+}
+
 func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -765,12 +770,8 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 		return false, nil
 	}
 	evidence, err := (v2eventjournal.Journal{
-		EventStore: d.EventStore,
-		MapContext: v2eventjournal.MapContext{
-			Namespace: task.Namespace,
-			TaskName:  task.Name,
-			StreamID:  task.Name,
-		},
+		EventStore:       d.EventStore,
+		MapContext:       mappedPromptRecoveryContext(task),
 		RecoveryIdentity: identity,
 	}).FindPromptTerminal(ctx)
 	if err != nil {
@@ -869,12 +870,8 @@ func (d *ACPDispatcher) recoverSettlingResultTerminal(
 		return nil, fmt.Errorf("settling prompt attempt %s has no receipt timestamp", attempt.ID)
 	}
 	journal := v2eventjournal.Journal{
-		EventStore: d.EventStore,
-		MapContext: v2eventjournal.MapContext{
-			Namespace: task.Namespace,
-			TaskName:  task.Name,
-			StreamID:  task.Name,
-		},
+		EventStore:       d.EventStore,
+		MapContext:       mappedPromptRecoveryContext(task),
 		RecoveryIdentity: identity,
 	}
 	state, err := journal.Open(ctx)
@@ -1454,6 +1451,12 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 }
 
 func (d *ACPDispatcher) recoverSucceededTaskProjection(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, fence store.ControllerEpochFence) error {
+	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
+		return err
+	}
+	if err := d.publishTaskResultReference(ctx, task); err != nil {
+		return err
+	}
 	if !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
 		switch attempt.DeliveryState {
 		case store.PromptDeliveryValidating:
