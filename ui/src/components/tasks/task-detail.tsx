@@ -53,7 +53,8 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const forkSupported = !taskEventsUnsupported && !taskEventsFailed
   const taskEvents = taskEventsResponse?.events ?? []
   const plan = task?.plan
-  const hasPlanHistory = Boolean(plan) || (task?.status?.iteration ?? 0) > 0
+  const hasPlanHistory = Boolean(plan) || (task?.status?.iteration ?? 0) > 0 ||
+    taskEvents.some((event) => event.type === 'PlanUpdated')
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
   const search = useSearch({ from: '/tasks/$taskId' })

@@ -366,6 +366,43 @@ describe('TaskDetail', () => {
     expect(await screen.findByText('Iteration 3')).toBeInTheDocument()
   })
 
+  it('keeps iteration-zero plan history visible from durable events', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'completed-agent', namespace: 'default', uid: 'uid-e', creationTimestamp: new Date().toISOString() },
+          spec: { type: 'agent', agentRef: { name: 'planner' } },
+          status: { phase: 'Succeeded', iteration: 0, completionTime: new Date().toISOString() },
+        }),
+      ),
+      http.get('/api/v1/tasks/:id/events', ({ params }) =>
+        HttpResponse.json({
+          namespace: 'default',
+          streamType: 'task',
+          streamID: params.id,
+          afterSeq: 0,
+          latestSeq: 1,
+          events: [{
+            id: 'plan-1',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: params.id,
+            seq: 1,
+            type: 'PlanUpdated',
+            severity: 'info',
+            contentText: '# Plan\n- inspect',
+            createdAt: new Date().toISOString(),
+          }],
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="completed-agent" />)
+    await waitFor(() => expect(screen.getByText('completed-agent')).toBeInTheDocument())
+    const planTab = await screen.findByRole('tab', { name: /plan/i })
+    await userEvent.click(planTab)
+    expect(await screen.findByText('Agent Plan')).toBeInTheDocument()
+  })
+
   it('shows a persisted plan when iteration is 0', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>

@@ -296,7 +296,8 @@ func redactPlanEntries(entries []harnessv2.PlanEntry) []harnessv2.PlanEntry {
 		priorities[index] = redacted[index].Priority
 		ordered = append(ordered, redacted[index].Content, redacted[index].Priority)
 	}
-	if logicalSequenceSensitive(contents) || logicalSequenceSensitive(priorities) || logicalSequenceSensitive(ordered) {
+	if logicalSequenceSensitive(contents) || logicalSequenceSensitive(priorities) ||
+		logicalSequenceSensitive(ordered) || logicalFieldPairSensitive(ordered) {
 		for index := range redacted {
 			if redacted[index].Content != "" {
 				redacted[index].Content = executionevents.ExecutionEventRedactedValue
@@ -307,6 +308,41 @@ func redactPlanEntries(entries []harnessv2.PlanEntry) []harnessv2.PlanEntry {
 		}
 	}
 	return redacted
+}
+
+const maxLogicalFieldBoundaryRunes = 256
+
+func logicalFieldPairSensitive(values []string) bool {
+	type boundaries struct {
+		prefix string
+		suffix string
+	}
+	fields := make([]boundaries, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		runes := []rune(value)
+		if len(runes) <= maxLogicalFieldBoundaryRunes {
+			fields = append(fields, boundaries{prefix: value, suffix: value})
+			continue
+		}
+		fields = append(fields, boundaries{
+			prefix: string(runes[:maxLogicalFieldBoundaryRunes]),
+			suffix: string(runes[len(runes)-maxLogicalFieldBoundaryRunes:]),
+		})
+	}
+	for left := 0; left < len(fields); left++ {
+		for right := left + 1; right < len(fields); right++ {
+			forward := fields[left].suffix + fields[right].prefix
+			reverse := fields[right].suffix + fields[left].prefix
+			if executionevents.RedactExecutionEventText(forward) != forward ||
+				executionevents.RedactExecutionEventText(reverse) != reverse {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func logicalSequenceSensitive(values []string) bool {

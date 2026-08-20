@@ -252,6 +252,20 @@ func TestProjectPlanUpdateRedactsCredentialSplitAcrossEntries(t *testing.T) {
 	}
 }
 
+func TestProjectPlanUpdateRedactsCredentialSplitAcrossEntrySubset(t *testing.T) {
+	prefix := "sk-" + strings.Repeat("a", 8)
+	suffix := strings.Repeat("b", 16)
+	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
+		{Content: prefix, Status: harnessv2.PlanEntryCompleted},
+		{Content: "--- unrelated ---", Status: harnessv2.PlanEntryPending},
+		{Content: suffix, Status: harnessv2.PlanEntryInProgress},
+	}})
+	if strings.Contains(projection.Document, prefix) || strings.Contains(projection.Document, suffix) ||
+		!strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("plan document exposed credential split across subset: %q", projection.Document)
+	}
+}
+
 func TestMapPromptLifecycle(t *testing.T) {
 	now := time.Now().UTC()
 	accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
