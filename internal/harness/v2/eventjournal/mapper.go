@@ -1,6 +1,8 @@
 package eventjournal
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -12,7 +14,11 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const mappedUpdateIdentityKeySeparator = "\x00"
+const (
+	mappedUpdateIdentityKeySeparator = "\x00"
+	mappedToolCallIDPrefix           = "event-tool-call-v1-sha256-"
+	mappedToolCallIDDomain           = "orka.harness.v2.execution-event.tool-call-id.v1\x00"
+)
 
 // MapContext supplies Orka-owned stream metadata for a validated harness v2
 // update. Protocol events do not own namespace, task name, or session linkage.
@@ -241,12 +247,12 @@ func MapUpdate(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent,
 		mapped.ContentText = event.Update.AssistantMessage.Text
 	case harnessv2.UpdateToolCall, harnessv2.UpdateToolCallUpdate:
 		tool := event.Update.ToolCall
-		mapped.ToolCallID = strings.TrimSpace(tool.ToolCallID)
+		mapped.ToolCallID = safeMappedToolCallID(tool.ToolCallID)
 		mapped.ToolName = strings.TrimSpace(tool.Kind)
 		mapped.ToolName, _, _ = executionevents.RedactAndTruncateExecutionEventText(mapped.ToolName, 128)
 		mapped.Type, mapped.Severity = toolCallEventType(tool.Status)
 		mapped.Summary = toolCallSummary(*tool)
-		content["toolCallID"] = tool.ToolCallID
+		content["toolCallID"] = mapped.ToolCallID
 		content["title"] = tool.Title
 		content["toolKind"] = tool.Kind
 		content["status"] = tool.Status
@@ -271,14 +277,27 @@ func MapUpdate(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent,
 		}
 	case harnessv2.UpdateUsage:
 		usage := event.Update.Usage
-		mapped.Type = executionevents.ExecutionEventTypeModelUsageUpdated
-		mapped.Summary = fmt.Sprintf(
-			"Model usage updated: %d input, %d output, %d cached input tokens",
-			usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens,
-		)
-		content["inputTokens"] = usage.InputTokens
-		content["outputTokens"] = usage.OutputTokens
-		content["cachedInputTokens"] = usage.CachedInputTokens
+		hasTokenUsage := usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0
+		if hasTokenUsage {
+			mapped.Type = executionevents.ExecutionEventTypeModelUsageUpdated
+			mapped.Summary = fmt.Sprintf(
+				"Model usage updated: %d input, %d output, %d cached input tokens",
+				usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens,
+			)
+			content["inputTokens"] = usage.InputTokens
+			content["outputTokens"] = usage.OutputTokens
+			content["cachedInputTokens"] = usage.CachedInputTokens
+		} else {
+			mapped.Type = executionevents.ExecutionEventTypeModelContextUpdated
+			mapped.Summary = fmt.Sprintf(
+				"Model context updated: %d of %d tokens used",
+				*usage.ContextWindowUsed, *usage.ContextWindowSize,
+			)
+		}
+		if usage.ContextWindowUsed != nil {
+			content["contextWindowUsed"] = *usage.ContextWindowUsed
+			content["contextWindowSize"] = *usage.ContextWindowSize
+		}
 		if mapCtx.Provider != "" {
 			content["provider"] = mapCtx.Provider
 		}
@@ -309,6 +328,12 @@ func MapUpdate(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent,
 		return nil, fmt.Errorf("sanitize mapped harness v2 update: %w", err)
 	}
 	return mapped, nil
+}
+
+func safeMappedToolCallID(value string) string {
+	value = strings.TrimSpace(value)
+	digest := sha256.Sum256([]byte(mappedToolCallIDDomain + value))
+	return mappedToolCallIDPrefix + hex.EncodeToString(digest[:])
 }
 
 func toolCallEventType(status harnessv2.ToolCallStatus) (string, string) {

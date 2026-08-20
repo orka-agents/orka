@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { TaskStatusBadge } from './task-status-badge'
 import type { Task, ExecutionEvent } from '@/schemas/task'
+import { latestModelContextEvent, latestModelUsageEvents } from '@/lib/execution-events'
 
 const steps = ['Pending', 'Running', 'Completed'] as const
 
@@ -180,12 +181,8 @@ function WorkspaceDelivery({ task }: { task: Task }) {
 
 export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?: ExecutionEvent[] }) {
   const phase = task.status?.phase
-  const usageUpdates = events.filter((event) => event.type === 'ModelUsageUpdated')
-  // ACP usage updates are snapshots; use the newest one instead of summing
-  // cumulative context-window counts. Legacy model completions remain additive.
-  const modelEvents = usageUpdates.length > 0
-    ? [usageUpdates.reduce((latest, event) => event.seq > latest.seq ? event : latest)]
-    : events.filter((event) => event.type === 'ModelRequestCompleted')
+  const modelEvents = latestModelUsageEvents(events)
+  const contextEvent = latestModelContextEvent(events)
   const totalIn = modelEvents.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0)
   const totalOut = modelEvents.reduce((sum, event) => sum + (event.outputTokens ?? 0), 0)
   const totalCachedIn = modelEvents.reduce((sum, event) => sum + (event.cachedInputTokens ?? 0), 0)
@@ -239,6 +236,24 @@ export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?:
                 </span>
               ))}
             </div>
+          </div>
+        )}
+
+        {contextEvent?.contextWindowSize !== undefined && (
+          <div className="rounded-md border p-3 text-sm" aria-label="GenAI context window">
+            <div className="font-medium">Context window</div>
+            <div className="text-muted-foreground">
+              {contextEvent.contextWindowUsed ?? 0} / {contextEvent.contextWindowSize} tokens used
+              {contextEvent.contextWindowSize > 0
+                ? ` · ${Math.round(((contextEvent.contextWindowUsed ?? 0) / contextEvent.contextWindowSize) * 100)}%`
+                : ''}
+            </div>
+            {(contextEvent.model || contextEvent.provider) && (
+              <div className="mt-2 text-xs text-muted-foreground">
+                {contextEvent.model ?? 'unknown model'}
+                {contextEvent.provider ? ` · ${contextEvent.provider}` : ''}
+              </div>
+            )}
           </div>
         )}
 

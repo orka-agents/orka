@@ -493,5 +493,5 @@ func listTaskEventsThrough(
 	taskName string,
 	throughSeq int64,
 ) ([]store.ExecutionEvent, error) {
-	return newTaskTimelineReader(eventStore, namespace, taskName).listRecentThrough(ctx, throughSeq, forkcontext.DefaultMaxEvents+1)
+	return newTaskTimelineReader(eventStore, namespace, taskName).listRecentContextThrough(ctx, throughSeq, forkcontext.DefaultMaxEvents+1)
 }

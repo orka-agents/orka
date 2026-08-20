@@ -69,6 +69,7 @@ const CATEGORY_BY_TYPE: Record<string, ExecutionEventCategory> = {
   ModelRequestCompleted: 'model',
   ModelRequestFailed: 'model',
   ModelUsageUpdated: 'model',
+  ModelContextUpdated: 'model',
   ModelMessage: 'model',
   ContextTruncated: 'model',
   ToolCallStarted: 'tools',
@@ -160,6 +161,43 @@ export function maxSeq(events: { seq: number }[], fallback = 0): number {
   let m = fallback
   for (const e of events) if (e.seq > m) m = e.seq
   return m
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function harnessV2PromptKey(event: ExecutionEvent): string | undefined {
+  if (!isRecord(event.content) || !isRecord(event.content.harnessV2)) return undefined
+  const identity = event.content.harnessV2
+  if (typeof identity.taskAttempt !== 'number' || typeof identity.promptID !== 'string') return undefined
+  return `${identity.taskAttempt}:${identity.promptID}`
+}
+
+// Harness v2 usage events are cumulative snapshots within one prompt. Keep the
+// newest snapshot per prompt, then sum prompts at the task level. Unscoped
+// legacy snapshots retain the previous newest-only behavior.
+export function latestModelUsageEvents(events: ExecutionEvent[]): ExecutionEvent[] {
+  const updates = events.filter((event) => event.type === 'ModelUsageUpdated')
+  if (updates.length === 0) {
+    return events.filter((event) => event.type === 'ModelRequestCompleted')
+  }
+  const latestByPrompt = new Map<string, ExecutionEvent>()
+  for (const event of updates) {
+    const key = harnessV2PromptKey(event) ?? 'unscoped'
+    const previous = latestByPrompt.get(key)
+    if (!previous || event.seq > previous.seq) latestByPrompt.set(key, event)
+  }
+  return Array.from(latestByPrompt.values()).sort((a, b) => a.seq - b.seq)
+}
+
+export function latestModelContextEvent(events: ExecutionEvent[]): ExecutionEvent | undefined {
+  let latest: ExecutionEvent | undefined
+  for (const event of events) {
+    if (event.contextWindowUsed === undefined || event.contextWindowSize === undefined) continue
+    if (!latest || event.seq > latest.seq) latest = event
+  }
+  return latest
 }
 
 // ---- SSE frame parsing ----

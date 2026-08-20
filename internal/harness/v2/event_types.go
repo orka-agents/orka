@@ -245,9 +245,24 @@ func (u PlanUpdate) Validate() error {
 }
 
 type UsageUpdate struct {
-	InputTokens       uint64 `json:"inputTokens,omitempty"`
-	OutputTokens      uint64 `json:"outputTokens,omitempty"`
-	CachedInputTokens uint64 `json:"cachedInputTokens,omitempty"`
+	InputTokens       uint64  `json:"inputTokens,omitempty"`
+	OutputTokens      uint64  `json:"outputTokens,omitempty"`
+	CachedInputTokens uint64  `json:"cachedInputTokens,omitempty"`
+	ContextWindowUsed *uint64 `json:"contextWindowUsed,omitempty"`
+	ContextWindowSize *uint64 `json:"contextWindowSize,omitempty"`
+}
+
+func (u UsageUpdate) Validate() error {
+	if (u.ContextWindowUsed == nil) != (u.ContextWindowSize == nil) {
+		return fmt.Errorf("context window usage requires both used and size")
+	}
+	if u.ContextWindowUsed != nil && *u.ContextWindowUsed > *u.ContextWindowSize {
+		return fmt.Errorf("context window used tokens must not exceed size")
+	}
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CachedInputTokens == 0 && u.ContextWindowUsed == nil {
+		return fmt.Errorf("usage update must carry token or context-window telemetry")
+	}
+	return nil
 }
 
 type DiagnosticUpdate struct {
@@ -296,7 +311,7 @@ func (e UpdateEvent) Validate() error {
 		if e.Usage == nil {
 			return fmt.Errorf("usage update requires usage payload")
 		}
-		return nil
+		return e.Usage.Validate()
 	case UpdateDiagnostic:
 		if e.Diagnostic == nil {
 			return fmt.Errorf("diagnostic update requires diagnostic payload")

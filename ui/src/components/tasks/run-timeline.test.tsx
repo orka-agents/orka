@@ -211,6 +211,7 @@ describe('RunTimeline', () => {
             severity: 'info',
             inputTokens: 5,
             outputTokens: 5,
+            content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
             createdAt: '2026-01-01T00:01:00Z',
           },
           {
@@ -227,18 +228,48 @@ describe('RunTimeline', () => {
             outputTokens: 8,
             cachedInputTokens: 5,
             stopReason: 'end_turn',
+            content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
             createdAt: '2026-01-01T00:02:00Z',
+          },
+          {
+            id: 'event-2',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: 'auto-task',
+            seq: 3,
+            type: 'ModelUsageUpdated',
+            severity: 'info',
+            model: 'claude-haiku-4',
+            inputTokens: 4,
+            outputTokens: 3,
+            cachedInputTokens: 2,
+            content: { harnessV2: { taskAttempt: 2, promptID: 'prompt-2' } },
+            createdAt: '2026-01-01T00:03:00Z',
+          },
+          {
+            id: 'event-3',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: 'auto-task',
+            seq: 4,
+            type: 'ModelContextUpdated',
+            severity: 'info',
+            contextWindowUsed: 53,
+            contextWindowSize: 200,
+            createdAt: '2026-01-01T00:04:00Z',
           },
         ]}
       />,
     )
     expect(screen.getByLabelText('GenAI telemetry')).toHaveTextContent(
-      '20 tokens',
+      '27 tokens',
     )
     expect(screen.getByLabelText('GenAI telemetry')).toHaveTextContent(
-      '5 cached input',
+      '7 cached input',
     )
     expect(screen.getByText(/claude-sonnet-4/)).toBeInTheDocument()
     expect(screen.getByText(/end_turn/)).toBeInTheDocument()
+    expect(screen.getByLabelText('GenAI context window')).toHaveTextContent('53 / 200 tokens')
+    expect(screen.getByLabelText('GenAI context window')).toHaveTextContent('27% used')
   })
 })

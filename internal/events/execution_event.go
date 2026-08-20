@@ -17,6 +17,7 @@ const (
 	ExecutionEventTypeModelRequestCompleted         = "ModelRequestCompleted"
 	ExecutionEventTypeModelRequestFailed            = "ModelRequestFailed"
 	ExecutionEventTypeModelUsageUpdated             = "ModelUsageUpdated"
+	ExecutionEventTypeModelContextUpdated           = "ModelContextUpdated"
 	ExecutionEventTypeModelMessage                  = "ModelMessage"
 	ExecutionEventTypeContextTruncated              = "ContextTruncated"
 	ExecutionEventTypeToolCallStarted               = "ToolCallStarted"
@@ -73,6 +74,7 @@ var executionEventTypes = []string{
 	ExecutionEventTypeModelRequestCompleted,
 	ExecutionEventTypeModelRequestFailed,
 	ExecutionEventTypeModelUsageUpdated,
+	ExecutionEventTypeModelContextUpdated,
 	ExecutionEventTypeModelMessage,
 	ExecutionEventTypeContextTruncated,
 	ExecutionEventTypeToolCallStarted,

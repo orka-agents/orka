@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	executionevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -30,6 +31,59 @@ type EventSummary struct {
 	ToolCallID  string          `json:"toolCallID,omitempty"`
 	Content     json.RawMessage `json:"content,omitempty"`
 	ContentText string          `json:"contentText,omitempty"`
+}
+
+// CoalesceAdjacentModelMessages joins streamed harness v2 chunks from the same
+// prompt before fork retention is applied. Stored events remain immutable; the
+// returned slice is a fork-context read model whose sequence/content identity
+// points at the newest included chunk.
+func CoalesceAdjacentModelMessages(values []store.ExecutionEvent) []store.ExecutionEvent {
+	coalesced := make([]store.ExecutionEvent, 0, len(values))
+	for _, event := range values {
+		if len(coalesced) > 0 && sameHarnessV2ModelMessage(coalesced[len(coalesced)-1], event) {
+			previous := &coalesced[len(coalesced)-1]
+			previous.ContentText += event.ContentText
+			previous.Seq = event.Seq
+			previous.CreatedAt = event.CreatedAt
+			previous.Content = cloneRaw(event.Content)
+			previous.Truncation = store.MergeExecutionEventTruncation(previous.Truncation, event.Truncation)
+			continue
+		}
+		coalesced = append(coalesced, event)
+	}
+	return coalesced
+}
+
+func sameHarnessV2ModelMessage(left, right store.ExecutionEvent) bool {
+	if left.Type != executionevents.ExecutionEventTypeModelMessage || right.Type != executionevents.ExecutionEventTypeModelMessage {
+		return false
+	}
+	leftIdentity, leftOK := harnessV2PromptIdentity(left.Content)
+	rightIdentity, rightOK := harnessV2PromptIdentity(right.Content)
+	return leftOK && rightOK && leftIdentity == rightIdentity
+}
+
+type promptIdentity struct {
+	TaskUID     string
+	TaskAttempt uint32
+	PromptID    string
+}
+
+func harnessV2PromptIdentity(content json.RawMessage) (promptIdentity, bool) {
+	var envelope struct {
+		HarnessV2 struct {
+			TaskUID     string `json:"taskUID"`
+			TaskAttempt uint32 `json:"taskAttempt"`
+			PromptID    string `json:"promptID"`
+		} `json:"harnessV2"`
+	}
+	if len(content) == 0 || json.Unmarshal(content, &envelope) != nil {
+		return promptIdentity{}, false
+	}
+	identity := promptIdentity{
+		TaskUID: envelope.HarnessV2.TaskUID, TaskAttempt: envelope.HarnessV2.TaskAttempt, PromptID: envelope.HarnessV2.PromptID,
+	}
+	return identity, identity.TaskUID != "" && identity.TaskAttempt > 0 && identity.PromptID != ""
 }
 
 // BuildContext returns a bounded, already-sanitized summary of events up to afterSeq.

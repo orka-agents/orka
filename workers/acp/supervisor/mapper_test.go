@@ -79,7 +79,7 @@ func TestMapACPUpdatePreservesWhitespaceChunkWithoutEvent(t *testing.T) {
 	}
 }
 
-func TestMapACPUpdateIgnoresToolCallContentArray(t *testing.T) {
+func TestMapACPUpdatePreservesToolCallContentArray(t *testing.T) {
 	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
 		"sessionUpdate":"tool_call_update",
 		"toolCallId":"call-1",
@@ -100,6 +100,26 @@ func TestMapACPUpdateIgnoresToolCallContentArray(t *testing.T) {
 	}
 	if update.ToolCall.ToolCallID != wantID || update.ToolCall.Status != harnessv2.ToolCallStatusCompleted {
 		t.Fatalf("tool call = %#v", update.ToolCall)
+	}
+	if len(update.ToolCall.Content) != 1 || update.ToolCall.Content[0].Type != harnessv2.ContentBlockText ||
+		update.ToolCall.Content[0].Text != "tool output" {
+		t.Fatalf("tool call content = %#v", update.ToolCall.Content)
+	}
+}
+
+func TestMapACPUpdatePreservesContentOnlyToolCallUpdate(t *testing.T) {
+	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
+		"sessionUpdate":"tool_call_update",
+		"toolCallId":"call-1",
+		"content":[{"type":"content","content":{"type":"text","text":"streamed output"}}]
+	}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || text != "" || update == nil || update.ToolCall == nil ||
+		update.ToolCall.Status != harnessv2.ToolCallStatusInProgress || len(update.ToolCall.Content) != 1 ||
+		update.ToolCall.Content[0].Text != "streamed output" {
+		t.Fatalf("mapped content-only update = %#v text=%q ok=%v", update, text, ok)
 	}
 }
 
@@ -176,6 +196,24 @@ func TestMapACPUpdatePreservesToolCallLifecycleTransitions(t *testing.T) {
 				t.Fatalf("mapped lifecycle update = %#v text=%q ok=%v", update, text, ok)
 			}
 		})
+	}
+}
+
+func TestMapACPUpdatePreservesContextWindowUsage(t *testing.T) {
+	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
+		"sessionUpdate":"usage_update","used":53000,"size":200000
+	}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || text != "" || update == nil || update.Kind != harnessv2.UpdateUsage || update.Usage == nil ||
+		update.Usage.ContextWindowUsed == nil || *update.Usage.ContextWindowUsed != 53000 ||
+		update.Usage.ContextWindowSize == nil || *update.Usage.ContextWindowSize != 200000 ||
+		update.Usage.InputTokens != 0 {
+		t.Fatalf("mapped usage update = %#v text=%q ok=%v", update, text, ok)
+	}
+	if err := update.Validate(); err != nil {
+		t.Fatalf("mapped usage validation: %v", err)
 	}
 }
 

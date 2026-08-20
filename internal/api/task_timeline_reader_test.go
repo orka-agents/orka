@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/orka-agents/orka/internal/events"
@@ -11,7 +13,7 @@ import (
 )
 
 func TestTaskTimelineReaderListMatchingReturnsEmptySlice(t *testing.T) {
-	reader := newTaskTimelineReader(storetest.NewFakeExecutionEventStore(), "default", "task-a")
+	reader := newTaskTimelineReader(storetest.NewFakeExecutionEventStore(), defaultNamespace, "task-a")
 	listed, err := reader.listMatching(context.Background(), []string{events.ExecutionEventTypeApprovalRequested})
 	if err != nil {
 		t.Fatalf("listMatching error = %v", err)
@@ -25,7 +27,7 @@ func TestTaskTimelineReaderListThroughAllowsExactLimitAndRejectsNext(t *testing.
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeModelMessage, 3)
-	reader := newTaskTimelineReader(eventStore, "default", "task-a")
+	reader := newTaskTimelineReader(eventStore, defaultNamespace, "task-a")
 
 	listed, err := reader.listThrough(ctx, 3, 3)
 	if err != nil {
@@ -44,7 +46,7 @@ func TestTaskTimelineReaderListRecentThroughPreservesForkOverflowEvent(t *testin
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeModelMessage, 5)
-	reader := newTaskTimelineReader(eventStore, "default", "task-a")
+	reader := newTaskTimelineReader(eventStore, defaultNamespace, "task-a")
 
 	listed, err := reader.listRecentThrough(ctx, 5, 3)
 	if err != nil {
@@ -55,11 +57,38 @@ func TestTaskTimelineReaderListRecentThroughPreservesForkOverflowEvent(t *testin
 	}
 }
 
+func TestTaskTimelineReaderListRecentContextThroughCoalescesAssistantChunksBeforeRetention(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	appendReaderEvent(t, eventStore, store.ExecutionEvent{Type: events.ExecutionEventTypeToolCallCompleted, Summary: "tool result"})
+	content := json.RawMessage(`{"harnessV2":{"taskUID":"task-uid","taskAttempt":1,"promptID":"prompt-1","sequence":2}}`)
+	for range 205 {
+		appendReaderEvent(t, eventStore, store.ExecutionEvent{
+			Type: events.ExecutionEventTypeModelMessage, Content: content, ContentText: "x",
+		})
+	}
+	appendReaderEvent(t, eventStore, store.ExecutionEvent{Type: events.ExecutionEventTypePlanUpdated, Summary: "plan"})
+	reader := newTaskTimelineReader(eventStore, defaultNamespace, "task-a")
+
+	listed, err := reader.listRecentContextThrough(ctx, 207, 3)
+	if err != nil {
+		t.Fatalf("listRecentContextThrough error = %v", err)
+	}
+	if len(listed) != 3 || listed[0].Type != events.ExecutionEventTypeToolCallCompleted ||
+		listed[1].Type != events.ExecutionEventTypeModelMessage || listed[1].Seq != 206 ||
+		listed[2].Type != events.ExecutionEventTypePlanUpdated {
+		t.Fatalf("listRecentContextThrough = %#v", listed)
+	}
+	if listed[1].ContentText != strings.Repeat("x", 205) {
+		t.Fatalf("coalesced assistant length = %d, want 205", len(listed[1].ContentText))
+	}
+}
+
 func TestTaskTimelineReaderSeqExistsValidatesCheckpointRanges(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeModelMessage, 2)
-	reader := newTaskTimelineReader(eventStore, "default", "task-a")
+	reader := newTaskTimelineReader(eventStore, defaultNamespace, "task-a")
 
 	for _, seq := range []int64{0, 2} {
 		ok, err := reader.seqExists(ctx, seq, 2)
@@ -85,7 +114,7 @@ func TestTaskTimelineReaderTerminalForCompletionScansPastFilteredCursor(t *testi
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeToolCallCompleted, 1)
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeTaskSucceeded, 1)
 	appendReaderEvents(t, eventStore, events.ExecutionEventTypeToolCallCompleted, 1)
-	reader := newTaskTimelineReader(eventStore, "default", "task-a")
+	reader := newTaskTimelineReader(eventStore, defaultNamespace, "task-a")
 
 	terminal, found, scannedThrough, err := reader.terminalForCompletion(ctx, 1)
 	if err != nil {
@@ -102,9 +131,19 @@ func TestTaskTimelineReaderTerminalForCompletionScansPastFilteredCursor(t *testi
 func appendReaderEvents(t *testing.T, eventStore store.ExecutionEventStore, eventType string, count int) {
 	t.Helper()
 	for range count {
-		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a", Type: eventType}); err != nil {
+		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{Namespace: defaultNamespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a", Type: eventType}); err != nil {
 			t.Fatalf("AppendExecutionEvent: %v", err)
 		}
+	}
+}
+
+func appendReaderEvent(t *testing.T, eventStore store.ExecutionEventStore, event store.ExecutionEvent) {
+	t.Helper()
+	event.Namespace = defaultNamespace
+	event.StreamType = store.ExecutionEventStreamTypeTask
+	event.StreamID = "task-a"
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &event); err != nil {
+		t.Fatalf("AppendExecutionEvent: %v", err)
 	}
 }
 

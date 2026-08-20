@@ -664,7 +664,7 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	}
 
 	resp := taskResponse{Task: *task}
-	if h.planStore != nil && task.Status.Iteration > 0 {
+	if h.planStore != nil {
 		if plan, planErr := h.planStore.GetPlan(ctx, task.Namespace, task.Name); planErr == nil {
 			resp.Plan = &planResponse{
 				Summary:      plan.Summary,

@@ -38,6 +38,8 @@ export const executionEventSchema = z.object({
   inputTokens: z.number().optional(),
   outputTokens: z.number().optional(),
   cachedInputTokens: z.number().optional(),
+  contextWindowUsed: z.number().optional(),
+  contextWindowSize: z.number().optional(),
   summary: z.string().optional(),
   content: z.unknown().optional(),
   contentText: z.string().optional(),

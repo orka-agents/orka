@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils'
+import { latestModelContextEvent, latestModelUsageEvents } from '@/lib/execution-events'
 import { CheckCircle2, Circle, XCircle, MinusCircle, Flag } from 'lucide-react'
 import type { Task, PlanState, TaskPhase, ExecutionEvent } from '@/schemas/task'
 
@@ -190,12 +191,8 @@ export function RunTimeline({
   className,
 }: RunTimelineProps) {
   const events = buildEvents(task, plan)
-  const usageUpdates = taskEvents.filter(
-    (event) => event.type === 'ModelUsageUpdated',
-  )
-  const modelEvents = usageUpdates.length > 0
-    ? [usageUpdates.reduce((latest, event) => event.seq > latest.seq ? event : latest)]
-    : taskEvents.filter((event) => event.type === 'ModelRequestCompleted')
+  const modelEvents = latestModelUsageEvents(taskEvents)
+  const contextEvent = latestModelContextEvent(taskEvents)
   const totalIn = modelEvents.reduce(
     (sum, event) => sum + (event.inputTokens ?? 0),
     0,
@@ -285,6 +282,25 @@ export function RunTimeline({
                 {event.stopReason ? ` · ${event.stopReason}` : ''}
               </span>
             ))}
+          </div>
+        </div>
+      )}
+
+      {contextEvent?.contextWindowSize !== undefined && (
+        <div
+          className="rounded-md border bg-card p-3 text-xs"
+          aria-label="GenAI context window"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium">Context</span>
+            <span className="rounded-full bg-muted px-2 py-0.5">
+              {contextEvent.contextWindowUsed ?? 0} / {contextEvent.contextWindowSize} tokens
+            </span>
+            {contextEvent.contextWindowSize > 0 && (
+              <span className="text-muted-foreground">
+                {Math.round(((contextEvent.contextWindowUsed ?? 0) / contextEvent.contextWindowSize) * 100)}% used
+              </span>
+            )}
           </div>
         </div>
       )}

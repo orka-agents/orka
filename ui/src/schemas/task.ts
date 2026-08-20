@@ -348,12 +348,21 @@ export const k8sMetadataSchema = z.object({
   annotations: z.record(z.string()).optional(),
 })
 
+export const planStateSchema = z.object({
+  summary: z.string().optional(),
+  progressPct: z.number().optional(),
+  goalComplete: z.boolean().optional(),
+  planDocument: z.string().optional(),
+  iteration: z.number().optional(),
+})
+
 export const taskSchema = z.object({
   apiVersion: z.string().optional(),
   kind: z.string().optional(),
   metadata: k8sMetadataSchema,
   spec: taskSpecSchema,
   status: taskStatusSchema.optional(),
+  plan: planStateSchema.optional(),
 })
 
 export type Task = z.infer<typeof taskSchema>
@@ -364,14 +373,6 @@ export type TaskPhase = z.infer<typeof taskPhaseSchema>
 export type WorkspaceIntent = z.infer<typeof workspaceIntentSchema>
 export type TaskExecutionStatus = z.infer<typeof taskExecutionStatusSchema>
 export type TaskDeliveryStatus = z.infer<typeof taskDeliveryStatusSchema>
-
-export const planStateSchema = z.object({
-  summary: z.string().optional(),
-  progressPct: z.number().optional(),
-  goalComplete: z.boolean().optional(),
-  planDocument: z.string().optional(),
-  iteration: z.number().optional(),
-})
 
 export type PlanState = z.infer<typeof planStateSchema>
 
@@ -394,6 +395,8 @@ const executionEventSchema = z.object({
   inputTokens: z.number().optional(),
   outputTokens: z.number().optional(),
   cachedInputTokens: z.number().optional(),
+  contextWindowUsed: z.number().optional(),
+  contextWindowSize: z.number().optional(),
   summary: z.string().optional(),
   content: z.unknown().optional(),
   contentText: z.string().optional(),

@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/orka-agents/orka/internal/events"
+	forkcontext "github.com/orka-agents/orka/internal/fork"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -102,6 +103,40 @@ func (r taskTimelineReader) listRecentThrough(ctx context.Context, throughSeq in
 			after = event.Seq
 		}
 		if after >= throughSeq || len(out) >= maxEvents || len(batch) < store.MaxExecutionEventLimit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (r taskTimelineReader) listRecentContextThrough(ctx context.Context, throughSeq int64, maxEvents int) ([]store.ExecutionEvent, error) {
+	if throughSeq == 0 || maxEvents <= 0 {
+		return nil, nil
+	}
+	out := make([]store.ExecutionEvent, 0, maxEvents)
+	var after int64
+	for {
+		batch, err := r.list(ctx, after, store.MaxExecutionEventLimit, nil)
+		if err != nil {
+			return nil, err
+		}
+		if len(batch) == 0 {
+			break
+		}
+		reachedCutoff := false
+		for _, event := range batch {
+			if event.Seq > throughSeq {
+				reachedCutoff = true
+				break
+			}
+			out = append(out, event)
+			after = event.Seq
+		}
+		out = forkcontext.CoalesceAdjacentModelMessages(out)
+		if len(out) > maxEvents {
+			out = append([]store.ExecutionEvent(nil), out[len(out)-maxEvents:]...)
+		}
+		if reachedCutoff || after >= throughSeq || len(batch) < store.MaxExecutionEventLimit {
 			break
 		}
 	}

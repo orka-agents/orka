@@ -39,6 +39,8 @@ func TestExecutionEventResponseDTOJSONFieldNames(t *testing.T) {
 		InputTokens:       3,
 		OutputTokens:      5,
 		CachedInputTokens: 2,
+		ContextWindowUsed: 50,
+		ContextWindowSize: 200,
 		Summary:           "created",
 		Content:           json.RawMessage(`{"ok":true}`),
 		ContentText:       "hello",
@@ -53,7 +55,7 @@ func TestExecutionEventResponseDTOJSONFieldNames(t *testing.T) {
 	if err := json.Unmarshal(data, &body); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	for _, key := range []string{"id", "namespace", "streamType", "streamID", "seq", "type", "severity", "taskName", "sessionName", "agentName", "toolName", "toolCallID", "provider", "model", "stopReason", "inputTokens", "outputTokens", "cachedInputTokens", "summary", "content", "contentText", "truncation", "createdAt"} {
+	for _, key := range []string{"id", "namespace", "streamType", "streamID", "seq", "type", "severity", "taskName", "sessionName", "agentName", "toolName", "toolCallID", "provider", "model", "stopReason", "inputTokens", "outputTokens", "cachedInputTokens", "contextWindowUsed", "contextWindowSize", "summary", "content", "contentText", "truncation", "createdAt"} {
 		if _, ok := body[key]; !ok {
 			t.Fatalf("response JSON missing key %q in %s", key, data)
 		}
@@ -110,7 +112,7 @@ func TestExecutionEventResponsePromotesGenAISemConvTerminalFields(t *testing.T) 
 		Type:    events.ExecutionEventTypeModelRequestCompleted,
 		Content: content,
 	})
-	if completed.Provider != "openai" || completed.Model != "served-model" || completed.StopReason != "stop" {
+	if completed.Provider != compatToolOpenAIProviderType || completed.Model != "served-model" || completed.StopReason != "stop" {
 		t.Fatalf("completed telemetry = provider:%q model:%q stop:%q", completed.Provider, completed.Model, completed.StopReason)
 	}
 	if completed.InputTokens != 7 || completed.OutputTokens != 11 {
@@ -133,6 +135,23 @@ func TestExecutionEventResponseClampsUint64UsageToPlatformInt(t *testing.T) {
 	})
 	if response.InputTokens != int(^uint(0)>>1) || response.OutputTokens != 2 || response.CachedInputTokens != 1 {
 		t.Fatalf("usage tokens = %d/%d cached=%d", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
+	}
+}
+
+func TestExecutionEventResponsePromotesContextWindowWithoutTokenAccounting(t *testing.T) {
+	response := NewExecutionEventResponse(store.ExecutionEvent{
+		Type: events.ExecutionEventTypeModelContextUpdated,
+		Content: mustRawJSON(t, map[string]any{
+			"provider": compatToolOpenAIProviderType, "model": "gpt-5",
+			"contextWindowUsed": 53_000, "contextWindowSize": 200_000,
+		}),
+	})
+	if response.Provider != compatToolOpenAIProviderType || response.Model != "gpt-5" ||
+		response.ContextWindowUsed != 53_000 || response.ContextWindowSize != 200_000 {
+		t.Fatalf("context telemetry = %#v", response)
+	}
+	if response.InputTokens != 0 || response.OutputTokens != 0 || response.CachedInputTokens != 0 {
+		t.Fatalf("context occupancy was promoted as token accounting: %#v", response)
 	}
 }
 

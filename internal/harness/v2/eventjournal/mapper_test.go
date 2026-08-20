@@ -8,6 +8,7 @@ import (
 
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestMapUpdateMapsACPUpdateKinds(t *testing.T) {
@@ -34,7 +35,7 @@ func TestMapUpdateMapsACPUpdateKinds(t *testing.T) {
 				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "README.md"}},
 			}},
 			wantType: executionevents.ExecutionEventTypeToolCallStarted, wantSeverity: executionevents.ExecutionEventSeverityInfo,
-			wantToolName: "file_read", wantToolID: "call-1",
+			wantToolName: "file_read", wantToolID: safeMappedToolCallID("call-1"),
 		},
 		{
 			name: "tool completed",
@@ -42,7 +43,7 @@ func TestMapUpdateMapsACPUpdateKinds(t *testing.T) {
 				ToolCallID: "call-1", Title: "Read the repository", Kind: "file_read", Status: harnessv2.ToolCallStatusCompleted,
 			}},
 			wantType: executionevents.ExecutionEventTypeToolCallCompleted, wantSeverity: executionevents.ExecutionEventSeverityInfo,
-			wantToolName: "file_read", wantToolID: "call-1",
+			wantToolName: "file_read", wantToolID: safeMappedToolCallID("call-1"),
 		},
 		{
 			name: "tool failed",
@@ -50,7 +51,7 @@ func TestMapUpdateMapsACPUpdateKinds(t *testing.T) {
 				ToolCallID: "call-2", Kind: "shell", Status: harnessv2.ToolCallStatusFailed,
 			}},
 			wantType: executionevents.ExecutionEventTypeToolCallFailed, wantSeverity: executionevents.ExecutionEventSeverityError,
-			wantToolName: "shell", wantToolID: "call-2",
+			wantToolName: "shell", wantToolID: safeMappedToolCallID("call-2"),
 		},
 		{
 			name: "plan",
@@ -119,6 +120,60 @@ func TestMapUsagePreservesPromotedTelemetryContent(t *testing.T) {
 	}
 	if content["provider"] != "openai" || content["model"] != "gpt-test" {
 		t.Fatalf("model content = %#v", content)
+	}
+}
+
+func TestMapContextWindowUsageDoesNotMasqueradeAsTokenAccounting(t *testing.T) {
+	used, size := uint64(53_000), uint64(200_000)
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage,
+		Usage: &harnessv2.UsageUpdate{
+			ContextWindowUsed: &used,
+			ContextWindowSize: &size,
+		},
+	})
+	mapped, err := MapUpdate(event, testMapContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.Type != executionevents.ExecutionEventTypeModelContextUpdated ||
+		!strings.Contains(mapped.Summary, "53000 of 200000") {
+		t.Fatalf("mapped context event = %#v", mapped)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(mapped.Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	if content["contextWindowUsed"] != float64(53_000) || content["contextWindowSize"] != float64(200_000) {
+		t.Fatalf("context content = %#v", content)
+	}
+	if _, ok := content["inputTokens"]; ok {
+		t.Fatalf("context occupancy exposed as model input tokens: %#v", content)
+	}
+}
+
+func TestMapToolCallIDUsesStableNonSecretCorrelationID(t *testing.T) {
+	rawID := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjcmVkZW50aWFsIn0.signature"
+	mapTool := func(sequence uint64) *store.ExecutionEvent {
+		event := testUpdateEvent(sequence, time.Now().UTC(), harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCall,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: rawID, Kind: "read", Status: harnessv2.ToolCallStatusPending,
+			},
+		})
+		mapped, err := MapUpdate(event, testMapContext())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mapped
+	}
+	first, second := mapTool(2), mapTool(3)
+	if first.ToolCallID == rawID || first.ToolCallID != second.ToolCallID ||
+		!strings.HasPrefix(first.ToolCallID, mappedToolCallIDPrefix) {
+		t.Fatalf("mapped tool IDs = %q/%q", first.ToolCallID, second.ToolCallID)
+	}
+	if strings.Contains(string(first.Content), rawID) {
+		t.Fatalf("mapped content exposed raw tool call ID: %s", first.Content)
 	}
 }
 

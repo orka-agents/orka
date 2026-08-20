@@ -84,6 +84,8 @@ type ExecutionEventResponse struct {
 	InputTokens       int                              `json:"inputTokens,omitempty"`
 	OutputTokens      int                              `json:"outputTokens,omitempty"`
 	CachedInputTokens int                              `json:"cachedInputTokens,omitempty"`
+	ContextWindowUsed int                              `json:"contextWindowUsed,omitempty"`
+	ContextWindowSize int                              `json:"contextWindowSize,omitempty"`
 	Summary           string                           `json:"summary,omitempty"`
 	Content           json.RawMessage                  `json:"content,omitempty"`
 	ContentText       string                           `json:"contentText,omitempty"`
@@ -137,9 +139,10 @@ func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventRespons
 
 func fillExecutionEventResponse(response *ExecutionEventResponse, event *store.ExecutionEvent) {
 	var provider, model, stopReason string
-	var inTok, outTok, cachedInTok int
+	var inTok, outTok, cachedInTok, contextUsed, contextSize int
 	if executionEventTypeCarriesModelTelemetry(event.Type) {
 		provider, model, stopReason, inTok, outTok, cachedInTok = executionEventTelemetryFields(event.Type, event.Content)
+		contextUsed, contextSize = executionEventContextFields(event.Content)
 	}
 	*response = ExecutionEventResponse{
 		ID:                event.ID,
@@ -160,6 +163,8 @@ func fillExecutionEventResponse(response *ExecutionEventResponse, event *store.E
 		InputTokens:       inTok,
 		OutputTokens:      outTok,
 		CachedInputTokens: cachedInTok,
+		ContextWindowUsed: contextUsed,
+		ContextWindowSize: contextSize,
 		Summary:           event.Summary,
 		Content:           cloneRawMessage(event.Content),
 		ContentText:       event.ContentText,
@@ -252,11 +257,25 @@ func executionEventTypeCarriesModelTelemetry(typ string) bool {
 	case events.ExecutionEventTypeModelRequestStarted,
 		events.ExecutionEventTypeModelRequestCompleted,
 		events.ExecutionEventTypeModelRequestFailed,
-		events.ExecutionEventTypeModelUsageUpdated:
+		events.ExecutionEventTypeModelUsageUpdated,
+		events.ExecutionEventTypeModelContextUpdated:
 		return true
 	default:
 		return false
 	}
+}
+
+func executionEventContextFields(content json.RawMessage) (used, size int) {
+	if len(content) == 0 {
+		return 0, 0
+	}
+	var body map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	if err := decoder.Decode(&body); err != nil {
+		return 0, 0
+	}
+	return intField(body, "contextWindowUsed"), intField(body, "contextWindowSize")
 }
 
 func executionEventTelemetryFields(typ string, content json.RawMessage) (provider, model, stopReason string, inTok, outTok, cachedInTok int) {
@@ -314,9 +333,8 @@ func intField(body map[string]any, keys ...string) int {
 				if math.IsNaN(typed) || math.IsInf(typed, 0) || typed <= 0 {
 					return 0
 				}
-				maxInt := uint64(^uint(0) >> 1)
-				if typed >= float64(maxInt) {
-					return int(maxInt)
+				if typed >= float64(math.MaxInt) {
+					return math.MaxInt
 				}
 				return int(typed)
 			case int:
@@ -328,12 +346,10 @@ func intField(body map[string]any, keys ...string) int {
 				if strings.HasPrefix(typed.String(), "-") {
 					return 0
 				}
-				if value, err := strconv.ParseUint(typed.String(), 10, 64); err == nil {
-					maxInt := uint64(^uint(0) >> 1)
-					if value > maxInt {
-						return int(maxInt)
-					}
+				if value, err := strconv.ParseInt(typed.String(), 10, strconv.IntSize); err == nil {
 					return int(value)
+				} else if numErr, ok := err.(*strconv.NumError); ok && numErr.Err == strconv.ErrRange {
+					return math.MaxInt
 				}
 			}
 		}

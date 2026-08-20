@@ -13,7 +13,10 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-const acpUpdateToolCall = "tool_call"
+const (
+	acpUpdateToolCall  = "tool_call"
+	acpContentTypeText = "text"
+)
 
 const (
 	maxACPToolCallTitleBytes = 1024
@@ -69,7 +72,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 		if err := json.Unmarshal(envelope.Content, &content); err != nil {
 			return nil, "", false, fmt.Errorf("decode ACP agent message content: %w", err)
 		}
-		if content.Type != "text" || content.Text == "" {
+		if content.Type != acpContentTypeText || content.Text == "" {
 			return nil, "", false, nil
 		}
 		if strings.TrimSpace(content.Text) == "" {
@@ -84,12 +87,16 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 		if err != nil {
 			return nil, "", false, err
 		}
+		toolContent, err := mapACPToolCallContent(envelope.Content)
+		if err != nil {
+			return nil, "", false, err
+		}
 		// ACP adapters may stream tool output through provider-specific fields
 		// that harness v2 deliberately does not project. A status-less update
 		// with no visible metadata would otherwise become an unbounded series of
 		// synthetic in_progress events carrying identical state.
 		if envelope.SessionUpdate == "tool_call_update" && envelope.Status == "" &&
-			envelope.Title == "" && envelope.Kind == "" {
+			envelope.Title == "" && envelope.Kind == "" && len(toolContent) == 0 {
 			return nil, "", false, nil
 		}
 		status := envelope.Status
@@ -108,6 +115,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 			Kind: kind,
 			ToolCall: &harnessv2.ToolCallUpdate{
 				ToolCallID: toolCallID, Title: boundACPToolCallTitle(envelope.Title), Kind: envelope.Kind, Status: status,
+				Content: toolContent,
 			},
 		}, "", true, nil
 	case "plan":
@@ -116,12 +124,88 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 		}
 		return &harnessv2.UpdateEvent{Kind: harnessv2.UpdatePlan, Plan: &harnessv2.PlanUpdate{Entries: envelope.Entries}}, "", true, nil
 	case "usage_update":
-		return &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: envelope.Used}}, "", true, nil
+		return &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{
+			ContextWindowUsed: &envelope.Used,
+			ContextWindowSize: &envelope.Size,
+		}}, "", true, nil
 	case "agent_thought_chunk", "user_message_chunk", "available_commands_update", "current_mode_update", "config_option_update", "session_info_update":
 		return nil, "", false, nil
 	default:
 		return nil, "", false, nil
 	}
+}
+
+func mapACPToolCallContent(raw json.RawMessage) ([]harnessv2.ContentBlock, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var items []struct {
+		Type    string          `json:"type"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("decode ACP tool call content: %w", err)
+	}
+	mapped := make([]harnessv2.ContentBlock, 0, len(items))
+	for index, item := range items {
+		if item.Type != "content" || len(item.Content) == 0 {
+			continue
+		}
+		var block acp.ContentBlock
+		if err := json.Unmarshal(item.Content, &block); err != nil {
+			return nil, fmt.Errorf("decode ACP tool call content block %d: %w", index, err)
+		}
+		projected, ok, err := projectACPContentBlock(block)
+		if err != nil {
+			return nil, fmt.Errorf("project ACP tool call content block %d: %w", index, err)
+		}
+		if ok {
+			mapped = append(mapped, projected)
+		}
+	}
+	return mapped, nil
+}
+
+func projectACPContentBlock(block acp.ContentBlock) (harnessv2.ContentBlock, bool, error) {
+	var projected harnessv2.ContentBlock
+	switch block.Type {
+	case acpContentTypeText:
+		if block.Text == "" {
+			return projected, false, nil
+		}
+		projected = harnessv2.ContentBlock{Type: harnessv2.ContentBlockText, Text: block.Text}
+	case "resource_link":
+		if block.URI == "" {
+			return projected, false, nil
+		}
+		projected = harnessv2.ContentBlock{
+			Type: harnessv2.ContentBlockResourceLink, URI: block.URI, Name: block.Name, MimeType: block.MIMEType,
+		}
+	case "resource":
+		var resource struct {
+			URI      string `json:"uri"`
+			MIMEType string `json:"mimeType"`
+			Text     string `json:"text"`
+		}
+		if len(block.Resource) == 0 || json.Unmarshal(block.Resource, &resource) != nil {
+			return projected, false, nil
+		}
+		if resource.Text != "" {
+			projected = harnessv2.ContentBlock{Type: harnessv2.ContentBlockText, Text: resource.Text}
+		} else if resource.URI != "" {
+			projected = harnessv2.ContentBlock{
+				Type: harnessv2.ContentBlockResourceLink, URI: resource.URI, MimeType: resource.MIMEType,
+			}
+		} else {
+			return projected, false, nil
+		}
+	default:
+		return projected, false, nil
+	}
+	if err := projected.Validate(); err != nil {
+		return harnessv2.ContentBlock{}, false, err
+	}
+	return projected, true, nil
 }
 
 func boundACPToolCallTitle(value string) string {
