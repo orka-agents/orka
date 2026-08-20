@@ -24,6 +24,8 @@ on:
       - "scripts/tests/security-scan-e2e-test.sh"
       - "workers/**"
   push:
+    branches:
+      - main
     paths:
       - ".dockerignore"
       - ".github/workflows/security-scan-e2e.yml"

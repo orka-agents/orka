@@ -16,7 +16,35 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/orka-agents/orka/internal/llm"
 )
+
+func TestIsLiveCopilotProxyQuotaExhaustedError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "sentinel", err: errLiveCopilotProxyQuotaExhausted, want: true},
+		{name: "quota code", err: &llm.ProviderError{StatusCode: http.StatusPaymentRequired, Message: `{"code":"quota_exceeded"}`}, want: true},
+		{name: "monthly quota text", err: &llm.ProviderError{StatusCode: http.StatusPaymentRequired, Message: "monthly quota exhausted"}, want: true},
+		{name: "generic payment required", err: &llm.ProviderError{StatusCode: http.StatusPaymentRequired, Message: "payment required"}, want: false},
+		{name: "rate limit", err: &llm.ProviderError{StatusCode: http.StatusTooManyRequests, Message: `{"code":"quota_exceeded"}`}, want: false},
+		{name: "nil", err: nil, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isLiveCopilotProxyQuotaExhaustedError(tt.err); got != tt.want {
+				t.Fatalf("isLiveCopilotProxyQuotaExhaustedError() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestLiveCopilotProxyClaudeModelPreferences(t *testing.T) {
 	t.Parallel()

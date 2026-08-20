@@ -3,6 +3,8 @@ name: Live Copilot Proxy E2E
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths-ignore:
       - ".agents/**"
       - ".claude/**"

@@ -39,6 +39,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		cancelProxyPF      context.CancelFunc
 		proxyPFCmd         *exec.Cmd
 		discoveredModel    string
+		openAISkipReason   string
 		token              string
 	)
 
@@ -104,6 +105,10 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 			liveProxyOpenAIModelPreferences,
 			liveCopilotProxyGPTModelPrefixes...,
 		)
+		if isLiveCopilotProxyQuotaExhaustedError(err) {
+			openAISkipReason = "live Copilot proxy monthly quota is exhausted"
+			Skip("Skipping OpenAI provider checks: " + openAISkipReason)
+		}
 		Expect(err).NotTo(HaveOccurred())
 		if discoveredModel == "" {
 			Skip("Skipping live Copilot proxy OpenAI provider checks: no usable GPT OpenAI model exposed")
@@ -112,6 +117,10 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 	})
 
 	It("should run a tiny AI task through the live copilot proxy and return the exact output", func() {
+		if openAISkipReason != "" {
+			Skip("Skipping OpenAI provider checks: " + openAISkipReason)
+		}
+
 		By("discovering a live chat-completions model from the proxy service")
 		model := discoveredModel
 		if model == "" {
@@ -224,6 +233,10 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 	})
 
 	It("should auto-inject and execute coordination memory tools for a live copilot proxy Agent", func() {
+		if openAISkipReason != "" {
+			Skip("Skipping OpenAI provider checks: " + openAISkipReason)
+		}
+
 		By("discovering a live chat-completions model from the proxy service")
 		catalog, err := fetchProxyModelCatalogViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),

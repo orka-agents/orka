@@ -12,6 +12,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +40,8 @@ const (
 	controllerAPIService = "orka-api"
 	liveProxyProbeAPIKey = "live-proxy-e2e-probe"
 )
+
+var errLiveCopilotProxyQuotaExhausted = errors.New("live Copilot proxy monthly quota exhausted")
 
 // Keep this to models that work through the OpenAI provider path; the live
 // catalog can include runtime-only GPT models rejected by the worker route.
@@ -1129,6 +1132,22 @@ func isLiveCopilotProxyForbiddenError(err error) bool {
 	return isLiveCopilotProxyForbiddenText(err.Error())
 }
 
+func isLiveCopilotProxyQuotaExhaustedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errLiveCopilotProxyQuotaExhausted) {
+		return true
+	}
+
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.StatusCode != http.StatusPaymentRequired {
+		return false
+	}
+	message := strings.ToLower(providerErr.Message)
+	return strings.Contains(message, "quota_exceeded") || strings.Contains(message, "monthly quota")
+}
+
 func isLiveCopilotProxyForbiddenText(value string) bool {
 	return strings.Contains(value, "copilot-proxy") && strings.Contains(value, "403 Forbidden")
 }
@@ -1239,6 +1258,9 @@ func firstUsableProxyOpenAIModel(baseURL string, catalog proxyModelCatalog, pref
 			return modelID, nil
 		} else {
 			_, _ = fmt.Fprintf(GinkgoWriter, "\nOpenAI provider probe for model %q failed: %v\n", modelID, err)
+			if isLiveCopilotProxyQuotaExhaustedError(err) {
+				return "", fmt.Errorf("%w while probing model %q", errLiveCopilotProxyQuotaExhausted, modelID)
+			}
 			probeFailures = append(probeFailures, fmt.Sprintf("%s: %v", modelID, err))
 		}
 	}
