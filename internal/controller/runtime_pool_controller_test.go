@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -799,7 +800,7 @@ func TestRuntimePoolReconcilerUnreadyRolloutClearsObservedReadiness(t *testing.T
 		t.Fatalf("active instance = %#v, want the previous runtime fence preserved", status.ActiveInstance)
 	}
 	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
-	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != "PodNotReady" {
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != runtimePoolSchedulingReasonPodNotReady {
 		t.Fatalf("scheduling condition = %#v, want Unknown/PodNotReady", condition)
 	}
 	if got := runtimePoolReadyReplicas(status); got != 0 {
@@ -883,7 +884,7 @@ func TestRuntimePoolReconcilerStoppedRolloutClearsObservedReadiness(t *testing.T
 		t.Fatalf("active instance = %#v, want nil while the old runtime Pod terminates", status.ActiveInstance)
 	}
 	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
-	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != "PodNotReady" {
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != runtimePoolSchedulingReasonPodNotReady {
 		t.Fatalf("scheduling condition = %#v, want Unknown/PodNotReady", condition)
 	}
 	if got := runtimePoolReadyReplicas(status); got != 0 {
@@ -1012,6 +1013,14 @@ func TestRuntimePoolReconcilerScaleDownRequiresDrainAndQuiescentStatus(t *testin
 	if err := r.Update(context.Background(), &current); err != nil {
 		t.Fatalf("set desired replicas to zero: %v", err)
 	}
+	currentPod := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
+		t.Fatalf("get runtime Pod: %v", err)
+	}
+	currentPod.Finalizers = append(currentPod.Finalizers, "test.orka.ai/hold-termination")
+	if err := r.Update(context.Background(), currentPod); err != nil {
+		t.Fatalf("add runtime Pod test finalizer: %v", err)
+	}
 
 	runtimePoolReconcile(t, r, pool)
 	deployment := runtimePoolTestDeployment(t, r, pool.Namespace, runtimePoolResourceName(pool.Namespace, pool.Name))
@@ -1045,6 +1054,21 @@ func TestRuntimePoolReconcilerScaleDownRequiresDrainAndQuiescentStatus(t *testin
 	current = runtimePoolTestGetPool(t, r, pool)
 	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
 		t.Fatalf("status after scale down = %s/%s, want Stopping/Closed", current.Status.Lifecycle, current.Status.AdmissionState)
+	}
+	if err := r.Delete(context.Background(), currentPod); err != nil {
+		t.Fatalf("delete runtime Pod: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance != nil {
+		t.Fatalf("active instance = %#v, want nil while the scaled-down Pod terminates", current.Status.ActiveInstance)
+	}
+	condition := meta.FindStatusCondition(current.Status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != runtimePoolSchedulingReasonPodNotReady {
+		t.Fatalf("scheduling condition = %#v, want Unknown/PodNotReady", condition)
+	}
+	if got := runtimePoolReadyReplicas(current.Status); got != 0 {
+		t.Fatalf("ready replicas = %d, want 0 while the scaled-down Pod terminates", got)
 	}
 }
 
@@ -1121,7 +1145,7 @@ func TestRuntimePoolReadyReplicasRequiresReadyCondition(t *testing.T) {
 			status: corev1alpha1.RuntimePoolStatus{
 				ActiveInstance: active,
 				Conditions: []metav1.Condition{{
-					Type: corev1alpha1.RuntimePoolConditionSchedulingReady, Status: metav1.ConditionUnknown, Reason: "PodNotReady",
+					Type: corev1alpha1.RuntimePoolConditionSchedulingReady, Status: metav1.ConditionUnknown, Reason: runtimePoolSchedulingReasonPodNotReady,
 				}},
 			},
 		},
@@ -1340,6 +1364,63 @@ func TestRuntimePoolReconcilerCleanupOnlyFinalizerCleansCrossNamespaceChildren(t
 	if err != nil && !apierrors.IsNotFound(err) {
 		t.Fatalf("Get deleting RuntimePool: %v", err)
 	}
+}
+
+func TestRuntimePoolReconcilerDeletionRemovesMetricsBeforeCleanupCompletes(t *testing.T) {
+	orkametrics.ACPRuntimePoolDesiredReplicas.Reset()
+	orkametrics.ACPRuntimePoolReadyReplicas.Reset()
+	orkametrics.ACPRuntimePoolSessionsActive.Reset()
+	orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+	orkametrics.ACPRuntimePoolQueuedTasks.Reset()
+	orkametrics.ACPRuntimePoolAdmissionState.Reset()
+	t.Cleanup(func() {
+		orkametrics.ACPRuntimePoolDesiredReplicas.Reset()
+		orkametrics.ACPRuntimePoolReadyReplicas.Reset()
+		orkametrics.ACPRuntimePoolSessionsActive.Reset()
+		orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+		orkametrics.ACPRuntimePoolQueuedTasks.Reset()
+		orkametrics.ACPRuntimePoolAdmissionState.Reset()
+	})
+
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	pool.Finalizers = []string{runtimePoolFinalizer}
+	deletedAt := metav1.NewTime(runtimePoolTestNow)
+	pool.DeletionTimestamp = &deletedAt
+	base := runtimePoolResourceName(pool.Namespace, pool.Name)
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name: base, Namespace: pool.Namespace, Finalizers: []string{"test.orka.ai/hold-cleanup"},
+	}}
+	r := runtimePoolTestReconciler(t, scheme, nil, pool, deployment)
+	orkametrics.RecordACPRuntimePoolStatus(pool.Namespace, pool.Name, 1, 1, 2, 1, 3, string(corev1alpha1.RuntimePoolAdmissionAccepting))
+	if got := runtimePoolMetricSeriesCount(orkametrics.ACPRuntimePoolDesiredReplicas); got != 1 {
+		t.Fatalf("desired replica series before deletion = %d, want 1", got)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if !controllerutil.ContainsFinalizer(&current, runtimePoolFinalizer) {
+		t.Fatal("RuntimePool finalizer was removed before child cleanup completed")
+	}
+	for name, collector := range map[string]prometheus.Collector{
+		"desired replicas":  orkametrics.ACPRuntimePoolDesiredReplicas,
+		"ready replicas":    orkametrics.ACPRuntimePoolReadyReplicas,
+		"active sessions":   orkametrics.ACPRuntimePoolSessionsActive,
+		"in-flight prompts": orkametrics.ACPRuntimePoolPromptsInFlight,
+		"queued tasks":      orkametrics.ACPRuntimePoolQueuedTasks,
+		"admission state":   orkametrics.ACPRuntimePoolAdmissionState,
+	} {
+		if got := runtimePoolMetricSeriesCount(collector); got != 0 {
+			t.Fatalf("%s series during deletion = %d, want 0", name, got)
+		}
+	}
+}
+
+func runtimePoolMetricSeriesCount(collector prometheus.Collector) int {
+	metrics := make(chan prometheus.Metric, 16)
+	collector.Collect(metrics)
+	close(metrics)
+	return len(metrics)
 }
 
 func TestRuntimePoolReconcilerPublishesExactActivePodStatus(t *testing.T) {

@@ -93,11 +93,12 @@ const (
 	runtimePoolResourceClassStandard      = "standard"
 	runtimePoolDefaultControllerNamespace = "orka-system"
 
-	runtimePoolRolloutReasonDraining  = "RolloutDraining"
-	runtimePoolRolloutReasonQuiescent = "RolloutQuiescent"
-	runtimePoolRolloutReasonStopping  = "RolloutStopping"
-	runtimePoolRolloutReasonStarting  = "RolloutStarting"
-	runtimePoolRolloutReasonTimedOut  = "RolloutTimedOut"
+	runtimePoolRolloutReasonDraining       = "RolloutDraining"
+	runtimePoolRolloutReasonQuiescent      = "RolloutQuiescent"
+	runtimePoolRolloutReasonStopping       = "RolloutStopping"
+	runtimePoolRolloutReasonStarting       = "RolloutStarting"
+	runtimePoolRolloutReasonTimedOut       = "RolloutTimedOut"
+	runtimePoolSchedulingReasonPodNotReady = "PodNotReady"
 
 	runtimePoolIdentityCapacityReasonDraining  = "IdentityCapacityDraining"
 	runtimePoolIdentityCapacityReasonQuiescent = "IdentityCapacityQuiescent"
@@ -324,6 +325,7 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 	if !pool.DeletionTimestamp.IsZero() {
+		orkametrics.DeleteACPRuntimePool(pool.Namespace, pool.Name)
 		return r.finalizeRuntimePool(ctx, pool)
 	}
 	if r.CleanupOnly {
@@ -628,7 +630,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 			status.Message = "previously active runtime Pod is not Ready; preserving its exact fence while admission is closed"
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, "PodNotReady", status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
@@ -916,7 +918,7 @@ func (r *RuntimePoolReconciler) reconcileStoppedRuntimePoolRollout(
 		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 		status.Message = "waiting for the drained old runtime Pod to terminate before applying the new Recreate template"
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, "PodNotReady", status.Message)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonStopping, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
@@ -947,7 +949,7 @@ func (r *RuntimePoolReconciler) reconcileUnreadyRuntimePoolRollout(
 	if reason, message, ok := runtimePoolSchedulingFailure(pods); ok {
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionFalse, reason, message)
 	} else {
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, "PodNotReady", "no Ready runtime Pod is available during Recreate rollout")
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, "no Ready runtime Pod is available during Recreate rollout")
 	}
 	if pool.Status.ActiveInstance != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
@@ -1182,8 +1184,10 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionTrue, "ScaledToZero", status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
+		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 		status.Message = "waiting for the quiescent runtime Pod to terminate"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
