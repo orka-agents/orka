@@ -315,14 +315,21 @@ func redactPlanEntries(entries []harnessv2.PlanEntry) []harnessv2.PlanEntry {
 }
 
 const (
-	maxLogicalFieldBoundaryRunes    = 256
-	maxLogicalFieldSubsetCandidates = 4096
+	maxLogicalFieldBoundaryRunes       = 256
+	maxLogicalFieldSubsetCandidates    = 4096
+	maxLogicalFieldPermutationFields   = 256
+	maxLogicalFieldPermutationBitWords = maxLogicalFieldPermutationFields / 64
 )
 
 type logicalFieldBoundaries struct {
 	prefix string
 	suffix string
 	whole  bool
+}
+
+type logicalFieldPermutationCandidate struct {
+	suffix string
+	used   [maxLogicalFieldPermutationBitWords]uint64
 }
 
 func logicalFieldSubsetSensitive(values []string) bool {
@@ -344,40 +351,55 @@ func logicalFieldSubsetSensitive(values []string) bool {
 	if len(fields) < 2 {
 		return false
 	}
-	if orderedLogicalFieldSubsetsSensitive(fields) {
-		return true
-	}
-	for left, right := 0, len(fields)-1; left < right; left, right = left+1, right-1 {
-		fields[left], fields[right] = fields[right], fields[left]
-	}
-	return orderedLogicalFieldSubsetsSensitive(fields)
+	return permutedLogicalFieldSubsetsSensitive(fields)
 }
 
-func orderedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool {
-	candidates := make(map[string]struct{}, min(len(fields), maxLogicalFieldSubsetCandidates))
-	for _, field := range fields {
-		next := make(map[string]struct{}, min(len(candidates)*2+1, maxLogicalFieldSubsetCandidates+1))
-		for candidate := range candidates {
-			next[candidate] = struct{}{}
-			joined := candidate + field.prefix
+func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool {
+	// PlanUpdate currently permits at most 128 entries with content and priority
+	// fields. Fail closed if that protocol bound grows without this search being
+	// updated, or if proving every arbitrary field order exceeds the work cap.
+	if len(fields) > maxLogicalFieldPermutationFields {
+		return true
+	}
+	candidates := make([]logicalFieldPermutationCandidate, 0, min(len(fields), maxLogicalFieldSubsetCandidates))
+	seen := make(map[logicalFieldPermutationCandidate]struct{}, min(len(fields), maxLogicalFieldSubsetCandidates))
+	for index, field := range fields {
+		candidate := logicalFieldPermutationCandidate{suffix: field.suffix}
+		candidate.used[index/64] = uint64(1) << uint(index%64)
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+	for cursor := 0; cursor < len(candidates); cursor++ {
+		candidate := candidates[cursor]
+		for index, field := range fields {
+			word := index / 64
+			bit := uint64(1) << uint(index%64)
+			if candidate.used[word]&bit != 0 {
+				continue
+			}
+			joined := candidate.suffix + field.prefix
 			if executionevents.RedactExecutionEventText(joined) != joined {
 				return true
 			}
+			next := candidate
+			next.used[word] |= bit
 			if field.whole {
-				joined = logicalFieldSuffix(candidate + field.suffix)
+				next.suffix = logicalFieldSuffix(joined)
 			} else {
-				joined = field.suffix
+				next.suffix = field.suffix
 			}
-			next[joined] = struct{}{}
-			if len(next) > maxLogicalFieldSubsetCandidates {
+			if _, exists := seen[next]; exists {
+				continue
+			}
+			if len(seen) >= maxLogicalFieldSubsetCandidates {
 				return true
 			}
+			seen[next] = struct{}{}
+			candidates = append(candidates, next)
 		}
-		next[field.suffix] = struct{}{}
-		if len(next) > maxLogicalFieldSubsetCandidates {
-			return true
-		}
-		candidates = next
 	}
 	return false
 }

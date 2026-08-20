@@ -281,6 +281,21 @@ func TestProjectPlanUpdateRedactsCredentialSplitAcrossFourFieldSubset(t *testing
 	}
 }
 
+func TestProjectPlanUpdateRedactsCredentialSplitAcrossArbitraryFieldOrder(t *testing.T) {
+	left := strings.Repeat("a", 10)
+	right := strings.Repeat("b", 10)
+	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
+		{Content: left, Status: harnessv2.PlanEntryCompleted},
+		{Content: "sk-", Status: harnessv2.PlanEntryPending},
+		{Content: right, Status: harnessv2.PlanEntryInProgress},
+	}})
+	if strings.Contains(projection.Document, left) || strings.Contains(projection.Document, "sk-") ||
+		strings.Contains(projection.Document, right) ||
+		!strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("plan document exposed credential reconstructed in arbitrary field order: %q", projection.Document)
+	}
+}
+
 func TestMapPromptLifecycle(t *testing.T) {
 	now := time.Now().UTC()
 	accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})

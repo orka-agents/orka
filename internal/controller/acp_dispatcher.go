@@ -1360,8 +1360,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		var persistenceErr *acpExecutionUpdatePersistenceError
 		if !errors.As(streamErr, &persistenceErr) {
-			if _, _, persistErr := journalState.AppendPromptStreamFailureIfNew(
-				flushCtx, time.Now().UTC(), promptStreamDiagnostic(streamErr),
+			if persistErr := appendPromptStreamFailureLifecycleIfNew(
+				flushCtx, journalState, time.Now().UTC(), streamErr,
 			); persistErr != nil {
 				streamErr = acpUpdatePersistenceError(persistErr, nil)
 			}
@@ -1377,6 +1377,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			logf.FromContext(ctx).Error(err, "persist unterminated ACP buffered streams", "namespace", task.Namespace, "task", task.Name)
 			return d.failPromptForExecutionEventPersistence(
 				ctx, task, attemptID, fence, "unterminated buffered stream persistence failed",
+			)
+		}
+		if err := appendPromptStreamFailureLifecycleIfNew(
+			ctx, journalState, time.Now().UTC(), harnessv2.ErrMissingTerminalEvent,
+		); err != nil {
+			logf.FromContext(ctx).Error(err, "persist unterminated ACP prompt lifecycle", "namespace", task.Namespace, "task", task.Name)
+			return d.failPromptForExecutionEventPersistence(
+				ctx, task, attemptID, fence, "unterminated prompt lifecycle persistence failed",
 			)
 		}
 		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event")
@@ -4082,6 +4090,8 @@ func (d *ACPDispatcher) failPromptForExecutionEventPersistence(
 	)
 }
 
+const promptStreamMissingTerminalDiagnostic = "runtime stream ended without a terminal event"
+
 func promptStreamDiagnostic(err error) string {
 	var persistenceErr *acpExecutionUpdatePersistenceError
 	switch {
@@ -4106,7 +4116,7 @@ func promptStreamDiagnostic(err error) string {
 	case errors.Is(err, harnessv2.ErrMissingAcceptedEvent):
 		return "runtime stream omitted the accepted event"
 	case errors.Is(err, harnessv2.ErrMissingTerminalEvent):
-		return "runtime stream ended without a terminal event"
+		return promptStreamMissingTerminalDiagnostic
 	case errors.Is(err, harnessv2.ErrBufferedEventOverflow):
 		return "runtime buffered event limit was exceeded"
 	case errors.Is(err, harnessv2.ErrPromptStreamDisconnected):
@@ -4124,6 +4134,16 @@ func promptStreamDiagnostic(err error) string {
 	default:
 		return "non-client prompt stream error"
 	}
+}
+
+func appendPromptStreamFailureLifecycleIfNew(
+	ctx context.Context,
+	journalState *v2eventjournal.State,
+	at time.Time,
+	streamErr error,
+) error {
+	_, _, err := journalState.AppendPromptStreamFailureIfNew(ctx, at, promptStreamDiagnostic(streamErr))
+	return err
 }
 
 func (d *ACPDispatcher) markOutcomeUnknown(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, reason, message string) error {

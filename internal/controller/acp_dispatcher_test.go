@@ -31,12 +31,14 @@ import (
 	"github.com/orka-agents/orka/internal/artifactcap"
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
 	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/orka-agents/orka/internal/tasktrace"
 )
 
@@ -625,7 +627,7 @@ func TestDeleteRuntimeSessionAcceptsExactTombstoneReplay(t *testing.T) {
 }
 
 func TestPromptStreamDiagnosticIsBoundedAndClassified(t *testing.T) {
-	if got := promptStreamDiagnostic(fmt.Errorf("wrapped: %w", harnessv2.ErrMissingTerminalEvent)); got != "runtime stream ended without a terminal event" {
+	if got := promptStreamDiagnostic(fmt.Errorf("wrapped: %w", harnessv2.ErrMissingTerminalEvent)); got != promptStreamMissingTerminalDiagnostic {
 		t.Fatalf("missing-terminal diagnostic = %q", got)
 	}
 	if got := promptStreamDiagnostic(fmt.Errorf("wrapped: %w", harnessv2.ErrEventRateExceeded)); got != "runtime update rate exceeded the negotiated limit" {
@@ -639,6 +641,63 @@ func TestPromptStreamDiagnosticIsBoundedAndClassified(t *testing.T) {
 	}
 	if got := promptStreamDiagnostic(acpUpdatePersistenceError(errors.New("store unavailable"), nil)); got != "local execution update persistence failed" {
 		t.Fatalf("persistence diagnostic = %q", got)
+	}
+}
+
+func TestAppendPromptStreamFailureLifecycleIfNewClosesMissingTerminal(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	journalState, err := (v2eventjournal.Journal{
+		EventStore: eventStore,
+		MapContext: v2eventjournal.MapContext{
+			Namespace: "default", TaskName: "missing-terminal", StreamID: "missing-terminal",
+		},
+	}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	accepted := harnessv2.Event{
+		Protocol: harnessv2.ProtocolVersion,
+		Type:     harnessv2.EventAccepted,
+		Identity: harnessv2.EventIdentity{
+			RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id",
+			RuntimeSessionUID: "runtime-session", RuntimeSessionGeneration: 1,
+			TaskUID: "task-uid", TaskAttempt: 1, PromptID: "prompt-missing-terminal", Sequence: 1,
+			RequestDigest: harnessv2.RequestDigest(testControlDigestForDispatcher("missing-terminal")), Timestamp: now,
+		},
+		Accepted: &harnessv2.AcceptedEvent{
+			AcceptedAt: now,
+			Lease: harnessv2.PromptLease{
+				Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+			},
+			ACPVersion: harnessv2.ACPProfileV1,
+		},
+	}
+	if appended, isNew, err := journalState.AppendPromptLifecycleIfNew(ctx, accepted); err != nil || !isNew || appended == nil {
+		t.Fatalf("append accepted lifecycle = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if err := appendPromptStreamFailureLifecycleIfNew(
+		ctx, journalState, now.Add(time.Second), harnessv2.ErrMissingTerminalEvent,
+	); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "missing-terminal",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 || listed[0].Type != executionevents.ExecutionEventTypeModelRequestStarted ||
+		listed[1].Type != executionevents.ExecutionEventTypeModelRequestFailed {
+		t.Fatalf("missing-terminal lifecycle = %#v", listed)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(listed[1].Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	if content["controllerSynthesized"] != true || content["message"] != promptStreamMissingTerminalDiagnostic {
+		t.Fatalf("missing-terminal lifecycle content = %#v", content)
 	}
 }
 
