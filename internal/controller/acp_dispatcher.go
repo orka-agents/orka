@@ -773,9 +773,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		lineage.NamespaceUID = string(taskNamespace.UID)
 	}
 	var sessionExecution *acpTaskSession
+	sessionCompleted := false
 	sessionCtx, sessionTrace := startACPSessionSpan(runtimeCtx, task)
 	endSessionTrace := func(err error) {
-		sessionTrace.setSessionReused(sessionExecution != nil && sessionExecution.Reused)
+		reused := sessionExecution != nil && sessionExecution.Reused
+		sessionTrace.setSessionReused(reused)
+		sessionTrace.setSessionOutcome(acpSessionOutcome(reused, sessionCompleted, err))
 		sessionTrace.End(err)
 	}
 	defer func() { endSessionTrace(retErr) }()
@@ -1171,6 +1174,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return err
 	}
+	sessionCompleted = true
 	endSessionTrace(nil)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionPlanned, store.PromptExecutionSubmitting, "submitting", nil); err != nil {
 		return err
@@ -1287,9 +1291,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			if err != nil {
 				_ = cleanupRuntimeSession("prompt_admission_reconciliation_stopped")
 				if runtimeContextError(runtimeCtx) != nil {
-					return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventCancelled})
+					return recordACPPromptOutcomeIfSettled(
+						ctx, acpPromptOutcomeCancelled,
+						d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventCancelled}),
+					)
 				}
-				return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventFailed})
+				return recordACPPromptOutcomeIfSettled(
+					ctx, acpPromptOutcomeFailed,
+					d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventFailed}),
+				)
 			}
 			continue
 		}

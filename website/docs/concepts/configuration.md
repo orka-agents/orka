@@ -1157,7 +1157,7 @@ children.
 | `orka.api` | HTTP/API middleware spans | HTTP request/route/status metadata |
 | `orka.chat` | `chat.request`, `chat.tool_loop.iteration` | session metadata; `chat.iteration`, `orka.tenant`, requested model, tool-call count |
 | `orka.worker` | `task.run` | `orka.task.id`, namespace, and agent name when known |
-| `orka.acp` | `acp.prompt`, `acp.session.create`, `acp.session.continue`, `acp.publication.reconcile` | `orka.task.id`, namespace, attempt/prompt identity, RuntimePool/RuntimeSession identity, publication identity, and agent name when known |
+| `orka.acp` | `acp.prompt`, `acp.session.create`, `acp.session.continue`, `acp.publication.reconcile` | `orka.task.id`, namespace, attempt/prompt identity, RuntimePool/RuntimeSession identity, prompt/session outcome, publication identity, and agent name when known |
 | `orka.agent` | `agent.step` | iteration, requested model/provider, tool-call count, Orka task metadata |
 | `orka.gen_ai` | `chat {model}` | `gen_ai.*` provider/model/token metadata and `error.type` |
 | `orka.gen_ai` | `execute_tool {tool.name}` | `gen_ai.tool.*`, `orka.tool.name`, `orka.tool.kind`, `orka.tool.result.size_bytes`, parent/child task fields for delegation |

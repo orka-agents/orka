@@ -94,6 +94,29 @@ func TestACPSessionSpanUsesFinalReuseDecision(t *testing.T) {
 	}
 }
 
+func TestACPSessionOutcome(t *testing.T) {
+	settlementErr := errors.New("session failed")
+	tests := []struct {
+		name      string
+		reused    bool
+		completed bool
+		err       error
+		want      string
+	}{
+		{name: "created", completed: true, want: acpSessionOutcomeCreated},
+		{name: "continued", reused: true, completed: true, want: acpSessionOutcomeContinued},
+		{name: "incomplete", reused: true, want: acpSessionOutcomeIncomplete},
+		{name: "failed", completed: true, err: settlementErr, want: acpSessionOutcomeFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := acpSessionOutcome(test.reused, test.completed, test.err); got != test.want {
+				t.Fatalf("acpSessionOutcome() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestACPSessionSpanRecordsCreationFailure(t *testing.T) {
 	if _, err := orkatracing.Init("acp-telemetry-test", false); err != nil {
 		t.Fatalf("initialize tracing: %v", err)

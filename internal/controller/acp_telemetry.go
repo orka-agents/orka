@@ -14,23 +14,28 @@ import (
 )
 
 const (
-	acpTracerName              = "orka.acp"
-	acpPromptSpanName          = "acp.prompt"
-	acpSessionCreateSpanName   = "acp.session.create"
-	acpSessionContinueSpanName = "acp.session.continue"
-	acpPublicationSpanName     = "acp.publication.reconcile"
-	acpAttrPromptID            = "orka.acp.prompt.id"
-	acpAttrTaskAttempt         = "orka.acp.task.attempt"
-	acpAttrRuntimePoolName     = "orka.acp.runtime_pool.name"
-	acpAttrRuntimeSessionUID   = "orka.acp.runtime_session.uid"
-	acpAttrRuntimeSessionGen   = "orka.acp.runtime_session.generation"
-	acpAttrPublicationID       = "orka.acp.publication.id"
-	acpAttrPublicationRecovery = "orka.acp.publication.recovery"
-	acpAttrPromptOutcome       = "orka.acp.prompt.outcome"
-	acpPromptOutcomeSucceeded  = "succeeded"
-	acpPromptOutcomeFailed     = "failed"
-	acpPromptOutcomeCancelled  = "cancelled"
-	acpPromptOutcomeUnknown    = "outcome_unknown"
+	acpTracerName               = "orka.acp"
+	acpPromptSpanName           = "acp.prompt"
+	acpSessionCreateSpanName    = "acp.session.create"
+	acpSessionContinueSpanName  = "acp.session.continue"
+	acpPublicationSpanName      = "acp.publication.reconcile"
+	acpAttrPromptID             = "orka.acp.prompt.id"
+	acpAttrTaskAttempt          = "orka.acp.task.attempt"
+	acpAttrRuntimePoolName      = "orka.acp.runtime_pool.name"
+	acpAttrRuntimeSessionUID    = "orka.acp.runtime_session.uid"
+	acpAttrRuntimeSessionGen    = "orka.acp.runtime_session.generation"
+	acpAttrPublicationID        = "orka.acp.publication.id"
+	acpAttrPublicationRecovery  = "orka.acp.publication.recovery"
+	acpAttrPromptOutcome        = "orka.acp.prompt.outcome"
+	acpAttrSessionOutcome       = "orka.acp.session.outcome"
+	acpPromptOutcomeSucceeded   = "succeeded"
+	acpPromptOutcomeFailed      = "failed"
+	acpPromptOutcomeCancelled   = "cancelled"
+	acpPromptOutcomeUnknown     = "outcome_unknown"
+	acpSessionOutcomeCreated    = "created"
+	acpSessionOutcomeContinued  = "continued"
+	acpSessionOutcomeIncomplete = "incomplete"
+	acpSessionOutcomeFailed     = "failed"
 )
 
 // acpSpan makes span completion idempotent so a scoped span can be ended at the
@@ -153,6 +158,26 @@ func (s *acpSpan) setSessionReused(reused bool) {
 		name = acpSessionContinueSpanName
 	}
 	s.span.SetName(name)
+}
+
+func acpSessionOutcome(reused, completed bool, err error) string {
+	switch {
+	case err != nil:
+		return acpSessionOutcomeFailed
+	case !completed:
+		return acpSessionOutcomeIncomplete
+	case reused:
+		return acpSessionOutcomeContinued
+	default:
+		return acpSessionOutcomeCreated
+	}
+}
+
+func (s *acpSpan) setSessionOutcome(outcome string) {
+	if s == nil || s.span == nil || s.ended || outcome == "" {
+		return
+	}
+	s.span.SetAttributes(attribute.String(acpAttrSessionOutcome, outcome))
 }
 
 func (s *acpSpan) withContext(ctx context.Context) context.Context {

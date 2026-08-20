@@ -731,6 +731,9 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if got := sessionSpan.Parent().SpanID().String(); got != parentSpanID {
 		t.Fatalf("acp.session.create parent = %s, want Task trace parent %s", got, parentSpanID)
 	}
+	if got := tracingtest.AttributeMap(sessionSpan)[acpAttrSessionOutcome].AsString(); got != acpSessionOutcomeCreated {
+		t.Fatalf("acp.session.create outcome = %q, want %q", got, acpSessionOutcomeCreated)
+	}
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
 		t.Fatal(err)
