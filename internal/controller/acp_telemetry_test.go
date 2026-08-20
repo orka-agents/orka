@@ -65,6 +65,31 @@ func TestRecordACPPromptOutcomeIfSettlementFails(t *testing.T) {
 	}
 }
 
+func TestACPPromptSpanSettlementIgnoresLaterDeliveryError(t *testing.T) {
+	if _, err := orkatracing.Init("acp-telemetry-test", false); err != nil {
+		t.Fatalf("initialize tracing: %v", err)
+	}
+	harness := tracingtest.NewSpanHarness(t)
+	ctx, promptTrace := startACPSpan(context.Background(), acpPromptSpanName)
+	recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
+	promptTrace.End(nil)
+	promptTrace.End(errors.New("delivery failed after prompt settlement"))
+
+	promptSpan := tracingtest.SpanNamed(harness.Recorder.Ended(), acpPromptSpanName)
+	if promptSpan == nil {
+		t.Fatal("missing acp.prompt span")
+	}
+	if got := tracingtest.AttributeMap(promptSpan)[acpAttrPromptOutcome].AsString(); got != acpPromptOutcomeSucceeded {
+		t.Fatalf("acp.prompt outcome = %q, want %q", got, acpPromptOutcomeSucceeded)
+	}
+	if got := promptSpan.Status().Code; got == codes.Error {
+		t.Fatalf("acp.prompt status = %s, want non-error after successful settlement", got)
+	}
+	if _, ok := tracingtest.AttributeMap(promptSpan)["error.type"]; ok {
+		t.Fatal("settled acp.prompt span recorded a later delivery error")
+	}
+}
+
 func TestACPSessionSpanUsesFinalReuseDecision(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -1386,6 +1386,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return patchErr
 		}
 		recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
+		promptTrace.End(nil)
 		if transitionErr := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryConflict, "workspace-validation-failed", "workspace validation failed before a trusted delta was established"); transitionErr != nil {
 			return transitionErr
 		}
@@ -1418,6 +1419,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return err
 	}
 	recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
+	promptTrace.End(nil)
 
 	var deliveryStatus corev1alpha1.TaskDeliveryStatus
 	publicationID := ""
