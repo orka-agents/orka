@@ -18,6 +18,7 @@ const (
 	mappedToolCallIDPrefix           = "event-tool-call-v1-sha256-"
 	mappedToolCallIDDomain           = "orka.harness.v2.execution-event.tool-call-id.v1\x00"
 	mappedAssistantTranscriptKind    = "assistant_transcript"
+	mappedToolStreamClosureKind      = "tool_stream_closure"
 )
 
 // MapContext supplies Orka-owned stream metadata for a validated harness v2
@@ -147,6 +148,27 @@ func MappedUpdateIdentityFromEvent(event store.ExecutionEvent) (MappedUpdateIden
 	return content.HarnessV2, true
 }
 
+func mappedExecutionEventKey(event store.ExecutionEvent) (MappedUpdateIdentity, string, bool) {
+	identity, ok := MappedUpdateIdentityFromEvent(event)
+	if !ok {
+		return MappedUpdateIdentity{}, "", false
+	}
+	var content struct {
+		JournalKind string `json:"journalKind"`
+	}
+	if err := json.Unmarshal(event.Content, &content); err != nil {
+		return MappedUpdateIdentity{}, "", false
+	}
+	if content.JournalKind == mappedToolStreamClosureKind {
+		return identity, mappedToolStreamClosureKey(identity), true
+	}
+	return identity, identity.Key(), true
+}
+
+func mappedToolStreamClosureKey(identity MappedUpdateIdentity) string {
+	return identity.Key() + mappedUpdateIdentityKeySeparator + mappedToolStreamClosureKind
+}
+
 // PlanProjection is the durable/public read model derived from one ACP plan
 // update.
 type PlanProjection struct {
@@ -224,6 +246,7 @@ type mapUpdateOptions struct {
 	toolContentTruncated             bool
 	toolContentMultipleBlocksOmitted bool
 	omitToolMetadata                 bool
+	journalKind                      string
 }
 
 const toolContentMultipleBlocksOmittedReason = "streamed_text_multiple_blocks_omitted"
@@ -258,6 +281,9 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 	content := map[string]any{
 		"harnessV2":  mappedUpdateIdentity(event),
 		"updateKind": event.Update.Kind,
+	}
+	if options.journalKind != "" {
+		content["journalKind"] = options.journalKind
 	}
 	mapped := &store.ExecutionEvent{
 		Namespace:   mapCtx.Namespace,
@@ -403,6 +429,21 @@ func mapToolUpdateWithContent(
 		toolContentText:                  &contentText,
 		toolContentTruncated:             contentTruncated,
 		toolContentMultipleBlocksOmitted: contentMultipleBlocksOmitted,
+	})
+}
+
+func mapToolStreamClosure(
+	event harnessv2.Event,
+	mapCtx MapContext,
+	contentText string,
+	contentTruncated bool,
+	contentMultipleBlocksOmitted bool,
+) (*store.ExecutionEvent, error) {
+	return mapUpdate(event, mapCtx, mapUpdateOptions{
+		toolContentText:                  &contentText,
+		toolContentTruncated:             contentTruncated,
+		toolContentMultipleBlocksOmitted: contentMultipleBlocksOmitted,
+		journalKind:                      mappedToolStreamClosureKind,
 	})
 }
 

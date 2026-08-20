@@ -2,6 +2,7 @@ package eventjournal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -538,6 +539,83 @@ func TestJournalPersistsBufferedToolClosuresInProtocolOrder(t *testing.T) {
 		listed[1].Type != executionevents.ExecutionEventTypeToolCallFailed ||
 		listed[0].ContentText != "first" || listed[1].ContentText != "second" {
 		t.Fatalf("persisted tool closure order = %#v", listed)
+	}
+}
+
+func TestJournalBuffersExplicitEmptyToolSnapshot(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-clear", Status: harnessv2.ToolCallStatusInProgress, ContentReplace: true,
+		},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew || appended != nil {
+		t.Fatalf("append empty tool snapshot = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if listed := listJournalEvents(t, ctx, eventStore); len(listed) != 0 {
+		t.Fatalf("empty snapshot persisted before closure: %#v", listed)
+	}
+	if err := state.AppendToolStreamClosuresIfNew(ctx); err != nil {
+		t.Fatal(err)
+	}
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallFailed || listed[0].ContentText != "" {
+		t.Fatalf("empty snapshot closure = %#v", listed)
+	}
+}
+
+func TestJournalTerminalizesContentFreeToolAfterPersistedStart(t *testing.T) {
+	ctx := context.Background()
+	base := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: base, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCall,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-open", Title: "Inspect repository", Kind: "shell", Status: harnessv2.ToolCallStatusPending,
+		},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew || appended == nil {
+		t.Fatalf("append content-free tool start = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	faulting := &faultingAppendEventStore{
+		ExecutionEventStore: base,
+		faults:              []appendFault{{persistBeforeError: true, err: errors.New("ambiguous closure append")}},
+	}
+	state.journal.EventStore = faulting
+	if err := state.AppendToolStreamClosuresIfNew(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if faulting.appendCalls != 1 {
+		t.Fatalf("closure append calls = %d, want 1", faulting.appendCalls)
+	}
+
+	listed := listJournalEvents(t, ctx, base)
+	if len(listed) != 2 || listed[0].Type != executionevents.ExecutionEventTypeToolCallStarted ||
+		listed[1].Type != executionevents.ExecutionEventTypeToolCallFailed || listed[0].ToolCallID != listed[1].ToolCallID {
+		t.Fatalf("content-free tool lifecycle = %#v", listed)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(listed[1].Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	if content["journalKind"] != mappedToolStreamClosureKind {
+		t.Fatalf("closure journal kind = %#v", content["journalKind"])
+	}
+	key := mappedToolStreamClosureKey(mappedUpdateIdentity(event))
+	if persisted, err := state.journal.hasPersistedIdentity(ctx, key); err != nil || !persisted {
+		t.Fatalf("closure persisted=%t err=%v", persisted, err)
 	}
 }
 

@@ -181,6 +181,33 @@ func TestMapACPUpdatePreservesWhitespaceToolContent(t *testing.T) {
 	}
 }
 
+func TestMapACPToolCallContentCapsProjectedBlocks(t *testing.T) {
+	items := make([]map[string]any, harnessv2.MaxContentBlocks+1)
+	for index := range items {
+		items[index] = map[string]any{
+			"type":    "content",
+			"content": map[string]any{"type": "text", "text": "tool output"},
+		}
+	}
+	raw, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapped, err := mapACPToolCallContent(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mapped) != harnessv2.MaxContentBlocks {
+		t.Fatalf("mapped content blocks = %d, want %d", len(mapped), harnessv2.MaxContentBlocks)
+	}
+	update := harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
+		ToolCallID: "call-many-blocks", Status: harnessv2.ToolCallStatusInProgress, Content: mapped,
+	}}
+	if err := update.Validate(); err != nil {
+		t.Fatalf("bounded tool update validation: %v", err)
+	}
+}
+
 func TestMapACPUpdateIgnoresStatuslessToolOutputDelta(t *testing.T) {
 	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
 		"sessionUpdate":"tool_call_update",

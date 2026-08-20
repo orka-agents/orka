@@ -147,6 +147,9 @@ func mapACPToolCallContent(raw json.RawMessage) ([]harnessv2.ContentBlock, error
 	}
 	mapped := make([]harnessv2.ContentBlock, 0, len(items))
 	for index, item := range items {
+		if len(mapped) == harnessv2.MaxContentBlocks {
+			break
+		}
 		if item.Type != "content" || len(item.Content) == 0 {
 			continue
 		}
