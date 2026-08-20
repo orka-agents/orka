@@ -19,6 +19,7 @@ import {
   taskStatusSchema,
   k8sMetadataSchema,
   taskSchema,
+  taskEventsResponseSchema,
 } from './task'
 import type { Task, TaskSpec, TaskStatus, TaskType, TaskPhase } from './task'
 
@@ -461,6 +462,31 @@ describe('taskSchema', () => {
 
   it('rejects missing spec', () => {
     expect(() => taskSchema.parse({ metadata: { name: 'x' } })).toThrow()
+  })
+})
+
+describe('taskEventsResponseSchema', () => {
+  it('preserves cached input token telemetry', () => {
+    const response = taskEventsResponseSchema.parse({
+      namespace: 'default',
+      streamType: 'task',
+      streamID: 'task-1',
+      afterSeq: 0,
+      latestSeq: 1,
+      events: [{
+        id: 'event-1',
+        namespace: 'default',
+        streamType: 'task',
+        streamID: 'task-1',
+        seq: 1,
+        type: 'ModelUsageUpdated',
+        severity: 'info',
+        cachedInputTokens: 42,
+        createdAt: '2026-08-20T00:00:00Z',
+      }],
+    })
+
+    expect(response.events[0].cachedInputTokens).toBe(42)
   })
 })
 
