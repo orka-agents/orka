@@ -2494,6 +2494,7 @@ func (r *RuntimePoolReconciler) finishRuntimePoolStatus(
 	status corev1alpha1.RuntimePoolStatus,
 	requeueAfter time.Duration,
 ) (ctrl.Result, error) {
+	clearRuntimePoolUnfencedProbePressure(&status)
 	status.Message = sanitizeRuntimePoolMessage(status.Message)
 	if reflect.DeepEqual(pool.Status, status) {
 		recordRuntimePoolMetrics(pool, status)
@@ -2510,6 +2511,19 @@ func (r *RuntimePoolReconciler) finishRuntimePoolStatus(
 		orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// Supervisor pressure belongs to one exact authenticated runtime instance.
+// Once that fence is absent, retaining the last probe would publish stale
+// sessions and prompts for a Pod that was lost, rejected, or recycled.
+func clearRuntimePoolUnfencedProbePressure(status *corev1alpha1.RuntimePoolStatus) {
+	if status == nil || status.ActiveInstance != nil {
+		return
+	}
+	status.Capacity.ResidentSessions = 0
+	status.Capacity.RunningPrompts = 0
+	status.Capacity.PendingPermissions = 0
+	status.Capacity.LiveDescendants = 0
 }
 
 func recordRuntimePoolMetrics(pool *corev1alpha1.RuntimePool, status corev1alpha1.RuntimePoolStatus) {

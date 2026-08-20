@@ -98,7 +98,8 @@ func (s *Server) authorizeWorkspaceReadCredential(
 	if request.ParentOperation == publisherservice.OperationWorkspacePrepare {
 		operationPrefix = "workspace-prepare-"
 	}
-	if execution.State != corev1alpha1.TaskExecutionStatePlanned || request.Metadata.PublicationID != "" ||
+	if (execution.State != corev1alpha1.TaskExecutionStateSessionStarting && execution.State != corev1alpha1.TaskExecutionStatePlanned) ||
+		request.Metadata.PublicationID != "" ||
 		request.Metadata.OperationID != operationPrefix+execution.PromptID || request.Reference.Kind != publisherservice.CredentialHTTPExtraHeader {
 		return nil, nil, "", "", fmt.Errorf("workspace read credential request is not bound to the planned task")
 	}

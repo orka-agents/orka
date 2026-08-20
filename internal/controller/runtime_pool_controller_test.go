@@ -1498,6 +1498,62 @@ func TestRuntimePoolReconcilerUnhealthySupervisorClearsReadinessBeforeRecycle(t 
 	}
 }
 
+func TestRuntimePoolReconcilerClearsProbePressureAfterActivePodDisappears(t *testing.T) {
+	orkametrics.ACPRuntimePoolSessionsActive.Reset()
+	orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+	t.Cleanup(func() {
+		orkametrics.ACPRuntimePoolSessionsActive.Reset()
+		orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+	})
+
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	pod := runtimePoolReadyPod(pool, pool.Namespace, "lost-pressure-pod", "lost-pressure-pod-uid", "10.0.0.49")
+	supervisor := &fakeRuntimePoolSupervisorClient{probe: runtimePoolValidProbe(pool, &pod, "lost-pressure-boot", false)}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, &pod)
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Status.Capacity.ResidentSessions = 3
+	current.Status.Capacity.RunningPrompts = 2
+	current.Status.Capacity.PendingPermissions = 1
+	current.Status.Capacity.LiveDescendants = 4
+	current.Status.Capacity.QueuedTasks = 5
+	current.Status.Capacity.ReservedSessions = 1
+	current.Status.Capacity.FinalizingSessions = 2
+	if err := r.Status().Update(context.Background(), &current); err != nil {
+		t.Fatalf("persist stale pressure fixture: %v", err)
+	}
+	if err := r.Delete(context.Background(), &pod); err != nil {
+		t.Fatalf("delete active runtime Pod: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.ActiveInstance != nil {
+		t.Fatalf("active instance = %#v, want nil after active Pod disappearance", status.ActiveInstance)
+	}
+	if status.Capacity.ResidentSessions != 0 || status.Capacity.RunningPrompts != 0 ||
+		status.Capacity.PendingPermissions != 0 || status.Capacity.LiveDescendants != 0 {
+		t.Fatalf("unfenced probe pressure = %#v, want all supervisor counters cleared", status.Capacity)
+	}
+	if status.Capacity.QueuedTasks != 5 || status.Capacity.ReservedSessions != 1 || status.Capacity.FinalizingSessions != 2 {
+		t.Fatalf("controller-owned capacity = %#v, want queued/reserved/finalizing counters preserved", status.Capacity)
+	}
+	for name, gauge := range map[string]*prometheus.GaugeVec{
+		"active sessions":   orkametrics.ACPRuntimePoolSessionsActive,
+		"in-flight prompts": orkametrics.ACPRuntimePoolPromptsInFlight,
+	} {
+		var metric dto.Metric
+		if err := gauge.WithLabelValues(pool.Namespace, pool.Name).Write(&metric); err != nil {
+			t.Fatalf("read %s gauge: %v", name, err)
+		}
+		if got := metric.GetGauge().GetValue(); got != 0 {
+			t.Fatalf("%s gauge = %v, want 0 after active Pod disappearance", name, got)
+		}
+	}
+}
+
 func TestRuntimePoolReconcilerPreservesActiveFenceAcrossReadinessGap(t *testing.T) {
 	const oldRuntimeInstanceID = "restart-gap-pod-uid.boot-before-gap"
 

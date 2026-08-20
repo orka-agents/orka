@@ -51,16 +51,25 @@ func TestPublisherCredentialBrokerReturnsOnlyFrozenOperationCredential(t *testin
 		CredentialBindings: []corev1alpha1.PromptCredentialBinding{{Role: "SourceRead", Namespace: "default", SecretName: "git-read", SecretKey: "token", SecretUID: "read-secret-uid", ResourceVersion: "7"}},
 	}}
 	effect := publisherEffectForTest("workspace-credential-effect", "workspace.prepare", string(taskUID), "workspace-prepare-prompt")
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(plannedTask, readSecret, attempt, effect).Build()
 	request := publisherservice.CredentialMaterialRequest{
 		ParentOperation: publisherservice.OperationWorkspacePrepare,
 		Metadata:        publisherservice.OperationMetadata{Namespace: "default", TaskID: string(taskUID), OperationID: "workspace-prepare-prompt"},
 		Reference:       publisherservice.CredentialReference{Name: "git-read", Kind: publisherservice.CredentialHTTPExtraHeader},
 	}
-	response := callPublisherCredentialBroker(t, kubeClient, publisherToken, request, effect)
 	expected := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:read-canary-token"))
-	if response.Material != expected || response.ResourceVersion != "7" {
-		t.Fatalf("credential response = %#v", response)
+	for _, state := range []corev1alpha1.TaskExecutionState{
+		corev1alpha1.TaskExecutionStatePlanned,
+		corev1alpha1.TaskExecutionStateSessionStarting,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			task := plannedTask.DeepCopy()
+			task.Status.Execution.State = state
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, readSecret.DeepCopy(), attempt.DeepCopy(), effect.DeepCopy()).Build()
+			response := callPublisherCredentialBroker(t, kubeClient, publisherToken, request, effect)
+			if response.Material != expected || response.ResourceVersion != "7" {
+				t.Fatalf("credential response = %#v", response)
+			}
+		})
 	}
 }
 
