@@ -1327,10 +1327,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 			continue
 		}
-		if lastAssistantUpdate != nil && assistant.Len() > 0 {
+		persistableAssistant := assistantTranscriptForPersistence(assistant.String(), assistantOverflow)
+		if lastAssistantUpdate != nil && persistableAssistant != "" {
 			flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			if _, _, persistErr := journalState.AppendAssistantStreamClosureIfNew(
-				flushCtx, *lastAssistantUpdate, assistant.String(),
+				flushCtx, *lastAssistantUpdate, persistableAssistant,
 			); persistErr != nil {
 				streamErr = acpUpdatePersistenceError(persistErr, nil)
 			}
@@ -1345,11 +1346,13 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event")
 	}
 	if terminal.Type != harnessv2.EventCompleted {
-		if _, _, err := journalState.AppendAssistantTranscriptIfNew(ctx, *terminal, assistant.String()); err != nil {
-			logf.FromContext(ctx).Error(err, "persist terminal ACP assistant transcript", "namespace", task.Namespace, "task", task.Name)
-			return d.failPromptForExecutionEventPersistence(
-				ctx, task, attemptID, fence, "terminal assistant transcript persistence failed",
-			)
+		if persistableAssistant := assistantTranscriptForPersistence(assistant.String(), assistantOverflow); persistableAssistant != "" {
+			if _, _, err := journalState.AppendAssistantTranscriptIfNew(ctx, *terminal, persistableAssistant); err != nil {
+				logf.FromContext(ctx).Error(err, "persist terminal ACP assistant transcript", "namespace", task.Namespace, "task", task.Name)
+				return d.failPromptForExecutionEventPersistence(
+					ctx, task, attemptID, fence, "terminal assistant transcript persistence failed",
+				)
+			}
 		}
 		return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal)
 	}
@@ -1654,6 +1657,13 @@ func acpUpdatePersistenceError(journalErr, planErr error) error {
 		return nil
 	}
 	return &acpExecutionUpdatePersistenceError{err: errors.Join(failures...)}
+}
+
+func assistantTranscriptForPersistence(streamed string, overflow bool) string {
+	if overflow {
+		return ""
+	}
+	return streamed
 }
 
 func completedPromptResultText(terminal *harnessv2.Event, streamed string, streamedOverflow bool) (string, error) {

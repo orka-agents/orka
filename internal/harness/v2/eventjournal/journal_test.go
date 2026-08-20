@@ -473,7 +473,7 @@ func TestJournalBuffersToolMetadataUntilTerminalEvent(t *testing.T) {
 	}
 }
 
-func TestJournalRetainsBoundedOversizedToolStream(t *testing.T) {
+func TestJournalOmitsOversizedToolStreamContent(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
 	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
@@ -481,11 +481,19 @@ func TestJournalRetainsBoundedOversizedToolStream(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	credential := "sk-" + strings.Repeat("c", 24)
 	now := time.Now().UTC()
 	for index := range 9 {
 		status := harnessv2.ToolCallStatusInProgress
 		if index == 8 {
 			status = harnessv2.ToolCallStatusCompleted
+		}
+		content := strings.Repeat("x", harnessv2.MaxProtocolStringBytes)
+		switch index {
+		case 7:
+			content = strings.Repeat("x", harnessv2.MaxProtocolStringBytes-8) + credential[:8]
+		case 8:
+			content = credential[8:]
 		}
 		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
 			Kind: harnessv2.UpdateToolCallUpdate,
@@ -493,7 +501,7 @@ func TestJournalRetainsBoundedOversizedToolStream(t *testing.T) {
 				ToolCallID: "call-large", Kind: "shell", Status: status,
 				Content: []harnessv2.ContentBlock{{
 					Type: harnessv2.ContentBlockText,
-					Text: strings.Repeat("x", harnessv2.MaxProtocolStringBytes),
+					Text: content,
 				}},
 			},
 		})
@@ -504,9 +512,10 @@ func TestJournalRetainsBoundedOversizedToolStream(t *testing.T) {
 
 	listed := listJournalEvents(t, ctx, eventStore)
 	completed := listed[len(listed)-1]
-	if len([]rune(completed.ContentText)) != executionevents.MaxExecutionEventContentTextChars ||
-		completed.ContentText != strings.Repeat("x", executionevents.MaxExecutionEventContentTextChars) ||
-		completed.Truncation == nil || !completed.Truncation.ContentTextTruncated {
+	encoded := completed.Summary + completed.ContentText + string(completed.Content)
+	if completed.ContentText != "" || strings.Contains(encoded, credential[:8]) ||
+		completed.Truncation == nil || !completed.Truncation.ContentTextTruncated ||
+		!strings.Contains(string(completed.Content), "streamed_text_exceeded_journal_limit") {
 		t.Fatalf("oversized completed tool event = %#v", completed)
 	}
 }

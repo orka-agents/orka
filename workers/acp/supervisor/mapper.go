@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/orka-agents/orka/internal/acp"
+	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -207,6 +208,7 @@ func projectACPContentBlock(block acp.ContentBlock) (harnessv2.ContentBlock, boo
 }
 
 func boundACPToolCallTitle(value string) string {
+	value = executionevents.RedactExecutionEventText(value)
 	if len(value) <= maxACPToolCallTitleBytes {
 		return value
 	}

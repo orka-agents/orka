@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/orka-agents/orka/internal/acp"
+	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -323,6 +324,32 @@ func TestMapACPUpdateBoundsProviderToolCallTitle(t *testing.T) {
 				t.Fatalf("mapped update violates harness v2: %v", err)
 			}
 		})
+	}
+}
+
+func TestMapACPUpdateRedactsProviderToolCallTitleBeforeBounding(t *testing.T) {
+	prefix := strings.Repeat("x", maxACPToolCallTitleBytes-9) + " "
+	credential := "sk-" + strings.Repeat("a", 24)
+	raw, err := json.Marshal(map[string]any{
+		"sessionUpdate": "tool_call",
+		"toolCallId":    "call-credential",
+		"title":         prefix + credential,
+		"kind":          "execute",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || text != "" || update == nil || update.ToolCall == nil {
+		t.Fatalf("mapped tool call = %#v text=%q ok=%v", update, text, ok)
+	}
+	redacted := prefix + executionevents.ExecutionEventRedactedValue
+	want := redacted[:maxACPToolCallTitleBytes-len(acpToolCallTitleEllipsis)] + acpToolCallTitleEllipsis
+	if update.ToolCall.Title != want || strings.Contains(update.ToolCall.Title, credential[:8]) {
+		t.Fatalf("bounded redacted title = %q, want %q", update.ToolCall.Title, want)
 	}
 }
 

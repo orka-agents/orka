@@ -59,10 +59,11 @@ func (s *streamText) append(value string) {
 	runes := utf8.RuneCountInString(value)
 	remaining := executionevents.MaxExecutionEventContentTextChars - s.runes
 	if runes > remaining {
-		if remaining > 0 {
-			s.text.WriteString(string([]rune(value)[:remaining]))
-			s.runes += remaining
-		}
+		// A truncated prefix cannot be redacted safely when a credential spans
+		// the cutoff. Discard all buffered text and persist only truncation
+		// metadata when the tool reaches a terminal update.
+		s.text.Reset()
+		s.runes = 0
 		s.overflow = true
 		return
 	}

@@ -95,6 +95,15 @@ func TestCompletedPromptResultTextPrefersTerminalContent(t *testing.T) {
 	}
 }
 
+func TestAssistantTranscriptForPersistenceOmitsOverflowedPrefix(t *testing.T) {
+	if got := assistantTranscriptForPersistence("credential prefix", true); got != "" {
+		t.Fatalf("overflowed assistant transcript = %q, want omitted", got)
+	}
+	if got := assistantTranscriptForPersistence("complete transcript", false); got != "complete transcript" {
+		t.Fatalf("complete assistant transcript = %q", got)
+	}
+}
+
 func TestSaveACPPlanUpdateWithRetry(t *testing.T) {
 	t.Run("transient failure", func(t *testing.T) {
 		planStore := &retryPlanStore{saveErrors: []error{errors.New("transient")}}
