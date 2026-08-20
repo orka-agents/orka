@@ -658,6 +658,9 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 			SessionRef: &corev1alpha1.SessionReference{Name: "session-1"},
 			Execution: &corev1alpha1.ExecutionSpec{
 				Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+					// ACP RuntimeSessions reject operator templateRef selection;
+					// policy fields still override controller defaults.
+					ws.TemplateRef = nil
 					ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 					ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
 				}),
@@ -668,11 +671,8 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
 		}
-		if request.TemplateName != "task-template" {
-			t.Fatalf("TemplateName = %q, want task-template", request.TemplateName)
-		}
-		if request.TemplateNamespace != testSandboxTemplatesNamespace {
-			t.Fatalf("TemplateNamespace = %q, want sandbox-templates", request.TemplateNamespace)
+		if request.TemplateName != "default-template" {
+			t.Fatalf("TemplateName = %q, want default-template", request.TemplateName)
 		}
 		if request.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
 			t.Fatalf("ReusePolicy = %q, want %q", request.ReusePolicy, corev1alpha1.WorkspaceReusePolicySession)
@@ -1079,7 +1079,7 @@ func TestResolveSubstrateWorkspaceRequestRejectsDeletingPoolRef(t *testing.T) {
 	}
 }
 
-func TestResolveExecutionWorkspaceRequestValidatesResolvedTemplateNamespace(t *testing.T) {
+func TestResolveExecutionWorkspaceRequestRejectsAgentSandboxTemplateRef(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
@@ -1108,12 +1108,9 @@ func TestResolveExecutionWorkspaceRequestValidatesResolvedTemplateNamespace(t *t
 		},
 	}
 
-	request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task)
-	if err != nil {
-		t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
-	}
-	if request.TemplateNamespace != testSandboxTemplatesNamespace || request.ClaimNamespace != testSandboxTemplatesNamespace {
-		t.Fatalf("resolved namespaces = template %q claim %q, want sandbox-templates", request.TemplateNamespace, request.ClaimNamespace)
+	_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task)
+	if err == nil || !strings.Contains(err.Error(), "templateRef must be omitted") {
+		t.Fatalf("resolveExecutionWorkspaceRequest() error = %v, want templateRef rejection", err)
 	}
 }
 

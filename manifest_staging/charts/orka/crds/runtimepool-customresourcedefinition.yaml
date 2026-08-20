@@ -109,6 +109,35 @@ spec:
                 maximum: 1
                 minimum: 0
                 type: integer
+              executionWorkspace:
+                description: |-
+                  ExecutionWorkspace, when set, materializes the pool's single runtime
+                  instance through an externally operated execution-workspace provider
+                  instead of a controller-owned Deployment. The binding is immutable;
+                  workspace-backed pools host exactly one resident RuntimeSession.
+                properties:
+                  bindingDigest:
+                    description: |-
+                      BindingDigest is the canonical digest of the frozen workspace binding
+                      (provider, policies, and session key) that names this pool. It is part of
+                      the pool identity and carries no provider-native or secret material.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  provider:
+                    allOf:
+                    - enum:
+                      - agent-sandbox
+                      - substrate
+                    - enum:
+                      - agent-sandbox
+                    description: |-
+                      Provider selects the execution-workspace provider control plane hosting
+                      this pool's single runtime instance.
+                    type: string
+                required:
+                - bindingDigest
+                - provider
+                type: object
               runtime:
                 description: Runtime pins the immutable supervisor image and behavior
                   profile.
@@ -303,6 +332,9 @@ spec:
                 (!has(self.runtimeNamespace) || self.runtimeNamespace == oldSelf.runtimeNamespace)
             - message: runtime image and profile are immutable
               rule: self.runtime == oldSelf.runtime
+            - message: executionWorkspace binding is immutable
+              rule: has(self.executionWorkspace) == has(oldSelf.executionWorkspace)
+                && (!has(self.executionWorkspace) || self.executionWorkspace == oldSelf.executionWorkspace)
           status:
             description: RuntimePoolStatus defines the observed state of a controller-owned
               pool.

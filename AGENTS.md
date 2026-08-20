@@ -84,6 +84,7 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 - `code_exec` timeout max is 60s — values above are ignored (30s default used)
 - Built-in AI worker tools: `web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`
 - Built-in agent runtimes (`codex`, `claude`, `copilot`, `opencode`) use only the `orka.harness.v2` ACP RuntimePool path; there is no per-Task Job or legacy fallback.
+- `Task.spec.execution.workspace` (provider `agent-sandbox`) is flag-gated behind `--agent-sandbox-enabled` + `--acp-workspace-dispatch-enabled`: it binds a dedicated single-session workspace-backed RuntimePool (`acp-ws-*`) whose SandboxClaim hosts the supervisor; substrate, `templateRef`, `cleanupPolicy: retain`, and harness-v1 requests fail closed, and provider-native identifiers never enter Task status (ADR 0024).
 - `Task.spec.workspace` is the only agent repository surface. Keep clone/read credentials in `readCredentialRef` and publication/forge credentials in `publicationCredentialRef`; neither enters the ACP process tree.
 - RuntimePools are controller-owned, digest-pinned, scale-to-zero resources. Only `Serving` + `Accepting` admits new RuntimeSessions; drain/finalization must complete before replacement or scale-down.
 - Safe v2 probes are `GET /v2/health` and `GET /v2/capabilities`; status and all mutations require controller authentication plus operation-scoped authorization and exact fences.

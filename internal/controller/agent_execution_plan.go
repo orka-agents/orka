@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -53,25 +54,18 @@ func rejectAgentExecutionPlanWithWorkspaceStatus(reason string, err error) agent
 
 // planAgentExecution owns the controller routing decision for type: agent
 // Tasks. Built-in Codex, Claude, Copilot, and OpenCode runtimes use only the ACP v2
-// RuntimePool path. External runtimeRef registrations and conformance remain
+// RuntimePool path; a Task.spec.execution.workspace request additionally binds
+// that path to a workspace-provider-backed RuntimePool when enabled and fails
+// closed otherwise. External runtimeRef registrations and conformance remain
 // available, but Task dispatch fails closed until the v2 dispatcher support
-// boundary is enabled. There is no legacy turn or Job fallback.
+// boundary is enabled. There is no legacy turn or Job fallback, and no
+// cross-mode harness-v1 fallback for workspace-backed v2 work.
 func (r *TaskReconciler) planAgentExecution(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) agentExecutionPlan {
-	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
-	if err != nil {
-		return rejectAgentExecutionPlanWithWorkspaceStatus(
-			fmt.Sprintf("failed to resolve execution workspace: %v", err),
-			err,
-		)
-	}
-	if workspaceRequest != nil {
-		err := fmt.Errorf("Task.spec.execution.workspace is not supported by the ACP core runtime; use Task.spec.workspace") //nolint:staticcheck // Field path begins the user-facing validation message.
-		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err)
-	}
+	workspaceRequested := taskRequestsExecutionWorkspace(task)
 
 	if agent == nil || agent.Spec.Runtime == nil {
 		return rejectAgentExecutionPlan("agent runtime configuration is required")
@@ -91,8 +85,16 @@ func (r *TaskReconciler) planAgentExecution(
 			if !r.HarnessV1Enabled {
 				return rejectAgentExecutionPlan("AgentRuntime is classified orka.harness.v1, but harness v1 admission is disabled; v2 execution never substitutes for it")
 			}
+			if workspaceRequested {
+				err := errors.New(harnessV1ExecutionWorkspaceUnsupportedReason) //nolint:staticcheck // Field path begins the user-facing validation message.
+				return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err)
+			}
 			return agentHarnessV1Plan(name)
 		case corev1alpha1.AgentRuntimeContractHarnessV2:
+			if workspaceRequested {
+				err := fmt.Errorf("Task.spec.execution.workspace is not supported for external AgentRuntime dispatch; %s", externalAgentRuntimeDispatchUnsupportedReason(name)) //nolint:staticcheck // Field path begins the user-facing validation message.
+				return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err)
+			}
 			return rejectAgentExecutionPlan(externalAgentRuntimeDispatchUnsupportedReason(name))
 		default:
 			return rejectAgentExecutionPlan(fmt.Sprintf("AgentRuntime %q is unclassified; a missing selector is never protocol evidence", name))
@@ -117,10 +119,19 @@ func (r *TaskReconciler) planAgentExecution(
 		if !r.ACPRuntimeEnabled {
 			return rejectAgentExecutionPlan("ACP core runtime is disabled; built-in v2 agent runtimes have no fallback execution path")
 		}
+		if workspaceRequested {
+			if plan, rejected := r.rejectUnsupportedACPWorkspacePlan(task); rejected {
+				return plan
+			}
+		}
 		return agentACPPlan()
 	case corev1alpha1.AgentRuntimeContractHarnessV1:
 		if !r.HarnessV1Enabled {
 			return rejectAgentExecutionPlan("agent is classified orka.harness.v1, but harness v1 admission is disabled; v2 execution never substitutes for it")
+		}
+		if workspaceRequested {
+			err := errors.New(harnessV1ExecutionWorkspaceUnsupportedReason) //nolint:staticcheck // Field path begins the user-facing validation message.
+			return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err)
 		}
 		if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
 			return rejectAgentExecutionPlan("new harness v1 OpenCode bindings are prohibited; only sealed-inventory legacy adoption may use the v1 OpenCode path")
@@ -132,6 +143,43 @@ func (r *TaskReconciler) planAgentExecution(
 	default:
 		return rejectAgentExecutionPlan("agent runtime.contractVersion is unclassified; a missing selector is never interpreted as either protocol and execution admission fails closed")
 	}
+}
+
+// harnessV1ExecutionWorkspaceUnsupportedReason names the harness v1 path
+// exactly; workspace-provider-backed execution is a v2 RuntimePool capability
+// and never dispatches through, or falls back to, a harness-v1 installation.
+//
+//nolint:staticcheck // Field path begins the user-facing validation message.
+const harnessV1ExecutionWorkspaceUnsupportedReason = "Task.spec.execution.workspace is not supported on the harness v1 execution path; workspace-provider-backed RuntimeSessions require the ACP v2 RuntimePool path, and repository access uses Task.spec.workspace"
+
+// taskRequestsExecutionWorkspace reports whether the Task carries an enabled
+// legacy-shaped execution-workspace request. classRef-shaped requests are
+// rejected earlier by validateExecutionWorkspace.
+func taskRequestsExecutionWorkspace(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil &&
+		task.Spec.Execution.Workspace.Enabled
+}
+
+// rejectUnsupportedACPWorkspacePlan fails closed on every workspace request the
+// ACP RuntimePool path cannot host, before any workspace or RuntimePool demand
+// exists. A nil plan with rejected=false admits the workspace-backed ACP path.
+func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(task *corev1alpha1.Task) (agentExecutionPlan, bool) {
+	binding, err := resolveACPWorkspaceBinding(task, r.ExecutionWorkspaceDefaultProvider)
+	if err != nil {
+		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
+	}
+	if binding == nil {
+		return agentExecutionPlan{}, false
+	}
+	if !r.AgentSandboxEnabled {
+		err := fmt.Errorf("execution workspace provider agent-sandbox is disabled; enable --agent-sandbox-enabled")
+		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
+	}
+	if !r.ACPWorkspaceDispatchEnabled {
+		err := fmt.Errorf("workspace-provider-backed RuntimeSession dispatch is disabled; enable --acp-workspace-dispatch-enabled to host this Task's RuntimeSession in an agent-sandbox workspace")
+		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
+	}
+	return agentExecutionPlan{}, false
 }
 
 func externalAgentRuntimeDispatchUnsupportedReason(name string) string {

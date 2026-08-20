@@ -940,6 +940,8 @@ rules:
   - extensions.agents.x-k8s.io
   resources:
   - sandboxclaims
+  - sandboxtemplates
+  - sandboxwarmpools
   verbs:
   - create
   - delete
@@ -947,15 +949,6 @@ rules:
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - extensions.agents.x-k8s.io
-  resources:
-  - sandboxtemplates
-  - sandboxwarmpools
-  verbs:
-  - get
-  - list
   - watch
 - apiGroups:
   - gateway.orka.ai

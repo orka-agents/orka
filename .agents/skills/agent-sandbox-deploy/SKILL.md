@@ -267,8 +267,13 @@ YAML
   credentials. It verifies the install/config path, but it does **not** exercise
   claim → ready → exec → cleanup through the direct adapter.
 
-If you need to demonstrate the intended API shape before RuntimeSession-backed workspace support lands, run it only as an **expected-failure** check and wait for the gate
-instead of `Succeeded`:
+Workspace-provider-backed RuntimeSession dispatch is flag-gated: it requires
+both `--agent-sandbox-enabled` and `--acp-workspace-dispatch-enabled` on the
+controller, and the Task must omit `templateRef` (ACP RuntimeSessions run only
+controller-rendered sandbox templates). With the dispatch flag off (the
+default in this skill's deployments), a workspace-backed Task fails closed;
+demonstrate the API shape as an **expected-failure** check and wait for the
+gate instead of `Succeeded`:
 
 ```bash
 "$kindctl" kubectl apply -f - <<'YAML'
@@ -302,8 +307,6 @@ spec:
   execution:
     workspace:
       enabled: true
-      templateRef:
-        name: orka-live-template
       reusePolicy: none
       cleanupPolicy: delete
   prompt: "Reply exactly: ORKA_LIVE_SANDBOX_OK"
@@ -314,11 +317,13 @@ YAML
   task/orka-live-sandbox-smoke --timeout=2m
 ```
 
-Once ACP RuntimeSessions map agent Tasks to execution workspaces, the expected-failure
-check can become the live success smoke. At that point, a successful sandbox
-wrapper log should include the claimed workspace name, e.g. `completed in
-sandbox workspace sandbox-claim-...`. Orka Task status does **not** expose
-sandbox claim/exec/cleanup state — read worker logs and upstream agent-sandbox
+With `--acp-workspace-dispatch-enabled` set (plus real, digest-pinned ACP
+runtime images and provider-proxy model access), the same Task instead binds a
+dedicated `acp-ws-<runtime>-<hash>` RuntimePool whose SandboxClaim hosts the
+RuntimeSession, and the check becomes a live success smoke waiting for
+`Succeeded`. Orka Task status stays provider-neutral
+(`status.executionWorkspace` carries provider/phase/reason only, never claim
+or sandbox names) — read the RuntimePool status and upstream agent-sandbox
 resources for lifecycle detail.
 
 ### Model-free CI parity

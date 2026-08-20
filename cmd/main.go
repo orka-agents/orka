@@ -243,6 +243,7 @@ func main() {
 	var acpProviderProxyPodLabels string
 	var acpProviderProxyTokenFile string
 	var agentSandboxEnabled bool
+	var acpWorkspaceDispatchEnabled bool
 	var agentSandboxCleanupPolicy string
 	var oidcIssuer string
 	var oidcAudience string
@@ -300,6 +301,7 @@ func main() {
 	executionWorkspaceDefaultProvider := controller.ExecutionWorkspaceDefaultProviderFromEnv(os.Getenv)
 	executionWorkspaceDefaultProviderFlag := string(executionWorkspaceDefaultProvider)
 	agentSandboxEnabled = strings.EqualFold(os.Getenv("ORKA_AGENT_SANDBOX_ENABLED"), "true")
+	acpWorkspaceDispatchEnabled = strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_DISPATCH_ENABLED"), "true")
 	agentSandboxConfig, agentSandboxConfigErr := controller.AgentSandboxConfigFromEnv(os.Getenv)
 	agentSandboxCleanupPolicy = string(agentSandboxConfig.CleanupPolicy)
 	substrateEnabled := strings.EqualFold(os.Getenv("ORKA_SUBSTRATE_ENABLED"), "true")
@@ -467,6 +469,8 @@ func main() {
 		"Default execution workspace provider when Task execution.workspace.provider is omitted (agent-sandbox, substrate).")
 	flag.BoolVar(&agentSandboxEnabled, "agent-sandbox-enabled", agentSandboxEnabled,
 		"Enable experimental agent sandbox workspace execution for agent Tasks.")
+	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
+		"Admit workspace-provider-backed ACP RuntimeSession dispatch (requires --agent-sandbox-enabled); when false, Task.spec.execution.workspace agent Tasks fail closed.")
 	flag.StringVar(&agentSandboxConfig.RouterURL, "agent-sandbox-router-url", agentSandboxConfig.RouterURL,
 		"Agent sandbox router base URL used by worker Jobs for workspace claims.")
 	flag.StringVar(&agentSandboxConfig.DefaultTemplate, "agent-sandbox-default-template",
@@ -1395,6 +1399,7 @@ func main() {
 		MaxTasksPerNamespace:              maxTasksPerNamespaceValue,
 		ExecutionWorkspaceDefaultProvider: executionWorkspaceDefaultProvider,
 		WorkspaceProviderAPIEnabled:       workspaceProviderAPIEnabled,
+		ACPWorkspaceDispatchEnabled:       acpWorkspaceDispatchEnabled,
 		AgentSandboxEnabled:               agentSandboxEnabled,
 		AgentSandboxConfig:                agentSandboxConfig,
 		SubstrateEnabled:                  substrateEnabled,

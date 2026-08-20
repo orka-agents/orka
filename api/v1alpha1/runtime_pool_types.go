@@ -214,6 +214,27 @@ type RuntimePoolProfileSpec struct {
 	ResourceClass string `json:"resourceClass"`
 }
 
+// RuntimePoolExecutionWorkspaceSpec binds a pool's runtime workload to an
+// externally operated execution-workspace provider instead of a
+// controller-owned Deployment. The rendered supervisor Pod template, image
+// allowlist, epoch-scoped Secrets, endpoint fencing, and admission semantics
+// are identical to plain pools; only workload materialization changes.
+// Provider-native identifiers never enter public Task status.
+type RuntimePoolExecutionWorkspaceSpec struct {
+	// Provider selects the execution-workspace provider control plane hosting
+	// this pool's single runtime instance.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=agent-sandbox
+	Provider WorkspaceProvider `json:"provider"`
+
+	// BindingDigest is the canonical digest of the frozen workspace binding
+	// (provider, policies, and session key) that names this pool. It is part of
+	// the pool identity and carries no provider-native or secret material.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	BindingDigest string `json:"bindingDigest"`
+}
+
 // RuntimePoolRuntimeSpec selects the immutable supervisor image and profile.
 type RuntimePoolRuntimeSpec struct {
 	// Image is a digest-pinned OCI image. Mutable tags are intentionally rejected.
@@ -251,6 +272,7 @@ type RuntimePoolCapacitySpec struct {
 // +kubebuilder:validation:XValidation:rule="self.trustDomain == oldSelf.trustDomain",message="trustDomain is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.runtimeNamespace) == has(oldSelf.runtimeNamespace) && (!has(self.runtimeNamespace) || self.runtimeNamespace == oldSelf.runtimeNamespace)",message="runtimeNamespace is immutable"
 // +kubebuilder:validation:XValidation:rule="self.runtime == oldSelf.runtime",message="runtime image and profile are immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.executionWorkspace) == has(oldSelf.executionWorkspace) && (!has(self.executionWorkspace) || self.executionWorkspace == oldSelf.executionWorkspace)",message="executionWorkspace binding is immutable"
 type RuntimePoolSpec struct {
 	// TrustDomain is the logical namespace/identity boundary served by this pool.
 	// +kubebuilder:validation:Required
@@ -266,6 +288,13 @@ type RuntimePoolSpec struct {
 	// Runtime pins the immutable supervisor image and behavior profile.
 	// +kubebuilder:validation:Required
 	Runtime RuntimePoolRuntimeSpec `json:"runtime"`
+
+	// ExecutionWorkspace, when set, materializes the pool's single runtime
+	// instance through an externally operated execution-workspace provider
+	// instead of a controller-owned Deployment. The binding is immutable;
+	// workspace-backed pools host exactly one resident RuntimeSession.
+	// +optional
+	ExecutionWorkspace *RuntimePoolExecutionWorkspaceSpec `json:"executionWorkspace,omitempty"`
 
 	// DesiredReplicas is zero or one. More than one runtime Pod would make
 	// stateful exact-instance routing ambiguous.

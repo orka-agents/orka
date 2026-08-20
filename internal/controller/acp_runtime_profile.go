@@ -27,6 +27,9 @@ type ACPRuntimePlan struct {
 	Image    string
 	Profile  harnessv2.RuntimeProfile
 	Digest   harnessv2.ProfileDigest
+	// Workspace, when set, binds the pool to an execution-workspace provider.
+	// It changes PoolName so workspace-backed sessions never share a plain pool.
+	Workspace *ACPRuntimeWorkspaceBinding
 }
 
 // validateACPRuntimePlanningAgent gates ACP planning on a complete built-in
@@ -162,6 +165,21 @@ func RuntimePoolProfileFromPlan(plan ACPRuntimePlan) corev1alpha1.RuntimePoolPro
 		ProxyCredentialRole: plan.Profile.ProxyCredentialRole, ProxyCredentialScope: plan.Profile.ProxyCredentialScope,
 		ResourceClass: plan.Profile.ResourceClass,
 	}
+}
+
+// acpRuntimePoolWorkspaceMatchesPlan requires an exact match between the
+// pool's immutable execution-workspace binding and the frozen plan: plain
+// plans never bind to workspace-backed pools and vice versa.
+func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACPRuntimePlan) bool {
+	if pool == nil {
+		return false
+	}
+	if plan.Workspace == nil {
+		return pool.Spec.ExecutionWorkspace == nil
+	}
+	return pool.Spec.ExecutionWorkspace != nil &&
+		pool.Spec.ExecutionWorkspace.Provider == plan.Workspace.Provider &&
+		pool.Spec.ExecutionWorkspace.BindingDigest == plan.Workspace.BindingDigest
 }
 
 func acpRuntimePoolBindingMatches(status *corev1alpha1.TaskExecutionStatus, pool *corev1alpha1.RuntimePool) bool {

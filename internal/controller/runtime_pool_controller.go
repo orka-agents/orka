@@ -81,6 +81,7 @@ const (
 	runtimePoolProviderTokenPath    = "/var/run/secrets/orka/provider/token"
 	runtimePoolOperationHeader      = "X-Orka-Operation-Capability"
 
+	runtimePoolAuthVolume     = "pool-auth"
 	runtimePoolSessionsVolume = "sessions"
 	runtimePoolTempVolume     = "tmp"
 	runtimePoolHomeVolume     = "home"
@@ -362,6 +363,9 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.ensureRuntimePoolAncillaryResources(ctx, pool, cfg); err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
+	if pool.Spec.ExecutionWorkspace != nil {
+		return r.reconcileWorkspaceBackedRuntimePool(ctx, pool, cfg, authSecret, providerSecret)
+	}
 
 	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
 	desiredTemplate := r.runtimePoolPodTemplate(pool, cfg, selector, authSecret.Name, providerSecret.Name)
@@ -438,6 +442,9 @@ func (r *RuntimePoolReconciler) runtimePoolConfig(pool *corev1alpha1.RuntimePool
 	}
 	profile, protocol, err := validateRuntimePoolProfile(pool)
 	if err != nil {
+		return runtimePoolConfig{}, err
+	}
+	if err := validateRuntimePoolExecutionWorkspace(pool); err != nil {
 		return runtimePoolConfig{}, err
 	}
 	namespace, err := r.runtimePoolNamespace(pool)
@@ -696,8 +703,8 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 	case probe.Status.Lifecycle == harnessv2.SupervisorLifecycleUnhealthy:
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = "runtime supervisor reported unhealthy; recycling exact Pod"
-		if err := r.Delete(ctx, &readyPods[0]); err != nil && !apierrors.IsNotFound(err) {
+		status.Message = "runtime supervisor reported unhealthy; recycling exact instance"
+		if err := r.recycleRuntimePoolInstance(ctx, pool, &readyPods[0]); err != nil {
 			return ctrl.Result{}, err
 		}
 	case probe.Status.Drain.Requested || probe.Status.Lifecycle == harnessv2.SupervisorLifecycleDraining || probe.Status.Lifecycle == harnessv2.SupervisorLifecycleTerminating:
@@ -749,7 +756,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolInPlaceSupervisorRestart(
 			return ctrl.Result{}, err
 		}
 	}
-	if err := r.Delete(ctx, pod, deleteCurrentObjectPreconditions(pod)...); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.recycleRuntimePoolInstance(ctx, pool, pod); err != nil {
 		return ctrl.Result{}, err
 	}
 	status.ActiveInstance = nil
@@ -856,7 +863,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolIdentityCapacityRotation(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
-	if err := r.Delete(ctx, pod, deleteCurrentObjectPreconditions(pod)...); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.recycleRuntimePoolInstance(ctx, pool, pod); err != nil {
 		return ctrl.Result{}, err
 	}
 	status.ActiveInstance = nil
@@ -1778,7 +1785,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 				},
 				Resources: runtimePoolResourceRequirements(pool.Spec.Runtime.Profile.ResourceClass),
 				VolumeMounts: []corev1.VolumeMount{
-					{Name: "pool-auth", MountPath: "/var/run/secrets/orka/auth", ReadOnly: true},
+					{Name: runtimePoolAuthVolume, MountPath: "/var/run/secrets/orka/auth", ReadOnly: true},
 					{Name: "provider-capability", MountPath: "/var/run/secrets/orka/provider", ReadOnly: true},
 					{Name: runtimePoolSessionsVolume, MountPath: "/sessions"},
 					{Name: runtimePoolTempVolume, MountPath: "/tmp"},
@@ -1790,7 +1797,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 				Lifecycle:      &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{Sleep: &corev1.SleepAction{Seconds: 5}}},
 			}},
 			Volumes: []corev1.Volume{
-				{Name: "pool-auth", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: authSecretName, DefaultMode: &mode, Items: []corev1.KeyToPath{
+				{Name: runtimePoolAuthVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: authSecretName, DefaultMode: &mode, Items: []corev1.KeyToPath{
 					{Key: runtimePoolControllerTokenKey, Path: runtimePoolControllerTokenKey, Mode: &mode},
 					{Key: runtimePoolCapabilitySecretKey, Path: runtimePoolCapabilitySecretKey, Mode: &mode},
 				}}}},
@@ -2114,7 +2121,20 @@ func runtimePoolDeploymentValidationTarget(
 	if pool == nil || deployment == nil || len(deployment.Spec.Template.Spec.Containers) != 1 {
 		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool template is invalid")
 	}
-	environment := runtimePoolLiteralEnvironment(deployment.Spec.Template.Spec.Containers[0].Env)
+	return runtimePoolValidationTargetFromTemplate(pool, deployment.Spec.Template)
+}
+
+// runtimePoolValidationTargetFromTemplate reconstructs the deployed pool
+// identity from a rendered Pod template regardless of the workload backend
+// (Deployment or provider workspace) that materialized it.
+func runtimePoolValidationTargetFromTemplate(
+	pool *corev1alpha1.RuntimePool,
+	template corev1.PodTemplateSpec,
+) (*corev1alpha1.RuntimePool, runtimePoolConfig, error) {
+	if pool == nil || len(template.Spec.Containers) != 1 {
+		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool template is invalid")
+	}
+	environment := runtimePoolLiteralEnvironment(template.Spec.Containers[0].Env)
 	poolGeneration, err := strconv.ParseInt(environment["ORKA_ACP_RUNTIME_POOL_GENERATION"], 10, 64)
 	if err != nil || poolGeneration <= 0 {
 		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool generation is invalid")
@@ -2125,11 +2145,11 @@ func runtimePoolDeploymentValidationTarget(
 	}
 	providerGeneration := strings.TrimSpace(environment["ORKA_ACP_PROVIDER_TOKEN_GENERATION"])
 	if !validRuntimePoolProviderTokenGeneration(providerGeneration) ||
-		deployment.Spec.Template.Annotations[runtimePoolProviderTokenGenerationAnnotation] != providerGeneration {
+		template.Annotations[runtimePoolProviderTokenGenerationAnnotation] != providerGeneration {
 		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool provider token generation is invalid")
 	}
 	profileDigest := strings.TrimSpace(environment["ORKA_ACP_RUNTIME_PROFILE_DIGEST"])
-	if !validSHA256Digest(profileDigest) || deployment.Spec.Template.Annotations[runtimePoolProfileAnnotation] != profileDigest {
+	if !validSHA256Digest(profileDigest) || template.Annotations[runtimePoolProfileAnnotation] != profileDigest {
 		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool profile digest is invalid")
 	}
 	adapterDigests := map[string]string{}
@@ -2224,7 +2244,7 @@ func (r *RuntimePoolReconciler) runtimePoolDeploymentAuthSecret(
 	secretName := ""
 	for i := range deployment.Spec.Template.Spec.Volumes {
 		volume := deployment.Spec.Template.Spec.Volumes[i]
-		if volume.Name == "pool-auth" && volume.Secret != nil {
+		if volume.Name == runtimePoolAuthVolume && volume.Secret != nil {
 			secretName = strings.TrimSpace(volume.Secret.SecretName)
 			break
 		}
@@ -2517,6 +2537,13 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 	remaining, err := r.deleteRuntimePoolChildren(ctx, cfg)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if pool.Spec.ExecutionWorkspace != nil {
+		workspaceRemaining, workspaceErr := r.deleteRuntimePoolWorkspaceChildren(ctx, cfg)
+		if workspaceErr != nil {
+			return ctrl.Result{}, workspaceErr
+		}
+		remaining = remaining || workspaceRemaining
 	}
 	if remaining {
 		return ctrl.Result{RequeueAfter: time.Second}, nil

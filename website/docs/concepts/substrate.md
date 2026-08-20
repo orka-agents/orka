@@ -4,7 +4,7 @@ slug: /substrate
 
 # Agent Substrate Workspaces
 
-Agent Substrate is the planned next execution-workspace phase after the initial ACP core runtime. The current built-in `type: agent` path does not run Tasks in Substrate Actors and rejects `Task.spec.execution.workspace` rather than falling back to the removed worker-based path.
+Agent Substrate is the planned second execution-workspace phase (Phase 2 of workspace-provider-backed RuntimeSessions). The built-in `type: agent` path does not run Tasks in Substrate Actors yet: a `Task.spec.execution.workspace` request with `provider: substrate` fails closed before any workspace or RuntimePool demand exists, and never falls back to the removed worker-based path or to the agent-sandbox backend. Phase 1 (agent-sandbox) is documented in [Agent Sandbox Workspaces](agent-sandbox.md); Substrate will plug into the same workspace-provider-backed RuntimePool seam while adding suspend/resume, placement, and snapshot semantics.
 
 Use top-level `Task.spec.workspace` for current ACP repository input and publication policy:
 

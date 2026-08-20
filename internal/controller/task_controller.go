@@ -139,6 +139,10 @@ type TaskReconciler struct {
 	MaxTasksPerNamespace              int32
 	ExecutionWorkspaceDefaultProvider corev1alpha1.WorkspaceProvider
 	WorkspaceProviderAPIEnabled       bool
+	// ACPWorkspaceDispatchEnabled admits workspace-provider-backed ACP
+	// RuntimeSession dispatch. When false, workspace-backed agent Tasks fail
+	// closed before any workspace or RuntimePool demand exists.
+	ACPWorkspaceDispatchEnabled       bool
 	AgentSandboxEnabled               bool
 	AgentSandboxConfig                AgentSandboxConfig
 	SubstrateEnabled                  bool
@@ -362,6 +366,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			"Task status initialized to Pending",
 		)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Handle based on current phase
@@ -3080,12 +3088,12 @@ func (r *TaskReconciler) validateExecutionWorkspaceProviderConfig(
 		if !r.AgentSandboxEnabled {
 			return fmt.Errorf("execution workspace provider %q requires agent sandbox to be enabled", provider)
 		}
-		cfg := r.AgentSandboxConfig.WithDefaults()
-		if err := cfg.Validate(); err != nil {
-			return err
-		}
-		if executionWorkspaceTemplateName(ws, cfg) == "" {
-			return fmt.Errorf("execution workspace templateRef.name is required when no agent sandbox default template is configured")
+		// ACP RuntimeSessions execute only in controller-rendered sandbox
+		// templates: the immutable runtime image, epoch-scoped Secret mounts,
+		// and fence environment cannot be hosted by an operator-provided
+		// template without exposing credentials through the provider API.
+		if ws.TemplateRef != nil {
+			return fmt.Errorf("execution workspace templateRef selects a legacy worker-path sandbox template; ACP RuntimeSessions run only in controller-rendered sandbox templates, so templateRef must be omitted")
 		}
 	case corev1alpha1.WorkspaceProviderSubstrate:
 		if !r.SubstrateEnabled {

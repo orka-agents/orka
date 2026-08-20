@@ -4,9 +4,14 @@ slug: /agent-sandbox
 
 # Agent Sandbox Workspaces
 
-Upstream `agent-sandbox` integration is a deferred execution-workspace provider for the ACP core runtime. It is not part of the current built-in ACP v2 Task path.
+Upstream `agent-sandbox` is an externally installed and operated
+execution-workspace provider. Orka can host a built-in agent Task's ACP
+RuntimeSession inside a provider-owned sandbox through a
+**workspace-provider-backed RuntimePool**. The integration is disabled by
+default and fails closed.
 
-A `type: agent` Task that sets `Task.spec.execution.workspace` is currently rejected with a fail-closed validation error. Use top-level `Task.spec.workspace` for the source repository, workspace intent, and clean-room publication policy:
+`Task.spec.workspace` remains the only repository surface — verified source,
+workspace intent, and clean-room publication policy:
 
 ```yaml
 spec:
@@ -18,41 +23,94 @@ spec:
       name: project-read
 ```
 
-`spec.workspace` does not request a durable sandbox. It describes the verified source and publication boundary for the ephemeral RuntimeSession workspace.
+`Task.spec.execution.workspace` additionally requests a physical
+execution-workspace provider for the RuntimeSession:
 
-## Current ACP v2 execution model
+```yaml
+spec:
+  type: agent
+  execution:
+    workspace:
+      enabled: true
+      provider: agent-sandbox
+      # reusePolicy: session   # with spec.sessionRef, continuation reuses the
+      #                        # same workspace-backed pool while it is alive
+```
 
-Built-in agent Tasks run in controller-owned RuntimePools:
+## Execution model
 
 ```text
 Task
-  -> RuntimePool
-  -> ephemeral RuntimeSession inside the exact runtime Pod
-  -> workspace validation
-  -> optional clean-room Workspace/Publisher transaction
+  -> workspace binding frozen into the immutable execution snapshot
+  -> dedicated single-session RuntimePool (acp-ws-<runtime>-<hash>)
+  -> controller-rendered SandboxTemplate + zero-replica SandboxWarmPool
+  -> one SandboxClaim; the sandbox Pod runs the immutable ACP runtime image
+  -> the authenticated exact-instance fence probe selects the ActiveInstance
+  -> ephemeral RuntimeSession, fenced prompts, workspace validation,
+     optional clean-room Workspace/Publisher transaction — all unchanged
 ```
 
-The runtime Pod has no Git credential and no direct SCM publication egress. Source materialization and publication are separate Orka operations.
+Only workload materialization changes: the provider control plane owns the
+sandbox and its Pod, while Orka owns the Task attempt, RuntimeSession, prompt
+lease, fences, publication records, drain barriers, and recovery. The sandbox
+Pod has no Git credential and no direct SCM publication egress; the pool's own
+default-deny NetworkPolicies select it, and the provider's managed
+NetworkPolicy is disabled.
 
-## Deferred provider seam
+## Enablement and fail-closed boundaries
 
-A future `agent-sandbox` integration must preserve the same `orka.harness.v2` lifecycle and governance boundaries. In particular, it must:
+Dispatch requires both controller flags:
 
-- keep the Task attempt, RuntimeSession, prompt lease, fences, and publication records authoritative in Orka;
-- expose one RuntimeSession through the v2 session operations rather than creating an agent Job fallback;
-- materialize only verified workspace artifacts;
-- keep source-read, target-read, target-write, and forge credentials outside the ACP child process tree;
-- produce an Orka-owned workspace delta after prompt settlement;
-- block eviction while validation, publication, finalization, or Session lease work is active;
-- fail closed on ambiguous runtime loss instead of replaying an accepted prompt;
-- preserve exact process cleanup and credential-revocation guarantees across suspension/resume.
+- `--agent-sandbox-enabled` — the provider is installed and admitted;
+- `--acp-workspace-dispatch-enabled` — workspace-provider-backed RuntimeSession
+  dispatch (also `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED=true`).
 
-Durable workspace resume, provider-session restore, prompt replay, stream reconnect, and transparent migration are not implied by ACP v2 and require separate reviewed designs.
+Everything the adapter cannot host is rejected before any workspace or
+RuntimePool demand exists, with the reason projected to
+`Task.status.executionWorkspace`:
+
+- `provider: substrate` (Phase 2; see the Substrate page);
+- `templateRef` — ACP RuntimeSessions run only controller-rendered sandbox
+  templates, because the immutable runtime image, epoch-scoped Secret mounts,
+  and fence environment cannot be hosted by an operator template without
+  exposing credentials through the provider API;
+- `cleanupPolicy: retain`, `onDetach`, `boot`, `poolRef`, `snapshot`,
+  `hibernation`;
+- any workspace request on the harness-v1 path — there is no cross-mode
+  fallback in either direction;
+- missing provider CRDs — the pool degrades and closes admission rather than
+  falling back to a Deployment workload.
+
+Task status stays provider-neutral: provider, phase, reason, and policies.
+Claim, sandbox, and template names, Pod IPs, and other provider-native
+identifiers never enter public Task status.
+
+## Lifecycle
+
+The claim is deleted after an authenticated supervisor drain and a persisted
+quiescence barrier (scale-to-zero, rollout, supervisor restart, or
+identity-capacity rotation), and the provider cascades the sandbox and Pod.
+Pool finalization removes the claim, warm pool, and template idempotently. A
+stopped, idle workspace pool object is garbage-collected after a second idle
+TTL; recovery treats the missing pool as proof of RuntimeSession cleanup and
+fresh demand recreates it deterministically by name.
+
+See `docs/adr/0024-acp-execution-workspace-runtime-pools.md` for the full
+provider-neutral contract, ownership state machine, and recovery semantics.
 
 ## RuntimeClass
 
-`Task.spec.execution.runtimeClassName`, per-Task placement, and custom Task resource requests are also not supported by the current built-in ACP path. Runtime isolation and resources are selected through reviewed RuntimePool profiles. Container and native `ai` Tasks keep their existing `spec.execution` behavior.
+`Task.spec.execution.runtimeClassName`, per-Task placement, and custom Task
+resource requests remain unsupported by the built-in ACP path. Runtime
+isolation and resources are selected through reviewed RuntimePool profiles.
+Container and native `ai` Tasks keep their existing `spec.execution` behavior.
 
 ## Local evaluation material
 
-The repository still contains local/kind evaluation scripts for the older execution-workspace prototype. They are not the supported ACP v2 deployment path and should not be used as release evidence. Live ACP validation should instead verify RuntimePool scale-up, exact-instance fencing, Session continuation, cancellation, workspace validation, clean-room publication, controller restart behavior, pool replacement, and cleanup.
+The repository still contains local/kind evaluation scripts for the older
+worker-based execution-workspace prototype. They are not the supported ACP v2
+deployment path and should not be used as release evidence. Live ACP
+validation should verify RuntimePool scale-up, exact-instance fencing, Session
+continuation, cancellation, workspace validation, clean-room publication,
+controller restart behavior, pool replacement, and cleanup — including the
+workspace-backed pool variants when the dispatch flag is enabled.

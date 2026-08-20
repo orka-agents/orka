@@ -356,7 +356,7 @@ execution:
 | `nodeSelector` | map[string]string | Restricts native worker Pods to nodes with matching labels |
 | `tolerations` | list | Allows native worker Pods onto tainted runtime-specific node pools |
 | `affinity` | object | Adds Kubernetes affinity or anti-affinity rules for native worker Pods |
-| `workspace` | object | Legacy experimental execution-workspace request. The ACP core runtime rejects it; use top-level `Task.spec.workspace`. |
+| `workspace` | object | Execution-workspace provider request. With `provider: agent-sandbox` and workspace dispatch enabled, the ACP runtime hosts the Task's RuntimeSession in a workspace-provider-backed RuntimePool; everything else fails closed. Repository access always uses top-level `Task.spec.workspace`. |
 
 Resolution order:
 
@@ -367,9 +367,9 @@ Resolution order:
 
 #### Execution Workspace Requests
 
-`Task.spec.execution.workspace` remains in the alpha API for earlier execution-workspace experiments, but the ACP core runtime rejects it and does not create a worker Job fallback. Use top-level `Task.spec.workspace` for the current verified source/publication contract.
+`Task.spec.execution.workspace` requests a physical execution-workspace provider for the Task's ACP RuntimeSession. With `provider: agent-sandbox`, `--agent-sandbox-enabled`, and `--acp-workspace-dispatch-enabled`, the RuntimeSession executes in a dedicated workspace-provider-backed RuntimePool; unsupported providers or options (Substrate, `templateRef`, `cleanupPolicy: retain`, boot/pool/snapshot/hibernation, `onDetach`) fail closed before any workspace or RuntimePool demand, with the reason projected to `Task.status.executionWorkspace`. There is no worker Job fallback and no harness-v1 fallback. Top-level `Task.spec.workspace` remains the verified source/publication contract.
 
-Upstream `agent-sandbox` and Agent Substrate integration are deferred behind the ACP v2 RuntimeSession seam. See [Agent Sandbox Workspaces](agent-sandbox.md) and [Agent Substrate Workspaces](substrate.md) for the required future invariants.
+See [Agent Sandbox Workspaces](agent-sandbox.md), [Agent Substrate Workspaces](substrate.md), and ADR 0024 for the provider-neutral contract.
 
 #### SubstrateActorPool
 
@@ -865,7 +865,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--watch-namespace` | required | One non-empty watched namespace carrying the matching `orka.ai/controller-mode` label. |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
-| `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` env or `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
+| `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` env or `false` | Admit the agent-sandbox execution-workspace provider for agent Tasks that set `execution.workspace` |
+| `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` env or `false` | Admit workspace-provider-backed ACP RuntimeSession dispatch; when false, workspace-backed agent Tasks fail closed |
 | `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` env or `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
 | `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` env or `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
 | `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Legacy compatibility setting: `disabled` or `template`; v0.5 claims use `SandboxWarmPool` references |
@@ -972,7 +973,7 @@ Task and Tool users select namespaced `ExecutionWorkspaceClass` objects. Provide
 
 ### Agent Sandbox Controller Settings
 
-These settings belong to the earlier execution-workspace prototype and remain disabled. The current ACP core path rejects `Task.spec.execution.workspace`; enabling these flags does not create an ACP fallback. They are retained only for local/deferred provider work:
+Workspace-provider-backed ACP RuntimeSession dispatch requires both `--agent-sandbox-enabled` and `--acp-workspace-dispatch-enabled`; with either unset, `Task.spec.execution.workspace` agent Tasks fail closed. The router/template/timeout settings below belong to the earlier worker-path prototype and are not used by the ACP RuntimePool backend (which renders its own sandbox templates):
 
 | Flag | Environment variable | Helm value | Default |
 |------|----------------------|------------|---------|

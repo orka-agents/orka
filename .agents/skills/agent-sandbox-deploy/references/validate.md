@@ -2,7 +2,7 @@
 
 Validation steps for `$agent-sandbox-deploy`. Read after the standard workflow completes.
 
-> **Known gate:** Orka ACP RuntimeSessions do not yet map to agent-sandbox claims. The direct adapter lifecycle is supported for local validation, but a `Task.spec.execution.workspace` agent Task must still fail closed with `WorkspaceValidationFailed`. Plain Codex/Claude Tasks run through controller-owned ACP RuntimePools and validate the model path separately.
+> **Known gate:** Workspace-provider-backed RuntimeSession dispatch is flag-gated behind `--agent-sandbox-enabled` **and** `--acp-workspace-dispatch-enabled`. With the dispatch flag off (the default in this skill's deployments), a `Task.spec.execution.workspace` agent Task fails closed with `WorkspaceValidationFailed`. The Task must omit `templateRef`; ACP RuntimeSessions run only controller-rendered sandbox templates. Plain Codex/Claude Tasks run through controller-owned ACP RuntimePools and validate the model path separately.
 
 Do **not** use an execution-workspace agent Task as the success criterion yet.
 Validate the three current surfaces separately: installation/configuration,
@@ -58,9 +58,8 @@ YAML
   `AgentSandboxExecutor`. It skips only the full Orka agent Task
   workspace path while the ACP workspace-dispatch gate is present.
 
-If you need to demonstrate the intended API shape before harness workspace
-support lands, run it only as an **expected-failure** check and wait for the gate
-instead of `Succeeded`:
+To demonstrate the API shape while the dispatch flag is off, run it as an
+**expected-failure** check and wait for the gate instead of `Succeeded`:
 
 ```bash
 "$kindctl" kubectl apply -f - <<'YAML'
@@ -94,8 +93,6 @@ spec:
   execution:
     workspace:
       enabled: true
-      templateRef:
-        name: orka-live-template
       reusePolicy: none
       cleanupPolicy: delete
   prompt: "Reply exactly: ORKA_LIVE_SANDBOX_OK"
@@ -106,12 +103,13 @@ YAML
   task/orka-live-sandbox-smoke --timeout=2m
 ```
 
-Once ACP RuntimeSessions map agent Tasks to execution workspaces, the expected-failure
-check can become the live success smoke. At that point, a successful sandbox
-wrapper log should include the claimed workspace name, e.g. `completed in
-sandbox workspace sandbox-claim-...`. Orka Task status does **not** expose
-sandbox claim/exec/cleanup state — read worker logs and upstream agent-sandbox
-resources for lifecycle detail.
+With `--acp-workspace-dispatch-enabled` set (plus real digest-pinned ACP
+runtime images and provider-proxy model access), the same Task binds a
+dedicated `acp-ws-<runtime>-<hash>` RuntimePool whose SandboxClaim hosts the
+RuntimeSession, and this becomes a live success smoke waiting for `Succeeded`.
+Orka Task status stays provider-neutral (`status.executionWorkspace` carries
+provider/phase/reason only, never claim or sandbox names) — read the
+RuntimePool status and upstream agent-sandbox resources for lifecycle detail.
 
 ## Model-free CI parity
 

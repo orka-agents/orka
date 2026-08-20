@@ -886,7 +886,7 @@ main() {
 
   run_workspace_smoke "${router_base}"
 
-  log "Skipping workspace-backed ACP Task smoke: Task.spec.execution.workspace is intentionally unsupported until RuntimeSession-to-agent-sandbox dispatch is implemented; the direct workspace adapter path was validated above"
+  log "Skipping workspace-backed ACP Task smoke: this workflow deploys placeholder ACP runtime image digests, so RuntimeSession execution (including the workspace-provider-backed RuntimePool path behind --acp-workspace-dispatch-enabled) is exercised by the live ACP runtime workflows instead; the direct workspace adapter path was validated above"
   log "Live agent-sandbox installation/configuration/workspace-adapter e2e passed"
 }
 

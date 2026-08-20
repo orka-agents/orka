@@ -21,12 +21,14 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
 
 const (
 	acpRuntimePoolLabel                      = "orka.ai/acp-runtime-pool"
 	acpRuntimeTrustLabel                     = "orka.ai/acp-trust-domain"
 	acpRuntimeProfileLabel                   = "orka.ai/acp-profile"
+	acpRuntimeWorkspaceProviderLabel         = "orka.ai/acp-execution-workspace-provider"
 	acpRuntimeTaskPoolLabel                  = "orka.ai/runtime-pool"
 	acpRuntimeSessionCleanupAnnotation       = "orka.ai/runtime-session-cleanup"
 	acpExternalRuntimeTaskLabel              = "orka.ai/agent-runtime"
@@ -149,6 +151,19 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	}
 	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
 		State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested, LastTransitionTime: &now,
+	}
+	if plan.Workspace != nil {
+		// Provider-neutral projection only: no claim, sandbox, or other
+		// provider-native identifier ever enters public Task status.
+		task.Status.ExecutionWorkspace = statusrules.Update{
+			Provider:      plan.Workspace.Provider,
+			Phase:         corev1alpha1.ExecutionWorkspacePhasePending,
+			Reason:        corev1alpha1.ExecutionWorkspaceReasonPending,
+			ReusePolicy:   plan.Workspace.ReusePolicy,
+			CleanupPolicy: plan.Workspace.CleanupPolicy,
+			Message:       "RuntimeSession is queued for a workspace-provider-backed RuntimePool",
+			ObservedAt:    &now,
+		}.Status()
 	}
 	if err := r.Status().Patch(ctx, task, client.MergeFrom(statusBase)); err != nil {
 		return ctrl.Result{}, err
@@ -1048,24 +1063,38 @@ func (r *TaskReconciler) ensureACPRuntimePool(ctx context.Context, namespace str
 	key := types.NamespacedName{Namespace: namespace, Name: plan.PoolName}
 	err := r.Get(ctx, key, pool)
 	if apierrors.IsNotFound(err) {
+		capacity := &corev1alpha1.RuntimePoolCapacitySpec{
+			MaxResidentSessions: corev1alpha1.DefaultRuntimePoolMaxResidentSessions,
+			MaxRunningPrompts:   corev1alpha1.DefaultRuntimePoolMaxRunningPrompts,
+		}
+		labels := map[string]string{
+			acpRuntimePoolLabel: "true", acpRuntimeTrustLabel: namespace,
+			acpRuntimeProfileLabel: strings.TrimPrefix(string(plan.Digest), "sha256:")[:16],
+		}
+		var executionWorkspace *corev1alpha1.RuntimePoolExecutionWorkspaceSpec
+		if plan.Workspace != nil {
+			// A workspace-backed pool hosts exactly one logical RuntimeSession
+			// inside one provider-owned physical workspace.
+			capacity = &corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 1, MaxRunningPrompts: 1}
+			labels[acpRuntimeWorkspaceProviderLabel] = string(plan.Workspace.Provider)
+			executionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider:      plan.Workspace.Provider,
+				BindingDigest: plan.Workspace.BindingDigest,
+			}
+		}
 		pool = &corev1alpha1.RuntimePool{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: namespace, Name: plan.PoolName,
 				Annotations: map[string]string{acpRuntimeLastDemandAnnotation: time.Now().UTC().Format(time.RFC3339Nano)},
-				Labels: map[string]string{
-					acpRuntimePoolLabel: "true", acpRuntimeTrustLabel: namespace,
-					acpRuntimeProfileLabel: strings.TrimPrefix(string(plan.Digest), "sha256:")[:16],
-				},
+				Labels:      labels,
 			},
 			Spec: corev1alpha1.RuntimePoolSpec{
-				TrustDomain:      corev1alpha1.RuntimePoolTrustDomain{Namespace: namespace, Identity: "namespace:" + namespace},
-				RuntimeNamespace: strings.TrimSpace(r.ACPRuntimeNamespace),
-				Runtime:          corev1alpha1.RuntimePoolRuntimeSpec{Image: plan.Image, Profile: RuntimePoolProfileFromPlan(plan)},
-				DesiredReplicas:  1,
-				Capacity: &corev1alpha1.RuntimePoolCapacitySpec{
-					MaxResidentSessions: corev1alpha1.DefaultRuntimePoolMaxResidentSessions,
-					MaxRunningPrompts:   corev1alpha1.DefaultRuntimePoolMaxRunningPrompts,
-				},
+				TrustDomain:             corev1alpha1.RuntimePoolTrustDomain{Namespace: namespace, Identity: "namespace:" + namespace},
+				RuntimeNamespace:        strings.TrimSpace(r.ACPRuntimeNamespace),
+				Runtime:                 corev1alpha1.RuntimePoolRuntimeSpec{Image: plan.Image, Profile: RuntimePoolProfileFromPlan(plan)},
+				ExecutionWorkspace:      executionWorkspace,
+				DesiredReplicas:         1,
+				Capacity:                capacity,
 				ColdStartTimeoutSeconds: corev1alpha1.DefaultRuntimePoolColdStartTimeoutSeconds,
 			},
 		}
@@ -1084,6 +1113,9 @@ func (r *TaskReconciler) ensureACPRuntimePool(ctx context.Context, namespace str
 	}
 	if pool.Spec.Runtime.Image != plan.Image || pool.Spec.Runtime.Profile.Digest != string(plan.Digest) {
 		return nil, fmt.Errorf("RuntimePool %s profile does not match queued Task", pool.Name)
+	}
+	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
+		return nil, fmt.Errorf("RuntimePool %s execution workspace binding does not match queued Task", pool.Name)
 	}
 	base := pool.DeepCopy()
 	changed := false

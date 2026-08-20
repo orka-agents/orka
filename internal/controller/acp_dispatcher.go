@@ -450,6 +450,12 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 			continue
 		}
 		pool = latest
+		if pool.Spec.DesiredReplicas == 0 {
+			if err := d.reapStoppedWorkspacePool(ctx, pool, activeByPool[key], now); err != nil {
+				return err
+			}
+			continue
+		}
 		if runtimePoolHasActiveDemand(pool, activeByPool[key]) {
 			continue
 		}
@@ -472,6 +478,35 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 		if err := d.Client.Patch(ctx, pool, patch); err != nil && !apierrors.IsConflict(err) {
 			return err
 		}
+	}
+	return nil
+}
+
+// reapStoppedWorkspacePool retires a scaled-to-zero workspace-backed pool
+// object after it has proven Stopped (drained, provider workspace deleted) and
+// stayed idle for another TTL. Recovery treats a missing pool as proof of
+// RuntimeSession cleanup, and fresh demand deterministically recreates the pool
+// by name. Plain pools are never deleted here; they are shared infrastructure.
+func (d *ACPDispatcher) reapStoppedWorkspacePool(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	activeTasks int,
+	now time.Time,
+) error {
+	if pool == nil || pool.Spec.ExecutionWorkspace == nil || activeTasks > 0 ||
+		pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped ||
+		pool.Status.ObservedGeneration != pool.Generation ||
+		pool.Status.Capacity.QueuedTasks > 0 || pool.Status.Capacity.FinalizingSessions > 0 ||
+		len(pool.Status.Capacity.Reservations) > 0 {
+		return nil
+	}
+	lastDemand, err := time.Parse(time.RFC3339Nano, pool.Annotations[acpRuntimeLastDemandAnnotation])
+	if err != nil || now.Sub(lastDemand) < 2*d.IdlePoolTTL {
+		return nil
+	}
+	if err := d.Client.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil &&
+		!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		return err
 	}
 	return nil
 }
@@ -689,6 +724,9 @@ func validateFrozenACPDispatchTarget(
 		task.Status.Execution.RuntimePoolName != target.pool.Name ||
 		task.Status.Execution.RuntimePoolUID != string(target.pool.UID) {
 		return errors.New("reserved RuntimePool does not exactly match the immutable execution snapshot")
+	}
+	if !acpRuntimePoolWorkspaceMatchesPlan(target.pool, bound.plan) {
+		return errors.New("reserved RuntimePool execution workspace binding does not exactly match the immutable execution snapshot")
 	}
 	return nil
 }

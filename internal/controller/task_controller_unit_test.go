@@ -1108,92 +1108,49 @@ func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 // validateExecutionWorkspace (pure logic)
 // ---------------------------------------------------------------------------
 
-func TestResolveExecutionWorkspaceRequestValidatesSandboxWarmPoolExists(t *testing.T) {
+func TestResolveExecutionWorkspaceRequestRejectsLegacyTemplateRef(t *testing.T) {
+	// ACP RuntimeSessions run only in controller-rendered sandbox templates, so
+	// the legacy operator-provided templateRef surface now fails closed before
+	// any warm-pool resolution.
 	scheme := newTestScheme()
-
-	executionWorkspace := func(name string, namespace string) *corev1alpha1.ExecutionWorkspaceSpec {
-		ws := &corev1alpha1.ExecutionWorkspaceSpec{
-			Enabled: true,
-			TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
-				Name: name,
-			},
-		}
-		if namespace != "" {
-			ws.TemplateRef.Namespace = namespace
-		}
-		return ws
-	}
-
-	task := func(name string, ws *corev1alpha1.ExecutionWorkspaceSpec) *corev1alpha1.Task {
-		return &corev1alpha1.Task{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNS},
-			Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: ws,
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-legacy-template", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:     true,
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "task-template"},
 				},
 			},
-		}
+		},
 	}
+	warmPool := &sandboxextv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: defaultNS},
+	}
+	r := newUnitReconciler(scheme, warmPool)
+	r.AgentSandboxEnabled = true
 
-	t.Run("existing warm pool in task namespace is accepted", func(t *testing.T) {
-		warmPool := &sandboxextv1beta1.SandboxWarmPool{
-			ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: defaultNS},
-		}
-		r := newUnitReconciler(scheme, warmPool)
-		r.AgentSandboxEnabled = true
-
-		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-ok", executionWorkspace("task-template", "")))
-		if err != nil {
-			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
-		}
-		if request == nil || request.TemplateName != "task-template" {
-			t.Fatalf("request = %#v, want template task-template", request)
-		}
-	})
-
-	t.Run("missing warm pool fails before job creation", func(t *testing.T) {
-		r := newUnitReconciler(scheme)
-		r.AgentSandboxEnabled = true
-
-		_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-missing", executionWorkspace("missing-template", "")))
-		if err == nil {
-			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want missing warm pool error")
-		}
-		want := `execution workspace warm pool "missing-template" not found in namespace "default"`
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error = %q, want substring %q", err.Error(), want)
-		}
-	})
-
-	t.Run("explicit warm pool namespace is accepted as claim namespace", func(t *testing.T) {
-		warmPool := &sandboxextv1beta1.SandboxWarmPool{
-			ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "sandbox-templates"},
-		}
-		r := newUnitReconciler(scheme, warmPool)
-		r.AgentSandboxEnabled = true
-
-		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-cross-ns", executionWorkspace("shared-template", "sandbox-templates")))
-		if err != nil {
-			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
-		}
-		if request.ClaimNamespace != "sandbox-templates" {
-			t.Fatalf("ClaimNamespace = %q, want sandbox-templates", request.ClaimNamespace)
-		}
-	})
+	_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task)
+	if err == nil || !strings.Contains(err.Error(), "templateRef must be omitted") {
+		t.Fatalf("resolveExecutionWorkspaceRequest() error = %v, want templateRef rejection", err)
+	}
 }
 
 func TestValidateExecutionWorkspace(t *testing.T) {
 	executionWorkspace := func(mutators ...func(*corev1alpha1.ExecutionWorkspaceSpec)) *corev1alpha1.ExecutionWorkspaceSpec {
-		ws := &corev1alpha1.ExecutionWorkspaceSpec{
-			Enabled:     true,
-			TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "default"},
-		}
+		// ACP RuntimeSessions run in controller-rendered sandbox templates, so a
+		// valid request omits templateRef entirely.
+		ws := &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}
 		for _, mutate := range mutators {
 			mutate(ws)
 		}
 		return ws
 	}
+	substrateTemplateRef := func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+		ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "default"}
+	}
+	_ = substrateTemplateRef
 
 	tests := []struct {
 		name                        string
@@ -1263,37 +1220,30 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			wantErr: "only supported for type: agent",
 		},
 		{
-			name:                "missing templateRef",
+			name:                "templateRef is rejected for ACP RuntimeSessions",
 			agentSandboxEnabled: true,
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef = nil }),
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "operator-template"}
+					}),
 				},
 			}},
-			wantErr: "templateRef.name is required",
+			wantErr: "templateRef must be omitted",
 		},
 		{
-			name:                "missing templateRef name",
+			name:                "empty templateRef name is still a templateRef and is rejected",
 			agentSandboxEnabled: true,
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef.Name = "" }),
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{}
+					}),
 				},
 			}},
-			wantErr: "templateRef.name is required",
-		},
-		{
-			name:                "default template satisfies missing templateRef",
-			agentSandboxEnabled: true,
-			agentSandboxConfig:  AgentSandboxConfig{DefaultTemplate: "controller-default"},
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef = nil }),
-				},
-			}},
+			wantErr: "templateRef must be omitted",
 		},
 		{
 			name:                "unsupported reusePolicy",
@@ -1389,7 +1339,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+					Workspace: executionWorkspace(substrateTemplateRef, func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
 						ws.PoolRef = &corev1alpha1.SubstrateActorPoolReference{Name: "codex-pool"}
 					}),
@@ -1407,7 +1357,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+					Workspace: executionWorkspace(substrateTemplateRef, func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
 						ws.PoolRef = &corev1alpha1.SubstrateActorPoolReference{Name: "codex-pool"}
 						ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
@@ -6078,15 +6028,15 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
-	if !strings.Contains(updated.Status.Message, "Task.spec.execution.workspace is not supported by the ACP core runtime; use Task.spec.workspace") {
-		t.Fatalf("message = %q, want workspace unsupported failure", updated.Status.Message)
+	if !strings.Contains(updated.Status.Message, "templateRef must be omitted") {
+		t.Fatalf("message = %q, want templateRef rejection", updated.Status.Message)
 	}
 	assertExecutionWorkspaceValidationFailedStatus(
 		t,
 		updated.Status.ExecutionWorkspace,
 		corev1alpha1.WorkspaceProviderAgentSandbox,
 		template.Name,
-		"Task.spec.execution.workspace is not supported by the ACP core runtime; use Task.spec.workspace",
+		"templateRef must be omitted",
 	)
 	assertNoJobsForTask(t, r, task)
 }
@@ -6194,18 +6144,22 @@ func TestHandlePending_ExecutionWorkspaceUnsupportedProviderStatusOmitsProviderD
 	assertNoJobsForTask(t, r, task)
 }
 
-func TestHandlePending_ExecutionWorkspaceResolutionFailureSetsWorkspaceStatus(t *testing.T) {
+func TestHandlePending_ExecutionWorkspaceDispatchDisabledFailsClosed(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeCodex,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "workspace-resolution-fails",
+			Name:      "workspace-dispatch-disabled",
 			Namespace: defaultNS,
+			UID:       "task-uid-workspace-dispatch",
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
@@ -6215,9 +6169,6 @@ func TestHandlePending_ExecutionWorkspaceResolutionFailureSetsWorkspaceStatus(t 
 				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
 					Enabled:  true,
 					Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
-					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
-						Name: "missing-template",
-					},
 				},
 			},
 		},
@@ -6225,6 +6176,7 @@ func TestHandlePending_ExecutionWorkspaceResolutionFailureSetsWorkspaceStatus(t 
 	}
 	r := newUnitReconciler(scheme, task, agent)
 	r.AgentSandboxEnabled = true
+	r.ACPRuntimeEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -6241,9 +6193,18 @@ func TestHandlePending_ExecutionWorkspaceResolutionFailureSetsWorkspaceStatus(t 
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
-	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderAgentSandbox, "missing-template", "execution workspace warm pool")
-	if !strings.Contains(updated.Status.Message, "failed to resolve execution workspace") {
-		t.Fatalf("message = %q, want resolve execution workspace failure", updated.Status.Message)
+	if !strings.Contains(updated.Status.Message, "acp-workspace-dispatch-enabled") {
+		t.Fatalf("message = %q, want workspace dispatch disabled failure", updated.Status.Message)
+	}
+	status := updated.Status.ExecutionWorkspace
+	if status == nil {
+		t.Fatal("ExecutionWorkspace status is nil")
+	}
+	if status.Phase != corev1alpha1.ExecutionWorkspacePhaseFailed || status.Reason != corev1alpha1.ExecutionWorkspaceReasonValidationFailed {
+		t.Fatalf("workspace status phase/reason = %q/%q, want Failed/WorkspaceValidationFailed", status.Phase, status.Reason)
+	}
+	if !strings.Contains(status.Message, "acp-workspace-dispatch-enabled") {
+		t.Fatalf("workspace status message = %q, want dispatch disabled", status.Message)
 	}
 	assertNoJobsForTask(t, r, task)
 }

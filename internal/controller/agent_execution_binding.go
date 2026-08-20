@@ -69,6 +69,21 @@ type agentExecutionSnapshotBody struct {
 	RuntimeOverride  *corev1alpha1.AgentRuntimeSpec    `json:"runtimeOverride,omitempty"`
 	DefaultTools     *agentExecutionSnapshotToolPolicy `json:"defaultTools,omitempty"`
 	HarnessV1        *agentExecutionSnapshotHarnessV1  `json:"harnessV1,omitempty"`
+	// ExecutionWorkspace freezes the resolved execution-workspace binding for
+	// workspace-provider-backed RuntimePools. It is absent for plain pools.
+	ExecutionWorkspace *agentExecutionSnapshotWorkspaceBinding `json:"executionWorkspace,omitempty"`
+}
+
+// agentExecutionSnapshotWorkspaceBinding freezes the canonical, provider-neutral
+// execution-workspace binding. It never carries provider-native identifiers,
+// physical workspace names, or secrets.
+type agentExecutionSnapshotWorkspaceBinding struct {
+	Provider      string `json:"provider"`
+	ReusePolicy   string `json:"reusePolicy"`
+	CleanupPolicy string `json:"cleanupPolicy"`
+	WorkspaceSlot string `json:"workspaceSlot"`
+	SessionKey    string `json:"sessionKey"`
+	BindingDigest string `json:"bindingDigest"`
 }
 
 type agentExecutionSnapshotAgent struct {
@@ -181,6 +196,14 @@ func (r *TaskReconciler) resolveAgentExecutionCandidate(
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
+	workspaceBinding, err := resolveACPWorkspaceBinding(task, r.ExecutionWorkspaceDefaultProvider)
+	if err != nil {
+		return nil, permanentACPAgentConfiguration(err)
+	}
+	plan, err = applyACPWorkspaceBindingToPlan(plan, workspaceBinding)
+	if err != nil {
+		return nil, err
+	}
 	var mcpConfiguration harnessv2.MCPPolicyConfiguration
 	if r.MCPRegistry != nil {
 		mcpConfiguration, err = buildRuntimeSessionMCPConfigurationWithRegistry(
@@ -233,6 +256,16 @@ func (r *TaskReconciler) resolveAgentExecutionCandidate(
 	}
 	if task.Spec.Timeout != nil {
 		body.Timeout = task.Spec.Timeout.Duration.String()
+	}
+	if workspaceBinding != nil {
+		body.ExecutionWorkspace = &agentExecutionSnapshotWorkspaceBinding{
+			Provider:      string(workspaceBinding.Provider),
+			ReusePolicy:   string(workspaceBinding.ReusePolicy),
+			CleanupPolicy: string(workspaceBinding.CleanupPolicy),
+			WorkspaceSlot: workspaceBinding.WorkspaceSlot,
+			SessionKey:    workspaceBinding.SessionKey,
+			BindingDigest: workspaceBinding.BindingDigest,
+		}
 	}
 	if agent.Spec.Runtime.DefaultAllowedTools != nil || agent.Spec.Runtime.DefaultAllowBash != nil {
 		body.DefaultTools = &agentExecutionSnapshotToolPolicy{
@@ -487,12 +520,59 @@ func validateAgentExecutionSnapshot(
 		return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, err
 	}
 	wantPoolName := acpRuntimePoolName(body.RuntimeType, harnessv2.ProfileDigest(poolIdentityDigest))
+	workspaceBinding, err := verifiedSnapshotWorkspaceBinding(binding, body)
+	if err != nil {
+		return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, err
+	}
+	if workspaceBinding != nil {
+		workspacePlan, workspaceErr := applyACPWorkspaceBindingToPlan(ACPRuntimePlan{
+			PoolName: wantPoolName, Image: body.RuntimeImage, Profile: body.RuntimeProfile, Digest: profileDigest,
+		}, workspaceBinding)
+		if workspaceErr != nil {
+			return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, workspaceErr
+		}
+		wantPoolName = workspacePlan.PoolName
+	}
 	if strings.TrimSpace(body.PoolName) == "" || body.PoolName != wantPoolName {
 		return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, errors.New("frozen RuntimePool identity is inconsistent")
 	}
 	return ACPRuntimePlan{
 		PoolName: body.PoolName, Image: body.RuntimeImage, Profile: body.RuntimeProfile, Digest: profileDigest,
+		Workspace: workspaceBinding,
 	}, configuration, mcpConfiguration, nil
+}
+
+// verifiedSnapshotWorkspaceBinding re-verifies the frozen execution-workspace
+// binding against its canonical digest and the immutable Task/session identity.
+func verifiedSnapshotWorkspaceBinding(
+	binding *corev1alpha1.AgentExecutionBinding,
+	body agentExecutionSnapshotBody,
+) (*ACPRuntimeWorkspaceBinding, error) {
+	if body.ExecutionWorkspace == nil {
+		return nil, nil
+	}
+	frozen := &ACPRuntimeWorkspaceBinding{
+		Provider:      corev1alpha1.WorkspaceProvider(body.ExecutionWorkspace.Provider),
+		ReusePolicy:   corev1alpha1.WorkspaceReusePolicy(body.ExecutionWorkspace.ReusePolicy),
+		CleanupPolicy: corev1alpha1.WorkspaceCleanupPolicy(body.ExecutionWorkspace.CleanupPolicy),
+		WorkspaceSlot: body.ExecutionWorkspace.WorkspaceSlot,
+		SessionKey:    body.ExecutionWorkspace.SessionKey,
+		BindingDigest: body.ExecutionWorkspace.BindingDigest,
+	}
+	if err := validateACPWorkspaceBindingValues(frozen); err != nil {
+		return nil, err
+	}
+	wantSessionKey := "task:" + string(binding.Task.UID)
+	if frozen.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+		if body.SessionRef == nil || strings.TrimSpace(body.SessionRef.Name) == "" {
+			return nil, errors.New("frozen execution workspace session reuse is missing the frozen sessionRef")
+		}
+		wantSessionKey = "session:" + strings.TrimSpace(body.SessionRef.Name)
+	}
+	if frozen.SessionKey != wantSessionKey {
+		return nil, errors.New("frozen execution workspace session key does not match the immutable Task and session identity")
+	}
+	return frozen, nil
 }
 
 func frozenTaskFromAgentExecutionSnapshot(task *corev1alpha1.Task, binding *corev1alpha1.AgentExecutionBinding, body agentExecutionSnapshotBody) *corev1alpha1.Task {
