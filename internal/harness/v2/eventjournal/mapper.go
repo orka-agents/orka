@@ -990,6 +990,7 @@ func mapPromptStreamFailure(
 func mapPromptSettlement(
 	identity MappedUpdateIdentity,
 	settlement harnessv2.PromptSettlement,
+	cancellationReason harnessv2.CancelReason,
 	mapCtx MapContext,
 ) (*store.ExecutionEvent, error) {
 	if err := mapCtx.validate(); err != nil {
@@ -1002,11 +1003,15 @@ func mapPromptSettlement(
 	if err := settlement.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid prompt settlement: %w", err)
 	}
+	if !validPromptCancellationReason(cancellationReason) {
+		return nil, fmt.Errorf("invalid prompt cancellation reason %q", cancellationReason)
+	}
 	content := map[string]any{
 		"harnessV2":             identity,
 		"modelRequestID":        string(identity.PromptID),
 		"journalKind":           mappedPromptTerminalKind,
 		"terminalEvent":         settlement.TerminalEvent,
+		"cancellationReason":    cancellationReason,
 		"outcome":               settlement.Outcome,
 		"stopReason":            settlement.StopReason,
 		"settledAt":             settlement.SettledAt.UTC(),
@@ -1062,6 +1067,17 @@ func mapPromptSettlement(
 		return nil, fmt.Errorf("sanitize mapped harness v2 prompt settlement: %w", err)
 	}
 	return mapped, nil
+}
+
+func validPromptCancellationReason(reason harnessv2.CancelReason) bool {
+	switch reason {
+	case harnessv2.CancelReasonUserRequested, harnessv2.CancelReasonTaskTimeout,
+		harnessv2.CancelReasonLeaseExpired, harnessv2.CancelReasonStreamDisconnected,
+		harnessv2.CancelReasonControllerShutdown:
+		return true
+	default:
+		return false
+	}
 }
 
 // MapAssistantTranscript maps the complete terminal assistant transcript as a

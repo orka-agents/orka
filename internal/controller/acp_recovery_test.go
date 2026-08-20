@@ -223,6 +223,35 @@ func TestACPDispatcherRecoversMatchedJournaledNonSuccessTerminal(t *testing.T) {
 	}
 }
 
+func TestACPDispatcherRecoversTimeoutReasonFromProvenCancellationSettlement(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+
+	task := configureRecoveryJournalIdentity(t, fixture)
+	appendRecoveryPromptSettlement(t, fixture, task, harnessv2.CancelReasonTaskTimeout)
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionCancelled {
+		t.Fatalf("recovered attempt state = %s, want %s", attempt.ExecutionState, store.PromptExecutionCancelled)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseCancelled || updated.Status.Execution == nil ||
+		updated.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled ||
+		updated.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled ||
+		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) ||
+		updated.Status.Execution.Message != acpTaskTimeoutCancellationSettledMessage {
+		t.Fatalf("recovered timeout cancellation status = %#v", updated.Status)
+	}
+}
+
 func TestACPDispatcherRecoversCompletedJournalTerminalOnlyWithExactResult(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -369,6 +398,64 @@ func appendRecoveryPromptTerminal(
 	}
 	if _, err := fixture.controlStore.AppendExecutionEvent(fixture.ctx, mapped); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func appendRecoveryPromptSettlement(
+	t *testing.T,
+	fixture *recoveryFixture,
+	task *corev1alpha1.Task,
+	cancellationReason harnessv2.CancelReason,
+) {
+	t.Helper()
+	execution := task.Status.Execution
+	now := time.Now().UTC()
+	accepted := harnessv2.Event{
+		Protocol: harnessv2.ProtocolVersion,
+		Type:     harnessv2.EventAccepted,
+		Identity: harnessv2.EventIdentity{
+			RuntimeInstanceID:        harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
+			SupervisorBootID:         harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID),
+			RuntimeSessionUID:        harnessv2.RuntimeSessionUID(execution.RuntimeSessionUID),
+			RuntimeSessionGeneration: uint64(execution.RuntimeSessionGeneration),
+			TaskUID:                  harnessv2.TaskUID(task.UID),
+			TaskAttempt:              uint32(execution.Attempt),
+			PromptID:                 harnessv2.PromptID(execution.PromptID),
+			Sequence:                 1,
+			RequestDigest:            harnessv2.RequestDigest(execution.RequestDigest),
+			Timestamp:                now,
+		},
+		Accepted: &harnessv2.AcceptedEvent{
+			AcceptedAt: now,
+			Lease: harnessv2.PromptLease{
+				Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+			},
+			ACPVersion: harnessv2.ACPProfileV1,
+		},
+	}
+	journal := v2eventjournal.Journal{
+		EventStore: fixture.controlStore,
+		MapContext: v2eventjournal.MapContext{
+			Namespace: task.Namespace, TaskName: task.Name, StreamID: task.Name,
+		},
+	}
+	state, err := journal.Open(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appended, isNew, err := state.AppendPromptLifecycleIfNew(fixture.ctx, accepted); err != nil || !isNew || appended == nil {
+		t.Fatalf("append recovery prompt acceptance = %#v new=%t err=%v", appended, isNew, err)
+	}
+	settlement := harnessv2.PromptSettlement{
+		TerminalEvent: harnessv2.EventCancelled,
+		Outcome:       harnessv2.PromptOutcomeCancelled,
+		StopReason:    harnessv2.ACPStopReasonCancelled,
+		SettledAt:     now.Add(time.Second),
+	}
+	if appended, isNew, err := state.AppendPromptSettlementIfNew(
+		fixture.ctx, settlement, cancellationReason,
+	); err != nil || !isNew || appended == nil {
+		t.Fatalf("append recovery prompt settlement = %#v new=%t err=%v", appended, isNew, err)
 	}
 }
 

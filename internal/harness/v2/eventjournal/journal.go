@@ -32,8 +32,9 @@ type Journal struct {
 // harness v2 prompt identity. Result content remains in ResultStore and is not
 // copied into the public execution-event journal.
 type PromptTerminalEvidence struct {
-	Identity      MappedUpdateIdentity
-	TerminalEvent harnessv2.EventType
+	Identity           MappedUpdateIdentity
+	TerminalEvent      harnessv2.EventType
+	CancellationReason harnessv2.CancelReason
 }
 
 // FindPromptTerminal walks the task stream backward and returns the newest
@@ -77,26 +78,35 @@ func (j Journal) FindPromptTerminal(ctx context.Context) (*PromptTerminalEvidenc
 			if !ok || kind != mappedJournalRecordPromptTerminal || !identity.samePrompt(j.RecoveryIdentity) {
 				continue
 			}
-			terminalEvent, err := promptTerminalEventType(event)
+			terminalEvent, cancellationReason, err := promptTerminalClassification(event)
 			if err != nil {
 				return nil, err
 			}
-			return &PromptTerminalEvidence{Identity: identity, TerminalEvent: terminalEvent}, nil
+			return &PromptTerminalEvidence{
+				Identity: identity, TerminalEvent: terminalEvent, CancellationReason: cancellationReason,
+			}, nil
 		}
 		pageEnd = pageStart
 	}
 	return nil, nil
 }
 
-func promptTerminalEventType(event store.ExecutionEvent) (harnessv2.EventType, error) {
+func promptTerminalClassification(event store.ExecutionEvent) (harnessv2.EventType, harnessv2.CancelReason, error) {
 	var content struct {
-		TerminalEvent         harnessv2.EventType `json:"terminalEvent"`
-		StopReason            string              `json:"stopReason"`
-		ControllerSynthesized bool                `json:"controllerSynthesized"`
-		SettlementProven      bool                `json:"settlementProven"`
+		TerminalEvent         harnessv2.EventType    `json:"terminalEvent"`
+		StopReason            string                 `json:"stopReason"`
+		ControllerSynthesized bool                   `json:"controllerSynthesized"`
+		SettlementProven      bool                   `json:"settlementProven"`
+		CancellationReason    harnessv2.CancelReason `json:"cancellationReason"`
 	}
 	if err := json.Unmarshal(event.Content, &content); err != nil {
-		return "", fmt.Errorf("%w: decode mapped harness v2 prompt terminal: %v", store.ErrConflict, err)
+		return "", "", fmt.Errorf("%w: decode mapped harness v2 prompt terminal: %v", store.ErrConflict, err)
+	}
+	if content.CancellationReason != "" {
+		if !content.ControllerSynthesized || !content.SettlementProven ||
+			!validPromptCancellationReason(content.CancellationReason) {
+			return "", "", fmt.Errorf("%w: mapped harness v2 prompt terminal has invalid cancellation reason %q", store.ErrConflict, content.CancellationReason)
+		}
 	}
 	terminalEvent := content.TerminalEvent
 	if content.ControllerSynthesized && !content.SettlementProven {
@@ -118,16 +128,16 @@ func promptTerminalEventType(event store.ExecutionEvent) (harnessv2.EventType, e
 		}
 	}
 	if !terminalEvent.IsTerminal() {
-		return "", fmt.Errorf("%w: mapped harness v2 prompt terminal has no terminal classification", store.ErrConflict)
+		return "", "", fmt.Errorf("%w: mapped harness v2 prompt terminal has no terminal classification", store.ErrConflict)
 	}
 	wantType := executionevents.ExecutionEventTypeModelRequestFailed
 	if terminalEvent == harnessv2.EventCompleted {
 		wantType = executionevents.ExecutionEventTypeModelRequestCompleted
 	}
 	if event.Type != wantType {
-		return "", fmt.Errorf("%w: mapped harness v2 prompt terminal type %q conflicts with %q", store.ErrConflict, event.Type, terminalEvent)
+		return "", "", fmt.Errorf("%w: mapped harness v2 prompt terminal type %q conflicts with %q", store.ErrConflict, event.Type, terminalEvent)
 	}
-	return terminalEvent, nil
+	return terminalEvent, content.CancellationReason, nil
 }
 
 // State is the mutable aggregation state for one non-reconnectable prompt
@@ -655,6 +665,7 @@ func (s *State) AppendPromptStreamFailureIfNew(
 func (s *State) AppendPromptSettlementIfNew(
 	ctx context.Context,
 	settlement harnessv2.PromptSettlement,
+	cancellationReason harnessv2.CancelReason,
 ) (*store.ExecutionEvent, bool, error) {
 	if s == nil {
 		return nil, false, fmt.Errorf("harness v2 journal state is required")
@@ -664,7 +675,7 @@ func (s *State) AppendPromptSettlementIfNew(
 	}
 	identity := s.promptIdentity
 	identity.Sequence = s.promptAcceptedSequence
-	mapped, err := mapPromptSettlement(identity, settlement, s.journal.MapContext)
+	mapped, err := mapPromptSettlement(identity, settlement, cancellationReason, s.journal.MapContext)
 	if err != nil {
 		return nil, false, err
 	}

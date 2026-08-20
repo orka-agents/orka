@@ -39,6 +39,8 @@ const (
 	DefaultACPRateLimitReconcileInterval                 = time.Second
 	defaultACPTaskTimeout                                = 30 * time.Minute
 	acpTaskTimeoutReason                                 = "TaskTimeout"
+	acpTaskTimeoutCancellationSettledMessage             = "task deadline cancellation settled"
+	acpCancelledOperation                                = "cancelled"
 	acpSucceededOperation                                = "succeeded"
 	acpCredentialBlockedOperation                        = "credential-blocked"
 	acpCredentialBlockedMessage                          = "workspace credential changed or became unavailable after queue; refusing to change frozen authority"
@@ -4021,7 +4023,7 @@ func (d *ACPDispatcher) handlePromptStreamError(
 		if errors.Is(runtimeContextErr, context.DeadlineExceeded) {
 			reason = harnessv2.CancelReasonTaskTimeout
 			terminalReason = acpTaskTimeoutReason
-			terminalMessage = "task deadline cancellation settled"
+			terminalMessage = acpTaskTimeoutCancellationSettledMessage
 		}
 		cancelRequest := harnessv2.CancelPromptRequest{
 			Protocol: harnessv2.ProtocolVersion,
@@ -4034,7 +4036,7 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			response, cancelErr := runtimeClient.CancelPrompt(cancelCtx, sessionID, cancelRequest)
 			if cancelErr == nil && response.SettlementProven {
 				if lifecycleErr := appendPromptSettlementLifecycleDetached(
-					ctx, journalState, response.Settlement,
+					ctx, journalState, response.Settlement, reason,
 				); lifecycleErr != nil {
 					logf.FromContext(ctx).Error(lifecycleErr, "persist proven ACP prompt settlement", "namespace", task.Namespace, "task", task.Name)
 					return d.failPromptForExecutionEventPersistence(
@@ -4043,7 +4045,7 @@ func (d *ACPDispatcher) handlePromptStreamError(
 				}
 				switch response.Settlement.TerminalEvent {
 				case harnessv2.EventCancelled:
-					operation := "cancelled"
+					operation := acpCancelledOperation
 					if terminalReason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
 						operation = "timeout-cancelled"
 					}
@@ -4116,7 +4118,7 @@ func (d *ACPDispatcher) handlePromptUpdatePersistenceFailure(
 		if cancelErr == nil && response.SettlementProven {
 			if !persistenceErr.journalFailed() {
 				if lifecycleErr := appendPromptSettlementLifecycleDetached(
-					ctx, journalState, response.Settlement,
+					ctx, journalState, response.Settlement, cancelRequest.Reason,
 				); lifecycleErr != nil {
 					logf.FromContext(ctx).Error(lifecycleErr, "persist ACP prompt settlement after plan persistence failure", "namespace", task.Namespace, "task", task.Name)
 					return d.failPromptForExecutionEventPersistence(
@@ -4231,10 +4233,11 @@ func appendPromptSettlementLifecycleDetached(
 	ctx context.Context,
 	journalState *v2eventjournal.State,
 	settlement harnessv2.PromptSettlement,
+	cancellationReason harnessv2.CancelReason,
 ) error {
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	_, _, err := journalState.AppendPromptSettlementIfNew(persistCtx, settlement)
+	_, _, err := journalState.AppendPromptSettlementIfNew(persistCtx, settlement, cancellationReason)
 	return err
 }
 
@@ -4284,20 +4287,40 @@ func (d *ACPDispatcher) persistOutcomeUnknown(ctx context.Context, attemptID str
 }
 
 func (d *ACPDispatcher) finishNonSuccess(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, session *acpTaskSession, terminal harnessv2.Event) error {
+	return d.finishNonSuccessWithCancellationReason(ctx, task, attemptID, fence, session, terminal, "")
+}
+
+func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	session *acpTaskSession,
+	terminal harnessv2.Event,
+	cancellationReason harnessv2.CancelReason,
+) error {
 	switch terminal.Type {
 	case harnessv2.EventCancelled:
-		if err := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled"); err != nil {
+		operation := acpCancelledOperation
+		reason := corev1alpha1.TaskExecutionReason("Cancelled")
+		message := "prompt cancelled"
+		if cancellationReason == harnessv2.CancelReasonTaskTimeout {
+			operation = "timeout-cancelled"
+			reason = acpTaskTimeoutReason
+			message = acpTaskTimeoutCancellationSettledMessage
+		}
+		if err := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, operation); err != nil {
 			return err
 		}
 		execution := corev1alpha1.TaskExecutionStatus{
 			State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeCancelled,
 			Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
-			Reason: "Cancelled", Message: "prompt cancelled",
+			Reason: reason, Message: message,
 		}
-		if err := d.finalizeTaskSessionMarker(ctx, task, fence, session, "Cancelled", "prompt cancelled", corev1alpha1.TaskPhaseCancelled, execution); err != nil {
+		if err := d.finalizeTaskSessionMarker(ctx, task, fence, session, "Cancelled", message, corev1alpha1.TaskPhaseCancelled, execution); err != nil {
 			return err
 		}
-		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancelled")
+		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, reason, message)
 	case harnessv2.EventOutcomeUnknown:
 		if err := d.persistOutcomeUnknown(ctx, attemptID, fence, "RuntimeLost", "prompt outcome is unknown"); err != nil {
 			return err

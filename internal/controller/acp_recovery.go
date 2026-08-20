@@ -748,8 +748,8 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 		if err != nil {
 			return true, err
 		}
-		return true, d.finishNonSuccess(
-			ctx, task, attempt.ID, fence, session, harnessv2.Event{Type: evidence.TerminalEvent},
+		return true, d.finishNonSuccessWithCancellationReason(
+			ctx, task, attempt.ID, fence, session, harnessv2.Event{Type: evidence.TerminalEvent}, evidence.CancellationReason,
 		)
 	}
 	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
