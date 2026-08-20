@@ -17,6 +17,8 @@ const (
 	mappedUpdateIdentityKeySeparator = "\x00"
 	mappedToolCallIDPrefix           = "event-tool-call-v1-sha256-"
 	mappedToolCallIDDomain           = "orka.harness.v2.execution-event.tool-call-id.v1\x00"
+	mappedJournalDedupeKeyPrefix     = "harness-v2-event-v1-sha256-"
+	mappedJournalDedupeKeyDomain     = "orka.harness.v2.execution-event.dedupe-key.v1\x00"
 	mappedAssistantTranscriptKind    = "assistant_transcript"
 	mappedToolStreamClosureKind      = "tool_stream_closure"
 	mappedTerminalUsageKind          = "terminal_usage"
@@ -209,6 +211,11 @@ func mappedTerminalUsageKey(identity MappedUpdateIdentity) string {
 
 func mappedPromptLifecycleKey(identity MappedUpdateIdentity, kind string) string {
 	return identity.Key() + mappedUpdateIdentityKeySeparator + kind
+}
+
+func mappedJournalDedupeKey(key string) string {
+	digest := sha256.Sum256([]byte(mappedJournalDedupeKeyDomain + key))
+	return mappedJournalDedupeKeyPrefix + hex.EncodeToString(digest[:])
 }
 
 // PlanProjection is the durable/public read model derived from one ACP plan

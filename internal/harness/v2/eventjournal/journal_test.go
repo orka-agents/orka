@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,6 +68,60 @@ func TestJournalDeduplicatesWithinPassAndAcrossRecovery(t *testing.T) {
 	}
 	if len(listed) != 2 {
 		t.Fatalf("persisted events = %d, want 2", len(listed))
+	}
+}
+
+func TestJournalDeduplicatesAcrossConcurrentStates(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	journal := Journal{EventStore: eventStore, MapContext: testMapContext()}
+	states := make([]*State, 2)
+	for index := range states {
+		state, err := journal.Open(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		states[index] = state
+	}
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 10},
+	})
+
+	type result struct {
+		appended *store.ExecutionEvent
+		isNew    bool
+		err      error
+	}
+	results := make(chan result, len(states))
+	var wg sync.WaitGroup
+	for _, state := range states {
+		wg.Go(func() {
+			appended, isNew, err := state.AppendUpdateIfNew(ctx, event)
+			results <- result{appended: appended, isNew: isNew, err: err}
+		})
+	}
+	wg.Wait()
+	close(results)
+
+	newCount := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent journal append: %v", result.err)
+		}
+		if result.isNew {
+			newCount++
+			if result.appended == nil {
+				t.Fatal("new concurrent append returned no event")
+			}
+		} else if result.appended != nil {
+			t.Fatalf("deduplicated append returned %#v", result.appended)
+		}
+	}
+	if newCount != 1 {
+		t.Fatalf("new concurrent appends = %d, want 1", newCount)
+	}
+	if listed := listJournalEvents(t, ctx, eventStore); len(listed) != 1 {
+		t.Fatalf("persisted events = %#v, want one", listed)
 	}
 }
 
@@ -1040,6 +1095,52 @@ func TestJournalOmitsExcessOpenToolAccumulatorWithoutFailingPrompt(t *testing.T)
 	}
 }
 
+func TestJournalMarksContentOmittedForOverflowToolTerminalWithoutContent(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for index := range maxOpenToolAccumulators {
+		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCall,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: fmt.Sprintf("call-open-%d", index), Status: harnessv2.ToolCallStatusPending,
+			},
+		})
+		if _, _, err := state.AppendUpdateIfNew(ctx, event); err != nil {
+			t.Fatalf("append open tool %d: %v", index, err)
+		}
+	}
+	overflow := testUpdateEvent(uint64(maxOpenToolAccumulators+2), now.Add(time.Second), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-open-overflow-omitted", Status: harnessv2.ToolCallStatusInProgress,
+			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "dropped output"}},
+		},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, overflow); err != nil || isNew || appended != nil {
+		t.Fatalf("overflow update = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	terminal := testUpdateEvent(uint64(maxOpenToolAccumulators+3), now.Add(2*time.Second), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-open-overflow-omitted", Kind: testToolKindShell, Status: harnessv2.ToolCallStatusCompleted,
+		},
+	})
+	completed, isNew, err := state.AppendUpdateIfNew(ctx, terminal)
+	if err != nil || !isNew || completed == nil {
+		t.Fatalf("overflow terminal = %#v new=%t err=%v", completed, isNew, err)
+	}
+	if completed.ContentText != "" || completed.Truncation == nil || !completed.Truncation.ContentTextTruncated ||
+		!strings.Contains(string(completed.Content), streamedTextTruncatedOrOmittedReason) {
+		t.Fatalf("overflow terminal omission = %#v", completed)
+	}
+}
+
 func TestJournalDeduplicationStateUsesSequenceHighWater(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
@@ -1269,6 +1370,28 @@ func (s *faultingAppendEventStore) AppendExecutionEvent(
 		return nil, fault.err
 	}
 	return s.ExecutionEventStore.AppendExecutionEvent(ctx, event)
+}
+
+func (s *faultingAppendEventStore) AppendExecutionEventIfAbsent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+) (*store.ExecutionEvent, bool, error) {
+	s.appendCalls++
+	deduplicatingStore, ok := s.ExecutionEventStore.(store.DeduplicatingExecutionEventStore)
+	if !ok {
+		return nil, false, errors.New("underlying store does not support atomic deduplication")
+	}
+	if s.appendCalls <= len(s.faults) {
+		fault := s.faults[s.appendCalls-1]
+		if fault.persistBeforeError {
+			if _, _, err := deduplicatingStore.AppendExecutionEventIfAbsent(ctx, event, dedupeKey); err != nil {
+				return nil, false, err
+			}
+		}
+		return nil, false, fault.err
+	}
+	return deduplicatingStore.AppendExecutionEventIfAbsent(ctx, event, dedupeKey)
 }
 
 func (s *faultingAppendEventStore) ListExecutionEvents(

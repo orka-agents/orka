@@ -252,6 +252,61 @@ func TestExecutionEventStoreConcurrentSameStreamAppendsMultiConnection(t *testin
 	assertConcurrentExecutionEventAppends(t, NewStore(db, dbPath))
 }
 
+func TestExecutionEventStoreAppendIfAbsentConcurrentAcrossStoreInstances(t *testing.T) {
+	s := setupDiskStore(t)
+	stores := []*Store{s, NewStore(s.db, s.dbPath)}
+	ctx := context.Background()
+	const count = 32
+
+	type result struct {
+		event    *store.ExecutionEvent
+		appended bool
+		err      error
+	}
+	results := make(chan result, count)
+	var wg sync.WaitGroup
+	for i := range count {
+		wg.Go(func() {
+			event, appended, err := stores[i%len(stores)].AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
+				Namespace:  "default",
+				StreamType: store.ExecutionEventStreamTypeTask,
+				StreamID:   "task-dedupe-concurrent",
+				TaskName:   "task-dedupe-concurrent",
+				Type:       events.ExecutionEventTypeToolCallStarted,
+			}, "shared-event-key")
+			results <- result{event: event, appended: appended, err: err}
+		})
+	}
+	wg.Wait()
+	close(results)
+
+	appendedCount := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("AppendExecutionEventIfAbsent concurrent: %v", result.err)
+		}
+		if result.event == nil || result.event.Seq != 1 {
+			t.Fatalf("deduplicated event = %#v, want seq 1", result.event)
+		}
+		if result.appended {
+			appendedCount++
+		}
+	}
+	if appendedCount != 1 {
+		t.Fatalf("new appends = %d, want 1", appendedCount)
+	}
+
+	listed, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-dedupe-concurrent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("deduplicated events = %#v, want one event", listed)
+	}
+}
+
 func assertConcurrentExecutionEventAppends(t *testing.T, s *Store) {
 	t.Helper()
 	ctx := context.Background()

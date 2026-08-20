@@ -174,6 +174,7 @@ func migrate(db *sql.DB) error {
 			stream_id       TEXT NOT NULL,
 			seq             INTEGER NOT NULL,
 			session_seq     INTEGER NOT NULL DEFAULT 0,
+			dedupe_key      TEXT NOT NULL DEFAULT '',
 			type            TEXT NOT NULL,
 			severity        TEXT NOT NULL DEFAULT 'info',
 			task_name       TEXT NOT NULL DEFAULT '',
@@ -949,8 +950,13 @@ func migrate(db *sql.DB) error {
 
 	if err := ensureSQLiteColumns(db, "execution_events", []sqliteColumnMigration{
 		{Name: "session_seq", Definition: "session_seq INTEGER NOT NULL DEFAULT 0"},
+		{Name: "dedupe_key", Definition: "dedupe_key TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_events_stream_dedupe_key
+		ON execution_events(namespace, stream_type, stream_id, dedupe_key) WHERE dedupe_key <> ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_execution_events_session_seq
 		ON execution_events(namespace, session_name, session_seq)`); err != nil {

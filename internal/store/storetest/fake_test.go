@@ -78,6 +78,37 @@ func TestExecutionEventStoreFakeAppendsMonotonicSeqPerStream(t *testing.T) {
 	}
 }
 
+func TestExecutionEventStoreFakeAppendIfAbsent(t *testing.T) {
+	ctx := context.Background()
+	fake := NewFakeExecutionEventStore()
+	event := &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-dedupe",
+		TaskName:   "task-dedupe",
+		Type:       events.ExecutionEventTypeTaskStarted,
+	}
+
+	first, appended, err := fake.AppendExecutionEventIfAbsent(ctx, event, "event-key")
+	if err != nil || !appended || first == nil {
+		t.Fatalf("first append = %#v appended=%t err=%v", first, appended, err)
+	}
+	duplicate, appended, err := fake.AppendExecutionEventIfAbsent(ctx, event, "event-key")
+	if err != nil || appended || duplicate == nil || duplicate.ID != first.ID || duplicate.Seq != first.Seq {
+		t.Fatalf("duplicate append = %#v appended=%t err=%v, want existing %#v", duplicate, appended, err, first)
+	}
+
+	listed, err := fake.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-dedupe",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("deduplicated events = %#v, want one event", listed)
+	}
+}
+
 func TestExecutionEventStoreFakeAggregatesSessionEvents(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)

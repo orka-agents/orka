@@ -43,6 +43,8 @@ type State struct {
 	promptTerminalSequence      uint64
 	toolClosureSequences        map[uint64]struct{}
 	toolText                    map[string]*streamText
+	overflowToolIDs             map[string]struct{}
+	untrackedOverflowTool       bool
 	toolBufferedBytes           int
 }
 
@@ -132,6 +134,7 @@ func (j Journal) Open(ctx context.Context) (*State, error) {
 		promptIdentity:       j.RecoveryIdentity,
 		toolClosureSequences: map[uint64]struct{}{},
 		toolText:             map[string]*streamText{},
+		overflowToolIDs:      map[string]struct{}{},
 	}
 	var err error
 	if j.RecoveryIdentity.promptValid() {
@@ -236,6 +239,8 @@ func (s *State) resetPrompt(identity MappedUpdateIdentity) {
 	s.promptAcceptedSequence = 0
 	s.promptTerminalSequence = 0
 	clear(s.toolClosureSequences)
+	clear(s.overflowToolIDs)
+	s.untrackedOverflowTool = false
 }
 
 func (s *State) bindPrompt(identity MappedUpdateIdentity) error {
@@ -618,11 +623,9 @@ func (s *State) appendToolStreamClosureIfNew(ctx context.Context, toolID string,
 	return nil
 }
 
-// appendMappedEvent reconciles an append error against the durable stream
-// before retrying. The execution-event store does not expose an idempotency
-// key, so an error may be returned after the event committed. Readback avoids
-// duplicating that ambiguous write; one retry is allowed only after absence is
-// confirmed, and a second readback reconciles an ambiguous retry.
+// appendMappedEvent uses the store's stream-scoped atomic deduplication key,
+// then reconciles an ambiguous append error against the durable stream before
+// one safe retry.
 func (s *State) appendMappedEvent(
 	ctx context.Context,
 	identity MappedUpdateIdentity,
@@ -641,9 +644,17 @@ func (s *State) appendMappedEvent(
 	case mappedJournalRecordPromptTerminal:
 		key = mappedPromptLifecycleKey(identity, mappedPromptTerminalKind)
 	}
-	appended, err := s.journal.EventStore.AppendExecutionEvent(ctx, mapped)
+	deduplicatingStore, ok := s.journal.EventStore.(store.DeduplicatingExecutionEventStore)
+	if !ok {
+		return nil, false, fmt.Errorf("%s: execution event store does not support atomic deduplication", operation)
+	}
+	dedupeKey := mappedJournalDedupeKey(key)
+	appended, isNew, err := deduplicatingStore.AppendExecutionEventIfAbsent(ctx, mapped, dedupeKey)
 	if err == nil {
 		s.markPersisted(identity, kind)
+		if !isNew {
+			return nil, false, nil
+		}
 		return appended, true, nil
 	}
 	firstErr := fmt.Errorf("%s: %w", operation, err)
@@ -656,9 +667,12 @@ func (s *State) appendMappedEvent(
 		return nil, false, nil
 	}
 
-	appended, err = s.journal.EventStore.AppendExecutionEvent(ctx, mapped)
+	appended, isNew, err = deduplicatingStore.AppendExecutionEventIfAbsent(ctx, mapped, dedupeKey)
 	if err == nil {
 		s.markPersisted(identity, kind)
+		if !isNew {
+			return nil, false, nil
+		}
 		return appended, true, nil
 	}
 	retryErr := fmt.Errorf("%s retry: %w", operation, err)
@@ -741,9 +755,13 @@ func (s *State) aggregateToolUpdate(event harnessv2.Event, sequence uint64) bool
 			if tool.Status == harnessv2.ToolCallStatusCompleted || tool.Status == harnessv2.ToolCallStatusFailed {
 				return false
 			}
+			s.rememberOverflowTool(toolID)
 			return true
 		}
 		accumulator = &streamText{}
+		if s.consumeOverflowTool(toolID) {
+			accumulator.omitForOverflow()
+		}
 		s.toolText[toolID] = accumulator
 	}
 	beforeBytes := accumulator.text.Len()
@@ -792,11 +810,38 @@ func (s *State) finishToolUpdate(event harnessv2.Event) (string, bool, bool, str
 	}
 	accumulator, ok := s.toolText[tool.ToolCallID]
 	if !ok {
+		if s.consumeOverflowTool(tool.ToolCallID) {
+			if tool.ContentReplace && !tool.ContentOmitted {
+				return "", false, false, "", "", false
+			}
+			return "", true, false, "", "", true
+		}
 		return "", false, false, "", "", false
 	}
 	s.removeToolAccumulator(tool.ToolCallID)
 	return accumulator.text.String(), accumulator.overflow, accumulator.multipleBlocksOmitted,
 		accumulator.title, accumulator.kind, true
+}
+
+func (s *State) rememberOverflowTool(toolID string) {
+	if _, ok := s.overflowToolIDs[toolID]; ok {
+		return
+	}
+	if len(s.overflowToolIDs) < maxOpenToolAccumulators {
+		s.overflowToolIDs[toolID] = struct{}{}
+		return
+	}
+	// Once the bounded exact set is full, conservatively mark otherwise
+	// untracked terminal tools as omitted for the rest of this prompt.
+	s.untrackedOverflowTool = true
+}
+
+func (s *State) consumeOverflowTool(toolID string) bool {
+	if _, ok := s.overflowToolIDs[toolID]; ok {
+		delete(s.overflowToolIDs, toolID)
+		return true
+	}
+	return s.untrackedOverflowTool
 }
 
 func transientTerminalToolUpdate(event harnessv2.Event) (string, bool, bool, string, string, bool) {
