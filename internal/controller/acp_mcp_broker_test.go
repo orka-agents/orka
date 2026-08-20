@@ -238,16 +238,13 @@ func TestRegistryACPMCPToolExecutorBindsTaskTransactionAuthority(t *testing.T) {
 			t.Fatalf("enforcement-off Txn-Token header = %q, want no controller ambient token", got)
 		}
 	})
-	t.Run("enforcement off refuses controller ambient scopes and service account subject", func(t *testing.T) {
+	t.Run("enforcement off refuses controller service account despite matching task scope", func(t *testing.T) {
 		t.Setenv(workerenv.TransactionScope, "controller.scope")
 		t.Setenv(workerenv.TransactionScopes, "controller.scope")
-		t.Setenv(workerenv.ContextTokenOutboundScope, "controller.scope")
+		t.Setenv(workerenv.ContextTokenOutboundScope, "reports.read")
 		t.Setenv(workerenv.ServiceAccountToken, "controller-service-account-token")
-		task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
-			Name: authenticated.Name, Namespace: authenticated.Namespace, UID: "task-uid",
-		}}
 		exchanger := &recordingContextTokenExchanger{}
-		executor := newExecutor(false, task)
+		executor := newExecutor(false, newTask([]string{"reports.read"}, "", ""))
 		executor.TransactionExchange = &workerexecutor.TransactionExchangeConfig{
 			TTS: contexttoken.TTSConfig{
 				Endpoint:    "https://tts.example.test/token",
@@ -256,8 +253,8 @@ func TestRegistryACPMCPToolExecutorBindsTaskTransactionAuthority(t *testing.T) {
 			Exchanger: exchanger,
 		}
 		if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err == nil ||
-			!strings.Contains(err.Error(), "parent transaction scopes are required") {
-			t.Fatalf("controller ambient authority error = %v", err)
+			!strings.Contains(err.Error(), "cannot use a service account subject token") {
+			t.Fatalf("controller service account authority error = %v", err)
 		}
 		if calls := exchanger.calls.Load(); calls != 0 {
 			t.Fatalf("controller service account subject reached TTS exchanger %d times: %#v", calls, exchanger.request)
