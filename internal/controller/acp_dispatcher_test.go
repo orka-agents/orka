@@ -205,6 +205,29 @@ func TestACPTaskDeadlineIncludesTimeBeforeRuntimeAdmission(t *testing.T) {
 	if !ok || !deadline.Equal(now.Add(4*time.Minute)) {
 		t.Fatalf("queue-derived deadline = %s, %v; want %s, true", deadline, ok, now.Add(4*time.Minute))
 	}
+
+	task.Spec.Timeout = nil
+	deadline, ok = acpTaskDeadline(task, now)
+	if !ok || !deadline.Equal(now.Add(defaultACPTaskTimeout-time.Minute)) {
+		t.Fatalf("default deadline = %s, %v; want %s, true", deadline, ok, now.Add(defaultACPTaskTimeout-time.Minute))
+	}
+}
+
+func TestACPTaskRuntimeContextUsesDefaultDeadline(t *testing.T) {
+	t.Parallel()
+	createdAt := time.Now().UTC().Add(-time.Minute)
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(createdAt)}}
+	runtimeCtx, cancel := (&ACPDispatcher{}).newTaskRuntimeContext(context.Background(), task)
+	defer cancel()
+
+	deadline, ok := runtimeCtx.Deadline()
+	want := createdAt.Add(defaultACPTaskTimeout)
+	if !ok || !deadline.Equal(want) {
+		t.Fatalf("runtime context deadline = %s, %v; want %s, true", deadline, ok, want)
+	}
+	if err := runtimeCtx.Err(); err != nil {
+		t.Fatalf("runtime context expired before the default deadline: %v", err)
+	}
 }
 
 func TestRuntimeSessionStartFailureMessageAllowsOnlyKnownStages(t *testing.T) {
@@ -2458,6 +2481,12 @@ func TestACPDispatcherSettlesExpiredTaskBeforeRuntimePoolAdmission(t *testing.T)
 	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
 		task.CreationTimestamp = metav1.NewTime(time.Now().UTC().Add(-2 * time.Minute))
 		task.Spec.Timeout = &timeout
+	}, corev1alpha1.TaskExecutionReason("TaskTimeout"), "task deadline exceeded before runtime admission", false)
+}
+
+func TestACPDispatcherSettlesDefaultExpiredTaskBeforeRuntimePoolAdmission(t *testing.T) {
+	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
+		task.CreationTimestamp = metav1.NewTime(time.Now().UTC().Add(-defaultACPTaskTimeout - time.Minute))
 	}, corev1alpha1.TaskExecutionReason("TaskTimeout"), "task deadline exceeded before runtime admission", false)
 }
 

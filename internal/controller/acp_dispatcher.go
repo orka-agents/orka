@@ -36,6 +36,7 @@ const (
 	DefaultACPIdlePoolTTL                                = 15 * time.Minute
 	DefaultACPRuntimePoolReservationTTL                  = 2 * time.Minute
 	DefaultACPRateLimitReconcileInterval                 = time.Second
+	defaultACPTaskTimeout                                = 30 * time.Minute
 	acpSucceededOperation                                = "succeeded"
 	acpCredentialBlockedOperation                        = "credential-blocked"
 	acpCredentialBlockedMessage                          = "workspace credential changed or became unavailable after queue; refusing to change frozen authority"
@@ -2517,8 +2518,15 @@ func runtimeSessionCreateTimeout(target acpDispatchTarget) time.Duration {
 }
 
 func acpTaskDeadline(task *corev1alpha1.Task, now time.Time) (time.Time, bool) {
-	if task == nil || task.Spec.Timeout == nil || task.Spec.Timeout.Duration <= 0 {
+	if task == nil {
 		return time.Time{}, false
+	}
+	timeout := defaultACPTaskTimeout
+	if task.Spec.Timeout != nil {
+		if task.Spec.Timeout.Duration <= 0 {
+			return time.Time{}, false
+		}
+		timeout = task.Spec.Timeout.Duration
 	}
 	now = now.UTC()
 	var startedAt time.Time
@@ -2530,7 +2538,7 @@ func acpTaskDeadline(task *corev1alpha1.Task, now time.Time) (time.Time, bool) {
 			startedAt = now
 		}
 	}
-	return startedAt.Add(task.Spec.Timeout.Duration), true
+	return startedAt.Add(timeout), true
 }
 
 func (d *ACPDispatcher) settleQueuedTaskBeforeAdmission(ctx context.Context, queued *corev1alpha1.Task) (bool, error) {
