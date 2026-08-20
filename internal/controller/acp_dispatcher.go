@@ -1124,6 +1124,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				sessionExecution.requeued = true
 				return nil
 			} else {
+				sessionTrace.End(err)
 				return d.handlePrePromptClientError(ctx, task, attemptID, fence, err)
 			}
 		} else {

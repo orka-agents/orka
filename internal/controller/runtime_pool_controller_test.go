@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -34,6 +35,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	orkametrics "github.com/orka-agents/orka/internal/metrics"
 )
 
 var (
@@ -986,6 +988,83 @@ func TestRuntimePoolCompletedScaleToZero(t *testing.T) {
 				t.Fatalf("runtimePoolCompletedScaleToZero() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestRuntimePoolReadyReplicasRequiresReadyCondition(t *testing.T) {
+	active := &corev1alpha1.RuntimePoolActiveInstanceStatus{PodName: "runtime-pod"}
+	tests := []struct {
+		name      string
+		status    corev1alpha1.RuntimePoolStatus
+		wantReady int32
+	}{
+		{
+			name: "selected ready pod",
+			status: corev1alpha1.RuntimePoolStatus{
+				ActiveInstance: active,
+				Conditions: []metav1.Condition{{
+					Type: corev1alpha1.RuntimePoolConditionSchedulingReady, Status: metav1.ConditionTrue,
+				}},
+			},
+			wantReady: 1,
+		},
+		{
+			name: "retained fence for not ready pod",
+			status: corev1alpha1.RuntimePoolStatus{
+				ActiveInstance: active,
+				Conditions: []metav1.Condition{{
+					Type: corev1alpha1.RuntimePoolConditionSchedulingReady, Status: metav1.ConditionUnknown, Reason: "PodNotReady",
+				}},
+			},
+		},
+		{name: "no selected instance"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := runtimePoolReadyReplicas(test.status); got != test.wantReady {
+				t.Fatalf("runtimePoolReadyReplicas() = %d, want %d", got, test.wantReady)
+			}
+		})
+	}
+}
+
+func TestFinishRuntimePoolStatusCountsScaleToZeroOnceForStaleReconcile(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(0)
+	pool.Name = "scale-zero-idempotent"
+	pool.UID = types.UID("scale-zero-idempotent-uid")
+	pool.Status = corev1alpha1.RuntimePoolStatus{
+		DesiredReplicas: 0,
+		CurrentReplicas: 1,
+		Lifecycle:       corev1alpha1.RuntimePoolLifecycleStopping,
+	}
+	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	stale := current.DeepCopy()
+	stopped := current.Status
+	stopped.CurrentReplicas = 0
+	stopped.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+	stopped.ActiveInstance = nil
+
+	counter := orkametrics.ACPRuntimePoolScaleToZeroTotal.WithLabelValues(pool.Namespace, pool.Name)
+	var beforeMetric dto.Metric
+	if err := counter.Write(&beforeMetric); err != nil {
+		t.Fatalf("read initial scale-to-zero counter: %v", err)
+	}
+	before := beforeMetric.GetCounter().GetValue()
+	if _, err := r.finishRuntimePoolStatus(context.Background(), &current, stopped, runtimePoolRequeue); err != nil {
+		t.Fatalf("first stopped status patch: %v", err)
+	}
+	if _, err := r.finishRuntimePoolStatus(context.Background(), stale, stopped, runtimePoolRequeue); !apierrors.IsConflict(err) {
+		t.Fatalf("stale stopped status patch error = %v, want conflict", err)
+	}
+	var afterMetric dto.Metric
+	if err := counter.Write(&afterMetric); err != nil {
+		t.Fatalf("read final scale-to-zero counter: %v", err)
+	}
+	if got := afterMetric.GetCounter().GetValue() - before; got != 1 {
+		t.Fatalf("scale-to-zero counter delta = %v, want 1", got)
 	}
 }
 

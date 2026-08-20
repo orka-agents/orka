@@ -9,10 +9,12 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
 	"go.opentelemetry.io/otel/codes"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
 )
@@ -76,5 +78,29 @@ func TestACPSessionSpanRenamesToContinuation(t *testing.T) {
 	}
 	if tracingtest.SpanNamed(spans, acpSessionContinueSpanName) == nil {
 		t.Fatal("missing acp.session.continue span")
+	}
+}
+
+func TestACPSessionSpanRecordsCreationFailure(t *testing.T) {
+	if _, err := orkatracing.Init("acp-telemetry-test", false); err != nil {
+		t.Fatalf("initialize tracing: %v", err)
+	}
+	harness := tracingtest.NewSpanHarness(t)
+	_, sessionTrace := startACPSessionSpan(context.Background(), nil)
+	sessionTrace.End(&harnessv2.ClientError{
+		StatusCode: http.StatusBadRequest,
+		Code:       harnessv2.ErrorCodeInvalidRequest,
+		Kind:       harnessv2.ClientErrorValidation,
+	})
+
+	sessionSpan := tracingtest.SpanNamed(harness.Recorder.Ended(), acpSessionCreateSpanName)
+	if sessionSpan == nil {
+		t.Fatal("missing acp.session.create span")
+	}
+	if got := sessionSpan.Status().Code; got != codes.Error {
+		t.Fatalf("acp.session.create status = %s, want %s", got, codes.Error)
+	}
+	if got := tracingtest.AttributeMap(sessionSpan)["error.type"].AsString(); got == "" {
+		t.Fatal("acp.session.create error.type is empty")
 	}
 }

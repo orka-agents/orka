@@ -2487,7 +2487,7 @@ func (r *RuntimePoolReconciler) finishRuntimePoolStatus(
 	scaledToZero := runtimePoolCompletedScaleToZero(pool.Status, status)
 	base := pool.DeepCopy()
 	pool.Status = status
-	if err := r.Status().Patch(ctx, pool, client.MergeFrom(base)); err != nil {
+	if err := r.Status().Patch(ctx, pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
 	}
 	recordRuntimePoolMetrics(pool, status)
@@ -2501,20 +2501,27 @@ func recordRuntimePoolMetrics(pool *corev1alpha1.RuntimePool, status corev1alpha
 	if pool == nil {
 		return
 	}
-	readyReplicas := int32(0)
-	if status.ActiveInstance != nil {
-		readyReplicas = 1
-	}
 	orkametrics.RecordACPRuntimePoolStatus(
 		pool.Namespace,
 		pool.Name,
 		status.DesiredReplicas,
-		readyReplicas,
+		runtimePoolReadyReplicas(status),
 		status.Capacity.ResidentSessions,
 		status.Capacity.RunningPrompts,
 		status.Capacity.QueuedTasks,
 		string(status.AdmissionState),
 	)
+}
+
+func runtimePoolReadyReplicas(status corev1alpha1.RuntimePoolStatus) int32 {
+	if status.ActiveInstance == nil {
+		return 0
+	}
+	ready := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		return 0
+	}
+	return 1
 }
 
 func runtimePoolCompletedScaleToZero(previous, current corev1alpha1.RuntimePoolStatus) bool {
