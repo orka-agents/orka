@@ -83,8 +83,8 @@ type ExecutionEventResponse struct {
 	InputTokens       int                              `json:"inputTokens,omitempty"`
 	OutputTokens      int                              `json:"outputTokens,omitempty"`
 	CachedInputTokens int                              `json:"cachedInputTokens,omitempty"`
-	ContextWindowUsed int                              `json:"contextWindowUsed,omitempty"`
-	ContextWindowSize int                              `json:"contextWindowSize,omitempty"`
+	ContextWindowUsed *int                             `json:"contextWindowUsed,omitempty"`
+	ContextWindowSize *int                             `json:"contextWindowSize,omitempty"`
 	Summary           string                           `json:"summary,omitempty"`
 	Content           json.RawMessage                  `json:"content,omitempty"`
 	ContentText       string                           `json:"contentText,omitempty"`
@@ -138,7 +138,8 @@ func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventRespons
 
 func fillExecutionEventResponse(response *ExecutionEventResponse, event *store.ExecutionEvent) {
 	var provider, model, stopReason string
-	var inTok, outTok, cachedInTok, contextUsed, contextSize int
+	var inTok, outTok, cachedInTok int
+	var contextUsed, contextSize *int
 	if executionEventTypeCarriesModelTelemetry(event.Type) {
 		provider, model, stopReason, inTok, outTok, cachedInTok = executionEventTelemetryFields(event.Type, event.Content)
 		contextUsed, contextSize = executionEventContextFields(event.Content)
@@ -264,17 +265,17 @@ func executionEventTypeCarriesModelTelemetry(typ string) bool {
 	}
 }
 
-func executionEventContextFields(content json.RawMessage) (used, size int) {
+func executionEventContextFields(content json.RawMessage) (used, size *int) {
 	if len(content) == 0 {
-		return 0, 0
+		return nil, nil
 	}
 	var body map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.UseNumber()
 	if err := decoder.Decode(&body); err != nil {
-		return 0, 0
+		return nil, nil
 	}
-	return intField(body, "contextWindowUsed"), intField(body, "contextWindowSize")
+	return optionalIntField(body, "contextWindowUsed"), optionalIntField(body, "contextWindowSize")
 }
 
 func executionEventTelemetryFields(typ string, content json.RawMessage) (provider, model, stopReason string, inTok, outTok, cachedInTok int) {
@@ -354,4 +355,14 @@ func intField(body map[string]any, keys ...string) int {
 		}
 	}
 	return 0
+}
+
+func optionalIntField(body map[string]any, keys ...string) *int {
+	for _, key := range keys {
+		if _, ok := body[key]; ok {
+			value := intField(body, key)
+			return &value
+		}
+	}
+	return nil
 }

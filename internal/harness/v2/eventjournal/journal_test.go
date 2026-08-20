@@ -301,6 +301,44 @@ func TestJournalRedactsCredentialsSplitAcrossToolUpdates(t *testing.T) {
 	}
 }
 
+func TestJournalAggregatesContentOnlyToolFragmentsIntoTerminalEvent(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	for index, fragment := range []string{"streamed ", "output"} {
+		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCallUpdate,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: "call-content-only", Status: harnessv2.ToolCallStatusInProgress,
+				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: fragment}},
+			},
+		})
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew || appended != nil {
+			t.Fatalf("content fragment %d = %#v new=%t err=%v", index, appended, isNew, err)
+		}
+	}
+	completed := testUpdateEvent(4, now.Add(2*time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-content-only", Status: harnessv2.ToolCallStatusCompleted,
+		},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, completed); err != nil || !isNew || appended == nil {
+		t.Fatalf("completed tool = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallCompleted ||
+		listed[0].ContentText != "streamed output" {
+		t.Fatalf("persisted tool events = %#v", listed)
+	}
+}
+
 func TestJournalOmitsOversizedToolStream(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()

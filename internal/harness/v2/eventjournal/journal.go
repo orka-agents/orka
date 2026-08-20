@@ -104,8 +104,9 @@ func (j Journal) Open(ctx context.Context) (*State, error) {
 
 // AppendUpdateIfNew maps and appends event unless its full protocol identity is
 // already persisted or was processed earlier in this pass. Assistant chunks
-// are retained only for same-pass deduplication; the terminal transcript is the
-// sole durable assistant text event.
+// and content-only tool fragments are retained only for same-pass
+// deduplication; complete assistant/tool text is persisted only after the
+// logical stream ends so redaction sees update boundaries.
 func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*store.ExecutionEvent, bool, error) {
 	if s == nil {
 		return nil, false, fmt.Errorf("harness v2 journal state is required")
@@ -126,6 +127,13 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		s.keys[key] = struct{}{}
 		return nil, false, nil
 	}
+	if isContentOnlyToolFragment(event) {
+		// Keep streamed output in the accumulator, but do not emit an unbounded
+		// series of identical ToolCallStarted events. The terminal tool event
+		// receives the complete, redacted text.
+		s.keys[key] = struct{}{}
+		return nil, false, nil
+	}
 	if contentText, truncated, ok := s.finishToolText(event); ok {
 		mapped, err = mapToolUpdateWithContent(event, s.journal.MapContext, contentText, truncated)
 		if err != nil {
@@ -133,6 +141,17 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		}
 	}
 	return s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 update")
+}
+
+func isContentOnlyToolFragment(event harnessv2.Event) bool {
+	if event.Update == nil || event.Update.Kind != harnessv2.UpdateToolCallUpdate || event.Update.ToolCall == nil {
+		return false
+	}
+	tool := event.Update.ToolCall
+	if len(tool.Content) == 0 || strings.TrimSpace(tool.Title) != "" || strings.TrimSpace(tool.Kind) != "" {
+		return false
+	}
+	return tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed
 }
 
 // AppendAssistantTranscriptIfNew persists a complete terminal transcript as

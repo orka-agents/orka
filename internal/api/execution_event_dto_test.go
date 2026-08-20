@@ -21,6 +21,7 @@ import (
 
 func TestExecutionEventResponseDTOJSONFieldNames(t *testing.T) {
 	createdAt := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+	contextUsed, contextSize := 50, 200
 	response := ExecutionEventResponse{
 		ID:                "event-1",
 		Namespace:         "default",
@@ -40,8 +41,8 @@ func TestExecutionEventResponseDTOJSONFieldNames(t *testing.T) {
 		InputTokens:       3,
 		OutputTokens:      5,
 		CachedInputTokens: 2,
-		ContextWindowUsed: 50,
-		ContextWindowSize: 200,
+		ContextWindowUsed: &contextUsed,
+		ContextWindowSize: &contextSize,
 		Summary:           "created",
 		Content:           json.RawMessage(`{"ok":true}`),
 		ContentText:       "hello",
@@ -153,8 +154,9 @@ func TestExecutionEventResponseAcceptsIntegralJSONNumberEncodings(t *testing.T) 
 	if response.InputTokens != 123 || response.OutputTokens != 1000 || response.CachedInputTokens != 0 {
 		t.Fatalf("integral/fractional token encodings = %d/%d/%d", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
 	}
-	if response.ContextWindowUsed != 0 || response.ContextWindowSize != math.MaxInt {
-		t.Fatalf("bounded context encodings = %d/%d", response.ContextWindowUsed, response.ContextWindowSize)
+	if response.ContextWindowUsed == nil || *response.ContextWindowUsed != 0 ||
+		response.ContextWindowSize == nil || *response.ContextWindowSize != math.MaxInt {
+		t.Fatalf("bounded context encodings = %v/%v", response.ContextWindowUsed, response.ContextWindowSize)
 	}
 }
 
@@ -167,11 +169,34 @@ func TestExecutionEventResponsePromotesContextWindowWithoutTokenAccounting(t *te
 		}),
 	})
 	if response.Provider != compatToolOpenAIProviderType || response.Model != "gpt-5" ||
-		response.ContextWindowUsed != 53_000 || response.ContextWindowSize != 200_000 {
+		response.ContextWindowUsed == nil || *response.ContextWindowUsed != 53_000 ||
+		response.ContextWindowSize == nil || *response.ContextWindowSize != 200_000 {
 		t.Fatalf("context telemetry = %#v", response)
 	}
 	if response.InputTokens != 0 || response.OutputTokens != 0 || response.CachedInputTokens != 0 {
 		t.Fatalf("context occupancy was promoted as token accounting: %#v", response)
+	}
+}
+
+func TestExecutionEventResponsePreservesZeroContextOccupancy(t *testing.T) {
+	response := NewExecutionEventResponse(store.ExecutionEvent{
+		Type:    events.ExecutionEventTypeModelContextUpdated,
+		Content: json.RawMessage(`{"contextWindowUsed":0,"contextWindowSize":200000}`),
+	})
+	if response.ContextWindowUsed == nil || *response.ContextWindowUsed != 0 ||
+		response.ContextWindowSize == nil || *response.ContextWindowSize != 200_000 {
+		t.Fatalf("zero context telemetry = %#v", response)
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		t.Fatal(err)
+	}
+	if string(body["contextWindowUsed"]) != "0" || string(body["contextWindowSize"]) != "200000" {
+		t.Fatalf("encoded context telemetry = %s", encoded)
 	}
 }
 
