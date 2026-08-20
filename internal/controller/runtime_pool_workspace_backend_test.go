@@ -308,10 +308,25 @@ func TestValidateRuntimePoolExecutionWorkspace(t *testing.T) {
 		t.Fatalf("plain pool rejected: %v", err)
 	}
 
-	badProvider := runtimePoolWorkspaceTestObject()
-	badProvider.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
-	if err := validateRuntimePoolExecutionWorkspace(badProvider); err == nil || !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("substrate provider error = %v, want unsupported", err)
+	substrateMissingTemplate := runtimePoolWorkspaceTestObject()
+	substrateMissingTemplate.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	if err := validateRuntimePoolExecutionWorkspace(substrateMissingTemplate); err == nil || !strings.Contains(err.Error(), "infrastructure ActorTemplate") {
+		t.Fatalf("substrate provider error = %v, want missing infrastructure template", err)
+	}
+	substratePool := runtimePoolWorkspaceTestObject()
+	substratePool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	substratePool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		BaseTemplateNamespace: "ate-demo", BaseTemplateName: "orka-codex-infra",
+	}
+	if err := validateRuntimePoolExecutionWorkspace(substratePool); err != nil {
+		t.Fatalf("valid substrate pool rejected: %v", err)
+	}
+	sandboxWithSubstrate := runtimePoolWorkspaceTestObject()
+	sandboxWithSubstrate.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+		BaseTemplateNamespace: "ate-demo", BaseTemplateName: "orka-codex-infra",
+	}
+	if err := validateRuntimePoolExecutionWorkspace(sandboxWithSubstrate); err == nil || !strings.Contains(err.Error(), "only valid for provider substrate") {
+		t.Fatalf("sandbox-with-substrate error = %v, want provider mismatch", err)
 	}
 
 	badDigest := runtimePoolWorkspaceTestObject()

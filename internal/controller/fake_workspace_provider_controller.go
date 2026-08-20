@@ -301,7 +301,7 @@ func (r *FakeExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ct
 		}
 		if current.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeService && current.Spec.Service != nil && current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateDeleted {
 			for _, port := range current.Spec.Service.Ports {
-				scheme := "http"
+				scheme := urlSchemeHTTP
 				switch port.Protocol {
 				case "HTTPS":
 					scheme = urlSchemeHTTPS

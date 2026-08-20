@@ -67,9 +67,22 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			wantSession: "session:review-loop",
 		},
 		{
-			name:    "substrate provider fails closed",
+			name:    "substrate without templateRef fails closed",
 			task:    workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.Provider = corev1alpha1.WorkspaceProviderSubstrate }),
-			wantErr: "does not support ACP RuntimeSessions yet",
+			wantErr: "requires templateRef.name",
+		},
+		{
+			name: "substrate with an infrastructure template resolves",
+			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: "ate-demo"}
+			}),
+			wantSession: "task:11111111-1111-1111-1111-111111111111",
+		},
+		{
+			name:    "unknown provider fails closed",
+			task:    workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.Provider = corev1alpha1.WorkspaceProvider("other") }),
+			wantErr: "does not support ACP RuntimeSessions",
 		},
 		{
 			name: "templateRef fails closed",
@@ -93,7 +106,7 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 		{
 			name:    "boot fails closed",
 			task:    workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.Boot = true }),
-			wantErr: "not supported by provider",
+			wantErr: "not supported for ACP RuntimeSessions",
 		},
 		{
 			name: "session reuse without sessionRef fails closed",
@@ -137,6 +150,10 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			}
 			if binding.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete || binding.WorkspaceSlot != "default" {
 				t.Fatalf("binding defaults = %q/%q, want delete/default", binding.CleanupPolicy, binding.WorkspaceSlot)
+			}
+			if binding.Provider == corev1alpha1.WorkspaceProviderSubstrate &&
+				(binding.TemplateNamespace == "" || binding.TemplateName == "") {
+				t.Fatalf("substrate binding template = %q/%q, want frozen infrastructure template reference", binding.TemplateNamespace, binding.TemplateName)
 			}
 			digest, err := acpWorkspaceBindingDigest(binding)
 			if err != nil || digest != binding.BindingDigest {

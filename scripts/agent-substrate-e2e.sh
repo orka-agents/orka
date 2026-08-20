@@ -1314,7 +1314,7 @@ exercise_orka_tasks() {
   verify_mcp_tool_boots_actor_once "${tool_client_image}"
   verify_mcp_tool_cleanup
 
-  log "Skipping workspace-backed ACP Task execution: RuntimeSession-to-Substrate Actor dispatch is deferred; direct Substrate and Orka-brokered MCP workspace paths were validated above"
+  log "Skipping workspace-backed ACP Task execution: this workflow deploys placeholder ACP runtime image digests and leaves --acp-workspace-dispatch-enabled unset, so Substrate-backed RuntimeSession execution is exercised by the live ACP runtime workflows instead; direct Substrate and Orka-brokered MCP workspace paths were validated above"
 }
 
 wait_http_ok() {

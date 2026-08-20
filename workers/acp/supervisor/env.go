@@ -57,6 +57,12 @@ const (
 	EnvTrustNamespace            = "ORKA_ACP_TRUST_NAMESPACE"
 	EnvControllerTokenFile       = "ORKA_ACP_CONTROLLER_TOKEN_FILE"
 	EnvCapabilitySecretFile      = "ORKA_ACP_CAPABILITY_SECRET_FILE"
+	// The *_BOOTSTRAP variables carry read-once secrets for provider-hosted
+	// supervisors (for example Substrate Actors) that have no Kubernetes
+	// Secret mounts. The corresponding *_FILE variable always wins when set.
+	EnvControllerTokenBootstrap  = "ORKA_ACP_CONTROLLER_TOKEN_BOOTSTRAP"
+	EnvCapabilitySecretBootstrap = "ORKA_ACP_CAPABILITY_SECRET_BOOTSTRAP"
+	EnvProviderTokenBootstrap    = "ORKA_ACP_PROVIDER_TOKEN_BOOTSTRAP"
 	EnvSessionBaseDir            = "ORKA_ACP_SESSION_BASE_DIR"
 	EnvFirstSessionUID           = "ORKA_ACP_FIRST_SESSION_UID"
 	EnvLastSessionUID            = "ORKA_ACP_LAST_SESSION_UID"
@@ -145,11 +151,11 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	controllerToken, err := readRequiredSecretFile(EnvControllerTokenFile)
+	controllerToken, err := readRequiredSecret(EnvControllerTokenFile, EnvControllerTokenBootstrap)
 	if err != nil {
 		return Config{}, err
 	}
-	capabilitySecret, err := readRequiredSecretFile(EnvCapabilitySecretFile)
+	capabilitySecret, err := readRequiredSecret(EnvCapabilitySecretFile, EnvCapabilitySecretBootstrap)
 	if err != nil {
 		return Config{}, err
 	}
@@ -194,7 +200,7 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	providerToken, err := readRequiredSecretFile(EnvProviderTokenFile)
+	providerToken, err := readRequiredSecret(EnvProviderTokenFile, EnvProviderTokenBootstrap)
 	if err != nil {
 		return Config{}, err
 	}
@@ -955,6 +961,24 @@ func parsePositiveInt(name, value string) (int, error) {
 		return 0, fmt.Errorf("%s must be a positive integer", name)
 	}
 	return parsed, nil
+}
+
+// readRequiredSecret prefers the mounted secret file and falls back to the
+// read-once bootstrap environment variable when no file is named. The bootstrap
+// variable is unset immediately so later Go-level environment reads and any
+// explicitly inherited child environments never see it; like the workspace
+// agent's bootstrap token, the original exec-time environment block remains
+// visible only to same-UID processes inside the same isolation boundary.
+func readRequiredSecret(fileEnvName, bootstrapEnvName string) (string, error) {
+	if strings.TrimSpace(os.Getenv(fileEnvName)) != "" {
+		return readRequiredSecretFile(fileEnvName)
+	}
+	value := strings.TrimSpace(os.Getenv(bootstrapEnvName))
+	_ = os.Unsetenv(bootstrapEnvName)
+	if value == "" {
+		return "", fmt.Errorf("%s must name an absolute file, or %s must carry the read-once bootstrap secret", fileEnvName, bootstrapEnvName)
+	}
+	return value, nil
 }
 
 func readRequiredSecretFile(envName string) (string, error) {

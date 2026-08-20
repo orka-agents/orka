@@ -356,7 +356,7 @@ execution:
 | `nodeSelector` | map[string]string | Restricts native worker Pods to nodes with matching labels |
 | `tolerations` | list | Allows native worker Pods onto tainted runtime-specific node pools |
 | `affinity` | object | Adds Kubernetes affinity or anti-affinity rules for native worker Pods |
-| `workspace` | object | Execution-workspace provider request. With `provider: agent-sandbox` and workspace dispatch enabled, the ACP runtime hosts the Task's RuntimeSession in a workspace-provider-backed RuntimePool; everything else fails closed. Repository access always uses top-level `Task.spec.workspace`. |
+| `workspace` | object | Execution-workspace provider request. With workspace dispatch enabled, `provider: agent-sandbox` (no `templateRef`) or `provider: substrate` (with a required infrastructure `templateRef`) hosts the Task's RuntimeSession in a workspace-provider-backed RuntimePool; everything else fails closed. Repository access always uses top-level `Task.spec.workspace`. |
 
 Resolution order:
 
@@ -367,9 +367,9 @@ Resolution order:
 
 #### Execution Workspace Requests
 
-`Task.spec.execution.workspace` requests a physical execution-workspace provider for the Task's ACP RuntimeSession. With `provider: agent-sandbox`, `--agent-sandbox-enabled`, and `--acp-workspace-dispatch-enabled`, the RuntimeSession executes in a dedicated workspace-provider-backed RuntimePool; unsupported providers or options (Substrate, `templateRef`, `cleanupPolicy: retain`, boot/pool/snapshot/hibernation, `onDetach`) fail closed before any workspace or RuntimePool demand, with the reason projected to `Task.status.executionWorkspace`. There is no worker Job fallback and no harness-v1 fallback. Top-level `Task.spec.workspace` remains the verified source/publication contract.
+`Task.spec.execution.workspace` requests a physical execution-workspace provider for the Task's ACP RuntimeSession. With `--acp-workspace-dispatch-enabled`, `provider: agent-sandbox` (requires `--agent-sandbox-enabled`; `templateRef` must be omitted) or `provider: substrate` (requires `--substrate-enabled`; an infrastructure `templateRef` is required) executes the RuntimeSession in a dedicated workspace-provider-backed RuntimePool. Unsupported options (`cleanupPolicy: retain`, boot/pool/snapshot/hibernation, `onDetach`) fail closed before any workspace or RuntimePool demand, with the reason projected to `Task.status.executionWorkspace`. There is no worker Job fallback and no harness-v1 fallback. Top-level `Task.spec.workspace` remains the verified source/publication contract.
 
-See [Agent Sandbox Workspaces](agent-sandbox.md), [Agent Substrate Workspaces](substrate.md), and ADR 0024 for the provider-neutral contract.
+See [Agent Sandbox Workspaces](agent-sandbox.md), [Agent Substrate Workspaces](substrate.md), and ADRs 0024/0025 for the provider-neutral contract.
 
 #### SubstrateActorPool
 
@@ -973,7 +973,7 @@ Task and Tool users select namespaced `ExecutionWorkspaceClass` objects. Provide
 
 ### Agent Sandbox Controller Settings
 
-Workspace-provider-backed ACP RuntimeSession dispatch requires both `--agent-sandbox-enabled` and `--acp-workspace-dispatch-enabled`; with either unset, `Task.spec.execution.workspace` agent Tasks fail closed. The router/template/timeout settings below belong to the earlier worker-path prototype and are not used by the ACP RuntimePool backend (which renders its own sandbox templates):
+Workspace-provider-backed ACP RuntimeSession dispatch requires `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`); with either unset, `Task.spec.execution.workspace` agent Tasks fail closed. The Substrate backend also uses `--substrate-api-*`, `--substrate-router-url`, and `--substrate-actor-dns-suffix`. The agent-sandbox router/template/timeout settings below belong to the earlier worker-path prototype and are not used by the ACP RuntimePool backend (which renders its own sandbox templates):
 
 | Flag | Environment variable | Helm value | Default |
 |------|----------------------|------------|---------|

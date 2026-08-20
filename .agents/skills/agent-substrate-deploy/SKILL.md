@@ -8,9 +8,13 @@ description: Stand up Agent Substrate (warm, suspendable, gVisor-isolated Actors
 Stand up [Agent Substrate](https://github.com/agent-substrate/substrate) and an
 Orka-compatible `WorkerPool` + `ActorTemplate` on a local kind cluster, wire Orka
 with `--substrate-*` flags, then validate the direct Substrate actor/router and
-MCP tool paths. Today, `type: agent` Tasks whose `spec.execution.workspace` uses
-`provider: substrate` are expected-failure/future API checks because the
-service-backed harness rejects execution workspaces.
+MCP tool paths. `type: agent` Tasks whose `spec.execution.workspace` uses
+`provider: substrate` are flag-gated: without `--acp-workspace-dispatch-enabled`
+(the default in this skill's deployments) they fail closed, so treat them as
+expected-failure checks; with the flag, a required infrastructure `templateRef`,
+and real digest-pinned ACP runtime images plus provider-proxy model access, the
+Task's RuntimeSession is hosted in a Substrate Actor behind a dedicated
+`acp-ws-*` RuntimePool (ADR 0025).
 
 This skill is for **local/kind evaluation and validation**, not production. Orka
 does not install or manage Substrate (CRDs, control plane, router, snapshot
@@ -284,11 +288,13 @@ exec/suspend/delete) and Substrate-backed MCP tool lifecycle. A **plain** agent
 Task with no `execution.workspace` can validate the harness/model path separately
 after the model setup in step 4; the bundled e2e does not run that Task.
 
-Valid enabled provider-based `spec.execution.workspace` requests are still
-rejected during agent execution planning by the current harness-runtime gate,
-and the e2e skips those checks. Do not use
-a workspace-backed Task as a success criterion; `references/validate.md` covers
-it only as an expected-failure/future-API check.
+With `--acp-workspace-dispatch-enabled` unset (this skill's default), enabled
+provider-based `spec.execution.workspace` requests are rejected during agent
+execution planning and the e2e skips those checks; `references/validate.md`
+covers the expected-failure form. Substrate ACP dispatch additionally requires
+`templateRef` naming the operator infrastructure ActorTemplate, and never
+suspends actors — operators must not enable provider-side idle suspension for
+ACP templates.
 
 ## Troubleshooting
 

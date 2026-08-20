@@ -459,6 +459,66 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFromEnvBootstrapSecrets(t *testing.T) {
+	dir := t.TempDir()
+	values := map[string]string{
+		EnvPodUID: "actor:orka-acp-actor", EnvSupervisorBootID: "boot", EnvControllerEpoch: "1", EnvRuntimePoolUID: "pool-uid",
+		EnvRuntimePoolGeneration: "1", EnvProvider: providerKindCodex, EnvModel: "gpt-test", EnvWorkspaceIntent: "read",
+		EnvAgentConfigurationDigest: testDigest("agent"), EnvToolPolicyDigest: testDigest("tool"),
+		EnvApprovalPolicyDigest: testDigest("approval"), EnvMCPConfigurationDigest: testDigest("mcp"),
+		EnvProxyCredentialRole: "provider", EnvProxyCredentialScope: "model:gpt-test", EnvResourceClass: "standard",
+		EnvControllerTokenBootstrap: strings.Repeat("t", 32), EnvCapabilitySecretBootstrap: strings.Repeat("s", 32),
+		EnvProviderTokenBootstrap: "provider-capability",
+		EnvMCPBrokerURL:           "http://orka-controller.orka-system.svc:8080", EnvTrustNamespace: "default",
+		EnvSessionBaseDir: filepath.Join(dir, "sessions"), EnvFirstSessionUID: "20000", EnvLastSessionUID: "20010", EnvSessionGID: "20000",
+	}
+	for name, value := range values {
+		t.Setenv(name, value)
+	}
+	cfg, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ControllerBearerToken != strings.Repeat("t", 32) || string(cfg.CapabilitySecret) != strings.Repeat("s", 32) ||
+		cfg.ProviderProxy.UpstreamBearerToken != "provider-capability" {
+		t.Fatal("bootstrap secrets were not loaded into the supervisor config")
+	}
+	if cfg.Fence.RuntimeInstanceID != "actor:orka-acp-actor.boot" {
+		t.Fatalf("instance ID = %q, want actor-scoped identity", cfg.Fence.RuntimeInstanceID)
+	}
+	for _, name := range []string{EnvControllerTokenBootstrap, EnvCapabilitySecretBootstrap, EnvProviderTokenBootstrap} {
+		if value, present := os.LookupEnv(name); present && value != "" {
+			t.Fatalf("read-once bootstrap env %s survived config load", name)
+		}
+	}
+
+	// The file variable always wins over the bootstrap variable.
+	controllerToken := filepath.Join(dir, "controller-token")
+	if err := os.WriteFile(controllerToken, []byte(strings.Repeat("f", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvControllerTokenFile, controllerToken)
+	t.Setenv(EnvControllerTokenBootstrap, strings.Repeat("x", 32))
+	t.Setenv(EnvCapabilitySecretBootstrap, strings.Repeat("s", 32))
+	t.Setenv(EnvProviderTokenBootstrap, "provider-capability")
+	fileCfg, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileCfg.ControllerBearerToken != strings.Repeat("f", 32) {
+		t.Fatal("mounted secret file did not take precedence over the bootstrap env")
+	}
+
+	// Neither the file nor the bootstrap variable fails closed.
+	t.Setenv(EnvControllerTokenFile, "")
+	t.Setenv(EnvControllerTokenBootstrap, "")
+	t.Setenv(EnvCapabilitySecretBootstrap, strings.Repeat("s", 32))
+	t.Setenv(EnvProviderTokenBootstrap, "provider-capability")
+	if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "read-once bootstrap secret") {
+		t.Fatalf("missing controller secret error = %v, want fail-closed bootstrap message", err)
+	}
+}
+
 func TestDefaultProtocolLimitsUseProviderSpecificUpdateRates(t *testing.T) {
 	tests := []struct {
 		provider string

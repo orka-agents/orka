@@ -112,7 +112,7 @@ go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/repos
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-substrate-e2e.yml
 ```
 
-The agent-sandbox and Substrate scripts exercise the earlier execution-workspace prototype. They are not ACP v2 release evidence. Workspace-provider-backed ACP dispatch (agent-sandbox only) is flag-gated behind `--agent-sandbox-enabled` plus `--acp-workspace-dispatch-enabled` and fails closed otherwise; Substrate-backed dispatch is not implemented yet.
+The agent-sandbox and Substrate scripts exercise the earlier execution-workspace prototype. They are not ACP v2 release evidence. Workspace-provider-backed ACP dispatch is flag-gated behind `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`) and fails closed otherwise; live workspace-backed Task E2E promotion is tracked by #343.
 
 The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. Transaction-token provider E2E now lives in the external integration repository.
 

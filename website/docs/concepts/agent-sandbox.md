@@ -69,7 +69,7 @@ Everything the adapter cannot host is rejected before any workspace or
 RuntimePool demand exists, with the reason projected to
 `Task.status.executionWorkspace`:
 
-- `provider: substrate` (Phase 2; see the Substrate page);
+- unsupported providers (only `agent-sandbox` and `substrate` are implemented; see the [Substrate](substrate.md) page for the Phase 2 backend);
 - `templateRef` — ACP RuntimeSessions run only controller-rendered sandbox
   templates, because the immutable runtime image, epoch-scoped Secret mounts,
   and fence environment cannot be hosted by an operator template without

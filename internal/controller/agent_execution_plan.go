@@ -171,12 +171,20 @@ func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(task *corev1alpha1.Ta
 	if binding == nil {
 		return agentExecutionPlan{}, false
 	}
-	if !r.AgentSandboxEnabled {
-		err := fmt.Errorf("execution workspace provider agent-sandbox is disabled; enable --agent-sandbox-enabled")
-		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
+	switch binding.Provider {
+	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		if !r.AgentSandboxEnabled {
+			err := fmt.Errorf("execution workspace provider agent-sandbox is disabled; enable --agent-sandbox-enabled")
+			return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
+		}
+	case corev1alpha1.WorkspaceProviderSubstrate:
+		if !r.SubstrateEnabled {
+			err := fmt.Errorf("execution workspace provider substrate is disabled; enable --substrate-enabled")
+			return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
+		}
 	}
 	if !r.ACPWorkspaceDispatchEnabled {
-		err := fmt.Errorf("workspace-provider-backed RuntimeSession dispatch is disabled; enable --acp-workspace-dispatch-enabled to host this Task's RuntimeSession in an agent-sandbox workspace")
+		err := fmt.Errorf("workspace-provider-backed RuntimeSession dispatch is disabled; enable --acp-workspace-dispatch-enabled to host this Task's RuntimeSession in a %s workspace", binding.Provider)
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
 	}
 	return agentExecutionPlan{}, false

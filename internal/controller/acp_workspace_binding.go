@@ -35,6 +35,11 @@ type ACPRuntimeWorkspaceBinding struct {
 	// the continued session reference under reusePolicy session, or the exact
 	// Task UID otherwise.
 	SessionKey string
+	// TemplateNamespace and TemplateName reference the operator-owned Substrate
+	// infrastructure ActorTemplate. They are set exactly when Provider is
+	// substrate: agent-sandbox workloads run only controller-rendered templates.
+	TemplateNamespace string
+	TemplateName      string
 	// BindingDigest is the canonical digest over the fields above. It is part
 	// of the RuntimePool identity.
 	BindingDigest string
@@ -65,19 +70,37 @@ func resolveACPWorkspaceBinding(
 		return nil, fmt.Errorf("task UID is required for an execution workspace binding")
 	}
 	provider := resolveWorkspaceProvider(ws, defaultProvider)
-	if provider != corev1alpha1.WorkspaceProviderAgentSandbox {
+	templateNamespace := ""
+	templateName := ""
+	switch provider {
+	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		if ws.TemplateRef != nil {
+			return nil, fmt.Errorf(
+				"execution workspace templateRef selects a legacy worker-path sandbox template; ACP RuntimeSessions run only in controller-rendered sandbox templates, so templateRef must be omitted",
+			)
+		}
+	case corev1alpha1.WorkspaceProviderSubstrate:
+		// Substrate templates carry operator-owned infrastructure (worker pool
+		// placement, runsc build, snapshot location) that the controller cannot
+		// invent, so an explicit base template reference is required. The
+		// controller renders its own derived runtime template from it; the
+		// referenced template's containers never execute ACP work.
+		if ws.TemplateRef == nil || strings.TrimSpace(ws.TemplateRef.Name) == "" {
+			return nil, fmt.Errorf("execution workspace provider substrate requires templateRef.name naming the operator-owned infrastructure ActorTemplate")
+		}
+		templateName = strings.TrimSpace(ws.TemplateRef.Name)
+		templateNamespace = strings.TrimSpace(ws.TemplateRef.Namespace)
+		if templateNamespace == "" {
+			templateNamespace = task.Namespace
+		}
+	default:
 		return nil, fmt.Errorf(
-			"execution workspace provider %q does not support ACP RuntimeSessions yet; only agent-sandbox is supported and there is no fallback execution path",
+			"execution workspace provider %q does not support ACP RuntimeSessions; there is no fallback execution path",
 			provider,
 		)
 	}
-	if ws.TemplateRef != nil {
-		return nil, fmt.Errorf(
-			"execution workspace templateRef selects a legacy worker-path sandbox template; ACP RuntimeSessions run only in controller-rendered sandbox templates, so templateRef must be omitted",
-		)
-	}
 	if ws.PoolRef != nil || ws.Boot || ws.Snapshot != nil || ws.Hibernation != nil {
-		return nil, fmt.Errorf("execution workspace boot, poolRef, snapshot, and hibernation options are not supported by provider %q", provider)
+		return nil, fmt.Errorf("execution workspace boot, poolRef, snapshot, and hibernation options are not supported for ACP RuntimeSessions")
 	}
 	if ws.OnDetach != "" {
 		return nil, fmt.Errorf("execution workspace onDetach is not supported for ACP RuntimeSessions yet")
@@ -117,6 +140,7 @@ func resolveACPWorkspaceBinding(
 	binding := &ACPRuntimeWorkspaceBinding{
 		Provider: provider, ReusePolicy: reuse, CleanupPolicy: cleanup,
 		WorkspaceSlot: slot, SessionKey: sessionKey,
+		TemplateNamespace: templateNamespace, TemplateName: templateName,
 	}
 	digest, err := acpWorkspaceBindingDigest(binding)
 	if err != nil {
@@ -132,11 +156,13 @@ func acpWorkspaceBindingDigest(binding *ACPRuntimeWorkspaceBinding) (string, err
 		return "", fmt.Errorf("execution workspace binding is required")
 	}
 	return acpDomainDigest("execution-workspace-binding", map[string]string{
-		"provider":      string(binding.Provider),
-		"reusePolicy":   string(binding.ReusePolicy),
-		"cleanupPolicy": string(binding.CleanupPolicy),
-		"workspaceSlot": binding.WorkspaceSlot,
-		"sessionKey":    binding.SessionKey,
+		"provider":          string(binding.Provider),
+		"reusePolicy":       string(binding.ReusePolicy),
+		"cleanupPolicy":     string(binding.CleanupPolicy),
+		"workspaceSlot":     binding.WorkspaceSlot,
+		"sessionKey":        binding.SessionKey,
+		"templateNamespace": binding.TemplateNamespace,
+		"templateName":      binding.TemplateName,
 	})
 }
 
@@ -215,7 +241,16 @@ func validateACPWorkspaceBindingValues(binding *ACPRuntimeWorkspaceBinding) erro
 	if binding == nil {
 		return nil
 	}
-	if binding.Provider != corev1alpha1.WorkspaceProviderAgentSandbox {
+	switch binding.Provider {
+	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		if binding.TemplateNamespace != "" || binding.TemplateName != "" {
+			return fmt.Errorf("frozen agent-sandbox execution workspace binding must not carry a template reference")
+		}
+	case corev1alpha1.WorkspaceProviderSubstrate:
+		if strings.TrimSpace(binding.TemplateNamespace) == "" || strings.TrimSpace(binding.TemplateName) == "" {
+			return fmt.Errorf("frozen substrate execution workspace binding is missing the infrastructure template reference")
+		}
+	default:
 		return fmt.Errorf("frozen execution workspace provider %q is not supported", binding.Provider)
 	}
 	if binding.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete {

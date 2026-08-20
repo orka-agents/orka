@@ -85,10 +85,34 @@ type ACPDispatcher struct {
 	AdmissionGate            *ACPAdmissionGate
 	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
+	// SubstrateRouterURL and SubstrateActorDNSSuffix route Substrate-backed
+	// RuntimePool instances through the provider router while preserving the
+	// exact actor route host. Empty values fail closed for substrate pools.
+	SubstrateRouterURL      string
+	SubstrateActorDNSSuffix string
+
 	mu              sync.Mutex
 	active          map[types.UID]struct{}
 	sem             chan struct{}
 	runtimeSessions map[string]ACPRuntimeSessionBinding
+
+	substrateRouteOnce  sync.Once
+	substrateRouteHTTP  *http.Client
+	substrateRouteSetup error
+}
+
+// substrateRouteHTTPClient lazily builds the router-pinned transport for
+// Substrate-backed RuntimePool instances.
+func (d *ACPDispatcher) substrateRouteHTTPClient() (*http.Client, error) {
+	d.substrateRouteOnce.Do(func() {
+		transport, err := substrateRouteHTTPTransport(d.SubstrateRouterURL, d.SubstrateActorDNSSuffix)
+		if err != nil {
+			d.substrateRouteSetup = fmt.Errorf("substrate route transport is not configured: %w", err)
+			return
+		}
+		d.substrateRouteHTTP = &http.Client{Transport: transport}
+	})
+	return d.substrateRouteHTTP, d.substrateRouteSetup
 }
 
 func (d *ACPDispatcher) NeedLeaderElection() bool { return true }
@@ -3082,8 +3106,7 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool auth Secret is incomplete")
 	}
 	endpoint := exactPodEndpoint(active.PodAddress)
-	runtimeClient, err := harnessv2.NewClient(
-		endpoint,
+	options := []harnessv2.ClientOption{
 		harnessv2.WithControlTimeout(runtimeSessionCreateTimeout(acpDispatchTarget{pool: pool})),
 		harnessv2.WithControllerBearerToken(controllerToken),
 		harnessv2.WithOperationCapabilitySecret(capabilitySecret),
@@ -3091,7 +3114,19 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 			RuntimeProfileDigest: harnessv2.ProfileDigest(pool.Spec.Runtime.Profile.Digest),
 			RuntimeInstanceID:    harnessv2.RuntimeInstanceID(active.RuntimeInstanceID),
 		}),
-	)
+	}
+	if runtimePoolIsSubstrateBacked(pool) {
+		// Substrate-backed instances are reached through the provider router:
+		// the endpoint is the exact actor route host, and the pinned router
+		// transport preserves it as the logical Host header.
+		endpoint = urlSchemeHTTP + "://" + strings.TrimSpace(active.PodAddress)
+		substrateHTTPClient, substrateErr := d.substrateRouteHTTPClient()
+		if substrateErr != nil {
+			return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, substrateErr
+		}
+		options = append(options, harnessv2.WithHTTPClient(substrateHTTPClient))
+	}
+	runtimeClient, err := harnessv2.NewClient(endpoint, options...)
 	if err != nil {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
 	}

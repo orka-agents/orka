@@ -130,14 +130,42 @@ spec:
                       - substrate
                     - enum:
                       - agent-sandbox
+                      - substrate
                     description: |-
                       Provider selects the execution-workspace provider control plane hosting
                       this pool's single runtime instance.
                     type: string
+                  substrate:
+                    description: Substrate configures the Substrate-provider backend.
+                    properties:
+                      baseTemplateName:
+                        description: BaseTemplateName names the operator-owned infrastructure
+                          ActorTemplate.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      baseTemplateNamespace:
+                        description: |-
+                          BaseTemplateNamespace is the namespace of the operator-owned
+                          infrastructure ActorTemplate. Controller-rendered runtime templates and
+                          their epoch-scoped Secrets are created in the same namespace so the
+                          provider can resolve them.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - baseTemplateName
+                    - baseTemplateNamespace
+                    type: object
                 required:
                 - bindingDigest
                 - provider
                 type: object
+                x-kubernetes-validations:
+                - message: substrate settings are required exactly when provider is
+                    substrate
+                  rule: (self.provider == 'substrate') == has(self.substrate)
               runtime:
                 description: Runtime pins the immutable supervisor image and behavior
                   profile.

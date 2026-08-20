@@ -78,12 +78,14 @@ type agentExecutionSnapshotBody struct {
 // execution-workspace binding. It never carries provider-native identifiers,
 // physical workspace names, or secrets.
 type agentExecutionSnapshotWorkspaceBinding struct {
-	Provider      string `json:"provider"`
-	ReusePolicy   string `json:"reusePolicy"`
-	CleanupPolicy string `json:"cleanupPolicy"`
-	WorkspaceSlot string `json:"workspaceSlot"`
-	SessionKey    string `json:"sessionKey"`
-	BindingDigest string `json:"bindingDigest"`
+	Provider          string `json:"provider"`
+	ReusePolicy       string `json:"reusePolicy"`
+	CleanupPolicy     string `json:"cleanupPolicy"`
+	WorkspaceSlot     string `json:"workspaceSlot"`
+	SessionKey        string `json:"sessionKey"`
+	TemplateNamespace string `json:"templateNamespace,omitempty"`
+	TemplateName      string `json:"templateName,omitempty"`
+	BindingDigest     string `json:"bindingDigest"`
 }
 
 type agentExecutionSnapshotAgent struct {
@@ -259,12 +261,14 @@ func (r *TaskReconciler) resolveAgentExecutionCandidate(
 	}
 	if workspaceBinding != nil {
 		body.ExecutionWorkspace = &agentExecutionSnapshotWorkspaceBinding{
-			Provider:      string(workspaceBinding.Provider),
-			ReusePolicy:   string(workspaceBinding.ReusePolicy),
-			CleanupPolicy: string(workspaceBinding.CleanupPolicy),
-			WorkspaceSlot: workspaceBinding.WorkspaceSlot,
-			SessionKey:    workspaceBinding.SessionKey,
-			BindingDigest: workspaceBinding.BindingDigest,
+			Provider:          string(workspaceBinding.Provider),
+			ReusePolicy:       string(workspaceBinding.ReusePolicy),
+			CleanupPolicy:     string(workspaceBinding.CleanupPolicy),
+			WorkspaceSlot:     workspaceBinding.WorkspaceSlot,
+			SessionKey:        workspaceBinding.SessionKey,
+			TemplateNamespace: workspaceBinding.TemplateNamespace,
+			TemplateName:      workspaceBinding.TemplateName,
+			BindingDigest:     workspaceBinding.BindingDigest,
 		}
 	}
 	if agent.Spec.Runtime.DefaultAllowedTools != nil || agent.Spec.Runtime.DefaultAllowBash != nil {
@@ -552,12 +556,14 @@ func verifiedSnapshotWorkspaceBinding(
 		return nil, nil
 	}
 	frozen := &ACPRuntimeWorkspaceBinding{
-		Provider:      corev1alpha1.WorkspaceProvider(body.ExecutionWorkspace.Provider),
-		ReusePolicy:   corev1alpha1.WorkspaceReusePolicy(body.ExecutionWorkspace.ReusePolicy),
-		CleanupPolicy: corev1alpha1.WorkspaceCleanupPolicy(body.ExecutionWorkspace.CleanupPolicy),
-		WorkspaceSlot: body.ExecutionWorkspace.WorkspaceSlot,
-		SessionKey:    body.ExecutionWorkspace.SessionKey,
-		BindingDigest: body.ExecutionWorkspace.BindingDigest,
+		Provider:          corev1alpha1.WorkspaceProvider(body.ExecutionWorkspace.Provider),
+		ReusePolicy:       corev1alpha1.WorkspaceReusePolicy(body.ExecutionWorkspace.ReusePolicy),
+		CleanupPolicy:     corev1alpha1.WorkspaceCleanupPolicy(body.ExecutionWorkspace.CleanupPolicy),
+		WorkspaceSlot:     body.ExecutionWorkspace.WorkspaceSlot,
+		SessionKey:        body.ExecutionWorkspace.SessionKey,
+		TemplateNamespace: body.ExecutionWorkspace.TemplateNamespace,
+		TemplateName:      body.ExecutionWorkspace.TemplateName,
+		BindingDigest:     body.ExecutionWorkspace.BindingDigest,
 	}
 	if err := validateACPWorkspaceBindingValues(frozen); err != nil {
 		return nil, err

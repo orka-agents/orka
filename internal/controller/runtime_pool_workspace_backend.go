@@ -77,7 +77,18 @@ func validateRuntimePoolExecutionWorkspace(pool *corev1alpha1.RuntimePool) error
 	if workspace == nil {
 		return nil
 	}
-	if workspace.Provider != corev1alpha1.WorkspaceProviderAgentSandbox {
+	switch workspace.Provider {
+	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		if workspace.Substrate != nil {
+			return fmt.Errorf("spec.executionWorkspace.substrate is only valid for provider substrate")
+		}
+	case corev1alpha1.WorkspaceProviderSubstrate:
+		if workspace.Substrate == nil ||
+			strings.TrimSpace(workspace.Substrate.BaseTemplateNamespace) == "" ||
+			strings.TrimSpace(workspace.Substrate.BaseTemplateName) == "" {
+			return fmt.Errorf("spec.executionWorkspace.substrate must name the operator-owned infrastructure ActorTemplate")
+		}
+	default:
 		return fmt.Errorf("spec.executionWorkspace.provider %q is not supported", workspace.Provider)
 	}
 	if !validSHA256Digest(workspace.BindingDigest) {
@@ -255,7 +266,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 	if err != nil {
 		return r.finishRuntimePoolRolloutFailure(ctx, pool, status, err)
 	}
-	probe, err := r.supervisorClient().Probe(ctx, runtimePoolPodEndpoint(pod), string(deployedAuthSecret.Data[runtimePoolControllerTokenKey]), deployedAuthSecret.Data[runtimePoolCapabilitySecretKey])
+	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, pod), string(deployedAuthSecret.Data[runtimePoolControllerTokenKey]), deployedAuthSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		return r.finishRuntimePoolRolloutFailure(ctx, pool, status, fmt.Errorf("authenticated rollout status probe failed: %w", err))
 	}
@@ -275,9 +286,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 
 	if !probe.Status.Drain.Requested {
 		reason := "runtime_pool_rollout_" + runtimePoolShortRevision(desiredTemplate.Annotations[runtimePoolTemplateRevisionAnnotation])
-		if err := r.supervisorClient().RequestDrain(
+		if err := r.supervisorClientForPool(pool).RequestDrain(
 			ctx,
-			runtimePoolPodEndpoint(pod),
+			runtimePoolInstanceEndpoint(pool, pod),
 			string(deployedAuthSecret.Data[runtimePoolControllerTokenKey]),
 			deployedAuthSecret.Data[runtimePoolCapabilitySecretKey],
 			probe.Status,
@@ -286,7 +297,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 			return r.finishRuntimePoolRolloutFailure(ctx, pool, status, fmt.Errorf("authenticated rollout drain request failed: %w", err))
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
-		status.Message = "authenticated rollout drain requested; waiting for a subsequent quiescent observation"
+		status.Message = runtimePoolMessageRolloutDrainRequested
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonDraining, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
@@ -300,7 +311,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
-		status.Message = "waiting for controller reservations and supervisor sessions, prompts, permissions, descendants, or finalization to settle"
+		status.Message = runtimePoolMessageRolloutSettling
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonDraining, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -308,7 +319,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 	if !runtimePoolRolloutQuiescencePersisted(pool) {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
-		status.Message = "authenticated old runtime and controller reservations are quiescent"
+		status.Message = runtimePoolMessageRolloutQuiescent
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonQuiescent, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
@@ -346,7 +357,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		if claim == nil && len(pods) == 0 {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
 			status.ActiveInstance = nil
-			status.Message = "runtime pool is stopped"
+			status.Message = runtimePoolMessageStopped
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, "ScaledToZero", status.Message)
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionTrue, "ScaledToZero", status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -369,12 +380,12 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = "cannot authenticate the previous active runtime instance to prove drain"
+		status.Message = runtimePoolMessageDrainUnauthenticated
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
-	probe, err := r.supervisorClient().Probe(ctx, runtimePoolPodEndpoint(&readyPods[0]), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
+	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, &readyPods[0]), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -398,9 +409,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionTrue, "ExactInstanceReady", "selected runtime Pod and supervisor profile are ready")
 
 	if !probe.Status.Drain.Requested {
-		if err := r.supervisorClient().RequestDrain(
+		if err := r.supervisorClientForPool(pool).RequestDrain(
 			ctx,
-			runtimePoolPodEndpoint(&readyPods[0]),
+			runtimePoolInstanceEndpoint(pool, &readyPods[0]),
 			string(authSecret.Data[runtimePoolControllerTokenKey]),
 			authSecret.Data[runtimePoolCapabilitySecretKey],
 			probe.Status,
@@ -413,21 +424,21 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
-		status.Message = "drain requested; waiting for authenticated quiescence"
+		status.Message = runtimePoolMessageDrainRequested
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
 	if !runtimePoolProbeIsQuiescent(pool.Status.Capacity, probe.Status) {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
-		status.Message = "waiting for sessions, prompts, permissions, reservations, or finalization work to settle"
+		status.Message = runtimePoolMessageDrainSettling
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleQuiescent
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
-		status.Message = "authenticated supervisor and controller state are quiescent"
+		status.Message = runtimePoolMessageDrainQuiescent
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
@@ -458,6 +469,14 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 	cfg, err := r.runtimePoolConfigForDeletion(pool)
 	if err != nil {
 		return err
+	}
+	if runtimePoolIsSubstrateBacked(pool) {
+		control, controlErr := r.substrateActorControl()
+		if controlErr != nil {
+			return controlErr
+		}
+		defer control.Close() //nolint:errcheck // best-effort connection teardown
+		return r.recycleSubstrateActor(ctx, pool, control, runtimePoolSubstrateActorID(cfg.baseName))
 	}
 	claim, err := r.getRuntimePoolSandboxClaim(ctx, cfg)
 	if err != nil {

@@ -34,6 +34,7 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 		mutateAgent                 func(*corev1alpha1.Agent)
 		objects                     []client.Object
 		agentSandboxEnabled         bool
+		substrateEnabled            bool
 		acpRuntimeEnabled           bool
 		acpWorkspaceDispatchEnabled bool
 		harnessV1Enabled            bool
@@ -194,16 +195,39 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			wantWorkspaceStatusErr:      "templateRef must be omitted",
 		},
 		{
-			name: "substrate execution workspace fails closed before any demand",
+			name: "substrate execution workspace without templateRef fails closed before any demand",
 			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
 				workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
 			}),
-			agentSandboxEnabled:         true,
+			substrateEnabled:            true,
 			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
 			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  "does not support ACP RuntimeSessions yet",
-			wantWorkspaceStatusErr:      "does not support ACP RuntimeSessions yet",
+			wantReason:                  "requires templateRef.name",
+			wantWorkspaceStatusErr:      "requires templateRef.name",
+		},
+		{
+			name: "substrate-backed agent task uses ACP RuntimePool when dispatch is enabled",
+			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
+				workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: "ate-demo"}
+			}),
+			substrateEnabled:            true,
+			acpRuntimeEnabled:           true,
+			acpWorkspaceDispatchEnabled: true,
+			wantPath:                    agentExecutionPathACP,
+		},
+		{
+			name: "substrate-backed agent task fails closed when substrate is disabled",
+			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
+				workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: "ate-demo"}
+			}),
+			acpRuntimeEnabled:           true,
+			acpWorkspaceDispatchEnabled: true,
+			wantPath:                    agentExecutionPathRejected,
+			wantReason:                  "substrate-enabled",
+			wantWorkspaceStatusErr:      "substrate-enabled",
 		},
 		{
 			name: "workspace cleanupPolicy retain fails closed",
@@ -261,6 +285,7 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 
 			r := newUnitReconciler(scheme, tt.objects...)
 			r.AgentSandboxEnabled = tt.agentSandboxEnabled
+			r.SubstrateEnabled = tt.substrateEnabled
 			r.ACPRuntimeEnabled = tt.acpRuntimeEnabled
 			r.ACPWorkspaceDispatchEnabled = tt.acpWorkspaceDispatchEnabled
 			r.HarnessV1Enabled = tt.harnessV1Enabled

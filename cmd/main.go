@@ -1349,6 +1349,10 @@ func main() {
 		}
 		runtimePoolReconciler.Epochs = controllerEpochManager
 		runtimePoolReconciler.EnablePDB = true
+		if substrateEnabled {
+			runtimePoolReconciler.SubstrateEnabled = true
+			runtimePoolReconciler.SubstrateConfig = substrateConfig
+		}
 		runtimePoolReconciler.AllowedImages = controller.ACPRuntimeImages{
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,
@@ -1489,6 +1493,10 @@ func main() {
 			AdmissionGate:        acpAdmissionGate,
 			IdlePoolTTL:          acpIdlePoolTTL,
 			MCPRegistry:          acpMCPRegistry,
+		}
+		if substrateEnabled {
+			acpDispatcher.SubstrateRouterURL = substrateConfig.RouterURL
+			acpDispatcher.SubstrateActorDNSSuffix = substrateConfig.ActorDNSSuffix
 		}
 		if err := mgr.Add(acpDispatcher); err != nil {
 			setupLog.Error(err, "unable to add ACP dispatcher")

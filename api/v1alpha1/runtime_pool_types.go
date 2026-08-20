@@ -216,15 +216,16 @@ type RuntimePoolProfileSpec struct {
 
 // RuntimePoolExecutionWorkspaceSpec binds a pool's runtime workload to an
 // externally operated execution-workspace provider instead of a
-// controller-owned Deployment. The rendered supervisor Pod template, image
+// controller-owned Deployment. The rendered supervisor workload, image
 // allowlist, epoch-scoped Secrets, endpoint fencing, and admission semantics
 // are identical to plain pools; only workload materialization changes.
 // Provider-native identifiers never enter public Task status.
+// +kubebuilder:validation:XValidation:rule="(self.provider == 'substrate') == has(self.substrate)",message="substrate settings are required exactly when provider is substrate"
 type RuntimePoolExecutionWorkspaceSpec struct {
 	// Provider selects the execution-workspace provider control plane hosting
 	// this pool's single runtime instance.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=agent-sandbox
+	// +kubebuilder:validation:Enum=agent-sandbox;substrate
 	Provider WorkspaceProvider `json:"provider"`
 
 	// BindingDigest is the canonical digest of the frozen workspace binding
@@ -233,6 +234,32 @@ type RuntimePoolExecutionWorkspaceSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	BindingDigest string `json:"bindingDigest"`
+
+	// Substrate configures the Substrate-provider backend.
+	// +optional
+	Substrate *RuntimePoolSubstrateWorkspaceSpec `json:"substrate,omitempty"`
+}
+
+// RuntimePoolSubstrateWorkspaceSpec binds a Substrate-backed pool to the
+// operator-owned infrastructure ActorTemplate whose placement fields
+// (workerPoolRef, runsc, snapshotsConfig) seed the controller-rendered
+// runtime template. The runtime container itself is always controller-owned.
+type RuntimePoolSubstrateWorkspaceSpec struct {
+	// BaseTemplateNamespace is the namespace of the operator-owned
+	// infrastructure ActorTemplate. Controller-rendered runtime templates and
+	// their epoch-scoped Secrets are created in the same namespace so the
+	// provider can resolve them.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	BaseTemplateNamespace string `json:"baseTemplateNamespace"`
+
+	// BaseTemplateName names the operator-owned infrastructure ActorTemplate.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	BaseTemplateName string `json:"baseTemplateName"`
 }
 
 // RuntimePoolRuntimeSpec selects the immutable supervisor image and profile.

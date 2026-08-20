@@ -2,7 +2,7 @@
 
 Validation steps for `$agent-substrate-deploy`. Read after the standard workflow completes.
 
-> **Known gate:** Orka ACP RuntimeSessions do not yet map to Substrate Actors. The bundled E2E validates direct Actor create/resume/exec/suspend/delete plus Substrate-backed MCP lifecycle; a provider-backed agent Task remains expected-failure evidence. Validate plain Codex/Claude ACP Tasks separately with `scripts/live-acp-runtime-e2e.sh`.
+> **Known gate:** Substrate-backed ACP RuntimeSession dispatch requires `--substrate-enabled` **and** `--acp-workspace-dispatch-enabled` plus an infrastructure `templateRef`; this skill's deployments leave the dispatch flag off, so a provider-backed agent Task remains expected-failure evidence here. The bundled E2E validates direct Actor create/resume/exec/suspend/delete plus Substrate-backed MCP lifecycle. Validate plain Codex/Claude ACP Tasks separately with `scripts/live-acp-runtime-e2e.sh`.
 
 The installer leaves a fully wired cluster. During standup it smoke-tests direct
 actor create/resume/exec/suspend/delete and Substrate-backed MCP tool lifecycle.
@@ -57,11 +57,13 @@ YAML
 kubectl --context "$ctx" -n default get task substrate-smoke -o yaml
 ```
 
-Under the current gate, check `status.executionWorkspace.phase=Failed` and
+With the dispatch flag off, check `status.executionWorkspace.phase=Failed` and
 `reason=WorkspaceValidationFailed`; provider/template metadata remains sanitized.
-`placement`, `density`, and `resumeLatency` are populated only after successful
-workspace readiness, so this expected-failure Task cannot validate them. Status
-must never expose actor IDs, snapshot URIs, worker pod IPs, daemon URLs, or
+With `--acp-workspace-dispatch-enabled`, an infrastructure `templateRef`, real
+digest-pinned ACP runtime images, and provider-proxy model access, the same Task
+becomes a live success smoke waiting for `Succeeded`, backed by a dedicated
+`acp-ws-*` RuntimePool whose Actor hosts the supervisor. Status must never
+expose actor IDs, route hosts, snapshot URIs, worker pod IPs, daemon URLs, or
 tokens.
 
 ## CI parity

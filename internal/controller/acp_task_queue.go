@@ -1081,6 +1081,12 @@ func (r *TaskReconciler) ensureACPRuntimePool(ctx context.Context, namespace str
 				Provider:      plan.Workspace.Provider,
 				BindingDigest: plan.Workspace.BindingDigest,
 			}
+			if plan.Workspace.Provider == corev1alpha1.WorkspaceProviderSubstrate {
+				executionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+					BaseTemplateNamespace: plan.Workspace.TemplateNamespace,
+					BaseTemplateName:      plan.Workspace.TemplateName,
+				}
+			}
 		}
 		pool = &corev1alpha1.RuntimePool{
 			ObjectMeta: metav1.ObjectMeta{

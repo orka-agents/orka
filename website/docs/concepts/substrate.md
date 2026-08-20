@@ -4,9 +4,15 @@ slug: /substrate
 
 # Agent Substrate Workspaces
 
-Agent Substrate is the planned second execution-workspace phase (Phase 2 of workspace-provider-backed RuntimeSessions). The built-in `type: agent` path does not run Tasks in Substrate Actors yet: a `Task.spec.execution.workspace` request with `provider: substrate` fails closed before any workspace or RuntimePool demand exists, and never falls back to the removed worker-based path or to the agent-sandbox backend. Phase 1 (agent-sandbox) is documented in [Agent Sandbox Workspaces](agent-sandbox.md); Substrate will plug into the same workspace-provider-backed RuntimePool seam while adding suspend/resume, placement, and snapshot semantics.
+Agent Substrate is an externally installed and operated execution-workspace
+provider. Orka can host a built-in agent Task's ACP RuntimeSession inside a
+gVisor-isolated Substrate Actor through a **workspace-provider-backed
+RuntimePool** (Phase 2 of the seam established for
+[Agent Sandbox](agent-sandbox.md)). The integration is disabled by default and
+fails closed; there is never a fallback to the removed worker-based path or to
+the agent-sandbox backend.
 
-Use top-level `Task.spec.workspace` for current ACP repository input and publication policy:
+`Task.spec.workspace` remains the only repository surface:
 
 ```yaml
 spec:
@@ -22,43 +28,93 @@ spec:
     pushBranch: orka/example-change
 ```
 
-The separate Workspace/Publisher performs clone, deterministic commit preparation, exact-ref push, independent verification, and optional PR reconciliation. The ACP runtime or future Actor must not receive publication credentials.
+The separate Workspace/Publisher performs clone, deterministic commit
+preparation, exact-ref push, independent verification, and optional PR
+reconciliation. The Actor never receives publication credentials.
 
-## Planned ACP seam
+`Task.spec.execution.workspace` requests the Substrate backend. Unlike
+agent-sandbox, `templateRef` is **required**: it names the operator-owned
+*infrastructure* ActorTemplate whose placement fields (workerPoolRef, runsc
+build, snapshot location) seed the controller-rendered runtime template.
 
-The intended Substrate mapping is one Orka RuntimeSession per warm, suspendable Actor behind the same `orka.harness.v2` operations:
-
-```text
-Task attempt
-  -> logical RuntimePool / trust domain
-  -> RuntimeSession
-  -> Substrate Actor hosting one ACP provider session
-  -> validation and durable workspace delta
-  -> Orka Workspace/Publisher
+```yaml
+spec:
+  type: agent
+  execution:
+    workspace:
+      enabled: true
+      provider: substrate
+      templateRef:
+        namespace: ate-demo
+        name: orka-codex-infra
 ```
 
-Substrate would supply physical placement, suspension, and resume. Orka would remain authoritative for:
+## Execution model
 
-- Task attempt state and `OutcomeUnknown` classification;
-- controller epoch, pool/session generations, exact instance fences, and request digests;
-- prompt leases, permission decisions, cancellation, and external-effect identities;
-- canonical transcript and result finalization;
-- workspace baseline, validated delta, BranchClaim, Publication, and delivery receipt;
-- credential separation and prompt-scoped broker authority.
+```text
+Task
+  -> workspace binding (provider, policies, session key, infrastructure
+     template) frozen into the immutable execution snapshot
+  -> dedicated single-session RuntimePool (acp-ws-<runtime>-<hash>)
+  -> derived, controller-owned ActorTemplate: operator infrastructure fields +
+     the immutable ACP runtime container with fence env and read-once
+     bootstrap secret references (epoch-scoped Secrets in the template
+     namespace, resolved by the provider)
+  -> one Actor, booted from scratch exactly once (ResumeActor boot=true)
+  -> authenticated exact-instance fence probe through the router
+     (Host: <actorID>.<actorDNSSuffix>) selects the ActiveInstance
+  -> ephemeral RuntimeSession, fenced prompts, workspace validation,
+     optional clean-room Workspace/Publisher transaction — all unchanged
+```
 
-## Required properties before enablement
+Orka remains authoritative for Task attempt state, `OutcomeUnknown`
+classification, epochs/fences/request digests, prompt leases, permissions,
+cancellation, canonical transcripts, workspace deltas, publication, and
+delivery receipts. Substrate supplies physical placement and gVisor isolation.
 
-A production integration must prove:
+## Suspension is prohibited
 
-1. an Actor maps to one immutable runtime instance and boot identity;
-2. suspension cannot occur during a prompt, validation, publication, finalization, or Session lease release;
-3. resume never silently replays an accepted prompt;
-4. process-tree cleanup and private session filesystem boundaries remain verifiable;
-5. provider and broker capabilities are revoked while idle, suspended, validating, or publishing;
-6. source-read, target-read, target-write, and forge credentials never enter the Actor's ACP process tree;
-7. a replaced or lost Actor is classified using durable Orka state rather than provider history guesses;
-8. cleanup removes all Orka- and Substrate-owned resources for the test trust domain.
+gVisor suspension checkpoints Actor **process memory** into provider snapshot
+storage. A running supervisor holds the pool controller token, the capability
+secret, and the live provider-proxy bearer in memory, so suspending a booted
+ACP actor would write live credentials into a snapshot — which the
+execution-workspace contract forbids. Therefore:
 
-## Local evaluation material
+- the backend never calls `SuspendActor`; scale-down and rollout drain the
+  supervisor with the standard persisted quiescence barriers and then delete
+  the actor directly;
+- a provider-initiated suspension or snapshot of a booted actor fails closed:
+  admission closes, the actor is recycled, and the replacement boots fresh;
+- **operators must disable provider-side idle suspension for ACP actor
+  templates**;
+- Task options that imply warm workspaces (`boot`, `poolRef`, `snapshot`,
+  `hibernation`, `onDetach`, `cleanupPolicy: retain`) are rejected before any
+  workspace or RuntimePool demand exists.
 
-The existing kind/Substrate demo assets describe an earlier prototype and are not the supported ACP v2 release path. Do not build a runtime image around the removed shared wrapper or validate success through a per-Task worker Job. Current live release validation targets the Kubernetes RuntimePool implementation; Substrate acceptance comes only after an Actor-backed v2 supervisor is implemented and passes the same conformance, crash, security, and publication gates.
+Warm suspend/resume becomes viable only with provider-side credential-safe
+sessions (for example short-lived certificates via `SessionIdentity.MintCert`,
+which the provider API defines but does not support yet). Until then, "resume"
+is recreation: a fresh actor and boot, with logical session continuity through
+the existing RuntimeSession generation-increment recreation path. See
+`docs/adr/0025-substrate-backed-runtime-pools.md` for the full analysis.
+
+## Enablement and operator requirements
+
+Dispatch requires `--substrate-enabled` (with valid `--substrate-api-*`,
+`--substrate-router-url`, and `--substrate-actor-dns-suffix` configuration)
+plus `--acp-workspace-dispatch-enabled`. Either missing fails closed with the
+reason projected to `Task.status.executionWorkspace`.
+
+- The infrastructure ActorTemplate must exist in the referenced namespace; its
+  containers are never executed by ACP pools.
+- The Substrate control plane and router share the cluster with Orka;
+  cross-cluster topologies are unsupported and fail closed.
+- The Actor's egress must reach the Orka controller API and the provider
+  proxy (Vekil).
+- Pool finalization deletes the actor through the control API before the pool
+  is released; an unreachable control plane blocks pool deletion rather than
+  leaking a credentialed workload.
+
+Task status stays provider-neutral: provider, phase, reason, and policies.
+Actor IDs, route hosts, worker names, and snapshot URIs never enter public
+Task status.
