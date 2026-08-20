@@ -16,6 +16,7 @@ const (
 	ExecutionEventTypeModelRequestStarted           = "ModelRequestStarted"
 	ExecutionEventTypeModelRequestCompleted         = "ModelRequestCompleted"
 	ExecutionEventTypeModelRequestFailed            = "ModelRequestFailed"
+	ExecutionEventTypeModelUsageUpdated             = "ModelUsageUpdated"
 	ExecutionEventTypeModelMessage                  = "ModelMessage"
 	ExecutionEventTypeContextTruncated              = "ContextTruncated"
 	ExecutionEventTypeToolCallStarted               = "ToolCallStarted"
@@ -40,6 +41,7 @@ const (
 	ExecutionEventTypeApprovalDeclined              = "ApprovalDeclined"
 	ExecutionEventTypeApprovalExpired               = "ApprovalExpired"
 	ExecutionEventTypeApprovalCancelled             = "ApprovalCancelled"
+	ExecutionEventTypePlanUpdated                   = "PlanUpdated"
 )
 
 const (
@@ -70,6 +72,7 @@ var executionEventTypes = []string{
 	ExecutionEventTypeModelRequestStarted,
 	ExecutionEventTypeModelRequestCompleted,
 	ExecutionEventTypeModelRequestFailed,
+	ExecutionEventTypeModelUsageUpdated,
 	ExecutionEventTypeModelMessage,
 	ExecutionEventTypeContextTruncated,
 	ExecutionEventTypeToolCallStarted,
@@ -94,6 +97,7 @@ var executionEventTypes = []string{
 	ExecutionEventTypeApprovalDeclined,
 	ExecutionEventTypeApprovalExpired,
 	ExecutionEventTypeApprovalCancelled,
+	ExecutionEventTypePlanUpdated,
 }
 
 var validExecutionEventTypes = stringSet(executionEventTypes)
@@ -123,7 +127,7 @@ func stringSet(values []string) map[string]struct{} {
 	return set
 }
 
-// ExecutionEventTypes returns the stable Wave 0 execution event taxonomy.
+// ExecutionEventTypes returns the stable execution event taxonomy.
 func ExecutionEventTypes() []string {
 	return append([]string(nil), executionEventTypes...)
 }
@@ -151,7 +155,7 @@ func IsTerminalApprovalEventType(value string) bool {
 	return ok
 }
 
-// IsValidExecutionEventType reports whether value is one of the Wave 0 event types.
+// IsValidExecutionEventType reports whether value is a known execution event type.
 func IsValidExecutionEventType(value string) bool {
 	_, ok := validExecutionEventTypes[strings.TrimSpace(value)]
 	return ok

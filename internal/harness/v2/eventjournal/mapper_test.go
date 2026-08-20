@@ -1,0 +1,187 @@
+package eventjournal
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	executionevents "github.com/orka-agents/orka/internal/events"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+)
+
+func TestMapUpdateMapsACPUpdateKinds(t *testing.T) {
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	mapCtx := testMapContext()
+	tests := []struct {
+		name         string
+		update       harnessv2.UpdateEvent
+		wantType     string
+		wantSeverity string
+		wantToolName string
+		wantToolID   string
+	}{
+		{
+			name: "assistant message",
+			update: harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk,
+				AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "hello from the agent"}},
+			wantType: executionevents.ExecutionEventTypeModelMessage, wantSeverity: executionevents.ExecutionEventSeverityInfo,
+		},
+		{
+			name: "tool started",
+			update: harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: "call-1", Title: "Read the repository", Kind: "file_read", Status: harnessv2.ToolCallStatusPending,
+				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "README.md"}},
+			}},
+			wantType: executionevents.ExecutionEventTypeToolCallStarted, wantSeverity: executionevents.ExecutionEventSeverityInfo,
+			wantToolName: "file_read", wantToolID: "call-1",
+		},
+		{
+			name: "tool completed",
+			update: harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: "call-1", Title: "Read the repository", Kind: "file_read", Status: harnessv2.ToolCallStatusCompleted,
+			}},
+			wantType: executionevents.ExecutionEventTypeToolCallCompleted, wantSeverity: executionevents.ExecutionEventSeverityInfo,
+			wantToolName: "file_read", wantToolID: "call-1",
+		},
+		{
+			name: "tool failed",
+			update: harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: "call-2", Kind: "shell", Status: harnessv2.ToolCallStatusFailed,
+			}},
+			wantType: executionevents.ExecutionEventTypeToolCallFailed, wantSeverity: executionevents.ExecutionEventSeverityError,
+			wantToolName: "shell", wantToolID: "call-2",
+		},
+		{
+			name: "plan",
+			update: harnessv2.UpdateEvent{Kind: harnessv2.UpdatePlan, Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
+				{Content: "inspect", Status: harnessv2.PlanEntryCompleted},
+				{Content: "implement", Status: harnessv2.PlanEntryInProgress},
+			}}},
+			wantType: executionevents.ExecutionEventTypePlanUpdated, wantSeverity: executionevents.ExecutionEventSeverityInfo,
+		},
+		{
+			name: "usage",
+			update: harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage,
+				Usage: &harnessv2.UsageUpdate{InputTokens: 120, OutputTokens: 30, CachedInputTokens: 40}},
+			wantType: executionevents.ExecutionEventTypeModelUsageUpdated, wantSeverity: executionevents.ExecutionEventSeverityInfo,
+		},
+		{
+			name: "retryable diagnostic",
+			update: harnessv2.UpdateEvent{Kind: harnessv2.UpdateDiagnostic,
+				Diagnostic: &harnessv2.DiagnosticUpdate{Code: "provider_retry", Message: "retrying", Retryable: true}},
+			wantType: executionevents.ExecutionEventTypeAgentRuntimeCommandStarted, wantSeverity: executionevents.ExecutionEventSeverityWarning,
+		},
+	}
+
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), test.update)
+			mapped, err := MapUpdate(event, mapCtx)
+			if err != nil {
+				t.Fatalf("MapUpdate() error = %v", err)
+			}
+			if mapped.Type != test.wantType || mapped.Severity != test.wantSeverity {
+				t.Fatalf("mapped type/severity = %s/%s, want %s/%s", mapped.Type, mapped.Severity, test.wantType, test.wantSeverity)
+			}
+			if mapped.ToolName != test.wantToolName || mapped.ToolCallID != test.wantToolID {
+				t.Fatalf("mapped tool = %q/%q, want %q/%q", mapped.ToolName, mapped.ToolCallID, test.wantToolName, test.wantToolID)
+			}
+			if mapped.Namespace != mapCtx.Namespace || mapped.StreamID != mapCtx.StreamID || mapped.TaskName != mapCtx.TaskName || mapped.SessionName != mapCtx.SessionName || mapped.AgentName != mapCtx.AgentName {
+				t.Fatalf("mapped ownership = %#v", mapped)
+			}
+			identity, ok := MappedUpdateIdentityFromEvent(*mapped)
+			if !ok || identity.Sequence != event.Identity.Sequence || identity.PromptID != event.Identity.PromptID {
+				t.Fatalf("mapped identity = %#v, ok=%t", identity, ok)
+			}
+			if strings.Contains(string(mapped.Content), "requestDigest") || strings.Contains(string(mapped.Content), string(event.Identity.RequestDigest)) {
+				t.Fatalf("mapped content exposed request digest: %s", mapped.Content)
+			}
+		})
+	}
+}
+
+func TestMapUsagePreservesPromotedTelemetryContent(t *testing.T) {
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind:  harnessv2.UpdateUsage,
+		Usage: &harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 60},
+	})
+	mapped, err := MapUpdate(event, testMapContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(mapped.Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	if content["inputTokens"] != float64(100) || content["outputTokens"] != float64(25) || content["cachedInputTokens"] != float64(60) {
+		t.Fatalf("usage content = %#v", content)
+	}
+	if content["provider"] != "openai" || content["model"] != "gpt-test" {
+		t.Fatalf("model content = %#v", content)
+	}
+}
+
+func TestMapToolOutputKeepsDedupeIdentityWhenTextIsTruncated(t *testing.T) {
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-large", Kind: "shell", Status: harnessv2.ToolCallStatusCompleted,
+			Content: []harnessv2.ContentBlock{{
+				Type: harnessv2.ContentBlockText,
+				Text: strings.Repeat("x", executionevents.MaxExecutionEventContentTextChars+100),
+			}},
+		},
+	})
+	mapped, err := MapUpdate(event, testMapContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.Truncation == nil || !mapped.Truncation.ContentTextTruncated {
+		t.Fatalf("truncation = %#v", mapped.Truncation)
+	}
+	if len(mapped.Content) >= executionevents.MaxExecutionEventContentJSONBytes {
+		t.Fatalf("identity content unexpectedly large: %d bytes", len(mapped.Content))
+	}
+	identity, ok := MappedUpdateIdentityFromEvent(*mapped)
+	if !ok || identity.Sequence != 2 {
+		t.Fatalf("identity after truncation = %#v, ok=%t", identity, ok)
+	}
+}
+
+func TestProjectPlanUpdateBuildsProgressAndRedactsDocument(t *testing.T) {
+	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
+		{Content: "inspect", Status: harnessv2.PlanEntryCompleted},
+		{Content: "Authorization: Bearer top-secret-token", Priority: "high", Status: harnessv2.PlanEntryInProgress},
+		{Content: "verify", Status: harnessv2.PlanEntryPending},
+	}})
+	if projection.ProgressPct != 33 || projection.GoalComplete {
+		t.Fatalf("projection = %#v", projection)
+	}
+	if !strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) || strings.Contains(projection.Document, "top-secret-token") {
+		t.Fatalf("plan document was not redacted: %q", projection.Document)
+	}
+	if !strings.Contains(projection.Summary, "1/3 complete") {
+		t.Fatalf("plan summary = %q", projection.Summary)
+	}
+}
+
+func testMapContext() MapContext {
+	return MapContext{
+		Namespace: "default", TaskName: "task-1", SessionName: "session-1", AgentName: "agent-1",
+		StreamID: "task-1", Provider: "openai", Model: "gpt-test",
+	}
+}
+
+func testUpdateEvent(sequence uint64, at time.Time, update harnessv2.UpdateEvent) harnessv2.Event {
+	return harnessv2.Event{
+		Protocol: harnessv2.ProtocolVersion,
+		Type:     harnessv2.EventUpdate,
+		Identity: harnessv2.EventIdentity{
+			RuntimeInstanceID: "runtime-1", SupervisorBootID: "boot-1", RuntimeSessionUID: "session-uid-1",
+			RuntimeSessionGeneration: 1, TaskUID: "task-uid-1", TaskAttempt: 1, PromptID: "prompt-1",
+			Sequence: sequence, RequestDigest: harnessv2.RequestDigest("sha256:" + strings.Repeat("a", 64)), Timestamp: at,
+		},
+		Update: &update,
+	}
+}

@@ -190,15 +190,22 @@ export function RunTimeline({
   className,
 }: RunTimelineProps) {
   const events = buildEvents(task, plan)
-  const modelEvents = taskEvents.filter(
-    (event) => event.type === 'ModelRequestCompleted',
+  const usageUpdates = taskEvents.filter(
+    (event) => event.type === 'ModelUsageUpdated',
   )
+  const modelEvents = usageUpdates.length > 0
+    ? [usageUpdates.reduce((latest, event) => event.seq > latest.seq ? event : latest)]
+    : taskEvents.filter((event) => event.type === 'ModelRequestCompleted')
   const totalIn = modelEvents.reduce(
     (sum, event) => sum + (event.inputTokens ?? 0),
     0,
   )
   const totalOut = modelEvents.reduce(
     (sum, event) => sum + (event.outputTokens ?? 0),
+    0,
+  )
+  const totalCachedIn = modelEvents.reduce(
+    (sum, event) => sum + (event.cachedInputTokens ?? 0),
     0,
   )
   const iteration = task.status?.iteration ?? 0
@@ -264,6 +271,7 @@ export function RunTimeline({
             </span>
             <span className="text-muted-foreground">
               {totalIn} input / {totalOut} output
+              {totalCachedIn > 0 ? ` / ${totalCachedIn} cached input` : ''}
             </span>
           </div>
           <div className="mt-2 flex flex-wrap gap-2">

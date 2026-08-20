@@ -25,6 +25,7 @@ import (
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
+	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -70,6 +71,8 @@ type ACPDispatcher struct {
 	APIReader                client.Reader
 	Store                    store.DurableControlStore
 	ResultStore              store.ResultStore
+	EventStore               store.ExecutionEventStore
+	PlanStore                store.PlanStore
 	Snapshots                store.AgentExecutionSnapshotStore
 	Epochs                   *ControllerEpochManager
 	Sessions                 *ACPSessionContinuity
@@ -94,8 +97,8 @@ type ACPDispatcher struct {
 func (d *ACPDispatcher) NeedLeaderElection() bool { return true }
 
 func (d *ACPDispatcher) Start(ctx context.Context) error {
-	if d.Client == nil || d.Store == nil || d.ResultStore == nil || d.Snapshots == nil || d.Epochs == nil {
-		return fmt.Errorf("ACP dispatcher requires Kubernetes client, durable control store, result store, immutable snapshot store, and epoch manager")
+	if d.Client == nil || d.Store == nil || d.ResultStore == nil || d.EventStore == nil || d.PlanStore == nil || d.Snapshots == nil || d.Epochs == nil {
+		return fmt.Errorf("ACP dispatcher requires Kubernetes client, durable control store, result store, execution event store, plan store, immutable snapshot store, and epoch manager")
 	}
 	if d.APIReader == nil {
 		d.APIReader = d.Client
@@ -1178,6 +1181,22 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	assistantOverflow := false
 	accepted := false
 	admissionRetry := 0
+	agentName := ""
+	if task.Status.AgentExecutionBinding != nil && task.Status.AgentExecutionBinding.Agent != nil {
+		agentName = task.Status.AgentExecutionBinding.Agent.Name
+	} else if task.Spec.AgentRef != nil {
+		agentName = task.Spec.AgentRef.Name
+	}
+	journalState, err := (v2eventjournal.Journal{
+		EventStore: d.EventStore,
+		MapContext: v2eventjournal.MapContext{
+			Namespace: task.Namespace, TaskName: task.Name, SessionName: taskSessionName(task),
+			AgentName: agentName, StreamID: task.Name, Provider: profile.ProviderKind, Model: profile.Model,
+		},
+	}).Open(ctx)
+	if err != nil {
+		return fmt.Errorf("open ACP execution event journal: %w", err)
+	}
 	for {
 		promptRequest, err := d.buildPromptRequest(
 			task, runtimeFence, profile, mcpConfiguration, bootstrap, userPrompt, admissionRetry,
@@ -1232,6 +1251,19 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 							assistant.WriteString(text)
 						}
 					}
+				}
+				if event.Update != nil && event.Update.Plan != nil && !journalState.HasUpdate(event) {
+					projection := v2eventjournal.ProjectPlanUpdate(*event.Update.Plan)
+					if err := d.PlanStore.SavePlan(ctx, task.Namespace, task.Name, &store.PlanState{
+						TaskName: task.Name, Namespace: task.Namespace, Iteration: int(task.Status.Iteration),
+						Summary: projection.Summary, ProgressPct: projection.ProgressPct,
+						GoalComplete: projection.GoalComplete, PlanDocument: projection.Document,
+					}); err != nil {
+						return fmt.Errorf("save ACP plan update: %w", err)
+					}
+				}
+				if _, _, err := journalState.AppendUpdateIfNew(ctx, event); err != nil {
+					return err
 				}
 			case harnessv2.EventPermissionRequested:
 				return d.resolvePromptPermission(runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, event)

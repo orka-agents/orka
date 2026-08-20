@@ -21,28 +21,29 @@ import (
 func TestExecutionEventResponseDTOJSONFieldNames(t *testing.T) {
 	createdAt := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 	response := ExecutionEventResponse{
-		ID:           "event-1",
-		Namespace:    "default",
-		StreamType:   events.ExecutionEventStreamTypeTask,
-		StreamID:     "task-1",
-		Seq:          1,
-		Type:         events.ExecutionEventTypeTaskCreated,
-		Severity:     events.ExecutionEventSeverityInfo,
-		TaskName:     "task-1",
-		SessionName:  "session-a",
-		AgentName:    "codex",
-		ToolName:     "file_read",
-		ToolCallID:   "call-1",
-		Provider:     "openai",
-		Model:        "gpt-4o",
-		StopReason:   "stop",
-		InputTokens:  3,
-		OutputTokens: 5,
-		Summary:      "created",
-		Content:      json.RawMessage(`{"ok":true}`),
-		ContentText:  "hello",
-		Truncation:   &events.ExecutionEventTruncation{SummaryTruncated: true, SummaryOriginalChars: 5000},
-		CreatedAt:    createdAt,
+		ID:                "event-1",
+		Namespace:         "default",
+		StreamType:        events.ExecutionEventStreamTypeTask,
+		StreamID:          "task-1",
+		Seq:               1,
+		Type:              events.ExecutionEventTypeTaskCreated,
+		Severity:          events.ExecutionEventSeverityInfo,
+		TaskName:          "task-1",
+		SessionName:       "session-a",
+		AgentName:         "codex",
+		ToolName:          "file_read",
+		ToolCallID:        "call-1",
+		Provider:          "openai",
+		Model:             "gpt-4o",
+		StopReason:        "stop",
+		InputTokens:       3,
+		OutputTokens:      5,
+		CachedInputTokens: 2,
+		Summary:           "created",
+		Content:           json.RawMessage(`{"ok":true}`),
+		ContentText:       "hello",
+		Truncation:        &events.ExecutionEventTruncation{SummaryTruncated: true, SummaryOriginalChars: 5000},
+		CreatedAt:         createdAt,
 	}
 	data, err := json.Marshal(response)
 	if err != nil {
@@ -52,7 +53,7 @@ func TestExecutionEventResponseDTOJSONFieldNames(t *testing.T) {
 	if err := json.Unmarshal(data, &body); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	for _, key := range []string{"id", "namespace", "streamType", "streamID", "seq", "type", "severity", "taskName", "sessionName", "agentName", "toolName", "toolCallID", "provider", "model", "stopReason", "inputTokens", "outputTokens", "summary", "content", "contentText", "truncation", "createdAt"} {
+	for _, key := range []string{"id", "namespace", "streamType", "streamID", "seq", "type", "severity", "taskName", "sessionName", "agentName", "toolName", "toolCallID", "provider", "model", "stopReason", "inputTokens", "outputTokens", "cachedInputTokens", "summary", "content", "contentText", "truncation", "createdAt"} {
 		if _, ok := body[key]; !ok {
 			t.Fatalf("response JSON missing key %q in %s", key, data)
 		}
@@ -69,25 +70,26 @@ func TestExecutionEventResponsePromotesModelTelemetryFields(t *testing.T) {
 		Type:       events.ExecutionEventTypeModelRequestCompleted,
 		Severity:   events.ExecutionEventSeverityInfo,
 		Content: mustRawJSON(t, map[string]any{
-			"provider":     "anthropic",
-			"model":        "claude-sonnet-4",
-			"inputTokens":  123,
-			"outputTokens": 45,
-			"stopReason":   "end_turn",
+			"provider":          "anthropic",
+			"model":             "claude-sonnet-4",
+			"inputTokens":       123,
+			"outputTokens":      45,
+			"cachedInputTokens": 20,
+			"stopReason":        "end_turn",
 		}),
 	}
 	response := NewExecutionEventResponse(storeEvent)
 	if response.Provider != "anthropic" || response.Model != "claude-sonnet-4" || response.StopReason != "end_turn" {
 		t.Fatalf("telemetry strings = provider:%q model:%q stop:%q", response.Provider, response.Model, response.StopReason)
 	}
-	if response.InputTokens != 123 || response.OutputTokens != 45 {
-		t.Fatalf("tokens = %d/%d, want 123/45", response.InputTokens, response.OutputTokens)
+	if response.InputTokens != 123 || response.OutputTokens != 45 || response.CachedInputTokens != 20 {
+		t.Fatalf("tokens = %d/%d cached=%d, want 123/45 cached=20", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
 	}
 	data, err := json.Marshal(response)
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	for _, key := range []string{`"provider":"anthropic"`, `"model":"claude-sonnet-4"`, `"inputTokens":123`, `"outputTokens":45`, `"stopReason":"end_turn"`} {
+	for _, key := range []string{`"provider":"anthropic"`, `"model":"claude-sonnet-4"`, `"inputTokens":123`, `"outputTokens":45`, `"cachedInputTokens":20`, `"stopReason":"end_turn"`} {
 		if !strings.Contains(string(data), key) {
 			t.Fatalf("response JSON %s missing %s", data, key)
 		}
@@ -121,6 +123,16 @@ func TestExecutionEventResponsePromotesGenAISemConvTerminalFields(t *testing.T) 
 	})
 	if started.Model != "requested-model" {
 		t.Fatalf("started model = %q, want requested-model", started.Model)
+	}
+}
+
+func TestExecutionEventResponseClampsUint64UsageToPlatformInt(t *testing.T) {
+	response := NewExecutionEventResponse(store.ExecutionEvent{
+		Type:    events.ExecutionEventTypeModelUsageUpdated,
+		Content: json.RawMessage(`{"inputTokens":18446744073709551615,"outputTokens":2,"cachedInputTokens":1}`),
+	})
+	if response.InputTokens != int(^uint(0)>>1) || response.OutputTokens != 2 || response.CachedInputTokens != 1 {
+		t.Fatalf("usage tokens = %d/%d cached=%d", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
 	}
 }
 

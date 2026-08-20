@@ -194,6 +194,7 @@ func isExecutionEventTokenUsageKey(normalized string) bool {
 		"completiontokens",
 		"inputtokens",
 		"outputtokens",
+		"cachedinputtokens",
 		"totaltokens",
 		"totaltokencount",
 		"tokencount",

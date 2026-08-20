@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestExecutionEventTypeConstantsCoverP0Taxonomy(t *testing.T) {
+func TestExecutionEventTypeConstantsCoverTaxonomy(t *testing.T) {
 	want := []string{
 		ExecutionEventTypeTaskCreated,
 		ExecutionEventTypeTaskPhaseChanged,
@@ -21,6 +21,7 @@ func TestExecutionEventTypeConstantsCoverP0Taxonomy(t *testing.T) {
 		ExecutionEventTypeModelRequestStarted,
 		ExecutionEventTypeModelRequestCompleted,
 		ExecutionEventTypeModelRequestFailed,
+		ExecutionEventTypeModelUsageUpdated,
 		ExecutionEventTypeModelMessage,
 		ExecutionEventTypeContextTruncated,
 		ExecutionEventTypeToolCallStarted,
@@ -45,6 +46,7 @@ func TestExecutionEventTypeConstantsCoverP0Taxonomy(t *testing.T) {
 		ExecutionEventTypeApprovalDeclined,
 		ExecutionEventTypeApprovalExpired,
 		ExecutionEventTypeApprovalCancelled,
+		ExecutionEventTypePlanUpdated,
 	}
 	got := ExecutionEventTypes()
 	if len(got) != len(want) {
@@ -260,7 +262,7 @@ func TestRedactExecutionEventJSONPayload(t *testing.T) {
 }
 
 func TestRedactExecutionEventJSONPreservesTokenUsageFields(t *testing.T) {
-	content := json.RawMessage(`{"promptTokens":12,"completion_tokens":5,"totalTokenCount":17}`)
+	content := json.RawMessage(`{"promptTokens":12,"completion_tokens":5,"cachedInputTokens":3,"totalTokenCount":17}`)
 	payload, err := SanitizeExecutionEventPayload("", content, "")
 	if err != nil {
 		t.Fatalf("SanitizeExecutionEventPayload() error = %v", err)
@@ -269,7 +271,7 @@ func TestRedactExecutionEventJSONPreservesTokenUsageFields(t *testing.T) {
 	if err := json.Unmarshal(payload.Content, &got); err != nil {
 		t.Fatalf("unmarshal sanitized content: %v", err)
 	}
-	if got["promptTokens"] != 12 || got["completion_tokens"] != 5 || got["totalTokenCount"] != 17 {
+	if got["promptTokens"] != 12 || got["completion_tokens"] != 5 || got["cachedInputTokens"] != 3 || got["totalTokenCount"] != 17 {
 		t.Fatalf("token usage fields = %#v, want numeric values preserved", got)
 	}
 }

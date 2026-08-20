@@ -82,6 +82,7 @@ describe('parseExecutionEventFrame', () => {
       stopReason: 'end_turn',
       inputTokens: 1200,
       outputTokens: 345,
+      cachedInputTokens: 600,
     })
     const frame = parseExecutionEventFrame(`id: 1\nevent: execution_event\ndata: ${data}`)
     expect(frame?.kind).toBe('event')
@@ -91,6 +92,7 @@ describe('parseExecutionEventFrame', () => {
       expect(frame.event.stopReason).toBe('end_turn')
       expect(frame.event.inputTokens).toBe(1200)
       expect(frame.event.outputTokens).toBe(345)
+      expect(frame.event.cachedInputTokens).toBe(600)
     }
   })
 
@@ -163,6 +165,7 @@ describe('executionEventCategory', () => {
   it('maps known types to functional categories', () => {
     expect(executionEventCategory('TaskStarted')).toBe('lifecycle')
     expect(executionEventCategory('ModelRequestStarted')).toBe('model')
+    expect(executionEventCategory('ModelUsageUpdated')).toBe('model')
     expect(executionEventCategory('ToolCallFailed')).toBe('tools')
     expect(executionEventCategory('WorkspacePreparationStarted')).toBe('workspace')
     expect(executionEventCategory('ArtifactUploadCompleted')).toBe('artifacts')
@@ -172,6 +175,7 @@ describe('executionEventCategory', () => {
     // Agent-runtime lifecycle, including cancellation, groups under worker.
     expect(executionEventCategory('AgentRuntimeCancelled')).toBe('worker')
     expect(executionEventCategory('AgentRuntimeFailed')).toBe('worker')
+    expect(executionEventCategory('PlanUpdated')).toBe('worker')
     // TaskDeleted is a synthetic stream event (not in the persisted taxonomy);
     // it is intentionally categorized as lifecycle.
     expect(executionEventCategory('TaskDeleted')).toBe('lifecycle')

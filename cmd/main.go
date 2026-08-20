@@ -1474,6 +1474,7 @@ func main() {
 	if acpRuntimeEnabled {
 		acpDispatcher := &controller.ACPDispatcher{
 			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: durableControlStore, ResultStore: sqliteStore,
+			EventStore: sqliteStore, PlanStore: sqliteStore,
 			Snapshots: agentExecutionSnapshotStore,
 			Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
 			Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,

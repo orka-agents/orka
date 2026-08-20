@@ -1,0 +1,395 @@
+package eventjournal
+
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+
+	executionevents "github.com/orka-agents/orka/internal/events"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/store"
+)
+
+const mappedUpdateIdentityKeySeparator = "\x00"
+
+// MapContext supplies Orka-owned stream metadata for a validated harness v2
+// update. Protocol events do not own namespace, task name, or session linkage.
+type MapContext struct {
+	Namespace   string
+	TaskName    string
+	SessionName string
+	AgentName   string
+	StreamID    string
+	Provider    string
+	Model       string
+}
+
+func (c MapContext) normalized() MapContext {
+	c.Namespace = strings.TrimSpace(c.Namespace)
+	c.TaskName = strings.TrimSpace(c.TaskName)
+	c.SessionName = strings.TrimSpace(c.SessionName)
+	c.AgentName = strings.TrimSpace(c.AgentName)
+	c.StreamID = strings.TrimSpace(c.StreamID)
+	c.Provider = strings.TrimSpace(c.Provider)
+	c.Model = strings.TrimSpace(c.Model)
+	if c.StreamID == "" {
+		c.StreamID = c.TaskName
+	}
+	return c
+}
+
+func (c MapContext) validate() error {
+	c = c.normalized()
+	if c.Namespace == "" {
+		return fmt.Errorf("namespace is required")
+	}
+	if c.TaskName == "" {
+		return fmt.Errorf("task name is required")
+	}
+	if c.StreamID == "" {
+		return fmt.Errorf("stream id is required")
+	}
+	return nil
+}
+
+// MappedUpdateIdentity is the safe protocol identity persisted with each
+// execution event. RequestDigest is deliberately excluded: the validated
+// stream already enforces it, and journaling must not change or expose prompt
+// digest/fencing data.
+type MappedUpdateIdentity struct {
+	Protocol                 string                      `json:"protocol"`
+	RuntimeInstanceID        harnessv2.RuntimeInstanceID `json:"runtimeInstanceID"`
+	SupervisorBootID         harnessv2.SupervisorBootID  `json:"supervisorBootID"`
+	RuntimeSessionUID        harnessv2.RuntimeSessionUID `json:"runtimeSessionUID"`
+	RuntimeSessionGeneration uint64                      `json:"runtimeSessionGeneration"`
+	TaskUID                  harnessv2.TaskUID           `json:"taskUID"`
+	TaskAttempt              uint32                      `json:"taskAttempt"`
+	PromptID                 harnessv2.PromptID          `json:"promptID"`
+	Sequence                 uint64                      `json:"sequence"`
+}
+
+func mappedUpdateIdentity(event harnessv2.Event) MappedUpdateIdentity {
+	return MappedUpdateIdentity{
+		Protocol:                 event.Protocol,
+		RuntimeInstanceID:        event.Identity.RuntimeInstanceID,
+		SupervisorBootID:         event.Identity.SupervisorBootID,
+		RuntimeSessionUID:        event.Identity.RuntimeSessionUID,
+		RuntimeSessionGeneration: event.Identity.RuntimeSessionGeneration,
+		TaskUID:                  event.Identity.TaskUID,
+		TaskAttempt:              event.Identity.TaskAttempt,
+		PromptID:                 event.Identity.PromptID,
+		Sequence:                 event.Identity.Sequence,
+	}
+}
+
+func (i MappedUpdateIdentity) valid() bool {
+	return i.Protocol == harnessv2.ProtocolVersion &&
+		strings.TrimSpace(string(i.RuntimeInstanceID)) != "" &&
+		strings.TrimSpace(string(i.SupervisorBootID)) != "" &&
+		strings.TrimSpace(string(i.RuntimeSessionUID)) != "" &&
+		i.RuntimeSessionGeneration > 0 &&
+		strings.TrimSpace(string(i.TaskUID)) != "" &&
+		i.TaskAttempt > 0 &&
+		strings.TrimSpace(string(i.PromptID)) != "" &&
+		i.Sequence > 0
+}
+
+// Key returns the stable recovery-deduplication key for one protocol update.
+func (i MappedUpdateIdentity) Key() string {
+	return strings.Join([]string{
+		i.Protocol,
+		string(i.RuntimeInstanceID),
+		string(i.SupervisorBootID),
+		string(i.RuntimeSessionUID),
+		strconv.FormatUint(i.RuntimeSessionGeneration, 10),
+		string(i.TaskUID),
+		strconv.FormatUint(uint64(i.TaskAttempt), 10),
+		string(i.PromptID),
+		strconv.FormatUint(i.Sequence, 10),
+	}, mappedUpdateIdentityKeySeparator)
+}
+
+// MappedUpdateIdentityFromEvent extracts a persisted harness v2 update
+// identity. Events from other producers and malformed/truncated payloads are
+// ignored.
+func MappedUpdateIdentityFromEvent(event store.ExecutionEvent) (MappedUpdateIdentity, bool) {
+	if len(event.Content) == 0 {
+		return MappedUpdateIdentity{}, false
+	}
+	var content struct {
+		HarnessV2 MappedUpdateIdentity `json:"harnessV2"`
+	}
+	if err := json.Unmarshal(event.Content, &content); err != nil || !content.HarnessV2.valid() {
+		return MappedUpdateIdentity{}, false
+	}
+	return content.HarnessV2, true
+}
+
+// PlanProjection is the durable/public read model derived from one ACP plan
+// update.
+type PlanProjection struct {
+	Summary               string
+	ProgressPct           int
+	GoalComplete          bool
+	Document              string
+	DocumentTruncated     bool
+	DocumentOriginalChars int
+	Total                 int
+	Pending               int
+	InProgress            int
+	Completed             int
+}
+
+// ProjectPlanUpdate converts structured ACP plan entries into the existing
+// PlanStore contract and a bounded, redacted text representation for events.
+func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
+	projection := PlanProjection{Total: len(update.Entries)}
+	var inProgressSummary string
+	var document strings.Builder
+	document.WriteString("# Plan")
+	for _, entry := range update.Entries {
+		switch entry.Status {
+		case harnessv2.PlanEntryCompleted:
+			projection.Completed++
+		case harnessv2.PlanEntryInProgress:
+			projection.InProgress++
+			if inProgressSummary == "" {
+				inProgressSummary = compactSummary(entry.Content)
+			}
+		default:
+			projection.Pending++
+		}
+		document.WriteString("\n- ")
+		if entry.Status == harnessv2.PlanEntryCompleted {
+			document.WriteString("[x] ")
+		} else {
+			document.WriteString("[ ] ")
+		}
+		document.WriteString(strings.TrimSpace(entry.Content))
+		if entry.Status == harnessv2.PlanEntryInProgress {
+			document.WriteString(" _(in progress)_")
+		}
+		if priority := strings.TrimSpace(entry.Priority); priority != "" {
+			document.WriteString(" _(priority: ")
+			document.WriteString(priority)
+			document.WriteString(")_")
+		}
+	}
+	if projection.Total > 0 {
+		projection.ProgressPct = projection.Completed * 100 / projection.Total
+		projection.GoalComplete = projection.Completed == projection.Total
+	}
+	switch {
+	case projection.GoalComplete:
+		projection.Summary = fmt.Sprintf("Plan complete (%d/%d steps)", projection.Completed, projection.Total)
+	case inProgressSummary != "":
+		projection.Summary = fmt.Sprintf("Plan in progress (%d/%d complete): %s", projection.Completed, projection.Total, inProgressSummary)
+	default:
+		projection.Summary = fmt.Sprintf("Plan updated (%d/%d steps complete)", projection.Completed, projection.Total)
+	}
+	projection.Summary, _, _ = executionevents.RedactAndTruncateExecutionEventText(
+		projection.Summary, executionevents.MaxExecutionEventSummaryChars,
+	)
+	projection.Document, projection.DocumentTruncated, projection.DocumentOriginalChars =
+		executionevents.RedactAndTruncateExecutionEventText(document.String(), executionevents.MaxExecutionEventContentTextChars)
+	return projection
+}
+
+// MapUpdate maps one validated harness v2 update to the public execution-event
+// taxonomy. Large free-form output is carried in ContentText so the compact
+// identity JSON remains available for restart deduplication even when text is
+// truncated.
+func MapUpdate(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent, error) {
+	if err := mapCtx.validate(); err != nil {
+		return nil, err
+	}
+	mapCtx = mapCtx.normalized()
+	if event.Protocol != harnessv2.ProtocolVersion {
+		return nil, fmt.Errorf("unsupported protocol %q", event.Protocol)
+	}
+	if event.Type != harnessv2.EventUpdate || event.Update == nil {
+		return nil, fmt.Errorf("harness v2 update event is required")
+	}
+	if err := event.Identity.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid update identity: %w", err)
+	}
+	if err := event.Update.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid update payload: %w", err)
+	}
+
+	content := map[string]any{
+		"harnessV2":  mappedUpdateIdentity(event),
+		"updateKind": event.Update.Kind,
+	}
+	mapped := &store.ExecutionEvent{
+		Namespace:   mapCtx.Namespace,
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    mapCtx.StreamID,
+		Severity:    executionevents.ExecutionEventSeverityInfo,
+		TaskName:    mapCtx.TaskName,
+		SessionName: mapCtx.SessionName,
+		AgentName:   mapCtx.AgentName,
+		CreatedAt:   event.Identity.Timestamp.UTC(),
+	}
+
+	switch event.Update.Kind {
+	case harnessv2.UpdateAssistantMessageChunk:
+		mapped.Type = executionevents.ExecutionEventTypeModelMessage
+		mapped.Summary = compactSummary(event.Update.AssistantMessage.Text)
+		mapped.ContentText = event.Update.AssistantMessage.Text
+	case harnessv2.UpdateToolCall, harnessv2.UpdateToolCallUpdate:
+		tool := event.Update.ToolCall
+		mapped.ToolCallID = strings.TrimSpace(tool.ToolCallID)
+		mapped.ToolName = strings.TrimSpace(tool.Kind)
+		mapped.ToolName, _, _ = executionevents.RedactAndTruncateExecutionEventText(mapped.ToolName, 128)
+		mapped.Type, mapped.Severity = toolCallEventType(tool.Status)
+		mapped.Summary = toolCallSummary(*tool)
+		content["toolCallID"] = tool.ToolCallID
+		content["title"] = tool.Title
+		content["toolKind"] = tool.Kind
+		content["status"] = tool.Status
+		content["contentBlockCount"] = len(tool.Content)
+		mapped.ContentText, mapped.Truncation = toolContentText(tool.Content)
+	case harnessv2.UpdatePlan:
+		projection := ProjectPlanUpdate(*event.Update.Plan)
+		mapped.Type = executionevents.ExecutionEventTypePlanUpdated
+		mapped.Summary = projection.Summary
+		mapped.ContentText = projection.Document
+		content["totalEntries"] = projection.Total
+		content["pendingEntries"] = projection.Pending
+		content["inProgressEntries"] = projection.InProgress
+		content["completedEntries"] = projection.Completed
+		content["progressPct"] = projection.ProgressPct
+		content["goalComplete"] = projection.GoalComplete
+		if projection.DocumentTruncated {
+			mapped.Truncation = &executionevents.ExecutionEventTruncation{
+				ContentTextTruncated:     true,
+				ContentTextOriginalChars: projection.DocumentOriginalChars,
+			}
+		}
+	case harnessv2.UpdateUsage:
+		usage := event.Update.Usage
+		mapped.Type = executionevents.ExecutionEventTypeModelUsageUpdated
+		mapped.Summary = fmt.Sprintf(
+			"Model usage updated: %d input, %d output, %d cached input tokens",
+			usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens,
+		)
+		content["inputTokens"] = usage.InputTokens
+		content["outputTokens"] = usage.OutputTokens
+		content["cachedInputTokens"] = usage.CachedInputTokens
+		if mapCtx.Provider != "" {
+			content["provider"] = mapCtx.Provider
+		}
+		if mapCtx.Model != "" {
+			content["model"] = mapCtx.Model
+		}
+	case harnessv2.UpdateDiagnostic:
+		diagnostic := event.Update.Diagnostic
+		mapped.Type = executionevents.ExecutionEventTypeAgentRuntimeCommandStarted
+		mapped.Severity = executionevents.ExecutionEventSeverityError
+		if diagnostic.Retryable {
+			mapped.Severity = executionevents.ExecutionEventSeverityWarning
+		}
+		mapped.Summary = compactSummary(diagnostic.Code + ": " + diagnostic.Message)
+		mapped.ContentText = diagnostic.Message
+		content["code"] = diagnostic.Code
+		content["retryable"] = diagnostic.Retryable
+	default:
+		return nil, fmt.Errorf("unsupported harness v2 update kind %q", event.Update.Kind)
+	}
+
+	encoded, err := json.Marshal(content)
+	if err != nil {
+		return nil, fmt.Errorf("marshal mapped harness v2 update: %w", err)
+	}
+	mapped.Content = encoded
+	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
+		return nil, fmt.Errorf("sanitize mapped harness v2 update: %w", err)
+	}
+	return mapped, nil
+}
+
+func toolCallEventType(status harnessv2.ToolCallStatus) (string, string) {
+	switch status {
+	case harnessv2.ToolCallStatusCompleted:
+		return executionevents.ExecutionEventTypeToolCallCompleted, executionevents.ExecutionEventSeverityInfo
+	case harnessv2.ToolCallStatusFailed:
+		return executionevents.ExecutionEventTypeToolCallFailed, executionevents.ExecutionEventSeverityError
+	default:
+		return executionevents.ExecutionEventTypeToolCallStarted, executionevents.ExecutionEventSeverityInfo
+	}
+}
+
+func toolCallSummary(tool harnessv2.ToolCallUpdate) string {
+	if title := compactSummary(tool.Title); title != "" {
+		return title
+	}
+	for _, block := range tool.Content {
+		if block.Type == harnessv2.ContentBlockText {
+			if summary := compactSummary(block.Text); summary != "" {
+				return summary
+			}
+		}
+	}
+	return fmt.Sprintf("Tool call %s", strings.ReplaceAll(string(tool.Status), "_", " "))
+}
+
+func toolContentText(blocks []harnessv2.ContentBlock) (string, *executionevents.ExecutionEventTruncation) {
+	var text strings.Builder
+	totalRunes := 0
+	for _, block := range blocks {
+		var value string
+		switch block.Type {
+		case harnessv2.ContentBlockText:
+			value = block.Text
+		case harnessv2.ContentBlockResourceLink:
+			value = "resource: " + strings.TrimSpace(block.Name)
+		case harnessv2.ContentBlockArtifactRef:
+			if block.Artifact != nil {
+				value = "artifact: " + string(block.Artifact.ArtifactID)
+			}
+		}
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		if totalRunes > 0 {
+			appendBoundedRunes(&text, "\n", executionevents.MaxExecutionEventContentTextChars)
+			totalRunes++
+		}
+		appendBoundedRunes(&text, value, executionevents.MaxExecutionEventContentTextChars)
+		totalRunes += utf8.RuneCountInString(value)
+	}
+	if totalRunes <= executionevents.MaxExecutionEventContentTextChars {
+		return text.String(), nil
+	}
+	return text.String(), &executionevents.ExecutionEventTruncation{
+		ContentTextTruncated:     true,
+		ContentTextOriginalChars: totalRunes,
+	}
+}
+
+func appendBoundedRunes(builder *strings.Builder, value string, maxRunes int) {
+	remaining := maxRunes - utf8.RuneCountInString(builder.String())
+	if remaining <= 0 {
+		return
+	}
+	if utf8.RuneCountInString(value) <= remaining {
+		builder.WriteString(value)
+		return
+	}
+	for _, r := range value {
+		if remaining == 0 {
+			return
+		}
+		builder.WriteRune(r)
+		remaining--
+	}
+}
+
+func compactSummary(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	value, _, _ = executionevents.RedactAndTruncateExecutionEventText(value, executionevents.MaxExecutionEventSummaryChars)
+	return value
+}

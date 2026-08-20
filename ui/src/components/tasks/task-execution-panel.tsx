@@ -180,9 +180,15 @@ function WorkspaceDelivery({ task }: { task: Task }) {
 
 export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?: ExecutionEvent[] }) {
   const phase = task.status?.phase
-  const modelEvents = events.filter((event) => event.type === 'ModelRequestCompleted')
+  const usageUpdates = events.filter((event) => event.type === 'ModelUsageUpdated')
+  // ACP usage updates are snapshots; use the newest one instead of summing
+  // cumulative context-window counts. Legacy model completions remain additive.
+  const modelEvents = usageUpdates.length > 0
+    ? [usageUpdates.reduce((latest, event) => event.seq > latest.seq ? event : latest)]
+    : events.filter((event) => event.type === 'ModelRequestCompleted')
   const totalIn = modelEvents.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0)
   const totalOut = modelEvents.reduce((sum, event) => sum + (event.outputTokens ?? 0), 0)
+  const totalCachedIn = modelEvents.reduce((sum, event) => sum + (event.cachedInputTokens ?? 0), 0)
   const current = stepIndex(phase)
 
   return (
@@ -222,7 +228,10 @@ export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?:
         {modelEvents.length > 0 && (
           <div className="rounded-md border p-3 text-sm" aria-label="GenAI token rollup">
             <div className="font-medium">GenAI tokens</div>
-            <div className="text-muted-foreground">{totalIn + totalOut} total · {totalIn} input · {totalOut} output</div>
+            <div className="text-muted-foreground">
+              {totalIn + totalOut} total · {totalIn} input · {totalOut} output
+              {totalCachedIn > 0 ? ` · ${totalCachedIn} cached input` : ''}
+            </div>
             <div className="mt-2 flex flex-wrap gap-2 text-xs">
               {modelEvents.map((event) => (
                 <span key={event.id || event.seq} className="rounded-full bg-muted px-2 py-0.5">

@@ -174,17 +174,30 @@ describe('TaskExecutionPanel', () => {
         task={makeTask({ status: { phase: 'Succeeded', attempts: 1 } })}
         events={[
           {
-            id: 'event-1',
+            id: 'event-0',
             namespace: 'default',
             streamType: 'task',
             streamID: 'test-task',
             seq: 1,
-            type: 'ModelRequestCompleted',
+            type: 'ModelUsageUpdated',
+            severity: 'info',
+            inputTokens: 50,
+            outputTokens: 10,
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: 'event-1',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: 'test-task',
+            seq: 2,
+            type: 'ModelUsageUpdated',
             severity: 'info',
             provider: 'openai',
             model: 'gpt-4o',
             inputTokens: 100,
             outputTokens: 25,
+            cachedInputTokens: 40,
             stopReason: 'stop',
             createdAt: new Date().toISOString(),
           },
@@ -193,6 +206,8 @@ describe('TaskExecutionPanel', () => {
     )
     const rollup = screen.getByLabelText('GenAI token rollup')
     expect(rollup).toHaveTextContent('125 total')
+    expect(rollup).not.toHaveTextContent('185 total')
+    expect(rollup).toHaveTextContent('40 cached input')
     expect(rollup).toHaveTextContent('gpt-4o')
     expect(rollup).toHaveTextContent('openai')
   })

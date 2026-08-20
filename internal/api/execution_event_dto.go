@@ -7,8 +7,12 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/orka-agents/orka/internal/events"
@@ -62,28 +66,29 @@ func (r SubmitExecutionEventRequest) ToStoreEvent(namespace, streamType, streamI
 
 // ExecutionEventResponse is the public API representation of an execution event.
 type ExecutionEventResponse struct {
-	ID           string                           `json:"id"`
-	Namespace    string                           `json:"namespace"`
-	StreamType   string                           `json:"streamType"`
-	StreamID     string                           `json:"streamID"`
-	Seq          int64                            `json:"seq"`
-	Type         string                           `json:"type"`
-	Severity     string                           `json:"severity"`
-	TaskName     string                           `json:"taskName,omitempty"`
-	SessionName  string                           `json:"sessionName,omitempty"`
-	AgentName    string                           `json:"agentName,omitempty"`
-	ToolName     string                           `json:"toolName,omitempty"`
-	ToolCallID   string                           `json:"toolCallID,omitempty"`
-	Provider     string                           `json:"provider,omitempty"`
-	Model        string                           `json:"model,omitempty"`
-	StopReason   string                           `json:"stopReason,omitempty"`
-	InputTokens  int                              `json:"inputTokens,omitempty"`
-	OutputTokens int                              `json:"outputTokens,omitempty"`
-	Summary      string                           `json:"summary,omitempty"`
-	Content      json.RawMessage                  `json:"content,omitempty"`
-	ContentText  string                           `json:"contentText,omitempty"`
-	Truncation   *events.ExecutionEventTruncation `json:"truncation,omitempty"`
-	CreatedAt    time.Time                        `json:"createdAt"`
+	ID                string                           `json:"id"`
+	Namespace         string                           `json:"namespace"`
+	StreamType        string                           `json:"streamType"`
+	StreamID          string                           `json:"streamID"`
+	Seq               int64                            `json:"seq"`
+	Type              string                           `json:"type"`
+	Severity          string                           `json:"severity"`
+	TaskName          string                           `json:"taskName,omitempty"`
+	SessionName       string                           `json:"sessionName,omitempty"`
+	AgentName         string                           `json:"agentName,omitempty"`
+	ToolName          string                           `json:"toolName,omitempty"`
+	ToolCallID        string                           `json:"toolCallID,omitempty"`
+	Provider          string                           `json:"provider,omitempty"`
+	Model             string                           `json:"model,omitempty"`
+	StopReason        string                           `json:"stopReason,omitempty"`
+	InputTokens       int                              `json:"inputTokens,omitempty"`
+	OutputTokens      int                              `json:"outputTokens,omitempty"`
+	CachedInputTokens int                              `json:"cachedInputTokens,omitempty"`
+	Summary           string                           `json:"summary,omitempty"`
+	Content           json.RawMessage                  `json:"content,omitempty"`
+	ContentText       string                           `json:"contentText,omitempty"`
+	Truncation        *events.ExecutionEventTruncation `json:"truncation,omitempty"`
+	CreatedAt         time.Time                        `json:"createdAt"`
 }
 
 // SubmitExecutionEventResponse is returned after an event append succeeds.
@@ -132,33 +137,34 @@ func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventRespons
 
 func fillExecutionEventResponse(response *ExecutionEventResponse, event *store.ExecutionEvent) {
 	var provider, model, stopReason string
-	var inTok, outTok int
+	var inTok, outTok, cachedInTok int
 	if executionEventTypeCarriesModelTelemetry(event.Type) {
-		provider, model, stopReason, inTok, outTok = executionEventTelemetryFields(event.Type, event.Content)
+		provider, model, stopReason, inTok, outTok, cachedInTok = executionEventTelemetryFields(event.Type, event.Content)
 	}
 	*response = ExecutionEventResponse{
-		ID:           event.ID,
-		Namespace:    event.Namespace,
-		StreamType:   event.StreamType,
-		StreamID:     event.StreamID,
-		Seq:          event.Seq,
-		Type:         event.Type,
-		Severity:     normalizeExecutionEventResponseSeverity(event.Severity),
-		TaskName:     event.TaskName,
-		SessionName:  event.SessionName,
-		AgentName:    event.AgentName,
-		ToolName:     event.ToolName,
-		ToolCallID:   event.ToolCallID,
-		Provider:     provider,
-		Model:        model,
-		StopReason:   stopReason,
-		InputTokens:  inTok,
-		OutputTokens: outTok,
-		Summary:      event.Summary,
-		Content:      cloneRawMessage(event.Content),
-		ContentText:  event.ContentText,
-		Truncation:   cloneExecutionEventTruncation(event.Truncation),
-		CreatedAt:    event.CreatedAt,
+		ID:                event.ID,
+		Namespace:         event.Namespace,
+		StreamType:        event.StreamType,
+		StreamID:          event.StreamID,
+		Seq:               event.Seq,
+		Type:              event.Type,
+		Severity:          normalizeExecutionEventResponseSeverity(event.Severity),
+		TaskName:          event.TaskName,
+		SessionName:       event.SessionName,
+		AgentName:         event.AgentName,
+		ToolName:          event.ToolName,
+		ToolCallID:        event.ToolCallID,
+		Provider:          provider,
+		Model:             model,
+		StopReason:        stopReason,
+		InputTokens:       inTok,
+		OutputTokens:      outTok,
+		CachedInputTokens: cachedInTok,
+		Summary:           event.Summary,
+		Content:           cloneRawMessage(event.Content),
+		ContentText:       event.ContentText,
+		Truncation:        cloneExecutionEventTruncation(event.Truncation),
+		CreatedAt:         event.CreatedAt,
 	}
 }
 
@@ -245,20 +251,23 @@ func executionEventTypeCarriesModelTelemetry(typ string) bool {
 	switch typ {
 	case events.ExecutionEventTypeModelRequestStarted,
 		events.ExecutionEventTypeModelRequestCompleted,
-		events.ExecutionEventTypeModelRequestFailed:
+		events.ExecutionEventTypeModelRequestFailed,
+		events.ExecutionEventTypeModelUsageUpdated:
 		return true
 	default:
 		return false
 	}
 }
 
-func executionEventTelemetryFields(typ string, content json.RawMessage) (provider, model, stopReason string, inTok, outTok int) {
+func executionEventTelemetryFields(typ string, content json.RawMessage) (provider, model, stopReason string, inTok, outTok, cachedInTok int) {
 	if len(content) == 0 {
-		return "", "", "", 0, 0
+		return "", "", "", 0, 0, 0
 	}
 	var body map[string]any
-	if err := json.Unmarshal(content, &body); err != nil {
-		return "", "", "", 0, 0
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	if err := decoder.Decode(&body); err != nil {
+		return "", "", "", 0, 0, 0
 	}
 	provider = stringField(body, "provider", "gen_ai.provider.name")
 	modelKeys := []string{"model", "gen_ai.request.model", "gen_ai.response.model"}
@@ -269,7 +278,8 @@ func executionEventTelemetryFields(typ string, content json.RawMessage) (provide
 	stopReason = stringField(body, "stopReason", "stop_reason", "finishReason", "gen_ai.response.finish_reasons")
 	inTok = intField(body, "inputTokens", "input_tokens", "promptTokens", "prompt_tokens", "gen_ai.usage.input_tokens")
 	outTok = intField(body, "outputTokens", "output_tokens", "completionTokens", "completion_tokens", "gen_ai.usage.output_tokens")
-	return provider, model, stopReason, inTok, outTok
+	cachedInTok = intField(body, "cachedInputTokens", "cached_input_tokens", "cacheReadInputTokens", "cache_read_input_tokens", "gen_ai.usage.cache_read.input_tokens")
+	return provider, model, stopReason, inTok, outTok, cachedInTok
 }
 
 func stringField(body map[string]any, keys ...string) string {
@@ -301,12 +311,29 @@ func intField(body map[string]any, keys ...string) int {
 		if value, ok := body[key]; ok {
 			switch typed := value.(type) {
 			case float64:
+				if math.IsNaN(typed) || math.IsInf(typed, 0) || typed <= 0 {
+					return 0
+				}
+				maxInt := uint64(^uint(0) >> 1)
+				if typed >= float64(maxInt) {
+					return int(maxInt)
+				}
 				return int(typed)
 			case int:
+				if typed < 0 {
+					return 0
+				}
 				return typed
 			case json.Number:
-				if i, err := typed.Int64(); err == nil {
-					return int(i)
+				if strings.HasPrefix(typed.String(), "-") {
+					return 0
+				}
+				if value, err := strconv.ParseUint(typed.String(), 10, 64); err == nil {
+					maxInt := uint64(^uint(0) >> 1)
+					if value > maxInt {
+						return int(maxInt)
+					}
+					return int(value)
 				}
 			}
 		}

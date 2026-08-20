@@ -29,6 +29,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/publisher"
@@ -36,6 +37,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/tasktrace"
 )
 
 // dispatchQueuedTask reserves the queued Task on its RuntimePool and executes
@@ -43,6 +45,23 @@ import (
 // sequence.
 func dispatchQueuedTask(ctx context.Context, t *testing.T, dispatcher *ACPDispatcher, queued *corev1alpha1.Task) {
 	t.Helper()
+	if dispatcher.EventStore == nil {
+		if eventStore, ok := dispatcher.ResultStore.(store.ExecutionEventStore); ok {
+			dispatcher.EventStore = eventStore
+		} else if eventStore, ok := dispatcher.Store.(store.ExecutionEventStore); ok {
+			dispatcher.EventStore = eventStore
+		}
+	}
+	if dispatcher.PlanStore == nil {
+		if planStore, ok := dispatcher.ResultStore.(store.PlanStore); ok {
+			dispatcher.PlanStore = planStore
+		} else if planStore, ok := dispatcher.Store.(store.PlanStore); ok {
+			dispatcher.PlanStore = planStore
+		}
+	}
+	if dispatcher.EventStore == nil || dispatcher.PlanStore == nil {
+		t.Fatal("ACP dispatcher test requires execution event and plan stores")
+	}
 	task, target, err := dispatcher.reserveTask(ctx, queued)
 	if err != nil {
 		t.Fatal(err)
@@ -669,6 +688,49 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	}
 	if len(transcript) != 2 || transcript[0].Role != "user" || transcript[1].Role != "assistant" {
 		t.Fatalf("session transcript = %#v", transcript)
+	}
+	timeline, err := persistence.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace: task.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name,
+		Limit: store.MaxExecutionEventLimit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	typeCounts := map[string]int{}
+	var usageContent map[string]any
+	for _, event := range timeline {
+		typeCounts[event.Type]++
+		if event.Type == executionevents.ExecutionEventTypeModelUsageUpdated {
+			if err := json.Unmarshal(event.Content, &usageContent); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for eventType, want := range map[string]int{
+		executionevents.ExecutionEventTypeModelMessage:               2,
+		executionevents.ExecutionEventTypeToolCallStarted:            1,
+		executionevents.ExecutionEventTypeToolCallCompleted:          1,
+		executionevents.ExecutionEventTypePlanUpdated:                1,
+		executionevents.ExecutionEventTypeModelUsageUpdated:          1,
+		executionevents.ExecutionEventTypeAgentRuntimeCommandStarted: 1,
+	} {
+		if typeCounts[eventType] != want {
+			t.Fatalf("event count for %s = %d, want %d; timeline=%#v", eventType, typeCounts[eventType], want, timeline)
+		}
+	}
+	if usageContent["inputTokens"] != float64(100) || usageContent["outputTokens"] != float64(25) || usageContent["cachedInputTokens"] != float64(40) {
+		t.Fatalf("usage content = %#v", usageContent)
+	}
+	trace := tasktrace.BuildTaskTrace(tasktrace.MetadataFromTask(completed), timeline, time.Now().UTC())
+	if len(trace.ToolCalls) != 1 || trace.ToolCalls[0].Status != tasktrace.StatusCompleted || trace.ToolCalls[0].StartSeq == 0 || trace.ToolCalls[0].EndSeq <= trace.ToolCalls[0].StartSeq {
+		t.Fatalf("ACP trace tool calls = %#v", trace.ToolCalls)
+	}
+	planState, err := persistence.GetPlan(ctx, task.Namespace, task.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planState.ProgressPct != 50 || planState.GoalComplete || !strings.Contains(planState.PlanDocument, "verify result") {
+		t.Fatalf("ACP plan state = %#v", planState)
 	}
 	attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
 	if err != nil {
@@ -2082,8 +2144,14 @@ func newDispatcherRuntimeServer(
 			}
 		}
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity(1, now), Accepted: &harnessv2.AcceptedEvent{AcceptedAt: now, Lease: request.Lease, ACPVersion: harnessv2.ACPProfileV1}})
-		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(2, now.Add(time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "hello from runtime"}}})
-		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventCompleted, Identity: identity(3, now.Add(2*time.Millisecond)), Completed: &harnessv2.CompletedEvent{StopReason: harnessv2.ACPStopReasonEndTurn, Result: harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "hello from runtime"}}, Model: profile.Model}}})
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(2, now.Add(time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "hello "}}})
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(3, now.Add(2*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: "call-1", Title: "Inspect repository", Kind: "file_read", Status: harnessv2.ToolCallStatusPending}}})
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(4, now.Add(3*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: "call-1", Title: "Inspect repository", Status: harnessv2.ToolCallStatusCompleted, Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "README.md"}}}}})
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(5, now.Add(4*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdatePlan, Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{Content: "inspect repository", Status: harnessv2.PlanEntryCompleted}, {Content: "verify result", Status: harnessv2.PlanEntryInProgress}}}}})
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(6, now.Add(5*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 40}}})
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(7, now.Add(6*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateDiagnostic, Diagnostic: &harnessv2.DiagnosticUpdate{Code: "provider_retry", Message: "provider retry recovered", Retryable: true}}})
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(8, now.Add(7*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "from runtime"}}})
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventCompleted, Identity: identity(9, now.Add(8*time.Millisecond)), Completed: &harnessv2.CompletedEvent{StopReason: harnessv2.ACPStopReasonEndTurn, Result: harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "hello from runtime"}}, Model: profile.Model}}})
 		if err := encoder.Close(); err != nil {
 			t.Errorf("close encoder: %v", err)
 		}

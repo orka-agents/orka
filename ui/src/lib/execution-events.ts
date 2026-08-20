@@ -34,7 +34,7 @@ export const executionEventApiPath = {
   sessionEvents: (sessionId: string) => `/sessions/${encodeURIComponent(sessionId)}/events`,
 } as const
 
-// Functional event categories, derived from the Wave 0 taxonomy in
+// Functional event categories, derived from the taxonomy in
 // internal/events/execution_event.go. Error highlighting is driven by severity,
 // not by category, so failures stay grouped with their functional area.
 export type ExecutionEventCategory =
@@ -68,6 +68,7 @@ const CATEGORY_BY_TYPE: Record<string, ExecutionEventCategory> = {
   ModelRequestStarted: 'model',
   ModelRequestCompleted: 'model',
   ModelRequestFailed: 'model',
+  ModelUsageUpdated: 'model',
   ModelMessage: 'model',
   ContextTruncated: 'model',
   ToolCallStarted: 'tools',
@@ -86,6 +87,7 @@ const CATEGORY_BY_TYPE: Record<string, ExecutionEventCategory> = {
   ApprovalDeclined: 'approvals',
   ApprovalExpired: 'approvals',
   ApprovalCancelled: 'approvals',
+  PlanUpdated: 'worker',
 }
 
 export const EXECUTION_EVENT_CATEGORY_LABELS: Record<ExecutionEventCategory, string> = {

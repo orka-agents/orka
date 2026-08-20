@@ -202,17 +202,30 @@ describe('RunTimeline', () => {
         task={task}
         events={[
           {
-            id: 'event-1',
+            id: 'event-0',
             namespace: 'default',
             streamType: 'task',
             streamID: 'auto-task',
             seq: 1,
-            type: 'ModelRequestCompleted',
+            type: 'ModelUsageUpdated',
+            severity: 'info',
+            inputTokens: 5,
+            outputTokens: 5,
+            createdAt: '2026-01-01T00:01:00Z',
+          },
+          {
+            id: 'event-1',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: 'auto-task',
+            seq: 2,
+            type: 'ModelUsageUpdated',
             severity: 'info',
             provider: 'anthropic',
             model: 'claude-sonnet-4',
             inputTokens: 12,
             outputTokens: 8,
+            cachedInputTokens: 5,
             stopReason: 'end_turn',
             createdAt: '2026-01-01T00:02:00Z',
           },
@@ -221,6 +234,9 @@ describe('RunTimeline', () => {
     )
     expect(screen.getByLabelText('GenAI telemetry')).toHaveTextContent(
       '20 tokens',
+    )
+    expect(screen.getByLabelText('GenAI telemetry')).toHaveTextContent(
+      '5 cached input',
     )
     expect(screen.getByText(/claude-sonnet-4/)).toBeInTheDocument()
     expect(screen.getByText(/end_turn/)).toBeInTheDocument()

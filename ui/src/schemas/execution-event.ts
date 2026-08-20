@@ -37,6 +37,7 @@ export const executionEventSchema = z.object({
   stopReason: z.string().optional(),
   inputTokens: z.number().optional(),
   outputTokens: z.number().optional(),
+  cachedInputTokens: z.number().optional(),
   summary: z.string().optional(),
   content: z.unknown().optional(),
   contentText: z.string().optional(),
