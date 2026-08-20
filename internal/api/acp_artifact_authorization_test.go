@@ -568,6 +568,49 @@ func TestTaskStateAllowsWorkspacePreparation(t *testing.T) {
 			t.Fatalf("Task state %s rejected, want workspace preparation authorization", state)
 		}
 	}
+	if taskStateAllowsWorkspacePreparation(corev1alpha1.TaskExecutionStateSubmitting) {
+		t.Fatal("Submitting unexpectedly authorized for workspace credential preparation")
+	}
+}
+
+func TestAuthorizePublisherWorkspaceUploadRejectsPostSubmissionStates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	taskUID := types.UID("publisher-task-post-submission-uid")
+	request := publisherservice.ArtifactAuthorizationRequest{
+		ParentOperation: publisherservice.OperationWorkspacePrepare,
+		Metadata: publisherservice.OperationMetadata{
+			Namespace: "default", TaskID: string(taskUID), OperationID: "workspace-prepare-prompt",
+		},
+		ArtifactOperation: artifactcap.OperationUpload,
+	}
+	states := []corev1alpha1.TaskExecutionState{
+		corev1alpha1.TaskExecutionStateSubmittedUnknown,
+		corev1alpha1.TaskExecutionStateAccepted,
+		corev1alpha1.TaskExecutionStateRunning,
+		corev1alpha1.TaskExecutionStateSettling,
+		corev1alpha1.TaskExecutionStateSucceeded,
+		corev1alpha1.TaskExecutionStateFailed,
+		corev1alpha1.TaskExecutionStateCancelled,
+		corev1alpha1.TaskExecutionStateOutcomeUnknown,
+	}
+	for _, state := range states {
+		t.Run(string(state), func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "publisher-task", UID: taskUID},
+				Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+					State: state, PromptID: "prompt",
+				}},
+			}
+			apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+			server := &Server{client: apiReader, config: ServerConfig{APIReader: apiReader}}
+			if err := server.authorizePublisherArtifactRequest(context.Background(), request); err == nil {
+				t.Fatalf("workspace upload authorized in Task state %s", state)
+			}
+		})
+	}
 }
 
 func TestPublisherArtifactAuthorizationBrokerUsesFreshPublicationState(t *testing.T) {
