@@ -111,17 +111,18 @@ func (r taskTimelineReader) listRecentThrough(ctx context.Context, throughSeq in
 	return out, nil
 }
 
-func (r taskTimelineReader) listRecentContextThrough(ctx context.Context, throughSeq int64, maxEvents int) ([]store.ExecutionEvent, error) {
+func (r taskTimelineReader) listRecentContextThrough(ctx context.Context, throughSeq int64, maxEvents int) ([]store.ExecutionEvent, bool, error) {
 	if throughSeq == 0 || maxEvents <= 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	out := make([]store.ExecutionEvent, 0, maxEvents)
 	scanLimit := max(maxEvents, taskTimelineContextCompatibilityScanLimit)
-	after := max(throughSeq-int64(scanLimit), 0)
+	initialAfter := max(throughSeq-int64(scanLimit), 0)
+	after := initialAfter
 	for {
 		batch, err := r.list(ctx, after, store.MaxExecutionEventLimit, nil)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if len(batch) == 0 {
 			break
@@ -143,7 +144,15 @@ func (r taskTimelineReader) listRecentContextThrough(ctx context.Context, throug
 			break
 		}
 	}
-	return out, nil
+	scanTruncated := false
+	if initialAfter > 0 {
+		earliest, err := r.list(ctx, 0, 1, nil)
+		if err != nil {
+			return nil, false, err
+		}
+		scanTruncated = len(earliest) > 0 && earliest[0].Seq <= initialAfter
+	}
+	return out, scanTruncated, nil
 }
 
 func (r taskTimelineReader) seqExists(ctx context.Context, seq, latestSeq int64) (bool, error) {

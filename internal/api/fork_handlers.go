@@ -101,12 +101,13 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	if !validAfterSeq {
 		return fiber.NewError(fiber.StatusBadRequest, "afterSeq must be 0, latest, or an existing event sequence")
 	}
-	eventsBefore, err := listTaskEventsThrough(c.Context(), h.executionEventStore, namespace, sourceName, afterSeq)
+	eventsBefore, scanTruncated, err := listTaskEventsThrough(c.Context(), h.executionEventStore, namespace, sourceName, afterSeq)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
 	}
 
 	forkCtx := forkcontext.BuildContext(namespace, sourceName, afterSeq, eventsBefore, forkcontext.DefaultMaxEvents)
+	forkCtx.Truncated = forkCtx.Truncated || scanTruncated
 	idempotencyKey := strings.TrimSpace(c.Get("Idempotency-Key"))
 	newName := strings.TrimSpace(req.NewTaskName)
 	// Idempotent recovery is opt-in via an explicit Idempotency-Key. We do NOT
@@ -492,6 +493,6 @@ func listTaskEventsThrough(
 	namespace,
 	taskName string,
 	throughSeq int64,
-) ([]store.ExecutionEvent, error) {
+) ([]store.ExecutionEvent, bool, error) {
 	return newTaskTimelineReader(eventStore, namespace, taskName).listRecentContextThrough(ctx, throughSeq, forkcontext.DefaultMaxEvents+1)
 }

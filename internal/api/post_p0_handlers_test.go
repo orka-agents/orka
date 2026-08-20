@@ -993,6 +993,39 @@ func TestForkTaskAPIBoundsForkContextAndMarksTruncated(t *testing.T) {
 	}
 }
 
+func TestForkTaskAPIMarksCompatibilityScanTruncatedAfterCoalescing(t *testing.T) {
+	eventStore := storetest.NewFakeExecutionEventStore()
+	appendReaderEvent(t, eventStore, store.ExecutionEvent{
+		Type: events.ExecutionEventTypeToolCallCompleted, Summary: "tool result",
+	})
+	content := json.RawMessage(`{"harnessV2":{"taskUID":"task-uid","taskAttempt":1,"promptID":"prompt-1"}}`)
+	for range taskTimelineContextCompatibilityScanLimit + 1 {
+		appendReaderEvent(t, eventStore, store.ExecutionEvent{
+			Type: events.ExecutionEventTypeModelMessage, Content: content, ContentText: "x",
+		})
+	}
+	source := testTask("default", "task-a")
+	source.Spec.Type = corev1alpha1.TaskTypeAgent
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/task-a/fork?namespace=default", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var out ForkTaskResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.ForkContext.Truncated || len(out.ForkContext.Events) != 1 ||
+		out.ForkContext.Events[0].Type != events.ExecutionEventTypeModelMessage {
+		t.Fatalf("fork context = %#v", out.ForkContext)
+	}
+}
+
 // Oversize forked Task must be rejected with 413 BEFORE any create, so it never
 // orphans a fork event or returns a generic 500.
 func TestForkTaskAPIRejectsOversizeForkWith413(t *testing.T) {

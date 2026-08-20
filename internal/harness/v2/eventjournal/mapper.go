@@ -329,7 +329,10 @@ type mapUpdateOptions struct {
 	journalKind                      string
 }
 
-const toolContentMultipleBlocksOmittedReason = "streamed_text_multiple_blocks_omitted"
+const (
+	toolContentMultipleBlocksOmittedReason = "streamed_text_multiple_blocks_omitted"
+	toolContentTruncatedOrOmittedReason    = "streamed_text_truncated_or_omitted"
+)
 
 // MapUpdate maps one validated harness v2 update to the public execution-event
 // taxonomy. Streamed assistant and tool text is deliberately omitted here:
@@ -421,9 +424,10 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		} else if len(tool.Content) > 0 {
 			content["contentOmitted"] = "streamed_text_pending_completion_redaction"
 		}
-		if options.toolContentTruncated {
+		if options.toolContentTruncated || tool.ContentOmitted {
+			mapped.ContentText = ""
 			mapped.Truncation = &executionevents.ExecutionEventTruncation{ContentTextTruncated: true}
-			content["contentOmitted"] = "streamed_text_exceeded_journal_limit"
+			content["contentOmitted"] = toolContentTruncatedOrOmittedReason
 		} else if options.toolContentMultipleBlocksOmitted {
 			content["contentOmitted"] = toolContentMultipleBlocksOmittedReason
 		}

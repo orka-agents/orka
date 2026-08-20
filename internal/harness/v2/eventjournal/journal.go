@@ -359,7 +359,7 @@ func isBufferedToolContentUpdate(event harnessv2.Event) bool {
 	}
 	tool := event.Update.ToolCall
 	content, multipleBlocks := toolContentFragment(tool.Content)
-	return (tool.ContentReplace || content != "" || multipleBlocks) &&
+	return (tool.ContentOmitted || tool.ContentReplace || content != "" || multipleBlocks) &&
 		tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed
 }
 
@@ -699,7 +699,9 @@ func (s *State) aggregateToolUpdate(event harnessv2.Event, sequence uint64) bool
 		accumulator.kind = tool.Kind
 	}
 	content, multipleBlocks := toolContentFragment(tool.Content)
-	if multipleBlocks {
+	if tool.ContentOmitted {
+		accumulator.omitForOverflow()
+	} else if multipleBlocks {
 		accumulator.omitMultipleBlocks()
 	} else if tool.ContentReplace {
 		accumulator.replace(content)

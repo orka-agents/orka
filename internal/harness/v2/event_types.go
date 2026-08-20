@@ -179,6 +179,10 @@ type ToolCallUpdate struct {
 	Status         ToolCallStatus `json:"status"`
 	Content        []ContentBlock `json:"content,omitempty"`
 	ContentReplace bool           `json:"contentReplace,omitempty"`
+	// ContentOmitted reports that an otherwise present content snapshot was
+	// intentionally omitted to satisfy a transport bound. Receivers must retain
+	// truncation state instead of treating the missing content as complete.
+	ContentOmitted bool `json:"contentOmitted,omitempty"`
 }
 
 func (u ToolCallUpdate) Validate() error {
@@ -198,6 +202,9 @@ func (u ToolCallUpdate) Validate() error {
 	}
 	if len(u.Content) > MaxContentBlocks {
 		return fmt.Errorf("tool call content block count exceeds %d", MaxContentBlocks)
+	}
+	if u.ContentOmitted && (len(u.Content) > 0 || u.ContentReplace) {
+		return fmt.Errorf("omitted tool call content must not include content or contentReplace")
 	}
 	for i := range u.Content {
 		if err := u.Content[i].ValidateToolOutput(); err != nil {

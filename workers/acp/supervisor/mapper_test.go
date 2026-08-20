@@ -279,8 +279,9 @@ func TestMapRuntimeEventBoundsAggregateToolContentToEventLine(t *testing.T) {
 	if mapped == nil || mapped.Update == nil || mapped.Update.ToolCall == nil {
 		t.Fatalf("mapped tool update = %#v", mapped)
 	}
-	if len(mapped.Update.ToolCall.Content) != 1 {
-		t.Fatalf("mapped content blocks = %d, want one bounded block", len(mapped.Update.ToolCall.Content))
+	if len(mapped.Update.ToolCall.Content) != 0 || mapped.Update.ToolCall.ContentReplace ||
+		!mapped.Update.ToolCall.ContentOmitted {
+		t.Fatalf("mapped bounded tool content = %#v", mapped.Update.ToolCall)
 	}
 	line, err := json.Marshal(mapped)
 	if err != nil {

@@ -70,9 +70,12 @@ func TestTaskTimelineReaderListRecentContextThroughCoalescesAssistantChunksBefor
 	appendReaderEvent(t, eventStore, store.ExecutionEvent{Type: events.ExecutionEventTypePlanUpdated, Summary: "plan"})
 	reader := newTaskTimelineReader(eventStore, defaultNamespace, "task-a")
 
-	listed, err := reader.listRecentContextThrough(ctx, 207, 3)
+	listed, scanTruncated, err := reader.listRecentContextThrough(ctx, 207, 3)
 	if err != nil {
 		t.Fatalf("listRecentContextThrough error = %v", err)
+	}
+	if scanTruncated {
+		t.Fatal("listRecentContextThrough scanTruncated = true, want false")
 	}
 	if len(listed) != 3 || listed[0].Type != events.ExecutionEventTypeToolCallCompleted ||
 		listed[1].Type != events.ExecutionEventTypeModelMessage || listed[1].Seq != 206 ||
@@ -94,9 +97,12 @@ func TestTaskTimelineReaderListRecentContextThroughBoundsCompatibilityScan(t *te
 	eventStore := &recordingExecutionEventStore{ExecutionEventStore: base}
 	reader := newTaskTimelineReader(eventStore, defaultNamespace, "task-a")
 
-	listed, err := reader.listRecentContextThrough(ctx, 10_001, 3)
+	listed, scanTruncated, err := reader.listRecentContextThrough(ctx, 10_001, 3)
 	if err != nil {
 		t.Fatalf("listRecentContextThrough error = %v", err)
+	}
+	if scanTruncated {
+		t.Fatal("bounded compatibility scan marked sparse sequence as truncated")
 	}
 	if len(listed) != 2 || len(eventStore.filters) == 0 {
 		t.Fatalf("bounded context events = %#v filters=%#v", listed, eventStore.filters)
@@ -104,6 +110,31 @@ func TestTaskTimelineReaderListRecentContextThroughBoundsCompatibilityScan(t *te
 	wantAfter := int64(10_001 - taskTimelineContextCompatibilityScanLimit)
 	if eventStore.filters[0].AfterSeq != wantAfter {
 		t.Fatalf("first scan cursor = %d, want %d", eventStore.filters[0].AfterSeq, wantAfter)
+	}
+}
+
+func TestTaskTimelineReaderListRecentContextThroughMarksCompatibilityScanTruncated(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	appendReaderEvent(t, eventStore, store.ExecutionEvent{
+		Type: events.ExecutionEventTypeToolCallCompleted, Summary: "tool result",
+	})
+	content := json.RawMessage(`{"harnessV2":{"taskUID":"task-uid","taskAttempt":1,"promptID":"prompt-1"}}`)
+	for range taskTimelineContextCompatibilityScanLimit + 1 {
+		appendReaderEvent(t, eventStore, store.ExecutionEvent{
+			Type: events.ExecutionEventTypeModelMessage, Content: content, ContentText: "x",
+		})
+	}
+	reader := newTaskTimelineReader(eventStore, defaultNamespace, "task-a")
+
+	listed, scanTruncated, err := reader.listRecentContextThrough(
+		ctx, int64(taskTimelineContextCompatibilityScanLimit+2), 3,
+	)
+	if err != nil {
+		t.Fatalf("listRecentContextThrough error = %v", err)
+	}
+	if !scanTruncated || len(listed) != 1 || listed[0].Type != events.ExecutionEventTypeModelMessage {
+		t.Fatalf("bounded coalesced context = %#v scanTruncated=%t", listed, scanTruncated)
 	}
 }
 

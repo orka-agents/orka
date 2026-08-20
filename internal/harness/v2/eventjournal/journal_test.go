@@ -850,7 +850,7 @@ func TestJournalOmitsOversizedToolStreamContent(t *testing.T) {
 	encoded := completed.Summary + completed.ContentText + string(completed.Content)
 	if completed.ContentText != "" || strings.Contains(encoded, credential[:8]) ||
 		completed.Truncation == nil || !completed.Truncation.ContentTextTruncated ||
-		!strings.Contains(string(completed.Content), "streamed_text_exceeded_journal_limit") {
+		!strings.Contains(string(completed.Content), toolContentTruncatedOrOmittedReason) {
 		t.Fatalf("oversized completed tool event = %#v", completed)
 	}
 }
@@ -987,8 +987,42 @@ func TestJournalDegradesAggregateToolContentOverflow(t *testing.T) {
 		t.Fatalf("complete overflowed tool = %#v new=%t err=%v", completed, isNew, err)
 	}
 	if completed.ContentText != "" || completed.Truncation == nil || !completed.Truncation.ContentTextTruncated ||
-		!strings.Contains(string(completed.Content), "streamed_text_exceeded_journal_limit") {
+		!strings.Contains(string(completed.Content), toolContentTruncatedOrOmittedReason) {
 		t.Fatalf("degraded tool completion = %#v", completed)
+	}
+}
+
+func TestJournalPersistsUpstreamOmittedToolContentAsTruncated(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	buffered := testUpdateEvent(2, now, harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-upstream-omitted", Status: harnessv2.ToolCallStatusInProgress,
+			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "previous output"}}, ContentReplace: true,
+		},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, buffered); err != nil || isNew || appended != nil {
+		t.Fatalf("buffer tool content = %#v new=%t err=%v", appended, isNew, err)
+	}
+	terminal := testUpdateEvent(3, now.Add(time.Second), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-upstream-omitted", Status: harnessv2.ToolCallStatusCompleted, ContentOmitted: true,
+		},
+	})
+	completed, isNew, err := state.AppendUpdateIfNew(ctx, terminal)
+	if err != nil || !isNew || completed == nil {
+		t.Fatalf("complete omitted tool = %#v new=%t err=%v", completed, isNew, err)
+	}
+	if completed.ContentText != "" || completed.Truncation == nil || !completed.Truncation.ContentTextTruncated ||
+		!strings.Contains(string(completed.Content), toolContentTruncatedOrOmittedReason) {
+		t.Fatalf("omitted tool completion = %#v", completed)
 	}
 }
 

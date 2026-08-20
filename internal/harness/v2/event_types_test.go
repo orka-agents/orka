@@ -2,6 +2,27 @@ package v2
 
 import "testing"
 
+func TestToolCallUpdateValidateRequiresOmittedContentToBeEmpty(t *testing.T) {
+	for _, update := range []ToolCallUpdate{
+		{
+			ToolCallID: "call-1", Status: ToolCallStatusCompleted, ContentOmitted: true,
+			Content: []ContentBlock{{Type: ContentBlockText, Text: "partial"}},
+		},
+		{
+			ToolCallID: "call-1", Status: ToolCallStatusCompleted, ContentOmitted: true, ContentReplace: true,
+		},
+	} {
+		if err := update.Validate(); err == nil {
+			t.Fatalf("ToolCallUpdate.Validate(%#v) error = nil, want invalid omitted content rejection", update)
+		}
+	}
+	if err := (ToolCallUpdate{
+		ToolCallID: "call-1", Status: ToolCallStatusCompleted, ContentOmitted: true,
+	}).Validate(); err != nil {
+		t.Fatalf("validate omitted tool content: %v", err)
+	}
+}
+
 func TestUsageUpdateValidateAllowsZeroSnapshot(t *testing.T) {
 	event := UpdateEvent{Kind: UpdateUsage, Usage: &UsageUpdate{}}
 	if err := event.Validate(); err != nil {
