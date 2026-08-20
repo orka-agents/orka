@@ -11,7 +11,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/big"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/orka-agents/orka/internal/events"
@@ -343,18 +344,91 @@ func intField(body map[string]any, keys ...string) int {
 				}
 				return typed
 			case json.Number:
-				rational, ok := new(big.Rat).SetString(typed.String())
-				if !ok || rational.Sign() <= 0 || !rational.IsInt() {
-					return 0
-				}
-				if !rational.Num().IsInt64() || rational.Num().Int64() >= int64(math.MaxInt) {
-					return math.MaxInt
-				}
-				return int(rational.Num().Int64())
+				return boundedJSONNumberInt(typed)
 			}
 		}
 	}
 	return 0
+}
+
+// boundedJSONNumberInt accepts integral JSON decimal/exponent encodings
+// without constructing arbitrary-precision values. Values outside the
+// platform int range clamp, while negative and fractional values remain zero.
+func boundedJSONNumberInt(number json.Number) int {
+	raw := number.String()
+	if raw == "" || raw[0] == '-' {
+		return 0
+	}
+
+	mantissa := raw
+	exponentText := ""
+	if index := strings.IndexAny(raw, "eE"); index >= 0 {
+		mantissa = raw[:index]
+		exponentText = raw[index+1:]
+	}
+	decimalDigits := 0
+	digits := mantissa
+	if index := strings.IndexByte(mantissa, '.'); index >= 0 {
+		decimalDigits = len(mantissa) - index - 1
+		digits = mantissa[:index] + mantissa[index+1:]
+	}
+	for _, digit := range digits {
+		if digit < '0' || digit > '9' {
+			return 0
+		}
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return 0
+	}
+
+	var exponent int64
+	if exponentText != "" {
+		parsed, err := strconv.ParseInt(exponentText, 10, 64)
+		if err != nil {
+			numErr, rangeErr := err.(*strconv.NumError)
+			if !rangeErr || numErr.Err != strconv.ErrRange {
+				return 0
+			}
+			if strings.HasPrefix(exponentText, "-") {
+				return 0
+			}
+			return math.MaxInt
+		}
+		exponent = parsed
+	}
+	decimalScale := int64(decimalDigits)
+	if exponent < math.MinInt64+decimalScale {
+		return 0
+	}
+	scale := exponent - decimalScale
+	if scale < 0 {
+		if scale <= -int64(len(digits)) {
+			return 0
+		}
+		remove := int(-scale)
+		integerEnd := len(digits) - remove
+		if strings.Trim(digits[integerEnd:], "0") != "" {
+			return 0
+		}
+		digits = digits[:integerEnd]
+	}
+
+	maxIntText := strconv.Itoa(math.MaxInt)
+	if scale > 0 {
+		if scale > int64(len(maxIntText)) || int64(len(digits))+scale > int64(len(maxIntText)) {
+			return math.MaxInt
+		}
+		digits += strings.Repeat("0", int(scale))
+	}
+	if len(digits) > len(maxIntText) || len(digits) == len(maxIntText) && digits >= maxIntText {
+		return math.MaxInt
+	}
+	parsed, err := strconv.ParseUint(digits, 10, 64)
+	if err != nil {
+		return math.MaxInt
+	}
+	return int(parsed)
 }
 
 func optionalIntField(body map[string]any, keys ...string) *int {

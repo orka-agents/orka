@@ -1265,18 +1265,26 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 						}
 					}
 				}
-				if event.Update != nil && event.Update.Plan != nil && !journalState.HasUpdate(event) {
+				var planState *store.PlanState
+				var planErr error
+				if event.Update != nil && event.Update.Plan != nil {
 					projection := v2eventjournal.ProjectPlanUpdate(*event.Update.Plan)
-					if err := saveACPPlanUpdateWithRetry(ctx, d.PlanStore, task.Namespace, task.Name, &store.PlanState{
+					planState = &store.PlanState{
 						TaskName: task.Name, Namespace: task.Namespace, Iteration: int(task.Status.Iteration),
 						Summary: projection.Summary, ProgressPct: projection.ProgressPct,
 						GoalComplete: projection.GoalComplete, PlanDocument: projection.Document,
-					}); err != nil {
-						logTelemetryFailure("plan", err)
 					}
+					planErr = saveACPPlanUpdateWithRetry(ctx, d.PlanStore, task.Namespace, task.Name, planState)
 				}
-				if _, _, err := journalState.AppendUpdateIfNew(ctx, event); err != nil {
-					logTelemetryFailure("execution-event", err)
+				_, _, journalErr := journalState.AppendUpdateIfNew(ctx, event)
+				if journalErr != nil {
+					logTelemetryFailure("execution-event", journalErr)
+				}
+				if planState != nil {
+					planErr = reconcileACPPlanUpdateAfterJournal(
+						ctx, d.PlanStore, task.Namespace, task.Name, planState, planErr, journalErr,
+					)
+					logTelemetryFailure("plan", planErr)
 				}
 			case harnessv2.EventPermissionRequested:
 				return d.resolvePromptPermission(runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, event)
@@ -1580,6 +1588,24 @@ func saveACPPlanUpdateWithRetry(
 				fmt.Errorf("retry ACP plan update: %w", retryErr),
 			)
 		}
+	}
+	return nil
+}
+
+func reconcileACPPlanUpdateAfterJournal(
+	ctx context.Context,
+	planStore store.PlanStore,
+	namespace,
+	taskName string,
+	plan *store.PlanState,
+	planErr,
+	journalErr error,
+) error {
+	if planErr == nil || journalErr != nil {
+		return planErr
+	}
+	if err := planStore.SavePlan(ctx, namespace, taskName, plan); err != nil {
+		return errors.Join(planErr, fmt.Errorf("reconcile ACP plan update after journal append: %w", err))
 	}
 	return nil
 }

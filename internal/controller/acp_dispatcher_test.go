@@ -119,6 +119,34 @@ func TestSaveACPPlanUpdateWithRetry(t *testing.T) {
 			t.Fatalf("save calls = %d, want 2", planStore.saveCalls)
 		}
 	})
+
+	t.Run("reconciles after journal append", func(t *testing.T) {
+		firstErr := errors.New("first")
+		retryErr := errors.New("retry")
+		planStore := &retryPlanStore{saveErrors: []error{firstErr, retryErr}}
+		plan := &store.PlanState{TaskName: "task", Namespace: "default", Summary: "working"}
+		planErr := saveACPPlanUpdateWithRetry(context.Background(), planStore, "default", "task", plan)
+		if err := reconcileACPPlanUpdateAfterJournal(
+			context.Background(), planStore, "default", "task", plan, planErr, nil,
+		); err != nil {
+			t.Fatalf("reconcile plan after journal append: %v", err)
+		}
+		if planStore.saveCalls != 3 || planStore.lastPlan != plan {
+			t.Fatalf("save calls = %d plan=%p, want 3 and %p", planStore.saveCalls, planStore.lastPlan, plan)
+		}
+	})
+
+	t.Run("does not reconcile before journal append", func(t *testing.T) {
+		planErr := errors.New("plan unavailable")
+		journalErr := errors.New("journal unavailable")
+		planStore := &retryPlanStore{}
+		err := reconcileACPPlanUpdateAfterJournal(
+			context.Background(), planStore, "default", "task", &store.PlanState{}, planErr, journalErr,
+		)
+		if !errors.Is(err, planErr) || planStore.saveCalls != 0 {
+			t.Fatalf("pre-journal reconciliation error = %v calls=%d", err, planStore.saveCalls)
+		}
+	})
 }
 
 type retryPlanStore struct {

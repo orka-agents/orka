@@ -47,6 +47,17 @@ func CoalesceAdjacentModelMessages(values []store.ExecutionEvent) []store.Execut
 			previous.CreatedAt = event.CreatedAt
 			previous.Content = cloneRaw(event.Content)
 			previous.Truncation = store.MergeExecutionEventTruncation(previous.Truncation, event.Truncation)
+			contentText, truncated, originalChars := executionevents.RedactAndTruncateExecutionEventText(
+				previous.ContentText,
+				executionevents.MaxExecutionEventContentTextChars,
+			)
+			previous.ContentText = contentText
+			if truncated {
+				previous.Truncation = store.MergeExecutionEventTruncation(previous.Truncation, &executionevents.ExecutionEventTruncation{
+					ContentTextTruncated:     true,
+					ContentTextOriginalChars: originalChars,
+				})
+			}
 			continue
 		}
 		coalesced = append(coalesced, event)

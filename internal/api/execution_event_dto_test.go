@@ -160,6 +160,20 @@ func TestExecutionEventResponseAcceptsIntegralJSONNumberEncodings(t *testing.T) 
 	}
 }
 
+func TestExecutionEventResponseBoundsExtremeJSONExponents(t *testing.T) {
+	response := NewExecutionEventResponse(store.ExecutionEvent{
+		Type: events.ExecutionEventTypeModelUsageUpdated,
+		Content: json.RawMessage(`{
+			"inputTokens":1e1000000000,
+			"outputTokens":1e-1000000000,
+			"cachedInputTokens":1.2300e2
+		}`),
+	})
+	if response.InputTokens != math.MaxInt || response.OutputTokens != 0 || response.CachedInputTokens != 123 {
+		t.Fatalf("extreme exponent tokens = %d/%d/%d", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
+	}
+}
+
 func TestExecutionEventResponsePromotesContextWindowWithoutTokenAccounting(t *testing.T) {
 	response := NewExecutionEventResponse(store.ExecutionEvent{
 		Type: events.ExecutionEventTypeModelContextUpdated,
