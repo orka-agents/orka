@@ -215,6 +215,87 @@ func TestMapTerminalToolMetadataRedactsCredentialSplitAcrossFields(t *testing.T)
 	}
 }
 
+func TestMapTerminalToolRedactsCredentialSplitAcrossMetadataAndOutput(t *testing.T) {
+	output := strings.Repeat("c", 24)
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-split-output", Title: "sk-", Kind: "read", Status: harnessv2.ToolCallStatusCompleted,
+		},
+	})
+	mapped, err := mapToolUpdateWithContent(event, testMapContext(), output, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(mapped.Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	title, _ := content["title"].(string)
+	if title+mapped.ContentText == "sk-"+output || title == "sk-" || mapped.ContentText == output {
+		t.Fatalf("tool metadata/output reconstruct credential: title=%q output=%q", title, mapped.ContentText)
+	}
+	if title != executionevents.ExecutionEventRedactedValue || mapped.ContentText != executionevents.ExecutionEventRedactedValue {
+		t.Fatalf("tool logical payload = title %q output %q", title, mapped.ContentText)
+	}
+}
+
+func TestProjectPlanUpdateRedactsCredentialSplitAcrossEntries(t *testing.T) {
+	suffix := strings.Repeat("d", 24)
+	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
+		{Content: "sk-", Status: harnessv2.PlanEntryCompleted},
+		{Content: suffix, Status: harnessv2.PlanEntryInProgress},
+	}})
+	if strings.Contains(projection.Document, "sk-") || strings.Contains(projection.Document, suffix) ||
+		!strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("plan document exposed split credential: %q", projection.Document)
+	}
+}
+
+func TestMapPromptLifecycle(t *testing.T) {
+	now := time.Now().UTC()
+	accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
+	accepted.Type = harnessv2.EventAccepted
+	accepted.Update = nil
+	accepted.Accepted = &harnessv2.AcceptedEvent{
+		AcceptedAt: now,
+		Lease: harnessv2.PromptLease{
+			Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+		},
+		ACPVersion: harnessv2.ACPProfileV1,
+	}
+	started, err := MapPromptLifecycle(accepted, testMapContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.Type != executionevents.ExecutionEventTypeModelRequestStarted {
+		t.Fatalf("accepted lifecycle type = %q", started.Type)
+	}
+
+	completed := testTerminalEvent(2, now.Add(time.Second))
+	completed.Completed = &harnessv2.CompletedEvent{
+		StopReason: harnessv2.ACPStopReasonEndTurn,
+		Result: harnessv2.PromptResult{
+			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "done"}}, Model: "served-model",
+		},
+	}
+	finished, err := MapPromptLifecycle(completed, testMapContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Type != executionevents.ExecutionEventTypeModelRequestCompleted {
+		t.Fatalf("completed lifecycle type = %q", finished.Type)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(finished.Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	if content["modelRequestID"] != "prompt-1" || content["provider"] != "openai" ||
+		content["model"] != "served-model" || content["stopReason"] != string(harnessv2.ACPStopReasonEndTurn) {
+		t.Fatalf("completed lifecycle content = %#v", content)
+	}
+}
+
 func TestMapToolCallIDUsesStableNonSecretCorrelationID(t *testing.T) {
 	rawID := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjcmVkZW50aWFsIn0.signature"
 	mapTool := func(sequence uint64) *store.ExecutionEvent {

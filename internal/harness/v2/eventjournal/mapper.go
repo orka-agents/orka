@@ -20,6 +20,8 @@ const (
 	mappedAssistantTranscriptKind    = "assistant_transcript"
 	mappedToolStreamClosureKind      = "tool_stream_closure"
 	mappedTerminalUsageKind          = "terminal_usage"
+	mappedPromptAcceptedKind         = "prompt_accepted"
+	mappedPromptTerminalKind         = "prompt_terminal"
 )
 
 type mappedJournalRecordKind uint8
@@ -29,6 +31,8 @@ const (
 	mappedJournalRecordAssistantTranscript
 	mappedJournalRecordToolStreamClosure
 	mappedJournalRecordTerminalUsage
+	mappedJournalRecordPromptAccepted
+	mappedJournalRecordPromptTerminal
 )
 
 // MapContext supplies Orka-owned stream metadata for a validated harness v2
@@ -183,6 +187,12 @@ func mappedExecutionEventRecord(
 	if content.JournalKind == mappedTerminalUsageKind {
 		return identity, mappedTerminalUsageKey(identity), mappedJournalRecordTerminalUsage, true
 	}
+	if content.JournalKind == mappedPromptAcceptedKind {
+		return identity, mappedPromptLifecycleKey(identity, mappedPromptAcceptedKind), mappedJournalRecordPromptAccepted, true
+	}
+	if content.JournalKind == mappedPromptTerminalKind {
+		return identity, mappedPromptLifecycleKey(identity, mappedPromptTerminalKind), mappedJournalRecordPromptTerminal, true
+	}
 	if content.UpdateKind == mappedAssistantTranscriptKind {
 		return identity, identity.Key(), mappedJournalRecordAssistantTranscript, true
 	}
@@ -195,6 +205,10 @@ func mappedToolStreamClosureKey(identity MappedUpdateIdentity) string {
 
 func mappedTerminalUsageKey(identity MappedUpdateIdentity) string {
 	return identity.Key() + mappedUpdateIdentityKeySeparator + mappedTerminalUsageKind
+}
+
+func mappedPromptLifecycleKey(identity MappedUpdateIdentity, kind string) string {
+	return identity.Key() + mappedUpdateIdentityKeySeparator + kind
 }
 
 // PlanProjection is the durable/public read model derived from one ACP plan
@@ -217,10 +231,11 @@ type PlanProjection struct {
 // PlanStore contract and a bounded, redacted text representation for events.
 func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 	projection := PlanProjection{Total: len(update.Entries)}
+	entries := redactPlanEntries(update.Entries)
 	var inProgressSummary string
 	var document strings.Builder
 	document.WriteString("# Plan")
-	for _, entry := range update.Entries {
+	for _, entry := range entries {
 		switch entry.Status {
 		case harnessv2.PlanEntryCompleted:
 			projection.Completed++
@@ -267,6 +282,43 @@ func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 	projection.EventDocument, projection.EventDocumentTruncated, projection.EventDocumentOriginalChars =
 		executionevents.RedactAndTruncateExecutionEventText(projection.Document, executionevents.MaxExecutionEventContentTextChars)
 	return projection
+}
+
+func redactPlanEntries(entries []harnessv2.PlanEntry) []harnessv2.PlanEntry {
+	redacted := append([]harnessv2.PlanEntry(nil), entries...)
+	contents := make([]string, len(entries))
+	priorities := make([]string, len(entries))
+	ordered := make([]string, 0, len(entries)*2)
+	for index, entry := range entries {
+		redacted[index].Content = executionevents.RedactExecutionEventText(entry.Content)
+		redacted[index].Priority = executionevents.RedactExecutionEventText(entry.Priority)
+		contents[index] = redacted[index].Content
+		priorities[index] = redacted[index].Priority
+		ordered = append(ordered, redacted[index].Content, redacted[index].Priority)
+	}
+	if logicalSequenceSensitive(contents) || logicalSequenceSensitive(priorities) || logicalSequenceSensitive(ordered) {
+		for index := range redacted {
+			if redacted[index].Content != "" {
+				redacted[index].Content = executionevents.ExecutionEventRedactedValue
+			}
+			if redacted[index].Priority != "" {
+				redacted[index].Priority = executionevents.ExecutionEventRedactedValue
+			}
+		}
+	}
+	return redacted
+}
+
+func logicalSequenceSensitive(values []string) bool {
+	var forward, reverse strings.Builder
+	for index, value := range values {
+		forward.WriteString(value)
+		reverse.WriteString(values[len(values)-1-index])
+	}
+	forwardText := forward.String()
+	reverseText := reverse.String()
+	return executionevents.RedactExecutionEventText(forwardText) != forwardText ||
+		executionevents.RedactExecutionEventText(reverseText) != reverseText
 }
 
 type mapUpdateOptions struct {
@@ -340,7 +392,12 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 			mapped.Summary = toolCallSummary(metadataFree)
 			content["metadataOmitted"] = "streamed_metadata_pending_completion_redaction"
 		} else {
-			title, kind := redactRelatedFields(tool.Title, tool.Kind)
+			toolContentText := ""
+			if options.toolContentText != nil {
+				toolContentText = *options.toolContentText
+			}
+			fields := redactSmallLogicalFieldSet(tool.Title, tool.Kind, toolContentText)
+			title, kind, toolContentText := fields[0], fields[1], fields[2]
 			redactedTool := *tool
 			redactedTool.Title = title
 			redactedTool.Kind = kind
@@ -348,7 +405,7 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 			mapped.ToolName, _, _ = executionevents.RedactAndTruncateExecutionEventText(mapped.ToolName, 128)
 			mapped.Summary = toolCallSummary(redactedTool)
 			if options.toolContentText != nil && strings.TrimSpace(title) == "" {
-				if summary := compactSummary(*options.toolContentText); summary != "" {
+				if summary := compactSummary(toolContentText); summary != "" {
 					mapped.Summary = summary
 				}
 			}
@@ -359,7 +416,8 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		content["status"] = tool.Status
 		content["contentBlockCount"] = len(tool.Content)
 		if options.toolContentText != nil {
-			mapped.ContentText = *options.toolContentText
+			fields := redactSmallLogicalFieldSet(tool.Title, tool.Kind, *options.toolContentText)
+			mapped.ContentText = fields[2]
 		} else if len(tool.Content) > 0 {
 			content["contentOmitted"] = "streamed_text_pending_completion_redaction"
 		}
@@ -390,7 +448,8 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		mapUsageUpdate(event.Update.Usage, mapCtx, mapped, content)
 	case harnessv2.UpdateDiagnostic:
 		diagnostic := event.Update.Diagnostic
-		code, message := redactRelatedFields(diagnostic.Code, diagnostic.Message)
+		fields := redactSmallLogicalFieldSet(diagnostic.Code, diagnostic.Message)
+		code, message := fields[0], fields[1]
 		mapped.Type = executionevents.ExecutionEventTypeAgentRuntimeCommandStarted
 		mapped.Severity = executionevents.ExecutionEventSeverityError
 		if diagnostic.Retryable {
@@ -415,17 +474,48 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 	return mapped, nil
 }
 
-func redactRelatedFields(left, right string) (string, string) {
-	redactedLeft := executionevents.RedactExecutionEventText(left)
-	redactedRight := executionevents.RedactExecutionEventText(right)
-	if redactedLeft != left || redactedRight != right {
-		return redactedLeft, redactedRight
+func redactSmallLogicalFieldSet(values ...string) []string {
+	redacted := make([]string, len(values))
+	for index, value := range values {
+		redacted[index] = executionevents.RedactExecutionEventText(value)
 	}
-	if executionevents.RedactExecutionEventText(left+right) != left+right ||
-		executionevents.RedactExecutionEventText(right+left) != right+left {
-		redactedRight = executionevents.ExecutionEventRedactedValue
+	if !smallLogicalFieldSetSensitive(redacted) {
+		return redacted
 	}
-	return redactedLeft, redactedRight
+	for index, value := range values {
+		if value != "" {
+			redacted[index] = executionevents.ExecutionEventRedactedValue
+		}
+	}
+	return redacted
+}
+
+func smallLogicalFieldSetSensitive(values []string) bool {
+	if len(values) < 2 || len(values) > 4 {
+		return false
+	}
+	used := make([]bool, len(values))
+	var visit func(string, int) bool
+	visit = func(prefix string, depth int) bool {
+		if depth >= 2 && executionevents.RedactExecutionEventText(prefix) != prefix {
+			return true
+		}
+		if depth == len(values) {
+			return false
+		}
+		for index, value := range values {
+			if used[index] {
+				continue
+			}
+			used[index] = true
+			if visit(prefix+value, depth+1) {
+				return true
+			}
+			used[index] = false
+		}
+		return false
+	}
+	return visit("", 0)
 }
 
 func mapUsageUpdate(
@@ -520,6 +610,125 @@ func MapTerminalUsage(event harnessv2.Event, mapCtx MapContext) (*store.Executio
 	update.Completed = nil
 	update.Update = &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &usage}
 	return mapUpdate(update, mapCtx, mapUpdateOptions{journalKind: mappedTerminalUsageKind})
+}
+
+// MapPromptLifecycle maps prompt acceptance and settlement into the existing
+// model-request lifecycle taxonomy used by task traces and UI execution graphs.
+func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent, error) {
+	if err := mapCtx.validate(); err != nil {
+		return nil, err
+	}
+	mapCtx = mapCtx.normalized()
+	if event.Protocol != harnessv2.ProtocolVersion {
+		return nil, fmt.Errorf("unsupported protocol %q", event.Protocol)
+	}
+	if err := event.Identity.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid lifecycle identity: %w", err)
+	}
+	content := map[string]any{
+		"harnessV2":      mappedUpdateIdentity(event),
+		"modelRequestID": string(event.Identity.PromptID),
+	}
+	mapped := &store.ExecutionEvent{
+		Namespace:   mapCtx.Namespace,
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    mapCtx.StreamID,
+		Severity:    executionevents.ExecutionEventSeverityInfo,
+		TaskName:    mapCtx.TaskName,
+		SessionName: mapCtx.SessionName,
+		AgentName:   mapCtx.AgentName,
+		CreatedAt:   event.Identity.Timestamp.UTC(),
+	}
+	model := mapCtx.Model
+	switch event.Type {
+	case harnessv2.EventAccepted:
+		if event.Accepted == nil {
+			return nil, fmt.Errorf("accepted harness v2 event is required")
+		}
+		if err := event.Accepted.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid accepted payload: %w", err)
+		}
+		content["journalKind"] = mappedPromptAcceptedKind
+		content["acceptedAt"] = event.Accepted.AcceptedAt.UTC()
+		content["acpVersion"] = event.Accepted.ACPVersion
+		mapped.Type = executionevents.ExecutionEventTypeModelRequestStarted
+		mapped.Summary = "Model request started"
+	case harnessv2.EventCompleted:
+		if event.Completed == nil {
+			return nil, fmt.Errorf("completed harness v2 event is required")
+		}
+		if err := event.Completed.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid completed payload: %w", err)
+		}
+		if event.Completed.Result.Model != "" {
+			model = event.Completed.Result.Model
+		}
+		content["journalKind"] = mappedPromptTerminalKind
+		content["stopReason"] = event.Completed.StopReason
+		mapped.Type = executionevents.ExecutionEventTypeModelRequestCompleted
+		mapped.Summary = "Model request completed"
+	case harnessv2.EventCancelled:
+		if event.Cancelled == nil {
+			return nil, fmt.Errorf("cancelled harness v2 event is required")
+		}
+		if err := event.Cancelled.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid cancelled payload: %w", err)
+		}
+		content["journalKind"] = mappedPromptTerminalKind
+		content["stopReason"] = event.Cancelled.StopReason
+		content["reason"] = executionevents.RedactExecutionEventText(event.Cancelled.Reason)
+		mapped.Type = executionevents.ExecutionEventTypeModelRequestFailed
+		mapped.Severity = executionevents.ExecutionEventSeverityWarning
+		mapped.Summary = "Model request cancelled"
+	case harnessv2.EventFailed:
+		if event.Failed == nil {
+			return nil, fmt.Errorf("failed harness v2 event is required")
+		}
+		if err := event.Failed.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid failed payload: %w", err)
+		}
+		fields := redactSmallLogicalFieldSet(event.Failed.Code, event.Failed.Message)
+		content["journalKind"] = mappedPromptTerminalKind
+		content["stopReason"] = event.Failed.StopReason
+		content["code"] = fields[0]
+		content["message"] = fields[1]
+		mapped.Type = executionevents.ExecutionEventTypeModelRequestFailed
+		mapped.Severity = executionevents.ExecutionEventSeverityError
+		mapped.Summary = compactSummary(fields[0] + ": " + fields[1])
+	case harnessv2.EventOutcomeUnknown:
+		if event.OutcomeUnknown == nil {
+			return nil, fmt.Errorf("outcome_unknown harness v2 event is required")
+		}
+		if err := event.OutcomeUnknown.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid outcome_unknown payload: %w", err)
+		}
+		fields := redactSmallLogicalFieldSet(event.OutcomeUnknown.Code, event.OutcomeUnknown.Message)
+		content["journalKind"] = mappedPromptTerminalKind
+		content["stopReason"] = event.Type
+		content["code"] = fields[0]
+		content["message"] = fields[1]
+		content["forcedTermination"] = event.OutcomeUnknown.ForcedTermination
+		mapped.Type = executionevents.ExecutionEventTypeModelRequestFailed
+		mapped.Severity = executionevents.ExecutionEventSeverityError
+		mapped.Summary = compactSummary(fields[0] + ": " + fields[1])
+	default:
+		return nil, fmt.Errorf("accepted or terminal harness v2 event is required")
+	}
+	if mapCtx.Provider != "" {
+		content["provider"] = mapCtx.Provider
+	}
+	if model != "" {
+		content["model"] = model
+	}
+	encoded, err := json.Marshal(content)
+	if err != nil {
+		return nil, fmt.Errorf("marshal mapped harness v2 lifecycle: %w", err)
+	}
+	mapped.Content = encoded
+	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
+		return nil, fmt.Errorf("sanitize mapped harness v2 lifecycle: %w", err)
+	}
+	return mapped, nil
 }
 
 // MapAssistantTranscript maps the complete terminal assistant transcript as a

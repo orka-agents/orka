@@ -351,6 +351,54 @@ func TestJournalPersistsTerminalUsageSeparatelyFromAssistantTranscript(t *testin
 	}
 }
 
+func TestJournalPersistsPromptLifecycleWithRecoveryDeduplication(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	journal := Journal{EventStore: eventStore, MapContext: testMapContext()}
+	state, err := journal.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
+	accepted.Type = harnessv2.EventAccepted
+	accepted.Update = nil
+	accepted.Accepted = &harnessv2.AcceptedEvent{
+		AcceptedAt: now,
+		Lease: harnessv2.PromptLease{
+			Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+		},
+		ACPVersion: harnessv2.ACPProfileV1,
+	}
+	terminal := testTerminalEvent(2, now.Add(time.Second))
+	terminal.Completed = &harnessv2.CompletedEvent{
+		StopReason: harnessv2.ACPStopReasonEndTurn,
+		Result:     harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "done"}}},
+	}
+	if appended, isNew, err := state.AppendPromptLifecycleIfNew(ctx, accepted); err != nil || !isNew || appended == nil {
+		t.Fatalf("append accepted lifecycle = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if appended, isNew, err := state.AppendPromptLifecycleIfNew(ctx, terminal); err != nil || !isNew || appended == nil {
+		t.Fatalf("append terminal lifecycle = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 2 || listed[0].Type != executionevents.ExecutionEventTypeModelRequestStarted ||
+		listed[1].Type != executionevents.ExecutionEventTypeModelRequestCompleted {
+		t.Fatalf("prompt lifecycle events = %#v", listed)
+	}
+	recovered, err := journal.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate, isNew, err := recovered.AppendPromptLifecycleIfNew(ctx, accepted); err != nil || isNew || duplicate != nil {
+		t.Fatalf("recovered accepted lifecycle = %#v new=%t err=%v", duplicate, isNew, err)
+	}
+	if duplicate, isNew, err := recovered.AppendPromptLifecycleIfNew(ctx, terminal); err != nil || isNew || duplicate != nil {
+		t.Fatalf("recovered terminal lifecycle = %#v new=%t err=%v", duplicate, isNew, err)
+	}
+}
+
 func TestJournalPersistsAssistantTextOnNonTerminalStreamClosure(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()

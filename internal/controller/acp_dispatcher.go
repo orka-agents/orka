@@ -1248,6 +1248,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			switch event.Type {
 			case harnessv2.EventAccepted:
 				runtimeSessionSettlementRequired = true
+				if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, event); err != nil {
+					return acpUpdatePersistenceError(err, nil)
+				}
 				if !accepted {
 					if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionSubmitting, store.PromptExecutionAccepted, "accepted", nil); err != nil {
 						return err
@@ -1366,6 +1369,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	if terminal == nil {
 		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event")
+	}
+	if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, *terminal); err != nil {
+		logf.FromContext(ctx).Error(err, "persist terminal ACP prompt lifecycle", "namespace", task.Namespace, "task", task.Name)
+		return d.failPromptForExecutionEventPersistence(
+			ctx, task, attemptID, fence, "terminal prompt lifecycle persistence failed",
+		)
 	}
 	if terminal.Type != harnessv2.EventCompleted {
 		if persistableAssistant := assistantTranscriptForPersistence(assistant.String(), assistantOverflow); persistableAssistant != "" {

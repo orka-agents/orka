@@ -39,6 +39,8 @@ type State struct {
 	aggregatedSequence          uint64
 	assistantTranscriptSequence uint64
 	terminalUsageSequence       uint64
+	promptAcceptedSequence      uint64
+	promptTerminalSequence      uint64
 	toolClosureSequences        map[uint64]struct{}
 	toolText                    map[string]*streamText
 	toolBufferedBytes           int
@@ -231,6 +233,8 @@ func (s *State) resetPrompt(identity MappedUpdateIdentity) {
 	s.aggregatedSequence = 0
 	s.assistantTranscriptSequence = 0
 	s.terminalUsageSequence = 0
+	s.promptAcceptedSequence = 0
+	s.promptTerminalSequence = 0
 	clear(s.toolClosureSequences)
 }
 
@@ -265,6 +269,14 @@ func (s *State) observePersisted(identity MappedUpdateIdentity, kind mappedJourn
 	case mappedJournalRecordTerminalUsage:
 		if identity.Sequence > s.terminalUsageSequence {
 			s.terminalUsageSequence = identity.Sequence
+		}
+	case mappedJournalRecordPromptAccepted:
+		if identity.Sequence > s.promptAcceptedSequence {
+			s.promptAcceptedSequence = identity.Sequence
+		}
+	case mappedJournalRecordPromptTerminal:
+		if identity.Sequence > s.promptTerminalSequence {
+			s.promptTerminalSequence = identity.Sequence
 		}
 	}
 }
@@ -423,6 +435,41 @@ func (s *State) AppendTerminalUsageIfNew(
 	)
 }
 
+// AppendPromptLifecycleIfNew persists accepted and terminal model-request
+// lifecycle events with distinct identities from terminal usage/transcripts.
+func (s *State) AppendPromptLifecycleIfNew(
+	ctx context.Context,
+	event harnessv2.Event,
+) (*store.ExecutionEvent, bool, error) {
+	if s == nil {
+		return nil, false, fmt.Errorf("harness v2 journal state is required")
+	}
+	identity := mappedUpdateIdentity(event)
+	if err := s.bindPrompt(identity); err != nil {
+		return nil, false, err
+	}
+	var kind mappedJournalRecordKind
+	switch {
+	case event.Type == harnessv2.EventAccepted:
+		if s.promptAcceptedSequence == identity.Sequence {
+			return nil, false, nil
+		}
+		kind = mappedJournalRecordPromptAccepted
+	case event.Type.IsTerminal():
+		if s.promptTerminalSequence == identity.Sequence {
+			return nil, false, nil
+		}
+		kind = mappedJournalRecordPromptTerminal
+	default:
+		return nil, false, fmt.Errorf("accepted or terminal harness v2 event is required")
+	}
+	mapped, err := MapPromptLifecycle(event, s.journal.MapContext)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.appendMappedEvent(ctx, identity, kind, mapped, "append mapped harness v2 prompt lifecycle")
+}
+
 // AppendAssistantStreamClosureIfNew persists the complete assistant text seen
 // before a non-terminal stream closure. The last assistant update supplies the
 // durable protocol identity; the complete buffered text supplies the redaction
@@ -532,6 +579,10 @@ func (s *State) appendMappedEvent(
 		key = mappedToolStreamClosureKey(identity)
 	case mappedJournalRecordTerminalUsage:
 		key = mappedTerminalUsageKey(identity)
+	case mappedJournalRecordPromptAccepted:
+		key = mappedPromptLifecycleKey(identity, mappedPromptAcceptedKind)
+	case mappedJournalRecordPromptTerminal:
+		key = mappedPromptLifecycleKey(identity, mappedPromptTerminalKind)
 	}
 	appended, err := s.journal.EventStore.AppendExecutionEvent(ctx, mapped)
 	if err == nil {
@@ -574,6 +625,10 @@ func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalR
 		s.rememberToolClosure(identity.Sequence)
 	case mappedJournalRecordTerminalUsage:
 		s.terminalUsageSequence = identity.Sequence
+	case mappedJournalRecordPromptAccepted:
+		s.promptAcceptedSequence = identity.Sequence
+	case mappedJournalRecordPromptTerminal:
+		s.promptTerminalSequence = identity.Sequence
 	}
 }
 

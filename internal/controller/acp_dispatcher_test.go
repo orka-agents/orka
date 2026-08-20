@@ -936,6 +936,8 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		}
 	}
 	for eventType, want := range map[string]int{
+		executionevents.ExecutionEventTypeModelRequestStarted:        1,
+		executionevents.ExecutionEventTypeModelRequestCompleted:      1,
 		executionevents.ExecutionEventTypeModelMessage:               1,
 		executionevents.ExecutionEventTypeToolCallStarted:            1,
 		executionevents.ExecutionEventTypeToolCallCompleted:          1,
@@ -951,6 +953,10 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		t.Fatalf("usage content = %#v", usageContent)
 	}
 	trace := tasktrace.BuildTaskTrace(tasktrace.MetadataFromTask(completed), timeline, time.Now().UTC())
+	if len(trace.ModelRequests) != 1 || trace.ModelRequests[0].Status != tasktrace.StatusCompleted ||
+		trace.ModelRequests[0].StartSeq == 0 || trace.ModelRequests[0].EndSeq <= trace.ModelRequests[0].StartSeq {
+		t.Fatalf("ACP trace model requests = %#v", trace.ModelRequests)
+	}
 	if len(trace.ToolCalls) != 1 || trace.ToolCalls[0].Status != tasktrace.StatusCompleted || trace.ToolCalls[0].StartSeq == 0 || trace.ToolCalls[0].EndSeq <= trace.ToolCalls[0].StartSeq {
 		t.Fatalf("ACP trace tool calls = %#v", trace.ToolCalls)
 	}
