@@ -10,6 +10,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sort"
 	"strconv"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	dto "github.com/prometheus/client_model/go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -33,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -1418,6 +1422,77 @@ func TestRuntimePoolReconcilerDeletionRemovesMetricsBeforeCleanupCompletes(t *te
 			t.Fatalf("%s series during deletion = %d, want 0", name, got)
 		}
 	}
+}
+
+func TestACPRuntimePoolMetricsAreExposedAndDeletedFromRegistry(t *testing.T) {
+	orkametrics.ACPRuntimePoolDesiredReplicas.Reset()
+	orkametrics.ACPRuntimePoolReadyReplicas.Reset()
+	orkametrics.ACPRuntimePoolSessionsActive.Reset()
+	orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+	orkametrics.ACPRuntimePoolQueuedTasks.Reset()
+	orkametrics.ACPRuntimePoolAdmissionState.Reset()
+	orkametrics.ACPRuntimePoolScaleToZeroTotal.Reset()
+	t.Cleanup(func() {
+		orkametrics.ACPRuntimePoolDesiredReplicas.Reset()
+		orkametrics.ACPRuntimePoolReadyReplicas.Reset()
+		orkametrics.ACPRuntimePoolSessionsActive.Reset()
+		orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+		orkametrics.ACPRuntimePoolQueuedTasks.Reset()
+		orkametrics.ACPRuntimePoolAdmissionState.Reset()
+		orkametrics.ACPRuntimePoolScaleToZeroTotal.Reset()
+	})
+
+	const namespace = "metrics-test"
+	const poolName = "codex-pool"
+	orkametrics.RecordACPRuntimePoolStatus(namespace, poolName, 2, 1, 3, 4, 5, "Accepting")
+	orkametrics.RecordACPRuntimePoolScaleToZero(namespace, poolName)
+
+	body := scrapeControllerMetrics(t)
+	wantLines := []string{
+		`orka_acp_runtime_pool_desired_replicas{namespace="metrics-test",runtime_pool="codex-pool"} 2`,
+		`orka_acp_runtime_pool_ready_replicas{namespace="metrics-test",runtime_pool="codex-pool"} 1`,
+		`orka_acp_runtime_pool_sessions_active{namespace="metrics-test",runtime_pool="codex-pool"} 3`,
+		`orka_acp_runtime_pool_prompts_in_flight{namespace="metrics-test",runtime_pool="codex-pool"} 4`,
+		`orka_acp_runtime_pool_queued_tasks{namespace="metrics-test",runtime_pool="codex-pool"} 5`,
+		`orka_acp_runtime_pool_admission_state{namespace="metrics-test",runtime_pool="codex-pool",state="accepting"} 1`,
+		`orka_acp_runtime_pool_admission_state{namespace="metrics-test",runtime_pool="codex-pool",state="ambiguous"} 0`,
+		`orka_acp_runtime_pool_admission_state{namespace="metrics-test",runtime_pool="codex-pool",state="closed"} 0`,
+		`orka_acp_runtime_pool_admission_state{namespace="metrics-test",runtime_pool="codex-pool",state="draining"} 0`,
+		`orka_acp_runtime_pool_admission_state{namespace="metrics-test",runtime_pool="codex-pool",state="unknown"} 0`,
+		`orka_acp_runtime_pool_scale_to_zero_total{namespace="metrics-test",runtime_pool="codex-pool"} 1`,
+	}
+	for _, want := range wantLines {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics scrape missing %q", want)
+		}
+	}
+
+	orkametrics.DeleteACPRuntimePool(namespace, poolName)
+	body = scrapeControllerMetrics(t)
+	for _, metricName := range []string{
+		"orka_acp_runtime_pool_desired_replicas",
+		"orka_acp_runtime_pool_ready_replicas",
+		"orka_acp_runtime_pool_sessions_active",
+		"orka_acp_runtime_pool_prompts_in_flight",
+		"orka_acp_runtime_pool_queued_tasks",
+		"orka_acp_runtime_pool_admission_state",
+		"orka_acp_runtime_pool_scale_to_zero_total",
+	} {
+		if strings.Contains(body, metricName+`{namespace="`+namespace+`",runtime_pool="`+poolName+`"`) {
+			t.Fatalf("metrics scrape retained deleted %s series", metricName)
+		}
+	}
+}
+
+func scrapeControllerMetrics(t *testing.T) string {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{}).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("metrics scrape status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	return recorder.Body.String()
 }
 
 func runtimePoolMetricSeriesCount(collector prometheus.Collector) int {
