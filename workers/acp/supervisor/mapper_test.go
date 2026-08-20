@@ -298,6 +298,25 @@ func TestMapACPUpdateMarksOversizedToolContentOmitted(t *testing.T) {
 	}
 }
 
+func TestMapACPUpdateMarksUnprojectableToolContentOmitted(t *testing.T) {
+	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
+		"sessionUpdate":"tool_call_update",
+		"toolCallId":"call-unprojectable-content",
+		"status":"completed",
+		"content":[{"type":"diff","path":"README.md"}]
+	}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || text != "" || update == nil || update.ToolCall == nil ||
+		len(update.ToolCall.Content) != 0 || update.ToolCall.ContentReplace || !update.ToolCall.ContentOmitted {
+		t.Fatalf("mapped unprojectable tool content = %#v text=%q ok=%t", update, text, ok)
+	}
+	if err := update.Validate(); err != nil {
+		t.Fatalf("validate omitted unprojectable tool content: %v", err)
+	}
+}
+
 func TestMapRuntimeEventBoundsAggregateToolContentToEventLine(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	fence := cfg.Fence

@@ -152,7 +152,7 @@ func mapACPToolCallContent(raw json.RawMessage) ([]harnessv2.ContentBlock, bool,
 			return nil, true, nil
 		}
 		if item.Type != "content" || len(item.Content) == 0 {
-			continue
+			return nil, true, nil
 		}
 		var block acp.ContentBlock
 		if err := json.Unmarshal(item.Content, &block); err != nil {
@@ -162,12 +162,10 @@ func mapACPToolCallContent(raw json.RawMessage) ([]harnessv2.ContentBlock, bool,
 		if err != nil {
 			return nil, false, fmt.Errorf("project ACP tool call content block %d: %w", index, err)
 		}
-		if bounded {
+		if bounded || !ok {
 			return nil, true, nil
 		}
-		if ok {
-			mapped = append(mapped, projected)
-		}
+		mapped = append(mapped, projected)
 	}
 	return mapped, false, nil
 }
