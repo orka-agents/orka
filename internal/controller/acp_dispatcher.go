@@ -772,11 +772,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		lineage.NamespaceUID = string(taskNamespace.UID)
 	}
+	sessionCtx, sessionTrace := startACPSessionSpan(runtimeCtx, task)
+	defer func() { sessionTrace.End(retErr) }()
 	sessionExecution, err := d.prepareTaskSession(
-		runtimeCtx, task, fence, runtimeFence.RuntimeProfileDigest, mcpBindingDigest,
+		sessionCtx, task, fence, runtimeFence.RuntimeProfileDigest, mcpBindingDigest,
 		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage,
 	)
 	if err != nil {
+		sessionTrace.End(err)
 		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
 			recoveredSession, cleanupErr := d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
 			if cleanupErr != nil {
@@ -796,8 +799,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, err)
 	}
-	sessionCtx, sessionTrace := startACPSessionSpan(runtimeCtx, task, sessionExecution != nil && sessionExecution.Reused)
-	defer func() { sessionTrace.End(retErr) }()
+	sessionTrace.setSessionReused(sessionExecution != nil && sessionExecution.Reused)
 	if sessionExecution != nil && sessionExecution.Turn != nil {
 		defer func() {
 			if sessionExecution.finalized || sessionExecution.requeued {
@@ -3757,7 +3759,10 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled-before-acceptance"); transitionErr != nil {
 				return transitionErr
 			}
-			return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancelled before acceptance")
+			return recordACPPromptOutcomeIfSettled(
+				ctx, acpPromptOutcomeCancelled,
+				d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancelled before acceptance"),
+			)
 		}
 		now := time.Now().UTC()
 		reason := harnessv2.CancelReasonControllerShutdown
@@ -3779,25 +3784,40 @@ func (d *ACPDispatcher) handlePromptStreamError(
 					if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled"); transitionErr != nil {
 						return transitionErr
 					}
-					return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancellation settled")
+					return recordACPPromptOutcomeIfSettled(
+						ctx, acpPromptOutcomeCancelled,
+						d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancellation settled"),
+					)
 				case harnessv2.EventFailed:
 					if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "cancel-failed"); transitionErr != nil {
 						return transitionErr
 					}
-					return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptFailed", "prompt failed during cancellation")
+					return recordACPPromptOutcomeIfSettled(
+						ctx, acpPromptOutcomeFailed,
+						d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptFailed", "prompt failed during cancellation"),
+					)
 				}
 			}
 		}
-		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "prompt cancellation settlement is unknown")
+		return recordACPPromptOutcomeIfSettled(
+			ctx, acpPromptOutcomeUnknown,
+			d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "prompt cancellation settlement is unknown"),
+		)
 	}
 	var clientErr *harnessv2.ClientError
 	if !accepted && errors.As(err, &clientErr) && clientErr.WriteEvidence.SafeToResendSameIdentity() {
 		if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "prompt-not-accepted"); transitionErr != nil {
 			return transitionErr
 		}
-		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptNotAccepted", "prompt transport failed before any request bytes were written")
+		return recordACPPromptOutcomeIfSettled(
+			ctx, acpPromptOutcomeFailed,
+			d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptNotAccepted", "prompt transport failed before any request bytes were written"),
+		)
 	}
-	return d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "accepted prompt outcome is unknown")
+	return recordACPPromptOutcomeIfSettled(
+		ctx, acpPromptOutcomeUnknown,
+		d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "accepted prompt outcome is unknown"),
+	)
 }
 
 func promptStreamDiagnostic(err error) string {

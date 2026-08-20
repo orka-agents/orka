@@ -45,12 +45,8 @@ func startACPPromptSpan(ctx context.Context, task *corev1alpha1.Task) (context.C
 	return startACPSpan(ctx, acpPromptSpanName, acpTaskSpanAttributes(task)...)
 }
 
-func startACPSessionSpan(ctx context.Context, task *corev1alpha1.Task, reused bool) (context.Context, *acpSpan) {
-	name := acpSessionCreateSpanName
-	if reused {
-		name = acpSessionContinueSpanName
-	}
-	return startACPSpan(ctx, name, acpTaskSpanAttributes(task)...)
+func startACPSessionSpan(ctx context.Context, task *corev1alpha1.Task) (context.Context, *acpSpan) {
+	return startACPSpan(ctx, acpSessionCreateSpanName, acpTaskSpanAttributes(task)...)
 }
 
 func startACPPublicationSpan(
@@ -129,6 +125,24 @@ func recordACPPromptOutcome(ctx context.Context, outcome string) {
 	case acpPromptOutcomeFailed, acpPromptOutcomeUnknown:
 		span.SetStatus(codes.Error, outcome)
 	}
+}
+
+func recordACPPromptOutcomeIfSettled(ctx context.Context, outcome string, err error) error {
+	if err == nil {
+		recordACPPromptOutcome(ctx, outcome)
+	}
+	return err
+}
+
+func (s *acpSpan) setSessionReused(reused bool) {
+	if s == nil || s.span == nil || s.ended {
+		return
+	}
+	name := acpSessionCreateSpanName
+	if reused {
+		name = acpSessionContinueSpanName
+	}
+	s.span.SetName(name)
 }
 
 func (s *acpSpan) End(err error) {
