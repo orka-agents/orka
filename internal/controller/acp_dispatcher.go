@@ -1132,8 +1132,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				sessionExecution.requeued = true
 				return nil
 			} else {
-				endSessionTrace(err)
-				return d.handlePrePromptClientError(ctx, task, attemptID, fence, err)
+				retrying, handleErr := d.handlePrePromptClientError(ctx, task, attemptID, fence, err)
+				if !retrying {
+					endSessionTrace(err)
+				}
+				return handleErr
 			}
 		} else {
 			created = true
@@ -3734,9 +3737,9 @@ func runtimeSessionStartDiagnostic(err error) (int, harnessv2.ErrorCode, string)
 	return clientErr.StatusCode, clientErr.Code, message
 }
 
-func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, err error) error {
+func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, err error) (bool, error) {
 	if isACPRateLimitedClientError(err) {
-		return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+		return true, d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
 	}
 	status, code, diagnostic := runtimeSessionStartDiagnostic(err)
 	logf.FromContext(ctx).Info(
@@ -3747,9 +3750,9 @@ func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *co
 		"serverMessage", boundedRuntimeSessionServerMessage(err),
 	)
 	if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "runtime-session-start-failed"); transitionErr != nil {
-		return transitionErr
+		return false, transitionErr
 	}
-	return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "RuntimeSessionStartFailed", runtimeSessionStartFailureMessage(err))
+	return false, d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "RuntimeSessionStartFailed", runtimeSessionStartFailureMessage(err))
 }
 
 func (d *ACPDispatcher) handlePromptStreamError(

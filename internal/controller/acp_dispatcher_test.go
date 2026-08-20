@@ -2744,8 +2744,12 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 		}
 	}
 	rateLimited := &harnessv2.ClientError{StatusCode: http.StatusTooManyRequests, Code: harnessv2.ErrorCodeRateLimited, Retryable: true}
-	if err := dispatcher.handlePrePromptClientError(ctx, task.DeepCopy(), attemptID, fence, rateLimited); err != nil {
+	retrying, err := dispatcher.handlePrePromptClientError(ctx, task.DeepCopy(), attemptID, fence, rateLimited)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !retrying {
+		t.Fatal("rate-limited RuntimeSession start was not classified as a retry")
 	}
 	attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
 	if err != nil {

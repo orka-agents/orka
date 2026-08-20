@@ -138,6 +138,7 @@ func recordACPPromptOutcome(ctx context.Context, outcome string) {
 	span.SetAttributes(attribute.String(acpAttrPromptOutcome, outcome))
 	switch outcome {
 	case acpPromptOutcomeFailed, acpPromptOutcomeUnknown:
+		span.SetAttributes(attribute.String("error.type", acpPromptSpanName+"."+outcome))
 		span.SetStatus(codes.Error, outcome)
 	}
 }

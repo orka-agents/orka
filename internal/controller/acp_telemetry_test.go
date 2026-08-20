@@ -23,13 +23,14 @@ import (
 
 func TestRecordACPPromptOutcomeIfSettledEndsBeforeLaterError(t *testing.T) {
 	tests := []struct {
-		name      string
-		outcome   string
-		wantError bool
+		name          string
+		outcome       string
+		wantError     bool
+		wantErrorType string
 	}{
-		{name: "failed", outcome: acpPromptOutcomeFailed, wantError: true},
+		{name: "failed", outcome: acpPromptOutcomeFailed, wantError: true, wantErrorType: "acp.prompt.failed"},
 		{name: "cancelled", outcome: acpPromptOutcomeCancelled},
-		{name: "unknown", outcome: acpPromptOutcomeUnknown, wantError: true},
+		{name: "unknown", outcome: acpPromptOutcomeUnknown, wantError: true, wantErrorType: "acp.prompt.outcome_unknown"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -53,8 +54,12 @@ func TestRecordACPPromptOutcomeIfSettledEndsBeforeLaterError(t *testing.T) {
 			if got := promptSpan.Status().Code == codes.Error; got != test.wantError {
 				t.Fatalf("acp.prompt error status = %t, want %t", got, test.wantError)
 			}
-			if _, ok := tracingtest.AttributeMap(promptSpan)["error.type"]; ok {
-				t.Fatal("settled acp.prompt span recorded a later cleanup error")
+			errorType, ok := tracingtest.AttributeMap(promptSpan)["error.type"]
+			if test.wantErrorType == "" && ok {
+				t.Fatalf("settled acp.prompt error.type = %q, want absent", errorType.AsString())
+			}
+			if test.wantErrorType != "" && (!ok || errorType.AsString() != test.wantErrorType) {
+				t.Fatalf("settled acp.prompt error.type = %q, want %q", errorType.AsString(), test.wantErrorType)
 			}
 		})
 	}
