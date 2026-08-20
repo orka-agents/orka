@@ -21,6 +21,30 @@ func main() {
 		logger.Error("failed to harden ACP supervisor", "error", err)
 		os.Exit(1)
 	}
+	if supervisor.CredentialBootstrapConfigured() {
+		// Provider-hosted supervisors boot credential-free (their workload
+		// template is provider-visible and may be golden-snapshotted) and wait
+		// for the controller to seed the pool credentials.
+		logger.Info("awaiting controller credential bootstrap")
+		bootstrapCtx, cancelBootstrap := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		seeded, err := supervisor.AwaitCredentialBootstrap(bootstrapCtx, supervisor.DefaultCredentialBootstrapTimeout)
+		cancelBootstrap()
+		if err != nil {
+			logger.Error("credential bootstrap failed", "error", err)
+			os.Exit(1)
+		}
+		for name, value := range map[string]string{
+			supervisor.EnvControllerTokenBootstrap:  seeded.ControllerToken,
+			supervisor.EnvCapabilitySecretBootstrap: seeded.CapabilitySecret,
+			supervisor.EnvProviderTokenBootstrap:    seeded.ProviderToken,
+		} {
+			if err := os.Setenv(name, value); err != nil {
+				logger.Error("stage bootstrapped credential", "error", err)
+				os.Exit(1)
+			}
+		}
+		logger.Info("credential bootstrap complete")
+	}
 	cfg, err := supervisor.LoadConfigFromEnv()
 	if err != nil {
 		logger.Error("invalid ACP supervisor configuration", "error", err)

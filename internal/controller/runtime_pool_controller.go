@@ -76,7 +76,11 @@ const (
 
 	runtimePoolControllerTokenKey  = "controller-token"
 	runtimePoolCapabilitySecretKey = "capability-secret"
-	runtimePoolProviderTokenKey    = "token"
+	// runtimePoolBootstrapNonceKey holds the public per-pool credential
+	// bootstrap nonce used by provider-hosted supervisors that boot
+	// credential-free. It fences seeding only and grants nothing by itself.
+	runtimePoolBootstrapNonceKey = "bootstrap-nonce"
+	runtimePoolProviderTokenKey  = "token"
 
 	runtimePoolControllerTokenPath  = "/var/run/secrets/orka/auth/controller-token"
 	runtimePoolCapabilitySecretPath = "/var/run/secrets/orka/auth/capability-secret"
@@ -319,6 +323,9 @@ type RuntimePoolReconciler struct {
 	// SubstrateActorControlFactory builds the narrow, suspension-free actor
 	// control client. Tests inject fakes; production defaults to the gRPC client.
 	SubstrateActorControlFactory func(SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error)
+	// SubstrateCredentialSeeder overrides the credential bootstrap PUT for
+	// tests; production seeds through the router transport.
+	SubstrateCredentialSeeder func(ctx context.Context, routeHost, nonce string, request harnessv2.CredentialBootstrapRequest) error
 
 	SupervisorClient RuntimePoolSupervisorClient
 	HTTPClient       *http.Client
@@ -1338,6 +1345,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecrets(
 	auth, err := r.ensureRuntimePoolSecret(ctx, pool, cfg, authName, map[string]int{
 		runtimePoolControllerTokenKey:  32,
 		runtimePoolCapabilitySecretKey: 32,
+		runtimePoolBootstrapNonceKey:   32,
 	}, map[string]string{runtimePoolAuthLabel: "true"})
 	if err != nil {
 		return nil, nil, err
@@ -1555,8 +1563,9 @@ func runtimePoolManagedCredentialSecret(secret *corev1.Secret, cfg runtimePoolCo
 	if suffix := runtimePoolAuthSuffixPattern.FindString(secret.Name); suffix != "" &&
 		runtimePoolChildName(cfg.baseName, suffix) == secret.Name {
 		return secret.Labels[runtimePoolAuthLabel] == scheduledRunLabelValue &&
-			len(secret.Data) == 2 && len(secret.Data[runtimePoolControllerTokenKey]) > 0 &&
-			len(secret.Data[runtimePoolCapabilitySecretKey]) > 0
+			len(secret.Data) == 3 && len(secret.Data[runtimePoolControllerTokenKey]) > 0 &&
+			len(secret.Data[runtimePoolCapabilitySecretKey]) > 0 &&
+			len(secret.Data[runtimePoolBootstrapNonceKey]) > 0
 	}
 	if suffix := runtimePoolProviderSuffixPattern.FindString(secret.Name); suffix != "" &&
 		runtimePoolChildName(cfg.baseName, suffix) == secret.Name {
@@ -1571,8 +1580,13 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolProviderSecret(
 	cfg runtimePoolConfig,
 	name string,
 ) (*corev1.Secret, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	secret := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret)
+	// Uncached read: see ensureRuntimePoolSecret.
+	err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret)
 	if apierrors.IsNotFound(err) {
 		secret = &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cfg.namespace, Labels: cloneStringMap(cfg.labels)},
@@ -1615,8 +1629,15 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecret(
 	keys map[string]int,
 	extraLabels map[string]string,
 ) (*corev1.Secret, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	secret := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret)
+	// Uncached read: pool Secrets always live in the runtime namespace, but the
+	// namespace-scoped manager cache is configured independently, so a direct
+	// read keeps Secret handling correct regardless of cache scope drift.
+	err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret)
 	if apierrors.IsNotFound(err) {
 		data := make(map[string][]byte, len(keys))
 		for key, size := range keys {

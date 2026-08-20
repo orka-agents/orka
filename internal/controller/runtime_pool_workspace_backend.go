@@ -488,9 +488,19 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 	return r.deleteRuntimePoolSandboxClaim(ctx, claim)
 }
 
+// sandboxReader returns the uncached reader for provider workload objects:
+// the namespace-scoped manager cache does not watch sandbox extension kinds in
+// the runtime namespace, and the provider CRDs may legitimately be absent.
+func (r *RuntimePoolReconciler) sandboxReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 func (r *RuntimePoolReconciler) getRuntimePoolSandboxTemplate(ctx context.Context, cfg runtimePoolConfig) (*sandboxextv1beta1.SandboxTemplate, error) {
 	template := &sandboxextv1beta1.SandboxTemplate{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: runtimePoolSandboxTemplateName(cfg.baseName)}, template)
+	err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: runtimePoolSandboxTemplateName(cfg.baseName)}, template)
 	if err != nil {
 		return nil, ignoreSandboxAPIAbsence("read RuntimePool sandbox template", err)
 	}
@@ -499,7 +509,7 @@ func (r *RuntimePoolReconciler) getRuntimePoolSandboxTemplate(ctx context.Contex
 
 func (r *RuntimePoolReconciler) getRuntimePoolSandboxClaim(ctx context.Context, cfg runtimePoolConfig) (*sandboxextv1beta1.SandboxClaim, error) {
 	claim := &sandboxextv1beta1.SandboxClaim{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: runtimePoolSandboxClaimName(cfg.baseName)}, claim)
+	err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: runtimePoolSandboxClaimName(cfg.baseName)}, claim)
 	if err != nil {
 		return nil, ignoreSandboxAPIAbsence("read RuntimePool sandbox claim", err)
 	}
@@ -609,7 +619,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSandboxWarmPool(
 ) error {
 	warmPool := &sandboxextv1beta1.SandboxWarmPool{}
 	name := runtimePoolSandboxWarmPoolName(cfg.baseName)
-	err := r.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, warmPool)
+	err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, warmPool)
 	if apierrors.IsNotFound(err) {
 		// Zero replicas: every claim cold-starts from the exact current
 		// template, so a stale pre-warmed Pod can never be adopted.
@@ -768,7 +778,7 @@ func (r *RuntimePoolReconciler) deleteRuntimePoolWorkspaceChildren(ctx context.C
 	}
 	for _, obj := range objects {
 		key := types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}
-		if err := r.Get(ctx, key, obj); err != nil {
+		if err := r.sandboxReader().Get(ctx, key, obj); err != nil {
 			if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) || k8sRuntimeIsMissingKindError(err) {
 				continue
 			}

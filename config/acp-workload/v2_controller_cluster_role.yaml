@@ -77,6 +77,17 @@ rules:
   - gatewayclasses/finalizers
   verbs:
   - update
+# Substrate-backed RuntimePools read operator-owned infrastructure
+# ActorTemplates across namespaces; writes (derived templates and epoch-scoped
+# Secrets) require an operator-provided RoleBinding in the template namespace.
+- apiGroups:
+  - ate.dev
+  resources:
+  - actortemplates
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - workspace.orka.ai
   resources:

@@ -8,6 +8,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,12 +24,15 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
+	substrateTestStatusSuspended   = "STATUS_SUSPENDED"
 	substrateTestTemplateNamespace = "ate-demo"
 	substrateTestBaseTemplateName  = "orka-codex-infra"
 	substrateTestActorDNSSuffix    = "actors.test.example"
@@ -38,6 +43,7 @@ type fakeSubstrateActorControl struct {
 	created []string
 	resumed []string
 	boots   []bool
+	settled []string
 	deleted []string
 	closed  int
 }
@@ -59,7 +65,7 @@ func (f *fakeSubstrateActorControl) CreateActor(_ context.Context, actorID, temp
 	f.created = append(f.created, actorID)
 	actor := &workspace.SubstrateRuntimeActor{
 		ActorID: actorID, TemplateNamespace: templateNamespace, TemplateName: templateName,
-		Status: "STATUS_SUSPENDED",
+		Status: substrateTestStatusSuspended,
 	}
 	f.actors[actorID] = actor
 	view := *actor
@@ -82,7 +88,22 @@ func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID strin
 	return &view, nil
 }
 
+func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {
+	f.settled = append(f.settled, actorID)
+	actor, ok := f.actors[actorID]
+	if !ok {
+		return nil, fmt.Errorf("settle: actor %s not found", actorID)
+	}
+	actor.Status = substrateTestStatusSuspended
+	view := *actor
+	return &view, nil
+}
+
 func (f *fakeSubstrateActorControl) DeleteActor(_ context.Context, actorID string) error {
+	if actor, ok := f.actors[actorID]; ok && actor.Status != substrateTestStatusSuspended {
+		// Mirror the provider: only suspended (settled) actors are deletable.
+		return fmt.Errorf("FailedPrecondition: Actor %s is not suspended (status: %s)", actorID, actor.Status)
+	}
 	f.deleted = append(f.deleted, actorID)
 	delete(f.actors, actorID)
 	return nil
@@ -149,6 +170,15 @@ func runtimePoolSubstrateTestReconciler(
 	r.SubstrateActorControlFactory = func(SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error) {
 		return control, nil
 	}
+	r.SubstrateCredentialSeeder = func(_ context.Context, routeHost, nonce string, request harnessv2.CredentialBootstrapRequest) error {
+		if routeHost == "" || nonce == "" {
+			return fmt.Errorf("seeder called without route host or nonce")
+		}
+		if err := request.Validate(); err != nil {
+			return err
+		}
+		return nil
+	}
 	return r, pool
 }
 
@@ -205,6 +235,32 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	if derived == nil {
 		t.Fatal("derived ActorTemplate was not created")
 	}
+	assertSubstrateDerivedTemplate(t, r, pool, derived, actorID)
+
+	var deployment appsv1.Deployment
+	base := runtimePoolResourceName(pool.Namespace, pool.Name)
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: base}, &deployment); !apierrors.IsNotFound(err) {
+		t.Fatalf("substrate-backed pool created a Deployment (err=%v); the provider owns the workload", err)
+	}
+
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("status = %s/%s, want Starting/Closed", got.Status.Lifecycle, got.Status.AdmissionState)
+	}
+	if got.Annotations[substrateActorBootedAnnotation] != actorID {
+		t.Fatalf("booted annotation = %q, want %q", got.Annotations[substrateActorBootedAnnotation], actorID)
+	}
+}
+
+//nolint:gocyclo // Every rendered-template invariant is asserted in one place.
+func assertSubstrateDerivedTemplate(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+	derived *unstructured.Unstructured,
+	actorID string,
+) {
+	t.Helper()
 	deployed, err := substrateTemplatePodTemplateSpec(derived)
 	if err != nil {
 		t.Fatalf("reconstruct deployed template: %v", err)
@@ -223,42 +279,38 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	if env["ORKA_ACP_POD_UID"].Value != substrateActorInstanceUID(actorID) {
 		t.Fatalf("derived POD_UID = %q, want actor instance UID", env["ORKA_ACP_POD_UID"].Value)
 	}
-	for _, forbidden := range []string{"ORKA_ACP_CONTROLLER_TOKEN_FILE", "ORKA_ACP_CAPABILITY_SECRET_FILE", "ORKA_ACP_PROVIDER_TOKEN_FILE"} {
+	if env["ORKA_ACP_LISTEN_ADDRESS"].Value != ":80" ||
+		len(container.Ports) != 1 || container.Ports[0].ContainerPort != substrateActorListenPort {
+		t.Fatalf("derived listen address/port = %q/%v, want the conventional actor port 80", env["ORKA_ACP_LISTEN_ADDRESS"].Value, container.Ports)
+	}
+	for _, forbidden := range []string{
+		"ORKA_ACP_CONTROLLER_TOKEN_FILE", "ORKA_ACP_CAPABILITY_SECRET_FILE", "ORKA_ACP_PROVIDER_TOKEN_FILE",
+		"ORKA_ACP_CONTROLLER_TOKEN_BOOTSTRAP", "ORKA_ACP_CAPABILITY_SECRET_BOOTSTRAP", "ORKA_ACP_PROVIDER_TOKEN_BOOTSTRAP",
+	} {
 		if _, present := env[forbidden]; present {
-			t.Fatalf("derived template carries file-mounted secret env %q", forbidden)
+			t.Fatalf("derived template carries credential env %q; provider templates must stay credential-free", forbidden)
 		}
 	}
-	for _, bootstrap := range []string{"ORKA_ACP_CONTROLLER_TOKEN_BOOTSTRAP", "ORKA_ACP_CAPABILITY_SECRET_BOOTSTRAP", "ORKA_ACP_PROVIDER_TOKEN_BOOTSTRAP"} {
-		item, present := env[bootstrap]
-		if !present || item.ValueFrom == nil || item.ValueFrom.SecretKeyRef == nil || item.Value != "" {
-			t.Fatalf("derived template bootstrap env %q = %#v, want secretKeyRef-only", bootstrap, item)
+	for _, item := range container.Env {
+		if item.ValueFrom != nil {
+			t.Fatalf("derived template env %q uses valueFrom; provider workloads must not resolve Secrets", item.Name)
 		}
-		secret := &corev1.Secret{}
-		if err := r.Get(context.Background(), types.NamespacedName{
-			Namespace: substrateTestTemplateNamespace, Name: item.ValueFrom.SecretKeyRef.Name,
-		}, secret); err != nil {
-			t.Fatalf("bootstrap Secret %q missing in template namespace: %v", item.ValueFrom.SecretKeyRef.Name, err)
-		}
+	}
+	if strings.TrimSpace(env["ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"].Value) == "" {
+		t.Fatal("derived template is missing the public credential bootstrap nonce")
+	}
+	if len(container.Command) != 1 || container.Command[0] != "/usr/local/bin/orka-acp-runtime" {
+		t.Fatalf("derived container command = %v, want the explicit runtime entrypoint (the provider does not read image config)", container.Command)
+	}
+	var templateSecrets corev1.SecretList
+	if err := r.List(context.Background(), &templateSecrets, client.InNamespace(substrateTestTemplateNamespace)); err == nil && len(templateSecrets.Items) != 0 {
+		t.Fatalf("template namespace holds %d Secrets; nothing secret may exist there", len(templateSecrets.Items))
 	}
 	if workerPool, _, _ := unstructured.NestedString(derived.Object, "spec", "workerPoolRef", "name"); workerPool != "orka-workers" {
 		t.Fatalf("derived template workerPoolRef = %q, want operator infrastructure copied", workerPool)
 	}
 	if location, _, _ := unstructured.NestedString(derived.Object, "spec", "snapshotsConfig", "location"); location != "gs://ate-snapshots/orka" {
-		t.Fatalf("derived template snapshotsConfig = %q, want operator infrastructure copied", location)
-	}
-
-	var deployment appsv1.Deployment
-	base := runtimePoolResourceName(pool.Namespace, pool.Name)
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: base}, &deployment); !apierrors.IsNotFound(err) {
-		t.Fatalf("substrate-backed pool created a Deployment (err=%v); the provider owns the workload", err)
-	}
-
-	got := runtimePoolTestGetPool(t, r, pool)
-	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
-		t.Fatalf("status = %s/%s, want Starting/Closed", got.Status.Lifecycle, got.Status.AdmissionState)
-	}
-	if got.Annotations[substrateActorBootedAnnotation] != actorID {
-		t.Fatalf("booted annotation = %q, want %q", got.Annotations[substrateActorBootedAnnotation], actorID)
+		t.Fatalf("derived template snapshotsConfig = %q, want operator infrastructure copied (safe: the golden-built instance boots credential-free)", location)
 	}
 }
 
@@ -288,6 +340,156 @@ func TestSubstrateRuntimePoolServesThroughRouterHost(t *testing.T) {
 	}
 }
 
+func TestSubstrateRuntimePoolRecyclesActorOnCredentialSeedConflict(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, harnessv2.CredentialBootstrapRequest) error {
+		return errSubstrateCredentialConflict
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("status = %s/%s, want Degraded/Closed", got.Status.Lifecycle, got.Status.AdmissionState)
+	}
+	if !strings.Contains(got.Status.Message, "seeded by another party") {
+		t.Fatalf("message = %q, want the seed-conflict reason", got.Status.Message)
+	}
+
+	// The staged teardown settles the memoryless actor, then deletes it —
+	// never a direct delete of a running workload.
+	runtimePoolReconcile(t, r, pool)
+	if len(control.settled) != 1 || control.settled[0] != actorID {
+		t.Fatalf("settled actors = %v, want the conflicted actor settled after workload destruction", control.settled)
+	}
+	if len(control.deleted) != 1 || control.deleted[0] != actorID {
+		t.Fatalf("deleted actors = %v, want the conflicted actor recycled", control.deleted)
+	}
+	got = runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorBootedAnnotation] != "" {
+		t.Fatal("booted annotation survived the recycle")
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != "" {
+		t.Fatal("recycling annotation survived teardown completion")
+	}
+}
+
+func TestSubstrateRuntimePoolHoldsAdmissionUntilCredentialSeeding(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(_ context.Context, routeHost, nonce string, request harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		if routeHost == "" || nonce == "" {
+			t.Fatalf("seeder called without route host or nonce")
+		}
+		if err := request.Validate(); err != nil {
+			t.Fatalf("seeder received invalid pool credentials: %v", err)
+		}
+		if seedAttempts == 1 {
+			return errors.New("supervisor is still booting")
+		}
+		return nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("status = %s/%s, want Starting/Closed while seeding is incomplete", got.Status.Lifecycle, got.Status.AdmissionState)
+	}
+	if !strings.Contains(got.Status.Message, "credential bootstrap is not complete") {
+		t.Fatalf("message = %q, want incomplete-bootstrap reason", got.Status.Message)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
+		t.Fatalf("status = %s/%s, want Serving/Accepting after seeding succeeds", status.Lifecycle, status.AdmissionState)
+	}
+	if seedAttempts < 2 {
+		t.Fatalf("seed attempts = %d, want a retry after the transient failure", seedAttempts)
+	}
+}
+
+func TestSubstrateTeardownDestroysLabeledWorkerPodBeforeSettling(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+	actorID := substrateTestActorID(pool)
+
+	worker := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ate-workers", Name: "worker-0",
+			Labels: map[string]string{"ate.dev/worker-pool": "orka-workers"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "ateom", Image: "example.com/ateom"}}},
+	}
+	if err := r.Create(context.Background(), worker); err != nil {
+		t.Fatalf("create worker pod: %v", err)
+	}
+
+	gone, err := r.teardownSubstrateActor(context.Background(), control, actorID)
+	if err != nil || gone {
+		t.Fatalf("teardown with live worker = (%v, %v), want in-progress", gone, err)
+	}
+	if len(control.settled) != 0 {
+		t.Fatal("actor settled while its workload memory still existed")
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: "ate-workers", Name: "worker-0"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("worker pod get after teardown = %v, want deleted", err)
+	}
+
+	gone, err = r.teardownSubstrateActor(context.Background(), control, actorID)
+	if err != nil || gone {
+		t.Fatalf("teardown after workload destruction = (%v, %v), want settling", gone, err)
+	}
+	if len(control.settled) != 1 {
+		t.Fatalf("settled = %v, want the memoryless actor settled", control.settled)
+	}
+	gone, err = r.teardownSubstrateActor(context.Background(), control, actorID)
+	if err != nil || !gone {
+		t.Fatalf("final teardown = (%v, %v), want deleted", gone, err)
+	}
+	if len(control.deleted) != 1 {
+		t.Fatalf("deleted = %v, want the settled actor deleted", control.deleted)
+	}
+}
+
+func TestSubstrateTeardownRefusesUnlabeledPod(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+	actorID := substrateTestActorID(pool)
+
+	bystander := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ate-workers", Name: "worker-0"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "example.com/app"}}},
+	}
+	if err := r.Create(context.Background(), bystander); err != nil {
+		t.Fatalf("create bystander pod: %v", err)
+	}
+	if _, err := r.teardownSubstrateActor(context.Background(), control, actorID); err == nil ||
+		!strings.Contains(err.Error(), "provider worker label") {
+		t.Fatalf("teardown error = %v, want refusal to delete an unlabeled Pod", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: "ate-workers", Name: "worker-0"}, &corev1.Pod{}); err != nil {
+		t.Fatalf("bystander pod must survive: %v", err)
+	}
+}
+
 func TestSubstrateRuntimePoolRecyclesProviderSuspendedActor(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
@@ -297,7 +499,7 @@ func TestSubstrateRuntimePoolRecyclesProviderSuspendedActor(t *testing.T) {
 	actorID := substrateTestActorID(pool)
 	// The provider suspended the booted actor behind the controller's back:
 	// supervisor memory (credentials included) has been checkpointed.
-	control.actors[actorID].Status = "STATUS_SUSPENDED"
+	control.actors[actorID].Status = substrateTestStatusSuspended
 	control.actors[actorID].SnapshotObserved = true
 
 	runtimePoolReconcile(t, r, pool)
@@ -350,7 +552,12 @@ func TestSubstrateRuntimePoolScaleToZeroDrainsThenDeletesActor(t *testing.T) {
 	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
 		t.Fatalf("lifecycle after quiescent probe = %s, want Quiescent", got)
 	}
+	// Staged teardown: settle the memoryless actor, then delete it.
 	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if len(control.settled) != 1 {
+		t.Fatalf("settled actors = %v, want the drained actor settled before deletion", control.settled)
+	}
 	if len(control.deleted) != 1 {
 		t.Fatalf("deleted actors = %v, want the drained actor deleted", control.deleted)
 	}
@@ -393,9 +600,8 @@ func TestSubstrateRuntimePoolFinalizerDeletesActorTemplateAndSecrets(t *testing.
 	var secrets corev1.SecretList
 	if err := r.List(context.Background(), &secrets, nil...); err == nil {
 		for i := range secrets.Items {
-			if secrets.Items[i].Namespace == substrateTestTemplateNamespace &&
-				secrets.Items[i].Labels[runtimePoolUIDLabel] == string(pool.UID) {
-				t.Fatalf("template-namespace Secret %q survived finalization", secrets.Items[i].Name)
+			if secrets.Items[i].Labels[runtimePoolUIDLabel] == string(pool.UID) {
+				t.Fatalf("pool Secret %q survived finalization", secrets.Items[i].Name)
 			}
 		}
 	}
@@ -417,9 +623,9 @@ func TestSubstrateRouteHTTPTransportDialsRouterPreservingHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("substrateRouteHTTPTransport: %v", err)
 	}
-	client := &http.Client{Transport: transport}
+	httpClient := &http.Client{Transport: transport}
 	routeHost := "orka-acp-actor." + substrateTestActorDNSSuffix
-	resp, err := client.Get("http://" + routeHost + "/v2/health")
+	resp, err := httpClient.Get("http://" + routeHost + "/v2/health")
 	if err != nil {
 		t.Fatalf("router-dialed request failed: %v", err)
 	}
@@ -428,7 +634,7 @@ func TestSubstrateRouteHTTPTransportDialsRouterPreservingHost(t *testing.T) {
 		t.Fatalf("router saw Host %q, want logical route host %q", seenHost, routeHost)
 	}
 
-	if _, err := client.Get("http://not-an-actor.example.com/"); err == nil || !strings.Contains(err.Error(), "refuses non-actor host") {
+	if _, err := httpClient.Get("http://not-an-actor.example.com/"); err == nil || !strings.Contains(err.Error(), "refuses non-actor host") {
 		t.Fatalf("non-actor host error = %v, want refusal", err)
 	}
 

@@ -22,7 +22,7 @@ jobs:
   live-agent-sandbox-e2e:
     name: Live Agent Sandbox E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 110
     env:
       KIND_CLUSTER: orka-live-agent-sandbox-e2e
     steps:

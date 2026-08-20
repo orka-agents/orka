@@ -30,6 +30,17 @@ sandbox_fixture_image="${ORKA_AGENT_SANDBOX_FIXTURE_IMAGE:-orka-agent-sandbox-fi
 sandbox_router_image="${ORKA_AGENT_SANDBOX_ROUTER_IMAGE:-orka-agent-sandbox-router:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_template_name="${ORKA_AGENT_SANDBOX_TEMPLATE:-orka-agent-sandbox-e2e-template}"
 smoke_claim_name="${ORKA_AGENT_SANDBOX_SMOKE_CLAIM:-orka-agent-sandbox-e2e-retained-smoke}"
+# The workspace-backed ACP Task smoke builds the real Codex runtime image and
+# proves the workspace-provider-backed RuntimePool path live against upstream
+# agent-sandbox (admission, claim materialization, authenticated Serving, and
+# cleanup). It is model-free: prompt-level completion is exercised by the live
+# ACP runtime workflows. Set to 0 to skip the runtime image build.
+acp_task_smoke_enabled="${ORKA_AGENT_SANDBOX_ACP_TASK_SMOKE:-1}"
+acp_codex_runtime_image="${ORKA_ACP_CODEX_RUNTIME_IMAGE:-orka-acp-codex-runtime:live-agent-sandbox-e2e-${e2e_run_id}}"
+acp_runtime_namespace="${ORKA_ACP_RUNTIME_NAMESPACE:-orka-runtimes}"
+acp_task_namespace="${ORKA_AGENT_SANDBOX_ACP_TASK_NAMESPACE:-${orka_namespace}}"
+acp_task_name="orka-ws-sandbox-smoke"
+acp_agent_name="orka-ws-sandbox-agent"
 api_pf_pid=""
 router_pf_pid=""
 router_namespace=""
@@ -83,6 +94,16 @@ dump_diagnostics() {
     echo
     echo "=== Agent Sandbox Resources ==="
     kubectl get pods,svc,deploy,sandboxclaims,sandboxes,sandboxtemplates,sandboxwarmpools -A -o wide 2>/dev/null || true
+    echo
+    echo "=== Workspace-backed RuntimePools ==="
+    kubectl get runtimepools -A -o wide 2>/dev/null || true
+    kubectl get runtimepools -A -o yaml 2>/dev/null || true
+    echo
+    echo "=== ACP Runtime Namespace Resources ==="
+    kubectl get pods,secrets,sandboxclaims,sandboxes,sandboxtemplates,sandboxwarmpools -n "${acp_runtime_namespace}" -o wide 2>/dev/null || true
+    echo
+    echo "=== Workspace-backed ACP Task ==="
+    kubectl -n "${acp_task_namespace}" get task "${acp_task_name}" -o yaml 2>/dev/null || true
     echo
     echo "=== Orka Namespace Events ==="
     kubectl get events -n "${orka_namespace}" --sort-by=.lastTimestamp 2>/dev/null || true
@@ -523,6 +544,7 @@ patch_controller_for_agent_sandbox() {
           | .args = ((.args // []) | upsert_arg("--agent-sandbox-claim-timeout"; "3m"))
           | .args = ((.args // []) | upsert_arg("--agent-sandbox-command-timeout"; "5m"))
           | .args = ((.args // []) | upsert_arg("--agent-sandbox-cleanup-policy"; "delete"))
+          | .args = ((.args // []) | upsert_arg("--acp-workspace-dispatch-enabled"; "true"))
         else . end
       )
     ' | kubectl apply -f -
@@ -793,6 +815,8 @@ run_workspace_smoke() {
 
 reset_e2e_resources() {
   log "Resetting fixed-name agent-sandbox e2e resources"
+  run kubectl -n "${acp_task_namespace}" delete task "${acp_task_name}"     --ignore-not-found=true --wait=true --timeout=2m
+  run kubectl -n "${acp_task_namespace}" delete agent "${acp_agent_name}"     --ignore-not-found=true --wait=true --timeout=1m
   run kubectl -n "${orka_namespace}" delete sandboxclaim "${smoke_claim_name}" \
     --ignore-not-found=true \
     --wait=true \
@@ -805,6 +829,162 @@ reset_e2e_resources() {
     --ignore-not-found=true \
     --wait=true \
     --timeout=2m
+}
+
+wait_for_jsonpath() {
+  local kind="$1" namespace="$2" name="$3" path="$4" want="$5" timeout_seconds="$6"
+  local started now value
+  started="$(date +%s)"
+  while true; do
+    value="$(kubectl -n "${namespace}" get "${kind}" "${name}" -o jsonpath="${path}" 2>/dev/null || true)"
+    if [[ "${value}" == "${want}" ]]; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started >= timeout_seconds )); then
+      die "timed out waiting for ${kind}/${name} ${path}=${want} (last: ${value:-<empty>})"
+    fi
+    sleep 3
+  done
+}
+
+wait_for_nonempty_jsonpath() {
+  local kind="$1" namespace="$2" name="$3" path="$4" timeout_seconds="$5"
+  local started now value
+  started="$(date +%s)"
+  while true; do
+    value="$(kubectl -n "${namespace}" get "${kind}" "${name}" -o jsonpath="${path}" 2>/dev/null || true)"
+    if [[ -n "${value}" ]]; then
+      printf '%s' "${value}"
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started >= timeout_seconds )); then
+      die "timed out waiting for ${kind}/${name} ${path} to be set"
+    fi
+    sleep 3
+  done
+}
+
+# run_workspace_backed_acp_task_smoke proves the Phase-1 workspace-provider
+# adapter live against upstream agent-sandbox, without model access:
+#   1. a Task.spec.execution.workspace agent Task is admitted (not rejected
+#      with WorkspaceValidationFailed) and binds a dedicated acp-ws-* pool;
+#   2. the pool materializes a controller-rendered SandboxTemplate, a
+#      zero-replica SandboxWarmPool, and one SandboxClaim through the real
+#      provider controller, and the sandbox Pod runs the immutable Codex
+#      runtime image;
+#   3. the authenticated exact-instance fence probe reaches Serving/Accepting;
+#   4. Task status stays provider-neutral (no claim identifiers);
+#   5. pool deletion removes the claim, warm pool, and template.
+# Prompt-level completion needs provider model access and is covered by the
+# live ACP runtime workflows.
+run_workspace_backed_acp_task_smoke() {
+  log "Running workspace-backed ACP Task infrastructure smoke"
+
+  bash "${repo_root}/scripts/lib/ensure-static-mode-namespace.sh" \
+    kubectl "${acp_task_namespace}" harness-v2
+
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: ${acp_agent_name}
+  namespace: ${acp_task_namespace}
+spec:
+  runtime:
+    type: codex
+    contractVersion: orka.harness.v2
+    defaultMaxTurns: 1
+  model:
+    name: gpt-5.5
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: ${acp_task_name}
+  namespace: ${acp_task_namespace}
+spec:
+  type: agent
+  agentRef:
+    name: ${acp_agent_name}
+  agentRuntime:
+    maxTurns: 1
+  timeout: 10m0s
+  execution:
+    workspace:
+      enabled: true
+      provider: agent-sandbox
+      reusePolicy: none
+      cleanupPolicy: delete
+  prompt: "Reply exactly: ORKA_WS_SANDBOX_OK"
+YAML
+
+  local pool_name
+  pool_name="$(wait_for_nonempty_jsonpath task "${acp_task_namespace}" "${acp_task_name}"     '{.status.execution.runtimePoolName}' 120)"
+  log "Workspace-backed Task bound RuntimePool ${pool_name}"
+  [[ "${pool_name}" == acp-ws-codex-* ]] ||
+    die "runtime pool ${pool_name} is not a workspace-backed pool"
+
+  local workspace_provider workspace_reason
+  workspace_provider="$(kubectl -n "${acp_task_namespace}" get task "${acp_task_name}"     -o jsonpath='{.status.executionWorkspace.provider}')"
+  workspace_reason="$(kubectl -n "${acp_task_namespace}" get task "${acp_task_name}"     -o jsonpath='{.status.executionWorkspace.reason}')"
+  [[ "${workspace_provider}" == "agent-sandbox" ]] ||
+    die "workspace status provider ${workspace_provider}, want agent-sandbox"
+  [[ "${workspace_reason}" != "WorkspaceValidationFailed" ]] ||
+    die "workspace-backed Task was rejected with WorkspaceValidationFailed"
+
+  log "Waiting for workspace-backed RuntimePool ${pool_name} to reach Serving"
+  wait_for_jsonpath runtimepool "${acp_task_namespace}" "${pool_name}"     '{.status.lifecycle}' "Serving" 480
+
+  local active_pod_uid
+  active_pod_uid="$(kubectl -n "${acp_task_namespace}" get runtimepool "${pool_name}"     -o jsonpath='{.status.activeInstance.podUID}')"
+  [[ -n "${active_pod_uid}" ]] || die "Serving pool has no active instance"
+
+  local claim_count claim_name
+  claim_count="$(kubectl get sandboxclaims -A     -l "orka.ai/runtime-pool-name=${pool_name}" -o name | wc -l | tr -d ' ')"
+  [[ "${claim_count}" == "1" ]] ||
+    die "expected exactly one SandboxClaim for ${pool_name}, found ${claim_count}"
+  claim_name="$(kubectl get sandboxclaims -n "${acp_runtime_namespace}"     -l "orka.ai/runtime-pool-name=${pool_name}" -o jsonpath='{.items[0].metadata.name}')"
+  log "Workspace-backed pool is Serving through SandboxClaim ${claim_name}"
+
+  local sandbox_pod_image
+  sandbox_pod_image="$(kubectl get pods -n "${acp_runtime_namespace}"     -l "orka.ai/runtime-pool-name=${pool_name}"     -o jsonpath='{.items[0].spec.containers[0].image}')"
+  [[ "${sandbox_pod_image}" == *"acp-codex"* ]] ||
+    die "sandbox Pod image ${sandbox_pod_image} is not the immutable Codex runtime image"
+
+  if kubectl -n "${acp_task_namespace}" get task "${acp_task_name}" -o yaml | grep -q "${claim_name}"; then
+    die "public Task status leaked the provider claim identifier ${claim_name}"
+  fi
+
+  log "Waiting for the dispatcher to engage the workspace-backed pool"
+  local started now execution_state
+  started="$(date +%s)"
+  while true; do
+    execution_state="$(kubectl -n "${acp_task_namespace}" get task "${acp_task_name}"       -o jsonpath='{.status.execution.state}' 2>/dev/null || true)"
+    if [[ -n "${execution_state}" && "${execution_state}" != "Queued" ]]; then
+      break
+    fi
+    now="$(date +%s)"
+    if (( now - started >= 300 )); then
+      die "dispatcher never engaged the workspace-backed pool (state: ${execution_state:-<empty>})"
+    fi
+    sleep 3
+  done
+  log "Workspace-backed Task execution progressed to state ${execution_state} (prompt-level completion requires model access and is out of scope here)"
+
+  workspace_reason="$(kubectl -n "${acp_task_namespace}" get task "${acp_task_name}"     -o jsonpath='{.status.executionWorkspace.reason}')"
+  [[ "${workspace_reason}" != "WorkspaceValidationFailed" ]] ||
+    die "workspace-backed Task regressed to WorkspaceValidationFailed after dispatch"
+
+  log "Cleaning up the workspace-backed Task and pool"
+  run kubectl -n "${acp_task_namespace}" delete task "${acp_task_name}" --wait=true --timeout=3m
+  run kubectl -n "${acp_task_namespace}" delete runtimepool "${pool_name}" --wait=true --timeout=4m
+  local remaining
+  remaining="$(kubectl get sandboxclaims,sandboxwarmpools,sandboxtemplates -n "${acp_runtime_namespace}"     -l "orka.ai/runtime-pool-name=${pool_name}" -o name | wc -l | tr -d ' ')"
+  [[ "${remaining}" == "0" ]] ||
+    die "pool finalization left ${remaining} provider objects for ${pool_name}"
+  log "Workspace-backed ACP Task infrastructure smoke passed"
 }
 
 main() {
@@ -837,6 +1017,10 @@ main() {
   run make docker-build IMG="${manager_image}"
   log "Building workspace publisher image ${publisher_image}"
   run make docker-build-workspace-publisher WORKSPACE_PUBLISHER_IMG="${publisher_image}"
+  if [[ "${acp_task_smoke_enabled}" == "1" ]]; then
+    log "Building immutable Codex ACP runtime image ${acp_codex_runtime_image} for the workspace-backed Task smoke"
+    run make docker-build-acp-codex-runtime ACP_CODEX_RUNTIME_IMG="${acp_codex_runtime_image}"
+  fi
 
   write_sandbox_fixture_dockerfile
   log "Building agent-sandbox HTTP fixture image ${sandbox_fixture_image}"
@@ -851,17 +1035,21 @@ main() {
   local manager_ref publisher_ref
   manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
   publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
+  local placeholder_digest codex_runtime_ref
+  placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
+  codex_runtime_ref="example.invalid/orka/acp-codex@${placeholder_digest}"
+  if [[ "${acp_task_smoke_enabled}" == "1" ]]; then
+    codex_runtime_ref="$(orka_kind_registry_push "${acp_codex_runtime_image}" "orka/acp-codex-runtime")"
+  fi
 
   log "Bootstrapping test-only admission TLS"
   orka_e2e_bootstrap_admission_tls
 
-  log "Deploying Orka manager with inert digest-pinned ACP images (agent-sandbox RuntimeSession dispatch is deferred)"
-  local placeholder_digest
-  placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
+  log "Deploying Orka manager (Codex runtime image real when the workspace-backed Task smoke is enabled; other runtimes inert)"
   run make deploy \
     IMG="${manager_ref}" \
     WORKSPACE_PUBLISHER_IMG="${publisher_ref}" \
-    ACP_CODEX_RUNTIME_IMG="example.invalid/orka/acp-codex@${placeholder_digest}" \
+    ACP_CODEX_RUNTIME_IMG="${codex_runtime_ref}" \
     ACP_CLAUDE_RUNTIME_IMG="example.invalid/orka/acp-claude@${placeholder_digest}" \
     ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
     ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
@@ -886,7 +1074,11 @@ main() {
 
   run_workspace_smoke "${router_base}"
 
-  log "Skipping workspace-backed ACP Task smoke: this workflow deploys placeholder ACP runtime image digests, so RuntimeSession execution (including the workspace-provider-backed RuntimePool path behind --acp-workspace-dispatch-enabled) is exercised by the live ACP runtime workflows instead; the direct workspace adapter path was validated above"
+  if [[ "${acp_task_smoke_enabled}" == "1" ]]; then
+    run_workspace_backed_acp_task_smoke
+  else
+    log "Skipping workspace-backed ACP Task smoke (ORKA_AGENT_SANDBOX_ACP_TASK_SMOKE=0): prompt-level RuntimeSession execution is exercised by the live ACP runtime workflows"
+  fi
   log "Live agent-sandbox installation/configuration/workspace-adapter e2e passed"
 }
 

@@ -151,6 +151,28 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - extensions.agents.x-k8s.io
+  resources:
+  - sandboxclaims
+  - sandboxtemplates
+  - sandboxwarmpools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agents.x-k8s.io
+  resources:
+  - sandboxes
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -1404,6 +1426,14 @@ rules:
   - gatewayclasses/finalizers
   verbs:
   - update
+- apiGroups:
+  - ate.dev
+  resources:
+  - actortemplates
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - workspace.orka.ai
   resources:

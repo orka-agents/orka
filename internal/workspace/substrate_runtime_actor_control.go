@@ -34,12 +34,25 @@ func (a *SubstrateRuntimeActor) SuspendedOrSuspending() bool {
 	return a != nil && (a.Status == substrateStatusSuspended || a.Status == substrateStatusSuspending)
 }
 
+// Suspended reports the settled provider state that permits DeleteActor.
+func (a *SubstrateRuntimeActor) Suspended() bool {
+	return a != nil && a.Status == substrateStatusSuspended
+}
+
+// Suspending reports an in-flight provider suspension transition.
+func (a *SubstrateRuntimeActor) Suspending() bool {
+	return a != nil && a.Status == substrateStatusSuspending
+}
+
 // SubstrateRuntimeActorControl is the narrow Substrate control surface needed
-// to host one ACP RuntimePool instance in an Actor. It intentionally excludes
-// SuspendActor: gVisor suspension checkpoints supervisor process memory —
-// including live pool and provider-proxy credentials — into provider snapshot
-// storage, which the ACP execution-workspace contract prohibits. Teardown uses
-// DeleteActor directly and never the legacy scrub-suspend-delete executor flow.
+// to host one ACP RuntimePool instance in an Actor. Suspending a live
+// workload is prohibited: gVisor suspension checkpoints supervisor process
+// memory — including live pool and provider-proxy credentials — into provider
+// snapshot storage, which the ACP execution-workspace contract forbids.
+// Because the provider deletes only suspended actors, teardown first destroys
+// the workload's memory (deleting its single-workload worker Pod), then calls
+// SettleActor purely to transition the memoryless actor into the deletable
+// suspended state — with nothing left to checkpoint — and then DeleteActor.
 type SubstrateRuntimeActorControl interface {
 	// GetActor returns nil with no error when the actor does not exist.
 	GetActor(ctx context.Context, actorID string) (*SubstrateRuntimeActor, error)
@@ -47,7 +60,13 @@ type SubstrateRuntimeActorControl interface {
 	// ResumeActor with boot=true starts the workload from scratch. ACP hosting
 	// always boots fresh so a supervisor lifetime is exactly one boot.
 	ResumeActor(ctx context.Context, actorID string, boot bool) (*SubstrateRuntimeActor, error)
-	// DeleteActor returns nil when the actor is already absent.
+	// SettleActor transitions the actor toward the provider's deletable
+	// suspended state. It must only be called after the actor's workload
+	// memory has been destroyed and its absence confirmed — settling a live
+	// supervisor would checkpoint credentials and is prohibited.
+	SettleActor(ctx context.Context, actorID string) (*SubstrateRuntimeActor, error)
+	// DeleteActor returns nil when the actor is already absent. The provider
+	// only accepts deletion of suspended (settled) actors.
 	DeleteActor(ctx context.Context, actorID string) error
 	Close() error
 }
@@ -99,6 +118,14 @@ func (c *substrateRuntimeActorControl) CreateActor(
 
 func (c *substrateRuntimeActorControl) ResumeActor(ctx context.Context, actorID string, boot bool) (*SubstrateRuntimeActor, error) {
 	actor, err := c.control.ResumeActor(ctx, actorID, boot)
+	if err != nil {
+		return nil, err
+	}
+	return substrateRuntimeActorView(actor), nil
+}
+
+func (c *substrateRuntimeActorControl) SettleActor(ctx context.Context, actorID string) (*SubstrateRuntimeActor, error) {
+	actor, err := c.control.SuspendActor(ctx, actorID)
 	if err != nil {
 		return nil, err
 	}
