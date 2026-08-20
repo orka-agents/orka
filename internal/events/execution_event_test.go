@@ -227,13 +227,15 @@ func TestRedactExecutionEventTextCoversSecrets(t *testing.T) {
 
 func TestRedactExecutionEventTextStripsURLQueriesAndFragments(t *testing.T) {
 	capabilityURL := "https://account.blob.core.windows.net/output.txt?sp=r&sig=usable-secret#download"
-	got := RedactExecutionEventText("download " + capabilityURL + ", then open https://example.com/docs.")
-	for _, leaked := range []string{"sig=", "usable-secret", "#download"} {
+	schemeRelativeURL := "//account.blob.core.windows.net/output.txt?sp=r&sig=scheme-relative-secret#download"
+	got := RedactExecutionEventText("download " + capabilityURL + ", mirror " + schemeRelativeURL + "; then open https://example.com/docs.")
+	for _, leaked := range []string{"sig=", "usable-secret", "scheme-relative-secret", "#download"} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("RedactExecutionEventText leaked %q in %q", leaked, got)
 		}
 	}
 	if !strings.Contains(got, "https://account.blob.core.windows.net/output.txt,") ||
+		!strings.Contains(got, "//account.blob.core.windows.net/output.txt;") ||
 		!strings.Contains(got, "https://example.com/docs.") {
 		t.Fatalf("RedactExecutionEventText() = %q", got)
 	}

@@ -461,6 +461,18 @@ func TestMapACPUpdatePreservesContextWindowUsage(t *testing.T) {
 	}
 }
 
+func TestMapACPUpdateDropsInvalidContextWindowUsage(t *testing.T) {
+	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
+		"sessionUpdate":"usage_update","used":53000,"size":0
+	}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok || text != "" || update != nil {
+		t.Fatalf("mapped invalid usage update = %#v text=%q ok=%v", update, text, ok)
+	}
+}
+
 func TestMapACPUpdateBoundsProviderToolCallTitle(t *testing.T) {
 	exactBoundary := strings.Repeat("x", maxACPToolCallTitleBytes)
 	fullCommand := strings.Repeat("git diff --no-ext-diff && ", 64) + "go test ./..."

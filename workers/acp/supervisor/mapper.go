@@ -124,10 +124,14 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 		}
 		return &harnessv2.UpdateEvent{Kind: harnessv2.UpdatePlan, Plan: plan}, "", true, nil
 	case "usage_update":
-		return &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{
+		usage := &harnessv2.UsageUpdate{
 			ContextWindowUsed: &envelope.Used,
 			ContextWindowSize: &envelope.Size,
-		}}, "", true, nil
+		}
+		if err := usage.Validate(); err != nil {
+			return nil, "", false, nil
+		}
+		return &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: usage}, "", true, nil
 	case "agent_thought_chunk", "user_message_chunk", "available_commands_update", "current_mode_update", "config_option_update", "session_info_update":
 		return nil, "", false, nil
 	default:
