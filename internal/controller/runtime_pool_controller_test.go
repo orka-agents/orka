@@ -1469,6 +1469,35 @@ func TestRuntimePoolReconcilerPublishesExactActivePodStatus(t *testing.T) {
 	}
 }
 
+func TestRuntimePoolReconcilerUnhealthySupervisorClearsReadinessBeforeRecycle(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	pod := runtimePoolReadyPod(pool, pool.Namespace, "unhealthy-pod", "unhealthy-pod-uid", "10.0.0.48")
+	probe := runtimePoolValidProbe(pool, &pod, "unhealthy-boot", false)
+	probe.Status.Lifecycle = harnessv2.SupervisorLifecycleUnhealthy
+	supervisor := &fakeRuntimePoolSupervisorClient{probe: probe}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, &pod)
+
+	runtimePoolReconcile(t, r, pool)
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("unhealthy status = %s/%s, want Degraded/Closed", status.Lifecycle, status.AdmissionState)
+	}
+	if status.ActiveInstance != nil {
+		t.Fatalf("active instance = %#v, want nil after unhealthy Pod deletion", status.ActiveInstance)
+	}
+	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != runtimePoolSchedulingReasonPodNotReady {
+		t.Fatalf("scheduling condition = %#v, want Unknown/PodNotReady", condition)
+	}
+	if got := runtimePoolReadyReplicas(status); got != 0 {
+		t.Fatalf("ready replicas = %d, want 0 after unhealthy Pod deletion", got)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("unhealthy runtime Pod still exists, err=%v", err)
+	}
+}
+
 func TestRuntimePoolReconcilerPreservesActiveFenceAcrossReadinessGap(t *testing.T) {
 	const oldRuntimeInstanceID = "restart-gap-pod-uid.boot-before-gap"
 

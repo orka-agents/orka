@@ -704,6 +704,9 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		if err := r.Delete(ctx, &readyPods[0]); err != nil && !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
+		status.ActiveInstance = nil
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 	case probe.Status.Drain.Requested || probe.Status.Lifecycle == harnessv2.SupervisorLifecycleDraining || probe.Status.Lifecycle == harnessv2.SupervisorLifecycleTerminating:
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
