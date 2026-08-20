@@ -317,6 +317,7 @@ func TestJournalPersistsTerminalUsageSeparatelyFromAssistantTranscript(t *testin
 		StopReason: harnessv2.ACPStopReasonEndTurn,
 		Result: harnessv2.PromptResult{
 			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "done"}},
+			Model:   "served-model",
 			Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 40},
 		},
 	}
@@ -337,6 +338,13 @@ func TestJournalPersistsTerminalUsageSeparatelyFromAssistantTranscript(t *testin
 	if listed[0].Type != executionevents.ExecutionEventTypeModelUsageUpdated ||
 		listed[1].Type != executionevents.ExecutionEventTypeModelMessage {
 		t.Fatalf("terminal journal events = %#v", listed)
+	}
+	var usageContent map[string]any
+	if err := json.Unmarshal(listed[0].Content, &usageContent); err != nil {
+		t.Fatal(err)
+	}
+	if usageContent["model"] != "served-model" {
+		t.Fatalf("terminal usage content = %#v", usageContent)
 	}
 
 	recovered, err := journal.Open(ctx)

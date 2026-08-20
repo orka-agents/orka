@@ -609,6 +609,9 @@ func MapTerminalUsage(event harnessv2.Event, mapCtx MapContext) (*store.Executio
 	if err := usage.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid completed usage: %w", err)
 	}
+	if event.Completed.Result.Model != "" {
+		mapCtx.Model = event.Completed.Result.Model
+	}
 	update := event
 	update.Type = harnessv2.EventUpdate
 	update.Completed = nil

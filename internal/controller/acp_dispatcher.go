@@ -1370,12 +1370,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if terminal == nil {
 		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event")
 	}
-	if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, *terminal); err != nil {
-		logf.FromContext(ctx).Error(err, "persist terminal ACP prompt lifecycle", "namespace", task.Namespace, "task", task.Name)
-		return d.failPromptForExecutionEventPersistence(
-			ctx, task, attemptID, fence, "terminal prompt lifecycle persistence failed",
-		)
-	}
 	if terminal.Type != harnessv2.EventCompleted {
 		if persistableAssistant := assistantTranscriptForPersistence(assistant.String(), assistantOverflow); persistableAssistant != "" {
 			if _, _, err := journalState.AppendAssistantTranscriptIfNew(ctx, *terminal, persistableAssistant); err != nil {
@@ -1384,6 +1378,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 					ctx, task, attemptID, fence, "terminal assistant transcript persistence failed",
 				)
 			}
+		}
+		if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, *terminal); err != nil {
+			logf.FromContext(ctx).Error(err, "persist terminal ACP prompt lifecycle", "namespace", task.Namespace, "task", task.Name)
+			return d.failPromptForExecutionEventPersistence(
+				ctx, task, attemptID, fence, "terminal prompt lifecycle persistence failed",
+			)
 		}
 		return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal)
 	}
@@ -1415,6 +1415,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		logf.FromContext(ctx).Error(err, "persist terminal ACP assistant transcript", "namespace", task.Namespace, "task", task.Name)
 		return d.failPromptForExecutionEventPersistence(
 			ctx, task, attemptID, fence, "terminal assistant transcript persistence failed",
+		)
+	}
+	if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, *terminal); err != nil {
+		logf.FromContext(ctx).Error(err, "persist terminal ACP prompt lifecycle", "namespace", task.Namespace, "task", task.Name)
+		return d.failPromptForExecutionEventPersistence(
+			ctx, task, attemptID, fence, "terminal prompt lifecycle persistence failed",
 		)
 	}
 	if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryNotRequested, store.PromptDeliveryValidating, "validate-workspace", ""); err != nil {
