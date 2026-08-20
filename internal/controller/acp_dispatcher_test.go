@@ -1114,7 +1114,7 @@ func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 				TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
 				StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
 			},
-			wantState: corev1alpha1.TaskExecutionStateCancelled, wantReason: "Cancelled",
+			wantState: corev1alpha1.TaskExecutionStateCancelled, wantReason: acpTaskTimeoutReason,
 			wantAttempt: store.PromptExecutionCancelled, wantTerminal: harnessv2.EventCancelled,
 		},
 		{
