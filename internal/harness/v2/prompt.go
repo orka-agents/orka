@@ -49,7 +49,7 @@ func (b ContentBlock) validate(allowWhitespaceText bool) error {
 			return fmt.Errorf("text content must not carry URI or artifact")
 		}
 	case ContentBlockResourceLink:
-		if err := validateBoundedString("resource URI", b.URI, true, 4096); err != nil {
+		if err := validateBoundedString("resource URI", b.URI, true, MaxResourceURIBytes); err != nil {
 			return err
 		}
 		parsed, err := url.Parse(b.URI)
@@ -72,10 +72,10 @@ func (b ContentBlock) validate(allowWhitespaceText bool) error {
 	default:
 		return fmt.Errorf("unsupported content block type %q", b.Type)
 	}
-	if err := validateBoundedString("content name", b.Name, false, 1024); err != nil {
+	if err := validateBoundedString("content name", b.Name, false, MaxContentNameBytes); err != nil {
 		return err
 	}
-	return validateBoundedString("content MIME type", b.MimeType, false, 256)
+	return validateBoundedString("content MIME type", b.MimeType, false, MaxContentMIMETypeBytes)
 }
 
 type PromptInput struct {

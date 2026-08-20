@@ -10,12 +10,15 @@ import (
 )
 
 const (
-	MaxProtocolStringBytes = 4 * 1024
-	MaxDiagnosticBytes     = 8 * 1024
-	MaxMetadataEntries     = 128
-	MaxContentBlocks       = 128
-	MaxPromptContentBytes  = 1 << 20
-	MaxRawConfigBytes      = 256 << 10
+	MaxProtocolStringBytes  = 4 * 1024
+	MaxDiagnosticBytes      = 8 * 1024
+	MaxMetadataEntries      = 128
+	MaxContentBlocks        = 128
+	MaxPromptContentBytes   = 1 << 20
+	MaxResourceURIBytes     = 4 * 1024
+	MaxContentNameBytes     = 1024
+	MaxContentMIMETypeBytes = 256
+	MaxRawConfigBytes       = 256 << 10
 )
 
 func validateProtocol(version string) error {

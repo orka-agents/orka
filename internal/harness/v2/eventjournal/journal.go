@@ -33,12 +33,14 @@ type Journal struct {
 // Controller takeover deliberately terminalizes accepted prompts as
 // OutcomeUnknown rather than replaying or persisting a raw-content crash buffer.
 type State struct {
-	journal           Journal
-	keys              map[string]struct{}
-	persistedKeys     map[string]struct{}
-	aggregatedKeys    map[string]struct{}
-	toolText          map[string]*streamText
-	toolBufferedBytes int
+	journal                     Journal
+	promptIdentity              MappedUpdateIdentity
+	processedSequence           uint64
+	aggregatedSequence          uint64
+	assistantTranscriptSequence uint64
+	toolClosureSequences        map[uint64]struct{}
+	toolText                    map[string]*streamText
+	toolBufferedBytes           int
 }
 
 type streamText struct {
@@ -100,17 +102,20 @@ func (s *streamText) omitForOverflow() {
 	s.multipleBlocksOmitted = false
 }
 
-// HasUpdate reports whether event was already persisted or appended during
-// this journal pass.
+// HasUpdate reports whether event was already persisted or processed during
+// this journal pass. Validated harness streams use strictly increasing event
+// sequences, so one high-water mark bounds deduplication state for any prompt
+// duration.
 func (s *State) HasUpdate(event harnessv2.Event) bool {
 	if s == nil {
 		return false
 	}
-	_, ok := s.keys[mappedUpdateIdentity(event).Key()]
-	return ok
+	identity := mappedUpdateIdentity(event)
+	return identity.valid() && s.promptIdentity.promptValid() &&
+		identity.samePrompt(s.promptIdentity) && identity.Sequence <= s.processedSequence
 }
 
-// Open loads all persisted harness v2 update identities for this task stream.
+// Open loads persisted harness v2 sequence state for the current prompt.
 func (j Journal) Open(ctx context.Context) (*State, error) {
 	if j.EventStore == nil {
 		return nil, fmt.Errorf("execution event store is required")
@@ -119,31 +124,28 @@ func (j Journal) Open(ctx context.Context) (*State, error) {
 		return nil, err
 	}
 	mapCtx := j.MapContext.normalized()
-	keys := map[string]struct{}{}
-	persistedKeys := map[string]struct{}{}
+	state := &State{
+		journal:              j,
+		promptIdentity:       j.RecoveryIdentity,
+		toolClosureSequences: map[uint64]struct{}{},
+		toolText:             map[string]*streamText{},
+	}
 	var err error
 	if j.RecoveryIdentity.promptValid() {
-		err = j.loadCurrentPromptIdentities(ctx, mapCtx, keys, persistedKeys)
+		err = j.loadCurrentPromptIdentities(ctx, mapCtx, state)
 	} else {
-		err = j.loadAllIdentities(ctx, mapCtx, keys, persistedKeys)
+		err = j.loadAllIdentities(ctx, mapCtx, state)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &State{
-		journal:        j,
-		keys:           keys,
-		persistedKeys:  persistedKeys,
-		aggregatedKeys: map[string]struct{}{},
-		toolText:       map[string]*streamText{},
-	}, nil
+	return state, nil
 }
 
 func (j Journal) loadAllIdentities(
 	ctx context.Context,
 	mapCtx MapContext,
-	keys map[string]struct{},
-	persistedKeys map[string]struct{},
+	state *State,
 ) error {
 	var afterSeq int64
 	for {
@@ -164,9 +166,11 @@ func (j Journal) loadAllIdentities(
 			if event.Seq > afterSeq {
 				afterSeq = event.Seq
 			}
-			if _, key, ok := mappedExecutionEventKey(event); ok {
-				keys[key] = struct{}{}
-				persistedKeys[key] = struct{}{}
+			if identity, _, kind, ok := mappedExecutionEventRecord(event); ok {
+				if !state.promptIdentity.promptValid() || !identity.samePrompt(state.promptIdentity) {
+					state.resetPrompt(identity)
+				}
+				state.observePersisted(identity, kind)
 			}
 		}
 		if len(listed) < store.MaxExecutionEventLimit {
@@ -179,8 +183,7 @@ func (j Journal) loadAllIdentities(
 func (j Journal) loadCurrentPromptIdentities(
 	ctx context.Context,
 	mapCtx MapContext,
-	keys map[string]struct{},
-	persistedKeys map[string]struct{},
+	state *State,
 ) error {
 	pageEnd, err := j.EventStore.GetLatestExecutionEventSeq(
 		ctx, mapCtx.Namespace, store.ExecutionEventStreamTypeTask, mapCtx.StreamID,
@@ -207,19 +210,70 @@ func (j Journal) loadCurrentPromptIdentities(
 			if event.Seq > pageEnd {
 				continue
 			}
-			identity, key, ok := mappedExecutionEventKey(event)
+			identity, _, kind, ok := mappedExecutionEventRecord(event)
 			if !ok {
 				continue
 			}
 			if !identity.samePrompt(j.RecoveryIdentity) {
 				return nil
 			}
-			keys[key] = struct{}{}
-			persistedKeys[key] = struct{}{}
+			state.observePersisted(identity, kind)
 		}
 		pageEnd = pageStart
 	}
 	return nil
+}
+
+func (s *State) resetPrompt(identity MappedUpdateIdentity) {
+	s.promptIdentity = identity
+	s.processedSequence = 0
+	s.aggregatedSequence = 0
+	s.assistantTranscriptSequence = 0
+	clear(s.toolClosureSequences)
+}
+
+func (s *State) bindPrompt(identity MappedUpdateIdentity) error {
+	if !identity.valid() {
+		return fmt.Errorf("valid harness v2 update identity is required")
+	}
+	if !s.promptIdentity.promptValid() {
+		s.promptIdentity = identity
+		return nil
+	}
+	if !identity.samePrompt(s.promptIdentity) {
+		return fmt.Errorf("harness v2 update prompt identity does not match journal state")
+	}
+	return nil
+}
+
+func (s *State) observePersisted(identity MappedUpdateIdentity, kind mappedJournalRecordKind) {
+	if identity.Sequence > s.processedSequence {
+		s.processedSequence = identity.Sequence
+	}
+	if identity.Sequence > s.aggregatedSequence {
+		s.aggregatedSequence = identity.Sequence
+	}
+	switch kind {
+	case mappedJournalRecordAssistantTranscript:
+		if identity.Sequence > s.assistantTranscriptSequence {
+			s.assistantTranscriptSequence = identity.Sequence
+		}
+	case mappedJournalRecordToolStreamClosure:
+		s.rememberToolClosure(identity.Sequence)
+	}
+}
+
+func (s *State) markProcessed(identity MappedUpdateIdentity) {
+	if identity.Sequence > s.processedSequence {
+		s.processedSequence = identity.Sequence
+	}
+}
+
+func (s *State) rememberToolClosure(sequence uint64) {
+	if _, ok := s.toolClosureSequences[sequence]; ok || len(s.toolClosureSequences) >= maxOpenToolAccumulators {
+		return
+	}
+	s.toolClosureSequences[sequence] = struct{}{}
 }
 
 // AppendUpdateIfNew maps and appends event unless its full protocol identity is
@@ -231,32 +285,35 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 	if s == nil {
 		return nil, false, fmt.Errorf("harness v2 journal state is required")
 	}
-	key := mappedUpdateIdentity(event).Key()
+	identity := mappedUpdateIdentity(event)
 	mapped, err := MapUpdate(event, s.journal.MapContext)
 	if err != nil {
 		return nil, false, err
 	}
-	if s.aggregateToolUpdate(event, key) {
-		// The journal's in-memory telemetry bound must not abort a valid
-		// prompt. Omit excess open-tool updates until capacity is available.
-		s.keys[key] = struct{}{}
-		return nil, false, nil
+	if err := s.bindPrompt(identity); err != nil {
+		return nil, false, err
 	}
 	if s.HasUpdate(event) {
 		s.finishToolUpdate(event)
 		return nil, false, nil
 	}
+	if s.aggregateToolUpdate(event, identity.Sequence) {
+		// The journal's in-memory telemetry bound must not abort a valid
+		// prompt. Omit excess open-tool updates until capacity is available.
+		s.markProcessed(identity)
+		return nil, false, nil
+	}
 	if event.Update.Kind == harnessv2.UpdateAssistantMessageChunk {
 		// The complete terminal transcript is persisted once redaction can see
-		// all chunk boundaries. Retain the chunk key only for same-pass replay.
-		s.keys[key] = struct{}{}
+		// all chunk boundaries. Advance only the bounded sequence high-water.
+		s.markProcessed(identity)
 		return nil, false, nil
 	}
 	if isBufferedToolContentUpdate(event) {
 		// Keep streamed output in the accumulator, but do not emit an unbounded
 		// series of ToolCallStarted events. The terminal tool event or prompt
 		// stream closure receives the complete, redacted text.
-		s.keys[key] = struct{}{}
+		s.markProcessed(identity)
 		return nil, false, nil
 	}
 	if contentText, truncated, multipleBlocksOmitted, title, kind, ok := s.finishToolUpdate(event); ok {
@@ -273,7 +330,9 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 			return nil, false, err
 		}
 	}
-	return s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 update")
+	return s.appendMappedEvent(
+		ctx, identity, mappedJournalRecordUpdate, mapped, "append mapped harness v2 update",
+	)
 }
 
 func isBufferedToolContentUpdate(event harnessv2.Event) bool {
@@ -308,15 +367,21 @@ func (s *State) AppendAssistantTranscriptIfNew(
 	if transcript == "" {
 		return nil, false, nil
 	}
-	key := mappedUpdateIdentity(terminal).Key()
-	if _, ok := s.persistedKeys[key]; ok {
+	identity := mappedUpdateIdentity(terminal)
+	if err := s.bindPrompt(identity); err != nil {
+		return nil, false, err
+	}
+	if s.assistantTranscriptSequence == identity.Sequence {
 		return nil, false, nil
 	}
 	mapped, err := MapAssistantTranscript(terminal, s.journal.MapContext, transcript)
 	if err != nil {
 		return nil, false, err
 	}
-	return s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 assistant transcript")
+	return s.appendMappedEvent(
+		ctx, identity, mappedJournalRecordAssistantTranscript, mapped,
+		"append mapped harness v2 assistant transcript",
+	)
 }
 
 // AppendAssistantStreamClosureIfNew persists the complete assistant text seen
@@ -337,15 +402,21 @@ func (s *State) AppendAssistantStreamClosureIfNew(
 	if lastUpdate.Type != harnessv2.EventUpdate || lastUpdate.Update == nil || lastUpdate.Update.AssistantMessage == nil {
 		return nil, false, fmt.Errorf("last assistant update is required")
 	}
-	key := mappedUpdateIdentity(lastUpdate).Key()
-	if _, ok := s.persistedKeys[key]; ok {
+	identity := mappedUpdateIdentity(lastUpdate)
+	if err := s.bindPrompt(identity); err != nil {
+		return nil, false, err
+	}
+	if s.assistantTranscriptSequence == identity.Sequence {
 		return nil, false, nil
 	}
 	mapped, err := MapAssistantTranscript(lastUpdate, s.journal.MapContext, transcript)
 	if err != nil {
 		return nil, false, err
 	}
-	return s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 assistant stream closure")
+	return s.appendMappedEvent(
+		ctx, identity, mappedJournalRecordAssistantTranscript, mapped,
+		"append mapped harness v2 assistant stream closure",
+	)
 }
 
 // AppendToolStreamClosuresIfNew persists buffered output for tools that did
@@ -377,8 +448,11 @@ func (s *State) AppendToolStreamClosuresIfNew(ctx context.Context) error {
 	for _, closure := range closures {
 		toolID := closure.toolID
 		accumulator := closure.accumulator
-		key := mappedToolStreamClosureKey(mappedUpdateIdentity(accumulator.lastEvent))
-		if _, ok := s.persistedKeys[key]; ok {
+		identity := mappedUpdateIdentity(accumulator.lastEvent)
+		if err := s.bindPrompt(identity); err != nil {
+			return err
+		}
+		if _, ok := s.toolClosureSequences[identity.Sequence]; ok {
 			s.removeToolAccumulator(toolID)
 			continue
 		}
@@ -390,7 +464,10 @@ func (s *State) AppendToolStreamClosuresIfNew(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if _, _, err := s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 tool stream closure"); err != nil {
+		if _, _, err := s.appendMappedEvent(
+			ctx, identity, mappedJournalRecordToolStreamClosure, mapped,
+			"append mapped harness v2 tool stream closure",
+		); err != nil {
 			return err
 		}
 		s.removeToolAccumulator(toolID)
@@ -405,13 +482,18 @@ func (s *State) AppendToolStreamClosuresIfNew(ctx context.Context) error {
 // confirmed, and a second readback reconciles an ambiguous retry.
 func (s *State) appendMappedEvent(
 	ctx context.Context,
-	key string,
+	identity MappedUpdateIdentity,
+	kind mappedJournalRecordKind,
 	mapped *store.ExecutionEvent,
 	operation string,
 ) (*store.ExecutionEvent, bool, error) {
+	key := identity.Key()
+	if kind == mappedJournalRecordToolStreamClosure {
+		key = mappedToolStreamClosureKey(identity)
+	}
 	appended, err := s.journal.EventStore.AppendExecutionEvent(ctx, mapped)
 	if err == nil {
-		s.markPersisted(key)
+		s.markPersisted(identity, kind)
 		return appended, true, nil
 	}
 	firstErr := fmt.Errorf("%s: %w", operation, err)
@@ -420,13 +502,13 @@ func (s *State) appendMappedEvent(
 		return nil, false, errors.Join(firstErr, fmt.Errorf("reconcile failed append: %w", reconcileErr))
 	}
 	if persisted {
-		s.markPersisted(key)
+		s.markPersisted(identity, kind)
 		return nil, false, nil
 	}
 
 	appended, err = s.journal.EventStore.AppendExecutionEvent(ctx, mapped)
 	if err == nil {
-		s.markPersisted(key)
+		s.markPersisted(identity, kind)
 		return appended, true, nil
 	}
 	retryErr := fmt.Errorf("%s retry: %w", operation, err)
@@ -435,15 +517,20 @@ func (s *State) appendMappedEvent(
 		return nil, false, errors.Join(firstErr, retryErr, fmt.Errorf("reconcile failed append retry: %w", reconcileErr))
 	}
 	if persisted {
-		s.markPersisted(key)
+		s.markPersisted(identity, kind)
 		return nil, false, nil
 	}
 	return nil, false, errors.Join(firstErr, retryErr)
 }
 
-func (s *State) markPersisted(key string) {
-	s.keys[key] = struct{}{}
-	s.persistedKeys[key] = struct{}{}
+func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalRecordKind) {
+	s.markProcessed(identity)
+	switch kind {
+	case mappedJournalRecordAssistantTranscript:
+		s.assistantTranscriptSequence = identity.Sequence
+	case mappedJournalRecordToolStreamClosure:
+		s.rememberToolClosure(identity.Sequence)
+	}
 }
 
 func (j Journal) hasPersistedIdentity(ctx context.Context, key string) (bool, error) {
@@ -482,14 +569,14 @@ func (j Journal) hasPersistedIdentity(ctx context.Context, key string) (bool, er
 	}
 }
 
-func (s *State) aggregateToolUpdate(event harnessv2.Event, key string) bool {
+func (s *State) aggregateToolUpdate(event harnessv2.Event, sequence uint64) bool {
 	if event.Update == nil || event.Update.ToolCall == nil {
 		return false
 	}
-	if _, ok := s.aggregatedKeys[key]; ok {
+	if sequence <= s.aggregatedSequence {
 		return false
 	}
-	s.aggregatedKeys[key] = struct{}{}
+	s.aggregatedSequence = sequence
 	tool := event.Update.ToolCall
 	toolID := tool.ToolCallID
 	accumulator := s.toolText[toolID]

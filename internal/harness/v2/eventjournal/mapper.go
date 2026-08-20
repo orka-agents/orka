@@ -21,6 +21,14 @@ const (
 	mappedToolStreamClosureKind      = "tool_stream_closure"
 )
 
+type mappedJournalRecordKind uint8
+
+const (
+	mappedJournalRecordUpdate mappedJournalRecordKind = iota
+	mappedJournalRecordAssistantTranscript
+	mappedJournalRecordToolStreamClosure
+)
+
 // MapContext supplies Orka-owned stream metadata for a validated harness v2
 // update. Protocol events do not own namespace, task name, or session linkage.
 type MapContext struct {
@@ -149,20 +157,31 @@ func MappedUpdateIdentityFromEvent(event store.ExecutionEvent) (MappedUpdateIden
 }
 
 func mappedExecutionEventKey(event store.ExecutionEvent) (MappedUpdateIdentity, string, bool) {
+	identity, key, _, ok := mappedExecutionEventRecord(event)
+	return identity, key, ok
+}
+
+func mappedExecutionEventRecord(
+	event store.ExecutionEvent,
+) (MappedUpdateIdentity, string, mappedJournalRecordKind, bool) {
 	identity, ok := MappedUpdateIdentityFromEvent(event)
 	if !ok {
-		return MappedUpdateIdentity{}, "", false
+		return MappedUpdateIdentity{}, "", mappedJournalRecordUpdate, false
 	}
 	var content struct {
 		JournalKind string `json:"journalKind"`
+		UpdateKind  string `json:"updateKind"`
 	}
 	if err := json.Unmarshal(event.Content, &content); err != nil {
-		return MappedUpdateIdentity{}, "", false
+		return MappedUpdateIdentity{}, "", mappedJournalRecordUpdate, false
 	}
 	if content.JournalKind == mappedToolStreamClosureKind {
-		return identity, mappedToolStreamClosureKey(identity), true
+		return identity, mappedToolStreamClosureKey(identity), mappedJournalRecordToolStreamClosure, true
 	}
-	return identity, identity.Key(), true
+	if content.UpdateKind == mappedAssistantTranscriptKind {
+		return identity, identity.Key(), mappedJournalRecordAssistantTranscript, true
+	}
+	return identity, identity.Key(), mappedJournalRecordUpdate, true
 }
 
 func mappedToolStreamClosureKey(identity MappedUpdateIdentity) string {

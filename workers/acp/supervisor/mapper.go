@@ -204,10 +204,20 @@ func projectACPContentBlock(block acp.ContentBlock) (harnessv2.ContentBlock, boo
 	default:
 		return projected, false, nil
 	}
+	if acpToolContentExceedsHarnessLimits(projected) {
+		return harnessv2.ContentBlock{}, false, nil
+	}
 	if err := projected.ValidateToolOutput(); err != nil {
 		return harnessv2.ContentBlock{}, false, err
 	}
 	return projected, true, nil
+}
+
+func acpToolContentExceedsHarnessLimits(block harnessv2.ContentBlock) bool {
+	return len(block.Text) > harnessv2.MaxPromptContentBytes ||
+		len(block.URI) > harnessv2.MaxResourceURIBytes ||
+		len(block.Name) > harnessv2.MaxContentNameBytes ||
+		len(block.MimeType) > harnessv2.MaxContentMIMETypeBytes
 }
 
 func boundACPToolCallTitle(value string) string {

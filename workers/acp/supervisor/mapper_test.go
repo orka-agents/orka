@@ -208,6 +208,40 @@ func TestMapACPToolCallContentCapsProjectedBlocks(t *testing.T) {
 	}
 }
 
+func TestProjectACPContentBlockOmitsOversizedTelemetry(t *testing.T) {
+	oversizedText := strings.Repeat("x", harnessv2.MaxPromptContentBytes+1)
+	oversizedResource, err := json.Marshal(map[string]any{
+		"uri": "file:///workspace/output.txt", "mimeType": "text/plain", "text": oversizedText,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name  string
+		block acp.ContentBlock
+	}{
+		{name: "text", block: acp.ContentBlock{Type: acpContentTypeText, Text: oversizedText}},
+		{name: "resource text", block: acp.ContentBlock{Type: "resource", Resource: oversizedResource}},
+		{name: "resource URI", block: acp.ContentBlock{
+			Type: "resource_link", URI: "https://example.com/" + strings.Repeat("x", harnessv2.MaxResourceURIBytes),
+		}},
+		{name: "resource name", block: acp.ContentBlock{
+			Type: "resource_link", URI: "https://example.com/output", Name: strings.Repeat("x", harnessv2.MaxContentNameBytes+1),
+		}},
+		{name: "resource MIME type", block: acp.ContentBlock{
+			Type: "resource_link", URI: "https://example.com/output", MIMEType: strings.Repeat("x", harnessv2.MaxContentMIMETypeBytes+1),
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			projected, ok, err := projectACPContentBlock(test.block)
+			if err != nil || ok || projected != (harnessv2.ContentBlock{}) {
+				t.Fatalf("oversized projection = %#v ok=%t err=%v", projected, ok, err)
+			}
+		})
+	}
+}
+
 func TestMapACPUpdateIgnoresStatuslessToolOutputDelta(t *testing.T) {
 	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
 		"sessionUpdate":"tool_call_update",

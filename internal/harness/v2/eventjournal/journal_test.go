@@ -805,6 +805,47 @@ func TestJournalOmitsExcessOpenToolAccumulatorWithoutFailingPrompt(t *testing.T)
 	}
 }
 
+func TestJournalDeduplicationStateUsesSequenceHighWater(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	updateCount := store.MaxExecutionEventLimit*2 + 1
+	var first harnessv2.Event
+	for index := range updateCount {
+		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCallUpdate,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: fmt.Sprintf("call-high-water-%d", index), Status: harnessv2.ToolCallStatusCompleted,
+			},
+		})
+		if index == 0 {
+			first = event
+		}
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew || appended == nil {
+			t.Fatalf("append update %d = %#v new=%t err=%v", index, appended, isNew, err)
+		}
+	}
+
+	wantSequence := uint64(updateCount + 1)
+	if state.processedSequence != wantSequence || state.aggregatedSequence != wantSequence {
+		t.Fatalf(
+			"sequence state processed=%d aggregated=%d, want %d",
+			state.processedSequence, state.aggregatedSequence, wantSequence,
+		)
+	}
+	if len(state.toolText) != 0 || len(state.toolClosureSequences) != 0 {
+		t.Fatalf("bounded journal state tools=%d closures=%d", len(state.toolText), len(state.toolClosureSequences))
+	}
+	if duplicate, isNew, err := state.AppendUpdateIfNew(ctx, first); err != nil || isNew || duplicate != nil {
+		t.Fatalf("old duplicate = %#v new=%t err=%v", duplicate, isNew, err)
+	}
+}
+
 func TestJournalDegradesAggregateToolContentOverflow(t *testing.T) {
 	ctx := context.Background()
 	state, err := (Journal{EventStore: storetest.NewFakeExecutionEventStore(), MapContext: testMapContext()}).Open(ctx)
