@@ -227,6 +227,38 @@ func TestJournalRedactsCredentialSplitAcrossPlanUpdates(t *testing.T) {
 	}
 }
 
+func TestJournalRedactsCredentialSplitAcrossDiagnosticUpdates(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := "sk-" + strings.Repeat("a", 8)
+	suffix := strings.Repeat("b", 16)
+	updates := []harnessv2.DiagnosticUpdate{
+		{Code: "x", Message: prefix, Retryable: true},
+		{Code: "x", Message: suffix, Retryable: true},
+		{Code: "x", Message: "retrying safely", Retryable: true},
+	}
+	for index, update := range updates {
+		event := testUpdateEvent(uint64(index+2), time.Now().UTC().Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateDiagnostic, Diagnostic: &update,
+		})
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew || appended == nil {
+			t.Fatalf("append diagnostic %d = %#v new=%t err=%v", index, appended, isNew, err)
+		}
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 3 || !strings.Contains(listed[0].ContentText, prefix) ||
+		strings.Contains(listed[1].ContentText, suffix) ||
+		!strings.Contains(listed[1].ContentText, executionevents.ExecutionEventRedactedValue) ||
+		listed[2].ContentText != "retrying safely" {
+		t.Fatalf("persisted diagnostic updates = %#v", listed)
+	}
+}
+
 func TestJournalRetriesAppendOnlyAfterConfirmedAbsence(t *testing.T) {
 	ctx := context.Background()
 	base := storetest.NewFakeExecutionEventStore()

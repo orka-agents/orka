@@ -1020,8 +1020,7 @@ func TestForkTaskAPIMarksCompatibilityScanTruncatedAfterCoalescing(t *testing.T)
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if !out.ForkContext.Truncated || len(out.ForkContext.Events) != 1 ||
-		out.ForkContext.Events[0].Type != events.ExecutionEventTypeModelMessage {
+	if !out.ForkContext.Truncated || len(out.ForkContext.Events) != 0 {
 		t.Fatalf("fork context = %#v", out.ForkContext)
 	}
 }

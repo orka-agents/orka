@@ -152,6 +152,9 @@ func (r taskTimelineReader) listRecentContextThrough(ctx context.Context, throug
 		}
 		scanTruncated = len(earliest) > 0 && earliest[0].Seq <= initialAfter
 	}
+	if scanTruncated && len(out) > 0 && out[0].Type == events.ExecutionEventTypeModelMessage {
+		out = out[1:]
+	}
 	return out, scanTruncated, nil
 }
 

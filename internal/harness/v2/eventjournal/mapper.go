@@ -308,23 +308,48 @@ func redactPlanEntries(
 	history []logicalFieldBoundaries,
 ) ([]harnessv2.PlanEntry, []logicalFieldBoundaries) {
 	redacted := append([]harnessv2.PlanEntry(nil), entries...)
-	current := make([]logicalFieldBoundaries, 0, len(entries)*2)
-	for index, entry := range entries {
-		redacted[index].Content = executionevents.RedactExecutionEventText(entry.Content)
-		redacted[index].Priority = executionevents.RedactExecutionEventText(entry.Priority)
-		current = appendLogicalFieldBoundary(current, redacted[index].Content)
-		current = appendLogicalFieldBoundary(current, redacted[index].Priority)
+	values := make([]string, 0, len(entries)*2)
+	for _, entry := range entries {
+		values = append(values, entry.Content, entry.Priority)
+	}
+	values, publishedFields := redactLogicalFields(history, values...)
+	for index := range redacted {
+		redacted[index].Content = values[index*2]
+		redacted[index].Priority = values[index*2+1]
+	}
+	return redacted, publishedFields
+}
+
+type diagnosticProjection struct {
+	code    string
+	message string
+}
+
+func projectDiagnosticUpdate(
+	update harnessv2.DiagnosticUpdate,
+	history []logicalFieldBoundaries,
+) (diagnosticProjection, []logicalFieldBoundaries) {
+	values, publishedFields := redactLogicalFields(history, update.Code, update.Message)
+	return diagnosticProjection{code: values[0], message: values[1]}, publishedFields
+}
+
+func redactLogicalFields(
+	history []logicalFieldBoundaries,
+	values ...string,
+) ([]string, []logicalFieldBoundaries) {
+	redacted := make([]string, len(values))
+	current := make([]logicalFieldBoundaries, 0, len(values))
+	for index, value := range values {
+		redacted[index] = executionevents.RedactExecutionEventText(value)
+		current = appendLogicalFieldBoundary(current, redacted[index])
 	}
 	fields := make([]logicalFieldBoundaries, 0, len(history)+len(current))
 	fields = append(fields, history...)
 	fields = append(fields, current...)
 	if len(fields) >= 2 && permutedLogicalFieldSubsetsSensitive(fields) {
-		for index := range redacted {
-			if redacted[index].Content != "" {
-				redacted[index].Content = executionevents.ExecutionEventRedactedValue
-			}
-			if redacted[index].Priority != "" {
-				redacted[index].Priority = executionevents.ExecutionEventRedactedValue
+		for index, value := range redacted {
+			if value != "" {
+				redacted[index] = executionevents.ExecutionEventRedactedValue
 			}
 		}
 		return redacted, nil
@@ -518,6 +543,7 @@ type mapUpdateOptions struct {
 	toolContentMultipleBlocksOmitted bool
 	omitToolMetadata                 bool
 	planProjection                   *PlanProjection
+	diagnosticProjection             *diagnosticProjection
 	journalKind                      string
 }
 
@@ -649,16 +675,18 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		mapUsageUpdate(event.Update.Usage, mapCtx, mapped, content)
 	case harnessv2.UpdateDiagnostic:
 		diagnostic := event.Update.Diagnostic
-		fields := redactSmallLogicalFieldSet(diagnostic.Code, diagnostic.Message)
-		code, message := fields[0], fields[1]
+		projection, _ := projectDiagnosticUpdate(*diagnostic, nil)
+		if options.diagnosticProjection != nil {
+			projection = *options.diagnosticProjection
+		}
 		mapped.Type = executionevents.ExecutionEventTypeAgentRuntimeCommandStarted
 		mapped.Severity = executionevents.ExecutionEventSeverityError
 		if diagnostic.Retryable {
 			mapped.Severity = executionevents.ExecutionEventSeverityWarning
 		}
-		mapped.Summary = compactSummary(code + ": " + message)
-		mapped.ContentText = message
-		content["code"] = code
+		mapped.Summary = compactSummary(projection.code + ": " + projection.message)
+		mapped.ContentText = projection.message
+		content["code"] = projection.code
 		content["retryable"] = diagnostic.Retryable
 	default:
 		return nil, fmt.Errorf("unsupported harness v2 update kind %q", event.Update.Kind)

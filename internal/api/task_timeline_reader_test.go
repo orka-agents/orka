@@ -133,7 +133,7 @@ func TestTaskTimelineReaderListRecentContextThroughMarksCompatibilityScanTruncat
 	if err != nil {
 		t.Fatalf("listRecentContextThrough error = %v", err)
 	}
-	if !scanTruncated || len(listed) != 1 || listed[0].Type != events.ExecutionEventTypeModelMessage {
+	if !scanTruncated || len(listed) != 0 {
 		t.Fatalf("bounded coalesced context = %#v scanTruncated=%t", listed, scanTruncated)
 	}
 }

@@ -162,6 +162,7 @@ type State struct {
 	untrackedOverflowTool       bool
 	toolBufferedBytes           int
 	planFieldHistory            []logicalFieldBoundaries
+	diagnosticFieldHistory      []logicalFieldBoundaries
 }
 
 type streamText struct {
@@ -427,6 +428,7 @@ func (s *State) resetPrompt(identity MappedUpdateIdentity) {
 	clear(s.overflowToolIDs)
 	s.untrackedOverflowTool = false
 	s.planFieldHistory = nil
+	s.diagnosticFieldHistory = nil
 }
 
 func (s *State) bindPrompt(identity MappedUpdateIdentity) error {
@@ -532,10 +534,16 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 	identity := mappedUpdateIdentity(event)
 	options := mapUpdateOptions{}
 	var planFields []logicalFieldBoundaries
+	var diagnosticFields []logicalFieldBoundaries
 	if event.Update != nil && event.Update.Plan != nil {
 		projection, fields := s.projectPlanUpdate(*event.Update.Plan)
 		options.planProjection = &projection
 		planFields = fields
+	}
+	if event.Update != nil && event.Update.Diagnostic != nil {
+		projection, fields := projectDiagnosticUpdate(*event.Update.Diagnostic, s.diagnosticFieldHistory)
+		options.diagnosticProjection = &projection
+		diagnosticFields = fields
 	}
 	mapped, err := mapUpdate(event, s.journal.MapContext, options)
 	if err != nil {
@@ -610,6 +618,9 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		}
 		if event.Update.Kind == harnessv2.UpdatePlan {
 			s.planFieldHistory = append(s.planFieldHistory, planFields...)
+		}
+		if event.Update.Kind == harnessv2.UpdateDiagnostic {
+			s.diagnosticFieldHistory = append(s.diagnosticFieldHistory, diagnosticFields...)
 		}
 	}
 	return appended, isNew, err
