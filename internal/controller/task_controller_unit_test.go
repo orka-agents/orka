@@ -7167,6 +7167,93 @@ func TestHandlePending_BoundV2AgentExpiresAtDefaultDeadlineBeforeQueue(t *testin
 	}
 }
 
+func TestHandlePending_UnboundV2AgentExpiresAtDefaultDeadlineAtNamespaceLimit(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+		}},
+	}
+	active := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "active", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "unbound-v2-default-timeout", Namespace: "default", UID: "12345678-abcd-efgh-ijkl-1234567890b1",
+			CreationTimestamp: metav1.NewTime(time.Now().UTC().Add(-defaultACPTaskTimeout - time.Minute)),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}, Prompt: "expired at namespace limit",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent, active)
+	r.ACPRuntimeEnabled = true
+	r.MaxTasksPerNamespace = 1
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("result = %#v, want terminal result", result)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseCancelled || updated.Status.Execution == nil ||
+		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("TaskTimeout") {
+		t.Fatalf("expired unbound v2 Task status = %#v", updated.Status)
+	}
+}
+
+func TestHandlePending_UnboundV1AgentRetainsBindingRelativeDefaultAtNamespaceLimit(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
+		}},
+	}
+	active := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "active", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "unbound-v1-default-timeout", Namespace: "default", UID: "12345678-abcd-efgh-ijkl-1234567890b2",
+			CreationTimestamp: metav1.NewTime(time.Now().UTC().Add(-defaultACPTaskTimeout - time.Minute)),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}, Prompt: "wait at namespace limit",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent, active)
+	r.HarnessV1Enabled = true
+	r.MaxTasksPerNamespace = 1
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != 10*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 10s", result.RequeueAfter)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhasePending || updated.Status.Execution != nil {
+		t.Fatalf("queued unbound v1 Task status = %#v", updated.Status)
+	}
+}
+
 func TestHandlePending_ExpiredAgentSettlesDurableAttemptBeforeStatusBinding(t *testing.T) {
 	scheme := newTestScheme()
 	timeout := metav1.Duration{Duration: time.Minute}

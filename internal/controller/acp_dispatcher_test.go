@@ -1282,7 +1282,9 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
 	}
-	if completed.Status.Phase != corev1alpha1.TaskPhaseCancelled || completed.Status.Execution == nil || completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled {
+	if completed.Status.Phase != corev1alpha1.TaskPhaseCancelled || completed.Status.Execution == nil ||
+		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled ||
+		completed.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("TaskTimeout") {
 		t.Fatalf("unexpected timeout status: %#v", completed.Status)
 	}
 	if got := deleteCalls.Load(); got != 1 {

@@ -667,7 +667,7 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.Execution == nil {
 		now := time.Now().UTC()
-		if deadline, ok := acpTaskDeadline(task, now); ok && !now.Before(deadline) {
+		if deadline, ok := r.pendingAgentTaskDeadline(ctx, task, now); ok && !now.Before(deadline) {
 			return r.cancelACPTaskBeforeDurableAttempt(ctx, task, "task deadline exceeded before runtime admission")
 		}
 	}
@@ -765,6 +765,28 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	return r.createTaskJob(ctx, task, agent, provider)
+}
+
+func (r *TaskReconciler) pendingAgentTaskDeadline(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	now time.Time,
+) (time.Time, bool) {
+	if deadline, ok := acpTaskDeadline(task, now); ok {
+		return deadline, true
+	}
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Status.AgentExecutionBinding != nil {
+		return time.Time{}, false
+	}
+	deadline := taskDeadlineFromTimeout(task, now, defaultACPTaskTimeout)
+	if now.Before(deadline) {
+		return time.Time{}, false
+	}
+	agent, err := r.resolveAgent(ctx, task)
+	if err != nil || r.planAgentExecution(ctx, task, agent).path != agentExecutionPathACP {
+		return time.Time{}, false
+	}
+	return deadline, true
 }
 
 func (r *TaskReconciler) handleBoundAgentTaskPending(
