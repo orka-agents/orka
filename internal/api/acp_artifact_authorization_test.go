@@ -396,6 +396,7 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 	tests := []struct {
 		name        string
 		request     publisherservice.ArtifactAuthorizationRequest
+		apiReader   client.Reader
 		epochSource ControllerEpochFenceSource
 		wantStatus  int
 	}{
@@ -451,6 +452,42 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 			epochSource: fixedControllerEpochFenceSource{err: context.DeadlineExceeded},
 			wantStatus:  http.StatusServiceUnavailable,
 		},
+		{
+			name: "transient task state read failure",
+			request: publisherservice.ArtifactAuthorizationRequest{
+				ParentOperation:   publisherservice.OperationWorkspacePrepare,
+				Metadata:          publisherservice.OperationMetadata{Namespace: "default", TaskID: string(taskUID), OperationID: "workspace-prepare-prompt-publisher"},
+				ArtifactOperation: artifactcap.OperationUpload,
+				Artifact:          harnessv2.ArtifactReference{ArtifactID: harnessv2.ArtifactID(workspaceID), Digest: workspaceDigest, SizeBytes: int64(len(workspace)), MediaType: artifactcap.MediaTypeWorkspaceTar},
+				Attempt:           1,
+			},
+			apiReader:  failingPublisherAuthorizationReader{err: context.DeadlineExceeded},
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name: "missing task remains denied",
+			request: publisherservice.ArtifactAuthorizationRequest{
+				ParentOperation:   publisherservice.OperationWorkspacePrepare,
+				Metadata:          publisherservice.OperationMetadata{Namespace: "default", TaskID: string(taskUID), OperationID: "workspace-prepare-prompt-publisher"},
+				ArtifactOperation: artifactcap.OperationUpload,
+				Artifact:          harnessv2.ArtifactReference{ArtifactID: harnessv2.ArtifactID(workspaceID), Digest: workspaceDigest, SizeBytes: int64(len(workspace)), MediaType: artifactcap.MediaTypeWorkspaceTar},
+				Attempt:           1,
+			},
+			apiReader:  fake.NewClientBuilder().WithScheme(scheme).Build(),
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "transient publication state read failure",
+			request: publisherservice.ArtifactAuthorizationRequest{
+				ParentOperation:   publisherservice.OperationPublicationPrepare,
+				Metadata:          publisherservice.OperationMetadata{Namespace: "default", PublicationID: publication.Spec.ID, OperationID: "prepare-operation"},
+				ArtifactOperation: artifactcap.OperationUpload,
+				Artifact:          harnessv2.ArtifactReference{ArtifactID: harnessv2.ArtifactID(bundleID), Digest: bundleDigest, SizeBytes: int64(len(bundle)), MediaType: artifactcap.MediaTypeGitBundle},
+				Attempt:           1,
+			},
+			apiReader:  failingPublisherAuthorizationReader{err: context.DeadlineExceeded},
+			wantStatus: http.StatusServiceUnavailable,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -467,6 +504,7 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 				app: app, client: kubeClient,
 				config: ServerConfig{
 					ArtifactReservations: &recordingCapabilityReservations{},
+					APIReader:            test.apiReader,
 					ControllerEpochs:     epochSource,
 				},
 			}
@@ -827,6 +865,18 @@ func publisherEffectForTest(name, kind, aggregateID, operationID string) *corev1
 type fixedControllerEpochFenceSource struct {
 	fence store.ControllerEpochFence
 	err   error
+}
+
+type failingPublisherAuthorizationReader struct {
+	err error
+}
+
+func (r failingPublisherAuthorizationReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return r.err
+}
+
+func (r failingPublisherAuthorizationReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return r.err
 }
 
 type fixedControllerEpochStore struct {
