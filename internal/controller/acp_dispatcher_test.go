@@ -707,7 +707,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		}
 	}
 	for eventType, want := range map[string]int{
-		executionevents.ExecutionEventTypeModelMessage:               2,
+		executionevents.ExecutionEventTypeModelMessage:               1,
 		executionevents.ExecutionEventTypeToolCallStarted:            1,
 		executionevents.ExecutionEventTypeToolCallCompleted:          1,
 		executionevents.ExecutionEventTypePlanUpdated:                1,

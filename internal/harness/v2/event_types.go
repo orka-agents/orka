@@ -296,7 +296,10 @@ func (e UpdateEvent) Validate() error {
 		if e.AssistantMessage == nil {
 			return fmt.Errorf("assistant message update requires assistantMessage payload")
 		}
-		return validateBoundedString("assistant message chunk", e.AssistantMessage.Text, true, MaxProtocolStringBytes)
+		if e.AssistantMessage.Text == "" {
+			return fmt.Errorf("assistant message chunk is required")
+		}
+		return validateBoundedString("assistant message chunk", e.AssistantMessage.Text, false, MaxProtocolStringBytes)
 	case UpdateToolCall, UpdateToolCallUpdate:
 		if e.ToolCall == nil {
 			return fmt.Errorf("tool call update requires toolCall payload")

@@ -66,7 +66,7 @@ func TestACPAssistantMessagePhaseAllowsOnlyCodexProtocolEnums(t *testing.T) {
 	}
 }
 
-func TestMapACPUpdatePreservesWhitespaceChunkWithoutEvent(t *testing.T) {
+func TestMapACPUpdatePreservesWhitespaceChunk(t *testing.T) {
 	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
 		"sessionUpdate":"agent_message_chunk",
 		"content":{"type":"text","text":" \n"}
@@ -74,8 +74,12 @@ func TestMapACPUpdatePreservesWhitespaceChunkWithoutEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok || update != nil || text != " \n" {
+	if !ok || update == nil || update.AssistantMessage == nil ||
+		update.AssistantMessage.Text != " \n" || text != " \n" {
 		t.Fatalf("mapped whitespace update = %#v text=%q ok=%v", update, text, ok)
+	}
+	if err := update.Validate(); err != nil {
+		t.Fatalf("whitespace update validation: %v", err)
 	}
 }
 

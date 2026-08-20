@@ -75,9 +75,6 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 		if content.Type != acpContentTypeText || content.Text == "" {
 			return nil, "", false, nil
 		}
-		if strings.TrimSpace(content.Text) == "" {
-			return nil, content.Text, false, nil
-		}
 		return &harnessv2.UpdateEvent{
 			Kind:             harnessv2.UpdateAssistantMessageChunk,
 			AssistantMessage: &harnessv2.AssistantMessageChunk{Text: content.Text},

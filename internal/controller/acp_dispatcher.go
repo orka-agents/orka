@@ -1316,6 +1316,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event")
 	}
 	if terminal.Type != harnessv2.EventCompleted {
+		if !assistantOverflow {
+			if _, _, err := journalState.AppendAssistantTranscriptIfNew(ctx, *terminal, assistant.String()); err != nil {
+				return err
+			}
+		}
 		return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal)
 	}
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionRunning, store.PromptExecutionSettling, "settling", nil); err != nil {
@@ -1334,6 +1339,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	resultText, err := completedPromptResultText(terminal, assistant.String(), assistantOverflow)
 	if err != nil {
+		return err
+	}
+	if _, _, err := journalState.AppendAssistantTranscriptIfNew(ctx, *terminal, resultText); err != nil {
 		return err
 	}
 	if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryNotRequested, store.PromptDeliveryValidating, "validate-workspace", ""); err != nil {

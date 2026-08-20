@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -18,6 +17,7 @@ const (
 	mappedUpdateIdentityKeySeparator = "\x00"
 	mappedToolCallIDPrefix           = "event-tool-call-v1-sha256-"
 	mappedToolCallIDDomain           = "orka.harness.v2.execution-event.tool-call-id.v1\x00"
+	mappedAssistantTranscriptKind    = "assistant_transcript"
 )
 
 // MapContext supplies Orka-owned stream metadata for a validated harness v2
@@ -203,11 +203,21 @@ func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 	return projection
 }
 
+type mapUpdateOptions struct {
+	toolContentText      *string
+	toolContentTruncated bool
+}
+
 // MapUpdate maps one validated harness v2 update to the public execution-event
-// taxonomy. Large free-form output is carried in ContentText so the compact
-// identity JSON remains available for restart deduplication even when text is
-// truncated.
+// taxonomy. Streamed assistant and tool text is deliberately omitted here:
+// independently redacting chunks can leak credentials split across update
+// boundaries. Journal state supplies tool text only after the logical stream is
+// complete, and assistant text is persisted from the terminal transcript.
 func MapUpdate(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent, error) {
+	return mapUpdate(event, mapCtx, mapUpdateOptions{})
+}
+
+func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOptions) (*store.ExecutionEvent, error) {
 	if err := mapCtx.validate(); err != nil {
 		return nil, err
 	}
@@ -243,8 +253,8 @@ func MapUpdate(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent,
 	switch event.Update.Kind {
 	case harnessv2.UpdateAssistantMessageChunk:
 		mapped.Type = executionevents.ExecutionEventTypeModelMessage
-		mapped.Summary = compactSummary(event.Update.AssistantMessage.Text)
-		mapped.ContentText = event.Update.AssistantMessage.Text
+		mapped.Summary = "Assistant message streamed"
+		content["contentOmitted"] = "streamed_text_pending_terminal_redaction"
 	case harnessv2.UpdateToolCall, harnessv2.UpdateToolCallUpdate:
 		tool := event.Update.ToolCall
 		mapped.ToolCallID = safeMappedToolCallID(tool.ToolCallID)
@@ -252,12 +262,25 @@ func MapUpdate(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent,
 		mapped.ToolName, _, _ = executionevents.RedactAndTruncateExecutionEventText(mapped.ToolName, 128)
 		mapped.Type, mapped.Severity = toolCallEventType(tool.Status)
 		mapped.Summary = toolCallSummary(*tool)
+		if options.toolContentText != nil && strings.TrimSpace(tool.Title) == "" {
+			if summary := compactSummary(*options.toolContentText); summary != "" {
+				mapped.Summary = summary
+			}
+		}
 		content["toolCallID"] = mapped.ToolCallID
 		content["title"] = tool.Title
 		content["toolKind"] = tool.Kind
 		content["status"] = tool.Status
 		content["contentBlockCount"] = len(tool.Content)
-		mapped.ContentText, mapped.Truncation = toolContentText(tool.Content)
+		if options.toolContentText != nil {
+			mapped.ContentText = *options.toolContentText
+		} else if len(tool.Content) > 0 {
+			content["contentOmitted"] = "streamed_text_pending_completion_redaction"
+		}
+		if options.toolContentTruncated {
+			mapped.Truncation = &executionevents.ExecutionEventTruncation{ContentTextTruncated: true}
+			content["contentOmitted"] = "streamed_text_exceeded_journal_limit"
+		}
 	case harnessv2.UpdatePlan:
 		projection := ProjectPlanUpdate(*event.Update.Plan)
 		mapped.Type = executionevents.ExecutionEventTypePlanUpdated
@@ -330,6 +353,65 @@ func MapUpdate(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent,
 	return mapped, nil
 }
 
+func mapToolUpdateWithContent(
+	event harnessv2.Event,
+	mapCtx MapContext,
+	contentText string,
+	contentTruncated bool,
+) (*store.ExecutionEvent, error) {
+	return mapUpdate(event, mapCtx, mapUpdateOptions{
+		toolContentText:      &contentText,
+		toolContentTruncated: contentTruncated,
+	})
+}
+
+// MapAssistantTranscript maps the complete terminal assistant transcript as a
+// single event so redaction sees credential shapes spanning protocol chunks.
+func MapAssistantTranscript(event harnessv2.Event, mapCtx MapContext, transcript string) (*store.ExecutionEvent, error) {
+	if err := mapCtx.validate(); err != nil {
+		return nil, err
+	}
+	mapCtx = mapCtx.normalized()
+	if event.Protocol != harnessv2.ProtocolVersion {
+		return nil, fmt.Errorf("unsupported protocol %q", event.Protocol)
+	}
+	if !event.Type.IsTerminal() {
+		return nil, fmt.Errorf("terminal harness v2 event is required")
+	}
+	if err := event.Identity.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid terminal identity: %w", err)
+	}
+	if transcript == "" {
+		return nil, fmt.Errorf("assistant transcript is required")
+	}
+
+	content, err := json.Marshal(map[string]any{
+		"harnessV2":  mappedUpdateIdentity(event),
+		"updateKind": mappedAssistantTranscriptKind,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal mapped harness v2 assistant transcript: %w", err)
+	}
+	mapped := &store.ExecutionEvent{
+		Namespace:   mapCtx.Namespace,
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    mapCtx.StreamID,
+		Type:        executionevents.ExecutionEventTypeModelMessage,
+		Severity:    executionevents.ExecutionEventSeverityInfo,
+		TaskName:    mapCtx.TaskName,
+		SessionName: mapCtx.SessionName,
+		AgentName:   mapCtx.AgentName,
+		Summary:     compactSummary(transcript),
+		Content:     content,
+		ContentText: transcript,
+		CreatedAt:   event.Identity.Timestamp.UTC(),
+	}
+	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
+		return nil, fmt.Errorf("sanitize mapped harness v2 assistant transcript: %w", err)
+	}
+	return mapped, nil
+}
+
 func safeMappedToolCallID(value string) string {
 	value = strings.TrimSpace(value)
 	digest := sha256.Sum256([]byte(mappedToolCallIDDomain + value))
@@ -351,66 +433,7 @@ func toolCallSummary(tool harnessv2.ToolCallUpdate) string {
 	if title := compactSummary(tool.Title); title != "" {
 		return title
 	}
-	for _, block := range tool.Content {
-		if block.Type == harnessv2.ContentBlockText {
-			if summary := compactSummary(block.Text); summary != "" {
-				return summary
-			}
-		}
-	}
 	return fmt.Sprintf("Tool call %s", strings.ReplaceAll(string(tool.Status), "_", " "))
-}
-
-func toolContentText(blocks []harnessv2.ContentBlock) (string, *executionevents.ExecutionEventTruncation) {
-	var text strings.Builder
-	totalRunes := 0
-	for _, block := range blocks {
-		var value string
-		switch block.Type {
-		case harnessv2.ContentBlockText:
-			value = block.Text
-		case harnessv2.ContentBlockResourceLink:
-			value = "resource: " + strings.TrimSpace(block.Name)
-		case harnessv2.ContentBlockArtifactRef:
-			if block.Artifact != nil {
-				value = "artifact: " + string(block.Artifact.ArtifactID)
-			}
-		}
-		if strings.TrimSpace(value) == "" {
-			continue
-		}
-		if totalRunes > 0 {
-			appendBoundedRunes(&text, "\n", executionevents.MaxExecutionEventContentTextChars)
-			totalRunes++
-		}
-		appendBoundedRunes(&text, value, executionevents.MaxExecutionEventContentTextChars)
-		totalRunes += utf8.RuneCountInString(value)
-	}
-	if totalRunes <= executionevents.MaxExecutionEventContentTextChars {
-		return text.String(), nil
-	}
-	return text.String(), &executionevents.ExecutionEventTruncation{
-		ContentTextTruncated:     true,
-		ContentTextOriginalChars: totalRunes,
-	}
-}
-
-func appendBoundedRunes(builder *strings.Builder, value string, maxRunes int) {
-	remaining := maxRunes - utf8.RuneCountInString(builder.String())
-	if remaining <= 0 {
-		return
-	}
-	if utf8.RuneCountInString(value) <= remaining {
-		builder.WriteString(value)
-		return
-	}
-	for _, r := range value {
-		if remaining == 0 {
-			return
-		}
-		builder.WriteRune(r)
-		remaining--
-	}
 }
 
 func compactSummary(value string) string {

@@ -177,30 +177,46 @@ func TestMapToolCallIDUsesStableNonSecretCorrelationID(t *testing.T) {
 	}
 }
 
-func TestMapToolOutputKeepsDedupeIdentityWhenTextIsTruncated(t *testing.T) {
-	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
-		Kind: harnessv2.UpdateToolCallUpdate,
-		ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-large", Kind: "shell", Status: harnessv2.ToolCallStatusCompleted,
-			Content: []harnessv2.ContentBlock{{
-				Type: harnessv2.ContentBlockText,
-				Text: strings.Repeat("x", executionevents.MaxExecutionEventContentTextChars+100),
-			}},
+func TestMapUpdateOmitsUnredactedStreamText(t *testing.T) {
+	tests := []harnessv2.UpdateEvent{
+		{
+			Kind:             harnessv2.UpdateAssistantMessageChunk,
+			AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "assistant-stream-fragment"},
 		},
-	})
-	mapped, err := MapUpdate(event, testMapContext())
+		{
+			Kind: harnessv2.UpdateToolCallUpdate,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: "call-stream", Kind: "shell", Status: harnessv2.ToolCallStatusInProgress,
+				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "tool-stream-fragment"}},
+			},
+		},
+	}
+	for index, update := range tests {
+		mapped, err := MapUpdate(testUpdateEvent(uint64(index+2), time.Now().UTC(), update), testMapContext())
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded := mapped.Summary + mapped.ContentText + string(mapped.Content)
+		if mapped.ContentText != "" || strings.Contains(encoded, "stream-fragment") {
+			t.Fatalf("stream text reached stateless mapped event: %#v content=%s", mapped, mapped.Content)
+		}
+	}
+}
+
+func TestMapAssistantTranscriptRedactsCompleteText(t *testing.T) {
+	credential := "sk-" + strings.Repeat("a", 24)
+	transcript := "hello Authorization: Bearer " + credential + " world"
+	mapped, err := MapAssistantTranscript(testTerminalEvent(3, time.Now().UTC()), testMapContext(), transcript)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mapped.Truncation == nil || !mapped.Truncation.ContentTextTruncated {
-		t.Fatalf("truncation = %#v", mapped.Truncation)
-	}
-	if len(mapped.Content) >= executionevents.MaxExecutionEventContentJSONBytes {
-		t.Fatalf("identity content unexpectedly large: %d bytes", len(mapped.Content))
+	encoded := mapped.Summary + mapped.ContentText + string(mapped.Content)
+	if strings.Contains(encoded, credential) || !strings.Contains(mapped.ContentText, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("assistant transcript was not redacted: %#v content=%s", mapped, mapped.Content)
 	}
 	identity, ok := MappedUpdateIdentityFromEvent(*mapped)
-	if !ok || identity.Sequence != 2 {
-		t.Fatalf("identity after truncation = %#v, ok=%t", identity, ok)
+	if !ok || identity.Sequence != 3 {
+		t.Fatalf("assistant transcript identity = %#v, ok=%t", identity, ok)
 	}
 }
 
@@ -239,4 +255,14 @@ func testUpdateEvent(sequence uint64, at time.Time, update harnessv2.UpdateEvent
 		},
 		Update: &update,
 	}
+}
+
+func testTerminalEvent(sequence uint64, at time.Time) harnessv2.Event {
+	event := testUpdateEvent(sequence, at, harnessv2.UpdateEvent{
+		Kind:             harnessv2.UpdateAssistantMessageChunk,
+		AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "placeholder"},
+	})
+	event.Type = harnessv2.EventCompleted
+	event.Update = nil
+	return event
 }
