@@ -58,6 +58,8 @@ func TestPublisherCredentialBrokerReturnsOnlyFrozenOperationCredential(t *testin
 	}
 	expected := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:read-canary-token"))
 	for _, state := range []corev1alpha1.TaskExecutionState{
+		corev1alpha1.TaskExecutionStateQueued,
+		corev1alpha1.TaskExecutionStateReserved,
 		corev1alpha1.TaskExecutionStatePlanned,
 		corev1alpha1.TaskExecutionStateSessionStarting,
 	} {

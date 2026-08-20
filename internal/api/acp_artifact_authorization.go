@@ -294,14 +294,26 @@ func (s *Server) authorizePublisherWorkspaceUpload(ctx context.Context, request 
 	}
 	execution := task.Status.Execution
 	// Task status and the external-effect lease are committed through separate
-	// Kubernetes objects. A fresh Task read can therefore still observe the
-	// immediately preceding SessionStarting state after the exact parent effect
-	// is durably InFlight. Keep all later and terminal states fail-closed.
-	if (execution.State != corev1alpha1.TaskExecutionStateSessionStarting && execution.State != corev1alpha1.TaskExecutionStatePlanned) ||
+	// Kubernetes objects. A fresh Task read can therefore still observe an
+	// earlier pre-submission state after the exact parent effect is durably
+	// InFlight. Keep all submitted and terminal states fail-closed.
+	if !taskStateAllowsWorkspacePreparation(execution.State) ||
 		execution.PromptID == "" || request.Metadata.OperationID != "workspace-prepare-"+execution.PromptID {
 		return fmt.Errorf("workspace Task is not in the exact preparation state")
 	}
 	return nil
+}
+
+func taskStateAllowsWorkspacePreparation(state corev1alpha1.TaskExecutionState) bool {
+	switch state {
+	case corev1alpha1.TaskExecutionStateQueued,
+		corev1alpha1.TaskExecutionStateReserved,
+		corev1alpha1.TaskExecutionStateSessionStarting,
+		corev1alpha1.TaskExecutionStatePlanned:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) authorizePublisherDeltaDownload(ctx context.Context, request publisherservice.ArtifactAuthorizationRequest) error {

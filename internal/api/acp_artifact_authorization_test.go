@@ -497,7 +497,7 @@ func TestPublisherArtifactAuthorizationBrokerToleratesTaskStatusLag(t *testing.T
 	laggingTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "publisher-task", UID: taskUID},
 		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
-			State: corev1alpha1.TaskExecutionStateSessionStarting, PromptID: "fresh-prompt",
+			State: corev1alpha1.TaskExecutionStateReserved, PromptID: "fresh-prompt",
 		}},
 	}
 	cachedTask := laggingTask.DeepCopy()
@@ -575,8 +575,6 @@ func TestAuthorizePublisherWorkspaceUploadRejectsNonPreparationStates(t *testing
 		"workspace-non-preparation-effect", "workspace.prepare", string(taskUID), metadata.OperationID,
 	)
 	states := []corev1alpha1.TaskExecutionState{
-		corev1alpha1.TaskExecutionStateQueued,
-		corev1alpha1.TaskExecutionStateReserved,
 		corev1alpha1.TaskExecutionStateSubmitting,
 		corev1alpha1.TaskExecutionStateSubmittedUnknown,
 		corev1alpha1.TaskExecutionStateAccepted,
@@ -612,6 +610,19 @@ func TestAuthorizePublisherWorkspaceUploadRejectsNonPreparationStates(t *testing
 				t.Fatalf("workspace upload authorized in Task state %s", state)
 			}
 		})
+	}
+}
+
+func TestTaskStateAllowsWorkspacePreparation(t *testing.T) {
+	for _, state := range []corev1alpha1.TaskExecutionState{
+		corev1alpha1.TaskExecutionStateQueued,
+		corev1alpha1.TaskExecutionStateReserved,
+		corev1alpha1.TaskExecutionStateSessionStarting,
+		corev1alpha1.TaskExecutionStatePlanned,
+	} {
+		if !taskStateAllowsWorkspacePreparation(state) {
+			t.Fatalf("Task state %s rejected, want workspace preparation authorization", state)
+		}
 	}
 }
 
