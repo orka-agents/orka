@@ -175,10 +175,12 @@ function harnessV2PromptKey(event: ExecutionEvent): string | undefined {
 }
 
 // Harness v2 usage events are cumulative snapshots within one prompt. Keep the
-// newest snapshot per prompt, then sum prompts at the task level. Unscoped
-// legacy snapshots retain the previous newest-only behavior.
+// newest event identity while carrying forward counters omitted by partial
+// updates, then sum prompts at the task level.
 export function latestModelUsageEvents(events: ExecutionEvent[]): ExecutionEvent[] {
-  const updates = events.filter((event) => event.type === 'ModelUsageUpdated')
+  const updates = events
+    .filter((event) => event.type === 'ModelUsageUpdated')
+    .sort((a, b) => a.seq - b.seq)
   if (updates.length === 0) {
     return events.filter((event) => event.type === 'ModelRequestCompleted')
   }
@@ -186,7 +188,12 @@ export function latestModelUsageEvents(events: ExecutionEvent[]): ExecutionEvent
   for (const event of updates) {
     const key = harnessV2PromptKey(event) ?? 'unscoped'
     const previous = latestByPrompt.get(key)
-    if (!previous || event.seq > previous.seq) latestByPrompt.set(key, event)
+    latestByPrompt.set(key, {
+      ...event,
+      inputTokens: event.inputTokens ?? previous?.inputTokens,
+      outputTokens: event.outputTokens ?? previous?.outputTokens,
+      cachedInputTokens: event.cachedInputTokens ?? previous?.cachedInputTokens,
+    })
   }
   return Array.from(latestByPrompt.values()).sort((a, b) => a.seq - b.seq)
 }

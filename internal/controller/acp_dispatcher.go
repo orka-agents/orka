@@ -1166,6 +1166,13 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			Namespace: task.Namespace, TaskName: task.Name, SessionName: taskSessionName(task),
 			AgentName: agentName, StreamID: task.Name, Provider: profile.ProviderKind, Model: profile.Model,
 		},
+		RecoveryIdentity: v2eventjournal.MappedUpdateIdentity{
+			Protocol:          harnessv2.ProtocolVersion,
+			RuntimeInstanceID: runtimeFence.RuntimeInstanceID, SupervisorBootID: runtimeFence.SupervisorBootID,
+			RuntimeSessionUID: runtimeFence.RuntimeSessionUID, RuntimeSessionGeneration: runtimeFence.RuntimeSessionGeneration,
+			TaskUID: harnessv2.TaskUID(task.UID), TaskAttempt: uint32(task.Status.Execution.Attempt),
+			PromptID: harnessv2.PromptID(task.Status.Execution.PromptID),
+		},
 	}).Open(ctx)
 	if err != nil {
 		openErr := fmt.Errorf("open ACP execution event journal: %w", err)
@@ -1206,6 +1213,20 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	var lastAssistantUpdate *harnessv2.Event
 	var assistant strings.Builder
 	assistantOverflow := false
+	flushInterruptedOutput := func(flushCtx context.Context) error {
+		var flushErrs []error
+		if persistableAssistant := assistantTranscriptForPersistence(assistant.String(), assistantOverflow); lastAssistantUpdate != nil && persistableAssistant != "" {
+			if _, _, err := journalState.AppendAssistantStreamClosureIfNew(
+				flushCtx, *lastAssistantUpdate, persistableAssistant,
+			); err != nil {
+				flushErrs = append(flushErrs, err)
+			}
+		}
+		if err := journalState.AppendToolStreamClosuresIfNew(flushCtx); err != nil {
+			flushErrs = append(flushErrs, err)
+		}
+		return errors.Join(flushErrs...)
+	}
 	accepted := false
 	admissionRetry := 0
 	for {
@@ -1327,19 +1348,20 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 			continue
 		}
-		persistableAssistant := assistantTranscriptForPersistence(assistant.String(), assistantOverflow)
-		if lastAssistantUpdate != nil && persistableAssistant != "" {
-			flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			if _, _, persistErr := journalState.AppendAssistantStreamClosureIfNew(
-				flushCtx, *lastAssistantUpdate, persistableAssistant,
-			); persistErr != nil {
-				streamErr = acpUpdatePersistenceError(persistErr, nil)
-			}
-			cancel()
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		if persistErr := flushInterruptedOutput(flushCtx); persistErr != nil {
+			streamErr = acpUpdatePersistenceError(persistErr, nil)
 		}
+		cancel()
 		return d.handlePromptStreamError(
 			ctx, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence,
 			accepted || summary.Accepted, summary.WriteEvidence, runtimeContextError(runtimeCtx), streamErr,
+		)
+	}
+	if err := journalState.AppendToolStreamClosuresIfNew(ctx); err != nil {
+		logf.FromContext(ctx).Error(err, "persist terminal ACP tool stream closures", "namespace", task.Namespace, "task", task.Name)
+		return d.failPromptForExecutionEventPersistence(
+			ctx, task, attemptID, fence, "terminal tool stream closure persistence failed",
 		)
 	}
 	if terminal == nil {

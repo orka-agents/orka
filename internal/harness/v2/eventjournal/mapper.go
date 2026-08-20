@@ -91,6 +91,10 @@ func mappedUpdateIdentity(event harnessv2.Event) MappedUpdateIdentity {
 }
 
 func (i MappedUpdateIdentity) valid() bool {
+	return i.promptValid() && i.Sequence > 0
+}
+
+func (i MappedUpdateIdentity) promptValid() bool {
 	return i.Protocol == harnessv2.ProtocolVersion &&
 		strings.TrimSpace(string(i.RuntimeInstanceID)) != "" &&
 		strings.TrimSpace(string(i.SupervisorBootID)) != "" &&
@@ -98,8 +102,18 @@ func (i MappedUpdateIdentity) valid() bool {
 		i.RuntimeSessionGeneration > 0 &&
 		strings.TrimSpace(string(i.TaskUID)) != "" &&
 		i.TaskAttempt > 0 &&
-		strings.TrimSpace(string(i.PromptID)) != "" &&
-		i.Sequence > 0
+		strings.TrimSpace(string(i.PromptID)) != ""
+}
+
+func (i MappedUpdateIdentity) samePrompt(other MappedUpdateIdentity) bool {
+	return i.Protocol == other.Protocol &&
+		i.RuntimeInstanceID == other.RuntimeInstanceID &&
+		i.SupervisorBootID == other.SupervisorBootID &&
+		i.RuntimeSessionUID == other.RuntimeSessionUID &&
+		i.RuntimeSessionGeneration == other.RuntimeSessionGeneration &&
+		i.TaskUID == other.TaskUID &&
+		i.TaskAttempt == other.TaskAttempt &&
+		i.PromptID == other.PromptID
 }
 
 // Key returns the stable recovery-deduplication key for one protocol update.
@@ -315,34 +329,7 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 			}
 		}
 	case harnessv2.UpdateUsage:
-		usage := event.Update.Usage
-		hasTokenUsage := usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0
-		if hasTokenUsage {
-			mapped.Type = executionevents.ExecutionEventTypeModelUsageUpdated
-			mapped.Summary = fmt.Sprintf(
-				"Model usage updated: %d input, %d output, %d cached input tokens",
-				usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens,
-			)
-			content["inputTokens"] = usage.InputTokens
-			content["outputTokens"] = usage.OutputTokens
-			content["cachedInputTokens"] = usage.CachedInputTokens
-		} else {
-			mapped.Type = executionevents.ExecutionEventTypeModelContextUpdated
-			mapped.Summary = fmt.Sprintf(
-				"Model context updated: %d of %d tokens used",
-				*usage.ContextWindowUsed, *usage.ContextWindowSize,
-			)
-		}
-		if usage.ContextWindowUsed != nil {
-			content["contextWindowUsed"] = *usage.ContextWindowUsed
-			content["contextWindowSize"] = *usage.ContextWindowSize
-		}
-		if mapCtx.Provider != "" {
-			content["provider"] = mapCtx.Provider
-		}
-		if mapCtx.Model != "" {
-			content["model"] = mapCtx.Model
-		}
+		mapUsageUpdate(event.Update.Usage, mapCtx, mapped, content)
 	case harnessv2.UpdateDiagnostic:
 		diagnostic := event.Update.Diagnostic
 		mapped.Type = executionevents.ExecutionEventTypeAgentRuntimeCommandStarted
@@ -367,6 +354,42 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		return nil, fmt.Errorf("sanitize mapped harness v2 update: %w", err)
 	}
 	return mapped, nil
+}
+
+func mapUsageUpdate(
+	usage *harnessv2.UsageUpdate,
+	mapCtx MapContext,
+	mapped *store.ExecutionEvent,
+	content map[string]any,
+) {
+	hasTokenUsage := usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0
+	hasContextWindow := usage.ContextWindowUsed != nil
+	if hasTokenUsage || !hasContextWindow {
+		mapped.Type = executionevents.ExecutionEventTypeModelUsageUpdated
+		mapped.Summary = fmt.Sprintf(
+			"Model usage updated: %d input, %d output, %d cached input tokens",
+			usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens,
+		)
+		content["inputTokens"] = usage.InputTokens
+		content["outputTokens"] = usage.OutputTokens
+		content["cachedInputTokens"] = usage.CachedInputTokens
+	} else {
+		mapped.Type = executionevents.ExecutionEventTypeModelContextUpdated
+		mapped.Summary = fmt.Sprintf(
+			"Model context updated: %d of %d tokens used",
+			*usage.ContextWindowUsed, *usage.ContextWindowSize,
+		)
+	}
+	if usage.ContextWindowUsed != nil {
+		content["contextWindowUsed"] = *usage.ContextWindowUsed
+		content["contextWindowSize"] = *usage.ContextWindowSize
+	}
+	if mapCtx.Provider != "" {
+		content["provider"] = mapCtx.Provider
+	}
+	if mapCtx.Model != "" {
+		content["model"] = mapCtx.Model
+	}
 }
 
 func mapToolUpdateWithContent(

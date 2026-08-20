@@ -66,6 +66,51 @@ func TestJournalDeduplicatesWithinPassAndAcrossRecovery(t *testing.T) {
 	}
 }
 
+func TestJournalRecoveryScansOnlyCurrentPromptTail(t *testing.T) {
+	ctx := context.Background()
+	base := storetest.NewFakeExecutionEventStore()
+	var oldEvent harnessv2.Event
+	for index := range store.MaxExecutionEventLimit + 5 {
+		oldEvent = testUpdateEvent(uint64(index+2), time.Now().UTC(), harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 1},
+		})
+		oldEvent.Identity.PromptID = "prompt-old"
+		mapped, err := MapUpdate(oldEvent, testMapContext())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := base.AppendExecutionEvent(ctx, mapped); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{OutputTokens: 2},
+	})
+	mapped, err := MapUpdate(current, testMapContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.AppendExecutionEvent(ctx, mapped); err != nil {
+		t.Fatal(err)
+	}
+
+	recording := &recordingExecutionEventStore{ExecutionEventStore: base}
+	recoveryIdentity := mappedUpdateIdentity(current)
+	recoveryIdentity.Sequence = 0
+	state, err := (Journal{
+		EventStore: recording, MapContext: testMapContext(), RecoveryIdentity: recoveryIdentity,
+	}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.HasUpdate(current) || state.HasUpdate(oldEvent) {
+		t.Fatalf("recovered current=%t old=%t", state.HasUpdate(current), state.HasUpdate(oldEvent))
+	}
+	if len(recording.filters) != 1 || recording.filters[0].AfterSeq == 0 {
+		t.Fatalf("recovery filters = %#v", recording.filters)
+	}
+}
+
 func TestJournalRetriesAppendOnlyAfterConfirmedAbsence(t *testing.T) {
 	ctx := context.Background()
 	base := storetest.NewFakeExecutionEventStore()
@@ -320,7 +365,7 @@ func TestJournalRedactsCredentialsSplitAcrossToolUpdates(t *testing.T) {
 				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: fragment}},
 			},
 		})
-		if _, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew {
+		if _, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew != (index == len(fragments)-1) {
 			t.Fatalf("append tool update %d new=%t err=%v", index, isNew, err)
 		}
 	}
@@ -413,6 +458,48 @@ func TestJournalAggregatesContentOnlyToolFragmentsIntoTerminalEvent(t *testing.T
 	if len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallCompleted ||
 		listed[0].ContentText != "streamed output" {
 		t.Fatalf("persisted tool events = %#v", listed)
+	}
+}
+
+func TestJournalPersistsBufferedToolOutputOnStreamClosure(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	credential := "sk-" + strings.Repeat("z", 24)
+	now := time.Now().UTC()
+	fragments := []string{"before " + credential[:10], credential[10:] + " after"}
+	for index, fragment := range fragments {
+		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCallUpdate,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: "call-open", Title: "Inspect repository", Kind: "shell",
+				Status:  harnessv2.ToolCallStatusInProgress,
+				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: fragment}},
+			},
+		})
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew || appended != nil {
+			t.Fatalf("append open tool fragment %d = %#v new=%t err=%v", index, appended, isNew, err)
+		}
+	}
+	if listed := listJournalEvents(t, ctx, eventStore); len(listed) != 0 {
+		t.Fatalf("tool output persisted before closure: %#v", listed)
+	}
+	if err := state.AppendToolStreamClosuresIfNew(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.AppendToolStreamClosuresIfNew(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallStarted ||
+		listed[0].ContentText != "before "+executionevents.ExecutionEventRedactedValue+" after" ||
+		listed[0].ToolName != "shell" || listed[0].Summary != "Inspect repository" {
+		t.Fatalf("persisted tool stream closure = %#v", listed)
 	}
 }
 
@@ -630,6 +717,28 @@ func TestToolContentFragmentPreservesURIOnlyResourceLink(t *testing.T) {
 	}
 }
 
+func TestToolContentFragmentSanitizesURLShapedResourceName(t *testing.T) {
+	got, multipleBlocks := toolContentFragment([]harnessv2.ContentBlock{{
+		Type: harnessv2.ContentBlockResourceLink,
+		Name: "https://account.blob.core.windows.net/output.txt?sp=r&sig=usable-secret#download",
+		URI:  "https://fallback.example.com/output.txt",
+	}})
+	if got != "resource: https://account.blob.core.windows.net/output.txt" || multipleBlocks ||
+		strings.Contains(got, "sig=") || strings.Contains(got, "usable-secret") {
+		t.Fatalf("resource-link name fragment = %q multipleBlocks=%t", got, multipleBlocks)
+	}
+}
+
+func TestToolContentFragmentOmitsOpaqueResourceURI(t *testing.T) {
+	got, multipleBlocks := toolContentFragment([]harnessv2.ContentBlock{{
+		Type: harnessv2.ContentBlockResourceLink,
+		URI:  "data:application/json,%7B%22private%22%3A%22sensitive-payload%22%7D",
+	}})
+	if got != "" || multipleBlocks {
+		t.Fatalf("opaque resource-link fragment = %q multipleBlocks=%t", got, multipleBlocks)
+	}
+}
+
 func listJournalEvents(t *testing.T, ctx context.Context, eventStore store.ExecutionEventStore) []store.ExecutionEvent {
 	t.Helper()
 	listed, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
@@ -653,6 +762,19 @@ type faultingAppendEventStore struct {
 	listFaultAt int
 	listErr     error
 	listCalls   int
+}
+
+type recordingExecutionEventStore struct {
+	store.ExecutionEventStore
+	filters []store.ExecutionEventFilter
+}
+
+func (s *recordingExecutionEventStore) ListExecutionEvents(
+	ctx context.Context,
+	filter store.ExecutionEventFilter,
+) ([]store.ExecutionEvent, error) {
+	s.filters = append(s.filters, filter)
+	return s.ExecutionEventStore.ListExecutionEvents(ctx, filter)
 }
 
 func (s *faultingAppendEventStore) AppendExecutionEvent(

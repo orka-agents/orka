@@ -152,6 +152,18 @@ func TestMapContextWindowUsageDoesNotMasqueradeAsTokenAccounting(t *testing.T) {
 	}
 }
 
+func TestMapZeroUsageSnapshotRemainsTokenTelemetry(t *testing.T) {
+	mapped, err := MapUpdate(testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{},
+	}), testMapContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.Type != executionevents.ExecutionEventTypeModelUsageUpdated {
+		t.Fatalf("zero usage event type = %q", mapped.Type)
+	}
+}
+
 func TestMapToolCallIDUsesStableNonSecretCorrelationID(t *testing.T) {
 	rawID := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjcmVkZW50aWFsIn0.signature"
 	mapTool := func(sequence uint64) *store.ExecutionEvent {

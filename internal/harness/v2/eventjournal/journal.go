@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -24,8 +25,9 @@ var ErrToolBufferLimitExceeded = errors.New("harness v2 tool aggregation buffer 
 
 // Journal owns duplicate-safe persistence of mapped harness v2 updates.
 type Journal struct {
-	EventStore store.ExecutionEventStore
-	MapContext MapContext
+	EventStore       store.ExecutionEventStore
+	MapContext       MapContext
+	RecoveryIdentity MappedUpdateIdentity
 }
 
 // State is the mutable aggregation state for one non-reconnectable prompt
@@ -51,6 +53,8 @@ type streamText struct {
 	multipleBlocksOmitted bool
 	title                 string
 	kind                  string
+	lastContentEvent      harnessv2.Event
+	hasContentEvent       bool
 }
 
 func (s *streamText) append(value string) {
@@ -111,9 +115,33 @@ func (j Journal) Open(ctx context.Context) (*State, error) {
 	if err := j.MapContext.validate(); err != nil {
 		return nil, err
 	}
+	mapCtx := j.MapContext.normalized()
 	keys := map[string]struct{}{}
 	persistedKeys := map[string]struct{}{}
-	mapCtx := j.MapContext.normalized()
+	var err error
+	if j.RecoveryIdentity.promptValid() {
+		err = j.loadCurrentPromptIdentities(ctx, mapCtx, keys, persistedKeys)
+	} else {
+		err = j.loadAllIdentities(ctx, mapCtx, keys, persistedKeys)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &State{
+		journal:        j,
+		keys:           keys,
+		persistedKeys:  persistedKeys,
+		aggregatedKeys: map[string]struct{}{},
+		toolText:       map[string]*streamText{},
+	}, nil
+}
+
+func (j Journal) loadAllIdentities(
+	ctx context.Context,
+	mapCtx MapContext,
+	keys map[string]struct{},
+	persistedKeys map[string]struct{},
+) error {
 	var afterSeq int64
 	for {
 		listed, err := j.EventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
@@ -124,7 +152,7 @@ func (j Journal) Open(ctx context.Context) (*State, error) {
 			Limit:      store.MaxExecutionEventLimit,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("list mapped harness v2 updates: %w", err)
+			return fmt.Errorf("list mapped harness v2 updates: %w", err)
 		}
 		if len(listed) == 0 {
 			break
@@ -143,13 +171,54 @@ func (j Journal) Open(ctx context.Context) (*State, error) {
 			break
 		}
 	}
-	return &State{
-		journal:        j,
-		keys:           keys,
-		persistedKeys:  persistedKeys,
-		aggregatedKeys: map[string]struct{}{},
-		toolText:       map[string]*streamText{},
-	}, nil
+	return nil
+}
+
+func (j Journal) loadCurrentPromptIdentities(
+	ctx context.Context,
+	mapCtx MapContext,
+	keys map[string]struct{},
+	persistedKeys map[string]struct{},
+) error {
+	pageEnd, err := j.EventStore.GetLatestExecutionEventSeq(
+		ctx, mapCtx.Namespace, store.ExecutionEventStreamTypeTask, mapCtx.StreamID,
+	)
+	if err != nil {
+		return fmt.Errorf("get latest mapped harness v2 update sequence: %w", err)
+	}
+	// Per-stream sequence numbers are monotonic and gap-tolerant. Fixed-width
+	// AfterSeq windows let recovery walk backward without expanding the store API.
+	for pageEnd > 0 {
+		pageStart := max(int64(0), pageEnd-int64(store.MaxExecutionEventLimit))
+		listed, err := j.EventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+			Namespace:  mapCtx.Namespace,
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   mapCtx.StreamID,
+			AfterSeq:   pageStart,
+			Limit:      int(pageEnd - pageStart),
+		})
+		if err != nil {
+			return fmt.Errorf("list current-prompt mapped harness v2 updates: %w", err)
+		}
+		for index := len(listed) - 1; index >= 0; index-- {
+			event := listed[index]
+			if event.Seq > pageEnd {
+				continue
+			}
+			identity, ok := MappedUpdateIdentityFromEvent(event)
+			if !ok {
+				continue
+			}
+			if !identity.samePrompt(j.RecoveryIdentity) {
+				return nil
+			}
+			key := identity.Key()
+			keys[key] = struct{}{}
+			persistedKeys[key] = struct{}{}
+		}
+		pageEnd = pageStart
+	}
+	return nil
 }
 
 // AppendUpdateIfNew maps and appends event unless its full protocol identity is
@@ -182,10 +251,10 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		s.keys[key] = struct{}{}
 		return nil, false, nil
 	}
-	if isContentOnlyToolFragment(event) {
+	if isBufferedToolContentUpdate(event) {
 		// Keep streamed output in the accumulator, but do not emit an unbounded
-		// series of identical ToolCallStarted events. The terminal tool event
-		// receives the complete, redacted text.
+		// series of ToolCallStarted events. The terminal tool event or prompt
+		// stream closure receives the complete, redacted text.
 		s.keys[key] = struct{}{}
 		return nil, false, nil
 	}
@@ -206,16 +275,14 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 	return s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 update")
 }
 
-func isContentOnlyToolFragment(event harnessv2.Event) bool {
+func isBufferedToolContentUpdate(event harnessv2.Event) bool {
 	if event.Update == nil || event.Update.Kind != harnessv2.UpdateToolCallUpdate || event.Update.ToolCall == nil {
 		return false
 	}
 	tool := event.Update.ToolCall
-	if (!tool.ContentReplace && len(tool.Content) == 0) ||
-		strings.TrimSpace(tool.Title) != "" || strings.TrimSpace(tool.Kind) != "" {
-		return false
-	}
-	return tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed
+	content, multipleBlocks := toolContentFragment(tool.Content)
+	return (content != "" || multipleBlocks) &&
+		tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed
 }
 
 func isNonTerminalToolUpdate(event harnessv2.Event) bool {
@@ -278,6 +345,44 @@ func (s *State) AppendAssistantStreamClosureIfNew(
 		return nil, false, err
 	}
 	return s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 assistant stream closure")
+}
+
+// AppendToolStreamClosuresIfNew persists buffered output for tools that did
+// not emit a completed/failed update before the prompt stream closed. The last
+// unpersisted content update supplies the durable protocol identity.
+func (s *State) AppendToolStreamClosuresIfNew(ctx context.Context) error {
+	if s == nil {
+		return fmt.Errorf("harness v2 journal state is required")
+	}
+	toolIDs := make([]string, 0, len(s.toolText))
+	for toolID := range s.toolText {
+		toolIDs = append(toolIDs, toolID)
+	}
+	sort.Strings(toolIDs)
+	for _, toolID := range toolIDs {
+		accumulator := s.toolText[toolID]
+		if accumulator == nil || !accumulator.hasContentEvent || !accumulator.hasPersistableContent() {
+			continue
+		}
+		key := mappedUpdateIdentity(accumulator.lastContentEvent).Key()
+		if _, ok := s.persistedKeys[key]; ok {
+			s.removeToolAccumulator(toolID)
+			continue
+		}
+		mappedEvent := withBufferedToolMetadata(accumulator.lastContentEvent, accumulator.title, accumulator.kind)
+		mapped, err := mapToolUpdateWithContent(
+			mappedEvent, s.journal.MapContext, accumulator.text.String(), accumulator.overflow,
+			accumulator.multipleBlocksOmitted,
+		)
+		if err != nil {
+			return err
+		}
+		if _, _, err := s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 tool stream closure"); err != nil {
+			return err
+		}
+		s.removeToolAccumulator(toolID)
+	}
+	return nil
 }
 
 // appendMappedEvent reconciles an append error against the durable stream
@@ -393,6 +498,10 @@ func (s *State) aggregateToolUpdate(event harnessv2.Event, key string) error {
 		accumulator.kind = tool.Kind
 	}
 	content, multipleBlocks := toolContentFragment(tool.Content)
+	if content != "" || multipleBlocks {
+		accumulator.lastContentEvent = event
+		accumulator.hasContentEvent = true
+	}
 	if multipleBlocks {
 		accumulator.omitMultipleBlocks()
 	} else if tool.ContentReplace {
@@ -422,10 +531,22 @@ func (s *State) finishToolUpdate(event harnessv2.Event) (string, bool, bool, str
 	if !ok {
 		return "", false, false, "", "", false
 	}
-	delete(s.toolText, tool.ToolCallID)
-	s.toolBufferedBytes -= accumulator.text.Len()
+	s.removeToolAccumulator(tool.ToolCallID)
 	return accumulator.text.String(), accumulator.overflow, accumulator.multipleBlocksOmitted,
 		accumulator.title, accumulator.kind, true
+}
+
+func (s *State) removeToolAccumulator(toolID string) {
+	accumulator, ok := s.toolText[toolID]
+	if !ok {
+		return
+	}
+	delete(s.toolText, toolID)
+	s.toolBufferedBytes -= accumulator.text.Len()
+}
+
+func (s *streamText) hasPersistableContent() bool {
+	return s != nil && (s.text.Len() > 0 || s.overflow || s.multipleBlocksOmitted)
 }
 
 func withBufferedToolMetadata(event harnessv2.Event, title, kind string) harnessv2.Event {
@@ -454,7 +575,7 @@ func toolContentFragment(blocks []harnessv2.ContentBlock) (string, bool) {
 		case harnessv2.ContentBlockText:
 			value = block.Text
 		case harnessv2.ContentBlockResourceLink:
-			resource := strings.TrimSpace(block.Name)
+			resource := safeResourceDisplayName(block.Name)
 			if resource == "" {
 				resource = safeResourceDisplayURI(block.URI)
 			}
@@ -478,9 +599,18 @@ func toolContentFragment(blocks []harnessv2.ContentBlock) (string, bool) {
 	return content, false
 }
 
+func safeResourceDisplayName(value string) string {
+	value = strings.TrimSpace(value)
+	parsed, err := url.Parse(value)
+	if err != nil || !parsed.IsAbs() {
+		return value
+	}
+	return safeResourceDisplayURI(value)
+}
+
 func safeResourceDisplayURI(value string) string {
 	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || !parsed.IsAbs() || parsed.User != nil {
+	if err != nil || !parsed.IsAbs() || parsed.User != nil || parsed.Opaque != "" {
 		return ""
 	}
 	parsed.RawQuery = ""

@@ -286,6 +286,21 @@ describe('model telemetry snapshots', () => {
     expect(selected.map((event) => event.id)).toEqual(['new'])
   })
 
+  it('merges partial cumulative usage fields within one harness prompt', () => {
+    const selected = latestModelUsageEvents([
+      {
+        ...base, id: 'input', seq: 1, type: 'ModelUsageUpdated', inputTokens: 10,
+        content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+      },
+      {
+        ...base, id: 'output', seq: 2, type: 'ModelUsageUpdated', outputTokens: 5,
+        content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+      },
+    ])
+    expect(selected).toHaveLength(1)
+    expect(selected[0]).toMatchObject({ id: 'output', inputTokens: 10, outputTokens: 5 })
+  })
+
   it('selects the newest context-window snapshot', () => {
     const latest = latestModelContextEvent([
       { ...base, id: 'old', seq: 1, type: 'ModelContextUpdated', contextWindowUsed: 10, contextWindowSize: 100 },
