@@ -207,6 +207,16 @@ func TestACPTaskDeadlineIncludesTimeBeforeRuntimeAdmission(t *testing.T) {
 	}
 
 	task.Spec.Timeout = nil
+	if deadline, ok = acpTaskDeadline(task, now); ok || !deadline.IsZero() {
+		t.Fatalf("unbound default deadline = %s, %v; want zero, false", deadline, ok)
+	}
+	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+	}
+	if deadline, ok = acpTaskDeadline(task, now); ok || !deadline.IsZero() {
+		t.Fatalf("harness v1 default deadline = %s, %v; want zero, false", deadline, ok)
+	}
+	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
 	deadline, ok = acpTaskDeadline(task, now)
 	if !ok || !deadline.Equal(now.Add(defaultACPTaskTimeout-time.Minute)) {
 		t.Fatalf("default deadline = %s, %v; want %s, true", deadline, ok, now.Add(defaultACPTaskTimeout-time.Minute))
@@ -216,7 +226,12 @@ func TestACPTaskDeadlineIncludesTimeBeforeRuntimeAdmission(t *testing.T) {
 func TestACPTaskRuntimeContextUsesDefaultDeadline(t *testing.T) {
 	t.Parallel()
 	createdAt := time.Now().UTC().Add(-time.Minute)
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(createdAt)}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(createdAt)},
+		Status: corev1alpha1.TaskStatus{
+			AgentExecutionBinding: testACPExecuteBindingForDispatcher(),
+		},
+	}
 	runtimeCtx, cancel := (&ACPDispatcher{}).newTaskRuntimeContext(context.Background(), task)
 	defer cancel()
 

@@ -2522,11 +2522,15 @@ func acpTaskDeadline(task *corev1alpha1.Task, now time.Time) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	timeout := defaultACPTaskTimeout
-	if task.Spec.Timeout != nil {
+	switch {
+	case task.Spec.Timeout != nil:
 		if task.Spec.Timeout.Duration <= 0 {
 			return time.Time{}, false
 		}
 		timeout = task.Spec.Timeout.Duration
+	case task.Status.AgentExecutionBinding == nil ||
+		task.Status.AgentExecutionBinding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2:
+		return time.Time{}, false
 	}
 	now = now.UTC()
 	var startedAt time.Time
