@@ -26,6 +26,7 @@ var (
 	executionEventCookieHeaderRe        = regexp.MustCompile(`(?i)\b((?:cookie|set-cookie)\s*:\s*)[^\r\n]+`)
 	executionEventAbsoluteURLRe         = regexp.MustCompile("(?i)\\b[a-z][a-z0-9+.-]*://[^\\s<>\\\"'`]+")
 	executionEventSchemeRelativeURLRe   = regexp.MustCompile("(?i)(^|[[:space:]<({\\[=:'\"`,;])//[^[:space:]<>\"'`]+")
+	executionEventRelativeURLRe         = regexp.MustCompile("(?i)(^|[[:space:]<({\\[=:'\"`,;])(?:/[^/[:space:]<>\"'`][^[:space:]<>\"'`]*|\\?[^[:space:]<>\"'`]+)")
 )
 
 // ExecutionEventTruncation records whether public event payload fields were truncated.
@@ -66,21 +67,22 @@ func RedactExecutionEventText(value string) string {
 
 func stripExecutionEventURLQueries(value string) string {
 	value = executionEventAbsoluteURLRe.ReplaceAllStringFunc(value, stripExecutionEventURLQuery)
-	return executionEventSchemeRelativeURLRe.ReplaceAllStringFunc(value, func(candidate string) string {
-		prefix := ""
-		if !strings.HasPrefix(candidate, "//") {
-			prefix = candidate[:1]
-			candidate = candidate[1:]
-		}
-		return prefix + stripExecutionEventURLQuery(candidate)
-	})
+	value = executionEventSchemeRelativeURLRe.ReplaceAllStringFunc(value, stripPrefixedExecutionEventURLQuery)
+	return executionEventRelativeURLRe.ReplaceAllStringFunc(value, stripPrefixedExecutionEventURLQuery)
+}
+
+func stripPrefixedExecutionEventURLQuery(candidate string) string {
+	if candidate == "" || strings.HasPrefix(candidate, "/") || strings.HasPrefix(candidate, "?") {
+		return stripExecutionEventURLQuery(candidate)
+	}
+	return candidate[:1] + stripExecutionEventURLQuery(candidate[1:])
 }
 
 func stripExecutionEventURLQuery(candidate string) string {
 	trimmed := strings.TrimRight(candidate, ".,;:!?)]}")
 	suffix := candidate[len(trimmed):]
 	parsed, err := url.Parse(trimmed)
-	if err != nil || (parsed.Scheme == "" && parsed.Host == "") {
+	if err != nil {
 		return candidate
 	}
 	if parsed.User == nil && parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "" {

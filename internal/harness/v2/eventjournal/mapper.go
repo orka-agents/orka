@@ -367,7 +367,8 @@ type mapUpdateOptions struct {
 
 const (
 	toolContentMultipleBlocksOmittedReason = "streamed_text_multiple_blocks_omitted"
-	toolContentTruncatedOrOmittedReason    = "streamed_text_truncated_or_omitted"
+	streamedTextTruncatedOrOmittedReason   = "streamed_text_truncated_or_omitted"
+	assistantResponseOmittedSummary        = "Assistant response omitted"
 )
 
 // MapUpdate maps one validated harness v2 update to the public execution-event
@@ -463,7 +464,7 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		if options.toolContentTruncated || tool.ContentOmitted {
 			mapped.ContentText = ""
 			mapped.Truncation = &executionevents.ExecutionEventTruncation{ContentTextTruncated: true}
-			content["contentOmitted"] = toolContentTruncatedOrOmittedReason
+			content["contentOmitted"] = streamedTextTruncatedOrOmittedReason
 		} else if options.toolContentMultipleBlocksOmitted {
 			content["contentOmitted"] = toolContentMultipleBlocksOmittedReason
 		}
@@ -776,7 +777,12 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 
 // MapAssistantTranscript maps the complete terminal assistant transcript as a
 // single event so redaction sees credential shapes spanning protocol chunks.
-func MapAssistantTranscript(event harnessv2.Event, mapCtx MapContext, transcript string) (*store.ExecutionEvent, error) {
+func MapAssistantTranscript(
+	event harnessv2.Event,
+	mapCtx MapContext,
+	transcript string,
+	contentOmitted bool,
+) (*store.ExecutionEvent, error) {
 	if err := mapCtx.validate(); err != nil {
 		return nil, err
 	}
@@ -791,14 +797,23 @@ func MapAssistantTranscript(event harnessv2.Event, mapCtx MapContext, transcript
 	if err := event.Identity.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid terminal identity: %w", err)
 	}
-	if transcript == "" {
+	if transcript == "" && !contentOmitted {
 		return nil, fmt.Errorf("assistant transcript is required")
 	}
+	if contentOmitted {
+		// Never retain a prefix once the complete logical stream exceeded its
+		// bound; a credential may span the discarded cutoff.
+		transcript = ""
+	}
 
-	content, err := json.Marshal(map[string]any{
+	contentBody := map[string]any{
 		"harnessV2":  mappedUpdateIdentity(event),
 		"updateKind": mappedAssistantTranscriptKind,
-	})
+	}
+	if contentOmitted {
+		contentBody["contentOmitted"] = streamedTextTruncatedOrOmittedReason
+	}
+	content, err := json.Marshal(contentBody)
 	if err != nil {
 		return nil, fmt.Errorf("marshal mapped harness v2 assistant transcript: %w", err)
 	}
@@ -815,6 +830,10 @@ func MapAssistantTranscript(event harnessv2.Event, mapCtx MapContext, transcript
 		Content:     content,
 		ContentText: transcript,
 		CreatedAt:   event.Identity.Timestamp.UTC(),
+	}
+	if contentOmitted {
+		mapped.Summary = assistantResponseOmittedSummary
+		mapped.Truncation = &executionevents.ExecutionEventTruncation{ContentTextTruncated: true}
 	}
 	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
 		return nil, fmt.Errorf("sanitize mapped harness v2 assistant transcript: %w", err)

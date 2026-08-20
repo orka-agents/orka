@@ -1214,15 +1214,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	var assistant strings.Builder
 	assistantOverflow := false
 	flushInterruptedOutput := func(flushCtx context.Context) error {
-		persistableAssistant := assistantTranscriptForPersistence(assistant.String(), assistantOverflow)
+		persistableAssistant, assistantContentOmitted := assistantTranscriptForPersistence(
+			assistant.String(), assistantOverflow,
+		)
 		var assistantEvent *harnessv2.Event
 		var assistantOrderSequence uint64
-		if lastAssistantUpdate != nil && persistableAssistant != "" {
+		if lastAssistantUpdate != nil && (persistableAssistant != "" || assistantContentOmitted) {
 			assistantEvent = lastAssistantUpdate
 			assistantOrderSequence = lastAssistantUpdate.Identity.Sequence
 		}
 		return journalState.AppendBufferedStreamsIfNew(
-			flushCtx, assistantEvent, assistantOrderSequence, persistableAssistant,
+			flushCtx, assistantEvent, assistantOrderSequence, persistableAssistant, assistantContentOmitted,
 		)
 	}
 	accepted := false
@@ -1368,21 +1370,25 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event")
 	}
-	flushTerminalOutput := func(transcript string) error {
+	flushTerminalOutput := func(transcript string, contentOmitted bool) error {
 		var assistantEvent *harnessv2.Event
 		var assistantOrderSequence uint64
-		if transcript != "" {
+		if transcript != "" || contentOmitted {
 			assistantEvent = terminal
 			assistantOrderSequence = terminal.Identity.Sequence
 			if lastAssistantUpdate != nil {
 				assistantOrderSequence = lastAssistantUpdate.Identity.Sequence
 			}
 		}
-		return journalState.AppendBufferedStreamsIfNew(ctx, assistantEvent, assistantOrderSequence, transcript)
+		return journalState.AppendBufferedStreamsIfNew(
+			ctx, assistantEvent, assistantOrderSequence, transcript, contentOmitted,
+		)
 	}
 	if terminal.Type != harnessv2.EventCompleted {
-		persistableAssistant := assistantTranscriptForPersistence(assistant.String(), assistantOverflow)
-		if err := flushTerminalOutput(persistableAssistant); err != nil {
+		persistableAssistant, assistantContentOmitted := assistantTranscriptForPersistence(
+			assistant.String(), assistantOverflow,
+		)
+		if err := flushTerminalOutput(persistableAssistant, assistantContentOmitted); err != nil {
 			logf.FromContext(ctx).Error(err, "persist terminal ACP buffered streams", "namespace", task.Namespace, "task", task.Name)
 			return d.failPromptForExecutionEventPersistence(
 				ctx, task, attemptID, fence, "terminal buffered stream persistence failed",
@@ -1414,7 +1420,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err != nil {
 		return err
 	}
-	if err := flushTerminalOutput(resultText); err != nil {
+	if err := flushTerminalOutput(resultText, false); err != nil {
 		logf.FromContext(ctx).Error(err, "persist terminal ACP buffered streams", "namespace", task.Namespace, "task", task.Name)
 		return d.failPromptForExecutionEventPersistence(
 			ctx, task, attemptID, fence, "terminal buffered stream persistence failed",
@@ -1711,11 +1717,11 @@ func acpUpdatePersistenceError(journalErr, planErr error) error {
 	return &acpExecutionUpdatePersistenceError{err: errors.Join(failures...)}
 }
 
-func assistantTranscriptForPersistence(streamed string, overflow bool) string {
+func assistantTranscriptForPersistence(streamed string, overflow bool) (string, bool) {
 	if overflow {
-		return ""
+		return "", true
 	}
-	return streamed
+	return streamed, false
 }
 
 func completedPromptResultText(terminal *harnessv2.Event, streamed string, streamedOverflow bool) (string, error) {

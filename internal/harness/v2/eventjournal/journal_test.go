@@ -277,7 +277,7 @@ func TestJournalRedactsCredentialsSplitAcrossAssistantChunks(t *testing.T) {
 		}
 	}
 	terminal := testTerminalEvent(6, now.Add(5*time.Millisecond))
-	if _, isNew, err := state.AppendAssistantTranscriptIfNew(ctx, terminal, transcript); err != nil || !isNew {
+	if _, isNew, err := state.AppendAssistantTranscriptIfNew(ctx, terminal, transcript, false); err != nil || !isNew {
 		t.Fatalf("append assistant transcript new=%t err=%v", isNew, err)
 	}
 
@@ -301,7 +301,7 @@ func TestJournalRedactsCredentialsSplitAcrossAssistantChunks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if duplicate, isNew, err := recovered.AppendAssistantTranscriptIfNew(ctx, terminal, transcript); err != nil || isNew || duplicate != nil {
+	if duplicate, isNew, err := recovered.AppendAssistantTranscriptIfNew(ctx, terminal, transcript, false); err != nil || isNew || duplicate != nil {
 		t.Fatalf("recovered assistant transcript = %#v new=%t err=%v", duplicate, isNew, err)
 	}
 }
@@ -327,7 +327,7 @@ func TestJournalPersistsTerminalUsageSeparatelyFromAssistantTranscript(t *testin
 	if appended, isNew, err := state.AppendTerminalUsageIfNew(ctx, terminal); err != nil || !isNew || appended == nil {
 		t.Fatalf("append terminal usage = %#v new=%t err=%v", appended, isNew, err)
 	}
-	if appended, isNew, err := state.AppendAssistantTranscriptIfNew(ctx, terminal, "done"); err != nil || !isNew || appended == nil {
+	if appended, isNew, err := state.AppendAssistantTranscriptIfNew(ctx, terminal, "done", false); err != nil || !isNew || appended == nil {
 		t.Fatalf("append assistant transcript = %#v new=%t err=%v", appended, isNew, err)
 	}
 	if duplicate, isNew, err := state.AppendTerminalUsageIfNew(ctx, terminal); err != nil || isNew || duplicate != nil {
@@ -357,7 +357,7 @@ func TestJournalPersistsTerminalUsageSeparatelyFromAssistantTranscript(t *testin
 	if duplicate, isNew, err := recovered.AppendTerminalUsageIfNew(ctx, terminal); err != nil || isNew || duplicate != nil {
 		t.Fatalf("recovered terminal usage = %#v new=%t err=%v", duplicate, isNew, err)
 	}
-	if duplicate, isNew, err := recovered.AppendAssistantTranscriptIfNew(ctx, terminal, "done"); err != nil || isNew || duplicate != nil {
+	if duplicate, isNew, err := recovered.AppendAssistantTranscriptIfNew(ctx, terminal, "done", false); err != nil || isNew || duplicate != nil {
 		t.Fatalf("recovered assistant transcript = %#v new=%t err=%v", duplicate, isNew, err)
 	}
 }
@@ -433,7 +433,7 @@ func TestJournalPersistsAssistantTextOnNonTerminalStreamClosure(t *testing.T) {
 		}
 	}
 	transcript := strings.Join(fragments, "")
-	if appended, isNew, err := state.AppendAssistantStreamClosureIfNew(ctx, last, transcript); err != nil || !isNew || appended == nil {
+	if appended, isNew, err := state.AppendAssistantStreamClosureIfNew(ctx, last, transcript, false); err != nil || !isNew || appended == nil {
 		t.Fatalf("assistant stream closure = %#v new=%t err=%v", appended, isNew, err)
 	}
 
@@ -445,8 +445,67 @@ func TestJournalPersistsAssistantTextOnNonTerminalStreamClosure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if duplicate, isNew, err := recovered.AppendAssistantStreamClosureIfNew(ctx, last, transcript); err != nil || isNew || duplicate != nil {
+	if duplicate, isNew, err := recovered.AppendAssistantStreamClosureIfNew(ctx, last, transcript, false); err != nil || isNew || duplicate != nil {
 		t.Fatalf("recovered assistant stream closure = %#v new=%t err=%v", duplicate, isNew, err)
+	}
+}
+
+func TestJournalPersistsOverflowedAssistantStreamAsOmitted(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		name := "non-terminal closure"
+		if terminal {
+			name = "terminal closure"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			eventStore := storetest.NewFakeExecutionEventStore()
+			journal := Journal{EventStore: eventStore, MapContext: testMapContext()}
+			state, err := journal.Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			now := time.Now().UTC()
+			lastUpdate := testUpdateEvent(2, now, harnessv2.UpdateEvent{
+				Kind:             harnessv2.UpdateAssistantMessageChunk,
+				AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "unsafe-prefix"},
+			})
+			if appended, isNew, err := state.AppendUpdateIfNew(ctx, lastUpdate); err != nil || isNew || appended != nil {
+				t.Fatalf("assistant chunk = %#v new=%t err=%v", appended, isNew, err)
+			}
+			assistantEvent := lastUpdate
+			if terminal {
+				assistantEvent = testTerminalEvent(3, now.Add(time.Millisecond))
+			}
+			if err := state.AppendBufferedStreamsIfNew(ctx, &assistantEvent, 2, "unsafe-prefix", true); err != nil {
+				t.Fatal(err)
+			}
+
+			listed := listJournalEvents(t, ctx, eventStore)
+			if len(listed) != 1 {
+				t.Fatalf("omitted assistant events = %#v", listed)
+			}
+			persisted := listed[0]
+			encoded := persisted.Summary + persisted.ContentText + string(persisted.Content)
+			if persisted.Type != executionevents.ExecutionEventTypeModelMessage ||
+				persisted.ContentText != "" || strings.Contains(encoded, "unsafe-prefix") ||
+				persisted.Summary != assistantResponseOmittedSummary ||
+				persisted.Truncation == nil || !persisted.Truncation.ContentTextTruncated ||
+				!strings.Contains(string(persisted.Content), streamedTextTruncatedOrOmittedReason) {
+				t.Fatalf("omitted assistant event = %#v content=%s", persisted, persisted.Content)
+			}
+
+			recovered, err := journal.Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := recovered.AppendBufferedStreamsIfNew(ctx, &assistantEvent, 2, "unsafe-prefix", true); err != nil {
+				t.Fatalf("recover omitted assistant stream: %v", err)
+			}
+			if listed = listJournalEvents(t, ctx, eventStore); len(listed) != 1 {
+				t.Fatalf("recovered omitted assistant events = %#v", listed)
+			}
+		})
 	}
 }
 
@@ -693,10 +752,10 @@ func TestJournalPersistsBufferedAssistantAndToolStreamsInProtocolOrder(t *testin
 				}
 			}
 			terminal := testTerminalEvent(4, now.Add(4*time.Millisecond))
-			if err := state.AppendBufferedStreamsIfNew(ctx, &terminal, test.assistantSeq, "assistant"); err != nil {
+			if err := state.AppendBufferedStreamsIfNew(ctx, &terminal, test.assistantSeq, "assistant", false); err != nil {
 				t.Fatal(err)
 			}
-			if err := state.AppendBufferedStreamsIfNew(ctx, &terminal, test.assistantSeq, "assistant"); err != nil {
+			if err := state.AppendBufferedStreamsIfNew(ctx, &terminal, test.assistantSeq, "assistant", false); err != nil {
 				t.Fatalf("repeat buffered stream append: %v", err)
 			}
 
@@ -925,7 +984,7 @@ func TestJournalOmitsOversizedToolStreamContent(t *testing.T) {
 	encoded := completed.Summary + completed.ContentText + string(completed.Content)
 	if completed.ContentText != "" || strings.Contains(encoded, credential[:8]) ||
 		completed.Truncation == nil || !completed.Truncation.ContentTextTruncated ||
-		!strings.Contains(string(completed.Content), toolContentTruncatedOrOmittedReason) {
+		!strings.Contains(string(completed.Content), streamedTextTruncatedOrOmittedReason) {
 		t.Fatalf("oversized completed tool event = %#v", completed)
 	}
 }
@@ -1067,7 +1126,7 @@ func TestJournalDegradesAggregateToolContentOverflow(t *testing.T) {
 		t.Fatalf("complete overflowed tool = %#v new=%t err=%v", completed, isNew, err)
 	}
 	if completed.ContentText != "" || completed.Truncation == nil || !completed.Truncation.ContentTextTruncated ||
-		!strings.Contains(string(completed.Content), toolContentTruncatedOrOmittedReason) {
+		!strings.Contains(string(completed.Content), streamedTextTruncatedOrOmittedReason) {
 		t.Fatalf("degraded tool completion = %#v", completed)
 	}
 }
@@ -1101,7 +1160,7 @@ func TestJournalPersistsUpstreamOmittedToolContentAsTruncated(t *testing.T) {
 		t.Fatalf("complete omitted tool = %#v new=%t err=%v", completed, isNew, err)
 	}
 	if completed.ContentText != "" || completed.Truncation == nil || !completed.Truncation.ContentTextTruncated ||
-		!strings.Contains(string(completed.Content), toolContentTruncatedOrOmittedReason) {
+		!strings.Contains(string(completed.Content), streamedTextTruncatedOrOmittedReason) {
 		t.Fatalf("omitted tool completion = %#v", completed)
 	}
 }

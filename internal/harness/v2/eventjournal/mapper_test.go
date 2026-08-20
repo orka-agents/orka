@@ -365,7 +365,7 @@ func TestMapAssistantTranscriptRedactsCompleteText(t *testing.T) {
 	credential := "sk-" + strings.Repeat("a", 24)
 	capabilityURL := "https://account.blob.core.windows.net/output.txt?sp=r&sig=usable-secret#download"
 	transcript := "hello Authorization: Bearer " + credential + " world\n" + capabilityURL
-	mapped, err := MapAssistantTranscript(testTerminalEvent(3, time.Now().UTC()), testMapContext(), transcript)
+	mapped, err := MapAssistantTranscript(testTerminalEvent(3, time.Now().UTC()), testMapContext(), transcript, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,6 +379,22 @@ func TestMapAssistantTranscriptRedactsCompleteText(t *testing.T) {
 	identity, ok := MappedUpdateIdentityFromEvent(*mapped)
 	if !ok || identity.Sequence != 3 {
 		t.Fatalf("assistant transcript identity = %#v, ok=%t", identity, ok)
+	}
+}
+
+func TestMapAssistantTranscriptPersistsOverflowAsOmitted(t *testing.T) {
+	mapped, err := MapAssistantTranscript(
+		testTerminalEvent(3, time.Now().UTC()), testMapContext(), "unsafe-prefix", true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := mapped.Summary + mapped.ContentText + string(mapped.Content)
+	if strings.Contains(encoded, "unsafe-prefix") || mapped.ContentText != "" ||
+		mapped.Summary != assistantResponseOmittedSummary ||
+		mapped.Truncation == nil || !mapped.Truncation.ContentTextTruncated ||
+		!strings.Contains(string(mapped.Content), streamedTextTruncatedOrOmittedReason) {
+		t.Fatalf("omitted assistant transcript = %#v content=%s", mapped, mapped.Content)
 	}
 }
 

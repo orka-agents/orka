@@ -96,11 +96,11 @@ func TestCompletedPromptResultTextPrefersTerminalContent(t *testing.T) {
 }
 
 func TestAssistantTranscriptForPersistenceOmitsOverflowedPrefix(t *testing.T) {
-	if got := assistantTranscriptForPersistence("credential prefix", true); got != "" {
-		t.Fatalf("overflowed assistant transcript = %q, want omitted", got)
+	if got, omitted := assistantTranscriptForPersistence("credential prefix", true); got != "" || !omitted {
+		t.Fatalf("overflowed assistant transcript = %q omitted=%t, want empty/true", got, omitted)
 	}
-	if got := assistantTranscriptForPersistence("complete transcript", false); got != "complete transcript" {
-		t.Fatalf("complete assistant transcript = %q", got)
+	if got, omitted := assistantTranscriptForPersistence("complete transcript", false); got != "complete transcript" || omitted {
+		t.Fatalf("complete assistant transcript = %q omitted=%t", got, omitted)
 	}
 }
 

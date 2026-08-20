@@ -386,11 +386,12 @@ func (s *State) AppendAssistantTranscriptIfNew(
 	ctx context.Context,
 	terminal harnessv2.Event,
 	transcript string,
+	contentOmitted bool,
 ) (*store.ExecutionEvent, bool, error) {
 	if s == nil {
 		return nil, false, fmt.Errorf("harness v2 journal state is required")
 	}
-	if transcript == "" {
+	if transcript == "" && !contentOmitted {
 		return nil, false, nil
 	}
 	identity := mappedUpdateIdentity(terminal)
@@ -400,7 +401,7 @@ func (s *State) AppendAssistantTranscriptIfNew(
 	if s.assistantTranscriptSequence == identity.Sequence {
 		return nil, false, nil
 	}
-	mapped, err := MapAssistantTranscript(terminal, s.journal.MapContext, transcript)
+	mapped, err := MapAssistantTranscript(terminal, s.journal.MapContext, transcript, contentOmitted)
 	if err != nil {
 		return nil, false, err
 	}
@@ -486,11 +487,12 @@ func (s *State) AppendAssistantStreamClosureIfNew(
 	ctx context.Context,
 	lastUpdate harnessv2.Event,
 	transcript string,
+	contentOmitted bool,
 ) (*store.ExecutionEvent, bool, error) {
 	if s == nil {
 		return nil, false, fmt.Errorf("harness v2 journal state is required")
 	}
-	if transcript == "" {
+	if transcript == "" && !contentOmitted {
 		return nil, false, nil
 	}
 	if lastUpdate.Type != harnessv2.EventUpdate || lastUpdate.Update == nil || lastUpdate.Update.AssistantMessage == nil {
@@ -503,7 +505,7 @@ func (s *State) AppendAssistantStreamClosureIfNew(
 	if s.assistantTranscriptSequence == identity.Sequence {
 		return nil, false, nil
 	}
-	mapped, err := MapAssistantTranscript(lastUpdate, s.journal.MapContext, transcript)
+	mapped, err := MapAssistantTranscript(lastUpdate, s.journal.MapContext, transcript, contentOmitted)
 	if err != nil {
 		return nil, false, err
 	}
@@ -516,12 +518,14 @@ func (s *State) AppendAssistantStreamClosureIfNew(
 // AppendBufferedStreamsIfNew persists buffered assistant and interrupted tool
 // streams in the order of their last protocol updates. assistantEvent supplies
 // the durable identity; assistantOrderSequence is the last assistant chunk's
-// sequence, or the assistant event sequence when no chunks preceded it.
+// sequence, or the assistant event sequence when no chunks preceded it. An
+// omitted assistant stream persists truncation metadata without unsafe text.
 func (s *State) AppendBufferedStreamsIfNew(
 	ctx context.Context,
 	assistantEvent *harnessv2.Event,
 	assistantOrderSequence uint64,
 	transcript string,
+	assistantContentOmitted bool,
 ) error {
 	if s == nil {
 		return fmt.Errorf("harness v2 journal state is required")
@@ -541,7 +545,7 @@ func (s *State) AppendBufferedStreamsIfNew(
 			sequence: accumulator.lastEvent.Identity.Sequence, toolID: toolID, accumulator: accumulator,
 		})
 	}
-	if transcript != "" {
+	if transcript != "" || assistantContentOmitted {
 		if assistantEvent == nil {
 			return fmt.Errorf("assistant event is required for a buffered transcript")
 		}
@@ -564,9 +568,9 @@ func (s *State) AppendBufferedStreamsIfNew(
 		if closure.assistant {
 			var err error
 			if assistantEvent.Type.IsTerminal() {
-				_, _, err = s.AppendAssistantTranscriptIfNew(ctx, *assistantEvent, transcript)
+				_, _, err = s.AppendAssistantTranscriptIfNew(ctx, *assistantEvent, transcript, assistantContentOmitted)
 			} else {
-				_, _, err = s.AppendAssistantStreamClosureIfNew(ctx, *assistantEvent, transcript)
+				_, _, err = s.AppendAssistantStreamClosureIfNew(ctx, *assistantEvent, transcript, assistantContentOmitted)
 			}
 			if err != nil {
 				return err
@@ -584,7 +588,7 @@ func (s *State) AppendBufferedStreamsIfNew(
 // not emit a completed/failed update before the prompt stream closed. The last
 // observed tool update supplies the durable protocol identity.
 func (s *State) AppendToolStreamClosuresIfNew(ctx context.Context) error {
-	return s.AppendBufferedStreamsIfNew(ctx, nil, 0, "")
+	return s.AppendBufferedStreamsIfNew(ctx, nil, 0, "", false)
 }
 
 func (s *State) appendToolStreamClosureIfNew(ctx context.Context, toolID string, accumulator *streamText) error {

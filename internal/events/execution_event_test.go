@@ -228,18 +228,26 @@ func TestRedactExecutionEventTextCoversSecrets(t *testing.T) {
 func TestRedactExecutionEventTextStripsURLQueriesAndFragments(t *testing.T) {
 	capabilityURL := "https://account.blob.core.windows.net/output.txt?sp=r&sig=usable-secret#download"
 	schemeRelativeURL := "//account.blob.core.windows.net/output.txt?sp=r&sig=scheme-relative-secret#download"
+	rootRelativeURL := "/api/artifacts/output?sig=root-relative-secret#download"
+	queryRelativeURL := "?sig=query-relative-secret#refresh"
 	userinfoURL := "//alice:scheme-relative-password@example.com/output.txt"
 	got := RedactExecutionEventText("download " + capabilityURL + ", mirror " + schemeRelativeURL +
-		"; authenticated mirror " + userinfoURL + "; then open https://example.com/docs.")
-	for _, leaked := range []string{"sig=", "usable-secret", "scheme-relative-secret", "#download", "alice", "scheme-relative-password"} {
+		"; root " + rootRelativeURL + "; refresh " + queryRelativeURL +
+		"; authenticated mirror " + userinfoURL + "; then open https://example.com/docs and /docs/getting-started.")
+	for _, leaked := range []string{
+		"sig=", "usable-secret", "scheme-relative-secret", "root-relative-secret", "query-relative-secret",
+		"#download", "#refresh", "alice", "scheme-relative-password",
+	} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("RedactExecutionEventText leaked %q in %q", leaked, got)
 		}
 	}
 	if !strings.Contains(got, "https://account.blob.core.windows.net/output.txt,") ||
 		!strings.Contains(got, "//account.blob.core.windows.net/output.txt;") ||
+		!strings.Contains(got, "/api/artifacts/output;") ||
 		!strings.Contains(got, "//example.com/output.txt;") ||
-		!strings.Contains(got, "https://example.com/docs.") {
+		!strings.Contains(got, "https://example.com/docs") ||
+		!strings.Contains(got, "/docs/getting-started.") {
 		t.Fatalf("RedactExecutionEventText() = %q", got)
 	}
 }
