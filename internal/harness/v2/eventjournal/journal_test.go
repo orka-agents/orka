@@ -646,7 +646,7 @@ func TestJournalRedactsCredentialsSplitAcrossToolUpdates(t *testing.T) {
 				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: fragment}},
 			},
 		})
-		if _, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew != (index == len(fragments)-1) {
+		if _, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew {
 			t.Fatalf("append tool update %d new=%t err=%v", index, isNew, err)
 		}
 	}
@@ -721,7 +721,8 @@ func TestJournalAggregatesContentOnlyToolFragmentsIntoTerminalEvent(t *testing.T
 				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: fragment}},
 			},
 		})
-		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew || appended != nil {
+		wantNew := index == 0
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew != wantNew || (isNew && appended == nil) || (!isNew && appended != nil) {
 			t.Fatalf("content fragment %d = %#v new=%t err=%v", index, appended, isNew, err)
 		}
 	}
@@ -736,8 +737,8 @@ func TestJournalAggregatesContentOnlyToolFragmentsIntoTerminalEvent(t *testing.T
 	}
 
 	listed := listJournalEvents(t, ctx, eventStore)
-	if len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallCompleted ||
-		listed[0].ContentText != "streamed output" {
+	if len(listed) != 2 || listed[0].Type != executionevents.ExecutionEventTypeToolCallStarted ||
+		listed[1].Type != executionevents.ExecutionEventTypeToolCallCompleted || listed[1].ContentText != "streamed output" {
 		t.Fatalf("persisted tool events = %#v", listed)
 	}
 }
@@ -762,12 +763,13 @@ func TestJournalPersistsBufferedToolOutputOnStreamClosure(t *testing.T) {
 				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: fragment}},
 			},
 		})
-		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew || appended != nil {
+		wantNew := index == 0
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew != wantNew || (isNew && appended == nil) || (!isNew && appended != nil) {
 			t.Fatalf("append open tool fragment %d = %#v new=%t err=%v", index, appended, isNew, err)
 		}
 	}
-	if listed := listJournalEvents(t, ctx, eventStore); len(listed) != 0 {
-		t.Fatalf("tool output persisted before closure: %#v", listed)
+	if listed := listJournalEvents(t, ctx, eventStore); len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallStarted {
+		t.Fatalf("tool start before closure = %#v", listed)
 	}
 	if err := state.AppendToolStreamClosuresIfNew(ctx); err != nil {
 		t.Fatal(err)
@@ -777,10 +779,10 @@ func TestJournalPersistsBufferedToolOutputOnStreamClosure(t *testing.T) {
 	}
 
 	listed := listJournalEvents(t, ctx, eventStore)
-	if len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallFailed ||
-		listed[0].Severity != executionevents.ExecutionEventSeverityError ||
-		listed[0].ContentText != "before "+executionevents.ExecutionEventRedactedValue+" after" ||
-		listed[0].ToolName != testToolKindShell || listed[0].Summary != "Inspect repository" {
+	if len(listed) != 2 || listed[1].Type != executionevents.ExecutionEventTypeToolCallFailed ||
+		listed[1].Severity != executionevents.ExecutionEventSeverityError ||
+		listed[1].ContentText != "before "+executionevents.ExecutionEventRedactedValue+" after" ||
+		listed[1].ToolName != testToolKindShell || listed[1].Summary != "Inspect repository" {
 		t.Fatalf("persisted tool stream closure = %#v", listed)
 	}
 }
@@ -805,7 +807,7 @@ func TestJournalPersistsBufferedToolClosuresInProtocolOrder(t *testing.T) {
 				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: tool.content}},
 			},
 		})
-		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew || appended != nil {
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew || appended == nil {
 			t.Fatalf("append open tool %q = %#v new=%t err=%v", tool.id, appended, isNew, err)
 		}
 	}
@@ -814,10 +816,12 @@ func TestJournalPersistsBufferedToolClosuresInProtocolOrder(t *testing.T) {
 	}
 
 	listed := listJournalEvents(t, ctx, eventStore)
-	if len(listed) != 2 ||
-		listed[0].Type != executionevents.ExecutionEventTypeToolCallFailed ||
-		listed[1].Type != executionevents.ExecutionEventTypeToolCallFailed ||
-		listed[0].ContentText != "first" || listed[1].ContentText != "second" {
+	if len(listed) != 4 ||
+		listed[0].Type != executionevents.ExecutionEventTypeToolCallStarted ||
+		listed[1].Type != executionevents.ExecutionEventTypeToolCallStarted ||
+		listed[2].Type != executionevents.ExecutionEventTypeToolCallFailed ||
+		listed[3].Type != executionevents.ExecutionEventTypeToolCallFailed ||
+		listed[2].ContentText != "first" || listed[3].ContentText != "second" {
 		t.Fatalf("persisted tool closure order = %#v", listed)
 	}
 }
@@ -831,11 +835,19 @@ func TestJournalPersistsBufferedAssistantAndToolStreamsInProtocolOrder(t *testin
 	}{
 		{
 			name: "assistant before tool", assistantSeq: 2, toolSeq: 3,
-			wantTypes: []string{executionevents.ExecutionEventTypeModelMessage, executionevents.ExecutionEventTypeToolCallFailed},
+			wantTypes: []string{
+				executionevents.ExecutionEventTypeToolCallStarted,
+				executionevents.ExecutionEventTypeModelMessage,
+				executionevents.ExecutionEventTypeToolCallFailed,
+			},
 		},
 		{
 			name: "tool before assistant", assistantSeq: 3, toolSeq: 2,
-			wantTypes: []string{executionevents.ExecutionEventTypeToolCallFailed, executionevents.ExecutionEventTypeModelMessage},
+			wantTypes: []string{
+				executionevents.ExecutionEventTypeToolCallStarted,
+				executionevents.ExecutionEventTypeToolCallFailed,
+				executionevents.ExecutionEventTypeModelMessage,
+			},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -861,7 +873,8 @@ func TestJournalPersistsBufferedAssistantAndToolStreamsInProtocolOrder(t *testin
 			}
 			sort.Slice(updates, func(i, j int) bool { return updates[i].Identity.Sequence < updates[j].Identity.Sequence })
 			for _, update := range updates {
-				if appended, isNew, err := state.AppendUpdateIfNew(ctx, update); err != nil || isNew || appended != nil {
+				wantNew := update.Update != nil && update.Update.ToolCall != nil
+				if appended, isNew, err := state.AppendUpdateIfNew(ctx, update); err != nil || isNew != wantNew || (isNew && appended == nil) || (!isNew && appended != nil) {
 					t.Fatalf("append update %d = %#v new=%t err=%v", update.Identity.Sequence, appended, isNew, err)
 				}
 			}
@@ -900,17 +913,17 @@ func TestJournalBuffersExplicitEmptyToolSnapshot(t *testing.T) {
 			ToolCallID: "call-clear", Status: harnessv2.ToolCallStatusInProgress, ContentReplace: true,
 		},
 	})
-	if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew || appended != nil {
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew || appended == nil {
 		t.Fatalf("append empty tool snapshot = %#v new=%t err=%v", appended, isNew, err)
 	}
-	if listed := listJournalEvents(t, ctx, eventStore); len(listed) != 0 {
-		t.Fatalf("empty snapshot persisted before closure: %#v", listed)
+	if listed := listJournalEvents(t, ctx, eventStore); len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallStarted {
+		t.Fatalf("empty snapshot start = %#v", listed)
 	}
 	if err := state.AppendToolStreamClosuresIfNew(ctx); err != nil {
 		t.Fatal(err)
 	}
 	listed := listJournalEvents(t, ctx, eventStore)
-	if len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallFailed || listed[0].ContentText != "" {
+	if len(listed) != 2 || listed[1].Type != executionevents.ExecutionEventTypeToolCallFailed || listed[1].ContentText != "" {
 		t.Fatalf("empty snapshot closure = %#v", listed)
 	}
 }
@@ -981,7 +994,8 @@ func TestJournalReplacesACPToolContentSnapshots(t *testing.T) {
 				ContentReplace: true,
 			},
 		})
-		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew || appended != nil {
+		wantNew := index == 0
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || isNew != wantNew || (isNew && appended == nil) || (!isNew && appended != nil) {
 			t.Fatalf("content snapshot %d = %#v new=%t err=%v", index, appended, isNew, err)
 		}
 	}
@@ -996,7 +1010,8 @@ func TestJournalReplacesACPToolContentSnapshots(t *testing.T) {
 	}
 
 	listed := listJournalEvents(t, ctx, eventStore)
-	if len(listed) != 1 || listed[0].ContentText != "ab" {
+	if len(listed) != 2 || listed[0].Type != executionevents.ExecutionEventTypeToolCallStarted ||
+		listed[1].Type != executionevents.ExecutionEventTypeToolCallCompleted || listed[1].ContentText != "ab" {
 		t.Fatalf("persisted tool snapshot events = %#v", listed)
 	}
 }
@@ -1269,7 +1284,8 @@ func TestJournalDegradesAggregateToolContentOverflow(t *testing.T) {
 			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: content}}, ContentReplace: true,
 		},
 	})
-	if appended, isNew, err := state.AppendUpdateIfNew(ctx, overflow); err != nil || isNew || appended != nil {
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, overflow); err != nil || !isNew || appended == nil ||
+		appended.Type != executionevents.ExecutionEventTypeToolCallStarted {
 		t.Fatalf("aggregate tool overflow = %#v new=%t err=%v", appended, isNew, err)
 	}
 	if state.toolBufferedBytes > maxBufferedToolContentBytes {
@@ -1306,7 +1322,8 @@ func TestJournalPersistsUpstreamOmittedToolContentAsTruncated(t *testing.T) {
 			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "previous output"}}, ContentReplace: true,
 		},
 	})
-	if appended, isNew, err := state.AppendUpdateIfNew(ctx, buffered); err != nil || isNew || appended != nil {
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, buffered); err != nil || !isNew || appended == nil ||
+		appended.Type != executionevents.ExecutionEventTypeToolCallStarted {
 		t.Fatalf("buffer tool content = %#v new=%t err=%v", appended, isNew, err)
 	}
 	terminal := testUpdateEvent(3, now.Add(time.Second), harnessv2.UpdateEvent{

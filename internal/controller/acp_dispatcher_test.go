@@ -173,6 +173,12 @@ func TestAssistantTranscriptForPersistenceOmitsOverflowedPrefix(t *testing.T) {
 	if got, omitted := assistantTranscriptForPersistence("complete transcript", false); got != "complete transcript" || omitted {
 		t.Fatalf("complete assistant transcript = %q omitted=%t", got, omitted)
 	}
+	if got, omitted := completedAssistantTranscriptForPersistence("commentary and final", false, "final"); got != "commentary and final" || omitted {
+		t.Fatalf("completed streamed transcript = %q omitted=%t", got, omitted)
+	}
+	if got, omitted := completedAssistantTranscriptForPersistence("", false, "terminal fallback"); got != "terminal fallback" || omitted {
+		t.Fatalf("completed terminal fallback = %q omitted=%t", got, omitted)
+	}
 }
 
 func TestSaveACPPlanUpdateWithRetry(t *testing.T) {
@@ -979,7 +985,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(result) != "hello from runtime" {
+	if string(result) != "from runtime" {
 		t.Fatalf("result = %q", result)
 	}
 	transcript, err := persistence.LoadTranscript(ctx, "default", "session", 10)
@@ -999,6 +1005,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	typeCounts := map[string]int{}
 	var usageContent map[string]any
 	var terminalLifecycleSeq, terminalMessageSeq, terminalUsageSeq int64
+	var terminalMessageText string
 	for _, event := range timeline {
 		typeCounts[event.Type]++
 		switch event.Type {
@@ -1006,6 +1013,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 			terminalLifecycleSeq = event.Seq
 		case executionevents.ExecutionEventTypeModelMessage:
 			terminalMessageSeq = event.Seq
+			terminalMessageText = event.ContentText
 		case executionevents.ExecutionEventTypeModelUsageUpdated:
 			terminalUsageSeq = event.Seq
 			if err := json.Unmarshal(event.Content, &usageContent); err != nil {
@@ -1037,6 +1045,9 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 			"terminal event order lifecycle=%d message=%d usage=%d; timeline=%#v",
 			terminalLifecycleSeq, terminalMessageSeq, terminalUsageSeq, timeline,
 		)
+	}
+	if terminalMessageText != "hello from runtime" {
+		t.Fatalf("terminal assistant transcript = %q", terminalMessageText)
 	}
 	trace := tasktrace.BuildTaskTrace(tasktrace.MetadataFromTask(completed), timeline, time.Now().UTC())
 	if len(trace.ModelRequests) != 1 || trace.ModelRequests[0].Status != tasktrace.StatusCompleted ||
@@ -2491,7 +2502,7 @@ func newDispatcherRuntimeServer(
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(5, now.Add(4*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdatePlan, Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{Content: "inspect repository", Status: harnessv2.PlanEntryCompleted}, {Content: "verify result", Status: harnessv2.PlanEntryInProgress}}}}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(6, now.Add(5*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateDiagnostic, Diagnostic: &harnessv2.DiagnosticUpdate{Code: "provider_retry", Message: "provider retry recovered", Retryable: true}}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(7, now.Add(6*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "from runtime"}}})
-		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventCompleted, Identity: identity(8, now.Add(7*time.Millisecond)), Completed: &harnessv2.CompletedEvent{StopReason: harnessv2.ACPStopReasonEndTurn, Result: harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "hello from runtime"}}, Model: "served-model", Usage: harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 40}}}})
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventCompleted, Identity: identity(8, now.Add(7*time.Millisecond)), Completed: &harnessv2.CompletedEvent{StopReason: harnessv2.ACPStopReasonEndTurn, Result: harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "from runtime"}}, Model: "served-model", Usage: harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 40}}}})
 		if err := encoder.Close(); err != nil {
 			t.Errorf("close encoder: %v", err)
 		}

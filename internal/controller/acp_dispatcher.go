@@ -1431,7 +1431,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err != nil {
 		return err
 	}
-	if err := flushTerminalOutput(resultText, false); err != nil {
+	persistableAssistant, assistantContentOmitted := completedAssistantTranscriptForPersistence(
+		assistant.String(), assistantOverflow, resultText,
+	)
+	if err := flushTerminalOutput(persistableAssistant, assistantContentOmitted); err != nil {
 		logf.FromContext(ctx).Error(err, "persist terminal ACP buffered streams", "namespace", task.Namespace, "task", task.Name)
 		return d.failPromptForExecutionEventPersistence(
 			ctx, task, attemptID, fence, "terminal buffered stream persistence failed",
@@ -1736,6 +1739,14 @@ func assistantTranscriptForPersistence(streamed string, overflow bool) (string, 
 		return "", true
 	}
 	return streamed, false
+}
+
+func completedAssistantTranscriptForPersistence(streamed string, overflow bool, result string) (string, bool) {
+	transcript, omitted := assistantTranscriptForPersistence(streamed, overflow)
+	if transcript == "" && !omitted {
+		transcript = result
+	}
+	return transcript, omitted
 }
 
 func completedPromptResultText(terminal *harnessv2.Event, streamed string, streamedOverflow bool) (string, error) {

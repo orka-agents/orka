@@ -156,6 +156,7 @@ type streamText struct {
 	runes                 int
 	overflow              bool
 	multipleBlocksOmitted bool
+	startPersisted        bool
 	title                 string
 	kind                  string
 	lastEvent             harnessv2.Event
@@ -436,11 +437,23 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		return nil, false, nil
 	}
 	if isBufferedToolContentUpdate(event) {
-		// Keep streamed output in the accumulator, but do not emit an unbounded
-		// series of ToolCallStarted events. The terminal tool event or prompt
-		// stream closure receives the complete, redacted text.
-		s.markProcessed(identity)
-		return nil, false, nil
+		// Persist one metadata-free start so trace consumers retain the real
+		// start time, then buffer later content-bearing updates until closure.
+		if s.toolStartPersisted(event) {
+			s.markProcessed(identity)
+			return nil, false, nil
+		}
+		mapped, err = mapToolUpdateWithoutMetadata(event, s.journal.MapContext)
+		if err != nil {
+			return nil, false, err
+		}
+		appended, isNew, err := s.appendMappedEvent(
+			ctx, identity, mappedJournalRecordUpdate, mapped, "append mapped harness v2 update",
+		)
+		if err == nil {
+			s.markToolStartPersisted(event)
+		}
+		return appended, isNew, err
 	}
 	if contentText, truncated, multipleBlocksOmitted, title, kind, ok := s.finishToolUpdate(event); ok {
 		mappedEvent := withBufferedToolMetadata(event, title, kind)
@@ -464,13 +477,17 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 			return nil, false, err
 		}
 	}
-	return s.appendMappedEvent(
+	appended, isNew, err := s.appendMappedEvent(
 		ctx, identity, mappedJournalRecordUpdate, mapped, "append mapped harness v2 update",
 	)
+	if err == nil && isNonTerminalToolUpdate(event) {
+		s.markToolStartPersisted(event)
+	}
+	return appended, isNew, err
 }
 
 func isBufferedToolContentUpdate(event harnessv2.Event) bool {
-	if event.Update == nil || event.Update.Kind != harnessv2.UpdateToolCallUpdate || event.Update.ToolCall == nil {
+	if event.Update == nil || event.Update.ToolCall == nil {
 		return false
 	}
 	tool := event.Update.ToolCall
@@ -485,6 +502,23 @@ func isNonTerminalToolUpdate(event harnessv2.Event) bool {
 	}
 	status := event.Update.ToolCall.Status
 	return status != harnessv2.ToolCallStatusCompleted && status != harnessv2.ToolCallStatusFailed
+}
+
+func (s *State) toolStartPersisted(event harnessv2.Event) bool {
+	if s == nil || event.Update == nil || event.Update.ToolCall == nil {
+		return false
+	}
+	accumulator := s.toolText[event.Update.ToolCall.ToolCallID]
+	return accumulator != nil && accumulator.startPersisted
+}
+
+func (s *State) markToolStartPersisted(event harnessv2.Event) {
+	if s == nil || event.Update == nil || event.Update.ToolCall == nil {
+		return
+	}
+	if accumulator := s.toolText[event.Update.ToolCall.ToolCallID]; accumulator != nil {
+		accumulator.startPersisted = true
+	}
 }
 
 // AppendAssistantTranscriptIfNew persists a complete terminal transcript as
