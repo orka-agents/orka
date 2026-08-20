@@ -2,6 +2,7 @@ package eventjournal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -131,12 +132,7 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 			return nil, false, err
 		}
 	}
-	appended, err := s.journal.EventStore.AppendExecutionEvent(ctx, mapped)
-	if err != nil {
-		return nil, false, fmt.Errorf("append mapped harness v2 update: %w", err)
-	}
-	s.keys[key] = struct{}{}
-	return appended, true, nil
+	return s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 update")
 }
 
 // AppendAssistantTranscriptIfNew persists a complete terminal transcript as
@@ -161,12 +157,86 @@ func (s *State) AppendAssistantTranscriptIfNew(
 	if err != nil {
 		return nil, false, err
 	}
+	return s.appendMappedEvent(ctx, key, mapped, "append mapped harness v2 assistant transcript")
+}
+
+// appendMappedEvent reconciles an append error against the durable stream
+// before retrying. The execution-event store does not expose an idempotency
+// key, so an error may be returned after the event committed. Readback avoids
+// duplicating that ambiguous write; one retry is allowed only after absence is
+// confirmed, and a second readback reconciles an ambiguous retry.
+func (s *State) appendMappedEvent(
+	ctx context.Context,
+	key string,
+	mapped *store.ExecutionEvent,
+	operation string,
+) (*store.ExecutionEvent, bool, error) {
 	appended, err := s.journal.EventStore.AppendExecutionEvent(ctx, mapped)
-	if err != nil {
-		return nil, false, fmt.Errorf("append mapped harness v2 assistant transcript: %w", err)
+	if err == nil {
+		s.keys[key] = struct{}{}
+		return appended, true, nil
 	}
-	s.keys[key] = struct{}{}
-	return appended, true, nil
+	firstErr := fmt.Errorf("%s: %w", operation, err)
+	persisted, reconcileErr := s.journal.hasPersistedIdentity(ctx, key)
+	if reconcileErr != nil {
+		return nil, false, errors.Join(firstErr, fmt.Errorf("reconcile failed append: %w", reconcileErr))
+	}
+	if persisted {
+		s.keys[key] = struct{}{}
+		return nil, false, nil
+	}
+
+	appended, err = s.journal.EventStore.AppendExecutionEvent(ctx, mapped)
+	if err == nil {
+		s.keys[key] = struct{}{}
+		return appended, true, nil
+	}
+	retryErr := fmt.Errorf("%s retry: %w", operation, err)
+	persisted, reconcileErr = s.journal.hasPersistedIdentity(ctx, key)
+	if reconcileErr != nil {
+		return nil, false, errors.Join(firstErr, retryErr, fmt.Errorf("reconcile failed append retry: %w", reconcileErr))
+	}
+	if persisted {
+		s.keys[key] = struct{}{}
+		return nil, false, nil
+	}
+	return nil, false, errors.Join(firstErr, retryErr)
+}
+
+func (j Journal) hasPersistedIdentity(ctx context.Context, key string) (bool, error) {
+	mapCtx := j.MapContext.normalized()
+	var afterSeq int64
+	for {
+		listed, err := j.EventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+			Namespace:  mapCtx.Namespace,
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   mapCtx.StreamID,
+			AfterSeq:   afterSeq,
+			Limit:      store.MaxExecutionEventLimit,
+		})
+		if err != nil {
+			return false, fmt.Errorf("list mapped harness v2 updates: %w", err)
+		}
+		if len(listed) == 0 {
+			return false, nil
+		}
+		nextSeq := afterSeq
+		for _, event := range listed {
+			if event.Seq > nextSeq {
+				nextSeq = event.Seq
+			}
+			if identity, ok := MappedUpdateIdentityFromEvent(event); ok && identity.Key() == key {
+				return true, nil
+			}
+		}
+		if len(listed) < store.MaxExecutionEventLimit {
+			return false, nil
+		}
+		if nextSeq <= afterSeq {
+			return false, fmt.Errorf("mapped harness v2 update scan did not advance after sequence %d", afterSeq)
+		}
+		afterSeq = nextSeq
+	}
 }
 
 func (s *State) aggregateToolText(event harnessv2.Event, key string) {

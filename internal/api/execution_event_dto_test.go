@@ -8,6 +8,7 @@ package api
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,6 +136,25 @@ func TestExecutionEventResponseClampsUint64UsageToPlatformInt(t *testing.T) {
 	})
 	if response.InputTokens != int(^uint(0)>>1) || response.OutputTokens != 2 || response.CachedInputTokens != 1 {
 		t.Fatalf("usage tokens = %d/%d cached=%d", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
+	}
+}
+
+func TestExecutionEventResponseAcceptsIntegralJSONNumberEncodings(t *testing.T) {
+	response := NewExecutionEventResponse(store.ExecutionEvent{
+		Type: events.ExecutionEventTypeModelUsageUpdated,
+		Content: json.RawMessage(`{
+			"inputTokens":123.0,
+			"outputTokens":1e3,
+			"cachedInputTokens":1.5,
+			"contextWindowUsed":-1,
+			"contextWindowSize":1e100
+		}`),
+	})
+	if response.InputTokens != 123 || response.OutputTokens != 1000 || response.CachedInputTokens != 0 {
+		t.Fatalf("integral/fractional token encodings = %d/%d/%d", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
+	}
+	if response.ContextWindowUsed != 0 || response.ContextWindowSize != math.MaxInt {
+		t.Fatalf("bounded context encodings = %d/%d", response.ContextWindowUsed, response.ContextWindowSize)
 	}
 }
 

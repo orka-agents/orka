@@ -11,8 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"strconv"
-	"strings"
+	"math/big"
 	"time"
 
 	"github.com/orka-agents/orka/internal/events"
@@ -343,14 +342,14 @@ func intField(body map[string]any, keys ...string) int {
 				}
 				return typed
 			case json.Number:
-				if strings.HasPrefix(typed.String(), "-") {
+				rational, ok := new(big.Rat).SetString(typed.String())
+				if !ok || rational.Sign() <= 0 || !rational.IsInt() {
 					return 0
 				}
-				if value, err := strconv.ParseInt(typed.String(), 10, strconv.IntSize); err == nil {
-					return int(value)
-				} else if numErr, ok := err.(*strconv.NumError); ok && numErr.Err == strconv.ErrRange {
+				if !rational.Num().IsInt64() || rational.Num().Int64() >= int64(math.MaxInt) {
 					return math.MaxInt
 				}
+				return int(rational.Num().Int64())
 			}
 		}
 	}

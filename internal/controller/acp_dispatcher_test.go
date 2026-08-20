@@ -95,6 +95,53 @@ func TestCompletedPromptResultTextPrefersTerminalContent(t *testing.T) {
 	}
 }
 
+func TestSaveACPPlanUpdateWithRetry(t *testing.T) {
+	t.Run("transient failure", func(t *testing.T) {
+		planStore := &retryPlanStore{saveErrors: []error{errors.New("transient")}}
+		plan := &store.PlanState{TaskName: "task", Namespace: "default", Summary: "working"}
+		if err := saveACPPlanUpdateWithRetry(context.Background(), planStore, "default", "task", plan); err != nil {
+			t.Fatalf("save plan with retry: %v", err)
+		}
+		if planStore.saveCalls != 2 || planStore.lastPlan != plan {
+			t.Fatalf("save calls = %d plan=%p, want 2 and %p", planStore.saveCalls, planStore.lastPlan, plan)
+		}
+	})
+
+	t.Run("persistent failure", func(t *testing.T) {
+		firstErr := errors.New("first")
+		retryErr := errors.New("retry")
+		planStore := &retryPlanStore{saveErrors: []error{firstErr, retryErr}}
+		err := saveACPPlanUpdateWithRetry(context.Background(), planStore, "default", "task", &store.PlanState{})
+		if !errors.Is(err, firstErr) || !errors.Is(err, retryErr) {
+			t.Fatalf("persistent save error = %v", err)
+		}
+		if planStore.saveCalls != 2 {
+			t.Fatalf("save calls = %d, want 2", planStore.saveCalls)
+		}
+	})
+}
+
+type retryPlanStore struct {
+	saveErrors []error
+	saveCalls  int
+	lastPlan   *store.PlanState
+}
+
+func (s *retryPlanStore) SavePlan(_ context.Context, _, _ string, plan *store.PlanState) error {
+	s.lastPlan = plan
+	s.saveCalls++
+	if s.saveCalls <= len(s.saveErrors) {
+		return s.saveErrors[s.saveCalls-1]
+	}
+	return nil
+}
+
+func (*retryPlanStore) GetPlan(context.Context, string, string) (*store.PlanState, error) {
+	return nil, store.ErrNotFound
+}
+
+func (*retryPlanStore) DeletePlan(context.Context, string, string) error { return nil }
+
 func prepareBoundACPDispatcherTaskForTest(
 	t *testing.T,
 	ctx context.Context,

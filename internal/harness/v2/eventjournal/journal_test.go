@@ -2,6 +2,7 @@ package eventjournal
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +62,145 @@ func TestJournalDeduplicatesWithinPassAndAcrossRecovery(t *testing.T) {
 	}
 	if len(listed) != 2 {
 		t.Fatalf("persisted events = %d, want 2", len(listed))
+	}
+}
+
+func TestJournalRetriesAppendOnlyAfterConfirmedAbsence(t *testing.T) {
+	ctx := context.Background()
+	base := storetest.NewFakeExecutionEventStore()
+	eventStore := &faultingAppendEventStore{
+		ExecutionEventStore: base,
+		faults:              []appendFault{{err: errors.New("transient append failure")}},
+	}
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 10},
+	})
+	appended, isNew, err := state.AppendUpdateIfNew(ctx, event)
+	if err != nil || !isNew || appended == nil {
+		t.Fatalf("recovered append = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if eventStore.appendCalls != 2 {
+		t.Fatalf("append calls = %d, want 2", eventStore.appendCalls)
+	}
+	if listed := listJournalEvents(t, ctx, base); len(listed) != 1 {
+		t.Fatalf("persisted events = %d, want 1", len(listed))
+	}
+}
+
+func TestJournalReconcilesAmbiguousCommittedAppendWithoutDuplicate(t *testing.T) {
+	ctx := context.Background()
+	base := storetest.NewFakeExecutionEventStore()
+	eventStore := &faultingAppendEventStore{
+		ExecutionEventStore: base,
+		faults: []appendFault{{
+			persistBeforeError: true,
+			err:                errors.New("append response lost"),
+		}},
+	}
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 10},
+	})
+	appended, isNew, err := state.AppendUpdateIfNew(ctx, event)
+	if err != nil || isNew || appended != nil {
+		t.Fatalf("ambiguous append = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if eventStore.appendCalls != 1 {
+		t.Fatalf("append calls = %d, want 1", eventStore.appendCalls)
+	}
+	if !state.HasUpdate(event) {
+		t.Fatal("journal did not remember reconciled update")
+	}
+	if listed := listJournalEvents(t, ctx, base); len(listed) != 1 {
+		t.Fatalf("persisted events = %d, want 1", len(listed))
+	}
+}
+
+func TestJournalReconcilesAmbiguousCommittedRetryWithoutDuplicate(t *testing.T) {
+	ctx := context.Background()
+	base := storetest.NewFakeExecutionEventStore()
+	eventStore := &faultingAppendEventStore{
+		ExecutionEventStore: base,
+		faults: []appendFault{
+			{err: errors.New("transient append failure")},
+			{persistBeforeError: true, err: errors.New("retry response lost")},
+		},
+	}
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 10},
+	})
+	appended, isNew, err := state.AppendUpdateIfNew(ctx, event)
+	if err != nil || isNew || appended != nil {
+		t.Fatalf("ambiguous retry = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if eventStore.appendCalls != 2 {
+		t.Fatalf("append calls = %d, want 2", eventStore.appendCalls)
+	}
+	if listed := listJournalEvents(t, ctx, base); len(listed) != 1 {
+		t.Fatalf("persisted events = %d, want 1", len(listed))
+	}
+}
+
+func TestJournalReturnsPersistentAppendFailureAfterOneRetry(t *testing.T) {
+	ctx := context.Background()
+	base := storetest.NewFakeExecutionEventStore()
+	eventStore := &faultingAppendEventStore{
+		ExecutionEventStore: base,
+		faults: []appendFault{
+			{err: errors.New("first append failure")},
+			{err: errors.New("retry append failure")},
+		},
+	}
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 10},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err == nil || isNew || appended != nil {
+		t.Fatalf("persistent append = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if eventStore.appendCalls != 2 {
+		t.Fatalf("append calls = %d, want 2", eventStore.appendCalls)
+	}
+	if state.HasUpdate(event) {
+		t.Fatal("journal remembered an update that was never persisted")
+	}
+}
+
+func TestJournalDoesNotRetryWhenAppendAbsenceCannotBeConfirmed(t *testing.T) {
+	ctx := context.Background()
+	base := storetest.NewFakeExecutionEventStore()
+	eventStore := &faultingAppendEventStore{
+		ExecutionEventStore: base,
+		faults:              []appendFault{{err: errors.New("append failure")}},
+		listFaultAt:         2,
+		listErr:             errors.New("readback failure"),
+	}
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 10},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err == nil || isNew || appended != nil {
+		t.Fatalf("unreconciled append = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if eventStore.appendCalls != 1 {
+		t.Fatalf("append calls = %d, want 1", eventStore.appendCalls)
 	}
 }
 
@@ -206,4 +346,46 @@ func listJournalEvents(t *testing.T, ctx context.Context, eventStore store.Execu
 		t.Fatal(err)
 	}
 	return listed
+}
+
+type appendFault struct {
+	persistBeforeError bool
+	err                error
+}
+
+type faultingAppendEventStore struct {
+	store.ExecutionEventStore
+	faults      []appendFault
+	appendCalls int
+	listFaultAt int
+	listErr     error
+	listCalls   int
+}
+
+func (s *faultingAppendEventStore) AppendExecutionEvent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+) (*store.ExecutionEvent, error) {
+	s.appendCalls++
+	if s.appendCalls <= len(s.faults) {
+		fault := s.faults[s.appendCalls-1]
+		if fault.persistBeforeError {
+			if _, err := s.ExecutionEventStore.AppendExecutionEvent(ctx, event); err != nil {
+				return nil, err
+			}
+		}
+		return nil, fault.err
+	}
+	return s.ExecutionEventStore.AppendExecutionEvent(ctx, event)
+}
+
+func (s *faultingAppendEventStore) ListExecutionEvents(
+	ctx context.Context,
+	filter store.ExecutionEventFilter,
+) ([]store.ExecutionEvent, error) {
+	s.listCalls++
+	if s.listCalls == s.listFaultAt {
+		return nil, s.listErr
+	}
+	return s.ExecutionEventStore.ListExecutionEvents(ctx, filter)
 }

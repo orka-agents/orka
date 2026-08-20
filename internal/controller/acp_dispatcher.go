@@ -1154,6 +1154,35 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 	}
 
+	agentName := ""
+	if task.Status.AgentExecutionBinding != nil && task.Status.AgentExecutionBinding.Agent != nil {
+		agentName = task.Status.AgentExecutionBinding.Agent.Name
+	} else if task.Spec.AgentRef != nil {
+		agentName = task.Spec.AgentRef.Name
+	}
+	journalState, err := (v2eventjournal.Journal{
+		EventStore: d.EventStore,
+		MapContext: v2eventjournal.MapContext{
+			Namespace: task.Namespace, TaskName: task.Name, SessionName: taskSessionName(task),
+			AgentName: agentName, StreamID: task.Name, Provider: profile.ProviderKind, Model: profile.Model,
+		},
+	}).Open(ctx)
+	if err != nil {
+		return fmt.Errorf("open ACP execution event journal: %w", err)
+	}
+	logTelemetryFailure := func(operation string, err error) {
+		if err == nil {
+			return
+		}
+		logf.FromContext(ctx).Error(
+			err,
+			"persist ACP execution telemetry",
+			"operation", operation,
+			"namespace", task.Namespace,
+			"task", task.Name,
+		)
+	}
+
 	if err := d.openTaskSessionTurn(runtimeCtx, task, attemptID, fence, sessionExecution); err != nil {
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 			return deadlineErr
@@ -1181,22 +1210,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	assistantOverflow := false
 	accepted := false
 	admissionRetry := 0
-	agentName := ""
-	if task.Status.AgentExecutionBinding != nil && task.Status.AgentExecutionBinding.Agent != nil {
-		agentName = task.Status.AgentExecutionBinding.Agent.Name
-	} else if task.Spec.AgentRef != nil {
-		agentName = task.Spec.AgentRef.Name
-	}
-	journalState, err := (v2eventjournal.Journal{
-		EventStore: d.EventStore,
-		MapContext: v2eventjournal.MapContext{
-			Namespace: task.Namespace, TaskName: task.Name, SessionName: taskSessionName(task),
-			AgentName: agentName, StreamID: task.Name, Provider: profile.ProviderKind, Model: profile.Model,
-		},
-	}).Open(ctx)
-	if err != nil {
-		return fmt.Errorf("open ACP execution event journal: %w", err)
-	}
 	for {
 		promptRequest, err := d.buildPromptRequest(
 			task, runtimeFence, profile, mcpConfiguration, bootstrap, userPrompt, admissionRetry,
@@ -1254,16 +1267,16 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				}
 				if event.Update != nil && event.Update.Plan != nil && !journalState.HasUpdate(event) {
 					projection := v2eventjournal.ProjectPlanUpdate(*event.Update.Plan)
-					if err := d.PlanStore.SavePlan(ctx, task.Namespace, task.Name, &store.PlanState{
+					if err := saveACPPlanUpdateWithRetry(ctx, d.PlanStore, task.Namespace, task.Name, &store.PlanState{
 						TaskName: task.Name, Namespace: task.Namespace, Iteration: int(task.Status.Iteration),
 						Summary: projection.Summary, ProgressPct: projection.ProgressPct,
 						GoalComplete: projection.GoalComplete, PlanDocument: projection.Document,
 					}); err != nil {
-						return fmt.Errorf("save ACP plan update: %w", err)
+						logTelemetryFailure("plan", err)
 					}
 				}
 				if _, _, err := journalState.AppendUpdateIfNew(ctx, event); err != nil {
-					return err
+					logTelemetryFailure("execution-event", err)
 				}
 			case harnessv2.EventPermissionRequested:
 				return d.resolvePromptPermission(runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, event)
@@ -1318,7 +1331,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if terminal.Type != harnessv2.EventCompleted {
 		if !assistantOverflow {
 			if _, _, err := journalState.AppendAssistantTranscriptIfNew(ctx, *terminal, assistant.String()); err != nil {
-				return err
+				logTelemetryFailure("assistant-transcript", err)
 			}
 		}
 		return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal)
@@ -1342,7 +1355,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return err
 	}
 	if _, _, err := journalState.AppendAssistantTranscriptIfNew(ctx, *terminal, resultText); err != nil {
-		return err
+		logTelemetryFailure("assistant-transcript", err)
 	}
 	if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryNotRequested, store.PromptDeliveryValidating, "validate-workspace", ""); err != nil {
 		return err
@@ -1551,6 +1564,24 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 	}
 	return d.completeSuccessWithDelivery(ctx, task, deliveryStatus, "ACP task completed")
+}
+
+func saveACPPlanUpdateWithRetry(
+	ctx context.Context,
+	planStore store.PlanStore,
+	namespace,
+	taskName string,
+	plan *store.PlanState,
+) error {
+	if err := planStore.SavePlan(ctx, namespace, taskName, plan); err != nil {
+		if retryErr := planStore.SavePlan(ctx, namespace, taskName, plan); retryErr != nil {
+			return errors.Join(
+				fmt.Errorf("save ACP plan update: %w", err),
+				fmt.Errorf("retry ACP plan update: %w", retryErr),
+			)
+		}
+	}
+	return nil
 }
 
 func completedPromptResultText(terminal *harnessv2.Event, streamed string, streamedOverflow bool) (string, error) {
