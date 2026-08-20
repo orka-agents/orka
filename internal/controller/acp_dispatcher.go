@@ -4025,8 +4025,6 @@ func promptStreamDiagnostic(err error) string {
 	switch {
 	case err == nil:
 		return "no stream error"
-	case errors.Is(err, v2eventjournal.ErrToolBufferLimitExceeded):
-		return "execution event tool aggregation exceeded its bounded buffer"
 	case errors.As(err, &persistenceErr):
 		return "local execution update persistence failed"
 	case errors.Is(err, harnessv2.ErrEventLineTooLarge):

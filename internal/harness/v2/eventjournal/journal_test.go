@@ -759,9 +759,10 @@ func TestJournalOmitsOversizedToolStreamContent(t *testing.T) {
 	}
 }
 
-func TestJournalRejectsTooManyOpenToolAccumulators(t *testing.T) {
+func TestJournalOmitsExcessOpenToolAccumulatorWithoutFailingPrompt(t *testing.T) {
 	ctx := context.Background()
-	state, err := (Journal{EventStore: storetest.NewFakeExecutionEventStore(), MapContext: testMapContext()}).Open(ctx)
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,9 +785,23 @@ func TestJournalRejectsTooManyOpenToolAccumulators(t *testing.T) {
 		},
 	})
 	for attempt := range 2 {
-		if _, _, err := state.AppendUpdateIfNew(ctx, overflow); !errors.Is(err, ErrToolBufferLimitExceeded) {
-			t.Fatalf("open-tool overflow attempt %d error = %v", attempt, err)
+		if appended, isNew, err := state.AppendUpdateIfNew(ctx, overflow); err != nil || isNew || appended != nil {
+			t.Fatalf("open-tool overflow attempt %d = %#v new=%t err=%v", attempt, appended, isNew, err)
 		}
+	}
+	if len(state.toolText) != maxOpenToolAccumulators {
+		t.Fatalf("open tool accumulators = %d, want %d", len(state.toolText), maxOpenToolAccumulators)
+	}
+
+	terminal := testUpdateEvent(uint64(maxOpenToolAccumulators+3), now.Add(2*time.Second), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-open-overflow", Kind: "shell", Status: harnessv2.ToolCallStatusCompleted,
+		},
+	})
+	completed, isNew, err := state.AppendUpdateIfNew(ctx, terminal)
+	if err != nil || !isNew || completed == nil || completed.Type != executionevents.ExecutionEventTypeToolCallCompleted {
+		t.Fatalf("complete omitted open tool = %#v new=%t err=%v", completed, isNew, err)
 	}
 }
 
