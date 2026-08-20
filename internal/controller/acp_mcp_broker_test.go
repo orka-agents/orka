@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,12 +27,38 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	storesqlite "github.com/orka-agents/orka/internal/store/sqlite"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 var apiextensionsJSONForMCPTest = apiextensionsv1.JSON{Raw: json.RawMessage(`{"type":"object"}`)}
+
+const acpMCPTestOKBody = `{"ok":true}`
+
+type recordingContextTokenExchanger struct {
+	calls   atomic.Int32
+	request contexttoken.ExchangeRequest
+}
+
+func (e *recordingContextTokenExchanger) Exchange(_ context.Context, request contexttoken.ExchangeRequest) (string, error) {
+	e.calls.Add(1)
+	e.request = request
+	return "exchanged-transaction-token", nil
+}
+
+func assertContextTokenExchange(t *testing.T, exchanger *recordingContextTokenExchanger, subjectToken, scope string) {
+	t.Helper()
+	if calls := exchanger.calls.Load(); calls != 1 {
+		t.Fatalf("TTS exchanger calls = %d, want 1", calls)
+	}
+	if exchanger.request.SubjectToken != subjectToken || exchanger.request.Scope != scope {
+		t.Fatalf("TTS exchange subject = %q scope = %q", exchanger.request.SubjectToken, exchanger.request.Scope)
+	}
+}
 
 func TestRegistryACPMCPToolExecutorReusesCustomToolExecutorWithIdempotency(t *testing.T) {
 	request, _ := testMCPBrokerRequest(t, harnessv2.MCPToolEffectConsequential)
@@ -47,7 +74,7 @@ func TestRegistryACPMCPToolExecutorReusesCustomToolExecutorWithIdempotency(t *te
 			t.Fatalf("custom tool body = %#v err=%v", body, err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(acpMCPTestOKBody))
 	}))
 	defer upstream.Close()
 	tool := &corev1alpha1.Tool{
@@ -66,15 +93,22 @@ func TestRegistryACPMCPToolExecutorReusesCustomToolExecutorWithIdempotency(t *te
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool).Build()
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "task", Namespace: request.Namespace, UID: "task-uid",
+	}}
+	authenticated := ACPMCPAuthenticatedTask{
+		Name: task.Name, Namespace: task.Namespace, UID: string(task.UID),
+	}
+	ctx := withACPMCPAuthenticatedTask(context.Background(), authenticated)
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool, task).Build()
 	executor := RegistryACPMCPToolExecutor{
 		Reader: reader, KubeClient: k8sfake.NewSimpleClientset(), HTTPClient: upstream.Client(),
 	}
-	result, err := executor.ExecuteACPMCPTool(context.Background(), request, descriptor)
+	result, err := executor.ExecuteACPMCPTool(ctx, request, descriptor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(result) != `{"ok":true}` {
+	if string(result) != acpMCPTestOKBody {
 		t.Fatalf("custom tool result = %s", result)
 	}
 
@@ -82,7 +116,7 @@ func TestRegistryACPMCPToolExecutorReusesCustomToolExecutorWithIdempotency(t *te
 	changed.Spec.Description = "changed after authorization"
 	reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(changed).Build()
 	executor.Reader = reader
-	if _, err := executor.ExecuteACPMCPTool(context.Background(), request, descriptor); err == nil ||
+	if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err == nil ||
 		!strings.Contains(err.Error(), "changed after prompt authorization") {
 		t.Fatalf("descriptor drift error = %v", err)
 	}
@@ -97,7 +131,7 @@ func TestRegistryACPMCPToolExecutorBindsTaskTransactionAuthority(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lastTxnToken.Store(r.Header.Get("Txn-Token"))
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(acpMCPTestOKBody))
 	}))
 	defer upstream.Close()
 	tool := &corev1alpha1.Tool{
@@ -151,10 +185,89 @@ func TestRegistryACPMCPToolExecutorBindsTaskTransactionAuthority(t *testing.T) {
 	authorizedTask := newTask([]string{"orka:secrets:credentials:read"}, "tool-credential", "")
 	ctx := withACPMCPAuthenticatedTask(context.Background(), authenticated)
 
-	t.Run("enforcement off preserves current behavior without task authority", func(t *testing.T) {
-		executor := newExecutor(false)
-		if _, err := executor.ExecuteACPMCPTool(context.Background(), request, descriptor); err != nil {
+	t.Run("enforcement off still binds task transaction authority", func(t *testing.T) {
+		t.Setenv(workerenv.ContextTokenOutboundScope, "")
+		t.Setenv(workerenv.TransactionScope, "controller.scope")
+		t.Setenv(workerenv.TransactionScopes, "controller.scope")
+		tokenSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "task-txn-token-off", Namespace: request.Namespace,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task",
+					Name: authenticated.Name, UID: "task-uid",
+				}},
+			},
+			Data: map[string][]byte{"token": []byte("task-scoped-token-off")},
+		}
+		exchanger := &recordingContextTokenExchanger{}
+		executor := newExecutor(false,
+			newTask([]string{"reports.read"}, "other-credential", tokenSecret.Name), tokenSecret)
+		executor.TransactionExchange = &workerexecutor.TransactionExchangeConfig{
+			TTS: contexttoken.TTSConfig{
+				Endpoint:    "https://tts.example.test/token",
+				TokenSource: contexttoken.TTSTokenSourceIncoming,
+			},
+			Exchanger: exchanger,
+		}
+		_, err := executor.ExecuteACPMCPTool(ctx, request, descriptor)
+		if err != nil {
 			t.Fatalf("enforcement-off execution error = %v", err)
+		}
+		if got, _ := lastTxnToken.Load().(string); got != "exchanged-transaction-token" {
+			t.Fatalf("enforcement-off Txn-Token header = %q, want exchanged task authority", got)
+		}
+		assertContextTokenExchange(t, exchanger, "task-scoped-token-off", "reports.read")
+	})
+	t.Run("enforcement off blanks controller ambient transaction authority", func(t *testing.T) {
+		ambientTokenFile := filepath.Join(t.TempDir(), "controller-transaction-token")
+		if err := os.WriteFile(ambientTokenFile, []byte("controller-ambient-token"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(workerenv.TransactionTokenFile, ambientTokenFile)
+		t.Setenv(workerenv.TransactionScope, "controller.scope")
+		t.Setenv(workerenv.TransactionScopes, "controller.scope")
+		task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+			Name: authenticated.Name, Namespace: authenticated.Namespace, UID: "task-uid",
+		}}
+		executor := newExecutor(false, task)
+		_, err := executor.ExecuteACPMCPTool(ctx, request, descriptor)
+		if err != nil {
+			t.Fatalf("enforcement-off execution error = %v", err)
+		}
+		if got, _ := lastTxnToken.Load().(string); got != "" {
+			t.Fatalf("enforcement-off Txn-Token header = %q, want no controller ambient token", got)
+		}
+	})
+	t.Run("enforcement off refuses controller ambient scopes and service account subject", func(t *testing.T) {
+		t.Setenv(workerenv.TransactionScope, "controller.scope")
+		t.Setenv(workerenv.TransactionScopes, "controller.scope")
+		t.Setenv(workerenv.ContextTokenOutboundScope, "controller.scope")
+		t.Setenv(workerenv.ServiceAccountToken, "controller-service-account-token")
+		task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+			Name: authenticated.Name, Namespace: authenticated.Namespace, UID: "task-uid",
+		}}
+		exchanger := &recordingContextTokenExchanger{}
+		executor := newExecutor(false, task)
+		executor.TransactionExchange = &workerexecutor.TransactionExchangeConfig{
+			TTS: contexttoken.TTSConfig{
+				Endpoint:    "https://tts.example.test/token",
+				TokenSource: contexttoken.TTSTokenSourceServiceAccount,
+			},
+			Exchanger: exchanger,
+		}
+		if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err == nil ||
+			!strings.Contains(err.Error(), "parent transaction scopes are required") {
+			t.Fatalf("controller ambient authority error = %v", err)
+		}
+		if calls := exchanger.calls.Load(); calls != 0 {
+			t.Fatalf("controller service account subject reached TTS exchanger %d times: %#v", calls, exchanger.request)
+		}
+	})
+	t.Run("missing authenticated task fails closed without enforcement", func(t *testing.T) {
+		executor := newExecutor(false, authorizedTask.DeepCopy())
+		if _, err := executor.ExecuteACPMCPTool(context.Background(), request, descriptor); err == nil ||
+			!strings.Contains(err.Error(), "task authority is unavailable") {
+			t.Fatalf("missing authenticated task error = %v", err)
 		}
 	})
 	t.Run("missing authenticated task fails closed under enforcement", func(t *testing.T) {
@@ -202,7 +315,7 @@ func TestRegistryACPMCPToolExecutorBindsTaskTransactionAuthority(t *testing.T) {
 		if err != nil {
 			t.Fatalf("authorized execution error = %v", err)
 		}
-		if string(result) != `{"ok":true}` {
+		if string(result) != acpMCPTestOKBody {
 			t.Fatalf("authorized result = %s", result)
 		}
 		if got, _ := lastTxnToken.Load().(string); got != "task-scoped-token" {
@@ -384,7 +497,7 @@ func TestACPMCPBrokerRejectsAuthFenceProfileAndInactivePrompt(t *testing.T) {
 			return nil
 		}),
 		Executor: ACPMCPToolExecutorFunc(func(context.Context, harnessv2.MCPBrokerCallRequest, harnessv2.MCPToolDescriptor) (json.RawMessage, error) {
-			return json.RawMessage(`{"ok":true}`), nil
+			return json.RawMessage(acpMCPTestOKBody), nil
 		}),
 		Effects: effects,
 	}
