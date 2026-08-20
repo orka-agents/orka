@@ -790,7 +790,7 @@ func TestJournalRejectsTooManyOpenToolAccumulators(t *testing.T) {
 	}
 }
 
-func TestJournalRejectsAggregateToolContentOverflow(t *testing.T) {
+func TestJournalDegradesAggregateToolContentOverflow(t *testing.T) {
 	ctx := context.Background()
 	state, err := (Journal{EventStore: storetest.NewFakeExecutionEventStore(), MapContext: testMapContext()}).Open(ctx)
 	if err != nil {
@@ -818,8 +818,25 @@ func TestJournalRejectsAggregateToolContentOverflow(t *testing.T) {
 			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: content}}, ContentReplace: true,
 		},
 	})
-	if _, _, err := state.AppendUpdateIfNew(ctx, overflow); !errors.Is(err, ErrToolBufferLimitExceeded) {
-		t.Fatalf("aggregate tool overflow error = %v", err)
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, overflow); err != nil || isNew || appended != nil {
+		t.Fatalf("aggregate tool overflow = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if state.toolBufferedBytes > maxBufferedToolContentBytes {
+		t.Fatalf("buffered tool bytes = %d, max %d", state.toolBufferedBytes, maxBufferedToolContentBytes)
+	}
+	terminal := testUpdateEvent(101, now.Add(2*time.Second), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-buffer-overflow", Status: harnessv2.ToolCallStatusCompleted,
+		},
+	})
+	completed, isNew, err := state.AppendUpdateIfNew(ctx, terminal)
+	if err != nil || !isNew || completed == nil {
+		t.Fatalf("complete overflowed tool = %#v new=%t err=%v", completed, isNew, err)
+	}
+	if completed.ContentText != "" || completed.Truncation == nil || !completed.Truncation.ContentTextTruncated ||
+		!strings.Contains(string(completed.Content), "streamed_text_exceeded_journal_limit") {
+		t.Fatalf("degraded tool completion = %#v", completed)
 	}
 }
 

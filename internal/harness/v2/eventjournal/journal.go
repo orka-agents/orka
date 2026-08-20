@@ -67,9 +67,7 @@ func (s *streamText) append(value string) {
 		// A truncated prefix cannot be redacted safely when a credential spans
 		// the cutoff. Discard all buffered text and persist only truncation
 		// metadata when the tool reaches a terminal update.
-		s.text.Reset()
-		s.runes = 0
-		s.overflow = true
+		s.omitForOverflow()
 		return
 	}
 	s.text.WriteString(value)
@@ -95,6 +93,16 @@ func (s *streamText) omitMultipleBlocks() {
 	s.runes = 0
 	s.overflow = false
 	s.multipleBlocksOmitted = true
+}
+
+func (s *streamText) omitForOverflow() {
+	if s == nil {
+		return
+	}
+	s.text.Reset()
+	s.runes = 0
+	s.overflow = true
+	s.multipleBlocksOmitted = false
 }
 
 // HasUpdate reports whether event was already persisted or appended during
@@ -519,10 +527,9 @@ func (s *State) aggregateToolUpdate(event harnessv2.Event, key string) error {
 	}
 	s.toolBufferedBytes += accumulator.text.Len() - beforeBytes
 	if s.toolBufferedBytes > maxBufferedToolContentBytes {
-		s.bufferErr = fmt.Errorf(
-			"%w: buffered tool content exceeds %d bytes", ErrToolBufferLimitExceeded, maxBufferedToolContentBytes,
-		)
-		return s.bufferErr
+		bufferedBytes := accumulator.text.Len()
+		accumulator.omitForOverflow()
+		s.toolBufferedBytes -= bufferedBytes
 	}
 	return nil
 }
