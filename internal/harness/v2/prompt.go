@@ -26,9 +26,23 @@ type ContentBlock struct {
 }
 
 func (b ContentBlock) Validate() error {
+	return b.validate(false)
+}
+
+// ValidateToolOutput validates a tool-output block while preserving non-empty
+// whitespace-only text deltas. Prompt and terminal-result content retain the
+// stricter non-whitespace requirement.
+func (b ContentBlock) ValidateToolOutput() error {
+	return b.validate(true)
+}
+
+func (b ContentBlock) validate(allowWhitespaceText bool) error {
 	switch b.Type {
 	case ContentBlockText:
-		if err := validateBoundedString("content text", b.Text, true, MaxPromptContentBytes); err != nil {
+		if b.Text == "" {
+			return fmt.Errorf("content text is required")
+		}
+		if err := validateBoundedString("content text", b.Text, !allowWhitespaceText, MaxPromptContentBytes); err != nil {
 			return err
 		}
 		if b.URI != "" || b.Artifact != nil {

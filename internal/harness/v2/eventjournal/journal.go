@@ -30,6 +30,8 @@ type streamText struct {
 	text     strings.Builder
 	runes    int
 	overflow bool
+	title    string
+	kind     string
 }
 
 func (s *streamText) append(value string) {
@@ -116,9 +118,9 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 	if err != nil {
 		return nil, false, err
 	}
-	s.aggregateToolText(event, key)
+	s.aggregateToolUpdate(event, key)
 	if s.HasUpdate(event) {
-		s.finishToolText(event)
+		s.finishToolUpdate(event)
 		return nil, false, nil
 	}
 	if event.Update.Kind == harnessv2.UpdateAssistantMessageChunk {
@@ -134,8 +136,14 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		s.keys[key] = struct{}{}
 		return nil, false, nil
 	}
-	if contentText, truncated, ok := s.finishToolText(event); ok {
-		mapped, err = mapToolUpdateWithContent(event, s.journal.MapContext, contentText, truncated)
+	if contentText, truncated, title, kind, ok := s.finishToolUpdate(event); ok {
+		mappedEvent := withBufferedToolMetadata(event, title, kind)
+		mapped, err = mapToolUpdateWithContent(mappedEvent, s.journal.MapContext, contentText, truncated)
+		if err != nil {
+			return nil, false, err
+		}
+	} else if isNonTerminalToolUpdate(event) {
+		mapped, err = mapToolUpdateWithoutMetadata(event, s.journal.MapContext)
 		if err != nil {
 			return nil, false, err
 		}
@@ -152,6 +160,14 @@ func isContentOnlyToolFragment(event harnessv2.Event) bool {
 		return false
 	}
 	return tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed
+}
+
+func isNonTerminalToolUpdate(event harnessv2.Event) bool {
+	if event.Update == nil || event.Update.ToolCall == nil {
+		return false
+	}
+	status := event.Update.ToolCall.Status
+	return status != harnessv2.ToolCallStatusCompleted && status != harnessv2.ToolCallStatusFailed
 }
 
 // AppendAssistantTranscriptIfNew persists a complete terminal transcript as
@@ -258,8 +274,8 @@ func (j Journal) hasPersistedIdentity(ctx context.Context, key string) (bool, er
 	}
 }
 
-func (s *State) aggregateToolText(event harnessv2.Event, key string) {
-	if event.Update == nil || event.Update.ToolCall == nil || len(event.Update.ToolCall.Content) == 0 {
+func (s *State) aggregateToolUpdate(event harnessv2.Event, key string) {
+	if event.Update == nil || event.Update.ToolCall == nil {
 		return
 	}
 	if _, ok := s.aggregatedKeys[key]; ok {
@@ -272,23 +288,49 @@ func (s *State) aggregateToolText(event harnessv2.Event, key string) {
 		accumulator = &streamText{}
 		s.toolText[toolID] = accumulator
 	}
-	accumulator.append(toolContentFragment(event.Update.ToolCall.Content))
+	tool := event.Update.ToolCall
+	if strings.TrimSpace(tool.Title) != "" {
+		accumulator.title = tool.Title
+	}
+	if strings.TrimSpace(tool.Kind) != "" {
+		accumulator.kind = tool.Kind
+	}
+	if len(tool.Content) > 0 {
+		accumulator.append(toolContentFragment(tool.Content))
+	}
 }
 
-func (s *State) finishToolText(event harnessv2.Event) (string, bool, bool) {
+func (s *State) finishToolUpdate(event harnessv2.Event) (string, bool, string, string, bool) {
 	if event.Update == nil || event.Update.ToolCall == nil {
-		return "", false, false
+		return "", false, "", "", false
 	}
 	tool := event.Update.ToolCall
 	if tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed {
-		return "", false, false
+		return "", false, "", "", false
 	}
 	accumulator, ok := s.toolText[tool.ToolCallID]
 	if !ok {
-		return "", false, false
+		return "", false, "", "", false
 	}
 	delete(s.toolText, tool.ToolCallID)
-	return accumulator.text.String(), accumulator.overflow, true
+	return accumulator.text.String(), accumulator.overflow, accumulator.title, accumulator.kind, true
+}
+
+func withBufferedToolMetadata(event harnessv2.Event, title, kind string) harnessv2.Event {
+	if event.Update == nil || event.Update.ToolCall == nil {
+		return event
+	}
+	update := *event.Update
+	tool := *event.Update.ToolCall
+	if strings.TrimSpace(tool.Title) == "" {
+		tool.Title = title
+	}
+	if strings.TrimSpace(tool.Kind) == "" {
+		tool.Kind = kind
+	}
+	update.ToolCall = &tool
+	event.Update = &update
+	return event
 }
 
 func toolContentFragment(blocks []harnessv2.ContentBlock) string {

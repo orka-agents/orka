@@ -11,6 +11,8 @@ import (
 
 var errTaskTimelineReadLimitExceeded = errors.New("task timeline read limit exceeded")
 
+const taskTimelineContextCompatibilityScanLimit = store.MaxExecutionEventLimit
+
 type taskTimelineReader struct {
 	eventStore store.ExecutionEventStore
 	namespace  string
@@ -114,7 +116,8 @@ func (r taskTimelineReader) listRecentContextThrough(ctx context.Context, throug
 		return nil, nil
 	}
 	out := make([]store.ExecutionEvent, 0, maxEvents)
-	var after int64
+	scanLimit := max(maxEvents, taskTimelineContextCompatibilityScanLimit)
+	after := max(throughSeq-int64(scanLimit), 0)
 	for {
 		batch, err := r.list(ctx, after, store.MaxExecutionEventLimit, nil)
 		if err != nil {

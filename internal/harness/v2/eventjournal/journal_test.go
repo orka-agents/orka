@@ -339,6 +339,61 @@ func TestJournalAggregatesContentOnlyToolFragmentsIntoTerminalEvent(t *testing.T
 	}
 }
 
+func TestJournalBuffersToolMetadataUntilTerminalEvent(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	credential := "sk-" + strings.Repeat("c", 24)
+	now := time.Now().UTC()
+	updates := []harnessv2.UpdateEvent{
+		{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-metadata", Title: credential[:10], Kind: "shell", Status: harnessv2.ToolCallStatusPending,
+		}},
+		{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-metadata", Title: credential[10:], Status: harnessv2.ToolCallStatusInProgress,
+		}},
+		{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-metadata", Title: "Finished safely", Status: harnessv2.ToolCallStatusCompleted,
+		}},
+	}
+	for index, update := range updates {
+		if _, isNew, err := state.AppendUpdateIfNew(
+			ctx,
+			testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), update),
+		); err != nil || !isNew {
+			t.Fatalf("append metadata update %d new=%t err=%v", index, isNew, err)
+		}
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 3 {
+		t.Fatalf("persisted tool events = %d, want 3", len(listed))
+	}
+	var persisted strings.Builder
+	for _, event := range listed {
+		persisted.WriteString(event.Summary)
+		persisted.WriteString(event.ToolName)
+		persisted.Write(event.Content)
+	}
+	if strings.Contains(persisted.String(), credential) || strings.Contains(persisted.String(), credential[:10]) ||
+		strings.Contains(persisted.String(), credential[10:]) {
+		t.Fatalf("streamed tool metadata remained reconstructable: %q", persisted.String())
+	}
+	for _, event := range listed[:2] {
+		if event.ToolName != "" || !strings.Contains(string(event.Content), "metadataOmitted") {
+			t.Fatalf("nonterminal tool metadata was persisted: %#v", event)
+		}
+	}
+	terminal := listed[2]
+	if terminal.ToolName != "shell" || terminal.Summary != "Finished safely" {
+		t.Fatalf("terminal tool metadata = %#v", terminal)
+	}
+}
+
 func TestJournalOmitsOversizedToolStream(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()

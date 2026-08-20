@@ -1168,7 +1168,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		},
 	}).Open(ctx)
 	if err != nil {
-		return fmt.Errorf("open ACP execution event journal: %w", err)
+		openErr := fmt.Errorf("open ACP execution event journal: %w", err)
+		if sessionExecution != nil {
+			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+				ctx, task, attemptID, fence, openErr, &sessionExecution.Binding,
+			); requeueErr != nil {
+				return errors.Join(openErr, requeueErr)
+			}
+			sessionExecution.requeued = true
+			return nil
+		}
+		return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, openErr)
 	}
 	logTelemetryFailure := func(operation string, err error) {
 		if err == nil {

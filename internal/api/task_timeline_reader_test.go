@@ -84,6 +84,29 @@ func TestTaskTimelineReaderListRecentContextThroughCoalescesAssistantChunksBefor
 	}
 }
 
+func TestTaskTimelineReaderListRecentContextThroughBoundsCompatibilityScan(t *testing.T) {
+	ctx := context.Background()
+	base := storetest.NewFakeExecutionEventStore()
+	appendReaderEvent(t, base, store.ExecutionEvent{
+		Seq: 10_000, Type: events.ExecutionEventTypeToolCallCompleted, Summary: "tool result",
+	})
+	appendReaderEvent(t, base, store.ExecutionEvent{Type: events.ExecutionEventTypePlanUpdated, Summary: "plan"})
+	eventStore := &recordingExecutionEventStore{ExecutionEventStore: base}
+	reader := newTaskTimelineReader(eventStore, defaultNamespace, "task-a")
+
+	listed, err := reader.listRecentContextThrough(ctx, 10_001, 3)
+	if err != nil {
+		t.Fatalf("listRecentContextThrough error = %v", err)
+	}
+	if len(listed) != 2 || len(eventStore.filters) == 0 {
+		t.Fatalf("bounded context events = %#v filters=%#v", listed, eventStore.filters)
+	}
+	wantAfter := int64(10_001 - taskTimelineContextCompatibilityScanLimit)
+	if eventStore.filters[0].AfterSeq != wantAfter {
+		t.Fatalf("first scan cursor = %d, want %d", eventStore.filters[0].AfterSeq, wantAfter)
+	}
+}
+
 func TestTaskTimelineReaderSeqExistsValidatesCheckpointRanges(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
@@ -153,4 +176,17 @@ func eventSeqs(values []store.ExecutionEvent) []int64 {
 		out = append(out, value.Seq)
 	}
 	return out
+}
+
+type recordingExecutionEventStore struct {
+	store.ExecutionEventStore
+	filters []store.ExecutionEventFilter
+}
+
+func (s *recordingExecutionEventStore) ListExecutionEvents(
+	ctx context.Context,
+	filter store.ExecutionEventFilter,
+) ([]store.ExecutionEvent, error) {
+	s.filters = append(s.filters, filter)
+	return s.ExecutionEventStore.ListExecutionEvents(ctx, filter)
 }

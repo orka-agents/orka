@@ -199,7 +199,7 @@ func (u ToolCallUpdate) Validate() error {
 		return fmt.Errorf("tool call content block count exceeds %d", MaxContentBlocks)
 	}
 	for i := range u.Content {
-		if err := u.Content[i].Validate(); err != nil {
+		if err := u.Content[i].ValidateToolOutput(); err != nil {
 			return fmt.Errorf("tool call content block %d: %w", i, err)
 		}
 	}

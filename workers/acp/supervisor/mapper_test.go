@@ -127,6 +127,24 @@ func TestMapACPUpdatePreservesContentOnlyToolCallUpdate(t *testing.T) {
 	}
 }
 
+func TestMapACPUpdatePreservesWhitespaceToolContent(t *testing.T) {
+	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
+		"sessionUpdate":"tool_call_update",
+		"toolCallId":"call-1",
+		"content":[{"type":"content","content":{"type":"text","text":" \n"}}]
+	}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || text != "" || update == nil || update.ToolCall == nil || len(update.ToolCall.Content) != 1 ||
+		update.ToolCall.Content[0].Text != " \n" {
+		t.Fatalf("mapped whitespace tool content = %#v text=%q ok=%v", update, text, ok)
+	}
+	if err := update.Validate(); err != nil {
+		t.Fatalf("whitespace tool update validation: %v", err)
+	}
+}
+
 func TestMapACPUpdateIgnoresStatuslessToolOutputDelta(t *testing.T) {
 	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
 		"sessionUpdate":"tool_call_update",

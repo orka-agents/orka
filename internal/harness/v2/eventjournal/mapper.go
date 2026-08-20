@@ -206,6 +206,7 @@ func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 type mapUpdateOptions struct {
 	toolContentText      *string
 	toolContentTruncated bool
+	omitToolMetadata     bool
 }
 
 // MapUpdate maps one validated harness v2 update to the public execution-event
@@ -258,18 +259,26 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 	case harnessv2.UpdateToolCall, harnessv2.UpdateToolCallUpdate:
 		tool := event.Update.ToolCall
 		mapped.ToolCallID = safeMappedToolCallID(tool.ToolCallID)
-		mapped.ToolName = strings.TrimSpace(tool.Kind)
-		mapped.ToolName, _, _ = executionevents.RedactAndTruncateExecutionEventText(mapped.ToolName, 128)
 		mapped.Type, mapped.Severity = toolCallEventType(tool.Status)
-		mapped.Summary = toolCallSummary(*tool)
-		if options.toolContentText != nil && strings.TrimSpace(tool.Title) == "" {
-			if summary := compactSummary(*options.toolContentText); summary != "" {
-				mapped.Summary = summary
+		if options.omitToolMetadata {
+			metadataFree := *tool
+			metadataFree.Title = ""
+			metadataFree.Kind = ""
+			mapped.Summary = toolCallSummary(metadataFree)
+			content["metadataOmitted"] = "streamed_metadata_pending_completion_redaction"
+		} else {
+			mapped.ToolName = strings.TrimSpace(tool.Kind)
+			mapped.ToolName, _, _ = executionevents.RedactAndTruncateExecutionEventText(mapped.ToolName, 128)
+			mapped.Summary = toolCallSummary(*tool)
+			if options.toolContentText != nil && strings.TrimSpace(tool.Title) == "" {
+				if summary := compactSummary(*options.toolContentText); summary != "" {
+					mapped.Summary = summary
+				}
 			}
+			content["title"] = tool.Title
+			content["toolKind"] = tool.Kind
 		}
 		content["toolCallID"] = mapped.ToolCallID
-		content["title"] = tool.Title
-		content["toolKind"] = tool.Kind
 		content["status"] = tool.Status
 		content["contentBlockCount"] = len(tool.Content)
 		if options.toolContentText != nil {
@@ -363,6 +372,10 @@ func mapToolUpdateWithContent(
 		toolContentText:      &contentText,
 		toolContentTruncated: contentTruncated,
 	})
+}
+
+func mapToolUpdateWithoutMetadata(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent, error) {
+	return mapUpdate(event, mapCtx, mapUpdateOptions{omitToolMetadata: true})
 }
 
 // MapAssistantTranscript maps the complete terminal assistant transcript as a

@@ -199,7 +199,7 @@ func projectACPContentBlock(block acp.ContentBlock) (harnessv2.ContentBlock, boo
 	default:
 		return projected, false, nil
 	}
-	if err := projected.Validate(); err != nil {
+	if err := projected.ValidateToolOutput(); err != nil {
 		return harnessv2.ContentBlock{}, false, err
 	}
 	return projected, true, nil
