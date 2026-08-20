@@ -100,6 +100,7 @@ func TestArtifactClientPreservesBrokerAuthorizationClassification(t *testing.T) 
 		{name: "transient broker outage", status: http.StatusServiceUnavailable, retryable: true, wantStatus: http.StatusServiceUnavailable, wantRetryable: true},
 		{name: "broker authorization denial", status: http.StatusForbidden, retryable: false, wantStatus: http.StatusForbidden, wantRetryable: false},
 		{name: "successful status error is normalized", status: http.StatusOK, retryable: false, wantStatus: http.StatusBadGateway, wantRetryable: true},
+		{name: "redirect status error is normalized", status: http.StatusTemporaryRedirect, retryable: false, wantStatus: http.StatusBadGateway, wantRetryable: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
