@@ -913,8 +913,10 @@ func (r *RuntimePoolReconciler) reconcileStoppedRuntimePoolRollout(
 ) (ctrl.Result, error) {
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 	if len(pods) > 0 {
+		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 		status.Message = "waiting for the drained old runtime Pod to terminate before applying the new Recreate template"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, "PodNotReady", status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonStopping, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}

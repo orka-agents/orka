@@ -842,6 +842,55 @@ func TestRuntimePoolReconcilerUnreadyRolloutPreservesSchedulingFailure(t *testin
 	}
 }
 
+func TestRuntimePoolReconcilerStoppedRolloutClearsObservedReadiness(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	deployment, pod := runtimePoolTestStartServing(t, r, pool, supervisor, "stopping-rollout-pod", "stopping-rollout-pod-uid", "10.0.0.84", "stopping-rollout-boot")
+
+	currentPod := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
+		t.Fatalf("get runtime Pod: %v", err)
+	}
+	currentPod.Finalizers = append(currentPod.Finalizers, "test.orka.ai/hold-termination")
+	if err := r.Update(context.Background(), currentPod); err != nil {
+		t.Fatalf("add runtime Pod test finalizer: %v", err)
+	}
+
+	r.ProviderProxy.BearerToken = bytes.Clone(runtimePoolTestProviderTokenNext)
+	runtimePoolReconcile(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "stopping-rollout-boot", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if got := ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name).Spec.Replicas, -1); got != 0 {
+		t.Fatalf("replicas after authenticated drain = %d, want 0", got)
+	}
+
+	if err := r.Delete(context.Background(), currentPod); err != nil {
+		t.Fatalf("delete old runtime Pod: %v", err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
+		t.Fatalf("get terminating runtime Pod: %v", err)
+	}
+	if currentPod.DeletionTimestamp.IsZero() {
+		t.Fatal("runtime Pod is not terminating")
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.ActiveInstance != nil {
+		t.Fatalf("active instance = %#v, want nil while the old runtime Pod terminates", status.ActiveInstance)
+	}
+	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != "PodNotReady" {
+		t.Fatalf("scheduling condition = %#v, want Unknown/PodNotReady", condition)
+	}
+	if got := runtimePoolReadyReplicas(status); got != 0 {
+		t.Fatalf("ready replicas = %d, want 0 while the old rollout Pod terminates", got)
+	}
+}
+
 func TestRuntimePoolReconcilerRolloutFailureAndTimeoutPreserveOldPod(t *testing.T) {
 	t.Run("drain request failure retries without template replacement", func(t *testing.T) {
 		scheme := runtimePoolTestScheme(t)
