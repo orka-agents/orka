@@ -100,6 +100,9 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 	if d.Client == nil || d.Store == nil || d.ResultStore == nil || d.EventStore == nil || d.PlanStore == nil || d.Snapshots == nil || d.Epochs == nil {
 		return fmt.Errorf("ACP dispatcher requires Kubernetes client, durable control store, result store, execution event store, plan store, immutable snapshot store, and epoch manager")
 	}
+	if _, ok := d.EventStore.(store.DeduplicatingExecutionEventStore); !ok {
+		return fmt.Errorf("ACP dispatcher requires an execution event store with atomic deduplication")
+	}
 	if d.APIReader == nil {
 		d.APIReader = d.Client
 	}

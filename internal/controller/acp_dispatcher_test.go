@@ -74,6 +74,33 @@ func dispatchQueuedTask(ctx context.Context, t *testing.T, dispatcher *ACPDispat
 	}
 }
 
+type baseOnlyExecutionEventStore struct {
+	store.ExecutionEventStore
+}
+
+func TestACPDispatcherStartRequiresAtomicEventDeduplication(t *testing.T) {
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "start-event-store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	persistence := sqlite.NewStore(db, "start-event-store-test")
+	dispatcher := &ACPDispatcher{
+		Client:      fake.NewClientBuilder().Build(),
+		Store:       persistence,
+		ResultStore: persistence,
+		EventStore:  baseOnlyExecutionEventStore{ExecutionEventStore: persistence},
+		PlanStore:   persistence,
+		Snapshots:   persistence,
+		Epochs:      NewControllerEpochManager(persistence, "start-event-store-controller"),
+	}
+
+	err = dispatcher.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "execution event store with atomic deduplication") {
+		t.Fatalf("Start() error = %v, want atomic deduplication requirement", err)
+	}
+}
+
 func TestCompletedPromptResultTextPrefersTerminalContent(t *testing.T) {
 	terminal := &harnessv2.Event{Completed: &harnessv2.CompletedEvent{Result: harnessv2.PromptResult{
 		Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: `{"schemaVersion":1,"ok":true}`}},
