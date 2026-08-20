@@ -317,7 +317,8 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "provider"); err != nil {
 		return err
 	}
-	provider, err := h.fetchProvider(c, c.Params("name"))
+	name := c.Params("name")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
 		return err
 	}
@@ -325,14 +326,62 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	if err := validateProviderRESTUpdate(req.Spec, provider.Spec); err != nil {
-		return err
+
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
 	}
-	// REST updates cannot set protected routing fields, but they also must not
-	// clear values that were created through the Kubernetes API/RBAC path.
-	req.Spec.BaseURL = provider.Spec.BaseURL
-	provider.Spec = req.Spec
-	if err := h.client.Update(c.Context(), provider); err != nil {
+	ctx := c.Context()
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+	var (
+		provider          *corev1alpha1.Provider
+		initialGeneration int64
+		initialSpec       *corev1alpha1.ProviderSpec
+		initialUID        types.UID
+	)
+	errProviderSpecChanged := errors.New("provider spec changed concurrently")
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Provider{}
+		if err := reader.Get(ctx, key, current); err != nil {
+			return err
+		}
+		if initialSpec == nil {
+			initialGeneration = current.Generation
+			initialSpec = current.Spec.DeepCopy()
+			initialUID = current.UID
+		} else if current.UID != initialUID ||
+			current.Generation != initialGeneration ||
+			!apiequality.Semantic.DeepEqual(current.Spec, *initialSpec) {
+			return errProviderSpecChanged
+		}
+		if err := validateProviderRESTUpdate(req.Spec, current.Spec); err != nil {
+			return err
+		}
+		// REST updates cannot set protected routing fields, but they also must
+		// not clear values that were created through the Kubernetes API/RBAC path.
+		desiredSpec := req.Spec.DeepCopy()
+		desiredSpec.BaseURL = current.Spec.BaseURL
+		current.Spec = *desiredSpec
+		if err := h.client.Update(ctx, current); err != nil {
+			return err
+		}
+		provider = current
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errProviderSpecChanged) {
+			return fiber.NewError(fiber.StatusConflict, "provider spec was modified concurrently")
+		}
+		var fiberErr *fiber.Error
+		if errors.As(err, &fiberErr) {
+			return err
+		}
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "provider not found")
+		}
+		if apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusConflict, "provider was modified concurrently")
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update provider: %v", err))
 	}
 	return c.JSON(provider)
