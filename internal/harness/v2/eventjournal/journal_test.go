@@ -342,6 +342,42 @@ func TestJournalRedactsCredentialsSplitAcrossToolUpdates(t *testing.T) {
 	}
 }
 
+func TestJournalOmitsToolContentSplitAcrossBlocks(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prefix := "sk-aaaaaaaa"
+	suffix := "aaaaaaaaaaaaaaaa"
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-split-blocks", Kind: "shell", Status: harnessv2.ToolCallStatusCompleted,
+			Content: []harnessv2.ContentBlock{
+				{Type: harnessv2.ContentBlockText, Text: prefix},
+				{Type: harnessv2.ContentBlockText, Text: suffix},
+			},
+		},
+	})
+	if _, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew {
+		t.Fatalf("append multi-block tool update new=%t err=%v", isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 1 {
+		t.Fatalf("persisted tool events = %d, want 1", len(listed))
+	}
+	persisted := listed[0]
+	encoded := persisted.Summary + persisted.ContentText + string(persisted.Content)
+	if persisted.ContentText != "" || strings.Contains(encoded, prefix) || strings.Contains(encoded, suffix) ||
+		!strings.Contains(string(persisted.Content), toolContentMultipleBlocksOmittedReason) || persisted.Truncation != nil {
+		t.Fatalf("multi-block tool event = %#v", persisted)
+	}
+}
+
 func TestJournalAggregatesContentOnlyToolFragmentsIntoTerminalEvent(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
@@ -585,12 +621,12 @@ func TestJournalRejectsAggregateToolContentOverflow(t *testing.T) {
 }
 
 func TestToolContentFragmentPreservesURIOnlyResourceLink(t *testing.T) {
-	got := toolContentFragment([]harnessv2.ContentBlock{{
+	got, multipleBlocks := toolContentFragment([]harnessv2.ContentBlock{{
 		Type: harnessv2.ContentBlockResourceLink,
 		URI:  "https://example.com/output.txt?X-Amz-Credential=secret&X-Amz-Signature=value#download",
 	}})
-	if got != "resource: https://example.com/output.txt" {
-		t.Fatalf("resource-link fragment = %q", got)
+	if got != "resource: https://example.com/output.txt" || multipleBlocks {
+		t.Fatalf("resource-link fragment = %q multipleBlocks=%t", got, multipleBlocks)
 	}
 }
 

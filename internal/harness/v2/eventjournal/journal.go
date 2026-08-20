@@ -45,15 +45,16 @@ type State struct {
 }
 
 type streamText struct {
-	text     strings.Builder
-	runes    int
-	overflow bool
-	title    string
-	kind     string
+	text                  strings.Builder
+	runes                 int
+	overflow              bool
+	multipleBlocksOmitted bool
+	title                 string
+	kind                  string
 }
 
 func (s *streamText) append(value string) {
-	if s == nil || s.overflow || value == "" {
+	if s == nil || s.overflow || s.multipleBlocksOmitted || value == "" {
 		return
 	}
 	runes := utf8.RuneCountInString(value)
@@ -78,7 +79,18 @@ func (s *streamText) replace(value string) {
 	s.text.Reset()
 	s.runes = 0
 	s.overflow = false
+	s.multipleBlocksOmitted = false
 	s.append(value)
+}
+
+func (s *streamText) omitMultipleBlocks() {
+	if s == nil {
+		return
+	}
+	s.text.Reset()
+	s.runes = 0
+	s.overflow = false
+	s.multipleBlocksOmitted = true
 }
 
 // HasUpdate reports whether event was already persisted or appended during
@@ -177,9 +189,11 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		s.keys[key] = struct{}{}
 		return nil, false, nil
 	}
-	if contentText, truncated, title, kind, ok := s.finishToolUpdate(event); ok {
+	if contentText, truncated, multipleBlocksOmitted, title, kind, ok := s.finishToolUpdate(event); ok {
 		mappedEvent := withBufferedToolMetadata(event, title, kind)
-		mapped, err = mapToolUpdateWithContent(mappedEvent, s.journal.MapContext, contentText, truncated)
+		mapped, err = mapToolUpdateWithContent(
+			mappedEvent, s.journal.MapContext, contentText, truncated, multipleBlocksOmitted,
+		)
 		if err != nil {
 			return nil, false, err
 		}
@@ -378,10 +392,13 @@ func (s *State) aggregateToolUpdate(event harnessv2.Event, key string) error {
 	if strings.TrimSpace(tool.Kind) != "" {
 		accumulator.kind = tool.Kind
 	}
-	if tool.ContentReplace {
-		accumulator.replace(toolContentFragment(tool.Content))
+	content, multipleBlocks := toolContentFragment(tool.Content)
+	if multipleBlocks {
+		accumulator.omitMultipleBlocks()
+	} else if tool.ContentReplace {
+		accumulator.replace(content)
 	} else if len(tool.Content) > 0 {
-		accumulator.append(toolContentFragment(tool.Content))
+		accumulator.append(content)
 	}
 	s.toolBufferedBytes += accumulator.text.Len() - beforeBytes
 	if s.toolBufferedBytes > maxBufferedToolContentBytes {
@@ -393,21 +410,22 @@ func (s *State) aggregateToolUpdate(event harnessv2.Event, key string) error {
 	return nil
 }
 
-func (s *State) finishToolUpdate(event harnessv2.Event) (string, bool, string, string, bool) {
+func (s *State) finishToolUpdate(event harnessv2.Event) (string, bool, bool, string, string, bool) {
 	if event.Update == nil || event.Update.ToolCall == nil {
-		return "", false, "", "", false
+		return "", false, false, "", "", false
 	}
 	tool := event.Update.ToolCall
 	if tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed {
-		return "", false, "", "", false
+		return "", false, false, "", "", false
 	}
 	accumulator, ok := s.toolText[tool.ToolCallID]
 	if !ok {
-		return "", false, "", "", false
+		return "", false, false, "", "", false
 	}
 	delete(s.toolText, tool.ToolCallID)
 	s.toolBufferedBytes -= accumulator.text.Len()
-	return accumulator.text.String(), accumulator.overflow, accumulator.title, accumulator.kind, true
+	return accumulator.text.String(), accumulator.overflow, accumulator.multipleBlocksOmitted,
+		accumulator.title, accumulator.kind, true
 }
 
 func withBufferedToolMetadata(event harnessv2.Event, title, kind string) harnessv2.Event {
@@ -427,8 +445,9 @@ func withBufferedToolMetadata(event harnessv2.Event, title, kind string) harness
 	return event
 }
 
-func toolContentFragment(blocks []harnessv2.ContentBlock) string {
-	var text strings.Builder
+func toolContentFragment(blocks []harnessv2.ContentBlock) (string, bool) {
+	var content string
+	projectedBlocks := 0
 	for _, block := range blocks {
 		var value string
 		switch block.Type {
@@ -450,12 +469,13 @@ func toolContentFragment(blocks []harnessv2.ContentBlock) string {
 		if value == "" {
 			continue
 		}
-		if text.Len() > 0 {
-			text.WriteByte('\n')
+		projectedBlocks++
+		if projectedBlocks > 1 {
+			return "", true
 		}
-		text.WriteString(value)
+		content = value
 	}
-	return text.String()
+	return content, false
 }
 
 func safeResourceDisplayURI(value string) string {

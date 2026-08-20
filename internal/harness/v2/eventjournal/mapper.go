@@ -206,10 +206,13 @@ func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 }
 
 type mapUpdateOptions struct {
-	toolContentText      *string
-	toolContentTruncated bool
-	omitToolMetadata     bool
+	toolContentText                  *string
+	toolContentTruncated             bool
+	toolContentMultipleBlocksOmitted bool
+	omitToolMetadata                 bool
 }
+
+const toolContentMultipleBlocksOmittedReason = "streamed_text_multiple_blocks_omitted"
 
 // MapUpdate maps one validated harness v2 update to the public execution-event
 // taxonomy. Streamed assistant and tool text is deliberately omitted here:
@@ -291,6 +294,8 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		if options.toolContentTruncated {
 			mapped.Truncation = &executionevents.ExecutionEventTruncation{ContentTextTruncated: true}
 			content["contentOmitted"] = "streamed_text_exceeded_journal_limit"
+		} else if options.toolContentMultipleBlocksOmitted {
+			content["contentOmitted"] = toolContentMultipleBlocksOmittedReason
 		}
 	case harnessv2.UpdatePlan:
 		projection := ProjectPlanUpdate(*event.Update.Plan)
@@ -369,10 +374,12 @@ func mapToolUpdateWithContent(
 	mapCtx MapContext,
 	contentText string,
 	contentTruncated bool,
+	contentMultipleBlocksOmitted bool,
 ) (*store.ExecutionEvent, error) {
 	return mapUpdate(event, mapCtx, mapUpdateOptions{
-		toolContentText:      &contentText,
-		toolContentTruncated: contentTruncated,
+		toolContentText:                  &contentText,
+		toolContentTruncated:             contentTruncated,
+		toolContentMultipleBlocksOmitted: contentMultipleBlocksOmitted,
 	})
 }
 
