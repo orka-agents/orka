@@ -157,9 +157,11 @@ type State struct {
 	promptTerminalSequence      uint64
 	toolClosureSequences        map[uint64]struct{}
 	toolText                    map[string]*streamText
+	persistedOpenTools          map[string]persistedOpenTool
 	overflowToolIDs             map[string]struct{}
 	untrackedOverflowTool       bool
 	toolBufferedBytes           int
+	planFieldHistory            []logicalFieldBoundaries
 }
 
 type streamText struct {
@@ -172,6 +174,11 @@ type streamText struct {
 	kind                  string
 	lastEvent             harnessv2.Event
 	hasEvent              bool
+}
+
+type persistedOpenTool struct {
+	identity MappedUpdateIdentity
+	event    store.ExecutionEvent
 }
 
 func (s *streamText) append(value string) {
@@ -249,6 +256,7 @@ func (j Journal) Open(ctx context.Context) (*State, error) {
 		promptIdentity:       j.RecoveryIdentity,
 		toolClosureSequences: map[uint64]struct{}{},
 		toolText:             map[string]*streamText{},
+		persistedOpenTools:   map[string]persistedOpenTool{},
 		overflowToolIDs:      map[string]struct{}{},
 	}
 	var err error
@@ -292,6 +300,9 @@ func (j Journal) loadAllIdentities(
 					state.resetPrompt(identity)
 				}
 				state.observePersisted(identity, kind)
+				if err := state.observePersistedToolEvent(identity, event); err != nil {
+					return err
+				}
 			}
 		}
 		if len(listed) < store.MaxExecutionEventLimit {
@@ -312,6 +323,9 @@ func (j Journal) loadCurrentPromptIdentities(
 	if err != nil {
 		return fmt.Errorf("get latest mapped harness v2 update sequence: %w", err)
 	}
+	latestSeq := pageEnd
+	var earliestSeq int64
+	stop := false
 	// Per-stream sequence numbers are monotonic and gap-tolerant. Fixed-width
 	// AfterSeq windows let recovery walk backward without expanding the store API.
 	for pageEnd > 0 {
@@ -336,11 +350,66 @@ func (j Journal) loadCurrentPromptIdentities(
 				continue
 			}
 			if !identity.samePrompt(j.RecoveryIdentity) {
-				return nil
+				stop = true
+				break
 			}
 			state.observePersisted(identity, kind)
+			if earliestSeq == 0 || event.Seq < earliestSeq {
+				earliestSeq = event.Seq
+			}
+		}
+		if stop {
+			break
 		}
 		pageEnd = pageStart
+	}
+	if earliestSeq == 0 {
+		return nil
+	}
+	return j.loadCurrentPromptOpenTools(ctx, mapCtx, state, earliestSeq-1, latestSeq)
+}
+
+func (j Journal) loadCurrentPromptOpenTools(
+	ctx context.Context,
+	mapCtx MapContext,
+	state *State,
+	afterSeq int64,
+	throughSeq int64,
+) error {
+	for afterSeq < throughSeq {
+		listed, err := j.EventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+			Namespace:  mapCtx.Namespace,
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   mapCtx.StreamID,
+			AfterSeq:   afterSeq,
+			Limit:      store.MaxExecutionEventLimit,
+		})
+		if err != nil {
+			return fmt.Errorf("list current-prompt mapped harness v2 tool lifecycles: %w", err)
+		}
+		if len(listed) == 0 {
+			break
+		}
+		nextSeq := afterSeq
+		for _, event := range listed {
+			if event.Seq > throughSeq {
+				break
+			}
+			if event.Seq > nextSeq {
+				nextSeq = event.Seq
+			}
+			identity, _, _, ok := mappedExecutionEventRecord(event)
+			if !ok || !identity.samePrompt(j.RecoveryIdentity) {
+				continue
+			}
+			if err := state.observePersistedToolEvent(identity, event); err != nil {
+				return err
+			}
+		}
+		if nextSeq <= afterSeq {
+			break
+		}
+		afterSeq = nextSeq
 	}
 	return nil
 }
@@ -354,8 +423,10 @@ func (s *State) resetPrompt(identity MappedUpdateIdentity) {
 	s.promptAcceptedSequence = 0
 	s.promptTerminalSequence = 0
 	clear(s.toolClosureSequences)
+	clear(s.persistedOpenTools)
 	clear(s.overflowToolIDs)
 	s.untrackedOverflowTool = false
+	s.planFieldHistory = nil
 }
 
 func (s *State) bindPrompt(identity MappedUpdateIdentity) error {
@@ -401,6 +472,23 @@ func (s *State) observePersisted(identity MappedUpdateIdentity, kind mappedJourn
 	}
 }
 
+func (s *State) observePersistedToolEvent(identity MappedUpdateIdentity, event store.ExecutionEvent) error {
+	toolCallID := strings.TrimSpace(event.ToolCallID)
+	if toolCallID == "" {
+		return nil
+	}
+	switch event.Type {
+	case executionevents.ExecutionEventTypeToolCallStarted:
+		if _, exists := s.persistedOpenTools[toolCallID]; !exists && len(s.persistedOpenTools) >= maxOpenToolAccumulators {
+			return fmt.Errorf("%w: persisted prompt exceeds %d open tool lifecycles", store.ErrConflict, maxOpenToolAccumulators)
+		}
+		s.persistedOpenTools[toolCallID] = persistedOpenTool{identity: identity, event: event}
+	case executionevents.ExecutionEventTypeToolCallCompleted, executionevents.ExecutionEventTypeToolCallFailed:
+		delete(s.persistedOpenTools, toolCallID)
+	}
+	return nil
+}
+
 func (s *State) markProcessed(identity MappedUpdateIdentity) {
 	if identity.Sequence > s.processedSequence {
 		s.processedSequence = identity.Sequence
@@ -414,6 +502,24 @@ func (s *State) rememberToolClosure(sequence uint64) {
 	s.toolClosureSequences[sequence] = struct{}{}
 }
 
+// ProjectPlanUpdate applies the prompt's bounded public plan-field history so
+// a credential split across successive plan notifications is redacted from
+// the update that would make it reconstructable.
+func (s *State) ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
+	if s == nil {
+		return ProjectPlanUpdate(update)
+	}
+	projection, _ := projectPlanUpdate(update, s.planFieldHistory)
+	return projection
+}
+
+func (s *State) projectPlanUpdate(update harnessv2.PlanUpdate) (PlanProjection, []logicalFieldBoundaries) {
+	if s == nil {
+		return projectPlanUpdate(update, nil)
+	}
+	return projectPlanUpdate(update, s.planFieldHistory)
+}
+
 // AppendUpdateIfNew maps and appends event unless its full protocol identity is
 // already persisted or was processed earlier in this pass. Assistant chunks
 // and content-only tool fragments are retained only for same-pass
@@ -424,7 +530,14 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		return nil, false, fmt.Errorf("harness v2 journal state is required")
 	}
 	identity := mappedUpdateIdentity(event)
-	mapped, err := MapUpdate(event, s.journal.MapContext)
+	options := mapUpdateOptions{}
+	var planFields []logicalFieldBoundaries
+	if event.Update != nil && event.Update.Plan != nil {
+		projection, fields := s.projectPlanUpdate(*event.Update.Plan)
+		options.planProjection = &projection
+		planFields = fields
+	}
+	mapped, err := mapUpdate(event, s.journal.MapContext, options)
 	if err != nil {
 		return nil, false, err
 	}
@@ -491,8 +604,13 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 	appended, isNew, err := s.appendMappedEvent(
 		ctx, identity, mappedJournalRecordUpdate, mapped, "append mapped harness v2 update",
 	)
-	if err == nil && isNonTerminalToolUpdate(event) {
-		s.markToolStartPersisted(event)
+	if err == nil {
+		if isNonTerminalToolUpdate(event) {
+			s.markToolStartPersisted(event)
+		}
+		if event.Update.Kind == harnessv2.UpdatePlan {
+			s.planFieldHistory = append(s.planFieldHistory, planFields...)
+		}
 	}
 	return appended, isNew, err
 }
@@ -795,6 +913,41 @@ func (s *State) AppendBufferedStreamsIfNew(
 // observed tool update supplies the durable protocol identity.
 func (s *State) AppendToolStreamClosuresIfNew(ctx context.Context) error {
 	return s.AppendBufferedStreamsIfNew(ctx, nil, 0, "", false)
+}
+
+// AppendPersistedToolClosuresIfNew closes tool lifecycles whose starts were
+// durable before controller recovery but whose terminal updates were not.
+func (s *State) AppendPersistedToolClosuresIfNew(ctx context.Context, at time.Time) error {
+	if s == nil {
+		return fmt.Errorf("harness v2 journal state is required")
+	}
+	if at.IsZero() {
+		return fmt.Errorf("tool recovery timestamp is required")
+	}
+	tools := make([]persistedOpenTool, 0, len(s.persistedOpenTools))
+	for _, tool := range s.persistedOpenTools {
+		tools = append(tools, tool)
+	}
+	sort.Slice(tools, func(i, j int) bool {
+		if tools[i].identity.Sequence == tools[j].identity.Sequence {
+			return tools[i].event.ToolCallID < tools[j].event.ToolCallID
+		}
+		return tools[i].identity.Sequence < tools[j].identity.Sequence
+	})
+	for _, tool := range tools {
+		mapped, err := mapRecoveredToolStreamClosure(tool.identity, tool.event, at, s.journal.MapContext)
+		if err != nil {
+			return err
+		}
+		if _, _, err := s.appendMappedEvent(
+			ctx, tool.identity, mappedJournalRecordToolStreamClosure, mapped,
+			"append recovered harness v2 tool stream closure",
+		); err != nil {
+			return err
+		}
+		delete(s.persistedOpenTools, tool.event.ToolCallID)
+	}
+	return nil
 }
 
 func (s *State) appendToolStreamClosureIfNew(ctx context.Context, toolID string, accumulator *streamText) error {

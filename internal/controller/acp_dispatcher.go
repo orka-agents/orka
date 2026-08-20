@@ -1299,7 +1299,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				var planState *store.PlanState
 				var planErr error
 				if event.Update != nil && event.Update.Plan != nil {
-					projection := v2eventjournal.ProjectPlanUpdate(*event.Update.Plan)
+					projection := journalState.ProjectPlanUpdate(*event.Update.Plan)
 					planState = &store.PlanState{
 						TaskName: task.Name, Namespace: task.Namespace, Iteration: int(task.Status.Iteration),
 						Summary: projection.Summary, ProgressPct: projection.ProgressPct,

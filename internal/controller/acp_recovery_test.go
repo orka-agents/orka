@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/labels"
@@ -166,6 +167,75 @@ func TestACPDispatcherMakesAcceptedOldEpochAttemptOutcomeUnknown(t *testing.T) {
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhaseFailed || task.Status.Execution == nil || task.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeOutcomeUnknown {
 		t.Fatalf("recovered task status = %#v", task.Status)
+	}
+}
+
+func TestACPDispatcherClosesRecoveredPromptAndOpenToolsAsOutcomeUnknown(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionAccepted)
+	defer fixture.close(t)
+
+	task := configureRecoveryJournalIdentity(t, fixture)
+	appendRecoveryOpenPrompt(t, fixture, task)
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := fixture.controlStore.ListExecutionEvents(fixture.ctx, store.ExecutionEventFilter{
+		Namespace: task.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTypes := []string{
+		executionevents.ExecutionEventTypeModelRequestStarted,
+		executionevents.ExecutionEventTypeToolCallStarted,
+		executionevents.ExecutionEventTypeToolCallFailed,
+		executionevents.ExecutionEventTypeModelRequestFailed,
+	}
+	if len(listed) != len(wantTypes) {
+		t.Fatalf("recovered lifecycle events = %#v", listed)
+	}
+	for index, wantType := range wantTypes {
+		if listed[index].Type != wantType {
+			t.Fatalf("recovered lifecycle event %d type = %q, want %q", index, listed[index].Type, wantType)
+		}
+	}
+	if listed[1].ToolCallID == "" || listed[2].ToolCallID != listed[1].ToolCallID ||
+		listed[2].Summary != "Tool call outcome unknown" {
+		t.Fatalf("recovered tool lifecycle = start %#v terminal %#v", listed[1], listed[2])
+	}
+	var toolClosure struct {
+		ControllerSynthesized bool                `json:"controllerSynthesized"`
+		Outcome               harnessv2.EventType `json:"outcome"`
+	}
+	if err := json.Unmarshal(listed[2].Content, &toolClosure); err != nil {
+		t.Fatal(err)
+	}
+	if !toolClosure.ControllerSynthesized || toolClosure.Outcome != harnessv2.EventOutcomeUnknown {
+		t.Fatalf("recovered tool closure content = %#v", toolClosure)
+	}
+	var promptClosure struct {
+		ControllerSynthesized bool                `json:"controllerSynthesized"`
+		TerminalEvent         harnessv2.EventType `json:"terminalEvent"`
+	}
+	if err := json.Unmarshal(listed[3].Content, &promptClosure); err != nil {
+		t.Fatal(err)
+	}
+	if !promptClosure.ControllerSynthesized || promptClosure.TerminalEvent != harnessv2.EventOutcomeUnknown {
+		t.Fatalf("recovered prompt closure content = %#v", promptClosure)
+	}
+	identity, ok := mappedPromptRecoveryIdentity(task)
+	if !ok {
+		t.Fatal("recovery identity missing")
+	}
+	if err := fixture.dispatcher.closeRecoveredPromptJournal(
+		fixture.ctx, task, time.Now().UTC(), "duplicate recovery",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if duplicate, err := fixture.controlStore.ListExecutionEvents(fixture.ctx, store.ExecutionEventFilter{
+		Namespace: task.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name, Limit: 10,
+	}); err != nil || len(duplicate) != len(wantTypes) {
+		t.Fatalf("duplicate recovery events = %#v err=%v identity=%#v", duplicate, err, identity)
 	}
 }
 
@@ -342,6 +412,65 @@ func configureRecoveryJournalIdentity(t *testing.T, fixture *recoveryFixture) *c
 	}
 	fixture.dispatcher.EventStore = fixture.controlStore
 	return task
+}
+
+func appendRecoveryOpenPrompt(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task) {
+	t.Helper()
+	execution := task.Status.Execution
+	now := time.Now().UTC()
+	accepted := harnessv2.Event{
+		Protocol: harnessv2.ProtocolVersion,
+		Type:     harnessv2.EventAccepted,
+		Identity: harnessv2.EventIdentity{
+			RuntimeInstanceID:        harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
+			SupervisorBootID:         harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID),
+			RuntimeSessionUID:        harnessv2.RuntimeSessionUID(execution.RuntimeSessionUID),
+			RuntimeSessionGeneration: uint64(execution.RuntimeSessionGeneration),
+			TaskUID:                  harnessv2.TaskUID(task.UID),
+			TaskAttempt:              uint32(execution.Attempt),
+			PromptID:                 harnessv2.PromptID(execution.PromptID),
+			Sequence:                 1,
+			RequestDigest:            harnessv2.RequestDigest(execution.RequestDigest),
+			Timestamp:                now,
+		},
+		Accepted: &harnessv2.AcceptedEvent{
+			AcceptedAt: now,
+			Lease: harnessv2.PromptLease{
+				Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+			},
+			ACPVersion: harnessv2.ACPProfileV1,
+		},
+	}
+	journal := v2eventjournal.Journal{
+		EventStore: fixture.controlStore,
+		MapContext: v2eventjournal.MapContext{
+			Namespace: task.Namespace, TaskName: task.Name, StreamID: task.Name,
+		},
+	}
+	state, err := journal.Open(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appended, isNew, err := state.AppendPromptLifecycleIfNew(fixture.ctx, accepted); err != nil || !isNew || appended == nil {
+		t.Fatalf("append recovery prompt acceptance = %#v new=%t err=%v", appended, isNew, err)
+	}
+	tool := harnessv2.Event{
+		Protocol: harnessv2.ProtocolVersion,
+		Type:     harnessv2.EventUpdate,
+		Identity: accepted.Identity,
+		Update: &harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCall,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: "recovery-tool", Title: "Inspect repository", Kind: "read",
+				Status: harnessv2.ToolCallStatusInProgress,
+			},
+		},
+	}
+	tool.Identity.Sequence = 2
+	tool.Identity.Timestamp = now.Add(time.Millisecond)
+	if appended, isNew, err := state.AppendUpdateIfNew(fixture.ctx, tool); err != nil || !isNew || appended == nil {
+		t.Fatalf("append recovery open tool = %#v new=%t err=%v", appended, isNew, err)
+	}
 }
 
 func appendRecoveryPromptTerminal(

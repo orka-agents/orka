@@ -241,8 +241,16 @@ type PlanProjection struct {
 // ProjectPlanUpdate converts structured ACP plan entries into the existing
 // PlanStore contract and a bounded, redacted text representation for events.
 func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
+	projection, _ := projectPlanUpdate(update, nil)
+	return projection
+}
+
+func projectPlanUpdate(
+	update harnessv2.PlanUpdate,
+	history []logicalFieldBoundaries,
+) (PlanProjection, []logicalFieldBoundaries) {
 	projection := PlanProjection{Total: len(update.Entries)}
-	entries := redactPlanEntries(update.Entries)
+	entries, publishedFields := redactPlanEntries(update.Entries, history)
 	var inProgressSummary string
 	var document strings.Builder
 	document.WriteString("# Plan")
@@ -292,18 +300,25 @@ func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 	projection.Document = executionevents.RedactExecutionEventText(document.String())
 	projection.EventDocument, projection.EventDocumentTruncated, projection.EventDocumentOriginalChars =
 		executionevents.RedactAndTruncateExecutionEventText(projection.Document, executionevents.MaxExecutionEventContentTextChars)
-	return projection
+	return projection, publishedFields
 }
 
-func redactPlanEntries(entries []harnessv2.PlanEntry) []harnessv2.PlanEntry {
+func redactPlanEntries(
+	entries []harnessv2.PlanEntry,
+	history []logicalFieldBoundaries,
+) ([]harnessv2.PlanEntry, []logicalFieldBoundaries) {
 	redacted := append([]harnessv2.PlanEntry(nil), entries...)
-	ordered := make([]string, 0, len(entries)*2)
+	current := make([]logicalFieldBoundaries, 0, len(entries)*2)
 	for index, entry := range entries {
 		redacted[index].Content = executionevents.RedactExecutionEventText(entry.Content)
 		redacted[index].Priority = executionevents.RedactExecutionEventText(entry.Priority)
-		ordered = append(ordered, redacted[index].Content, redacted[index].Priority)
+		current = appendLogicalFieldBoundary(current, redacted[index].Content)
+		current = appendLogicalFieldBoundary(current, redacted[index].Priority)
 	}
-	if logicalFieldSubsetSensitive(ordered) {
+	fields := make([]logicalFieldBoundaries, 0, len(history)+len(current))
+	fields = append(fields, history...)
+	fields = append(fields, current...)
+	if len(fields) >= 2 && permutedLogicalFieldSubsetsSensitive(fields) {
 		for index := range redacted {
 			if redacted[index].Content != "" {
 				redacted[index].Content = executionevents.ExecutionEventRedactedValue
@@ -312,8 +327,9 @@ func redactPlanEntries(entries []harnessv2.PlanEntry) []harnessv2.PlanEntry {
 				redacted[index].Priority = executionevents.ExecutionEventRedactedValue
 			}
 		}
+		return redacted, nil
 	}
-	return redacted
+	return redacted, current
 }
 
 const (
@@ -377,26 +393,18 @@ var logicalFieldSensitiveMarkers = []string{
 	"#",
 }
 
-func logicalFieldSubsetSensitive(values []string) bool {
-	fields := make([]logicalFieldBoundaries, 0, len(values))
-	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		runes := []rune(value)
-		if len(runes) <= maxLogicalFieldBoundaryRunes {
-			fields = append(fields, logicalFieldBoundaries{prefix: value, suffix: value, whole: true})
-			continue
-		}
-		fields = append(fields, logicalFieldBoundaries{
-			prefix: string(runes[:maxLogicalFieldBoundaryRunes]),
-			suffix: string(runes[len(runes)-maxLogicalFieldBoundaryRunes:]),
-		})
+func appendLogicalFieldBoundary(fields []logicalFieldBoundaries, value string) []logicalFieldBoundaries {
+	if value == "" || value == executionevents.ExecutionEventRedactedValue {
+		return fields
 	}
-	if len(fields) < 2 {
-		return false
+	runes := []rune(value)
+	if len(runes) <= maxLogicalFieldBoundaryRunes {
+		return append(fields, logicalFieldBoundaries{prefix: value, suffix: value, whole: true})
 	}
-	return permutedLogicalFieldSubsetsSensitive(fields)
+	return append(fields, logicalFieldBoundaries{
+		prefix: string(runes[:maxLogicalFieldBoundaryRunes]),
+		suffix: string(runes[len(runes)-maxLogicalFieldBoundaryRunes:]),
+	})
 }
 
 func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries) bool {
@@ -509,6 +517,7 @@ type mapUpdateOptions struct {
 	toolContentTruncated             bool
 	toolContentMultipleBlocksOmitted bool
 	omitToolMetadata                 bool
+	planProjection                   *PlanProjection
 	journalKind                      string
 }
 
@@ -516,6 +525,7 @@ const (
 	toolContentMultipleBlocksOmittedReason = "streamed_text_multiple_blocks_omitted"
 	streamedTextTruncatedOrOmittedReason   = "streamed_text_truncated_or_omitted"
 	assistantResponseOmittedSummary        = "Assistant response omitted"
+	recoveredToolOutcomeUnknownSummary     = "Tool call outcome unknown"
 )
 
 // MapUpdate maps one validated harness v2 update to the public execution-event
@@ -617,6 +627,9 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		}
 	case harnessv2.UpdatePlan:
 		projection := ProjectPlanUpdate(*event.Update.Plan)
+		if options.planProjection != nil {
+			projection = *options.planProjection
+		}
 		mapped.Type = executionevents.ExecutionEventTypePlanUpdated
 		mapped.Summary = projection.Summary
 		mapped.ContentText = projection.EventDocument
@@ -774,6 +787,60 @@ func mapToolStreamClosure(
 		toolContentMultipleBlocksOmitted: contentMultipleBlocksOmitted,
 		journalKind:                      mappedToolStreamClosureKind,
 	})
+}
+
+func mapRecoveredToolStreamClosure(
+	identity MappedUpdateIdentity,
+	started store.ExecutionEvent,
+	at time.Time,
+	mapCtx MapContext,
+) (*store.ExecutionEvent, error) {
+	if err := mapCtx.validate(); err != nil {
+		return nil, err
+	}
+	mapCtx = mapCtx.normalized()
+	if !identity.valid() {
+		return nil, fmt.Errorf("valid harness v2 tool identity is required")
+	}
+	if started.Type != executionevents.ExecutionEventTypeToolCallStarted || strings.TrimSpace(started.ToolCallID) == "" {
+		return nil, fmt.Errorf("persisted open tool lifecycle is required")
+	}
+	if at.IsZero() {
+		return nil, fmt.Errorf("tool recovery timestamp is required")
+	}
+	content, err := json.Marshal(map[string]any{
+		"harnessV2":             identity,
+		"updateKind":            harnessv2.UpdateToolCallUpdate,
+		"journalKind":           mappedToolStreamClosureKind,
+		"toolCallID":            started.ToolCallID,
+		"status":                harnessv2.ToolCallStatusFailed,
+		"outcome":               harnessv2.EventOutcomeUnknown,
+		"controllerSynthesized": true,
+		"contentOmitted":        streamedTextTruncatedOrOmittedReason,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal recovered harness v2 tool closure: %w", err)
+	}
+	mapped := &store.ExecutionEvent{
+		Namespace:   mapCtx.Namespace,
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    mapCtx.StreamID,
+		Type:        executionevents.ExecutionEventTypeToolCallFailed,
+		Severity:    executionevents.ExecutionEventSeverityError,
+		TaskName:    mapCtx.TaskName,
+		SessionName: started.SessionName,
+		AgentName:   started.AgentName,
+		ToolName:    started.ToolName,
+		ToolCallID:  started.ToolCallID,
+		Summary:     recoveredToolOutcomeUnknownSummary,
+		Content:     content,
+		Truncation:  &executionevents.ExecutionEventTruncation{ContentTextTruncated: true},
+		CreatedAt:   at.UTC(),
+	}
+	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
+		return nil, fmt.Errorf("sanitize recovered harness v2 tool closure: %w", err)
+	}
+	return mapped, nil
 }
 
 func mapToolUpdateWithoutMetadata(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent, error) {

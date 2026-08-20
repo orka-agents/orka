@@ -165,8 +165,65 @@ func TestJournalRecoveryScansOnlyCurrentPromptTail(t *testing.T) {
 	if !state.HasUpdate(current) || state.HasUpdate(oldEvent) {
 		t.Fatalf("recovered current=%t old=%t", state.HasUpdate(current), state.HasUpdate(oldEvent))
 	}
-	if len(recording.filters) != 1 || recording.filters[0].AfterSeq == 0 {
+	if len(recording.filters) != 2 || recording.filters[0].AfterSeq == 0 ||
+		recording.filters[1].AfterSeq <= recording.filters[0].AfterSeq {
 		t.Fatalf("recovery filters = %#v", recording.filters)
+	}
+}
+
+func TestJournalRedactsCredentialSplitAcrossPlanUpdates(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := "sk-" + strings.Repeat("a", 8)
+	suffix := strings.Repeat("b", 16)
+	first := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: prefix, Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	if projection := state.ProjectPlanUpdate(*first.Update.Plan); !strings.Contains(projection.Document, prefix) {
+		t.Fatalf("first plan projection = %q, want published prefix", projection.Document)
+	}
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, first); err != nil || !isNew || appended == nil {
+		t.Fatalf("append first plan = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	second := testUpdateEvent(3, first.Identity.Timestamp.Add(time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: suffix, Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	projection := state.ProjectPlanUpdate(*second.Update.Plan)
+	if strings.Contains(projection.Document, suffix) ||
+		!strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("second plan projection exposed completing fragment: %q", projection.Document)
+	}
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, second); err != nil || !isNew || appended == nil {
+		t.Fatalf("append second plan = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	third := testUpdateEvent(4, second.Identity.Timestamp.Add(time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: "run focused tests", Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, third); err != nil || !isNew || appended == nil {
+		t.Fatalf("append benign plan = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 3 || !strings.Contains(listed[0].ContentText, prefix) ||
+		strings.Contains(listed[1].ContentText, suffix) ||
+		!strings.Contains(listed[1].ContentText, executionevents.ExecutionEventRedactedValue) ||
+		!strings.Contains(listed[2].ContentText, "run focused tests") {
+		t.Fatalf("persisted plan updates = %#v", listed)
 	}
 }
 

@@ -673,6 +673,10 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		}
 		const reason = "RuntimeLost"
 		const message = "controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
+		recoveredAt := time.Now().UTC()
+		if err := d.closeRecoveredPromptJournal(ctx, task, recoveredAt, message); err != nil {
+			return err
+		}
 		if err := d.persistOutcomeUnknown(ctx, attempt.ID, fence, reason, message); err != nil {
 			return err
 		}
@@ -696,6 +700,35 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 	default:
 		return fmt.Errorf("unsupported stale prompt attempt state %s", attempt.ExecutionState)
 	}
+}
+
+func (d *ACPDispatcher) closeRecoveredPromptJournal(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	at time.Time,
+	diagnostic string,
+) error {
+	identity, ok := mappedPromptRecoveryIdentity(task)
+	if !ok || d.EventStore == nil {
+		return nil
+	}
+	state, err := (v2eventjournal.Journal{
+		EventStore: d.EventStore,
+		MapContext: v2eventjournal.MapContext{
+			Namespace: task.Namespace,
+			TaskName:  task.Name,
+			StreamID:  task.Name,
+		},
+		RecoveryIdentity: identity,
+	}).Open(ctx)
+	if err != nil {
+		return err
+	}
+	if err := state.AppendPersistedToolClosuresIfNew(ctx, at); err != nil {
+		return err
+	}
+	_, _, err = state.AppendPromptStreamFailureIfNew(ctx, at, diagnostic)
+	return err
 }
 
 func mappedPromptRecoveryIdentity(task *corev1alpha1.Task) (v2eventjournal.MappedUpdateIdentity, bool) {
