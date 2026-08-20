@@ -221,6 +221,13 @@ func TestACPTaskDeadlineIncludesTimeBeforeRuntimeAdmission(t *testing.T) {
 	if !ok || !deadline.Equal(now.Add(defaultACPTaskTimeout-time.Minute)) {
 		t.Fatalf("default deadline = %s, %v; want %s, true", deadline, ok, now.Add(defaultACPTaskTimeout-time.Minute))
 	}
+	for _, duration := range []time.Duration{0, -time.Minute} {
+		task.Spec.Timeout = &metav1.Duration{Duration: duration}
+		deadline, ok = acpTaskDeadline(task, now)
+		if !ok || !deadline.Equal(now.Add(defaultACPTaskTimeout-time.Minute)) {
+			t.Fatalf("nonpositive %s deadline = %s, %v; want %s, true", duration, deadline, ok, now.Add(defaultACPTaskTimeout-time.Minute))
+		}
+	}
 }
 
 func TestACPTaskRuntimeContextUsesDefaultDeadline(t *testing.T) {

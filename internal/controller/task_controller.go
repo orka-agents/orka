@@ -782,6 +782,12 @@ func (r *TaskReconciler) handleBoundAgentTaskPending(
 		}
 		return r.queueHarnessV1Task(ctx, task)
 	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		if task.Status.Execution == nil {
+			now := time.Now().UTC()
+			if deadline, ok := acpTaskDeadline(task, now); ok && !now.Before(deadline) {
+				return r.cancelACPTaskBeforeDurableAttempt(ctx, task, "task deadline exceeded before runtime admission")
+			}
+		}
 		if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, nil); handled {
 			return result, err
 		}

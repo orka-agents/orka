@@ -7132,6 +7132,41 @@ func TestHandlePending_AgentSessionWaitExpiresAtAbsoluteDeadline(t *testing.T) {
 	}
 }
 
+func TestHandlePending_BoundV2AgentExpiresAtDefaultDeadlineBeforeQueue(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "bound-v2-default-timeout", Namespace: "default", UID: "12345678-abcd-efgh-ijkl-1234567890b0",
+			CreationTimestamp: metav1.NewTime(time.Now().UTC().Add(-defaultACPTaskTimeout - time.Minute)),
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "expired before ACP queueing"},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhasePending,
+			AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
+				ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("result = %#v, want terminal result", result)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseCancelled || updated.Status.Execution == nil ||
+		updated.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled ||
+		updated.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled ||
+		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("TaskTimeout") {
+		t.Fatalf("expired bound v2 Task status = %#v", updated.Status)
+	}
+}
+
 func TestHandlePending_ExpiredAgentSettlesDurableAttemptBeforeStatusBinding(t *testing.T) {
 	scheme := newTestScheme()
 	timeout := metav1.Duration{Duration: time.Minute}
