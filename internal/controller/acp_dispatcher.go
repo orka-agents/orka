@@ -1180,19 +1180,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, openErr)
 	}
-	logTelemetryFailure := func(operation string, err error) {
-		if err == nil {
-			return
-		}
-		logf.FromContext(ctx).Error(
-			err,
-			"persist ACP execution telemetry",
-			"operation", operation,
-			"namespace", task.Namespace,
-			"task", task.Name,
-		)
-	}
-
 	if err := d.openTaskSessionTurn(runtimeCtx, task, attemptID, fence, sessionExecution); err != nil {
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 			return deadlineErr
@@ -1346,10 +1333,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event")
 	}
 	if terminal.Type != harnessv2.EventCompleted {
-		if !assistantOverflow {
-			if _, _, err := journalState.AppendAssistantTranscriptIfNew(ctx, *terminal, assistant.String()); err != nil {
-				logTelemetryFailure("assistant-transcript", err)
-			}
+		if _, _, err := journalState.AppendAssistantTranscriptIfNew(ctx, *terminal, assistant.String()); err != nil {
+			logf.FromContext(ctx).Error(err, "persist terminal ACP assistant transcript", "namespace", task.Namespace, "task", task.Name)
+			return d.failPromptForExecutionEventPersistence(
+				ctx, task, attemptID, fence, "terminal assistant transcript persistence failed",
+			)
 		}
 		return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal)
 	}
@@ -1372,7 +1360,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return err
 	}
 	if _, _, err := journalState.AppendAssistantTranscriptIfNew(ctx, *terminal, resultText); err != nil {
-		logTelemetryFailure("assistant-transcript", err)
+		logf.FromContext(ctx).Error(err, "persist terminal ACP assistant transcript", "namespace", task.Namespace, "task", task.Name)
+		return d.failPromptForExecutionEventPersistence(
+			ctx, task, attemptID, fence, "terminal assistant transcript persistence failed",
+		)
 	}
 	if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryNotRequested, store.PromptDeliveryValidating, "validate-workspace", ""); err != nil {
 		return err
@@ -1622,6 +1613,8 @@ func reconcileACPPlanUpdateAfterJournal(
 type acpExecutionUpdatePersistenceError struct {
 	err error
 }
+
+const acpExecutionEventPersistenceFailureReason = "ExecutionEventPersistenceFailed"
 
 func (e *acpExecutionUpdatePersistenceError) Error() string {
 	if e == nil || e.err == nil {
@@ -3937,14 +3930,9 @@ func (d *ACPDispatcher) handlePromptUpdatePersistenceFailure(
 	runtimeFence harnessv2.Fence,
 	accepted bool,
 ) error {
-	const reason = "ExecutionEventPersistenceFailed"
 	if !accepted {
-		if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "event-persistence-failed"); transitionErr != nil {
-			return transitionErr
-		}
-		return d.failTask(
-			ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed,
-			reason, "execution update persistence failed before prompt acceptance",
+		return d.failPromptForExecutionEventPersistence(
+			ctx, task, attemptID, fence, "execution update persistence failed before prompt acceptance",
 		)
 	}
 
@@ -3959,20 +3947,32 @@ func (d *ACPDispatcher) handlePromptUpdatePersistenceFailure(
 		defer cancel()
 		response, cancelErr := runtimeClient.CancelPrompt(cancelCtx, sessionID, cancelRequest)
 		if cancelErr == nil && response.SettlementProven {
-			if transitionErr := d.transitionAttemptToTerminal(
-				ctx, attemptID, fence, store.PromptExecutionFailed, "event-persistence-failed",
-			); transitionErr != nil {
-				return transitionErr
-			}
-			return d.failTask(
-				ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed,
-				reason, "prompt was settled after execution update persistence failed",
+			return d.failPromptForExecutionEventPersistence(
+				ctx, task, attemptID, fence, "prompt was settled after execution update persistence failed",
 			)
 		}
 	}
 	return d.markOutcomeUnknown(
-		ctx, task, attemptID, fence, reason,
+		ctx, task, attemptID, fence, acpExecutionEventPersistenceFailureReason,
 		"prompt settlement is unknown after execution update persistence failed",
+	)
+}
+
+func (d *ACPDispatcher) failPromptForExecutionEventPersistence(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	message string,
+) error {
+	if transitionErr := d.transitionAttemptToTerminal(
+		ctx, attemptID, fence, store.PromptExecutionFailed, "event-persistence-failed",
+	); transitionErr != nil {
+		return transitionErr
+	}
+	return d.failTask(
+		ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed,
+		acpExecutionEventPersistenceFailureReason, message,
 	)
 }
 

@@ -12,13 +12,18 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// Journal owns restart-safe persistence of mapped harness v2 updates.
+// Journal owns duplicate-safe persistence of mapped harness v2 updates.
 type Journal struct {
 	EventStore store.ExecutionEventStore
 	MapContext MapContext
 }
 
-// State is the mutable deduplication state for one dispatcher pass.
+// State is the mutable aggregation state for one non-reconnectable prompt
+// stream. Public lifecycle/telemetry updates are durable as they arrive.
+// Untrusted assistant/tool text becomes durable only after its logical stream
+// ends, so redaction can see credential shapes split across protocol frames.
+// Controller takeover deliberately terminalizes accepted prompts as
+// OutcomeUnknown rather than replaying or persisting a raw-content crash buffer.
 type State struct {
 	journal        Journal
 	keys           map[string]struct{}
