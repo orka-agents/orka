@@ -381,7 +381,7 @@ func (s *State) AppendToolStreamClosuresIfNew(ctx context.Context) error {
 			s.removeToolAccumulator(toolID)
 			continue
 		}
-		mappedEvent := withBufferedToolMetadata(accumulator.lastContentEvent, accumulator.title, accumulator.kind)
+		mappedEvent := withInterruptedToolClosure(accumulator.lastContentEvent, accumulator.title, accumulator.kind)
 		mapped, err := mapToolUpdateWithContent(
 			mappedEvent, s.journal.MapContext, accumulator.text.String(), accumulator.overflow,
 			accumulator.multipleBlocksOmitted,
@@ -573,6 +573,19 @@ func withBufferedToolMetadata(event harnessv2.Event, title, kind string) harness
 	if strings.TrimSpace(tool.Kind) == "" {
 		tool.Kind = kind
 	}
+	update.ToolCall = &tool
+	event.Update = &update
+	return event
+}
+
+func withInterruptedToolClosure(event harnessv2.Event, title, kind string) harnessv2.Event {
+	event = withBufferedToolMetadata(event, title, kind)
+	if event.Update == nil || event.Update.ToolCall == nil {
+		return event
+	}
+	update := *event.Update
+	tool := *event.Update.ToolCall
+	tool.Status = harnessv2.ToolCallStatusFailed
 	update.ToolCall = &tool
 	event.Update = &update
 	return event

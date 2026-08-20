@@ -496,7 +496,8 @@ func TestJournalPersistsBufferedToolOutputOnStreamClosure(t *testing.T) {
 	}
 
 	listed := listJournalEvents(t, ctx, eventStore)
-	if len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallStarted ||
+	if len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallFailed ||
+		listed[0].Severity != executionevents.ExecutionEventSeverityError ||
 		listed[0].ContentText != "before "+executionevents.ExecutionEventRedactedValue+" after" ||
 		listed[0].ToolName != "shell" || listed[0].Summary != "Inspect repository" {
 		t.Fatalf("persisted tool stream closure = %#v", listed)
@@ -532,7 +533,10 @@ func TestJournalPersistsBufferedToolClosuresInProtocolOrder(t *testing.T) {
 	}
 
 	listed := listJournalEvents(t, ctx, eventStore)
-	if len(listed) != 2 || listed[0].ContentText != "first" || listed[1].ContentText != "second" {
+	if len(listed) != 2 ||
+		listed[0].Type != executionevents.ExecutionEventTypeToolCallFailed ||
+		listed[1].Type != executionevents.ExecutionEventTypeToolCallFailed ||
+		listed[0].ContentText != "first" || listed[1].ContentText != "second" {
 		t.Fatalf("persisted tool closure order = %#v", listed)
 	}
 }
