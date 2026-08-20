@@ -294,12 +294,12 @@ func (s *Server) authorizePublisherWorkspaceUpload(ctx context.Context, request 
 	}
 	execution := task.Status.Execution
 	// Task status and the external-effect lease are committed through separate
-	// Kubernetes objects. Under concurrent workspace preparation, a fresh LIST
-	// can briefly observe the preceding Task state after the exact parent effect
-	// is already durably InFlight. Bind the immutable prompt identity here and
-	// let authorizePublisherParentEffect enforce the live current-epoch lease.
-	if execution.PromptID == "" || request.Metadata.OperationID != "workspace-prepare-"+execution.PromptID {
-		return fmt.Errorf("workspace Task is not bound to the exact preparation operation")
+	// Kubernetes objects. A fresh Task read can therefore still observe the
+	// immediately preceding SessionStarting state after the exact parent effect
+	// is durably InFlight. Keep all later and terminal states fail-closed.
+	if (execution.State != corev1alpha1.TaskExecutionStateSessionStarting && execution.State != corev1alpha1.TaskExecutionStatePlanned) ||
+		execution.PromptID == "" || request.Metadata.OperationID != "workspace-prepare-"+execution.PromptID {
+		return fmt.Errorf("workspace Task is not in the exact preparation state")
 	}
 	return nil
 }

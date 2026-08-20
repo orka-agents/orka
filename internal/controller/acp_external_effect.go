@@ -295,11 +295,7 @@ func retryableACPExternalEffectError(err error) bool {
 	}
 	var clientErr *publisherservice.ClientError
 	if errors.As(err, &clientErr) {
-		// A decoded publisher envelope is authoritative. The publisher can use a
-		// 5xx status for an internal dependency rejection while still proving the
-		// exact idempotent operation is terminal. Invalid 5xx envelopes are already
-		// normalized by the client to Retryable=true.
-		return clientErr.Response.Retryable || clientErr.StatusCode == http.StatusTooManyRequests
+		return clientErr.Response.Retryable || clientErr.StatusCode == http.StatusTooManyRequests || clientErr.StatusCode >= 500
 	}
 	if errors.Is(err, store.ErrConflict) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
@@ -374,7 +370,7 @@ func settleACPExternalEffectError(
 ) error {
 	state := store.ExternalEffectOutcomeUnknown
 	var clientErr *publisherservice.ClientError
-	if errors.As(callErr, &clientErr) && !clientErr.Response.Retryable && clientErr.StatusCode != http.StatusTooManyRequests {
+	if errors.As(callErr, &clientErr) && !clientErr.Response.Retryable && clientErr.StatusCode != http.StatusTooManyRequests && clientErr.StatusCode < 500 {
 		state = store.ExternalEffectFailed
 	}
 	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
