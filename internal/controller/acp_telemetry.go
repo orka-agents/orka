@@ -46,6 +46,7 @@ func startACPPromptSpan(ctx context.Context, task *corev1alpha1.Task) (context.C
 }
 
 func startACPSessionSpan(ctx context.Context, task *corev1alpha1.Task) (context.Context, *acpSpan) {
+	ctx = orkatracing.ExtractTaskTraceContext(ctx, task)
 	return startACPSpan(ctx, acpSessionCreateSpanName, acpTaskSpanAttributes(task)...)
 }
 
@@ -152,6 +153,13 @@ func (s *acpSpan) setSessionReused(reused bool) {
 		name = acpSessionContinueSpanName
 	}
 	s.span.SetName(name)
+}
+
+func (s *acpSpan) withContext(ctx context.Context) context.Context {
+	if s == nil || s.span == nil || s.ended {
+		return ctx
+	}
+	return trace.ContextWithSpan(ctx, s.span)
 }
 
 func (s *acpSpan) End(err error) {

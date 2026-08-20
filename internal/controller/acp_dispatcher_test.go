@@ -715,6 +715,12 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if got := promptAttrs[acpAttrRuntimePoolName].AsString(); got != plan.PoolName {
 		t.Fatalf("acp.prompt runtime pool = %q, want %q", got, plan.PoolName)
 	}
+	if got := promptAttrs[acpAttrRuntimeSessionUID].AsString(); got != completed.Status.Execution.RuntimeSessionUID {
+		t.Fatalf("acp.prompt runtime session UID = %q, want %q", got, completed.Status.Execution.RuntimeSessionUID)
+	}
+	if got := promptAttrs[acpAttrRuntimeSessionGen].AsInt64(); got != completed.Status.Execution.RuntimeSessionGeneration {
+		t.Fatalf("acp.prompt runtime session generation = %d, want %d", got, completed.Status.Execution.RuntimeSessionGeneration)
+	}
 	if got := promptAttrs[acpAttrPromptOutcome].AsString(); got != acpPromptOutcomeSucceeded {
 		t.Fatalf("acp.prompt outcome = %q, want %q", got, acpPromptOutcomeSucceeded)
 	}
@@ -722,8 +728,8 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if sessionSpan == nil {
 		t.Fatal("missing acp.session.create span")
 	}
-	if got := sessionSpan.Parent().SpanID(); got != promptSpan.SpanContext().SpanID() {
-		t.Fatalf("acp.session.create parent = %s, want acp.prompt %s", got, promptSpan.SpanContext().SpanID())
+	if got := sessionSpan.Parent().SpanID().String(); got != parentSpanID {
+		t.Fatalf("acp.session.create parent = %s, want Task trace parent %s", got, parentSpanID)
 	}
 	cancelEpoch()
 	if err := <-epochDone; err != nil {

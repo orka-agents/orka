@@ -695,7 +695,7 @@ func validateFrozenACPDispatchTarget(
 
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alpha1.Task, target acpDispatchTarget) (retErr error) {
-	ctx, promptTrace := startACPPromptSpan(ctx, task)
+	var promptTrace *acpSpan
 	defer func() { promptTrace.End(retErr) }()
 
 	reservationLease := newACPRuntimePoolReservationLease(d, target.reservation)
@@ -1181,6 +1181,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}); err != nil {
 		return err
 	}
+	ctx, promptTrace = startACPPromptSpan(ctx, task)
+	promptTrace.setRuntimeSession(string(runtimeFence.RuntimeSessionUID), runtimeFence.RuntimeSessionGeneration)
+	runtimeCtx = promptTrace.withContext(runtimeCtx)
 
 	var bootstrap string
 	userPrompt := task.Spec.Prompt
@@ -1314,7 +1317,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal),
 		)
 	}
-	recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionRunning, store.PromptExecutionSettling, "settling", nil); err != nil {
 		return err
 	}
@@ -1373,6 +1375,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}); patchErr != nil {
 			return patchErr
 		}
+		recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
 		if transitionErr := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryConflict, "workspace-validation-failed", "workspace validation failed before a trusted delta was established"); transitionErr != nil {
 			return transitionErr
 		}
@@ -1404,6 +1407,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}); err != nil {
 		return err
 	}
+	recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
 
 	var deliveryStatus corev1alpha1.TaskDeliveryStatus
 	publicationID := ""
