@@ -251,9 +251,16 @@ func TestACPUpdatePersistenceError(t *testing.T) {
 	if !errors.As(err, &persistenceErr) {
 		t.Fatalf("persistence error type = %T, want *acpExecutionUpdatePersistenceError", err)
 	}
+	if !persistenceErr.journalFailed() {
+		t.Fatal("combined persistence error did not retain journal failure provenance")
+	}
 	if !strings.Contains(err.Error(), "persist ACP execution update") ||
 		!strings.Contains(err.Error(), "persist ACP plan update") {
 		t.Fatalf("persistence error context = %v", err)
+	}
+	planOnly := acpUpdatePersistenceError(nil, planErr)
+	if !errors.As(planOnly, &persistenceErr) || persistenceErr.journalFailed() {
+		t.Fatalf("plan-only persistence error provenance = %#v", persistenceErr)
 	}
 }
 
@@ -794,7 +801,7 @@ func TestPromptUpdatePersistenceFailureCancelsAndFailsWithoutRuntimeLost(t *test
 	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore, Epochs: epochs}
 	if err := dispatcher.handlePromptStreamError(
 		ctx, runtimeClient, "runtime-session-1", task.DeepCopy(), attempt.ID, fence, runtimeFence,
-		true, harnessv2.RequestWriteEvidence{}, nil,
+		nil, true, harnessv2.RequestWriteEvidence{}, nil,
 		acpUpdatePersistenceError(errors.New("event store unavailable"), nil),
 	); err != nil {
 		t.Fatal(err)
@@ -820,6 +827,291 @@ func TestPromptUpdatePersistenceFailureCancelsAndFailsWithoutRuntimeLost(t *test
 	}
 	if attempt.ExecutionState != store.PromptExecutionFailed {
 		t.Fatalf("persistence failure attempt state = %s, want %s", attempt.ExecutionState, store.PromptExecutionFailed)
+	}
+}
+
+type promptStreamLifecycleFixture struct {
+	ctx            context.Context
+	dispatcher     *ACPDispatcher
+	runtimeClient  *harnessv2.Client
+	task           *corev1alpha1.Task
+	attemptID      string
+	fence          store.ControllerEpochFence
+	runtimeFence   harnessv2.Fence
+	journalState   *v2eventjournal.State
+	eventStore     *storetest.FakeExecutionEventStore
+	controlStore   *sqlite.Store
+	cancelRequests chan harnessv2.CancelPromptRequest
+}
+
+func newPromptStreamLifecycleFixture(
+	t *testing.T,
+	settlement harnessv2.PromptSettlement,
+) *promptStreamLifecycleFixture {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "stream-lifecycle.db"))
+	t.Cleanup(closeStore)
+
+	const promptID = "prompt-stream-lifecycle-1"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "stream-lifecycle", UID: types.UID("95959595-9595-9595-9595-959595959595"),
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "persist prompt lifecycle"},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1, Execution: &corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateRunning, Attempt: 1, PromptID: promptID,
+			RequestDigest: testControlDigestForDispatcher("stream-lifecycle"), ControllerEpoch: fence.Epoch,
+		}},
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+	}), fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, next := range []store.PromptExecutionState{
+		store.PromptExecutionReserved, store.PromptExecutionSessionStarting, store.PromptExecutionPlanned,
+		store.PromptExecutionSubmitting, store.PromptExecutionAccepted, store.PromptExecutionRunning,
+	} {
+		operation := "stream-lifecycle-" + string(next)
+		attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+			ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+			NewState: next, OperationID: operation, OperationDigest: testControlDigestForDispatcher(operation), UpdatedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cancelRequests := make(chan harnessv2.CancelPromptRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || !strings.HasSuffix(r.URL.Path, "/cancel") {
+			http.NotFound(w, r)
+			return
+		}
+		var request harnessv2.CancelPromptRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode cancellation: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		cancelRequests <- request
+		writeDispatcherJSON(w, harnessv2.CancelPromptResponse{
+			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+			BarrierState: harnessv2.CancellationBarrierSettled, SettlementProven: true, Settlement: settlement,
+		})
+	}))
+	t.Cleanup(server.Close)
+	runtimeClient, err := harnessv2.NewClient(
+		server.URL,
+		harnessv2.WithControllerBearerToken(strings.Repeat("t", 32)),
+		harnessv2.WithOperationCapabilitySecret([]byte(strings.Repeat("s", 32))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeFence := harnessv2.Fence{
+		RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id", ControllerEpoch: uint64(fence.Epoch),
+		RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1,
+		RuntimeProfileDigest:       harnessv2.ProfileDigest(testControlDigestForDispatcher("stream-lifecycle-profile")),
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+		RuntimeSessionUID:          "runtime-session-uid", RuntimeSessionGeneration: 1,
+	}
+	currentEpoch, err := controlStore.GetControllerEpoch(ctx, fence.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epochs := NewControllerEpochManager(controlStore, fence.HolderID)
+	epochs.current = currentEpoch
+	close(epochs.ready)
+
+	eventStore := storetest.NewFakeExecutionEventStore()
+	journalState, err := (v2eventjournal.Journal{
+		EventStore: eventStore,
+		MapContext: v2eventjournal.MapContext{
+			Namespace: task.Namespace, TaskName: task.Name, StreamID: task.Name,
+		},
+	}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	accepted := harnessv2.Event{
+		Protocol: harnessv2.ProtocolVersion,
+		Type:     harnessv2.EventAccepted,
+		Identity: harnessv2.EventIdentity{
+			RuntimeInstanceID: runtimeFence.RuntimeInstanceID, SupervisorBootID: runtimeFence.SupervisorBootID,
+			RuntimeSessionUID: runtimeFence.RuntimeSessionUID, RuntimeSessionGeneration: runtimeFence.RuntimeSessionGeneration,
+			TaskUID: harnessv2.TaskUID(task.UID), TaskAttempt: 1, PromptID: harnessv2.PromptID(promptID), Sequence: 1,
+			RequestDigest: harnessv2.RequestDigest(task.Status.Execution.RequestDigest), Timestamp: now,
+		},
+		Accepted: &harnessv2.AcceptedEvent{
+			AcceptedAt: now,
+			Lease: harnessv2.PromptLease{
+				Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+			},
+			ACPVersion: harnessv2.ACPProfileV1,
+		},
+	}
+	if appended, isNew, err := journalState.AppendPromptLifecycleIfNew(ctx, accepted); err != nil || !isNew || appended == nil {
+		t.Fatalf("append accepted lifecycle = %#v new=%t err=%v", appended, isNew, err)
+	}
+	return &promptStreamLifecycleFixture{
+		ctx: ctx, dispatcher: &ACPDispatcher{Client: kubeClient, Store: controlStore, Epochs: epochs},
+		runtimeClient: runtimeClient, task: task, attemptID: attempt.ID, fence: fence, runtimeFence: runtimeFence,
+		journalState: journalState, eventStore: eventStore, controlStore: controlStore, cancelRequests: cancelRequests,
+	}
+}
+
+func (f *promptStreamLifecycleFixture) assertTerminalLifecycle(
+	t *testing.T,
+	terminal harnessv2.EventType,
+	settlementProven bool,
+) {
+	t.Helper()
+	listed, err := f.eventStore.ListExecutionEvents(f.ctx, store.ExecutionEventFilter{
+		Namespace: f.task.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: f.task.Name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 || listed[0].Type != executionevents.ExecutionEventTypeModelRequestStarted ||
+		listed[1].Type != executionevents.ExecutionEventTypeModelRequestFailed {
+		t.Fatalf("prompt lifecycle = %#v", listed)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(listed[1].Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	proven, _ := content["settlementProven"].(bool)
+	if content["terminalEvent"] != string(terminal) || content["controllerSynthesized"] != true || proven != settlementProven {
+		t.Fatalf("terminal lifecycle content = %#v", content)
+	}
+	trace := tasktrace.BuildTaskTrace(tasktrace.MetadataFromTask(f.task), listed, time.Now().UTC())
+	if len(trace.ModelRequests) != 1 || trace.ModelRequests[0].Status == tasktrace.StatusRunning || trace.ModelRequests[0].EndSeq == 0 {
+		t.Fatalf("terminal lifecycle trace = %#v", trace.ModelRequests)
+	}
+}
+
+func TestPromptPlanPersistenceFailureClosesLifecycleAfterProvenSettlement(t *testing.T) {
+	fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
+		TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
+		StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
+	})
+	if err := fixture.dispatcher.handlePromptStreamError(
+		fixture.ctx, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
+		fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, nil,
+		acpUpdatePersistenceError(nil, errors.New("plan store unavailable")),
+	); err != nil {
+		t.Fatal(err)
+	}
+	request := <-fixture.cancelRequests
+	if request.Reason != harnessv2.CancelReasonStreamDisconnected {
+		t.Fatalf("cancel reason = %q", request.Reason)
+	}
+	completed := &corev1alpha1.Task{}
+	if err := fixture.dispatcher.Client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.task), completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status.Execution == nil || completed.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed ||
+		completed.Status.Execution.Reason != corev1alpha1.TaskExecutionReason(acpExecutionEventPersistenceFailureReason) {
+		t.Fatalf("plan persistence failure status = %#v", completed.Status.Execution)
+	}
+	fixture.assertTerminalLifecycle(t, harnessv2.EventCancelled, true)
+}
+
+func TestPromptStreamFailureClosesLifecycleBeforeOutcomeUnknown(t *testing.T) {
+	fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
+		TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
+		StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
+	})
+	if err := fixture.dispatcher.handlePromptStreamError(
+		fixture.ctx, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
+		fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, nil,
+		errors.New("stream disconnected"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.cancelRequests) != 0 {
+		t.Fatal("non-context stream failure unexpectedly cancelled the prompt")
+	}
+	completed := &corev1alpha1.Task{}
+	if err := fixture.dispatcher.Client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.task), completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status.Execution == nil || completed.Status.Execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown ||
+		completed.Status.Execution.Reason != "RuntimeLost" {
+		t.Fatalf("stream failure status = %#v", completed.Status.Execution)
+	}
+	fixture.assertTerminalLifecycle(t, harnessv2.EventOutcomeUnknown, false)
+}
+
+func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		settlement   harnessv2.PromptSettlement
+		wantState    corev1alpha1.TaskExecutionState
+		wantReason   corev1alpha1.TaskExecutionReason
+		wantAttempt  store.PromptExecutionState
+		wantTerminal harnessv2.EventType
+	}{
+		{
+			name: "cancelled",
+			settlement: harnessv2.PromptSettlement{
+				TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
+				StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
+			},
+			wantState: corev1alpha1.TaskExecutionStateCancelled, wantReason: "Cancelled",
+			wantAttempt: store.PromptExecutionCancelled, wantTerminal: harnessv2.EventCancelled,
+		},
+		{
+			name: "failed",
+			settlement: harnessv2.PromptSettlement{
+				TerminalEvent: harnessv2.EventFailed, Outcome: harnessv2.PromptOutcomeFailed,
+				StopReason: harnessv2.ACPStopReasonRefusal, SettledAt: time.Now().UTC(),
+			},
+			wantState: corev1alpha1.TaskExecutionStateFailed, wantReason: "PromptFailed",
+			wantAttempt: store.PromptExecutionFailed, wantTerminal: harnessv2.EventFailed,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPromptStreamLifecycleFixture(t, test.settlement)
+			if err := fixture.dispatcher.handlePromptStreamError(
+				fixture.ctx, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
+				fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{},
+				context.DeadlineExceeded, context.DeadlineExceeded,
+			); err != nil {
+				t.Fatal(err)
+			}
+			request := <-fixture.cancelRequests
+			if request.Reason != harnessv2.CancelReasonTaskTimeout {
+				t.Fatalf("cancel reason = %q", request.Reason)
+			}
+			completed := &corev1alpha1.Task{}
+			if err := fixture.dispatcher.Client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.task), completed); err != nil {
+				t.Fatal(err)
+			}
+			if completed.Status.Execution == nil || completed.Status.Execution.State != test.wantState ||
+				completed.Status.Execution.Reason != test.wantReason {
+				t.Fatalf("timeout settlement status = %#v", completed.Status.Execution)
+			}
+			attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if attempt.ExecutionState != test.wantAttempt {
+				t.Fatalf("timeout settlement attempt = %s, want %s", attempt.ExecutionState, test.wantAttempt)
+			}
+			fixture.assertTerminalLifecycle(t, test.wantTerminal, true)
+		})
 	}
 }
 

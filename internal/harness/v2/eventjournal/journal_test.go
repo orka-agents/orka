@@ -524,6 +524,96 @@ func TestJournalPersistsPromptStreamFailureWithRecoveryDeduplication(t *testing.
 	}
 }
 
+func TestJournalPersistsProvenPromptSettlementWithRecoveryDeduplication(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		settlement harnessv2.PromptSettlement
+		wantType   string
+	}{
+		{
+			name: "cancelled",
+			settlement: harnessv2.PromptSettlement{
+				TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
+				StopReason: harnessv2.ACPStopReasonCancelled,
+			},
+			wantType: executionevents.ExecutionEventTypeModelRequestFailed,
+		},
+		{
+			name: "failed",
+			settlement: harnessv2.PromptSettlement{
+				TerminalEvent: harnessv2.EventFailed, Outcome: harnessv2.PromptOutcomeFailed,
+				StopReason: harnessv2.ACPStopReasonRefusal,
+			},
+			wantType: executionevents.ExecutionEventTypeModelRequestFailed,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			eventStore := storetest.NewFakeExecutionEventStore()
+			journal := Journal{EventStore: eventStore, MapContext: testMapContext()}
+			state, err := journal.Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
+			accepted.Type = harnessv2.EventAccepted
+			accepted.Update = nil
+			accepted.Accepted = &harnessv2.AcceptedEvent{
+				AcceptedAt: now,
+				Lease: harnessv2.PromptLease{
+					Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+				},
+				ACPVersion: harnessv2.ACPProfileV1,
+			}
+			if appended, isNew, err := state.AppendPromptLifecycleIfNew(ctx, accepted); err != nil || !isNew || appended == nil {
+				t.Fatalf("append accepted lifecycle = %#v new=%t err=%v", appended, isNew, err)
+			}
+			test.settlement.SettledAt = now.Add(time.Second)
+			if appended, isNew, err := state.AppendPromptSettlementIfNew(ctx, test.settlement); err != nil || !isNew || appended == nil {
+				t.Fatalf("append prompt settlement = %#v new=%t err=%v", appended, isNew, err)
+			}
+
+			listed := listJournalEvents(t, ctx, eventStore)
+			if len(listed) != 2 || listed[0].Type != executionevents.ExecutionEventTypeModelRequestStarted || listed[1].Type != test.wantType {
+				t.Fatalf("prompt settlement lifecycle events = %#v", listed)
+			}
+			var content map[string]any
+			if err := json.Unmarshal(listed[1].Content, &content); err != nil {
+				t.Fatal(err)
+			}
+			if content["terminalEvent"] != string(test.settlement.TerminalEvent) ||
+				content["controllerSynthesized"] != true || content["settlementProven"] != true {
+				t.Fatalf("prompt settlement lifecycle content = %#v", content)
+			}
+
+			recoveryJournal := journal
+			recoveryJournal.RecoveryIdentity = mappedUpdateIdentity(accepted)
+			evidence, err := recoveryJournal.FindPromptTerminal(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if evidence == nil || evidence.TerminalEvent != test.settlement.TerminalEvent {
+				t.Fatalf("prompt settlement recovery evidence = %#v", evidence)
+			}
+			recovered, err := journal.Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if duplicate, isNew, err := recovered.AppendPromptSettlementIfNew(ctx, test.settlement); err != nil || isNew || duplicate != nil {
+				t.Fatalf("recovered prompt settlement = %#v new=%t err=%v", duplicate, isNew, err)
+			}
+			laterTerminal := testTerminalEvent(2, now.Add(2*time.Second))
+			if duplicate, isNew, err := recovered.AppendPromptLifecycleIfNew(ctx, laterTerminal); err != nil || isNew || duplicate != nil {
+				t.Fatalf("terminal after proven settlement = %#v new=%t err=%v", duplicate, isNew, err)
+			}
+			if listed = listJournalEvents(t, ctx, eventStore); len(listed) != 2 {
+				t.Fatalf("prompt settlement lifecycle event count after later terminal = %d, want 2", len(listed))
+			}
+		})
+	}
+}
+
 func TestJournalPersistsAssistantTextOnNonTerminalStreamClosure(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()

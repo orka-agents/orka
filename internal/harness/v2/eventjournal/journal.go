@@ -93,12 +93,13 @@ func promptTerminalEventType(event store.ExecutionEvent) (harnessv2.EventType, e
 		TerminalEvent         harnessv2.EventType `json:"terminalEvent"`
 		StopReason            string              `json:"stopReason"`
 		ControllerSynthesized bool                `json:"controllerSynthesized"`
+		SettlementProven      bool                `json:"settlementProven"`
 	}
 	if err := json.Unmarshal(event.Content, &content); err != nil {
 		return "", fmt.Errorf("%w: decode mapped harness v2 prompt terminal: %v", store.ErrConflict, err)
 	}
 	terminalEvent := content.TerminalEvent
-	if content.ControllerSynthesized {
+	if content.ControllerSynthesized && !content.SettlementProven {
 		terminalEvent = harnessv2.EventOutcomeUnknown
 	}
 	if !terminalEvent.IsTerminal() {
@@ -607,7 +608,7 @@ func (s *State) AppendPromptLifecycleIfNew(
 		}
 		kind = mappedJournalRecordPromptAccepted
 	case event.Type.IsTerminal():
-		if s.promptTerminalSequence == identity.Sequence {
+		if s.promptTerminalSequence > 0 {
 			return nil, false, nil
 		}
 		kind = mappedJournalRecordPromptTerminal
@@ -645,6 +646,31 @@ func (s *State) AppendPromptStreamFailureIfNew(
 	return s.appendMappedEvent(
 		ctx, identity, mappedJournalRecordPromptTerminal, mapped,
 		"append mapped harness v2 prompt stream failure",
+	)
+}
+
+// AppendPromptSettlementIfNew closes a persisted prompt-acceptance lifecycle
+// from a proven cancellation settlement when the terminal stream event was
+// unavailable. The accepted identity supplies a stable deduplication key.
+func (s *State) AppendPromptSettlementIfNew(
+	ctx context.Context,
+	settlement harnessv2.PromptSettlement,
+) (*store.ExecutionEvent, bool, error) {
+	if s == nil {
+		return nil, false, fmt.Errorf("harness v2 journal state is required")
+	}
+	if s.promptAcceptedSequence == 0 || s.promptTerminalSequence > 0 {
+		return nil, false, nil
+	}
+	identity := s.promptIdentity
+	identity.Sequence = s.promptAcceptedSequence
+	mapped, err := mapPromptSettlement(identity, settlement, s.journal.MapContext)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.appendMappedEvent(
+		ctx, identity, mappedJournalRecordPromptTerminal, mapped,
+		"append mapped harness v2 prompt settlement",
 	)
 }
 

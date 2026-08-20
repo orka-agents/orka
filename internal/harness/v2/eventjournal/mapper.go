@@ -15,17 +15,19 @@ import (
 )
 
 const (
-	mappedUpdateIdentityKeySeparator = "\x00"
-	mappedToolCallIDPrefix           = "event-tool-call-v1-sha256-"
-	mappedToolCallIDDomain           = "orka.harness.v2.execution-event.tool-call-id.v1\x00"
-	mappedJournalDedupeKeyPrefix     = "harness-v2-event-v1-sha256-"
-	mappedJournalDedupeKeyDomain     = "orka.harness.v2.execution-event.dedupe-key.v1\x00"
-	mappedAssistantTranscriptKind    = "assistant_transcript"
-	mappedToolStreamClosureKind      = "tool_stream_closure"
-	mappedTerminalUsageKind          = "terminal_usage"
-	mappedPromptAcceptedKind         = "prompt_accepted"
-	mappedPromptTerminalKind         = "prompt_terminal"
-	mappedPromptStreamFailureCode    = "prompt_stream_error"
+	mappedUpdateIdentityKeySeparator  = "\x00"
+	mappedToolCallIDPrefix            = "event-tool-call-v1-sha256-"
+	mappedToolCallIDDomain            = "orka.harness.v2.execution-event.tool-call-id.v1\x00"
+	mappedJournalDedupeKeyPrefix      = "harness-v2-event-v1-sha256-"
+	mappedJournalDedupeKeyDomain      = "orka.harness.v2.execution-event.dedupe-key.v1\x00"
+	mappedAssistantTranscriptKind     = "assistant_transcript"
+	mappedToolStreamClosureKind       = "tool_stream_closure"
+	mappedTerminalUsageKind           = "terminal_usage"
+	mappedPromptAcceptedKind          = "prompt_accepted"
+	mappedPromptTerminalKind          = "prompt_terminal"
+	mappedPromptStreamFailureCode     = "prompt_stream_error"
+	mappedPromptSettlementFailureCode = "prompt_cancellation_failed"
+	mappedPromptSettlementUnknownCode = "prompt_settlement_outcome_unknown"
 )
 
 type mappedJournalRecordKind uint8
@@ -889,6 +891,85 @@ func mapPromptStreamFailure(
 	}
 	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
 		return nil, fmt.Errorf("sanitize mapped harness v2 prompt stream failure: %w", err)
+	}
+	return mapped, nil
+}
+
+// mapPromptSettlement maps a cancellation endpoint's proven settlement into
+// the prompt lifecycle taxonomy when the terminal stream event was unavailable.
+func mapPromptSettlement(
+	identity MappedUpdateIdentity,
+	settlement harnessv2.PromptSettlement,
+	mapCtx MapContext,
+) (*store.ExecutionEvent, error) {
+	if err := mapCtx.validate(); err != nil {
+		return nil, err
+	}
+	mapCtx = mapCtx.normalized()
+	if !identity.valid() {
+		return nil, fmt.Errorf("valid harness v2 prompt identity is required")
+	}
+	if err := settlement.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid prompt settlement: %w", err)
+	}
+	content := map[string]any{
+		"harnessV2":             identity,
+		"modelRequestID":        string(identity.PromptID),
+		"journalKind":           mappedPromptTerminalKind,
+		"terminalEvent":         settlement.TerminalEvent,
+		"outcome":               settlement.Outcome,
+		"stopReason":            settlement.StopReason,
+		"settledAt":             settlement.SettledAt.UTC(),
+		"controllerSynthesized": true,
+		"settlementProven":      true,
+	}
+	mapped := &store.ExecutionEvent{
+		Namespace:   mapCtx.Namespace,
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    mapCtx.StreamID,
+		Severity:    executionevents.ExecutionEventSeverityInfo,
+		TaskName:    mapCtx.TaskName,
+		SessionName: mapCtx.SessionName,
+		AgentName:   mapCtx.AgentName,
+		CreatedAt:   settlement.SettledAt.UTC(),
+	}
+	switch settlement.TerminalEvent {
+	case harnessv2.EventCompleted:
+		mapped.Type = executionevents.ExecutionEventTypeModelRequestCompleted
+		mapped.Summary = "Model request completed"
+	case harnessv2.EventCancelled:
+		content["reason"] = "prompt cancellation settled"
+		mapped.Type = executionevents.ExecutionEventTypeModelRequestFailed
+		mapped.Severity = executionevents.ExecutionEventSeverityWarning
+		mapped.Summary = "Model request cancelled"
+	case harnessv2.EventFailed:
+		content["code"] = mappedPromptSettlementFailureCode
+		content["message"] = "runtime reported prompt failure during cancellation"
+		mapped.Type = executionevents.ExecutionEventTypeModelRequestFailed
+		mapped.Severity = executionevents.ExecutionEventSeverityError
+		mapped.Summary = "Model request failed during cancellation"
+	case harnessv2.EventOutcomeUnknown:
+		content["code"] = mappedPromptSettlementUnknownCode
+		content["message"] = "runtime reported an unknown prompt outcome during cancellation"
+		mapped.Type = executionevents.ExecutionEventTypeModelRequestFailed
+		mapped.Severity = executionevents.ExecutionEventSeverityError
+		mapped.Summary = "Model request outcome unknown"
+	default:
+		return nil, fmt.Errorf("unsupported prompt settlement terminal event %q", settlement.TerminalEvent)
+	}
+	if mapCtx.Provider != "" {
+		content["provider"] = mapCtx.Provider
+	}
+	if mapCtx.Model != "" {
+		content["model"] = mapCtx.Model
+	}
+	encoded, err := json.Marshal(content)
+	if err != nil {
+		return nil, fmt.Errorf("marshal mapped harness v2 prompt settlement: %w", err)
+	}
+	mapped.Content = encoded
+	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
+		return nil, fmt.Errorf("sanitize mapped harness v2 prompt settlement: %w", err)
 	}
 	return mapped, nil
 }
