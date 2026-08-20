@@ -118,10 +118,11 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 			},
 		}, "", true, nil
 	case "plan":
-		if len(envelope.Entries) == 0 {
+		plan := &harnessv2.PlanUpdate{Entries: envelope.Entries}
+		if err := plan.Validate(); err != nil {
 			return nil, "", false, nil
 		}
-		return &harnessv2.UpdateEvent{Kind: harnessv2.UpdatePlan, Plan: &harnessv2.PlanUpdate{Entries: envelope.Entries}}, "", true, nil
+		return &harnessv2.UpdateEvent{Kind: harnessv2.UpdatePlan, Plan: plan}, "", true, nil
 	case "usage_update":
 		return &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{
 			ContextWindowUsed: &envelope.Used,

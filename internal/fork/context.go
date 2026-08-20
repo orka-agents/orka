@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	executionevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
@@ -42,27 +43,44 @@ func CoalesceAdjacentModelMessages(values []store.ExecutionEvent) []store.Execut
 	for _, event := range values {
 		if len(coalesced) > 0 && sameHarnessV2ModelMessage(coalesced[len(coalesced)-1], event) {
 			previous := &coalesced[len(coalesced)-1]
-			previous.ContentText += event.ContentText
+			combinedOriginalChars := executionEventContentTextChars(*previous) + executionEventContentTextChars(event)
 			previous.Seq = event.Seq
 			previous.CreatedAt = event.CreatedAt
 			previous.Content = cloneRaw(event.Content)
 			previous.Truncation = store.MergeExecutionEventTruncation(previous.Truncation, event.Truncation)
+			if previous.Truncation != nil && previous.Truncation.ContentTextTruncated {
+				previous.ContentText = ""
+				previous.Truncation = store.MergeExecutionEventTruncation(previous.Truncation, &executionevents.ExecutionEventTruncation{
+					ContentTextTruncated:     true,
+					ContentTextOriginalChars: combinedOriginalChars,
+				})
+				continue
+			}
 			contentText, truncated, originalChars := executionevents.RedactAndTruncateExecutionEventText(
-				previous.ContentText,
+				previous.ContentText+event.ContentText,
 				executionevents.MaxExecutionEventContentTextChars,
 			)
-			previous.ContentText = contentText
 			if truncated {
+				previous.ContentText = ""
 				previous.Truncation = store.MergeExecutionEventTruncation(previous.Truncation, &executionevents.ExecutionEventTruncation{
 					ContentTextTruncated:     true,
 					ContentTextOriginalChars: originalChars,
 				})
+			} else {
+				previous.ContentText = contentText
 			}
 			continue
 		}
 		coalesced = append(coalesced, event)
 	}
 	return coalesced
+}
+
+func executionEventContentTextChars(event store.ExecutionEvent) int {
+	if event.Truncation != nil && event.Truncation.ContentTextTruncated && event.Truncation.ContentTextOriginalChars > 0 {
+		return event.Truncation.ContentTextOriginalChars
+	}
+	return utf8.RuneCountInString(event.ContentText)
 }
 
 func sameHarnessV2ModelMessage(left, right store.ExecutionEvent) bool {

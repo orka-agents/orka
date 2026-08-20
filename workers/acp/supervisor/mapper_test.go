@@ -181,6 +181,34 @@ func TestMapACPUpdatePreservesWhitespaceToolContent(t *testing.T) {
 	}
 }
 
+func TestMapACPUpdateOmitsInvalidPlanTelemetry(t *testing.T) {
+	tooMany := make([]harnessv2.PlanEntry, 129)
+	for index := range tooMany {
+		tooMany[index] = harnessv2.PlanEntry{Content: "step", Status: harnessv2.PlanEntryPending}
+	}
+	tests := []struct {
+		name    string
+		entries []harnessv2.PlanEntry
+	}{
+		{name: "too many entries", entries: tooMany},
+		{name: "oversized entry", entries: []harnessv2.PlanEntry{{
+			Content: strings.Repeat("x", harnessv2.MaxProtocolStringBytes+1), Status: harnessv2.PlanEntryPending,
+		}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]any{"sessionUpdate": "plan", "entries": test.entries})
+			if err != nil {
+				t.Fatal(err)
+			}
+			update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: raw})
+			if err != nil || ok || update != nil || text != "" {
+				t.Fatalf("mapped invalid plan = %#v text=%q ok=%t err=%v", update, text, ok, err)
+			}
+		})
+	}
+}
+
 func TestMapACPToolCallContentOmitsSnapshotOverBlockLimit(t *testing.T) {
 	items := make([]map[string]any, harnessv2.MaxContentBlocks+1)
 	for index := range items {

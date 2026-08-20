@@ -225,6 +225,20 @@ func TestRedactExecutionEventTextCoversSecrets(t *testing.T) {
 	}
 }
 
+func TestRedactExecutionEventTextStripsURLQueriesAndFragments(t *testing.T) {
+	capabilityURL := "https://account.blob.core.windows.net/output.txt?sp=r&sig=usable-secret#download"
+	got := RedactExecutionEventText("download " + capabilityURL + ", then open https://example.com/docs.")
+	for _, leaked := range []string{"sig=", "usable-secret", "#download"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("RedactExecutionEventText leaked %q in %q", leaked, got)
+		}
+	}
+	if !strings.Contains(got, "https://account.blob.core.windows.net/output.txt,") ||
+		!strings.Contains(got, "https://example.com/docs.") {
+		t.Fatalf("RedactExecutionEventText() = %q", got)
+	}
+}
+
 func TestRedactExecutionEventJSONPayload(t *testing.T) {
 	bearerValue := fakeDashToken("bearer")
 	cookieValue := fakeDashToken("cookie")

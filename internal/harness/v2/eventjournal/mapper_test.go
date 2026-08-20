@@ -349,13 +349,17 @@ func TestMapUpdateOmitsUnredactedStreamText(t *testing.T) {
 
 func TestMapAssistantTranscriptRedactsCompleteText(t *testing.T) {
 	credential := "sk-" + strings.Repeat("a", 24)
-	transcript := "hello Authorization: Bearer " + credential + " world"
+	capabilityURL := "https://account.blob.core.windows.net/output.txt?sp=r&sig=usable-secret#download"
+	transcript := "hello Authorization: Bearer " + credential + " world\n" + capabilityURL
 	mapped, err := MapAssistantTranscript(testTerminalEvent(3, time.Now().UTC()), testMapContext(), transcript)
 	if err != nil {
 		t.Fatal(err)
 	}
 	encoded := mapped.Summary + mapped.ContentText + string(mapped.Content)
-	if strings.Contains(encoded, credential) || !strings.Contains(mapped.ContentText, executionevents.ExecutionEventRedactedValue) {
+	if strings.Contains(encoded, credential) || strings.Contains(encoded, "sig=") ||
+		strings.Contains(encoded, "usable-secret") || strings.Contains(encoded, "#download") ||
+		!strings.Contains(mapped.ContentText, executionevents.ExecutionEventRedactedValue) ||
+		!strings.Contains(mapped.ContentText, "https://account.blob.core.windows.net/output.txt") {
 		t.Fatalf("assistant transcript was not redacted: %#v content=%s", mapped, mapped.Content)
 	}
 	identity, ok := MappedUpdateIdentityFromEvent(*mapped)

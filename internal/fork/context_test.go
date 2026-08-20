@@ -107,11 +107,31 @@ func TestCoalesceAdjacentModelMessagesBoundsCombinedText(t *testing.T) {
 		{Seq: 1, Type: events.ExecutionEventTypeModelMessage, Content: content, ContentText: strings.Repeat("x", events.MaxExecutionEventContentTextChars)},
 		{Seq: 2, Type: events.ExecutionEventTypeModelMessage, Content: content, ContentText: "y"},
 	})
-	if len(coalesced) != 1 || len([]rune(coalesced[0].ContentText)) != events.MaxExecutionEventContentTextChars {
+	if len(coalesced) != 1 || coalesced[0].ContentText != "" {
 		t.Fatalf("bounded coalesced event = %#v", coalesced)
 	}
 	if coalesced[0].Truncation == nil || !coalesced[0].Truncation.ContentTextTruncated ||
 		coalesced[0].Truncation.ContentTextOriginalChars != events.MaxExecutionEventContentTextChars+1 {
+		t.Fatalf("coalesced truncation = %#v", coalesced[0].Truncation)
+	}
+}
+
+func TestCoalesceAdjacentModelMessagesKeepsTextOmittedAfterTruncation(t *testing.T) {
+	content := json.RawMessage(`{"harnessV2":{"taskUID":"task-uid","taskAttempt":1,"promptID":"prompt-1"}}`)
+	credentialSuffix := strings.Repeat("a", 24)
+	coalesced := CoalesceAdjacentModelMessages([]store.ExecutionEvent{
+		{
+			Seq: 1, Type: events.ExecutionEventTypeModelMessage, Content: content,
+			ContentText: strings.Repeat("x", events.MaxExecutionEventContentTextChars),
+		},
+		{Seq: 2, Type: events.ExecutionEventTypeModelMessage, Content: content, ContentText: "sk-"},
+		{Seq: 3, Type: events.ExecutionEventTypeModelMessage, Content: content, ContentText: credentialSuffix},
+	})
+	if len(coalesced) != 1 || coalesced[0].ContentText != "" {
+		t.Fatalf("coalesced truncated credential fragments = %#v", coalesced)
+	}
+	if coalesced[0].Truncation == nil || !coalesced[0].Truncation.ContentTextTruncated ||
+		coalesced[0].Truncation.ContentTextOriginalChars != events.MaxExecutionEventContentTextChars+3+len(credentialSuffix) {
 		t.Fatalf("coalesced truncation = %#v", coalesced[0].Truncation)
 	}
 }

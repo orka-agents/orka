@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -23,6 +24,7 @@ var (
 	executionEventAuthorizationHeaderRe = regexp.MustCompile(`(?i)\b(authorization\s*:\s*)[^\r\n]+`)
 	executionEventTransactionHeaderRe   = regexp.MustCompile(`(?i)\b((?:txn-token|transaction-token)\s*:\s*)[A-Za-z0-9._~+/=-]+`)
 	executionEventCookieHeaderRe        = regexp.MustCompile(`(?i)\b((?:cookie|set-cookie)\s*:\s*)[^\r\n]+`)
+	executionEventAbsoluteURLRe         = regexp.MustCompile("(?i)\\b[a-z][a-z0-9+.-]*://[^\\s<>\\\"'`]+")
 )
 
 // ExecutionEventTruncation records whether public event payload fields were truncated.
@@ -57,7 +59,24 @@ func RedactExecutionEventText(value string) string {
 	redacted = executionEventAuthorizationHeaderRe.ReplaceAllString(redacted, `${1}`+ExecutionEventRedactedValue)
 	redacted = executionEventTransactionHeaderRe.ReplaceAllString(redacted, `${1}`+ExecutionEventRedactedValue)
 	redacted = executionEventCookieHeaderRe.ReplaceAllString(redacted, `${1}`+ExecutionEventRedactedValue)
+	redacted = stripExecutionEventURLQueries(redacted)
 	return redacted
+}
+
+func stripExecutionEventURLQueries(value string) string {
+	return executionEventAbsoluteURLRe.ReplaceAllStringFunc(value, func(candidate string) string {
+		trimmed := strings.TrimRight(candidate, ".,;:!?)]}")
+		suffix := candidate[len(trimmed):]
+		parsed, err := url.Parse(trimmed)
+		if err != nil || !parsed.IsAbs() || (parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "") {
+			return candidate
+		}
+		parsed.RawQuery = ""
+		parsed.ForceQuery = false
+		parsed.Fragment = ""
+		parsed.RawFragment = ""
+		return parsed.String() + suffix
+	})
 }
 
 // RedactAndTruncateExecutionEventText redacts value and bounds it to maxChars runes.
