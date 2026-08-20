@@ -21,26 +21,42 @@ import (
 	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
 )
 
-func TestRecordACPPromptOutcomeIfSettled(t *testing.T) {
-	if _, err := orkatracing.Init("acp-telemetry-test", false); err != nil {
-		t.Fatalf("initialize tracing: %v", err)
+func TestRecordACPPromptOutcomeIfSettledEndsBeforeLaterError(t *testing.T) {
+	tests := []struct {
+		name      string
+		outcome   string
+		wantError bool
+	}{
+		{name: "failed", outcome: acpPromptOutcomeFailed, wantError: true},
+		{name: "cancelled", outcome: acpPromptOutcomeCancelled},
+		{name: "unknown", outcome: acpPromptOutcomeUnknown, wantError: true},
 	}
-	harness := tracingtest.NewSpanHarness(t)
-	ctx, promptTrace := startACPSpan(context.Background(), acpPromptSpanName)
-	if err := recordACPPromptOutcomeIfSettled(ctx, acpPromptOutcomeUnknown, nil); err != nil {
-		t.Fatalf("record settled prompt outcome: %v", err)
-	}
-	promptTrace.End(nil)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := orkatracing.Init("acp-telemetry-test", false); err != nil {
+				t.Fatalf("initialize tracing: %v", err)
+			}
+			harness := tracingtest.NewSpanHarness(t)
+			ctx, promptTrace := startACPSpan(context.Background(), acpPromptSpanName)
+			if err := recordACPPromptOutcomeIfSettled(ctx, promptTrace, test.outcome, nil); err != nil {
+				t.Fatalf("record settled prompt outcome: %v", err)
+			}
+			promptTrace.End(errors.New("runtime session cleanup failed"))
 
-	promptSpan := tracingtest.SpanNamed(harness.Recorder.Ended(), acpPromptSpanName)
-	if promptSpan == nil {
-		t.Fatal("missing acp.prompt span")
-	}
-	if got := tracingtest.AttributeMap(promptSpan)[acpAttrPromptOutcome].AsString(); got != acpPromptOutcomeUnknown {
-		t.Fatalf("acp.prompt outcome = %q, want %q", got, acpPromptOutcomeUnknown)
-	}
-	if got := promptSpan.Status().Code; got != codes.Error {
-		t.Fatalf("acp.prompt status = %s, want %s", got, codes.Error)
+			promptSpan := tracingtest.SpanNamed(harness.Recorder.Ended(), acpPromptSpanName)
+			if promptSpan == nil {
+				t.Fatal("missing acp.prompt span")
+			}
+			if got := tracingtest.AttributeMap(promptSpan)[acpAttrPromptOutcome].AsString(); got != test.outcome {
+				t.Fatalf("acp.prompt outcome = %q, want %q", got, test.outcome)
+			}
+			if got := promptSpan.Status().Code == codes.Error; got != test.wantError {
+				t.Fatalf("acp.prompt error status = %t, want %t", got, test.wantError)
+			}
+			if _, ok := tracingtest.AttributeMap(promptSpan)["error.type"]; ok {
+				t.Fatal("settled acp.prompt span recorded a later cleanup error")
+			}
+		})
 	}
 }
 
@@ -51,7 +67,7 @@ func TestRecordACPPromptOutcomeIfSettlementFails(t *testing.T) {
 	harness := tracingtest.NewSpanHarness(t)
 	ctx, promptTrace := startACPSpan(context.Background(), acpPromptSpanName)
 	settlementErr := errors.New("settlement failed")
-	if err := recordACPPromptOutcomeIfSettled(ctx, acpPromptOutcomeFailed, settlementErr); !errors.Is(err, settlementErr) {
+	if err := recordACPPromptOutcomeIfSettled(ctx, promptTrace, acpPromptOutcomeFailed, settlementErr); !errors.Is(err, settlementErr) {
 		t.Fatalf("settlement error = %v, want %v", err, settlementErr)
 	}
 	promptTrace.End(settlementErr)

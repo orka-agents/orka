@@ -1292,25 +1292,25 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				_ = cleanupRuntimeSession("prompt_admission_reconciliation_stopped")
 				if runtimeContextError(runtimeCtx) != nil {
 					return recordACPPromptOutcomeIfSettled(
-						ctx, acpPromptOutcomeCancelled,
+						ctx, promptTrace, acpPromptOutcomeCancelled,
 						d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventCancelled}),
 					)
 				}
 				return recordACPPromptOutcomeIfSettled(
-					ctx, acpPromptOutcomeFailed,
+					ctx, promptTrace, acpPromptOutcomeFailed,
 					d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventFailed}),
 				)
 			}
 			continue
 		}
 		return d.handlePromptStreamError(
-			ctx, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence,
+			ctx, promptTrace, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence,
 			accepted || summary.Accepted, summary.WriteEvidence, runtimeContextError(runtimeCtx), streamErr,
 		)
 	}
 	if terminal == nil {
 		return recordACPPromptOutcomeIfSettled(
-			ctx, acpPromptOutcomeUnknown,
+			ctx, promptTrace, acpPromptOutcomeUnknown,
 			d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event"),
 		)
 	}
@@ -1323,7 +1323,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			outcome = acpPromptOutcomeUnknown
 		}
 		return recordACPPromptOutcomeIfSettled(
-			ctx, outcome,
+			ctx, promptTrace, outcome,
 			d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal),
 		)
 	}
@@ -3754,6 +3754,7 @@ func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *co
 
 func (d *ACPDispatcher) handlePromptStreamError(
 	ctx context.Context,
+	promptTrace *acpSpan,
 	runtimeClient *harnessv2.Client,
 	sessionID harnessv2.RuntimeSessionID,
 	task *corev1alpha1.Task,
@@ -3786,7 +3787,7 @@ func (d *ACPDispatcher) handlePromptStreamError(
 				return transitionErr
 			}
 			return recordACPPromptOutcomeIfSettled(
-				ctx, acpPromptOutcomeCancelled,
+				ctx, promptTrace, acpPromptOutcomeCancelled,
 				d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancelled before acceptance"),
 			)
 		}
@@ -3811,7 +3812,7 @@ func (d *ACPDispatcher) handlePromptStreamError(
 						return transitionErr
 					}
 					return recordACPPromptOutcomeIfSettled(
-						ctx, acpPromptOutcomeCancelled,
+						ctx, promptTrace, acpPromptOutcomeCancelled,
 						d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancellation settled"),
 					)
 				case harnessv2.EventFailed:
@@ -3819,14 +3820,14 @@ func (d *ACPDispatcher) handlePromptStreamError(
 						return transitionErr
 					}
 					return recordACPPromptOutcomeIfSettled(
-						ctx, acpPromptOutcomeFailed,
+						ctx, promptTrace, acpPromptOutcomeFailed,
 						d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptFailed", "prompt failed during cancellation"),
 					)
 				}
 			}
 		}
 		return recordACPPromptOutcomeIfSettled(
-			ctx, acpPromptOutcomeUnknown,
+			ctx, promptTrace, acpPromptOutcomeUnknown,
 			d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "prompt cancellation settlement is unknown"),
 		)
 	}
@@ -3836,12 +3837,12 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			return transitionErr
 		}
 		return recordACPPromptOutcomeIfSettled(
-			ctx, acpPromptOutcomeFailed,
+			ctx, promptTrace, acpPromptOutcomeFailed,
 			d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptNotAccepted", "prompt transport failed before any request bytes were written"),
 		)
 	}
 	return recordACPPromptOutcomeIfSettled(
-		ctx, acpPromptOutcomeUnknown,
+		ctx, promptTrace, acpPromptOutcomeUnknown,
 		d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "accepted prompt outcome is unknown"),
 	)
 }

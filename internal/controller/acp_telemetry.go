@@ -142,9 +142,10 @@ func recordACPPromptOutcome(ctx context.Context, outcome string) {
 	}
 }
 
-func recordACPPromptOutcomeIfSettled(ctx context.Context, outcome string, err error) error {
+func recordACPPromptOutcomeIfSettled(ctx context.Context, promptTrace *acpSpan, outcome string, err error) error {
 	if err == nil {
 		recordACPPromptOutcome(ctx, outcome)
+		promptTrace.End(nil)
 	}
 	return err
 }
