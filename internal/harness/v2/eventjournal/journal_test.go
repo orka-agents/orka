@@ -303,6 +303,54 @@ func TestJournalPreservesBenignPlanUpdatesAfterFieldHistoryCap(t *testing.T) {
 	}
 }
 
+func TestJournalFailsClosedAfterLogicalFieldHistoryCapacity(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	first := testUpdateEvent(2, now, harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: "s", Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, first); err != nil || !isNew || appended == nil {
+		t.Fatalf("append initial fragment = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	entries := make([]harnessv2.PlanEntry, maxLogicalFieldPermutationFields/2)
+	for index := range entries {
+		entries[index] = harnessv2.PlanEntry{
+			Content: fmt.Sprintf("step %03d", index), Priority: fmt.Sprintf("priority %03d", index),
+			Status: harnessv2.PlanEntryPending,
+		}
+	}
+	full := testUpdateEvent(3, now.Add(time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan, Plan: &harnessv2.PlanUpdate{Entries: entries},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, full); err != nil || !isNew || appended == nil {
+		t.Fatalf("append capacity-crossing plan = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if !state.logicalFieldHistorySaturated {
+		t.Fatal("logical field history did not enter fail-closed mode")
+	}
+
+	suffix := "k-" + strings.Repeat("b", 24)
+	if appended, isNew, err := state.AppendAssistantTranscriptIfNew(
+		ctx, testTerminalEvent(4, now.Add(2*time.Millisecond)), suffix, false,
+	); err != nil || !isNew || appended == nil {
+		t.Fatalf("append post-capacity assistant fragment = %#v new=%t err=%v", appended, isNew, err)
+	}
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 3 || listed[2].ContentText != executionevents.ExecutionEventRedactedValue ||
+		strings.Contains(listed[2].Summary+string(listed[2].Content), suffix) {
+		t.Fatalf("post-capacity logical fields = %#v", listed)
+	}
+}
+
 func TestJournalRedactsCredentialSplitAcrossPlanAndDiagnosticUpdates(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
@@ -405,6 +453,178 @@ func TestJournalRedactsCredentialSplitAcrossPlanAndToolMetadata(t *testing.T) {
 		listed[1].ToolName != executionevents.ExecutionEventRedactedValue ||
 		strings.Contains(string(listed[1].Content), suffix) {
 		t.Fatalf("plan/tool logical fields = %#v", listed)
+	}
+}
+
+func TestJournalRedactsCredentialSplitIntoTerminalUsageModel(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	prefix := "sk-" + strings.Repeat("a", 10)
+	suffix := strings.Repeat("b", 14)
+	plan := testUpdateEvent(2, now, harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: prefix, Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, plan); err != nil || !isNew || appended == nil {
+		t.Fatalf("append plan prefix = %#v new=%t err=%v", appended, isNew, err)
+	}
+	terminal := testTerminalEvent(3, now.Add(time.Millisecond))
+	terminal.Completed = &harnessv2.CompletedEvent{
+		StopReason: harnessv2.ACPStopReasonEndTurn,
+		Result: harnessv2.PromptResult{
+			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "done"}},
+			Model:   suffix,
+			Usage:   harnessv2.UsageUpdate{InputTokens: 1},
+		},
+	}
+	if appended, isNew, err := state.AppendTerminalUsageIfNew(ctx, terminal); err != nil || !isNew || appended == nil {
+		t.Fatalf("append terminal usage = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 2 {
+		t.Fatalf("terminal usage events = %#v", listed)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(listed[1].Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	if content["model"] != executionevents.ExecutionEventRedactedValue ||
+		strings.Contains(listed[1].Summary+string(listed[1].Content), suffix) {
+		t.Fatalf("terminal usage content = %#v event=%#v", content, listed[1])
+	}
+}
+
+func TestJournalRedactsCredentialSplitIntoTerminalLifecycle(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		eventType  harnessv2.EventType
+		contentKey string
+	}{
+		{name: "completed model", eventType: harnessv2.EventCompleted, contentKey: "model"},
+		{name: "cancelled reason", eventType: harnessv2.EventCancelled, contentKey: "reason"},
+		{name: "failure message", eventType: harnessv2.EventFailed, contentKey: "message"},
+		{name: "unknown message", eventType: harnessv2.EventOutcomeUnknown, contentKey: "message"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			eventStore := storetest.NewFakeExecutionEventStore()
+			state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			prefix := "sk-" + strings.Repeat("a", 10)
+			suffix := strings.Repeat("b", 14)
+			plan := testUpdateEvent(2, now, harnessv2.UpdateEvent{
+				Kind: harnessv2.UpdatePlan,
+				Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+					Content: prefix, Status: harnessv2.PlanEntryInProgress,
+				}}},
+			})
+			if appended, isNew, err := state.AppendUpdateIfNew(ctx, plan); err != nil || !isNew || appended == nil {
+				t.Fatalf("append plan prefix = %#v new=%t err=%v", appended, isNew, err)
+			}
+
+			terminal := testUpdateEvent(3, now.Add(time.Millisecond), harnessv2.UpdateEvent{})
+			terminal.Type = test.eventType
+			terminal.Update = nil
+			switch test.eventType {
+			case harnessv2.EventCompleted:
+				terminal.Completed = &harnessv2.CompletedEvent{
+					StopReason: harnessv2.ACPStopReasonEndTurn,
+					Result: harnessv2.PromptResult{
+						Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "done"}},
+						Model:   suffix,
+					},
+				}
+			case harnessv2.EventCancelled:
+				terminal.Cancelled = &harnessv2.CancelledEvent{
+					StopReason: harnessv2.ACPStopReasonCancelled, Reason: suffix,
+				}
+			case harnessv2.EventFailed:
+				terminal.Failed = &harnessv2.FailedEvent{
+					StopReason: harnessv2.ACPStopReasonRefusal, Code: "runtime", Message: suffix,
+				}
+			case harnessv2.EventOutcomeUnknown:
+				terminal.OutcomeUnknown = &harnessv2.OutcomeUnknownEvent{Code: "runtime", Message: suffix}
+			}
+			if appended, isNew, err := state.AppendPromptLifecycleIfNew(ctx, terminal); err != nil || !isNew || appended == nil {
+				t.Fatalf("append terminal lifecycle = %#v new=%t err=%v", appended, isNew, err)
+			}
+
+			listed := listJournalEvents(t, ctx, eventStore)
+			if len(listed) != 2 {
+				t.Fatalf("terminal lifecycle events = %#v", listed)
+			}
+			var content map[string]any
+			if err := json.Unmarshal(listed[1].Content, &content); err != nil {
+				t.Fatal(err)
+			}
+			if content[test.contentKey] != executionevents.ExecutionEventRedactedValue ||
+				strings.Contains(listed[1].Summary+string(listed[1].Content), suffix) {
+				t.Fatalf("terminal lifecycle content = %#v event=%#v", content, listed[1])
+			}
+		})
+	}
+}
+
+func TestJournalRedactsCredentialSplitIntoPromptStreamFailure(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
+	accepted.Type = harnessv2.EventAccepted
+	accepted.Update = nil
+	accepted.Accepted = &harnessv2.AcceptedEvent{
+		AcceptedAt: now,
+		Lease: harnessv2.PromptLease{
+			Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+		},
+		ACPVersion: harnessv2.ACPProfileV1,
+	}
+	if appended, isNew, err := state.AppendPromptLifecycleIfNew(ctx, accepted); err != nil || !isNew || appended == nil {
+		t.Fatalf("append accepted lifecycle = %#v new=%t err=%v", appended, isNew, err)
+	}
+	prefix := "sk-" + strings.Repeat("a", 10)
+	suffix := strings.Repeat("b", 14)
+	plan := testUpdateEvent(2, now.Add(time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: prefix, Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, plan); err != nil || !isNew || appended == nil {
+		t.Fatalf("append plan prefix = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if appended, isNew, err := state.AppendPromptStreamFailureIfNew(
+		ctx, now.Add(2*time.Millisecond), suffix,
+	); err != nil || !isNew || appended == nil {
+		t.Fatalf("append stream failure = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 3 {
+		t.Fatalf("prompt stream failure events = %#v", listed)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(listed[2].Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	if content["message"] != executionevents.ExecutionEventRedactedValue ||
+		strings.Contains(listed[2].Summary+string(listed[2].Content), suffix) {
+		t.Fatalf("prompt stream failure content = %#v event=%#v", content, listed[2])
 	}
 }
 

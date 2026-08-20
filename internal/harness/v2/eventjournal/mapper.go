@@ -241,16 +241,17 @@ type PlanProjection struct {
 // ProjectPlanUpdate converts structured ACP plan entries into the existing
 // PlanStore contract and a bounded, redacted text representation for events.
 func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
-	projection, _ := projectPlanUpdate(update, nil)
+	projection, _ := projectPlanUpdate(update, nil, false)
 	return projection
 }
 
 func projectPlanUpdate(
 	update harnessv2.PlanUpdate,
 	history []logicalFieldBoundaries,
+	historySaturated bool,
 ) (PlanProjection, []logicalFieldBoundaries) {
 	projection := PlanProjection{Total: len(update.Entries)}
-	entries, publishedFields := redactPlanEntries(update.Entries, history)
+	entries, publishedFields := redactPlanEntries(update.Entries, history, historySaturated)
 	var inProgressSummary string
 	var document strings.Builder
 	document.WriteString("# Plan")
@@ -306,13 +307,14 @@ func projectPlanUpdate(
 func redactPlanEntries(
 	entries []harnessv2.PlanEntry,
 	history []logicalFieldBoundaries,
+	historySaturated bool,
 ) ([]harnessv2.PlanEntry, []logicalFieldBoundaries) {
 	redacted := append([]harnessv2.PlanEntry(nil), entries...)
 	values := make([]string, 0, len(entries)*2)
 	for _, entry := range entries {
 		values = append(values, entry.Content, entry.Priority)
 	}
-	values, publishedFields := redactLogicalFields(history, values...)
+	values, publishedFields := redactLogicalFieldsWithHistory(history, historySaturated, values...)
 	for index := range redacted {
 		redacted[index].Content = values[index*2]
 		redacted[index].Priority = values[index*2+1]
@@ -334,21 +336,25 @@ type toolProjection struct {
 func projectDiagnosticUpdate(
 	update harnessv2.DiagnosticUpdate,
 	history []logicalFieldBoundaries,
+	historySaturated bool,
 ) (diagnosticProjection, []logicalFieldBoundaries) {
-	values, publishedFields := redactLogicalFields(history, update.Code, update.Message)
+	values, publishedFields := redactLogicalFieldsWithHistory(
+		history, historySaturated, update.Code, update.Message,
+	)
 	return diagnosticProjection{code: values[0], message: values[1]}, publishedFields
 }
 
 func projectToolUpdate(
 	tool harnessv2.ToolCallUpdate,
 	history []logicalFieldBoundaries,
+	historySaturated bool,
 	contentText *string,
 ) (toolProjection, []logicalFieldBoundaries) {
 	values := []string{tool.Title, tool.Kind}
 	if contentText != nil {
 		values = append(values, *contentText)
 	}
-	values, publishedFields := redactLogicalFields(history, values...)
+	values, publishedFields := redactLogicalFieldsWithHistory(history, historySaturated, values...)
 	projection := toolProjection{title: values[0], kind: values[1]}
 	if contentText != nil {
 		projection.contentText = values[2]
@@ -356,15 +362,25 @@ func projectToolUpdate(
 	return projection, publishedFields
 }
 
-func redactLogicalFields(
+func redactLogicalFieldsWithHistory(
 	history []logicalFieldBoundaries,
+	historySaturated bool,
 	values ...string,
 ) ([]string, []logicalFieldBoundaries) {
 	redacted := make([]string, len(values))
 	current := make([]logicalFieldBoundaries, 0, len(values))
 	for index, value := range values {
 		redacted[index] = executionevents.RedactExecutionEventText(value)
+		if historySaturated {
+			if redacted[index] != "" {
+				redacted[index] = executionevents.ExecutionEventRedactedValue
+			}
+			continue
+		}
 		current = appendLogicalFieldBoundary(current, redacted[index])
+	}
+	if historySaturated {
+		return redacted, nil
 	}
 	fields := make([]logicalFieldBoundaries, 0, len(history)+len(current))
 	fields = append(fields, history...)
@@ -638,7 +654,7 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 			mapped.Summary = toolCallSummary(metadataFree)
 			content["metadataOmitted"] = "streamed_metadata_pending_completion_redaction"
 		} else {
-			projection, _ := projectToolUpdate(*tool, nil, options.toolContentText)
+			projection, _ := projectToolUpdate(*tool, nil, false, options.toolContentText)
 			if options.toolProjection != nil {
 				projection = *options.toolProjection
 			}
@@ -696,7 +712,7 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		mapUsageUpdate(event.Update.Usage, mapCtx, mapped, content)
 	case harnessv2.UpdateDiagnostic:
 		diagnostic := event.Update.Diagnostic
-		projection, _ := projectDiagnosticUpdate(*diagnostic, nil)
+		projection, _ := projectDiagnosticUpdate(*diagnostic, nil, false)
 		if options.diagnosticProjection != nil {
 			projection = *options.diagnosticProjection
 		}
@@ -722,50 +738,6 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		return nil, fmt.Errorf("sanitize mapped harness v2 update: %w", err)
 	}
 	return mapped, nil
-}
-
-func redactSmallLogicalFieldSet(values ...string) []string {
-	redacted := make([]string, len(values))
-	for index, value := range values {
-		redacted[index] = executionevents.RedactExecutionEventText(value)
-	}
-	if !smallLogicalFieldSetSensitive(redacted) {
-		return redacted
-	}
-	for index, value := range values {
-		if value != "" {
-			redacted[index] = executionevents.ExecutionEventRedactedValue
-		}
-	}
-	return redacted
-}
-
-func smallLogicalFieldSetSensitive(values []string) bool {
-	if len(values) < 2 || len(values) > 4 {
-		return false
-	}
-	used := make([]bool, len(values))
-	var visit func(string, int) bool
-	visit = func(prefix string, depth int) bool {
-		if depth >= 2 && executionevents.RedactExecutionEventText(prefix) != prefix {
-			return true
-		}
-		if depth == len(values) {
-			return false
-		}
-		for index, value := range values {
-			if used[index] {
-				continue
-			}
-			used[index] = true
-			if visit(prefix+value, depth+1) {
-				return true
-			}
-			used[index] = false
-		}
-		return false
-	}
-	return visit("", 0)
 }
 
 func mapUsageUpdate(
@@ -817,7 +789,7 @@ func mapToolUpdateWithContent(
 	contentMultipleBlocksOmitted bool,
 ) (*store.ExecutionEvent, error) {
 	mapped, _, err := mapToolUpdateWithHistory(
-		event, mapCtx, &contentText, contentTruncated, contentMultipleBlocksOmitted, "", nil,
+		event, mapCtx, &contentText, contentTruncated, contentMultipleBlocksOmitted, "", nil, false,
 	)
 	return mapped, err
 }
@@ -830,11 +802,14 @@ func mapToolUpdateWithHistory(
 	contentMultipleBlocksOmitted bool,
 	journalKind string,
 	history []logicalFieldBoundaries,
+	historySaturated bool,
 ) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
 	if event.Update == nil || event.Update.ToolCall == nil {
 		return nil, nil, fmt.Errorf("harness v2 tool update is required")
 	}
-	projection, publishedFields := projectToolUpdate(*event.Update.ToolCall, history, contentText)
+	projection, publishedFields := projectToolUpdate(
+		*event.Update.ToolCall, history, historySaturated, contentText,
+	)
 	mapped, err := mapUpdate(event, mapCtx, mapUpdateOptions{
 		toolContentText:                  contentText,
 		toolContentTruncated:             contentTruncated,
@@ -906,38 +881,64 @@ func mapToolUpdateWithoutMetadata(event harnessv2.Event, mapCtx MapContext) (*st
 // MapTerminalUsage projects usage reported only by a completed result while
 // retaining the terminal event's durable protocol identity.
 func MapTerminalUsage(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent, error) {
+	mapped, _, err := mapTerminalUsageWithHistory(event, mapCtx, nil, false)
+	return mapped, err
+}
+
+func mapTerminalUsageWithHistory(
+	event harnessv2.Event,
+	mapCtx MapContext,
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
 	if event.Type != harnessv2.EventCompleted || event.Completed == nil {
-		return nil, fmt.Errorf("completed harness v2 event is required")
+		return nil, nil, fmt.Errorf("completed harness v2 event is required")
 	}
 	usage := event.Completed.Result.Usage
 	if !hasUsageTelemetry(usage) {
-		return nil, fmt.Errorf("completed harness v2 usage is required")
+		return nil, nil, fmt.Errorf("completed harness v2 usage is required")
 	}
 	if err := usage.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid completed usage: %w", err)
+		return nil, nil, fmt.Errorf("invalid completed usage: %w", err)
 	}
+	var publishedFields []logicalFieldBoundaries
 	if event.Completed.Result.Model != "" {
-		mapCtx.Model = event.Completed.Result.Model
+		fields, published := redactLogicalFieldsWithHistory(
+			history, historySaturated, event.Completed.Result.Model,
+		)
+		mapCtx.Model = fields[0]
+		publishedFields = published
 	}
 	update := event
 	update.Type = harnessv2.EventUpdate
 	update.Completed = nil
 	update.Update = &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &usage}
-	return mapUpdate(update, mapCtx, mapUpdateOptions{journalKind: mappedTerminalUsageKind})
+	mapped, err := mapUpdate(update, mapCtx, mapUpdateOptions{journalKind: mappedTerminalUsageKind})
+	return mapped, publishedFields, err
 }
 
 // MapPromptLifecycle maps prompt acceptance and settlement into the existing
 // model-request lifecycle taxonomy used by task traces and UI execution graphs.
 func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent, error) {
+	mapped, _, err := mapPromptLifecycleWithHistory(event, mapCtx, nil, false)
+	return mapped, err
+}
+
+func mapPromptLifecycleWithHistory(
+	event harnessv2.Event,
+	mapCtx MapContext,
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
 	if err := mapCtx.validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	mapCtx = mapCtx.normalized()
 	if event.Protocol != harnessv2.ProtocolVersion {
-		return nil, fmt.Errorf("unsupported protocol %q", event.Protocol)
+		return nil, nil, fmt.Errorf("unsupported protocol %q", event.Protocol)
 	}
 	if err := event.Identity.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid lifecycle identity: %w", err)
+		return nil, nil, fmt.Errorf("invalid lifecycle identity: %w", err)
 	}
 	content := map[string]any{
 		"harnessV2":      mappedUpdateIdentity(event),
@@ -954,13 +955,14 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 		CreatedAt:   event.Identity.Timestamp.UTC(),
 	}
 	model := mapCtx.Model
+	var publishedFields []logicalFieldBoundaries
 	switch event.Type {
 	case harnessv2.EventAccepted:
 		if event.Accepted == nil {
-			return nil, fmt.Errorf("accepted harness v2 event is required")
+			return nil, nil, fmt.Errorf("accepted harness v2 event is required")
 		}
 		if err := event.Accepted.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid accepted payload: %w", err)
+			return nil, nil, fmt.Errorf("invalid accepted payload: %w", err)
 		}
 		content["journalKind"] = mappedPromptAcceptedKind
 		content["acceptedAt"] = event.Accepted.AcceptedAt.UTC()
@@ -969,13 +971,17 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 		mapped.Summary = "Model request started"
 	case harnessv2.EventCompleted:
 		if event.Completed == nil {
-			return nil, fmt.Errorf("completed harness v2 event is required")
+			return nil, nil, fmt.Errorf("completed harness v2 event is required")
 		}
 		if err := event.Completed.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid completed payload: %w", err)
+			return nil, nil, fmt.Errorf("invalid completed payload: %w", err)
 		}
 		if event.Completed.Result.Model != "" {
-			model = event.Completed.Result.Model
+			fields, published := redactLogicalFieldsWithHistory(
+				history, historySaturated, event.Completed.Result.Model,
+			)
+			model = fields[0]
+			publishedFields = published
 		}
 		content["journalKind"] = mappedPromptTerminalKind
 		content["terminalEvent"] = event.Type
@@ -984,26 +990,33 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 		mapped.Summary = "Model request completed"
 	case harnessv2.EventCancelled:
 		if event.Cancelled == nil {
-			return nil, fmt.Errorf("cancelled harness v2 event is required")
+			return nil, nil, fmt.Errorf("cancelled harness v2 event is required")
 		}
 		if err := event.Cancelled.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid cancelled payload: %w", err)
+			return nil, nil, fmt.Errorf("invalid cancelled payload: %w", err)
 		}
+		fields, published := redactLogicalFieldsWithHistory(
+			history, historySaturated, event.Cancelled.Reason,
+		)
+		publishedFields = published
 		content["journalKind"] = mappedPromptTerminalKind
 		content["terminalEvent"] = event.Type
 		content["stopReason"] = event.Cancelled.StopReason
-		content["reason"] = executionevents.RedactExecutionEventText(event.Cancelled.Reason)
+		content["reason"] = fields[0]
 		mapped.Type = executionevents.ExecutionEventTypeModelRequestFailed
 		mapped.Severity = executionevents.ExecutionEventSeverityWarning
 		mapped.Summary = "Model request cancelled"
 	case harnessv2.EventFailed:
 		if event.Failed == nil {
-			return nil, fmt.Errorf("failed harness v2 event is required")
+			return nil, nil, fmt.Errorf("failed harness v2 event is required")
 		}
 		if err := event.Failed.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid failed payload: %w", err)
+			return nil, nil, fmt.Errorf("invalid failed payload: %w", err)
 		}
-		fields := redactSmallLogicalFieldSet(event.Failed.Code, event.Failed.Message)
+		fields, published := redactLogicalFieldsWithHistory(
+			history, historySaturated, event.Failed.Code, event.Failed.Message,
+		)
+		publishedFields = published
 		content["journalKind"] = mappedPromptTerminalKind
 		content["terminalEvent"] = event.Type
 		content["stopReason"] = event.Failed.StopReason
@@ -1014,12 +1027,15 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 		mapped.Summary = compactSummary(fields[0] + ": " + fields[1])
 	case harnessv2.EventOutcomeUnknown:
 		if event.OutcomeUnknown == nil {
-			return nil, fmt.Errorf("outcome_unknown harness v2 event is required")
+			return nil, nil, fmt.Errorf("outcome_unknown harness v2 event is required")
 		}
 		if err := event.OutcomeUnknown.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid outcome_unknown payload: %w", err)
+			return nil, nil, fmt.Errorf("invalid outcome_unknown payload: %w", err)
 		}
-		fields := redactSmallLogicalFieldSet(event.OutcomeUnknown.Code, event.OutcomeUnknown.Message)
+		fields, published := redactLogicalFieldsWithHistory(
+			history, historySaturated, event.OutcomeUnknown.Code, event.OutcomeUnknown.Message,
+		)
+		publishedFields = published
 		content["journalKind"] = mappedPromptTerminalKind
 		content["terminalEvent"] = event.Type
 		content["stopReason"] = event.Type
@@ -1030,7 +1046,7 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 		mapped.Severity = executionevents.ExecutionEventSeverityError
 		mapped.Summary = compactSummary(fields[0] + ": " + fields[1])
 	default:
-		return nil, fmt.Errorf("accepted or terminal harness v2 event is required")
+		return nil, nil, fmt.Errorf("accepted or terminal harness v2 event is required")
 	}
 	if mapCtx.Provider != "" {
 		content["provider"] = mapCtx.Provider
@@ -1040,13 +1056,13 @@ func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.Execut
 	}
 	encoded, err := json.Marshal(content)
 	if err != nil {
-		return nil, fmt.Errorf("marshal mapped harness v2 lifecycle: %w", err)
+		return nil, nil, fmt.Errorf("marshal mapped harness v2 lifecycle: %w", err)
 	}
 	mapped.Content = encoded
 	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
-		return nil, fmt.Errorf("sanitize mapped harness v2 lifecycle: %w", err)
+		return nil, nil, fmt.Errorf("sanitize mapped harness v2 lifecycle: %w", err)
 	}
-	return mapped, nil
+	return mapped, publishedFields, nil
 }
 
 // mapPromptStreamFailure maps a controller-observed stream failure into a
@@ -1058,18 +1074,22 @@ func mapPromptStreamFailure(
 	at time.Time,
 	mapCtx MapContext,
 	diagnostic string,
-) (*store.ExecutionEvent, error) {
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
 	if err := mapCtx.validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	mapCtx = mapCtx.normalized()
 	if !identity.valid() {
-		return nil, fmt.Errorf("valid harness v2 prompt identity is required")
+		return nil, nil, fmt.Errorf("valid harness v2 prompt identity is required")
 	}
 	if at.IsZero() {
-		return nil, fmt.Errorf("prompt stream failure timestamp is required")
+		return nil, nil, fmt.Errorf("prompt stream failure timestamp is required")
 	}
-	fields := redactSmallLogicalFieldSet(mappedPromptStreamFailureCode, diagnostic)
+	fields, publishedFields := redactLogicalFieldsWithHistory(
+		history, historySaturated, mappedPromptStreamFailureCode, diagnostic,
+	)
 	content := map[string]any{
 		"harnessV2":             identity,
 		"modelRequestID":        string(identity.PromptID),
@@ -1087,7 +1107,7 @@ func mapPromptStreamFailure(
 	}
 	encoded, err := json.Marshal(content)
 	if err != nil {
-		return nil, fmt.Errorf("marshal mapped harness v2 prompt stream failure: %w", err)
+		return nil, nil, fmt.Errorf("marshal mapped harness v2 prompt stream failure: %w", err)
 	}
 	mapped := &store.ExecutionEvent{
 		Namespace:   mapCtx.Namespace,
@@ -1103,9 +1123,9 @@ func mapPromptStreamFailure(
 		CreatedAt:   at.UTC(),
 	}
 	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
-		return nil, fmt.Errorf("sanitize mapped harness v2 prompt stream failure: %w", err)
+		return nil, nil, fmt.Errorf("sanitize mapped harness v2 prompt stream failure: %w", err)
 	}
-	return mapped, nil
+	return mapped, publishedFields, nil
 }
 
 // mapPromptSettlement maps a proven settlement into the prompt lifecycle

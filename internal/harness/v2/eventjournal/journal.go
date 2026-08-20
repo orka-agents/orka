@@ -147,21 +147,22 @@ func promptTerminalClassification(event store.ExecutionEvent) (harnessv2.EventTy
 // Controller takeover deliberately terminalizes accepted prompts as
 // OutcomeUnknown rather than replaying or persisting a raw-content crash buffer.
 type State struct {
-	journal                     Journal
-	promptIdentity              MappedUpdateIdentity
-	processedSequence           uint64
-	aggregatedSequence          uint64
-	assistantTranscriptSequence uint64
-	terminalUsageSequence       uint64
-	promptAcceptedSequence      uint64
-	promptTerminalSequence      uint64
-	toolClosureSequences        map[uint64]struct{}
-	toolText                    map[string]*streamText
-	persistedOpenTools          map[string]persistedOpenTool
-	overflowToolIDs             map[string]struct{}
-	untrackedOverflowTool       bool
-	toolBufferedBytes           int
-	logicalFieldHistory         []logicalFieldBoundaries
+	journal                      Journal
+	promptIdentity               MappedUpdateIdentity
+	processedSequence            uint64
+	aggregatedSequence           uint64
+	assistantTranscriptSequence  uint64
+	terminalUsageSequence        uint64
+	promptAcceptedSequence       uint64
+	promptTerminalSequence       uint64
+	toolClosureSequences         map[uint64]struct{}
+	toolText                     map[string]*streamText
+	persistedOpenTools           map[string]persistedOpenTool
+	overflowToolIDs              map[string]struct{}
+	untrackedOverflowTool        bool
+	toolBufferedBytes            int
+	logicalFieldHistory          []logicalFieldBoundaries
+	logicalFieldHistorySaturated bool
 }
 
 type streamText struct {
@@ -427,6 +428,7 @@ func (s *State) resetPrompt(identity MappedUpdateIdentity) {
 	clear(s.overflowToolIDs)
 	s.untrackedOverflowTool = false
 	s.logicalFieldHistory = nil
+	s.logicalFieldHistorySaturated = false
 }
 
 func (s *State) bindPrompt(identity MappedUpdateIdentity) error {
@@ -509,15 +511,17 @@ func (s *State) ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 	if s == nil {
 		return ProjectPlanUpdate(update)
 	}
-	projection, _ := projectPlanUpdate(update, s.logicalFieldHistory)
+	projection, _ := projectPlanUpdate(
+		update, s.logicalFieldHistory, s.logicalFieldHistorySaturated,
+	)
 	return projection
 }
 
 func (s *State) projectPlanUpdate(update harnessv2.PlanUpdate) (PlanProjection, []logicalFieldBoundaries) {
 	if s == nil {
-		return projectPlanUpdate(update, nil)
+		return projectPlanUpdate(update, nil, false)
 	}
-	return projectPlanUpdate(update, s.logicalFieldHistory)
+	return projectPlanUpdate(update, s.logicalFieldHistory, s.logicalFieldHistorySaturated)
 }
 
 // AppendUpdateIfNew maps and appends event unless its full protocol identity is
@@ -538,7 +542,9 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		publishedFields = fields
 	}
 	if event.Update != nil && event.Update.Diagnostic != nil {
-		projection, fields := projectDiagnosticUpdate(*event.Update.Diagnostic, s.logicalFieldHistory)
+		projection, fields := projectDiagnosticUpdate(
+			*event.Update.Diagnostic, s.logicalFieldHistory, s.logicalFieldHistorySaturated,
+		)
 		options.diagnosticProjection = &projection
 		publishedFields = fields
 	}
@@ -588,7 +594,7 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		mappedEvent := withBufferedToolMetadata(event, title, kind)
 		mapped, publishedFields, err = mapToolUpdateWithHistory(
 			mappedEvent, s.journal.MapContext, &contentText, truncated, multipleBlocksOmitted, "",
-			s.logicalFieldHistory,
+			s.logicalFieldHistory, s.logicalFieldHistorySaturated,
 		)
 		if err != nil {
 			return nil, false, err
@@ -597,7 +603,7 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		mappedEvent := withBufferedToolMetadata(event, title, kind)
 		mapped, publishedFields, err = mapToolUpdateWithHistory(
 			mappedEvent, s.journal.MapContext, &contentText, truncated, multipleBlocksOmitted, "",
-			s.logicalFieldHistory,
+			s.logicalFieldHistory, s.logicalFieldHistorySaturated,
 		)
 		if err != nil {
 			return nil, false, err
@@ -610,6 +616,7 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 	} else if isTerminalToolUpdate(event) {
 		mapped, publishedFields, err = mapToolUpdateWithHistory(
 			event, s.journal.MapContext, nil, false, false, "", s.logicalFieldHistory,
+			s.logicalFieldHistorySaturated,
 		)
 		if err != nil {
 			return nil, false, err
@@ -622,25 +629,26 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		if isNonTerminalToolUpdate(event) {
 			s.markToolStartPersisted(event)
 		}
-		s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, publishedFields)
+		s.rememberLogicalFields(publishedFields)
 	}
 	return appended, isNew, err
 }
 
-func boundedLogicalFieldHistory(
-	history []logicalFieldBoundaries,
-	published []logicalFieldBoundaries,
-) []logicalFieldBoundaries {
-	if len(published) == 0 {
-		return history
+func (s *State) rememberLogicalFields(published []logicalFieldBoundaries) {
+	if s == nil || s.logicalFieldHistorySaturated || len(published) == 0 {
+		return
 	}
-	combined := make([]logicalFieldBoundaries, 0, len(history)+len(published))
-	combined = append(combined, history...)
+	if len(s.logicalFieldHistory)+len(published) > maxLogicalFieldPermutationFields {
+		// Retain the complete history collected so far and fail closed for all
+		// later runtime text. Evicting old boundaries would let a later fragment
+		// complete a credential that consumers can reconstruct from durable events.
+		s.logicalFieldHistorySaturated = true
+		return
+	}
+	combined := make([]logicalFieldBoundaries, 0, len(s.logicalFieldHistory)+len(published))
+	combined = append(combined, s.logicalFieldHistory...)
 	combined = append(combined, published...)
-	if len(combined) > maxLogicalFieldPermutationFields {
-		combined = combined[len(combined)-maxLogicalFieldPermutationFields:]
-	}
-	return append([]logicalFieldBoundaries(nil), combined...)
+	s.logicalFieldHistory = combined
 }
 
 func isBufferedToolContentUpdate(event harnessv2.Event) bool {
@@ -716,7 +724,7 @@ func (s *State) AppendAssistantTranscriptIfNew(
 		"append mapped harness v2 assistant transcript",
 	)
 	if err == nil {
-		s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, publishedFields)
+		s.rememberLogicalFields(publishedFields)
 	}
 	return appended, isNew, err
 }
@@ -728,7 +736,9 @@ func (s *State) mapAssistantTranscript(
 ) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
 	var publishedFields []logicalFieldBoundaries
 	if !contentOmitted {
-		values, fields := redactLogicalFields(s.logicalFieldHistory, transcript)
+		values, fields := redactLogicalFieldsWithHistory(
+			s.logicalFieldHistory, s.logicalFieldHistorySaturated, transcript,
+		)
 		transcript = values[0]
 		publishedFields = fields
 	}
@@ -759,14 +769,20 @@ func (s *State) AppendTerminalUsageIfNew(
 	if s.terminalUsageSequence == identity.Sequence {
 		return nil, false, nil
 	}
-	mapped, err := MapTerminalUsage(terminal, s.journal.MapContext)
+	mapped, publishedFields, err := mapTerminalUsageWithHistory(
+		terminal, s.journal.MapContext, s.logicalFieldHistory, s.logicalFieldHistorySaturated,
+	)
 	if err != nil {
 		return nil, false, err
 	}
-	return s.appendMappedEvent(
+	appended, isNew, err := s.appendMappedEvent(
 		ctx, identity, mappedJournalRecordTerminalUsage, mapped,
 		"append mapped harness v2 terminal usage",
 	)
+	if err == nil {
+		s.rememberLogicalFields(publishedFields)
+	}
+	return appended, isNew, err
 }
 
 // AppendPromptLifecycleIfNew persists accepted and terminal model-request
@@ -797,11 +813,19 @@ func (s *State) AppendPromptLifecycleIfNew(
 	default:
 		return nil, false, fmt.Errorf("accepted or terminal harness v2 event is required")
 	}
-	mapped, err := MapPromptLifecycle(event, s.journal.MapContext)
+	mapped, publishedFields, err := mapPromptLifecycleWithHistory(
+		event, s.journal.MapContext, s.logicalFieldHistory, s.logicalFieldHistorySaturated,
+	)
 	if err != nil {
 		return nil, false, err
 	}
-	return s.appendMappedEvent(ctx, identity, kind, mapped, "append mapped harness v2 prompt lifecycle")
+	appended, isNew, err := s.appendMappedEvent(
+		ctx, identity, kind, mapped, "append mapped harness v2 prompt lifecycle",
+	)
+	if err == nil {
+		s.rememberLogicalFields(publishedFields)
+	}
+	return appended, isNew, err
 }
 
 // AppendPromptStreamFailureIfNew closes a persisted prompt-acceptance
@@ -821,14 +845,21 @@ func (s *State) AppendPromptStreamFailureIfNew(
 	}
 	identity := s.promptIdentity
 	identity.Sequence = s.promptAcceptedSequence
-	mapped, err := mapPromptStreamFailure(identity, at, s.journal.MapContext, diagnostic)
+	mapped, publishedFields, err := mapPromptStreamFailure(
+		identity, at, s.journal.MapContext, diagnostic,
+		s.logicalFieldHistory, s.logicalFieldHistorySaturated,
+	)
 	if err != nil {
 		return nil, false, err
 	}
-	return s.appendMappedEvent(
+	appended, isNew, err := s.appendMappedEvent(
 		ctx, identity, mappedJournalRecordPromptTerminal, mapped,
 		"append mapped harness v2 prompt stream failure",
 	)
+	if err == nil {
+		s.rememberLogicalFields(publishedFields)
+	}
+	return appended, isNew, err
 }
 
 // AppendPromptSettlementIfNew closes a persisted prompt-acceptance lifecycle
@@ -892,7 +923,7 @@ func (s *State) AppendAssistantStreamClosureIfNew(
 		"append mapped harness v2 assistant stream closure",
 	)
 	if err == nil {
-		s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, publishedFields)
+		s.rememberLogicalFields(publishedFields)
 	}
 	return appended, isNew, err
 }
@@ -1022,6 +1053,7 @@ func (s *State) appendToolStreamClosureIfNew(ctx context.Context, toolID string,
 	mapped, publishedFields, err := mapToolUpdateWithHistory(
 		mappedEvent, s.journal.MapContext, &contentText, accumulator.overflow,
 		accumulator.multipleBlocksOmitted, mappedToolStreamClosureKind, s.logicalFieldHistory,
+		s.logicalFieldHistorySaturated,
 	)
 	if err != nil {
 		return err
@@ -1032,7 +1064,7 @@ func (s *State) appendToolStreamClosureIfNew(ctx context.Context, toolID string,
 	); err != nil {
 		return err
 	}
-	s.logicalFieldHistory = boundedLogicalFieldHistory(s.logicalFieldHistory, publishedFields)
+	s.rememberLogicalFields(publishedFields)
 	s.removeToolAccumulator(toolID)
 	return nil
 }
