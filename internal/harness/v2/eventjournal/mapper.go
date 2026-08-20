@@ -377,14 +377,15 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		mapUsageUpdate(event.Update.Usage, mapCtx, mapped, content)
 	case harnessv2.UpdateDiagnostic:
 		diagnostic := event.Update.Diagnostic
+		code, message := redactDiagnosticFields(diagnostic.Code, diagnostic.Message)
 		mapped.Type = executionevents.ExecutionEventTypeAgentRuntimeCommandStarted
 		mapped.Severity = executionevents.ExecutionEventSeverityError
 		if diagnostic.Retryable {
 			mapped.Severity = executionevents.ExecutionEventSeverityWarning
 		}
-		mapped.Summary = compactSummary(diagnostic.Code + ": " + diagnostic.Message)
-		mapped.ContentText = diagnostic.Message
-		content["code"] = diagnostic.Code
+		mapped.Summary = compactSummary(code + ": " + message)
+		mapped.ContentText = message
+		content["code"] = code
 		content["retryable"] = diagnostic.Retryable
 	default:
 		return nil, fmt.Errorf("unsupported harness v2 update kind %q", event.Update.Kind)
@@ -399,6 +400,19 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		return nil, fmt.Errorf("sanitize mapped harness v2 update: %w", err)
 	}
 	return mapped, nil
+}
+
+func redactDiagnosticFields(code, message string) (string, string) {
+	redactedCode := executionevents.RedactExecutionEventText(code)
+	redactedMessage := executionevents.RedactExecutionEventText(message)
+	if redactedCode != code || redactedMessage != message {
+		return redactedCode, redactedMessage
+	}
+	if executionevents.RedactExecutionEventText(code+message) != code+message ||
+		executionevents.RedactExecutionEventText(message+code) != message+code {
+		redactedMessage = executionevents.ExecutionEventRedactedValue
+	}
+	return redactedCode, redactedMessage
 }
 
 func mapUsageUpdate(

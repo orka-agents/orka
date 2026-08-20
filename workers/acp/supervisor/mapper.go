@@ -220,6 +220,47 @@ func acpToolContentExceedsHarnessLimits(block harnessv2.ContentBlock) bool {
 		len(block.MimeType) > harnessv2.MaxContentMIMETypeBytes
 }
 
+func boundACPToolContentToEventLine(event *harnessv2.Event, maxLineBytes int) error {
+	if event == nil || event.Update == nil || event.Update.ToolCall == nil || len(event.Update.ToolCall.Content) == 0 {
+		return nil
+	}
+	if maxLineBytes <= 0 {
+		return fmt.Errorf("%w: max event line bytes must be positive", harnessv2.ErrEventLineTooLarge)
+	}
+
+	content := event.Update.ToolCall.Content
+	fits := func(count int) (bool, error) {
+		event.Update.ToolCall.Content = content[:count]
+		line, err := json.Marshal(event)
+		if err != nil {
+			event.Update.ToolCall.Content = content
+			return false, fmt.Errorf("marshal projected ACP tool update: %w", err)
+		}
+		return len(line) <= maxLineBytes, nil
+	}
+
+	low, high := 0, len(content)
+	for low < high {
+		mid := low + (high-low+1)/2
+		ok, err := fits(mid)
+		if err != nil {
+			return err
+		}
+		if ok {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	if ok, err := fits(low); err != nil {
+		return err
+	} else if !ok {
+		event.Update.ToolCall.Content = content
+		return fmt.Errorf("%w: projected ACP tool update exceeds %d bytes without telemetry content", harnessv2.ErrEventLineTooLarge, maxLineBytes)
+	}
+	return nil
+}
+
 func boundACPToolCallTitle(value string) string {
 	value = executionevents.RedactExecutionEventText(value)
 	if len(value) <= maxACPToolCallTitleBytes {

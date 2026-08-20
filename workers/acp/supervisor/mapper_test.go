@@ -242,6 +242,55 @@ func TestProjectACPContentBlockOmitsOversizedTelemetry(t *testing.T) {
 	}
 }
 
+func TestMapRuntimeEventBoundsAggregateToolContentToEventLine(t *testing.T) {
+	server, cfg, _ := newTestServer(t, "immediate")
+	fence := cfg.Fence
+	fence.RuntimeSessionUID = "mapper-content-session-uid"
+	fence.RuntimeSessionGeneration = 1
+	state := &sessionState{
+		descriptor: harnessv2.RuntimeSessionDescriptor{
+			RuntimeSessionUID: fence.RuntimeSessionUID,
+			Generation:        fence.RuntimeSessionGeneration,
+		},
+		operations:  make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		permissions: make(map[harnessv2.PermissionRequestID]permissionState),
+	}
+	prompt := &promptState{request: testStartPromptRequest(t, cfg, fence)}
+	text := strings.Repeat("x", 600<<10)
+	raw, err := json.Marshal(map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-aggregate-content",
+		"status":        "completed",
+		"content": []map[string]any{
+			{"type": "content", "content": map[string]any{"type": "text", "text": text}},
+			{"type": "content", "content": map[string]any{"type": "text", "text": text}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapped, err := server.mapRuntimeEvent(state, prompt, acp.PromptEvent{
+		Type: acp.PromptEventUpdate, Timestamp: time.Now().UTC(),
+		Update: &acp.SessionNotification{SessionID: "provider-session", Update: raw},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped == nil || mapped.Update == nil || mapped.Update.ToolCall == nil {
+		t.Fatalf("mapped tool update = %#v", mapped)
+	}
+	if len(mapped.Update.ToolCall.Content) != 1 {
+		t.Fatalf("mapped content blocks = %d, want one bounded block", len(mapped.Update.ToolCall.Content))
+	}
+	line, err := json.Marshal(mapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(line) > server.cfg.Capabilities.Limits.MaxEventLineBytes {
+		t.Fatalf("mapped event line = %d bytes, limit %d", len(line), server.cfg.Capabilities.Limits.MaxEventLineBytes)
+	}
+}
+
 func TestMapACPUpdateIgnoresStatuslessToolOutputDelta(t *testing.T) {
 	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
 		"sessionUpdate":"tool_call_update",

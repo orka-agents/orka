@@ -386,7 +386,13 @@ func (r PromptResult) Validate() error {
 			return fmt.Errorf("prompt result content block %d: %w", i, err)
 		}
 	}
-	return validateBoundedString("result model", r.Model, false, 256)
+	if err := validateBoundedString("result model", r.Model, false, 256); err != nil {
+		return err
+	}
+	if err := r.Usage.Validate(); err != nil {
+		return fmt.Errorf("result usage: %w", err)
+	}
+	return nil
 }
 
 type CompletedEvent struct {

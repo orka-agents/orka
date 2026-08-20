@@ -164,6 +164,31 @@ func TestMapZeroUsageSnapshotRemainsTokenTelemetry(t *testing.T) {
 	}
 }
 
+func TestMapDiagnosticRedactsCredentialSplitAcrossFields(t *testing.T) {
+	message := strings.Repeat("a", 24)
+	secret := "sk-" + message
+	mapped, err := MapUpdate(testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateDiagnostic,
+		Diagnostic: &harnessv2.DiagnosticUpdate{
+			Code: "sk-", Message: message,
+		},
+	}), testMapContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(mapped.Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	code, _ := content["code"].(string)
+	if code+mapped.ContentText == secret || mapped.ContentText == message {
+		t.Fatalf("diagnostic fields reconstruct credential: code=%q message=%q", code, mapped.ContentText)
+	}
+	if !strings.Contains(mapped.ContentText, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("diagnostic message = %q, want redaction marker", mapped.ContentText)
+	}
+}
+
 func TestMapToolCallIDUsesStableNonSecretCorrelationID(t *testing.T) {
 	rawID := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjcmVkZW50aWFsIn0.signature"
 	mapTool := func(sequence uint64) *store.ExecutionEvent {
