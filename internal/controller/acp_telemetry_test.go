@@ -13,7 +13,9 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/otel/codes"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
@@ -63,21 +65,32 @@ func TestRecordACPPromptOutcomeIfSettlementFails(t *testing.T) {
 	}
 }
 
-func TestACPSessionSpanRenamesToContinuation(t *testing.T) {
-	if _, err := orkatracing.Init("acp-telemetry-test", false); err != nil {
-		t.Fatalf("initialize tracing: %v", err)
+func TestACPSessionSpanUsesFinalReuseDecision(t *testing.T) {
+	tests := []struct {
+		name      string
+		decisions []bool
+		wantName  string
+	}{
+		{name: "continued", decisions: []bool{true}, wantName: acpSessionContinueSpanName},
+		{name: "recreated after continuation plan", decisions: []bool{true, false}, wantName: acpSessionCreateSpanName},
+		{name: "continued after create plan", decisions: []bool{false, true}, wantName: acpSessionContinueSpanName},
 	}
-	harness := tracingtest.NewSpanHarness(t)
-	_, sessionTrace := startACPSessionSpan(context.Background(), nil)
-	sessionTrace.setSessionReused(true)
-	sessionTrace.End(nil)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := orkatracing.Init("acp-telemetry-test", false); err != nil {
+				t.Fatalf("initialize tracing: %v", err)
+			}
+			harness := tracingtest.NewSpanHarness(t)
+			_, sessionTrace := startACPSessionSpan(context.Background(), nil)
+			for _, reused := range test.decisions {
+				sessionTrace.setSessionReused(reused)
+			}
+			sessionTrace.End(nil)
 
-	spans := harness.Recorder.Ended()
-	if tracingtest.SpanNamed(spans, acpSessionCreateSpanName) != nil {
-		t.Fatal("reused RuntimeSession retained the create span name")
-	}
-	if tracingtest.SpanNamed(spans, acpSessionContinueSpanName) == nil {
-		t.Fatal("missing acp.session.continue span")
+			if tracingtest.SpanNamed(harness.Recorder.Ended(), test.wantName) == nil {
+				t.Fatalf("missing final session span %q", test.wantName)
+			}
+		})
 	}
 }
 
@@ -102,5 +115,27 @@ func TestACPSessionSpanRecordsCreationFailure(t *testing.T) {
 	}
 	if got := tracingtest.AttributeMap(sessionSpan)["error.type"].AsString(); got == "" {
 		t.Fatal("acp.session.create error.type is empty")
+	}
+}
+
+func TestACPPublicationRecoveryContinuesTaskTraceWithoutPromptSpan(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "recovery-task"}}
+	harness, parentSpanID := stampACPTaskTrace(t, task)
+	_, publicationTrace := startACPPublicationRecoverySpan(context.Background(), task, "publication-recovery")
+	publicationTrace.End(nil)
+
+	spans := harness.Recorder.Ended()
+	if tracingtest.SpanNamed(spans, acpPromptSpanName) != nil {
+		t.Fatal("publication recovery emitted an acp.prompt span")
+	}
+	publicationSpan := tracingtest.SpanNamed(spans, acpPublicationSpanName)
+	if publicationSpan == nil {
+		t.Fatal("missing acp.publication.reconcile span")
+	}
+	if got := publicationSpan.Parent().SpanID().String(); got != parentSpanID {
+		t.Fatalf("publication recovery parent = %s, want Task trace parent %s", got, parentSpanID)
+	}
+	if !tracingtest.AttributeMap(publicationSpan)[acpAttrPublicationRecovery].AsBool() {
+		t.Fatal("publication recovery span is not marked as recovery")
 	}
 }

@@ -63,6 +63,15 @@ func startACPPublicationSpan(
 	return startACPSpan(ctx, acpPublicationSpanName, attrs...)
 }
 
+func startACPPublicationRecoverySpan(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	publicationID string,
+) (context.Context, *acpSpan) {
+	ctx = orkatracing.ExtractTaskTraceContext(ctx, task)
+	return startACPPublicationSpan(ctx, task, publicationID, true)
+}
+
 func startACPSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, *acpSpan) {
 	ctx, span := orkatracing.Tracer(acpTracerName).Start(ctx, name, trace.WithAttributes(attrs...))
 	return ctx, &acpSpan{span: span}

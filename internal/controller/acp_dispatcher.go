@@ -772,14 +772,19 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		lineage.NamespaceUID = string(taskNamespace.UID)
 	}
+	var sessionExecution *acpTaskSession
 	sessionCtx, sessionTrace := startACPSessionSpan(runtimeCtx, task)
-	defer func() { sessionTrace.End(retErr) }()
-	sessionExecution, err := d.prepareTaskSession(
+	endSessionTrace := func(err error) {
+		sessionTrace.setSessionReused(sessionExecution != nil && sessionExecution.Reused)
+		sessionTrace.End(err)
+	}
+	defer func() { endSessionTrace(retErr) }()
+	sessionExecution, err = d.prepareTaskSession(
 		sessionCtx, task, fence, runtimeFence.RuntimeProfileDigest, mcpBindingDigest,
 		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage,
 	)
 	if err != nil {
-		sessionTrace.End(err)
+		endSessionTrace(err)
 		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
 			recoveredSession, cleanupErr := d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
 			if cleanupErr != nil {
@@ -1124,7 +1129,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				sessionExecution.requeued = true
 				return nil
 			} else {
-				sessionTrace.End(err)
+				endSessionTrace(err)
 				return d.handlePrePromptClientError(ctx, task, attemptID, fence, err)
 			}
 		} else {
@@ -1166,7 +1171,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return err
 	}
-	sessionTrace.End(nil)
+	endSessionTrace(nil)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionPlanned, store.PromptExecutionSubmitting, "submitting", nil); err != nil {
 		return err
 	}
@@ -1291,19 +1296,23 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		)
 	}
 	if terminal == nil {
-		recordACPPromptOutcome(ctx, acpPromptOutcomeUnknown)
-		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event")
+		return recordACPPromptOutcomeIfSettled(
+			ctx, acpPromptOutcomeUnknown,
+			d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event"),
+		)
 	}
 	if terminal.Type != harnessv2.EventCompleted {
+		outcome := acpPromptOutcomeFailed
 		switch terminal.Type {
 		case harnessv2.EventCancelled:
-			recordACPPromptOutcome(ctx, acpPromptOutcomeCancelled)
+			outcome = acpPromptOutcomeCancelled
 		case harnessv2.EventOutcomeUnknown:
-			recordACPPromptOutcome(ctx, acpPromptOutcomeUnknown)
-		default:
-			recordACPPromptOutcome(ctx, acpPromptOutcomeFailed)
+			outcome = acpPromptOutcomeUnknown
 		}
-		return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal)
+		return recordACPPromptOutcomeIfSettled(
+			ctx, outcome,
+			d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal),
+		)
 	}
 	recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionRunning, store.PromptExecutionSettling, "settling", nil); err != nil {
