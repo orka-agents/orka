@@ -898,7 +898,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolRollout(
 		return r.reconcileStoppedRuntimePoolRollout(ctx, pool, cfg, pods, desiredTemplate, status)
 	}
 	if len(readyPods) == 0 {
-		return r.reconcileUnreadyRuntimePoolRollout(ctx, pool, deployment, status)
+		return r.reconcileUnreadyRuntimePoolRollout(ctx, pool, deployment, pods, status)
 	}
 	return r.reconcileReadyRuntimePoolRollout(ctx, pool, cfg, deployment, &readyPods[0], desiredTemplate, status)
 }
@@ -939,9 +939,14 @@ func (r *RuntimePoolReconciler) reconcileUnreadyRuntimePoolRollout(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	deployment *appsv1.Deployment,
+	pods []corev1.Pod,
 	status corev1alpha1.RuntimePoolStatus,
 ) (ctrl.Result, error) {
-	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, "PodNotReady", "no Ready runtime Pod is available during Recreate rollout")
+	if reason, message, ok := runtimePoolSchedulingFailure(pods); ok {
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionFalse, reason, message)
+	} else {
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, "PodNotReady", "no Ready runtime Pod is available during Recreate rollout")
+	}
 	if pool.Status.ActiveInstance != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed

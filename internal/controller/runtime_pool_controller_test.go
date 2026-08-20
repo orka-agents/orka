@@ -807,6 +807,41 @@ func TestRuntimePoolReconcilerUnreadyRolloutClearsObservedReadiness(t *testing.T
 	}
 }
 
+func TestRuntimePoolReconcilerUnreadyRolloutPreservesSchedulingFailure(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, pod := runtimePoolTestStartServing(t, r, pool, supervisor, "unschedulable-rollout-pod", "unschedulable-rollout-pod-uid", "10.0.0.83", "unschedulable-rollout-boot")
+
+	r.ProviderProxy.BearerToken = bytes.Clone(runtimePoolTestProviderTokenNext)
+	runtimePoolTestSetPodReady(t, r, &pod, false)
+	currentPod := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
+		t.Fatalf("get runtime Pod: %v", err)
+	}
+	scheduled := findRuntimePoolPodCondition(currentPod.Status.Conditions, corev1.PodScheduled)
+	if scheduled == nil {
+		t.Fatal("runtime Pod has no Scheduled condition")
+	}
+	scheduled.Status = corev1.ConditionFalse
+	scheduled.Reason = corev1.PodReasonUnschedulable
+	scheduled.Message = "insufficient cpu"
+	if err := r.Status().Update(context.Background(), currentPod); err != nil {
+		t.Fatalf("update runtime Pod scheduling: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1.PodReasonUnschedulable || condition.Message != "insufficient cpu" {
+		t.Fatalf("scheduling condition = %#v, want False/Unschedulable with the Pod message", condition)
+	}
+	if got := runtimePoolReadyReplicas(status); got != 0 {
+		t.Fatalf("ready replicas = %d, want 0 while the rollout Pod is unschedulable", got)
+	}
+}
+
 func TestRuntimePoolReconcilerRolloutFailureAndTimeoutPreserveOldPod(t *testing.T) {
 	t.Run("drain request failure retries without template replacement", func(t *testing.T) {
 		scheme := runtimePoolTestScheme(t)
