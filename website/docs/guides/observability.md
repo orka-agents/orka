@@ -123,9 +123,10 @@ task.run
 An ACP v2 Task continues the same Task-carried trace in the controller:
 
 ```text
-acp.prompt
+<Task-carried parent span>
   ├─ acp.session.create / acp.session.continue
-  └─ acp.publication.reconcile  # write workspaces only
+  └─ acp.prompt
+      └─ acp.publication.reconcile  # write workspaces only
 ```
 
 Model client spans measure provider-call latency only. Tool spans are siblings
