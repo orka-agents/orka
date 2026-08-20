@@ -174,6 +174,12 @@ function harnessV2PromptKey(event: ExecutionEvent): string | undefined {
   return `${identity.taskAttempt}:${identity.promptID}`
 }
 
+function hasModelTokenTelemetry(event: ExecutionEvent): boolean {
+  return event.inputTokens !== undefined ||
+    event.outputTokens !== undefined ||
+    event.cachedInputTokens !== undefined
+}
+
 // Harness v2 usage events are cumulative snapshots within one prompt. Keep the
 // newest event identity while carrying forward counters omitted by partial
 // updates, then sum prompts at the task level.
@@ -181,8 +187,9 @@ export function latestModelUsageEvents(events: ExecutionEvent[]): ExecutionEvent
   const updates = events
     .filter((event) => event.type === 'ModelUsageUpdated')
     .sort((a, b) => a.seq - b.seq)
+  const completions = events.filter((event) => event.type === 'ModelRequestCompleted')
   if (updates.length === 0) {
-    return events.filter((event) => event.type === 'ModelRequestCompleted')
+    return completions
   }
   const latestByPrompt = new Map<string, ExecutionEvent>()
   for (const event of updates) {
@@ -195,7 +202,12 @@ export function latestModelUsageEvents(events: ExecutionEvent[]): ExecutionEvent
       cachedInputTokens: event.cachedInputTokens ?? previous?.cachedInputTokens,
     })
   }
-  return Array.from(latestByPrompt.values()).sort((a, b) => a.seq - b.seq)
+  const tokenCompletions = completions.filter((event) => {
+    if (!hasModelTokenTelemetry(event)) return false
+    const promptKey = harnessV2PromptKey(event)
+    return promptKey === undefined || !latestByPrompt.has(promptKey)
+  })
+  return [...tokenCompletions, ...latestByPrompt.values()].sort((a, b) => a.seq - b.seq)
 }
 
 export function latestModelContextEvent(events: ExecutionEvent[]): ExecutionEvent | undefined {

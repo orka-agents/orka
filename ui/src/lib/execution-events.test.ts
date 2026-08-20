@@ -301,6 +301,34 @@ describe('model telemetry snapshots', () => {
     expect(selected[0]).toMatchObject({ id: 'output', inputTokens: 10, outputTokens: 5 })
   })
 
+  it('keeps token-bearing completion events alongside harness usage snapshots', () => {
+    const selected = latestModelUsageEvents([
+      {
+        ...base, id: 'legacy', seq: 1, type: 'ModelRequestCompleted', inputTokens: 3, outputTokens: 2,
+      },
+      { ...base, id: 'empty', seq: 2, type: 'ModelRequestCompleted' },
+      {
+        ...base, id: 'v2', seq: 3, type: 'ModelUsageUpdated', inputTokens: 10,
+        content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+      },
+    ])
+    expect(selected.map((event) => event.id)).toEqual(['legacy', 'v2'])
+    expect(selected.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0)).toBe(13)
+  })
+
+  it('does not double-count a completion matching a harness usage snapshot', () => {
+    const identity = { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } }
+    const selected = latestModelUsageEvents([
+      {
+        ...base, id: 'usage', seq: 1, type: 'ModelUsageUpdated', inputTokens: 10, content: identity,
+      },
+      {
+        ...base, id: 'completion', seq: 2, type: 'ModelRequestCompleted', inputTokens: 10, content: identity,
+      },
+    ])
+    expect(selected.map((event) => event.id)).toEqual(['usage'])
+  })
+
   it('selects the newest context-window snapshot', () => {
     const latest = latestModelContextEvent([
       { ...base, id: 'old', seq: 1, type: 'ModelContextUpdated', contextWindowUsed: 10, contextWindowSize: 100 },
