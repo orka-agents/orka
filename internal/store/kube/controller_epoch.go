@@ -91,6 +91,17 @@ func (s *Store) GetControllerEpochFence(ctx context.Context, name string) (store
 	if err := validateControllerEpochObjectForLease(object, epoch, lease.Name); err != nil {
 		return store.ControllerEpochFence{}, err
 	}
+	latestLease := &coordinationv1.Lease{}
+	if err := s.readClient().Get(ctx, key, latestLease); err != nil {
+		return store.ControllerEpochFence{}, mapKubernetesError("revalidate controller epoch fence Lease", err)
+	}
+	latestEpoch, err := controllerEpochFromLease(normalized, latestLease)
+	if err != nil {
+		return store.ControllerEpochFence{}, err
+	}
+	if latestLease.UID != lease.UID || latestEpoch != epoch {
+		return store.ControllerEpochFence{}, controlConflict("controller epoch authority changed during fence read")
+	}
 	return store.ControllerEpochFence{Name: epoch.Name, Epoch: epoch.Epoch, HolderID: epoch.HolderID}, nil
 }
 

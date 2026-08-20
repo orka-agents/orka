@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
@@ -297,6 +298,7 @@ func (s *Server) authorizePublisherArtifactRequest(ctx context.Context, request 
 }
 
 func (s *Server) authorizePublisherWorkspaceUpload(ctx context.Context, request publisherservice.ArtifactAuthorizationRequest) error {
+	log := logf.FromContext(ctx)
 	if request.ArtifactOperation != artifactcap.OperationUpload || request.Metadata.TaskID == "" || request.Metadata.PublicationID != "" {
 		log.Info("publisher artifact authorization denied", "reason", "workspace_identity_invalid", "parentOperation", request.ParentOperation, "namespace", request.Metadata.Namespace, "operationID", request.Metadata.OperationID)
 		return fmt.Errorf("workspace artifact identity is invalid")
@@ -413,6 +415,7 @@ func (s *Server) authorizePublisherParentEffect(
 	operation publisherservice.Operation,
 	metadata publisherservice.OperationMetadata,
 ) error {
+	log := logf.FromContext(ctx)
 	if s.config.ControllerEpochs == nil {
 		log.Info("publisher artifact authorization denied", "reason", "parent_epoch_authority_unavailable", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID)
 		return errPublisherArtifactAuthorizationUnavailable

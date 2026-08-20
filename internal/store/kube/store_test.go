@@ -181,6 +181,46 @@ func TestControllerEpochFenceReadToleratesLeaseMutationResourceVersionChurn(t *t
 	}
 }
 
+func TestControllerEpochFenceReadRejectsConcurrentAuthorityChange(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, rawClient, _ := newTestStoreWithEpoch(t)
+	withWatch, ok := rawClient.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	name := controlstore.DefaultControllerEpochName
+	leaseKey := client.ObjectKey{Namespace: testControlNamespace, Name: controllerEpochLeaseName(name)}
+	var leaseReads atomic.Int64
+	kubeStore.reader = interceptor.NewClient(withWatch, interceptor.Funcs{
+		Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+			if _, isLease := object.(*coordinationv1.Lease); !isLease || key != leaseKey {
+				return delegate.Get(ctx, key, object, options...)
+			}
+			if leaseReads.Add(1) == 2 {
+				latest := &coordinationv1.Lease{}
+				if err := delegate.Get(ctx, key, latest, options...); err != nil {
+					return err
+				}
+				setControllerEpochLease(latest, controlstore.ControllerEpochCAS{
+					Name: name, NewEpoch: 2, HolderID: testControllerSecond,
+					RequestDigest: testDigest("concurrent-fence-read"), UpdatedAt: testNow.Add(time.Minute),
+				}, 2, "")
+				if err := delegate.Update(ctx, latest); err != nil {
+					return err
+				}
+			}
+			return delegate.Get(ctx, key, object, options...)
+		},
+	})
+
+	if _, err := kubeStore.GetControllerEpochFence(ctx, name); !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "changed during fence read") {
+		t.Fatalf("concurrent controller epoch fence read error = %v, want authority-change conflict", err)
+	}
+	if got := leaseReads.Load(); got != 2 {
+		t.Fatalf("controller epoch fence Lease reads = %d, want 2", got)
+	}
+}
+
 func TestControllerEpochAuthorityRejectsRecreatedLeaseIncarnation(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, fence := newTestStoreWithEpoch(t)

@@ -145,6 +145,9 @@ func (c *artifactClient) download(ctx context.Context, parent Operation, metadat
 func artifactAuthorizationErrorClassification(err error) (int, bool) {
 	var typed *operationError
 	if errors.As(err, &typed) {
+		if typed.status >= http.StatusOK && typed.status < http.StatusMultipleChoices {
+			return http.StatusBadGateway, true
+		}
 		return typed.status, typed.retryable
 	}
 	return http.StatusServiceUnavailable, false

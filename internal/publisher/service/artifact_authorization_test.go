@@ -91,12 +91,15 @@ func TestArtifactClientPreservesBrokerAuthorizationClassification(t *testing.T) 
 	}
 	metadata := OperationMetadata{Namespace: "default", TaskID: "task", OperationID: "workspace-prepare-prompt"}
 	tests := []struct {
-		name      string
-		status    int
-		retryable bool
+		name          string
+		status        int
+		retryable     bool
+		wantStatus    int
+		wantRetryable bool
 	}{
-		{name: "transient broker outage", status: http.StatusServiceUnavailable, retryable: true},
-		{name: "broker authorization denial", status: http.StatusForbidden, retryable: false},
+		{name: "transient broker outage", status: http.StatusServiceUnavailable, retryable: true, wantStatus: http.StatusServiceUnavailable, wantRetryable: true},
+		{name: "broker authorization denial", status: http.StatusForbidden, retryable: false, wantStatus: http.StatusForbidden, wantRetryable: false},
+		{name: "successful status error is normalized", status: http.StatusOK, retryable: false, wantStatus: http.StatusBadGateway, wantRetryable: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -113,8 +116,8 @@ func TestArtifactClientPreservesBrokerAuthorizationClassification(t *testing.T) 
 			if !errors.As(err, &operationErr) {
 				t.Fatalf("upload error = %v, want operationError", err)
 			}
-			if operationErr.status != test.status || operationErr.retryable != test.retryable || operationErr.code != "artifact_authorization_failed" {
-				t.Fatalf("upload authorization classification = status %d retryable %t code %q, want %d/%t/artifact_authorization_failed", operationErr.status, operationErr.retryable, operationErr.code, test.status, test.retryable)
+			if operationErr.status != test.wantStatus || operationErr.retryable != test.wantRetryable || operationErr.code != "artifact_authorization_failed" {
+				t.Fatalf("upload authorization classification = status %d retryable %t code %q, want %d/%t/artifact_authorization_failed", operationErr.status, operationErr.retryable, operationErr.code, test.wantStatus, test.wantRetryable)
 			}
 		})
 	}
