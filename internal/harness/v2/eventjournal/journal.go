@@ -342,6 +342,14 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 		if err != nil {
 			return nil, false, err
 		}
+	} else if contentText, truncated, multipleBlocksOmitted, title, kind, ok := transientTerminalToolUpdate(event); ok {
+		mappedEvent := withBufferedToolMetadata(event, title, kind)
+		mapped, err = mapToolUpdateWithContent(
+			mappedEvent, s.journal.MapContext, contentText, truncated, multipleBlocksOmitted,
+		)
+		if err != nil {
+			return nil, false, err
+		}
 	} else if isNonTerminalToolUpdate(event) {
 		mapped, err = mapToolUpdateWithoutMetadata(event, s.journal.MapContext)
 		if err != nil {
@@ -690,6 +698,21 @@ func (s *State) aggregateToolUpdate(event harnessv2.Event, sequence uint64) bool
 		s.toolText[toolID] = accumulator
 	}
 	beforeBytes := accumulator.text.Len()
+	applyToolUpdateToAccumulator(accumulator, event)
+	s.toolBufferedBytes += accumulator.text.Len() - beforeBytes
+	if s.toolBufferedBytes > maxBufferedToolContentBytes {
+		bufferedBytes := accumulator.text.Len()
+		accumulator.omitForOverflow()
+		s.toolBufferedBytes -= bufferedBytes
+	}
+	return false
+}
+
+func applyToolUpdateToAccumulator(accumulator *streamText, event harnessv2.Event) {
+	if accumulator == nil || event.Update == nil || event.Update.ToolCall == nil {
+		return
+	}
+	tool := event.Update.ToolCall
 	accumulator.lastEvent = event
 	accumulator.hasEvent = true
 	if strings.TrimSpace(tool.Title) != "" {
@@ -708,13 +731,6 @@ func (s *State) aggregateToolUpdate(event harnessv2.Event, sequence uint64) bool
 	} else if len(tool.Content) > 0 {
 		accumulator.append(content)
 	}
-	s.toolBufferedBytes += accumulator.text.Len() - beforeBytes
-	if s.toolBufferedBytes > maxBufferedToolContentBytes {
-		bufferedBytes := accumulator.text.Len()
-		accumulator.omitForOverflow()
-		s.toolBufferedBytes -= bufferedBytes
-	}
-	return false
 }
 
 func (s *State) finishToolUpdate(event harnessv2.Event) (string, bool, bool, string, string, bool) {
@@ -730,6 +746,21 @@ func (s *State) finishToolUpdate(event harnessv2.Event) (string, bool, bool, str
 		return "", false, false, "", "", false
 	}
 	s.removeToolAccumulator(tool.ToolCallID)
+	return accumulator.text.String(), accumulator.overflow, accumulator.multipleBlocksOmitted,
+		accumulator.title, accumulator.kind, true
+}
+
+func transientTerminalToolUpdate(event harnessv2.Event) (string, bool, bool, string, string, bool) {
+	if event.Update == nil || event.Update.ToolCall == nil {
+		return "", false, false, "", "", false
+	}
+	tool := event.Update.ToolCall
+	if (tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed) ||
+		(!tool.ContentOmitted && !tool.ContentReplace && len(tool.Content) == 0) {
+		return "", false, false, "", "", false
+	}
+	accumulator := &streamText{}
+	applyToolUpdateToAccumulator(accumulator, event)
 	return accumulator.text.String(), accumulator.overflow, accumulator.multipleBlocksOmitted,
 		accumulator.title, accumulator.kind, true
 }

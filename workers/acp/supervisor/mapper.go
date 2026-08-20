@@ -86,7 +86,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 			return nil, "", false, err
 		}
 		contentPresent := len(envelope.Content) > 0
-		toolContent, err := mapACPToolCallContent(envelope.Content)
+		toolContent, contentOmitted, err := mapACPToolCallContent(envelope.Content)
 		if err != nil {
 			return nil, "", false, err
 		}
@@ -114,7 +114,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 			Kind: kind,
 			ToolCall: &harnessv2.ToolCallUpdate{
 				ToolCallID: toolCallID, Title: boundACPToolCallTitle(envelope.Title), Kind: envelope.Kind, Status: status,
-				Content: toolContent, ContentReplace: contentPresent,
+				Content: toolContent, ContentReplace: contentPresent && !contentOmitted, ContentOmitted: contentOmitted,
 			},
 		}, "", true, nil
 	case "plan":
@@ -134,51 +134,54 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 	}
 }
 
-func mapACPToolCallContent(raw json.RawMessage) ([]harnessv2.ContentBlock, error) {
+func mapACPToolCallContent(raw json.RawMessage) ([]harnessv2.ContentBlock, bool, error) {
 	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
+		return nil, false, nil
 	}
 	var items []struct {
 		Type    string          `json:"type"`
 		Content json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &items); err != nil {
-		return nil, fmt.Errorf("decode ACP tool call content: %w", err)
+		return nil, false, fmt.Errorf("decode ACP tool call content: %w", err)
 	}
 	mapped := make([]harnessv2.ContentBlock, 0, len(items))
 	for index, item := range items {
 		if len(mapped) == harnessv2.MaxContentBlocks {
-			break
+			return nil, true, nil
 		}
 		if item.Type != "content" || len(item.Content) == 0 {
 			continue
 		}
 		var block acp.ContentBlock
 		if err := json.Unmarshal(item.Content, &block); err != nil {
-			return nil, fmt.Errorf("decode ACP tool call content block %d: %w", index, err)
+			return nil, false, fmt.Errorf("decode ACP tool call content block %d: %w", index, err)
 		}
-		projected, ok, err := projectACPContentBlock(block)
+		projected, ok, bounded, err := projectACPContentBlock(block)
 		if err != nil {
-			return nil, fmt.Errorf("project ACP tool call content block %d: %w", index, err)
+			return nil, false, fmt.Errorf("project ACP tool call content block %d: %w", index, err)
+		}
+		if bounded {
+			return nil, true, nil
 		}
 		if ok {
 			mapped = append(mapped, projected)
 		}
 	}
-	return mapped, nil
+	return mapped, false, nil
 }
 
-func projectACPContentBlock(block acp.ContentBlock) (harnessv2.ContentBlock, bool, error) {
+func projectACPContentBlock(block acp.ContentBlock) (harnessv2.ContentBlock, bool, bool, error) {
 	var projected harnessv2.ContentBlock
 	switch block.Type {
 	case acpContentTypeText:
 		if block.Text == "" {
-			return projected, false, nil
+			return projected, false, false, nil
 		}
 		projected = harnessv2.ContentBlock{Type: harnessv2.ContentBlockText, Text: block.Text}
 	case "resource_link":
 		if block.URI == "" {
-			return projected, false, nil
+			return projected, false, false, nil
 		}
 		projected = harnessv2.ContentBlock{
 			Type: harnessv2.ContentBlockResourceLink, URI: block.URI, Name: block.Name, MimeType: block.MIMEType,
@@ -190,7 +193,7 @@ func projectACPContentBlock(block acp.ContentBlock) (harnessv2.ContentBlock, boo
 			Text     string `json:"text"`
 		}
 		if len(block.Resource) == 0 || json.Unmarshal(block.Resource, &resource) != nil {
-			return projected, false, nil
+			return projected, false, false, nil
 		}
 		if resource.Text != "" {
 			projected = harnessv2.ContentBlock{Type: harnessv2.ContentBlockText, Text: resource.Text}
@@ -199,18 +202,18 @@ func projectACPContentBlock(block acp.ContentBlock) (harnessv2.ContentBlock, boo
 				Type: harnessv2.ContentBlockResourceLink, URI: resource.URI, MimeType: resource.MIMEType,
 			}
 		} else {
-			return projected, false, nil
+			return projected, false, false, nil
 		}
 	default:
-		return projected, false, nil
+		return projected, false, false, nil
 	}
 	if acpToolContentExceedsHarnessLimits(projected) {
-		return harnessv2.ContentBlock{}, false, nil
+		return harnessv2.ContentBlock{}, false, true, nil
 	}
 	if err := projected.ValidateToolOutput(); err != nil {
-		return harnessv2.ContentBlock{}, false, err
+		return harnessv2.ContentBlock{}, false, false, err
 	}
-	return projected, true, nil
+	return projected, true, false, nil
 }
 
 func acpToolContentExceedsHarnessLimits(block harnessv2.ContentBlock) bool {

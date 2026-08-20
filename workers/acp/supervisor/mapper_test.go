@@ -181,7 +181,7 @@ func TestMapACPUpdatePreservesWhitespaceToolContent(t *testing.T) {
 	}
 }
 
-func TestMapACPToolCallContentCapsProjectedBlocks(t *testing.T) {
+func TestMapACPToolCallContentOmitsSnapshotOverBlockLimit(t *testing.T) {
 	items := make([]map[string]any, harnessv2.MaxContentBlocks+1)
 	for index := range items {
 		items[index] = map[string]any{
@@ -193,15 +193,15 @@ func TestMapACPToolCallContentCapsProjectedBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mapped, err := mapACPToolCallContent(raw)
+	mapped, contentOmitted, err := mapACPToolCallContent(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(mapped) != harnessv2.MaxContentBlocks {
-		t.Fatalf("mapped content blocks = %d, want %d", len(mapped), harnessv2.MaxContentBlocks)
+	if len(mapped) != 0 || !contentOmitted {
+		t.Fatalf("mapped content blocks = %#v omitted=%t", mapped, contentOmitted)
 	}
 	update := harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
-		ToolCallID: "call-many-blocks", Status: harnessv2.ToolCallStatusInProgress, Content: mapped,
+		ToolCallID: "call-many-blocks", Status: harnessv2.ToolCallStatusInProgress, ContentOmitted: true,
 	}}
 	if err := update.Validate(); err != nil {
 		t.Fatalf("bounded tool update validation: %v", err)
@@ -234,11 +234,39 @@ func TestProjectACPContentBlockOmitsOversizedTelemetry(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			projected, ok, err := projectACPContentBlock(test.block)
-			if err != nil || ok || projected != (harnessv2.ContentBlock{}) {
-				t.Fatalf("oversized projection = %#v ok=%t err=%v", projected, ok, err)
+			projected, ok, bounded, err := projectACPContentBlock(test.block)
+			if err != nil || ok || !bounded || projected != (harnessv2.ContentBlock{}) {
+				t.Fatalf("oversized projection = %#v ok=%t bounded=%t err=%v", projected, ok, bounded, err)
 			}
 		})
+	}
+}
+
+func TestMapACPUpdateMarksOversizedToolContentOmitted(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-oversized-content",
+		"status":        "completed",
+		"content": []map[string]any{{
+			"type": "content",
+			"content": map[string]any{
+				"type": "text", "text": strings.Repeat("x", harnessv2.MaxPromptContentBytes+1),
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || text != "" || update == nil || update.ToolCall == nil ||
+		len(update.ToolCall.Content) != 0 || update.ToolCall.ContentReplace || !update.ToolCall.ContentOmitted {
+		t.Fatalf("mapped oversized tool content = %#v text=%q ok=%t", update, text, ok)
+	}
+	if err := update.Validate(); err != nil {
+		t.Fatalf("validate omitted oversized tool content: %v", err)
 	}
 }
 

@@ -15,6 +15,8 @@ import (
 	"github.com/orka-agents/orka/internal/store/storetest"
 )
 
+const testToolKindShell = "shell"
+
 func TestJournalDeduplicatesWithinPassAndAcrossRecovery(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
@@ -466,7 +468,7 @@ func TestJournalRedactsCredentialsSplitAcrossToolUpdates(t *testing.T) {
 		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
 			Kind: harnessv2.UpdateToolCallUpdate,
 			ToolCall: &harnessv2.ToolCallUpdate{
-				ToolCallID: "call-split", Kind: "shell", Status: status,
+				ToolCallID: "call-split", Kind: testToolKindShell, Status: status,
 				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: fragment}},
 			},
 		})
@@ -505,7 +507,7 @@ func TestJournalOmitsToolContentSplitAcrossBlocks(t *testing.T) {
 	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdateToolCallUpdate,
 		ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-split-blocks", Kind: "shell", Status: harnessv2.ToolCallStatusCompleted,
+			ToolCallID: "call-split-blocks", Kind: testToolKindShell, Status: harnessv2.ToolCallStatusCompleted,
 			Content: []harnessv2.ContentBlock{
 				{Type: harnessv2.ContentBlockText, Text: prefix},
 				{Type: harnessv2.ContentBlockText, Text: suffix},
@@ -581,7 +583,7 @@ func TestJournalPersistsBufferedToolOutputOnStreamClosure(t *testing.T) {
 		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
 			Kind: harnessv2.UpdateToolCallUpdate,
 			ToolCall: &harnessv2.ToolCallUpdate{
-				ToolCallID: "call-open", Title: "Inspect repository", Kind: "shell",
+				ToolCallID: "call-open", Title: "Inspect repository", Kind: testToolKindShell,
 				Status:  harnessv2.ToolCallStatusInProgress,
 				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: fragment}},
 			},
@@ -604,7 +606,7 @@ func TestJournalPersistsBufferedToolOutputOnStreamClosure(t *testing.T) {
 	if len(listed) != 1 || listed[0].Type != executionevents.ExecutionEventTypeToolCallFailed ||
 		listed[0].Severity != executionevents.ExecutionEventSeverityError ||
 		listed[0].ContentText != "before "+executionevents.ExecutionEventRedactedValue+" after" ||
-		listed[0].ToolName != "shell" || listed[0].Summary != "Inspect repository" {
+		listed[0].ToolName != testToolKindShell || listed[0].Summary != "Inspect repository" {
 		t.Fatalf("persisted tool stream closure = %#v", listed)
 	}
 }
@@ -686,7 +688,7 @@ func TestJournalTerminalizesContentFreeToolAfterPersistedStart(t *testing.T) {
 	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdateToolCall,
 		ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-open", Title: "Inspect repository", Kind: "shell", Status: harnessv2.ToolCallStatusPending,
+			ToolCallID: "call-open", Title: "Inspect repository", Kind: testToolKindShell, Status: harnessv2.ToolCallStatusPending,
 		},
 	})
 	if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew || appended == nil {
@@ -773,7 +775,7 @@ func TestJournalBuffersToolMetadataUntilTerminalEvent(t *testing.T) {
 	now := time.Now().UTC()
 	updates := []harnessv2.UpdateEvent{
 		{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-metadata", Title: credential[:10], Kind: "shell", Status: harnessv2.ToolCallStatusPending,
+			ToolCallID: "call-metadata", Title: credential[:10], Kind: testToolKindShell, Status: harnessv2.ToolCallStatusPending,
 		}},
 		{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
 			ToolCallID: "call-metadata", Title: credential[10:], Status: harnessv2.ToolCallStatusInProgress,
@@ -811,7 +813,7 @@ func TestJournalBuffersToolMetadataUntilTerminalEvent(t *testing.T) {
 		}
 	}
 	terminal := listed[2]
-	if terminal.ToolName != "shell" || terminal.Summary != "Finished safely" {
+	if terminal.ToolName != testToolKindShell || terminal.Summary != "Finished safely" {
 		t.Fatalf("terminal tool metadata = %#v", terminal)
 	}
 }
@@ -841,7 +843,7 @@ func TestJournalOmitsOversizedToolStreamContent(t *testing.T) {
 		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
 			Kind: harnessv2.UpdateToolCallUpdate,
 			ToolCall: &harnessv2.ToolCallUpdate{
-				ToolCallID: "call-large", Kind: "shell", Status: status,
+				ToolCallID: "call-large", Kind: testToolKindShell, Status: status,
 				Content: []harnessv2.ContentBlock{{
 					Type: harnessv2.ContentBlockText,
 					Text: content,
@@ -900,12 +902,17 @@ func TestJournalOmitsExcessOpenToolAccumulatorWithoutFailingPrompt(t *testing.T)
 	terminal := testUpdateEvent(uint64(maxOpenToolAccumulators+3), now.Add(2*time.Second), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdateToolCallUpdate,
 		ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-open-overflow", Kind: "shell", Status: harnessv2.ToolCallStatusCompleted,
+			ToolCallID: "call-open-overflow", Kind: testToolKindShell, Status: harnessv2.ToolCallStatusCompleted,
+			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "final output"}}, ContentReplace: true,
 		},
 	})
 	completed, isNew, err := state.AppendUpdateIfNew(ctx, terminal)
-	if err != nil || !isNew || completed == nil || completed.Type != executionevents.ExecutionEventTypeToolCallCompleted {
-		t.Fatalf("complete omitted open tool = %#v new=%t err=%v", completed, isNew, err)
+	if err != nil || !isNew || completed == nil || completed.Type != executionevents.ExecutionEventTypeToolCallCompleted ||
+		completed.ContentText != "final output" || completed.ToolName != testToolKindShell {
+		t.Fatalf("complete transient open tool = %#v new=%t err=%v", completed, isNew, err)
+	}
+	if len(state.toolText) != maxOpenToolAccumulators {
+		t.Fatalf("terminal snapshot retained an accumulator: %d", len(state.toolText))
 	}
 }
 
