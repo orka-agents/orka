@@ -124,6 +124,29 @@ func TestFirstUsableProxyAnthropicMessagesModel(t *testing.T) {
 	}
 }
 
+func TestFirstUsableProxyAnthropicMessagesModelReportsQuotaExhaustion(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(`{"message":"You have exceeded your monthly quota","code":"quota_exceeded"}`))
+	}))
+	defer server.Close()
+
+	actual, err := firstUsableProxyAnthropicMessagesModel(
+		server.URL,
+		proxyModelCatalog{AllModelIDs: []string{"claude-sonnet-5"}},
+		[]string{"claude-sonnet-5"},
+		"claude-",
+	)
+	if !isLiveCopilotProxyQuotaExhaustedError(err) {
+		t.Fatalf("error = %v, want live Copilot proxy quota exhaustion", err)
+	}
+	if actual != "" {
+		t.Fatalf("selected Claude model %q, want empty", actual)
+	}
+}
+
 func TestFirstUsableProxyAnthropicMessagesModelReportsRejectedCandidates(t *testing.T) {
 	t.Parallel()
 

@@ -959,6 +959,12 @@ func firstUsableProxyAnthropicMessagesModel(proxyBaseURL string, catalog proxyMo
 		if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
 			return modelID, nil
 		}
+		if isLiveCopilotProxyQuotaExhaustedError(&llm.ProviderError{
+			StatusCode: statusCode,
+			Message:    body,
+		}) {
+			return "", fmt.Errorf("%w while probing model %q", errLiveCopilotProxyQuotaExhausted, modelID)
+		}
 		if statusCode >= http.StatusInternalServerError {
 			return "", fmt.Errorf(
 				"live Copilot proxy Anthropic Messages probe for %q returned %d: %s",

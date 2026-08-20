@@ -31,12 +31,16 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 		liveAnthropicSecretName   = "e2e-live-anthropic-compat-secret"
 		liveAnthropicExpectedText = "ORKA_LIVE_ANTHROPIC_OK"
 		controllerPFPort          = 18090
+		liveAnthropicProxyPFPort  = 18092
 	)
 
 	var (
 		apiBaseURL      string
 		cancelPF        context.CancelFunc
 		portForwardCmd  *exec.Cmd
+		proxyBaseURL    string
+		cancelProxyPF   context.CancelFunc
+		proxyPFCmd      *exec.Cmd
 		token           string
 		liveClaudeModel string
 	)
@@ -56,6 +60,18 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 			stopPortForward(cancelPF, portForwardCmd)
 		})
 
+		By("setting up port-forward to the live copilot proxy")
+		proxyBaseURL, cancelProxyPF, proxyPFCmd, err = startServicePortForward(
+			liveCopilotProxyServiceNamespace(),
+			liveCopilotProxyServiceName(),
+			liveAnthropicProxyPFPort,
+			liveCopilotProxyServicePort(),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() {
+			stopPortForward(cancelProxyPF, proxyPFCmd)
+		})
+
 		By("getting a service account token")
 		token, err = serviceAccountToken()
 		Expect(err).NotTo(HaveOccurred())
@@ -70,14 +86,23 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 		Expect(ready.Status).To(Equal("ready"))
 		Expect(ready.Error).To(BeEmpty())
 
-		By("discovering a live Claude-family model from the proxy catalog")
-		liveClaudeModel = discoverPreferredProxyModelViaServiceProxy(
+		By("discovering a usable Claude-family model from the proxy catalog")
+		catalog, err := fetchProxyModelCatalogViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		liveClaudeModel, err = firstUsableProxyAnthropicMessagesModel(
+			proxyBaseURL,
+			catalog,
 			liveCopilotProxyClaudeModelPreferences,
 			liveCopilotProxyClaudeModelPrefixes...,
 		)
+		if isLiveCopilotProxyQuotaExhaustedError(err) {
+			Skip("Skipping Anthropic compatibility checks: live Copilot proxy monthly quota is exhausted")
+		}
+		Expect(err).NotTo(HaveOccurred())
 		Expect(liveClaudeModel).NotTo(BeEmpty(), "proxy should expose an allowed Claude-family model")
 
 		By("creating a dummy secret for the live provider")
