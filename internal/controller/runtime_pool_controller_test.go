@@ -783,6 +783,30 @@ func TestRuntimePoolReconcilerRolloutWaitsForReservationsButNotQueuedDemand(t *t
 	}
 }
 
+func TestRuntimePoolReconcilerUnreadyRolloutClearsObservedReadiness(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, pod := runtimePoolTestStartServing(t, r, pool, supervisor, "unready-rollout-pod", "unready-rollout-pod-uid", "10.0.0.82", "unready-rollout-boot")
+
+	r.ProviderProxy.BearerToken = bytes.Clone(runtimePoolTestProviderTokenNext)
+	runtimePoolTestSetPodReady(t, r, &pod, false)
+	runtimePoolReconcile(t, r, pool)
+
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.ActiveInstance == nil || status.ActiveInstance.PodUID != string(pod.UID) {
+		t.Fatalf("active instance = %#v, want the previous runtime fence preserved", status.ActiveInstance)
+	}
+	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != "PodNotReady" {
+		t.Fatalf("scheduling condition = %#v, want Unknown/PodNotReady", condition)
+	}
+	if got := runtimePoolReadyReplicas(status); got != 0 {
+		t.Fatalf("ready replicas = %d, want 0 while no rollout Pod is Ready", got)
+	}
+}
+
 func TestRuntimePoolReconcilerRolloutFailureAndTimeoutPreserveOldPod(t *testing.T) {
 	t.Run("drain request failure retries without template replacement", func(t *testing.T) {
 		scheme := runtimePoolTestScheme(t)

@@ -941,6 +941,7 @@ func (r *RuntimePoolReconciler) reconcileUnreadyRuntimePoolRollout(
 	deployment *appsv1.Deployment,
 	status corev1alpha1.RuntimePoolStatus,
 ) (ctrl.Result, error) {
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, "PodNotReady", "no Ready runtime Pod is available during Recreate rollout")
 	if pool.Status.ActiveInstance != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
