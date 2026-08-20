@@ -80,10 +80,13 @@ func stripExecutionEventURLQuery(candidate string) string {
 	trimmed := strings.TrimRight(candidate, ".,;:!?)]}")
 	suffix := candidate[len(trimmed):]
 	parsed, err := url.Parse(trimmed)
-	if err != nil || (parsed.Scheme == "" && parsed.Host == "") ||
-		(parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "") {
+	if err != nil || (parsed.Scheme == "" && parsed.Host == "") {
 		return candidate
 	}
+	if parsed.User == nil && parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "" {
+		return candidate
+	}
+	parsed.User = nil
 	parsed.RawQuery = ""
 	parsed.ForceQuery = false
 	parsed.Fragment = ""

@@ -23,7 +23,7 @@ func TestToolCallUpdateValidateRequiresOmittedContentToBeEmpty(t *testing.T) {
 	}
 }
 
-func TestUsageUpdateValidateAllowsZeroSnapshot(t *testing.T) {
+func TestUsageUpdateValidateAllowsEmptySnapshot(t *testing.T) {
 	event := UpdateEvent{Kind: UpdateUsage, Usage: &UsageUpdate{}}
 	if err := event.Validate(); err != nil {
 		t.Fatalf("validate zero usage snapshot: %v", err)
@@ -31,12 +31,13 @@ func TestUsageUpdateValidateAllowsZeroSnapshot(t *testing.T) {
 }
 
 func TestPromptResultValidateRejectsInvalidContextWindowUsage(t *testing.T) {
-	used, smallerSize := uint64(2), uint64(1)
+	used, smallerSize, zero := uint64(2), uint64(1), uint64(0)
 	tests := []struct {
 		name  string
 		usage UsageUpdate
 	}{
 		{name: "missing size", usage: UsageUpdate{ContextWindowUsed: &used}},
+		{name: "zero size", usage: UsageUpdate{ContextWindowUsed: &zero, ContextWindowSize: &zero}},
 		{name: "used exceeds size", usage: UsageUpdate{ContextWindowUsed: &used, ContextWindowSize: &smallerSize}},
 	}
 	for _, test := range tests {

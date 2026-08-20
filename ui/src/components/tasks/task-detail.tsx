@@ -53,6 +53,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const forkSupported = !taskEventsUnsupported && !taskEventsFailed
   const taskEvents = taskEventsResponse?.events ?? []
   const plan = task?.plan
+  const hasPlanHistory = Boolean(plan) || (task?.status?.iteration ?? 0) > 0
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
   const search = useSearch({ from: '/tasks/$taskId' })
@@ -62,7 +63,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const [tabState, setTabState] = useState<{ override: string | null; seen?: string }>({ override: null })
   if (tabState.seen !== search.tab) setTabState({ override: null, seen: search.tab })
   const availableTabs = new Set(['runtime', 'overview', 'execution', 'timeline', 'trace', 'approvals', 'result', 'logs'])
-  if (plan) availableTabs.add('plan')
+  if (hasPlanHistory) availableTabs.add('plan')
   if ((task?.status?.childTasks?.length ?? 0) > 0) availableTabs.add('children')
   const requestedTab = tabState.override ?? search.tab ?? 'runtime'
   const activeTab = availableTabs.has(requestedTab) ? requestedTab : 'runtime'
@@ -187,7 +188,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <TabsTrigger value="approvals">Approvals</TabsTrigger>
           <TabsTrigger value="result">Result</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
-          {plan && (
+          {hasPlanHistory && (
             <TabsTrigger value="plan">Plan</TabsTrigger>
           )}
           {(task.status?.childTasks?.length ?? 0) > 0 && (
@@ -269,7 +270,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             </CardContent>
           </Card>
 
-          {plan && (
+          {hasPlanHistory && (
             <Card>
               <CardHeader>
                 <CardTitle>Plan</CardTitle>
@@ -415,7 +416,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <StructuredLogViewer taskId={taskId} taskPhase={task.status?.phase} />
         </TabsContent>
 
-        {plan && (
+        {hasPlanHistory && (
           <TabsContent value="plan">
             <Card>
               <CardHeader>
@@ -424,7 +425,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               <CardContent>
                 <div className="space-y-4">
                   <RunTimeline task={task} plan={plan} events={taskEvents} />
-                  {plan.planDocument && (
+                  {plan?.planDocument && (
                     <div>
                       <p className="mb-1 text-xs font-medium text-muted-foreground">
                         Plan document

@@ -350,6 +350,22 @@ describe('TaskDetail', () => {
     expect(screen.queryByRole('tab', { name: /plan/i })).not.toBeInTheDocument()
   })
 
+  it('keeps autonomous run history visible after the persisted plan is cleaned up', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'completed-auto', namespace: 'default', uid: 'uid-c', creationTimestamp: new Date().toISOString() },
+          spec: { type: 'agent', agentRef: { name: 'looper' } },
+          status: { phase: 'Succeeded', iteration: 3, completionTime: new Date().toISOString() },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="completed-auto" />)
+    await waitFor(() => expect(screen.getByText('completed-auto')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('tab', { name: /plan/i }))
+    expect(await screen.findByText('Iteration 3')).toBeInTheDocument()
+  })
+
   it('shows a persisted plan when iteration is 0', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>

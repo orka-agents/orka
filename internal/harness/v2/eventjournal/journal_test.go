@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -645,6 +646,70 @@ func TestJournalPersistsBufferedToolClosuresInProtocolOrder(t *testing.T) {
 		listed[1].Type != executionevents.ExecutionEventTypeToolCallFailed ||
 		listed[0].ContentText != "first" || listed[1].ContentText != "second" {
 		t.Fatalf("persisted tool closure order = %#v", listed)
+	}
+}
+
+func TestJournalPersistsBufferedAssistantAndToolStreamsInProtocolOrder(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		assistantSeq uint64
+		toolSeq      uint64
+		wantTypes    []string
+	}{
+		{
+			name: "assistant before tool", assistantSeq: 2, toolSeq: 3,
+			wantTypes: []string{executionevents.ExecutionEventTypeModelMessage, executionevents.ExecutionEventTypeToolCallFailed},
+		},
+		{
+			name: "tool before assistant", assistantSeq: 3, toolSeq: 2,
+			wantTypes: []string{executionevents.ExecutionEventTypeToolCallFailed, executionevents.ExecutionEventTypeModelMessage},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			eventStore := storetest.NewFakeExecutionEventStore()
+			state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			now := time.Now().UTC()
+			updates := []harnessv2.Event{
+				testUpdateEvent(test.assistantSeq, now.Add(time.Duration(test.assistantSeq)*time.Millisecond), harnessv2.UpdateEvent{
+					Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "assistant"},
+				}),
+				testUpdateEvent(test.toolSeq, now.Add(time.Duration(test.toolSeq)*time.Millisecond), harnessv2.UpdateEvent{
+					Kind: harnessv2.UpdateToolCallUpdate,
+					ToolCall: &harnessv2.ToolCallUpdate{
+						ToolCallID: "call-open", Status: harnessv2.ToolCallStatusInProgress,
+						Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "tool"}},
+					},
+				}),
+			}
+			sort.Slice(updates, func(i, j int) bool { return updates[i].Identity.Sequence < updates[j].Identity.Sequence })
+			for _, update := range updates {
+				if appended, isNew, err := state.AppendUpdateIfNew(ctx, update); err != nil || isNew || appended != nil {
+					t.Fatalf("append update %d = %#v new=%t err=%v", update.Identity.Sequence, appended, isNew, err)
+				}
+			}
+			terminal := testTerminalEvent(4, now.Add(4*time.Millisecond))
+			if err := state.AppendBufferedStreamsIfNew(ctx, &terminal, test.assistantSeq, "assistant"); err != nil {
+				t.Fatal(err)
+			}
+			if err := state.AppendBufferedStreamsIfNew(ctx, &terminal, test.assistantSeq, "assistant"); err != nil {
+				t.Fatalf("repeat buffered stream append: %v", err)
+			}
+
+			listed := listJournalEvents(t, ctx, eventStore)
+			if len(listed) != len(test.wantTypes) {
+				t.Fatalf("buffered stream events = %#v", listed)
+			}
+			for i, wantType := range test.wantTypes {
+				if listed[i].Type != wantType {
+					t.Fatalf("buffered stream event %d type = %q, want %q", i, listed[i].Type, wantType)
+				}
+			}
+		})
 	}
 }
 

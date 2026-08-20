@@ -264,6 +264,9 @@ func (u UsageUpdate) Validate() error {
 	if (u.ContextWindowUsed == nil) != (u.ContextWindowSize == nil) {
 		return fmt.Errorf("context window usage requires both used and size")
 	}
+	if u.ContextWindowSize != nil && *u.ContextWindowSize == 0 {
+		return fmt.Errorf("context window size must be positive")
+	}
 	if u.ContextWindowUsed != nil && *u.ContextWindowUsed > *u.ContextWindowSize {
 		return fmt.Errorf("context window used tokens must not exceed size")
 	}

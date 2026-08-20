@@ -513,59 +513,104 @@ func (s *State) AppendAssistantStreamClosureIfNew(
 	)
 }
 
-// AppendToolStreamClosuresIfNew persists buffered output for tools that did
-// not emit a completed/failed update before the prompt stream closed. The last
-// observed tool update supplies the durable protocol identity.
-func (s *State) AppendToolStreamClosuresIfNew(ctx context.Context) error {
+// AppendBufferedStreamsIfNew persists buffered assistant and interrupted tool
+// streams in the order of their last protocol updates. assistantEvent supplies
+// the durable identity; assistantOrderSequence is the last assistant chunk's
+// sequence, or the assistant event sequence when no chunks preceded it.
+func (s *State) AppendBufferedStreamsIfNew(
+	ctx context.Context,
+	assistantEvent *harnessv2.Event,
+	assistantOrderSequence uint64,
+	transcript string,
+) error {
 	if s == nil {
 		return fmt.Errorf("harness v2 journal state is required")
 	}
-	type pendingToolClosure struct {
+	type pendingStreamClosure struct {
+		sequence    uint64
 		toolID      string
 		accumulator *streamText
+		assistant   bool
 	}
-	closures := make([]pendingToolClosure, 0, len(s.toolText))
+	closures := make([]pendingStreamClosure, 0, len(s.toolText)+1)
 	for toolID, accumulator := range s.toolText {
 		if accumulator == nil || !accumulator.hasEvent {
 			continue
 		}
-		closures = append(closures, pendingToolClosure{toolID: toolID, accumulator: accumulator})
+		closures = append(closures, pendingStreamClosure{
+			sequence: accumulator.lastEvent.Identity.Sequence, toolID: toolID, accumulator: accumulator,
+		})
+	}
+	if transcript != "" {
+		if assistantEvent == nil {
+			return fmt.Errorf("assistant event is required for a buffered transcript")
+		}
+		identity := mappedUpdateIdentity(*assistantEvent)
+		if assistantOrderSequence == 0 || assistantOrderSequence > identity.Sequence {
+			return fmt.Errorf("assistant order sequence must be in range 1..%d", identity.Sequence)
+		}
+		closures = append(closures, pendingStreamClosure{sequence: assistantOrderSequence, assistant: true})
 	}
 	sort.Slice(closures, func(i, j int) bool {
-		left := closures[i].accumulator.lastEvent.Identity.Sequence
-		right := closures[j].accumulator.lastEvent.Identity.Sequence
-		if left == right {
+		if closures[i].sequence == closures[j].sequence {
+			if closures[i].assistant != closures[j].assistant {
+				return closures[i].assistant
+			}
 			return closures[i].toolID < closures[j].toolID
 		}
-		return left < right
+		return closures[i].sequence < closures[j].sequence
 	})
 	for _, closure := range closures {
-		toolID := closure.toolID
-		accumulator := closure.accumulator
-		identity := mappedUpdateIdentity(accumulator.lastEvent)
-		if err := s.bindPrompt(identity); err != nil {
-			return err
-		}
-		if _, ok := s.toolClosureSequences[identity.Sequence]; ok {
-			s.removeToolAccumulator(toolID)
+		if closure.assistant {
+			var err error
+			if assistantEvent.Type.IsTerminal() {
+				_, _, err = s.AppendAssistantTranscriptIfNew(ctx, *assistantEvent, transcript)
+			} else {
+				_, _, err = s.AppendAssistantStreamClosureIfNew(ctx, *assistantEvent, transcript)
+			}
+			if err != nil {
+				return err
+			}
 			continue
 		}
-		mappedEvent := withInterruptedToolClosure(accumulator.lastEvent, accumulator.title, accumulator.kind)
-		mapped, err := mapToolStreamClosure(
-			mappedEvent, s.journal.MapContext, accumulator.text.String(), accumulator.overflow,
-			accumulator.multipleBlocksOmitted,
-		)
-		if err != nil {
+		if err := s.appendToolStreamClosureIfNew(ctx, closure.toolID, closure.accumulator); err != nil {
 			return err
 		}
-		if _, _, err := s.appendMappedEvent(
-			ctx, identity, mappedJournalRecordToolStreamClosure, mapped,
-			"append mapped harness v2 tool stream closure",
-		); err != nil {
-			return err
-		}
-		s.removeToolAccumulator(toolID)
 	}
+	return nil
+}
+
+// AppendToolStreamClosuresIfNew persists buffered output for tools that did
+// not emit a completed/failed update before the prompt stream closed. The last
+// observed tool update supplies the durable protocol identity.
+func (s *State) AppendToolStreamClosuresIfNew(ctx context.Context) error {
+	return s.AppendBufferedStreamsIfNew(ctx, nil, 0, "")
+}
+
+func (s *State) appendToolStreamClosureIfNew(ctx context.Context, toolID string, accumulator *streamText) error {
+	identity := mappedUpdateIdentity(accumulator.lastEvent)
+	if err := s.bindPrompt(identity); err != nil {
+		return err
+	}
+	if _, ok := s.toolClosureSequences[identity.Sequence]; ok {
+		s.removeToolAccumulator(toolID)
+		return nil
+	}
+	mappedEvent := withInterruptedToolClosure(accumulator.lastEvent, accumulator.title, accumulator.kind)
+	mapped, err := mapToolStreamClosure(
+		mappedEvent, s.journal.MapContext, accumulator.text.String(), accumulator.overflow,
+		accumulator.multipleBlocksOmitted,
+	)
+	if err != nil {
+		return err
+	}
+	if _, _, err := s.appendMappedEvent(
+		ctx, identity, mappedJournalRecordToolStreamClosure, mapped,
+		"append mapped harness v2 tool stream closure",
+	); err != nil {
+		return err
+	}
+	s.removeToolAccumulator(toolID)
 	return nil
 }
 
