@@ -189,6 +189,32 @@ func TestMapDiagnosticRedactsCredentialSplitAcrossFields(t *testing.T) {
 	}
 }
 
+func TestMapTerminalToolMetadataRedactsCredentialSplitAcrossFields(t *testing.T) {
+	kind := strings.Repeat("b", 24)
+	secret := "sk-" + kind
+	mapped, err := MapUpdate(testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-split-metadata", Title: "sk-", Kind: kind, Status: harnessv2.ToolCallStatusCompleted,
+		},
+	}), testMapContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content map[string]any
+	if err := json.Unmarshal(mapped.Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	title, _ := content["title"].(string)
+	toolKind, _ := content["toolKind"].(string)
+	if title+toolKind == secret || toolKind == kind || mapped.ToolName == kind {
+		t.Fatalf("tool metadata reconstructs credential: title=%q kind=%q toolName=%q", title, toolKind, mapped.ToolName)
+	}
+	if !strings.Contains(toolKind, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("tool kind = %q, want redaction marker", toolKind)
+	}
+}
+
 func TestMapToolCallIDUsesStableNonSecretCorrelationID(t *testing.T) {
 	rawID := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjcmVkZW50aWFsIn0.signature"
 	mapTool := func(sequence uint64) *store.ExecutionEvent {

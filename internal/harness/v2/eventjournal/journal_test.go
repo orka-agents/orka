@@ -303,6 +303,54 @@ func TestJournalRedactsCredentialsSplitAcrossAssistantChunks(t *testing.T) {
 	}
 }
 
+func TestJournalPersistsTerminalUsageSeparatelyFromAssistantTranscript(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	journal := Journal{EventStore: eventStore, MapContext: testMapContext()}
+	state, err := journal.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	terminal := testTerminalEvent(3, time.Now().UTC())
+	terminal.Completed = &harnessv2.CompletedEvent{
+		StopReason: harnessv2.ACPStopReasonEndTurn,
+		Result: harnessv2.PromptResult{
+			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "done"}},
+			Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 40},
+		},
+	}
+	if appended, isNew, err := state.AppendTerminalUsageIfNew(ctx, terminal); err != nil || !isNew || appended == nil {
+		t.Fatalf("append terminal usage = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if appended, isNew, err := state.AppendAssistantTranscriptIfNew(ctx, terminal, "done"); err != nil || !isNew || appended == nil {
+		t.Fatalf("append assistant transcript = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if duplicate, isNew, err := state.AppendTerminalUsageIfNew(ctx, terminal); err != nil || isNew || duplicate != nil {
+		t.Fatalf("same-pass terminal usage = %#v new=%t err=%v", duplicate, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 2 {
+		t.Fatalf("terminal journal events = %d, want 2", len(listed))
+	}
+	if listed[0].Type != executionevents.ExecutionEventTypeModelUsageUpdated ||
+		listed[1].Type != executionevents.ExecutionEventTypeModelMessage {
+		t.Fatalf("terminal journal events = %#v", listed)
+	}
+
+	recovered, err := journal.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate, isNew, err := recovered.AppendTerminalUsageIfNew(ctx, terminal); err != nil || isNew || duplicate != nil {
+		t.Fatalf("recovered terminal usage = %#v new=%t err=%v", duplicate, isNew, err)
+	}
+	if duplicate, isNew, err := recovered.AppendAssistantTranscriptIfNew(ctx, terminal, "done"); err != nil || isNew || duplicate != nil {
+		t.Fatalf("recovered assistant transcript = %#v new=%t err=%v", duplicate, isNew, err)
+	}
+}
+
 func TestJournalPersistsAssistantTextOnNonTerminalStreamClosure(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()

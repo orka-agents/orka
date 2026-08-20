@@ -1396,6 +1396,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err != nil {
 		return err
 	}
+	if _, _, err := journalState.AppendTerminalUsageIfNew(ctx, *terminal); err != nil {
+		logf.FromContext(ctx).Error(err, "persist terminal ACP usage", "namespace", task.Namespace, "task", task.Name)
+		return d.failPromptForExecutionEventPersistence(
+			ctx, task, attemptID, fence, "terminal usage persistence failed",
+		)
+	}
 	if _, _, err := journalState.AppendAssistantTranscriptIfNew(ctx, *terminal, resultText); err != nil {
 		logf.FromContext(ctx).Error(err, "persist terminal ACP assistant transcript", "namespace", task.Namespace, "task", task.Name)
 		return d.failPromptForExecutionEventPersistence(

@@ -19,6 +19,7 @@ const (
 	mappedToolCallIDDomain           = "orka.harness.v2.execution-event.tool-call-id.v1\x00"
 	mappedAssistantTranscriptKind    = "assistant_transcript"
 	mappedToolStreamClosureKind      = "tool_stream_closure"
+	mappedTerminalUsageKind          = "terminal_usage"
 )
 
 type mappedJournalRecordKind uint8
@@ -27,6 +28,7 @@ const (
 	mappedJournalRecordUpdate mappedJournalRecordKind = iota
 	mappedJournalRecordAssistantTranscript
 	mappedJournalRecordToolStreamClosure
+	mappedJournalRecordTerminalUsage
 )
 
 // MapContext supplies Orka-owned stream metadata for a validated harness v2
@@ -178,6 +180,9 @@ func mappedExecutionEventRecord(
 	if content.JournalKind == mappedToolStreamClosureKind {
 		return identity, mappedToolStreamClosureKey(identity), mappedJournalRecordToolStreamClosure, true
 	}
+	if content.JournalKind == mappedTerminalUsageKind {
+		return identity, mappedTerminalUsageKey(identity), mappedJournalRecordTerminalUsage, true
+	}
 	if content.UpdateKind == mappedAssistantTranscriptKind {
 		return identity, identity.Key(), mappedJournalRecordAssistantTranscript, true
 	}
@@ -186,6 +191,10 @@ func mappedExecutionEventRecord(
 
 func mappedToolStreamClosureKey(identity MappedUpdateIdentity) string {
 	return identity.Key() + mappedUpdateIdentityKeySeparator + mappedToolStreamClosureKind
+}
+
+func mappedTerminalUsageKey(identity MappedUpdateIdentity) string {
+	return identity.Key() + mappedUpdateIdentityKeySeparator + mappedTerminalUsageKind
 }
 
 // PlanProjection is the durable/public read model derived from one ACP plan
@@ -331,16 +340,20 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 			mapped.Summary = toolCallSummary(metadataFree)
 			content["metadataOmitted"] = "streamed_metadata_pending_completion_redaction"
 		} else {
-			mapped.ToolName = strings.TrimSpace(tool.Kind)
+			title, kind := redactRelatedFields(tool.Title, tool.Kind)
+			redactedTool := *tool
+			redactedTool.Title = title
+			redactedTool.Kind = kind
+			mapped.ToolName = strings.TrimSpace(kind)
 			mapped.ToolName, _, _ = executionevents.RedactAndTruncateExecutionEventText(mapped.ToolName, 128)
-			mapped.Summary = toolCallSummary(*tool)
-			if options.toolContentText != nil && strings.TrimSpace(tool.Title) == "" {
+			mapped.Summary = toolCallSummary(redactedTool)
+			if options.toolContentText != nil && strings.TrimSpace(title) == "" {
 				if summary := compactSummary(*options.toolContentText); summary != "" {
 					mapped.Summary = summary
 				}
 			}
-			content["title"] = tool.Title
-			content["toolKind"] = tool.Kind
+			content["title"] = title
+			content["toolKind"] = kind
 		}
 		content["toolCallID"] = mapped.ToolCallID
 		content["status"] = tool.Status
@@ -377,7 +390,7 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		mapUsageUpdate(event.Update.Usage, mapCtx, mapped, content)
 	case harnessv2.UpdateDiagnostic:
 		diagnostic := event.Update.Diagnostic
-		code, message := redactDiagnosticFields(diagnostic.Code, diagnostic.Message)
+		code, message := redactRelatedFields(diagnostic.Code, diagnostic.Message)
 		mapped.Type = executionevents.ExecutionEventTypeAgentRuntimeCommandStarted
 		mapped.Severity = executionevents.ExecutionEventSeverityError
 		if diagnostic.Retryable {
@@ -402,17 +415,17 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 	return mapped, nil
 }
 
-func redactDiagnosticFields(code, message string) (string, string) {
-	redactedCode := executionevents.RedactExecutionEventText(code)
-	redactedMessage := executionevents.RedactExecutionEventText(message)
-	if redactedCode != code || redactedMessage != message {
-		return redactedCode, redactedMessage
+func redactRelatedFields(left, right string) (string, string) {
+	redactedLeft := executionevents.RedactExecutionEventText(left)
+	redactedRight := executionevents.RedactExecutionEventText(right)
+	if redactedLeft != left || redactedRight != right {
+		return redactedLeft, redactedRight
 	}
-	if executionevents.RedactExecutionEventText(code+message) != code+message ||
-		executionevents.RedactExecutionEventText(message+code) != message+code {
-		redactedMessage = executionevents.ExecutionEventRedactedValue
+	if executionevents.RedactExecutionEventText(left+right) != left+right ||
+		executionevents.RedactExecutionEventText(right+left) != right+left {
+		redactedRight = executionevents.ExecutionEventRedactedValue
 	}
-	return redactedCode, redactedMessage
+	return redactedLeft, redactedRight
 }
 
 func mapUsageUpdate(
@@ -451,6 +464,11 @@ func mapUsageUpdate(
 	}
 }
 
+func hasUsageTelemetry(usage harnessv2.UsageUpdate) bool {
+	return usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0 ||
+		usage.ContextWindowUsed != nil || usage.ContextWindowSize != nil
+}
+
 func mapToolUpdateWithContent(
 	event harnessv2.Event,
 	mapCtx MapContext,
@@ -482,6 +500,26 @@ func mapToolStreamClosure(
 
 func mapToolUpdateWithoutMetadata(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent, error) {
 	return mapUpdate(event, mapCtx, mapUpdateOptions{omitToolMetadata: true})
+}
+
+// MapTerminalUsage projects usage reported only by a completed result while
+// retaining the terminal event's durable protocol identity.
+func MapTerminalUsage(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent, error) {
+	if event.Type != harnessv2.EventCompleted || event.Completed == nil {
+		return nil, fmt.Errorf("completed harness v2 event is required")
+	}
+	usage := event.Completed.Result.Usage
+	if !hasUsageTelemetry(usage) {
+		return nil, fmt.Errorf("completed harness v2 usage is required")
+	}
+	if err := usage.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid completed usage: %w", err)
+	}
+	update := event
+	update.Type = harnessv2.EventUpdate
+	update.Completed = nil
+	update.Update = &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &usage}
+	return mapUpdate(update, mapCtx, mapUpdateOptions{journalKind: mappedTerminalUsageKind})
 }
 
 // MapAssistantTranscript maps the complete terminal assistant transcript as a

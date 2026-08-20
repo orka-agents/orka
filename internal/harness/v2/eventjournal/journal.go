@@ -38,6 +38,7 @@ type State struct {
 	processedSequence           uint64
 	aggregatedSequence          uint64
 	assistantTranscriptSequence uint64
+	terminalUsageSequence       uint64
 	toolClosureSequences        map[uint64]struct{}
 	toolText                    map[string]*streamText
 	toolBufferedBytes           int
@@ -229,6 +230,7 @@ func (s *State) resetPrompt(identity MappedUpdateIdentity) {
 	s.processedSequence = 0
 	s.aggregatedSequence = 0
 	s.assistantTranscriptSequence = 0
+	s.terminalUsageSequence = 0
 	clear(s.toolClosureSequences)
 }
 
@@ -260,6 +262,10 @@ func (s *State) observePersisted(identity MappedUpdateIdentity, kind mappedJourn
 		}
 	case mappedJournalRecordToolStreamClosure:
 		s.rememberToolClosure(identity.Sequence)
+	case mappedJournalRecordTerminalUsage:
+		if identity.Sequence > s.terminalUsageSequence {
+			s.terminalUsageSequence = identity.Sequence
+		}
 	}
 }
 
@@ -384,6 +390,39 @@ func (s *State) AppendAssistantTranscriptIfNew(
 	)
 }
 
+// AppendTerminalUsageIfNew persists usage carried only by a completed result.
+// It uses a distinct journal identity so the same terminal event can also own
+// the final assistant transcript without ambiguous retry reconciliation.
+func (s *State) AppendTerminalUsageIfNew(
+	ctx context.Context,
+	terminal harnessv2.Event,
+) (*store.ExecutionEvent, bool, error) {
+	if s == nil {
+		return nil, false, fmt.Errorf("harness v2 journal state is required")
+	}
+	if terminal.Type != harnessv2.EventCompleted || terminal.Completed == nil {
+		return nil, false, fmt.Errorf("completed harness v2 event is required")
+	}
+	if !hasUsageTelemetry(terminal.Completed.Result.Usage) {
+		return nil, false, nil
+	}
+	identity := mappedUpdateIdentity(terminal)
+	if err := s.bindPrompt(identity); err != nil {
+		return nil, false, err
+	}
+	if s.terminalUsageSequence == identity.Sequence {
+		return nil, false, nil
+	}
+	mapped, err := MapTerminalUsage(terminal, s.journal.MapContext)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.appendMappedEvent(
+		ctx, identity, mappedJournalRecordTerminalUsage, mapped,
+		"append mapped harness v2 terminal usage",
+	)
+}
+
 // AppendAssistantStreamClosureIfNew persists the complete assistant text seen
 // before a non-terminal stream closure. The last assistant update supplies the
 // durable protocol identity; the complete buffered text supplies the redaction
@@ -488,8 +527,11 @@ func (s *State) appendMappedEvent(
 	operation string,
 ) (*store.ExecutionEvent, bool, error) {
 	key := identity.Key()
-	if kind == mappedJournalRecordToolStreamClosure {
+	switch kind {
+	case mappedJournalRecordToolStreamClosure:
 		key = mappedToolStreamClosureKey(identity)
+	case mappedJournalRecordTerminalUsage:
+		key = mappedTerminalUsageKey(identity)
 	}
 	appended, err := s.journal.EventStore.AppendExecutionEvent(ctx, mapped)
 	if err == nil {
@@ -530,6 +572,8 @@ func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalR
 		s.assistantTranscriptSequence = identity.Sequence
 	case mappedJournalRecordToolStreamClosure:
 		s.rememberToolClosure(identity.Sequence)
+	case mappedJournalRecordTerminalUsage:
+		s.terminalUsageSequence = identity.Sequence
 	}
 }
 
