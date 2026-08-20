@@ -334,6 +334,49 @@ type logicalFieldPermutationCandidate struct {
 	used   [maxLogicalFieldPermutationBitWords]uint64
 }
 
+type logicalFieldSensitiveMarkerState struct {
+	marker  int
+	matched int
+}
+
+var logicalFieldSensitiveMarkers = []string{
+	"authorization",
+	"txn-token",
+	"transaction-token",
+	"cookie",
+	"set-cookie",
+	"api-key",
+	"api_key",
+	"apikey",
+	"api key",
+	"token",
+	"secret",
+	"password",
+	"passwd",
+	"pwd",
+	"credential",
+	"private-key",
+	"private_key",
+	"private key",
+	"sk-",
+	"ghp_",
+	"gho_",
+	"ghu_",
+	"ghs_",
+	"ghr_",
+	"github_pat_",
+	"xoxb-",
+	"xoxa-",
+	"xoxp-",
+	"xoxr-",
+	"xoxs-",
+	"eyj",
+	"://",
+	"//",
+	"?",
+	"#",
+}
+
 func logicalFieldSubsetSensitive(values []string) bool {
 	fields := make([]logicalFieldBoundaries, 0, len(values))
 	for _, value := range values {
@@ -356,10 +399,57 @@ func logicalFieldSubsetSensitive(values []string) bool {
 	return permutedLogicalFieldSubsetsSensitive(fields)
 }
 
+func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries) bool {
+	states := make([]logicalFieldSensitiveMarkerState, 0)
+	seen := make(map[logicalFieldSensitiveMarkerState]struct{})
+	for markerIndex, marker := range logicalFieldSensitiveMarkers {
+		for _, field := range fields {
+			text := strings.ToLower(field.suffix)
+			if strings.Contains(text, marker) {
+				return true
+			}
+			for matched := 1; matched < len(marker) && matched <= len(text); matched++ {
+				if !strings.HasSuffix(text, marker[:matched]) {
+					continue
+				}
+				state := logicalFieldSensitiveMarkerState{marker: markerIndex, matched: matched}
+				if _, exists := seen[state]; exists {
+					continue
+				}
+				seen[state] = struct{}{}
+				states = append(states, state)
+			}
+		}
+	}
+	for cursor := 0; cursor < len(states); cursor++ {
+		state := states[cursor]
+		marker := logicalFieldSensitiveMarkers[state.marker]
+		remaining := marker[state.matched:]
+		for _, field := range fields {
+			text := strings.ToLower(field.prefix)
+			if strings.HasPrefix(text, remaining) {
+				return true
+			}
+			if !field.whole || !strings.HasPrefix(remaining, text) {
+				continue
+			}
+			next := logicalFieldSensitiveMarkerState{marker: state.marker, matched: state.matched + len(text)}
+			if _, exists := seen[next]; exists {
+				continue
+			}
+			seen[next] = struct{}{}
+			states = append(states, next)
+		}
+	}
+	return false
+}
+
 func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool {
 	// PlanUpdate currently permits at most 128 entries with content and priority
 	// fields. Fail closed if that protocol bound grows without this search being
-	// updated, or if proving every arbitrary field order exceeds the work cap.
+	// updated. If arbitrary-order proof exceeds the work cap, retain benign plans
+	// only when their fields cannot reconstruct any marker recognized by the
+	// shared credential and capability-URL redactor.
 	if len(fields) > maxLogicalFieldPermutationFields {
 		return true
 	}
@@ -397,7 +487,7 @@ func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool 
 				continue
 			}
 			if len(seen) >= maxLogicalFieldSubsetCandidates {
-				return true
+				return logicalFieldsMayReconstructSensitiveMarker(fields)
 			}
 			seen[next] = struct{}{}
 			candidates = append(candidates, next)

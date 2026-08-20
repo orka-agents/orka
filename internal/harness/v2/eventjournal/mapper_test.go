@@ -296,6 +296,33 @@ func TestProjectPlanUpdateRedactsCredentialSplitAcrossArbitraryFieldOrder(t *tes
 	}
 }
 
+func TestProjectPlanUpdatePreservesBenignFieldsPastPermutationWorkCap(t *testing.T) {
+	contents := []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf"}
+	entries := make([]harnessv2.PlanEntry, len(contents))
+	for index, content := range contents {
+		entries[index] = harnessv2.PlanEntry{Content: content, Status: harnessv2.PlanEntryPending}
+	}
+	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: entries})
+	if strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("benign plan was redacted after permutation work cap: %q", projection.Document)
+	}
+	for _, content := range contents {
+		if !strings.Contains(projection.Document, content) {
+			t.Fatalf("benign plan lost %q after permutation work cap: %q", content, projection.Document)
+		}
+	}
+}
+
+func TestLogicalFieldsMayReconstructSensitiveMarkerAcrossFragments(t *testing.T) {
+	fields := []logicalFieldBoundaries{
+		{prefix: "s", suffix: "s", whole: true},
+		{prefix: "k-", suffix: "k-", whole: true},
+	}
+	if !logicalFieldsMayReconstructSensitiveMarker(fields) {
+		t.Fatal("split credential marker was classified as benign")
+	}
+}
+
 func TestMapPromptLifecycle(t *testing.T) {
 	now := time.Now().UTC()
 	accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
