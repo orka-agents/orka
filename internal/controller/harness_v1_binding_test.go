@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -121,6 +122,81 @@ func (r *harnessV1CandidateErrorReader) Get(
 		}
 	}
 	return r.Reader.Get(ctx, key, object, options...)
+}
+
+func TestHarnessV1TaskMatchesBindingSnapshot(t *testing.T) {
+	deletionTime := metav1.Now()
+	boundSpec := corev1alpha1.TaskSpec{
+		Type: corev1alpha1.TaskTypeAgent, Prompt: "bound prompt",
+		Transaction: &corev1alpha1.TaskTransaction{
+			ID: "txn-1", Scopes: []string{"orka:secrets:credentials:read"},
+		},
+	}
+	boundDigest, err := harnessV1TaskSpecDigest(boundSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name              string
+		generation        int64
+		deleting          bool
+		allowDeleting     bool
+		legacySnapshot    bool
+		mutatePrompt      bool
+		mutateTransaction bool
+		want              bool
+	}{
+		{name: "bound generation", generation: 7, want: true},
+		{name: "bound generation with legacy snapshot", generation: 7, legacySnapshot: true, want: true},
+		{name: "non-deleting generation change", generation: 8},
+		{name: "deletion transition not authorized", generation: 8, deleting: true},
+		{name: "single deletion generation increment", generation: 8, deleting: true, allowDeleting: true, want: true},
+		{name: "deletion transition with changed prompt", generation: 8, deleting: true, allowDeleting: true, mutatePrompt: true},
+		{name: "deletion transition with changed transaction", generation: 8, deleting: true, allowDeleting: true, mutateTransaction: true},
+		{name: "deletion transition with legacy snapshot", generation: 8, deleting: true, allowDeleting: true, legacySnapshot: true},
+		{name: "multiple generation increments", generation: 9, deleting: true, allowDeleting: true},
+		{name: "stale generation", generation: 6, deleting: true, allowDeleting: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Generation: test.generation},
+				Spec:       *boundSpec.DeepCopy(),
+			}
+			if test.deleting {
+				task.DeletionTimestamp = &deletionTime
+			}
+			if test.mutatePrompt {
+				task.Spec.Prompt = "changed prompt"
+			}
+			if test.mutateTransaction {
+				task.Spec.Transaction.ID = "txn-2"
+			}
+			binding := &corev1alpha1.AgentExecutionBinding{
+				Task: corev1alpha1.AgentExecutionBindingTaskRef{BoundSpecGeneration: 7},
+			}
+			body := agentExecutionSnapshotBody{HarnessV1: &agentExecutionSnapshotHarnessV1{TaskSpecDigest: boundDigest}}
+			if test.legacySnapshot {
+				body.HarnessV1.TaskSpecDigest = ""
+			}
+			if got := harnessV1TaskMatchesBindingSnapshot(task, binding, body, test.allowDeleting); got != test.want {
+				t.Fatalf("binding snapshot match = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestResolveHarnessV1ExecutionCandidateRejectsTransactionOutsideBrokeredMode(t *testing.T) {
+	fixture := newHarnessV1CandidateFixture(t)
+	task := fixture.task.DeepCopy()
+	task.Spec.Transaction = &corev1alpha1.TaskTransaction{
+		ID: "txn-1", Scopes: []string{"orka:secrets:credentials:read"},
+	}
+	_, err := fixture.reconciler.resolveHarnessV1ExecutionCandidate(context.Background(), task, fixture.agent)
+	if err == nil || !isPermanentHarnessV1CandidateError(err) ||
+		!strings.Contains(err.Error(), "requires brokered tool execution") {
+		t.Fatalf("non-brokered transaction error = %v, want permanent brokered-only rejection", err)
+	}
 }
 
 func TestEnsureHarnessV1ExecutionBindingRequeuesTransientCandidateErrors(t *testing.T) {
@@ -706,6 +782,10 @@ func TestResolveHarnessV1ExecutionCandidateFreezesBrokeredToolAuthority(t *testi
 		t.Fatal(err)
 	}
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{toolName}}
+	task.Spec.Transaction = &corev1alpha1.TaskTransaction{
+		ID: "brokered-txn", Scopes: []string{"orka:secrets:credentials:read"},
+		Context: map[string]string{"secret": "tool-credential"},
+	}
 	if err := fixture.reconciler.Update(ctx, task); err != nil {
 		t.Fatal(err)
 	}
@@ -721,6 +801,16 @@ func TestResolveHarnessV1ExecutionCandidateFreezesBrokeredToolAuthority(t *testi
 	var body agentExecutionSnapshotBody
 	if err := json.Unmarshal(candidate.snapshotBody, &body); err != nil {
 		t.Fatal(err)
+	}
+	wantTaskSpecDigest, err := harnessV1TaskSpecDigest(task.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.HarnessV1 == nil || body.HarnessV1.TaskSpecDigest != wantTaskSpecDigest {
+		t.Fatalf("frozen Task spec digest = %#v, want %q", body.HarnessV1, wantTaskSpecDigest)
+	}
+	if bytes.Contains(candidate.snapshotBody, []byte(task.Spec.Transaction.ID)) {
+		t.Fatal("snapshot exposed transaction metadata instead of only its Task spec digest")
 	}
 	currentTool := &corev1alpha1.Tool{}
 	if err := fixture.reconciler.Get(ctx, client.ObjectKeyFromObject(tool), currentTool); err != nil {
