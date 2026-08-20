@@ -54,6 +54,57 @@ func (s *Store) GetControllerEpoch(ctx context.Context, name string) (*store.Con
 	return &result, nil
 }
 
+// GetControllerEpochFence reads and validates the current authoritative fence
+// without synchronizing the inspection mirror. Broker authorization paths use
+// this read-only form because unrelated control-store mutations legitimately
+// change the Lease resourceVersion while leaving its epoch authority intact.
+func (s *Store) GetControllerEpochFence(ctx context.Context, name string) (store.ControllerEpochFence, error) {
+	if err := s.requireClient(); err != nil {
+		return store.ControllerEpochFence{}, err
+	}
+	normalized, err := normalizeControllerEpochName(name)
+	if err != nil {
+		return store.ControllerEpochFence{}, err
+	}
+	lease := &coordinationv1.Lease{}
+	key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochLeaseName(normalized)}
+	if err := s.readClient().Get(ctx, key, lease); err != nil {
+		return store.ControllerEpochFence{}, mapKubernetesError("get controller epoch fence Lease", err)
+	}
+	epoch, err := controllerEpochFromLease(normalized, lease)
+	if err != nil {
+		return store.ControllerEpochFence{}, err
+	}
+	object, err := s.getControllerEpochObject(ctx, normalized)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.ControllerEpochFence{}, controlConflict(
+			"controller epoch object %q is missing while authoritative Lease %q exists",
+			controllerEpochObjectName(normalized), lease.Name,
+		)
+	}
+	if err != nil {
+		return store.ControllerEpochFence{}, err
+	}
+	if err := validateControllerEpochObjectLeaseUID(object, lease); err != nil {
+		return store.ControllerEpochFence{}, err
+	}
+	if err := validateControllerEpochObjectForLease(object, epoch, lease.Name); err != nil {
+		return store.ControllerEpochFence{}, err
+	}
+	latestLease := &coordinationv1.Lease{}
+	if err := s.readClient().Get(ctx, key, latestLease); err != nil {
+		return store.ControllerEpochFence{}, mapKubernetesError("revalidate controller epoch fence Lease", err)
+	}
+	latestEpoch, err := controllerEpochFromLease(normalized, latestLease)
+	if err != nil {
+		return store.ControllerEpochFence{}, err
+	}
+	if latestLease.UID != lease.UID || latestEpoch != epoch {
+		return store.ControllerEpochFence{}, controlConflict("controller epoch authority changed during fence read")
+	}
+	return store.ControllerEpochFence{Name: epoch.Name, Epoch: epoch.Epoch, HolderID: epoch.HolderID}, nil
+}
+
 // CompareAndSwapControllerEpoch creates or advances the authoritative Lease.
 // A same-holder, same-digest retry of an already committed target epoch is
 // idempotent even when the caller's expected values are stale.

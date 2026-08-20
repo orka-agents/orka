@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -393,8 +394,11 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 		t.Fatal(err)
 	}
 	tests := []struct {
-		name    string
-		request publisherservice.ArtifactAuthorizationRequest
+		name        string
+		request     publisherservice.ArtifactAuthorizationRequest
+		apiReader   client.Reader
+		epochSource ControllerEpochFenceSource
+		wantStatus  int
 	}{
 		{
 			name: "workspace upload",
@@ -436,15 +440,72 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 				Attempt:           1,
 			},
 		},
+		{
+			name: "transient controller epoch read failure",
+			request: publisherservice.ArtifactAuthorizationRequest{
+				ParentOperation:   publisherservice.OperationWorkspacePrepare,
+				Metadata:          publisherservice.OperationMetadata{Namespace: "default", TaskID: string(taskUID), OperationID: "workspace-prepare-prompt-publisher"},
+				ArtifactOperation: artifactcap.OperationUpload,
+				Artifact:          harnessv2.ArtifactReference{ArtifactID: harnessv2.ArtifactID(workspaceID), Digest: workspaceDigest, SizeBytes: int64(len(workspace)), MediaType: artifactcap.MediaTypeWorkspaceTar},
+				Attempt:           1,
+			},
+			epochSource: fixedControllerEpochFenceSource{err: context.DeadlineExceeded},
+			wantStatus:  http.StatusServiceUnavailable,
+		},
+		{
+			name: "transient task state read failure",
+			request: publisherservice.ArtifactAuthorizationRequest{
+				ParentOperation:   publisherservice.OperationWorkspacePrepare,
+				Metadata:          publisherservice.OperationMetadata{Namespace: "default", TaskID: string(taskUID), OperationID: "workspace-prepare-prompt-publisher"},
+				ArtifactOperation: artifactcap.OperationUpload,
+				Artifact:          harnessv2.ArtifactReference{ArtifactID: harnessv2.ArtifactID(workspaceID), Digest: workspaceDigest, SizeBytes: int64(len(workspace)), MediaType: artifactcap.MediaTypeWorkspaceTar},
+				Attempt:           1,
+			},
+			apiReader:  failingPublisherAuthorizationReader{err: context.DeadlineExceeded},
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name: "missing task remains denied",
+			request: publisherservice.ArtifactAuthorizationRequest{
+				ParentOperation:   publisherservice.OperationWorkspacePrepare,
+				Metadata:          publisherservice.OperationMetadata{Namespace: "default", TaskID: string(taskUID), OperationID: "workspace-prepare-prompt-publisher"},
+				ArtifactOperation: artifactcap.OperationUpload,
+				Artifact:          harnessv2.ArtifactReference{ArtifactID: harnessv2.ArtifactID(workspaceID), Digest: workspaceDigest, SizeBytes: int64(len(workspace)), MediaType: artifactcap.MediaTypeWorkspaceTar},
+				Attempt:           1,
+			},
+			apiReader:  fake.NewClientBuilder().WithScheme(scheme).Build(),
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "transient publication state read failure",
+			request: publisherservice.ArtifactAuthorizationRequest{
+				ParentOperation:   publisherservice.OperationPublicationPrepare,
+				Metadata:          publisherservice.OperationMetadata{Namespace: "default", PublicationID: publication.Spec.ID, OperationID: "prepare-operation"},
+				ArtifactOperation: artifactcap.OperationUpload,
+				Artifact:          harnessv2.ArtifactReference{ArtifactID: harnessv2.ArtifactID(bundleID), Digest: bundleDigest, SizeBytes: int64(len(bundle)), MediaType: artifactcap.MediaTypeGitBundle},
+				Attempt:           1,
+			},
+			apiReader:  failingPublisherAuthorizationReader{err: context.DeadlineExceeded},
+			wantStatus: http.StatusServiceUnavailable,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			epochSource := test.epochSource
+			if epochSource == nil {
+				epochSource = publisherEpochSourceForTest()
+			}
+			wantStatus := test.wantStatus
+			if wantStatus == 0 {
+				wantStatus = http.StatusOK
+			}
 			app := fiber.New()
 			server := &Server{
 				app: app, client: kubeClient,
 				config: ServerConfig{
 					ArtifactReservations: &recordingCapabilityReservations{},
-					ControllerEpochs:     publisherEpochSourceForTest(),
+					APIReader:            test.apiReader,
+					ControllerEpochs:     epochSource,
 				},
 			}
 			server.installACPArtifactAuthorizationBroker()
@@ -459,8 +520,11 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			if response.StatusCode != http.StatusOK {
-				t.Fatalf("status=%d", response.StatusCode)
+			if response.StatusCode != wantStatus {
+				t.Fatalf("status=%d, want %d", response.StatusCode, wantStatus)
+			}
+			if wantStatus != http.StatusOK {
+				return
 			}
 			var issued publisherservice.ArtifactAuthorizationResponse
 			if err := json.NewDecoder(response.Body).Decode(&issued); err != nil {
@@ -695,10 +759,11 @@ func TestAuthorizePublisherParentEffectRequiresLiveLease(t *testing.T) {
 		return publisherEffectForTest("workspace-effect", "workspace.prepare", metadata.TaskID, metadata.OperationID)
 	}
 	tests := []struct {
-		name        string
-		mutate      func(*corev1alpha1.ExternalEffect)
-		epochSource ControllerEpochFenceSource
-		wantErr     bool
+		name            string
+		mutate          func(*corev1alpha1.ExternalEffect)
+		epochSource     ControllerEpochFenceSource
+		wantErr         bool
+		wantUnavailable bool
 	}{
 		{name: "live lease authorizes", mutate: func(*corev1alpha1.ExternalEffect) {}, epochSource: publisherEpochSourceForTest()},
 		{
@@ -735,7 +800,7 @@ func TestAuthorizePublisherParentEffectRequiresLiveLease(t *testing.T) {
 		},
 		{
 			name: "unavailable controller authority is rejected", mutate: func(*corev1alpha1.ExternalEffect) {},
-			epochSource: fixedControllerEpochFenceSource{err: context.Canceled}, wantErr: true,
+			epochSource: fixedControllerEpochFenceSource{err: context.Canceled}, wantErr: true, wantUnavailable: true,
 		},
 	}
 	for _, test := range tests {
@@ -755,12 +820,15 @@ func TestAuthorizePublisherParentEffectRequiresLiveLease(t *testing.T) {
 			if !test.wantErr && err != nil {
 				t.Fatalf("expected authorization to succeed: %v", err)
 			}
+			if got := errors.Is(err, errPublisherArtifactAuthorizationUnavailable); got != test.wantUnavailable {
+				t.Fatalf("unavailable classification = %t, want %t (error %v)", got, test.wantUnavailable, err)
+			}
 		})
 	}
 }
 
 func TestControllerEpochStoreFenceSourceReadsDurableAuthority(t *testing.T) {
-	epochStore := &fixedControllerEpochStore{epoch: &store.ControllerEpoch{
+	epochStore := &fixedControllerEpochStore{fence: store.ControllerEpochFence{
 		Name: store.DefaultControllerEpochName, Epoch: 7, HolderID: "controller-7",
 	}}
 	source := NewControllerEpochStoreFenceSource(epochStore)
@@ -799,15 +867,27 @@ type fixedControllerEpochFenceSource struct {
 	err   error
 }
 
+type failingPublisherAuthorizationReader struct {
+	err error
+}
+
+func (r failingPublisherAuthorizationReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return r.err
+}
+
+func (r failingPublisherAuthorizationReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return r.err
+}
+
 type fixedControllerEpochStore struct {
-	epoch         *store.ControllerEpoch
+	fence         store.ControllerEpochFence
 	err           error
 	requestedName string
 }
 
-func (s *fixedControllerEpochStore) GetControllerEpoch(_ context.Context, name string) (*store.ControllerEpoch, error) {
+func (s *fixedControllerEpochStore) GetControllerEpochFence(_ context.Context, name string) (store.ControllerEpochFence, error) {
 	s.requestedName = name
-	return s.epoch, s.err
+	return s.fence, s.err
 }
 
 func (s fixedControllerEpochFenceSource) CurrentFence(context.Context) (store.ControllerEpochFence, error) {
