@@ -27,6 +27,7 @@ var (
 	executionEventAbsoluteURLRe         = regexp.MustCompile("(?i)\\b[a-z][a-z0-9+.-]*://[^\\s<>\\\"'`]+")
 	executionEventSchemeRelativeURLRe   = regexp.MustCompile("(?i)(^|[[:space:]<({\\[=:'\"`,;])//[^[:space:]<>\"'`]+")
 	executionEventPathRelativeURLRe     = regexp.MustCompile("(?i)\\b(?:[^/[:space:]<>\\\"'`?#]+/)+[^[:space:]<>\\\"'`?#]*(?:\\?[^[:space:]<>\\\"'`]+|#[^[:space:]<>\\\"'`]+)")
+	executionEventSingleRelativeURLRe   = regexp.MustCompile("(?i)\\b[^/[:space:]<>\\\"'`?#]+\\?[^[:space:]<>\\\"'`=]*=[^[:space:]<>\\\"'`]+")
 	executionEventRelativeURLRe         = regexp.MustCompile("(?i)(^|[[:space:]<({\\[=:'\"`,;])(?:/[^/[:space:]<>\"'`][^[:space:]<>\"'`]*|\\?[^[:space:]<>\"'`]+)")
 )
 
@@ -70,6 +71,7 @@ func stripExecutionEventURLQueries(value string) string {
 	value = executionEventAbsoluteURLRe.ReplaceAllStringFunc(value, stripExecutionEventURLQuery)
 	value = executionEventSchemeRelativeURLRe.ReplaceAllStringFunc(value, stripPrefixedExecutionEventURLQuery)
 	value = executionEventPathRelativeURLRe.ReplaceAllStringFunc(value, stripExecutionEventURLQuery)
+	value = executionEventSingleRelativeURLRe.ReplaceAllStringFunc(value, stripExecutionEventURLQuery)
 	return executionEventRelativeURLRe.ReplaceAllStringFunc(value, stripPrefixedExecutionEventURLQuery)
 }
 
