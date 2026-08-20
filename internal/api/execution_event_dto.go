@@ -424,14 +424,11 @@ func boundedJSONNumberInt(number json.Number) int {
 	if len(digits) > len(maxIntText) || len(digits) == len(maxIntText) && digits >= maxIntText {
 		return math.MaxInt
 	}
-	parsed, err := strconv.ParseUint(digits, 10, 64)
+	parsed, err := strconv.Atoi(digits)
 	if err != nil {
 		return math.MaxInt
 	}
-	if parsed > uint64(math.MaxInt) {
-		return math.MaxInt
-	}
-	return int(parsed)
+	return parsed
 }
 
 func optionalIntField(body map[string]any, keys ...string) *int {

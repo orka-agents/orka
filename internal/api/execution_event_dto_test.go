@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,13 @@ func TestExecutionEventResponseClampsUint64UsageToPlatformInt(t *testing.T) {
 	})
 	if response.InputTokens != int(^uint(0)>>1) || response.OutputTokens != 2 || response.CachedInputTokens != 1 {
 		t.Fatalf("usage tokens = %d/%d cached=%d", response.InputTokens, response.OutputTokens, response.CachedInputTokens)
+	}
+}
+
+func TestBoundedJSONNumberIntAcceptsNativeIntBoundary(t *testing.T) {
+	want := math.MaxInt - 1
+	if got := boundedJSONNumberInt(json.Number(strconv.Itoa(want))); got != want {
+		t.Fatalf("native int boundary = %d, want %d", got, want)
 	}
 }
 
