@@ -1373,6 +1373,7 @@ func TestRuntimePoolReconcilerDeletionRemovesMetricsBeforeCleanupCompletes(t *te
 	orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
 	orkametrics.ACPRuntimePoolQueuedTasks.Reset()
 	orkametrics.ACPRuntimePoolAdmissionState.Reset()
+	orkametrics.ACPRuntimePoolScaleToZeroTotal.Reset()
 	t.Cleanup(func() {
 		orkametrics.ACPRuntimePoolDesiredReplicas.Reset()
 		orkametrics.ACPRuntimePoolReadyReplicas.Reset()
@@ -1380,6 +1381,7 @@ func TestRuntimePoolReconcilerDeletionRemovesMetricsBeforeCleanupCompletes(t *te
 		orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
 		orkametrics.ACPRuntimePoolQueuedTasks.Reset()
 		orkametrics.ACPRuntimePoolAdmissionState.Reset()
+		orkametrics.ACPRuntimePoolScaleToZeroTotal.Reset()
 	})
 
 	scheme := runtimePoolTestScheme(t)
@@ -1393,6 +1395,7 @@ func TestRuntimePoolReconcilerDeletionRemovesMetricsBeforeCleanupCompletes(t *te
 	}}
 	r := runtimePoolTestReconciler(t, scheme, nil, pool, deployment)
 	orkametrics.RecordACPRuntimePoolStatus(pool.Namespace, pool.Name, 1, 1, 2, 1, 3, string(corev1alpha1.RuntimePoolAdmissionAccepting))
+	orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
 	if got := runtimePoolMetricSeriesCount(orkametrics.ACPRuntimePoolDesiredReplicas); got != 1 {
 		t.Fatalf("desired replica series before deletion = %d, want 1", got)
 	}
@@ -1409,6 +1412,7 @@ func TestRuntimePoolReconcilerDeletionRemovesMetricsBeforeCleanupCompletes(t *te
 		"in-flight prompts": orkametrics.ACPRuntimePoolPromptsInFlight,
 		"queued tasks":      orkametrics.ACPRuntimePoolQueuedTasks,
 		"admission state":   orkametrics.ACPRuntimePoolAdmissionState,
+		"scale-to-zero":     orkametrics.ACPRuntimePoolScaleToZeroTotal,
 	} {
 		if got := runtimePoolMetricSeriesCount(collector); got != 0 {
 			t.Fatalf("%s series during deletion = %d, want 0", name, got)

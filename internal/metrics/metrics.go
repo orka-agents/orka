@@ -399,8 +399,7 @@ func RecordACPRuntimePoolScaleToZero(namespace, runtimePool string) {
 	).Inc()
 }
 
-// DeleteACPRuntimePool removes stale gauge series after a RuntimePool is deleted.
-// The transition counter is intentionally retained for the process lifetime.
+// DeleteACPRuntimePool removes stale metric series after a RuntimePool is deleted.
 func DeleteACPRuntimePool(namespace, runtimePool string) {
 	namespace = normalizeMetricLabel(namespace)
 	runtimePool = normalizeMetricLabel(runtimePool)
@@ -412,6 +411,7 @@ func DeleteACPRuntimePool(namespace, runtimePool string) {
 	for _, state := range acpRuntimePoolAdmissionStates {
 		ACPRuntimePoolAdmissionState.DeleteLabelValues(namespace, runtimePool, state)
 	}
+	ACPRuntimePoolScaleToZeroTotal.DeleteLabelValues(namespace, runtimePool)
 }
 
 func normalizeACPRuntimePoolAdmissionState(value string) string {
