@@ -293,9 +293,13 @@ func (s *Server) authorizePublisherWorkspaceUpload(ctx context.Context, request 
 		return fmt.Errorf("workspace Task is unavailable")
 	}
 	execution := task.Status.Execution
-	if execution.State != corev1alpha1.TaskExecutionStatePlanned || execution.PromptID == "" ||
-		request.Metadata.OperationID != "workspace-prepare-"+execution.PromptID {
-		return fmt.Errorf("workspace Task is not in the exact preparation state")
+	// Task status and the external-effect lease are committed through separate
+	// Kubernetes objects. Under concurrent workspace preparation, a fresh LIST
+	// can briefly observe the preceding Task state after the exact parent effect
+	// is already durably InFlight. Bind the immutable prompt identity here and
+	// let authorizePublisherParentEffect enforce the live current-epoch lease.
+	if execution.PromptID == "" || request.Metadata.OperationID != "workspace-prepare-"+execution.PromptID {
+		return fmt.Errorf("workspace Task is not bound to the exact preparation operation")
 	}
 	return nil
 }
@@ -385,7 +389,7 @@ func (s *Server) authorizePublisherParentEffect(
 	operation publisherservice.Operation,
 	metadata publisherservice.OperationMetadata,
 ) error {
-	if s.config.ControllerEpochs == nil {
+	if s.config.ControllerEpochs == nil || s.config.ExternalEffects == nil {
 		return fmt.Errorf("publisher controller epoch authority is unavailable")
 	}
 	currentFence, err := s.config.ControllerEpochs.CurrentFence(ctx)
@@ -415,23 +419,17 @@ func (s *Server) authorizePublisherParentEffect(
 	if aggregateID == "" || metadata.OperationID == "" {
 		return fmt.Errorf("publisher parent effect identity is incomplete")
 	}
-	var effects corev1alpha1.ExternalEffectList
-	if err := s.authorizationReader().List(ctx, &effects, client.InNamespace(metadata.Namespace)); err != nil {
+	identity := store.ExternalEffectIdentity{
+		Kind: kind, Namespace: metadata.Namespace, AggregateID: aggregateID, OperationID: metadata.OperationID,
+	}
+	effect, err := s.config.ExternalEffects.GetExternalEffectByIdentity(ctx, identity)
+	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
-	matches := 0
-	for i := range effects.Items {
-		effect := &effects.Items[i]
-		if effect.Spec.Kind == kind && effect.Spec.IdentityNamespace == metadata.Namespace &&
-			effect.Spec.AggregateID == aggregateID && effect.Spec.OperationID == metadata.OperationID &&
-			effect.Status.State == corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight) &&
-			externalEffectLeaseActive(effect.Status, currentFence, now) {
-			matches++
-		}
-	}
-	if matches != 1 {
-		return fmt.Errorf("publisher parent effect is not uniquely in flight")
+	if effect.Identity != identity || effect.State != store.ExternalEffectInFlight ||
+		!externalEffectLeaseActive(effect, currentFence, now) {
+		return fmt.Errorf("publisher parent effect is not exactly in flight")
 	}
 	return nil
 }
@@ -442,10 +440,10 @@ func (s *Server) authorizePublisherParentEffect(
 // epoch capability, so a lease from a superseded controller epoch must stop
 // authorizing broker access immediately even when its wall-clock expiry has not
 // elapsed yet.
-func externalEffectLeaseActive(status corev1alpha1.ExternalEffectStatus, fence store.ControllerEpochFence, now time.Time) bool {
-	if strings.TrimSpace(status.LeaseOwner) == "" || status.ControllerEpoch <= 0 {
+func externalEffectLeaseActive(effect *store.ExternalEffect, fence store.ControllerEpochFence, now time.Time) bool {
+	if effect == nil || strings.TrimSpace(effect.LeaseOwner) == "" || effect.ControllerEpoch <= 0 {
 		return false
 	}
-	return status.ControllerEpochName == fence.Name && status.ControllerEpoch == fence.Epoch &&
-		status.LeaseExpiresAt != nil && status.LeaseExpiresAt.After(now)
+	return effect.ControllerEpochName == fence.Name && effect.ControllerEpoch == fence.Epoch &&
+		effect.LeaseExpiresAt != nil && effect.LeaseExpiresAt.After(now)
 }

@@ -1627,6 +1627,45 @@ func TestExternalEffectLifecyclesQueueThirtyConcurrentControllerEpochMutations(t
 	}
 }
 
+func TestGetExternalEffectByIdentityUsesExactObjectGet(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
+	identity := controlstore.ExternalEffectIdentity{
+		Kind: "workspace.prepare", Namespace: "tenant-a", AggregateID: "task-uid", OperationID: "workspace-prepare-prompt",
+	}
+	effect, err := kubeStore.ReserveExternalEffect(ctx, controlstore.ReserveExternalEffectRequest{
+		Identity: identity, RequestDigest: testDigest("exact-effect"), Fence: fence, CreatedAt: testNow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseExpiry := testNow.Add(5 * time.Minute)
+	if _, err := kubeStore.TransitionExternalEffect(ctx, controlstore.ExternalEffectTransition{
+		ID: effect.ID, Fence: fence, ExpectedVersion: effect.Version, ExpectedState: controlstore.ExternalEffectPending,
+		NewState: controlstore.ExternalEffectInFlight, RequestDigest: effect.RequestDigest,
+		LeaseOwner: "exact-reader", LeaseExpiresAt: &leaseExpiry, UpdatedAt: testNow.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	withWatch, ok := rawClient.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	kubeStore.reader = interceptor.NewClient(withWatch, interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return errors.New("LIST must not be used for exact external-effect identity lookup")
+		},
+	})
+
+	got, err := kubeStore.GetExternalEffectByIdentity(ctx, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != effect.ID || got.Identity != identity || got.State != controlstore.ExternalEffectInFlight {
+		t.Fatalf("exact external effect = %#v", got)
+	}
+}
+
 func TestControllerEpochMutationQueueRespectsCallerDeadline(t *testing.T) {
 	kubeStore, _, fence := newTestStoreWithEpoch(t)
 	_, snapshot, err := kubeStore.requireControllerEpoch(context.Background(), fence)

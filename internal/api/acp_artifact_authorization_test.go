@@ -373,13 +373,15 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 			PreparedAt: metav1.NewTime(time.Now().UTC()),
 		},
 	}
-	effects := []client.Object{
+	effects := []*corev1alpha1.ExternalEffect{
 		publisherEffectForTest("workspace-effect", "workspace.prepare", string(taskUID), "workspace-prepare-prompt-publisher"),
 		publisherEffectForTest("prepare-effect", "publisher.prepare", publication.Spec.ID, "prepare-operation"),
 		publisherEffectForTest("verify-effect", "publisher.verify", readyPublication.Spec.ID, "verify-operation"),
 	}
 	objects := []client.Object{task, publication, readyPublication}
-	objects = append(objects, effects...)
+	for _, effect := range effects {
+		objects = append(objects, effect)
+	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 	artifactSecret := []byte(strings.Repeat("a", 32))
 	publisherToken := strings.Repeat("p", 32)
@@ -445,6 +447,7 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 				config: ServerConfig{
 					ArtifactReservations: &recordingCapabilityReservations{},
 					ControllerEpochs:     publisherEpochSourceForTest(),
+					ExternalEffects:      publisherEffectReaderForTest(effects...),
 				},
 			}
 			server.installACPArtifactAuthorizationBroker()
@@ -485,20 +488,20 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 	}
 }
 
-func TestPublisherArtifactAuthorizationBrokerUsesFreshTaskState(t *testing.T) {
+func TestPublisherArtifactAuthorizationBrokerToleratesTaskStatusLag(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	taskUID := types.UID("fresh-publisher-task-uid")
-	freshTask := &corev1alpha1.Task{
+	laggingTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "publisher-task", UID: taskUID},
 		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
-			State: corev1alpha1.TaskExecutionStatePlanned, PromptID: "fresh-prompt",
+			State: corev1alpha1.TaskExecutionStateSessionStarting, PromptID: "fresh-prompt",
 		}},
 	}
-	staleTask := freshTask.DeepCopy()
-	staleTask.Status.Execution.State = corev1alpha1.TaskExecutionStateRunning
+	cachedTask := laggingTask.DeepCopy()
+	cachedTask.Status.Execution.State = corev1alpha1.TaskExecutionStatePlanned
 
 	workspace := []byte("fresh workspace tar")
 	workspaceDigest := artifactcap.DigestBytes(workspace)
@@ -521,8 +524,8 @@ func TestPublisherArtifactAuthorizationBrokerUsesFreshTaskState(t *testing.T) {
 	effect := publisherEffectForTest(
 		"fresh-workspace-effect", "workspace.prepare", string(taskUID), request.Metadata.OperationID,
 	)
-	cachedClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(staleTask, effect.DeepCopy()).Build()
-	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(freshTask, effect).Build()
+	cachedClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cachedTask, effect.DeepCopy()).Build()
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(laggingTask, effect).Build()
 
 	artifactSecret := []byte(strings.Repeat("a", 32))
 	publisherToken := strings.Repeat("p", 32)
@@ -534,7 +537,7 @@ func TestPublisherArtifactAuthorizationBrokerUsesFreshTaskState(t *testing.T) {
 		app: app, client: cachedClient,
 		config: ServerConfig{
 			APIReader: apiReader, ArtifactReservations: &recordingCapabilityReservations{},
-			ControllerEpochs: publisherEpochSourceForTest(),
+			ControllerEpochs: publisherEpochSourceForTest(), ExternalEffects: publisherEffectReaderForTest(effect),
 		},
 	}
 	server.installACPArtifactAuthorizationBroker()
@@ -604,7 +607,7 @@ func TestPublisherArtifactAuthorizationBrokerUsesFreshPublicationState(t *testin
 		app: app, client: cachedClient,
 		config: ServerConfig{
 			APIReader: apiReader, ArtifactReservations: &recordingCapabilityReservations{},
-			ControllerEpochs: publisherEpochSourceForTest(),
+			ControllerEpochs: publisherEpochSourceForTest(), ExternalEffects: publisherEffectReaderForTest(effect),
 		},
 	}
 	server.installACPArtifactAuthorizationBroker()
@@ -624,11 +627,7 @@ func TestPublisherArtifactAuthorizationBrokerUsesFreshPublicationState(t *testin
 	}
 }
 
-func TestAuthorizePublisherParentEffectUsesFreshReaderWithFallback(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
+func TestAuthorizePublisherParentEffectUsesExactIdentityReader(t *testing.T) {
 	metadata := publisherservice.OperationMetadata{
 		Namespace: "default", TaskID: "task-uid", OperationID: "workspace-prepare-prompt",
 	}
@@ -639,36 +638,25 @@ func TestAuthorizePublisherParentEffectUsesFreshReaderWithFallback(t *testing.T)
 	settledEffect.Status.State = corev1alpha1.ExternalEffectControlState(store.ExternalEffectSucceeded)
 
 	tests := []struct {
-		name          string
-		cachedObjects []client.Object
-		freshObjects  []client.Object
-		useAPIReader  bool
-		wantErr       bool
+		name    string
+		effect  *corev1alpha1.ExternalEffect
+		wantErr bool
 	}{
 		{
-			name:         "fresh reader observes newly created in-flight effect",
-			freshObjects: []client.Object{inFlightEffect.DeepCopy()},
-			useAPIReader: true,
+			name:   "exact reader observes in-flight effect",
+			effect: inFlightEffect.DeepCopy(),
 		},
 		{
-			name:          "fresh reader rejects effect settled behind stale cache",
-			cachedObjects: []client.Object{inFlightEffect.DeepCopy()},
-			freshObjects:  []client.Object{settledEffect},
-			useAPIReader:  true,
-			wantErr:       true,
-		},
-		{
-			name:          "cached client remains fallback when API reader is unset",
-			cachedObjects: []client.Object{inFlightEffect.DeepCopy()},
+			name:    "exact reader rejects settled effect",
+			effect:  settledEffect,
+			wantErr: true,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			cachedClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(test.cachedObjects...).Build()
-			server := &Server{client: cachedClient, config: ServerConfig{ControllerEpochs: publisherEpochSourceForTest()}}
-			if test.useAPIReader {
-				server.config.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(test.freshObjects...).Build()
-			}
+			server := &Server{config: ServerConfig{
+				ControllerEpochs: publisherEpochSourceForTest(), ExternalEffects: publisherEffectReaderForTest(test.effect),
+			}}
 
 			err := server.authorizePublisherParentEffect(
 				context.Background(), publisherservice.OperationWorkspacePrepare, metadata,
@@ -743,8 +731,9 @@ func TestAuthorizePublisherParentEffectRequiresLiveLease(t *testing.T) {
 			effect := base()
 			test.mutate(effect)
 			server := &Server{
-				client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(effect).Build(),
-				config: ServerConfig{ControllerEpochs: test.epochSource},
+				config: ServerConfig{
+					ControllerEpochs: test.epochSource, ExternalEffects: publisherEffectReaderForTest(effect),
+				},
 			}
 			err := server.authorizePublisherParentEffect(
 				context.Background(), publisherservice.OperationWorkspacePrepare, metadata,
@@ -792,6 +781,42 @@ func publisherEffectForTest(name, kind, aggregateID, operationID string) *corev1
 			ControlRecordMutationStatus: corev1alpha1.ControlRecordMutationStatus{ControllerEpochName: store.DefaultControllerEpochName, ControllerEpoch: 1},
 		},
 	}
+}
+
+type externalEffectIdentityReaderFunc func(context.Context, store.ExternalEffectIdentity) (*store.ExternalEffect, error)
+
+func (f externalEffectIdentityReaderFunc) GetExternalEffectByIdentity(
+	ctx context.Context,
+	identity store.ExternalEffectIdentity,
+) (*store.ExternalEffect, error) {
+	return f(ctx, identity)
+}
+
+func publisherEffectReaderForTest(effects ...*corev1alpha1.ExternalEffect) store.ExternalEffectIdentityReader {
+	return externalEffectIdentityReaderFunc(func(_ context.Context, identity store.ExternalEffectIdentity) (*store.ExternalEffect, error) {
+		for _, effect := range effects {
+			if effect == nil || effect.Spec.Kind != identity.Kind || effect.Spec.IdentityNamespace != identity.Namespace ||
+				effect.Spec.AggregateID != identity.AggregateID || effect.Spec.OperationID != identity.OperationID {
+				continue
+			}
+			var leaseExpiresAt *time.Time
+			if effect.Status.LeaseExpiresAt != nil {
+				value := effect.Status.LeaseExpiresAt.UTC()
+				leaseExpiresAt = &value
+			}
+			return &store.ExternalEffect{
+				ID: effect.Spec.ID,
+				Identity: store.ExternalEffectIdentity{
+					Kind: effect.Spec.Kind, Namespace: effect.Spec.IdentityNamespace,
+					AggregateID: effect.Spec.AggregateID, OperationID: effect.Spec.OperationID,
+				},
+				State: store.ExternalEffectState(effect.Status.State), LeaseOwner: effect.Status.LeaseOwner,
+				LeaseExpiresAt: leaseExpiresAt, ControllerEpochName: effect.Status.ControllerEpochName,
+				ControllerEpoch: effect.Status.ControllerEpoch,
+			}, nil
+		}
+		return nil, store.ErrNotFound
+	})
 }
 
 type fixedControllerEpochFenceSource struct {

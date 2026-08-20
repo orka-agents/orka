@@ -55,10 +55,8 @@ func TestPublisherCredentialBrokerUsesTargetReadBindingForContinuation(t *testin
 			{Role: "TargetRead", Namespace: "default", SecretName: "target-read", SecretKey: defaultWorkspaceCredentialKey, SecretUID: "target-object-uid", ResourceVersion: "9"},
 		},
 	}}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		plannedTask, targetK8sObject, attempt,
-		publisherEffectForTest("workspace-continuation-credential-effect", "workspace.prepare", string(taskUID), "workspace-prepare-prompt"),
-	).Build()
+	effect := publisherEffectForTest("workspace-continuation-credential-effect", "workspace.prepare", string(taskUID), "workspace-prepare-prompt")
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(plannedTask, targetK8sObject, attempt, effect).Build()
 	request := publisherservice.CredentialMaterialRequest{
 		ParentOperation: publisherservice.OperationWorkspacePrepare,
 		Metadata:        publisherservice.OperationMetadata{Namespace: "default", TaskID: string(taskUID), OperationID: "workspace-prepare-prompt"},
@@ -66,7 +64,7 @@ func TestPublisherCredentialBrokerUsesTargetReadBindingForContinuation(t *testin
 			Name: "target-read", Kind: publisherservice.CredentialHTTPExtraHeader, Role: publisherservice.CredentialRoleTargetRead,
 		},
 	}
-	response := callPublisherCredentialBroker(t, kubeClient, publisherBearer, request)
+	response := callPublisherCredentialBroker(t, kubeClient, publisherBearer, request, effect)
 	expected := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+targetMaterial))
 	if response.Material != expected || response.ResourceVersion != "9" {
 		t.Fatalf("credential response = %#v", response)
@@ -114,10 +112,8 @@ func TestPublisherCredentialBrokerUsesTargetReadForContinuationPublicationPrepar
 		},
 	}}
 	operationID := controller.ACPPublicationOperationID("prepare", plannedTask)
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		plannedTask, publication, targetK8sObject, attempt,
-		publisherEffectForTest("publication-continuation-credential-effect", "publisher.prepare", publicationID, operationID),
-	).Build()
+	effect := publisherEffectForTest("publication-continuation-credential-effect", "publisher.prepare", publicationID, operationID)
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(plannedTask, publication, targetK8sObject, attempt, effect).Build()
 	request := publisherservice.CredentialMaterialRequest{
 		ParentOperation: publisherservice.OperationPublicationPrepare,
 		Metadata:        publisherservice.OperationMetadata{Namespace: "default", PublicationID: publicationID, OperationID: operationID},
@@ -125,7 +121,7 @@ func TestPublisherCredentialBrokerUsesTargetReadForContinuationPublicationPrepar
 			Name: "target-read", Kind: publisherservice.CredentialHTTPExtraHeader, Role: publisherservice.CredentialRoleTargetRead,
 		},
 	}
-	response := callPublisherCredentialBroker(t, kubeClient, publisherBearer, request)
+	response := callPublisherCredentialBroker(t, kubeClient, publisherBearer, request, effect)
 	expected := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+targetMaterial))
 	if response.Material != expected || response.ResourceVersion != "9" {
 		t.Fatalf("credential response = %#v", response)
@@ -185,7 +181,10 @@ func TestPublisherCredentialBrokerUsesUncachedReaderForCredentialVersion(t *test
 	app := fiber.New()
 	server := &Server{
 		app: app, client: cachedClient,
-		config: ServerConfig{APIReader: uncachedReader, ControllerEpochs: publisherEpochSourceForTest()},
+		config: ServerConfig{
+			APIReader: uncachedReader, ControllerEpochs: publisherEpochSourceForTest(),
+			ExternalEffects: publisherEffectReaderForTest(effect),
+		},
 	}
 	server.installACPArtifactAuthorizationBroker()
 	body, err := json.Marshal(request)

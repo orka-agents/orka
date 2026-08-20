@@ -170,33 +170,60 @@ func TestRunACPExternalEffectWithRetryStopsOnCallerCancellation(t *testing.T) {
 }
 
 func TestRunACPExternalEffectWithRetryDoesNotRetryNonRetryableResponse(t *testing.T) {
-	controlStore, fence, closeStore := newACPSessionTestStore(
-		t, filepath.Join(t.TempDir(), "external-effect-nonretryable.db"),
-	)
-	defer closeStore()
-	dispatcher := &ACPDispatcher{Store: controlStore}
-	identity := store.ExternalEffectIdentity{
-		Kind: "workspace.resolve", Namespace: "default", AggregateID: "task-rejected", OperationID: "workspace-resolve-rejected",
+	tests := []struct {
+		name       string
+		statusCode int
+		code       string
+	}{
+		{name: "client rejection", statusCode: http.StatusBadRequest, code: "invalid_request"},
+		{name: "terminal publisher dependency rejection", statusCode: http.StatusServiceUnavailable, code: "artifact_authorization_failed"},
 	}
-	attempts := 0
-
-	_, err := runACPExternalEffectWithRetryPolicy(
-		context.Background(), dispatcher, fence, identity, map[string]string{"source": "invalid"},
-		time.Millisecond, 50*time.Millisecond,
-		func(context.Context) (string, error) {
-			attempts++
-			return "", &publisherservice.ClientError{
-				StatusCode: http.StatusBadRequest,
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			controlStore, fence, closeStore := newACPSessionTestStore(
+				t, filepath.Join(t.TempDir(), "external-effect-nonretryable.db"),
+			)
+			defer closeStore()
+			dispatcher := &ACPDispatcher{Store: controlStore}
+			identity := store.ExternalEffectIdentity{
+				Kind: "workspace.resolve", Namespace: "default", AggregateID: "task-rejected", OperationID: "workspace-resolve-rejected",
+			}
+			attempts := 0
+			callErr := &publisherservice.ClientError{
+				StatusCode: test.statusCode,
 				Response: publisherservice.ErrorResponse{
-					Code: "invalid_request", Message: "request is invalid", Retryable: false,
+					Code: test.code, Message: "request is terminal", Retryable: false,
 				},
 			}
-		},
-	)
-	if err == nil || attempts != 1 {
-		t.Fatalf("non-retryable result = attempts %d error %v, want one failed attempt", attempts, err)
+
+			_, err := runACPExternalEffectWithRetryPolicy(
+				context.Background(), dispatcher, fence, identity, map[string]string{"source": "invalid"},
+				time.Millisecond, 50*time.Millisecond,
+				func(context.Context) (string, error) {
+					attempts++
+					return "", callErr
+				},
+			)
+			if err == nil || attempts != 1 {
+				t.Fatalf("non-retryable result = attempts %d error %v, want one failed attempt", attempts, err)
+			}
+			assertInFlightExternalEffectWithOneLease(t, controlStore, identity)
+			if err := settleACPExternalEffectError(context.Background(), dispatcher, fence, identity, callErr); err != nil {
+				t.Fatal(err)
+			}
+			effectID, err := identity.CanonicalID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			effect, err := controlStore.GetExternalEffect(context.Background(), effectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if effect.State != store.ExternalEffectFailed {
+				t.Fatalf("settled effect state = %s, want %s", effect.State, store.ExternalEffectFailed)
+			}
+		})
 	}
-	assertInFlightExternalEffectWithOneLease(t, controlStore, identity)
 }
 
 func TestRunExternalEffectBoundsCallToLeaseAccountableDuration(t *testing.T) {
