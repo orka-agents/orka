@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -395,7 +397,7 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	policiesAtActorCreation := 0
 	control.afterCreate = func() {
 		var policies networkingv1.NetworkPolicyList
-		if err := r.List(context.Background(), &policies, client.InNamespace(substrateTestWorkerNamespace), client.MatchingLabels{
+		if err := r.List(context.Background(), &policies, client.MatchingLabels{
 			runtimePoolKeyLabel: runtimePoolKey(pool.Namespace, pool.Name),
 		}); err != nil {
 			t.Fatalf("list Substrate RuntimePool NetworkPolicies during Actor creation: %v", err)
@@ -412,8 +414,8 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	if len(control.resumed) != 1 || len(control.boots) != 1 || !control.boots[0] {
 		t.Fatalf("resume calls = %v boots = %v, want one fresh boot", control.resumed, control.boots)
 	}
-	if policiesAtActorCreation != 4 {
-		t.Fatalf("NetworkPolicies present at Actor creation = %d, want 4", policiesAtActorCreation)
+	if policiesAtActorCreation != 5 {
+		t.Fatalf("NetworkPolicies present at Actor creation = %d, want 5", policiesAtActorCreation)
 	}
 
 	derived := substrateTestDerivedTemplate(t, r, pool)
@@ -467,6 +469,30 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 		if len(policy.Spec.PolicyTypes) != 1 || policy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress || len(policy.Spec.Ingress) != 0 {
 			t.Fatalf("NetworkPolicy %q types/ingress = %v/%v, want egress-only confinement", policy.Name, policy.Spec.PolicyTypes, policy.Spec.Ingress)
 		}
+	}
+	providerIngress := &networkingv1.NetworkPolicy{}
+	if err := r.Get(context.Background(), types.NamespacedName{
+		Namespace: runtimePoolDefaultControllerNamespace,
+		Name:      runtimePoolChildName(runtimePoolResourceName(pool.Namespace, pool.Name), runtimePoolSubstrateProviderIngressSuffix),
+	}, providerIngress); err != nil {
+		t.Fatalf("get provider proxy ingress NetworkPolicy: %v", err)
+	}
+	if !apiequality.Semantic.DeepEqual(providerIngress.Spec.PodSelector.MatchLabels, r.ProviderProxy.PodLabels) {
+		t.Fatalf("provider ingress selector = %#v, want %#v", providerIngress.Spec.PodSelector.MatchLabels, r.ProviderProxy.PodLabels)
+	}
+	if len(providerIngress.Spec.PolicyTypes) != 1 || providerIngress.Spec.PolicyTypes[0] != networkingv1.PolicyTypeIngress ||
+		len(providerIngress.Spec.Ingress) != 1 || len(providerIngress.Spec.Ingress[0].From) != 1 ||
+		len(providerIngress.Spec.Ingress[0].Ports) != 1 {
+		t.Fatalf("provider ingress policy = %#v, want one ingress rule from the worker pool", providerIngress.Spec)
+	}
+	from := providerIngress.Spec.Ingress[0].From[0]
+	if from.NamespaceSelector == nil || from.NamespaceSelector.MatchLabels[corev1.LabelMetadataName] != substrateTestWorkerNamespace ||
+		from.PodSelector == nil || from.PodSelector.MatchLabels[substrateWorkerPoolLabel] != substrateTestWorkerPoolName {
+		t.Fatalf("provider ingress source = %#v, want worker pool %s/%s", from, substrateTestWorkerNamespace, substrateTestWorkerPoolName)
+	}
+	port := providerIngress.Spec.Ingress[0].Ports[0]
+	if port.Protocol == nil || *port.Protocol != corev1.ProtocolTCP || port.Port == nil || port.Port.IntVal != 8080 {
+		t.Fatalf("provider ingress port = %#v, want TCP/8080", port)
 	}
 	probePod := substrateTestProbePod(pool)
 	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
@@ -1188,6 +1214,48 @@ func TestSubstrateRuntimePoolRecyclesActorOnCredentialSeedConflict(t *testing.T)
 	}
 	if got.Annotations[substrateActorCredentialSeededAnnotation] != "" {
 		t.Fatal("credential-seeded annotation survived teardown completion")
+	}
+}
+
+func TestSubstrateRuntimePoolRecyclesActorWhenPhysicalWorkerChanges(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedCalls := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedCalls++
+		return nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	authSecret := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	staleBinding, err := json.Marshal(runtimePoolBootstrapInstanceBinding{
+		AuthSecretUID: authSecret.UID,
+		WorkloadUID:   types.UID("replaced-worker-pod-uid"),
+	})
+	if err != nil {
+		t.Fatalf("encode stale bootstrap binding: %v", err)
+	}
+	current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation] = string(staleBinding)
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record stale bootstrap binding: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	if seedCalls != 0 {
+		t.Fatalf("replacement physical worker received %d credential seeds before actor recycling", seedCalls)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		got.Status.ActiveInstance != nil ||
+		!strings.Contains(got.Status.Message, "physical worker changed") {
+		t.Fatalf("replacement physical worker status = %s/%s active=%v message=%q, want Degraded/Closed with no active instance", got.Status.Lifecycle, got.Status.AdmissionState, got.Status.ActiveInstance, got.Status.Message)
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != substrateTestActorID(pool) {
+		t.Fatalf("recycling annotation = %q, want actor %q", got.Annotations[substrateActorRecyclingAnnotation], substrateTestActorID(pool))
 	}
 }
 
@@ -1961,12 +2029,13 @@ func TestSubstrateRuntimePoolFinalizerDeletesPoliciesWithoutTemplates(t *testing
 	if err := r.List(context.Background(), &policies, client.MatchingLabels{runtimePoolUIDLabel: string(pool.UID)}); err != nil {
 		t.Fatalf("list RuntimePool policies: %v", err)
 	}
-	if len(policies.Items) != 4 {
-		t.Fatalf("RuntimePool policy count = %d, want 4", len(policies.Items))
+	if len(policies.Items) != 5 {
+		t.Fatalf("RuntimePool policy count = %d, want 5", len(policies.Items))
 	}
 	current := runtimePoolTestGetPool(t, r, pool)
-	if got := current.Annotations[substrateNetworkPolicyNamespacesAnnotation]; got != substrateTestWorkerNamespace {
-		t.Fatalf("recorded NetworkPolicy namespaces = %q, want ate-workers", got)
+	wantPolicyNamespaces := substrateTestWorkerNamespace + "," + runtimePoolDefaultControllerNamespace
+	if got := current.Annotations[substrateNetworkPolicyNamespacesAnnotation]; got != wantPolicyNamespaces {
+		t.Fatalf("recorded NetworkPolicy namespaces = %q, want %s", got, wantPolicyNamespaces)
 	}
 	r.APIReader = &substrateNamespaceScopedNetworkPolicyReader{Reader: r.Client}
 	delete(control.actors, substrateTestActorID(pool))

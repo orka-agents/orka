@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -56,6 +57,8 @@ import (
 	orkametrics "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/workspace"
 )
+
+var errRuntimePoolBootstrapInstanceConflict = errors.New("RuntimePool bootstrap credentials are bound to another physical workspace instance")
 
 const (
 	runtimePoolFinalizer          = "orka.ai/runtime-pool-cleanup"
@@ -1733,7 +1736,7 @@ func (r *RuntimePoolReconciler) bindWorkspaceRuntimePoolBootstrapInstance(
 		if *existing == desired {
 			return nil
 		}
-		return fmt.Errorf("RuntimePool bootstrap credentials are already bound to another physical workspace instance")
+		return errRuntimePoolBootstrapInstanceConflict
 	}
 	value, err := json.Marshal(desired)
 	if err != nil {

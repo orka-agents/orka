@@ -538,8 +538,15 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 }
 
 func runtimePoolHasActiveDemand(pool *corev1alpha1.RuntimePool, activeTasks int) bool {
-	return pool == nil || pool.Spec.DesiredReplicas == 0 || activeTasks > 0 ||
-		pool.Status.Capacity.ResidentSessions > 0 || pool.Status.Capacity.RunningPrompts > 0 ||
+	if pool == nil || pool.Spec.DesiredReplicas == 0 || activeTasks > 0 {
+		return true
+	}
+	// Workspace-backed pools are single-session physical workspaces. Once no
+	// Task, prompt, permission, reservation, or finalization work remains, their
+	// authenticated scale-down drain retires an idle reusable RuntimeSession.
+	// Plain shared pools must stay resident while any RuntimeSession remains.
+	residentSessionsBlockScaleDown := pool.Spec.ExecutionWorkspace == nil && pool.Status.Capacity.ResidentSessions > 0
+	return residentSessionsBlockScaleDown || pool.Status.Capacity.RunningPrompts > 0 ||
 		pool.Status.Capacity.ReservedSessions > 0 || pool.Status.Capacity.ReservedPrompts > 0 ||
 		pool.Status.Capacity.FinalizingSessions > 0 || pool.Status.Capacity.PendingPermissions > 0
 }

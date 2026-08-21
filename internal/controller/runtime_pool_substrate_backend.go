@@ -70,6 +70,7 @@ const (
 	runtimePoolSubstrateDenyEgressSuffix       = "substrate-deny-egress"
 	runtimePoolSubstrateDNSEgressSuffix        = "substrate-dns-egress"
 	runtimePoolSubstrateProviderEgressSuffix   = "substrate-provider-egress"
+	runtimePoolSubstrateProviderIngressSuffix  = "substrate-provider-ingress"
 	runtimePoolSubstrateControllerEgressSuffix = "substrate-controller-egress"
 	substrateObjectSpecField                   = "spec"
 	substrateObjectLabelsField                 = "labels"
@@ -746,6 +747,18 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 	if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, authSecret, workerPodFence.UID); err != nil {
+		if errors.Is(err, errRuntimePoolBootstrapInstanceConflict) {
+			if recycleErr := r.recycleSubstrateActor(ctx, pool, control, actorID); recycleErr != nil {
+				return ctrl.Result{}, recycleErr
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "provider actor physical worker changed; recycling it before credential bootstrap rotation"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 	bootstrapAlreadyComplete, err := r.seedSubstrateSupervisorCredentials(ctx, routeHost, bootstrapNonce, authSecret, providerSecret)
@@ -1640,11 +1653,13 @@ func (r *RuntimePoolReconciler) ensureSubstrateRuntimePoolNetworkPolicies(
 	if err != nil {
 		return false, err
 	}
-	// Record the namespace before creating any cross-namespace child so a
+	// Record every namespace before creating cross-namespace children so a
 	// controller crash or later template deletion cannot make cleanup depend on
 	// a cluster-wide NetworkPolicy list.
-	if err := r.recordSubstrateRuntimePoolNetworkPolicyNamespace(ctx, pool, workerNamespace); err != nil {
-		return false, err
+	for _, namespace := range []string{workerNamespace, cfg.providerProxy.namespace} {
+		if err := r.recordSubstrateRuntimePoolNetworkPolicyNamespace(ctx, pool, namespace); err != nil {
+			return false, err
+		}
 	}
 	changed := false
 	reader := r.APIReader
@@ -1734,6 +1749,20 @@ func (r *RuntimePoolReconciler) substrateRuntimePoolNetworkPolicies(
 			},
 		},
 		{
+			ObjectMeta: metav1.ObjectMeta{Name: runtimePoolChildName(cfg.baseName, runtimePoolSubstrateProviderIngressSuffix), Namespace: cfg.providerProxy.namespace},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{MatchLabels: cloneStringMap(cfg.providerProxy.podLabels)},
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+				Ingress: []networkingv1.NetworkPolicyIngressRule{{
+					From: []networkingv1.NetworkPolicyPeer{{
+						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: workerNamespace}},
+						PodSelector:       &selector,
+					}},
+					Ports: []networkingv1.NetworkPolicyPort{{Protocol: new(corev1.ProtocolTCP), Port: new(intstr.FromInt32(cfg.providerProxy.port))}},
+				}},
+			},
+		},
+		{
 			ObjectMeta: metav1.ObjectMeta{Name: runtimePoolChildName(cfg.baseName, runtimePoolSubstrateControllerEgressSuffix), Namespace: workerNamespace},
 			Spec: networkingv1.NetworkPolicySpec{
 				PodSelector: selector,
@@ -1798,6 +1827,7 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolNetworkPolicies(
 		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDenyEgressSuffix),
 		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDNSEgressSuffix),
 		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateProviderEgressSuffix),
+		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateProviderIngressSuffix),
 		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateControllerEgressSuffix),
 	}
 	remaining := false

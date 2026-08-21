@@ -354,6 +354,18 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
 		if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, authSecret, readyPods[0].UID); err != nil {
+			if errors.Is(err, errRuntimePoolBootstrapInstanceConflict) {
+				if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
+					return ctrl.Result{}, errors.Join(err, deleteErr)
+				}
+				status.ActiveInstance = nil
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+				status.Message = "provider workspace physical instance changed; recycling it before credential bootstrap rotation"
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+			}
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		alreadyComplete, seedErr := r.seedWorkspaceSupervisorCredentials(

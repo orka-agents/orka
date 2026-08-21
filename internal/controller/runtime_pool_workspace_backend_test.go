@@ -1138,6 +1138,56 @@ func TestWorkspaceRuntimePoolSupervisorRestartRecyclesClaim(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolRecyclesClaimWhenPhysicalPodChanges(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	seedCalls := 0
+	r.WorkspaceCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
+		seedCalls++
+		return false, nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace template and claim were not materialized")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.82")
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-original", false)
+	runtimePoolReconcile(t, r, pool)
+	if seedCalls != 1 {
+		t.Fatalf("initial credential seed calls = %d, want 1", seedCalls)
+	}
+
+	if err := r.Delete(context.Background(), &pod); err != nil {
+		t.Fatalf("delete replaced workspace Pod: %v", err)
+	}
+	replacement := pod.DeepCopy()
+	replacement.UID = types.UID("replacement-sandbox-pod-uid")
+	replacement.ResourceVersion = ""
+	replacement.Status.PodIP = "10.0.0.83"
+	runtimePoolTestCreatePod(t, r, replacement)
+	supervisor.probe = runtimePoolValidProbe(pool, replacement, "boot-replacement", false)
+
+	runtimePoolReconcile(t, r, pool)
+
+	if seedCalls != 1 {
+		t.Fatalf("replacement physical Pod received %d total credential seeds, want the original seed only", seedCalls)
+	}
+	if _, _, currentClaim := runtimePoolWorkspaceTestChildren(t, r, pool); currentClaim != nil {
+		t.Fatal("replacement physical Pod did not trigger SandboxClaim recycling")
+	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		status.ActiveInstance != nil ||
+		!strings.Contains(status.Message, "physical instance changed") {
+		t.Fatalf("replacement physical Pod status = %s/%s active=%v message=%q, want Degraded/Closed with no active instance", status.Lifecycle, status.AdmissionState, status.ActiveInstance, status.Message)
+	}
+}
+
 func TestWorkspaceRuntimePoolRotatesConsumedBootstrapBeforeReplacementClaim(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()

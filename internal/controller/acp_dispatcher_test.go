@@ -2733,6 +2733,29 @@ func TestACPDispatcherCapacityBackpressureRunsIdlePoolMaintenance(t *testing.T) 
 	}
 }
 
+func TestRuntimePoolHasActiveDemandAllowsIdleWorkspaceSessionScaleDown(t *testing.T) {
+	pool := &corev1alpha1.RuntimePool{
+		Spec: corev1alpha1.RuntimePoolSpec{
+			DesiredReplicas: 1,
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+			},
+		},
+		Status: corev1alpha1.RuntimePoolStatus{
+			Capacity: corev1alpha1.RuntimePoolCapacityStatus{ResidentSessions: 1},
+		},
+	}
+
+	if runtimePoolHasActiveDemand(pool, 0) {
+		t.Fatal("idle workspace-backed resident session blocked authenticated scale-down")
+	}
+
+	pool.Spec.ExecutionWorkspace = nil
+	if !runtimePoolHasActiveDemand(pool, 0) {
+		t.Fatal("plain shared pool ignored its resident session")
+	}
+}
+
 func TestACPDispatcherRuntimePoolReservationCASAndIdempotentRelease(t *testing.T) {
 	ctx := context.Background()
 	dispatcher, kubeClient, pool, first, second := newRuntimePoolReservationTestFixture(t)
