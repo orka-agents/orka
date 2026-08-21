@@ -243,7 +243,7 @@ assert_task_result_contains() {
   local api_token result_file status attempts_remaining
 
   wait_for_http "${api_base}/readyz" "Orka API /readyz"
-  api_token="$(kubectl -n "${orka_namespace}" create token "${orka_api_client_service_account}")"
+  api_token="$(kubectl -n "${namespace_arg}" create token "${orka_api_client_service_account}")"
   result_file="${work_dir}/${task_name}-result.json"
   attempts_remaining=15
   while (( attempts_remaining > 0 )); do
@@ -333,20 +333,20 @@ YAML
 }
 
 ensure_api_client_identity() {
-  log "Creating scoped Orka API client identity ${orka_api_client_service_account}"
+  log "Creating scoped Orka API client identity ${acp_task_namespace}/${orka_api_client_service_account}"
   kubectl apply -f - <<YAML
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: ${orka_api_client_service_account}
-  namespace: ${orka_namespace}
+  namespace: ${acp_task_namespace}
 automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: ${orka_api_client_service_account}
-  namespace: ${orka_namespace}
+  namespace: ${acp_task_namespace}
 rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks"]
@@ -356,7 +356,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: ${orka_api_client_service_account}
-  namespace: ${orka_namespace}
+  namespace: ${acp_task_namespace}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -364,7 +364,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: ${orka_api_client_service_account}
-    namespace: ${orka_namespace}
+    namespace: ${acp_task_namespace}
 YAML
 }
 
