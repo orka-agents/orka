@@ -90,6 +90,37 @@ func (s *Store) GetExternalEffect(ctx context.Context, id string) (*store.Extern
 	return &result, nil
 }
 
+// GetExternalEffectByIdentity resolves an external effect through its exact
+// deterministic Kubernetes object key. Authorization paths must not depend on
+// namespace-wide LIST visibility immediately after the effect lease CAS.
+func (s *Store) GetExternalEffectByIdentity(ctx context.Context, identity store.ExternalEffectIdentity) (*store.ExternalEffect, error) {
+	if err := s.requireClient(); err != nil {
+		return nil, err
+	}
+	identity.Kind = strings.TrimSpace(identity.Kind)
+	identity.Namespace = strings.TrimSpace(identity.Namespace)
+	identity.AggregateID = strings.TrimSpace(identity.AggregateID)
+	identity.OperationID = strings.TrimSpace(identity.OperationID)
+	if err := identity.Validate(); err != nil {
+		return nil, err
+	}
+	id, err := identity.CanonicalID()
+	if err != nil {
+		return nil, err
+	}
+	object := &corev1alpha1.ExternalEffect{}
+	key := client.ObjectKey{Namespace: identity.Namespace, Name: objectName(externalEffectNamePrefix, id)}
+	if err := s.readClient().Get(ctx, key, object); err != nil {
+		return nil, mapKubernetesError("get external effect by identity", err)
+	}
+	if object.Spec.ID != id || object.Spec.Kind != identity.Kind || object.Spec.IdentityNamespace != identity.Namespace ||
+		object.Spec.AggregateID != identity.AggregateID || object.Spec.OperationID != identity.OperationID {
+		return nil, controlConflict("external effect %q does not match its deterministic identity", id)
+	}
+	result := externalEffectFromObject(object)
+	return &result, nil
+}
+
 // TransitionExternalEffect applies an exact version/state/lease-owner,
 // resourceVersion, request-digest, and controller-epoch CAS.
 func (s *Store) TransitionExternalEffect(ctx context.Context, transition store.ExternalEffectTransition) (*store.ExternalEffect, error) {

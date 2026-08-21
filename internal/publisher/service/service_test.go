@@ -53,6 +53,12 @@ type artifactFixture struct {
 	calls   atomic.Int64
 }
 
+type artifactAuthorizerFunc func(context.Context, ArtifactAuthorizationRequest) (artifactcap.Authorization, error)
+
+func (f artifactAuthorizerFunc) Authorize(ctx context.Context, request ArtifactAuthorizationRequest) (artifactcap.Authorization, error) {
+	return f(ctx, request)
+}
+
 func TestWorkspaceResolveAndPrepareAcceptExactCommit(t *testing.T) {
 	t.Parallel()
 	repository := newRepositoryFixture(t, false)
@@ -82,6 +88,42 @@ func TestWorkspaceResolveAndPrepareAcceptExactCommit(t *testing.T) {
 		Source:   repository.source, SourceRef: repository.baselineOID, BaselineOID: strings.Repeat("a", 40),
 	})
 	assertClientCode(t, err, "invalid_request")
+}
+
+func TestWorkspacePrepareRetriesRetryableArtifactAuthorizationFailure(t *testing.T) {
+	repository := newRepositoryFixture(t, false)
+	fixture := newServiceFixture(t)
+	local := &localArtifactAuthorizer{secret: fixture.artifactSecret, ttl: time.Minute, now: time.Now}
+	var authorizationCalls atomic.Int64
+	fixture.server.artifacts.authorizer = artifactAuthorizerFunc(func(ctx context.Context, request ArtifactAuthorizationRequest) (artifactcap.Authorization, error) {
+		if authorizationCalls.Add(1) == 1 {
+			return artifactcap.Authorization{}, apiError(
+				ErrArtifactTransport, "artifact_authorization_transport_failed",
+				"artifact authorization broker transport failed", http.StatusServiceUnavailable, true, context.DeadlineExceeded,
+			)
+		}
+		return local.Authorize(ctx, request)
+	})
+	request := WorkspacePrepareRequest{
+		Metadata: OperationMetadata{
+			Namespace: testNamespace, OperationID: "workspace-prepare-retryable-authorization", TaskID: "task-retryable-authorization",
+		},
+		Source: repository.source, SourceRef: testMainRef, BaselineOID: repository.baselineOID,
+	}
+
+	_, err := fixture.client.PrepareWorkspace(context.Background(), request)
+	var first *ClientError
+	if !errors.As(err, &first) || first.StatusCode != http.StatusServiceUnavailable || !first.Response.Retryable ||
+		first.Response.Code != "artifact_authorization_failed" {
+		t.Fatalf("first PrepareWorkspace error = %#v, want retryable artifact authorization failure", err)
+	}
+	prepared, err := fixture.client.PrepareWorkspace(context.Background(), request)
+	if err != nil {
+		t.Fatalf("retry PrepareWorkspace: %v", err)
+	}
+	if prepared.Artifact.Digest == "" || authorizationCalls.Load() != 2 {
+		t.Fatalf("retry result = %#v, authorization calls = %d", prepared, authorizationCalls.Load())
+	}
 }
 
 func TestWorkspaceResolveFreezesAdvertisedDefaultBranch(t *testing.T) {

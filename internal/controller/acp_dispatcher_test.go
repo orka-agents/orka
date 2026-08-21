@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +38,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	orkatracing "github.com/orka-agents/orka/internal/tracing"
+	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
 )
 
 // dispatchQueuedTask reserves the queued Task on its RuntimePool and executes
@@ -53,6 +57,35 @@ func dispatchQueuedTask(ctx context.Context, t *testing.T, dispatcher *ACPDispat
 	if err := dispatcher.executeReservedTask(ctx, task, target); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func stampACPTaskTrace(t *testing.T, task *corev1alpha1.Task) (*tracingtest.SpanHarness, string) {
+	t.Helper()
+	if _, err := orkatracing.Init("acp-controller-test", false); err != nil {
+		t.Fatalf("initialize tracing: %v", err)
+	}
+	harness := tracingtest.NewSpanHarness(t)
+	ctx, parent := orkatracing.Tracer("test").Start(context.Background(), "task.creator")
+	parentID := parent.SpanContext().SpanID().String()
+	orkatracing.StampTaskTraceContext(ctx, task)
+	parent.End()
+	return harness, parentID
+}
+
+func acpSpanForTask(
+	t *testing.T,
+	spans []sdktrace.ReadOnlySpan,
+	spanName string,
+	taskName string,
+) sdktrace.ReadOnlySpan {
+	t.Helper()
+	for _, span := range tracingtest.SpansNamed(spans, spanName) {
+		if tracingtest.AttributeMap(span)[orkatracing.AttrTaskID].AsString() == taskName {
+			return span
+		}
+	}
+	t.Fatalf("missing %s span for Task %s", spanName, taskName)
+	return nil
 }
 
 func TestCompletedPromptResultTextPrefersTerminalContent(t *testing.T) {
@@ -204,6 +237,51 @@ func TestACPTaskDeadlineIncludesTimeBeforeRuntimeAdmission(t *testing.T) {
 	deadline, ok = acpTaskDeadline(task, now)
 	if !ok || !deadline.Equal(now.Add(4*time.Minute)) {
 		t.Fatalf("queue-derived deadline = %s, %v; want %s, true", deadline, ok, now.Add(4*time.Minute))
+	}
+
+	task.Spec.Timeout = nil
+	if deadline, ok = acpTaskDeadline(task, now); ok || !deadline.IsZero() {
+		t.Fatalf("unbound default deadline = %s, %v; want zero, false", deadline, ok)
+	}
+	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+	}
+	if deadline, ok = acpTaskDeadline(task, now); ok || !deadline.IsZero() {
+		t.Fatalf("harness v1 default deadline = %s, %v; want zero, false", deadline, ok)
+	}
+	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
+	deadline, ok = acpTaskDeadline(task, now)
+	if !ok || !deadline.Equal(now.Add(defaultACPTaskTimeout-time.Minute)) {
+		t.Fatalf("default deadline = %s, %v; want %s, true", deadline, ok, now.Add(defaultACPTaskTimeout-time.Minute))
+	}
+	for _, duration := range []time.Duration{0, -time.Minute} {
+		task.Spec.Timeout = &metav1.Duration{Duration: duration}
+		deadline, ok = acpTaskDeadline(task, now)
+		if !ok || !deadline.Equal(now.Add(defaultACPTaskTimeout-time.Minute)) {
+			t.Fatalf("nonpositive %s deadline = %s, %v; want %s, true", duration, deadline, ok, now.Add(defaultACPTaskTimeout-time.Minute))
+		}
+	}
+}
+
+func TestACPTaskRuntimeContextUsesDefaultDeadline(t *testing.T) {
+	t.Parallel()
+	createdAt := time.Now().UTC().Add(-time.Minute)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(createdAt)},
+		Status: corev1alpha1.TaskStatus{
+			AgentExecutionBinding: testACPExecuteBindingForDispatcher(),
+		},
+	}
+	runtimeCtx, cancel := (&ACPDispatcher{}).newTaskRuntimeContext(context.Background(), task)
+	defer cancel()
+
+	deadline, ok := runtimeCtx.Deadline()
+	want := createdAt.Add(defaultACPTaskTimeout)
+	if !ok || !deadline.Equal(want) {
+		t.Fatalf("runtime context deadline = %s, %v; want %s, true", deadline, ok, want)
+	}
+	if err := runtimeCtx.Err(); err != nil {
+		t.Fatalf("runtime context expired before the default deadline: %v", err)
 	}
 }
 
@@ -536,6 +614,10 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	}
 	taskUID := types.UID("11111111-1111-1111-1111-111111111111")
 	promptID := "prompt-" + string(taskUID) + "-1"
+	continuedTaskUID := types.UID("22222222-2222-2222-2222-222222222222")
+	failedTaskUID := types.UID("33333333-3333-3333-3333-333333333333")
+	cancelledTaskUID := types.UID("44444444-4444-4444-4444-444444444444")
+	unknownTaskUID := types.UID("55555555-5555-5555-5555-555555555555")
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: taskUID, Labels: map[string]string{acpRuntimeTaskPoolLabel: "pool"}},
 		Spec: corev1alpha1.TaskSpec{
@@ -548,6 +630,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 			RequestDigest: testControlDigestForDispatcher("task-request"), ControllerEpoch: 1,
 		}},
 	}
+	spanHarness, parentSpanID := stampACPTaskTrace(t, task)
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
@@ -563,7 +646,11 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	profileDigest := plan.Digest
 	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
 	task.Status.Execution.RuntimePoolName = plan.PoolName
-	server := newDispatcherRuntimeServer(t, profile, profileDigest)
+	server := newDispatcherRuntimeServerWithTerminalEvents(t, profile, profileDigest, map[harnessv2.PromptID]harnessv2.EventType{
+		harnessv2.PromptID("prompt-" + string(failedTaskUID) + "-1"):    harnessv2.EventFailed,
+		harnessv2.PromptID("prompt-" + string(cancelledTaskUID) + "-1"): harnessv2.EventCancelled,
+		harnessv2.PromptID("prompt-" + string(unknownTaskUID) + "-1"):   harnessv2.EventOutcomeUnknown,
+	})
 	defer server.Close()
 	parsed, err := url.Parse(server.URL)
 	if err != nil {
@@ -646,6 +733,75 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
 		Snapshots: persistence, Epochs: epochs, Sessions: continuity,
 	}
+	prepareAdditionalTask := func(
+		name string,
+		uid types.UID,
+		prompt string,
+		sessionRef *corev1alpha1.SessionReference,
+	) (*corev1alpha1.Task, string, string) {
+		t.Helper()
+		additionalPromptID := "prompt-" + string(uid) + "-1"
+		additional := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: task.Namespace,
+				Name:      name,
+				UID:       uid,
+				Labels:    map[string]string{acpRuntimeTaskPoolLabel: plan.PoolName},
+			},
+			Spec: corev1alpha1.TaskSpec{
+				Type:         corev1alpha1.TaskTypeAgent,
+				Prompt:       prompt,
+				AgentRuntime: &corev1alpha1.AgentRuntimeSpec{},
+				AgentRef:     &corev1alpha1.AgentReference{Name: agent.Name},
+				SessionRef:   sessionRef,
+			},
+			Status: corev1alpha1.TaskStatus{
+				Phase:    corev1alpha1.TaskPhasePending,
+				Attempts: 1,
+				Execution: &corev1alpha1.TaskExecutionStatus{
+					State:           corev1alpha1.TaskExecutionStateQueued,
+					Attempt:         1,
+					PromptID:        additionalPromptID,
+					RuntimePoolName: plan.PoolName,
+					RuntimePoolUID:  string(pool.UID),
+					RequestDigest:   testControlDigestForDispatcher(name + "-request"),
+					ControllerEpoch: fence.Epoch,
+				},
+			},
+		}
+		traceCtx, parent := orkatracing.Tracer("test").Start(context.Background(), "task.creator."+name)
+		parentID := parent.SpanContext().SpanID().String()
+		orkatracing.StampTaskTraceContext(traceCtx, additional)
+		parent.End()
+		if err := kubeClient.Create(ctx, additional); err != nil {
+			t.Fatal(err)
+		}
+		additional = prepareBoundACPDispatcherTaskWithStoresForTest(
+			t, ctx, kubeClient, scheme, controlStore, persistence, additional, agent, images,
+		)
+		key := store.PromptAttemptKey{
+			Namespace: additional.Namespace,
+			TaskUID:   string(additional.UID),
+			Attempt:   1,
+			PromptID:  additionalPromptID,
+		}
+		additionalAttemptID, err := key.CanonicalID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+			ID:             additionalAttemptID,
+			Key:            key,
+			RequestDigest:  additional.Status.Execution.RequestDigest,
+			BindingDigest:  additional.Status.AgentExecutionBinding.BindingDigest,
+			SnapshotDigest: additional.Status.AgentExecutionBinding.Snapshot.Digest,
+			ExecutionState: store.PromptExecutionQueued,
+			DeliveryState:  store.PromptDeliveryNotRequested,
+		}), fence); err != nil {
+			t.Fatal(err)
+		}
+		return additional, additionalAttemptID, parentID
+	}
 	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
@@ -683,6 +839,157 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	}
 	if len(completedPool.Status.Capacity.Reservations) != 0 || completedPool.Status.Capacity.ReservedSessions != 0 || completedPool.Status.Capacity.ReservedPrompts != 0 {
 		t.Fatalf("capacity reservation leaked after acceptance: %#v", completedPool.Status.Capacity)
+	}
+
+	continuedTask, continuedAttemptID, continuedParentID := prepareAdditionalTask(
+		"continued-task",
+		continuedTaskUID,
+		"continue briefly",
+		&corev1alpha1.SessionReference{Name: "session", Create: false, Append: true},
+	)
+	dispatchQueuedTask(ctx, t, dispatcher, continuedTask.DeepCopy())
+	continuedCompleted := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(continuedTask), continuedCompleted); err != nil {
+		t.Fatal(err)
+	}
+	if continuedCompleted.Status.Phase != corev1alpha1.TaskPhaseSucceeded || continuedCompleted.Status.Execution == nil ||
+		continuedCompleted.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded {
+		t.Fatalf("unexpected continued Task status: %#v", continuedCompleted.Status)
+	}
+	if continuedCompleted.Status.Execution.RuntimeSessionUID != completed.Status.Execution.RuntimeSessionUID {
+		t.Fatalf(
+			"continued RuntimeSession UID = %q, want reused %q",
+			continuedCompleted.Status.Execution.RuntimeSessionUID,
+			completed.Status.Execution.RuntimeSessionUID,
+		)
+	}
+	continuedAttempt, err := controlStore.GetPromptAttempt(ctx, continuedAttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if continuedAttempt.ExecutionState != store.PromptExecutionSucceeded || continuedAttempt.DeliveryState != store.PromptDeliveryReadValidated {
+		t.Fatalf("continued attempt = %#v", continuedAttempt)
+	}
+	transcript, err = persistence.LoadTranscript(ctx, "default", "session", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transcript) != 4 || transcript[2].Role != "user" || transcript[3].Role != "assistant" {
+		t.Fatalf("continued session transcript = %#v", transcript)
+	}
+	continuedSessionSpan := acpSpanForTask(t, spanHarness.Recorder.Ended(), acpSessionContinueSpanName, continuedTask.Name)
+	if got := continuedSessionSpan.Parent().SpanID().String(); got != continuedParentID {
+		t.Fatalf("acp.session.continue parent = %s, want Task trace parent %s", got, continuedParentID)
+	}
+	if got := tracingtest.AttributeMap(continuedSessionSpan)[acpAttrSessionOutcome].AsString(); got != acpSessionOutcomeContinued {
+		t.Fatalf("acp.session.continue outcome = %q, want %q", got, acpSessionOutcomeContinued)
+	}
+
+	terminalTests := []struct {
+		name             string
+		uid              types.UID
+		wantPhase        corev1alpha1.TaskPhase
+		wantState        corev1alpha1.TaskExecutionState
+		wantOutcome      corev1alpha1.TaskExecutionOutcome
+		wantAttemptState store.PromptExecutionState
+		wantSpanOutcome  string
+		wantSpanError    bool
+		wantErrorType    string
+	}{
+		{
+			name: "failed", uid: failedTaskUID,
+			wantPhase: corev1alpha1.TaskPhaseFailed, wantState: corev1alpha1.TaskExecutionStateFailed,
+			wantOutcome: corev1alpha1.TaskExecutionOutcomeFailed, wantAttemptState: store.PromptExecutionFailed,
+			wantSpanOutcome: acpPromptOutcomeFailed, wantSpanError: true, wantErrorType: "acp.prompt.failed",
+		},
+		{
+			name: "cancelled", uid: cancelledTaskUID,
+			wantPhase: corev1alpha1.TaskPhaseCancelled, wantState: corev1alpha1.TaskExecutionStateCancelled,
+			wantOutcome: corev1alpha1.TaskExecutionOutcomeCancelled, wantAttemptState: store.PromptExecutionCancelled,
+			wantSpanOutcome: acpPromptOutcomeCancelled,
+		},
+		{
+			name: "outcome-unknown", uid: unknownTaskUID,
+			wantPhase: corev1alpha1.TaskPhaseFailed, wantState: corev1alpha1.TaskExecutionStateOutcomeUnknown,
+			wantOutcome: corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, wantAttemptState: store.PromptExecutionOutcomeUnknown,
+			wantSpanOutcome: acpPromptOutcomeUnknown, wantSpanError: true, wantErrorType: "acp.prompt.outcome_unknown",
+		},
+	}
+	for _, test := range terminalTests {
+		terminalTask, terminalAttemptID, terminalParentID := prepareAdditionalTask(
+			"terminal-"+test.name,
+			test.uid,
+			"exercise "+test.name+" telemetry",
+			nil,
+		)
+		dispatchQueuedTask(ctx, t, dispatcher, terminalTask.DeepCopy())
+		terminalCompleted := &corev1alpha1.Task{}
+		if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(terminalTask), terminalCompleted); err != nil {
+			t.Fatal(err)
+		}
+		if terminalCompleted.Status.Phase != test.wantPhase || terminalCompleted.Status.Execution == nil ||
+			terminalCompleted.Status.Execution.State != test.wantState || terminalCompleted.Status.Execution.Outcome != test.wantOutcome {
+			t.Fatalf("%s terminal status = %#v", test.name, terminalCompleted.Status)
+		}
+		terminalAttempt, err := controlStore.GetPromptAttempt(ctx, terminalAttemptID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if terminalAttempt.ExecutionState != test.wantAttemptState {
+			t.Fatalf("%s attempt state = %s, want %s", test.name, terminalAttempt.ExecutionState, test.wantAttemptState)
+		}
+		terminalSpan := acpSpanForTask(t, spanHarness.Recorder.Ended(), acpPromptSpanName, terminalTask.Name)
+		if got := terminalSpan.Parent().SpanID().String(); got != terminalParentID {
+			t.Fatalf("%s acp.prompt parent = %s, want Task trace parent %s", test.name, got, terminalParentID)
+		}
+		terminalAttrs := tracingtest.AttributeMap(terminalSpan)
+		if got := terminalAttrs[acpAttrPromptOutcome].AsString(); got != test.wantSpanOutcome {
+			t.Fatalf("%s acp.prompt outcome = %q, want %q", test.name, got, test.wantSpanOutcome)
+		}
+		if got := terminalSpan.Status().Code == codes.Error; got != test.wantSpanError {
+			t.Fatalf("%s acp.prompt error status = %t, want %t", test.name, got, test.wantSpanError)
+		}
+		errorType, hasErrorType := terminalAttrs["error.type"]
+		if test.wantErrorType == "" && hasErrorType {
+			t.Fatalf("%s acp.prompt error.type = %q, want absent", test.name, errorType.AsString())
+		}
+		if test.wantErrorType != "" && (!hasErrorType || errorType.AsString() != test.wantErrorType) {
+			t.Fatalf("%s acp.prompt error.type = %q, want %q", test.name, errorType.AsString(), test.wantErrorType)
+		}
+	}
+	spans := spanHarness.Recorder.Ended()
+	promptSpan := tracingtest.SpanNamed(spans, acpPromptSpanName)
+	if promptSpan == nil {
+		t.Fatal("missing acp.prompt span")
+	}
+	if got := promptSpan.Parent().SpanID().String(); got != parentSpanID {
+		t.Fatalf("acp.prompt parent = %s, want Task trace parent %s", got, parentSpanID)
+	}
+	promptAttrs := tracingtest.AttributeMap(promptSpan)
+	if got := promptAttrs[orkatracing.AttrTaskID].AsString(); got != task.Name {
+		t.Fatalf("acp.prompt task id = %q, want %q", got, task.Name)
+	}
+	if got := promptAttrs[acpAttrRuntimePoolName].AsString(); got != plan.PoolName {
+		t.Fatalf("acp.prompt runtime pool = %q, want %q", got, plan.PoolName)
+	}
+	if got := promptAttrs[acpAttrRuntimeSessionUID].AsString(); got != completed.Status.Execution.RuntimeSessionUID {
+		t.Fatalf("acp.prompt runtime session UID = %q, want %q", got, completed.Status.Execution.RuntimeSessionUID)
+	}
+	if got := promptAttrs[acpAttrRuntimeSessionGen].AsInt64(); got != completed.Status.Execution.RuntimeSessionGeneration {
+		t.Fatalf("acp.prompt runtime session generation = %d, want %d", got, completed.Status.Execution.RuntimeSessionGeneration)
+	}
+	if got := promptAttrs[acpAttrPromptOutcome].AsString(); got != acpPromptOutcomeSucceeded {
+		t.Fatalf("acp.prompt outcome = %q, want %q", got, acpPromptOutcomeSucceeded)
+	}
+	sessionSpan := tracingtest.SpanNamed(spans, acpSessionCreateSpanName)
+	if sessionSpan == nil {
+		t.Fatal("missing acp.session.create span")
+	}
+	if got := sessionSpan.Parent().SpanID().String(); got != parentSpanID {
+		t.Fatalf("acp.session.create parent = %s, want Task trace parent %s", got, parentSpanID)
+	}
+	if got := tracingtest.AttributeMap(sessionSpan)[acpAttrSessionOutcome].AsString(); got != acpSessionOutcomeCreated {
+		t.Fatalf("acp.session.create outcome = %q, want %q", got, acpSessionOutcomeCreated)
 	}
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
@@ -936,6 +1243,7 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 			RequestDigest: testControlDigestForDispatcher("write-session-request"), ControllerEpoch: 1,
 		}},
 	}
+	spanHarness, parentSpanID := stampACPTaskTrace(t, task)
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
@@ -1119,6 +1427,25 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 		gotFinalization.TerminalState != harnessv2.PublicationTerminalVerifiedExact || gotFinalization.TerminalReceiptDigest == "" {
 		t.Fatalf("publication finalization request = %#v", gotFinalization)
 	}
+	spans := spanHarness.Recorder.Ended()
+	promptSpan := tracingtest.SpanNamed(spans, acpPromptSpanName)
+	publicationSpan := tracingtest.SpanNamed(spans, acpPublicationSpanName)
+	if promptSpan == nil || publicationSpan == nil {
+		t.Fatalf("ACP spans missing: prompt=%v publication=%v", promptSpan != nil, publicationSpan != nil)
+	}
+	if got := promptSpan.Parent().SpanID().String(); got != parentSpanID {
+		t.Fatalf("acp.prompt parent = %s, want Task trace parent %s", got, parentSpanID)
+	}
+	if got := publicationSpan.Parent().SpanID(); got != promptSpan.SpanContext().SpanID() {
+		t.Fatalf("acp.publication.reconcile parent = %s, want acp.prompt %s", got, promptSpan.SpanContext().SpanID())
+	}
+	publicationAttrs := tracingtest.AttributeMap(publicationSpan)
+	if got := publicationAttrs[acpAttrPublicationID].AsString(); got != publicationIDForTask(completed) {
+		t.Fatalf("publication span id = %q, want %q", got, publicationIDForTask(completed))
+	}
+	if publicationAttrs[acpAttrPublicationRecovery].AsBool() {
+		t.Fatal("live publication span was marked as recovery")
+	}
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
 		t.Fatal(err)
@@ -1237,7 +1564,9 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
 	}
-	if completed.Status.Phase != corev1alpha1.TaskPhaseCancelled || completed.Status.Execution == nil || completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled {
+	if completed.Status.Phase != corev1alpha1.TaskPhaseCancelled || completed.Status.Execution == nil ||
+		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled ||
+		completed.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("TaskTimeout") {
 		t.Fatalf("unexpected timeout status: %#v", completed.Status)
 	}
 	if got := deleteCalls.Load(); got != 1 {
@@ -2007,6 +2336,17 @@ func newDispatcherRuntimeServer(
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
 	t.Helper()
+	return newDispatcherRuntimeServerWithTerminalEvents(t, profile, digest, nil, onCreate...)
+}
+
+func newDispatcherRuntimeServerWithTerminalEvents(
+	t *testing.T,
+	profile harnessv2.RuntimeProfile,
+	digest harnessv2.ProfileDigest,
+	terminalEvents map[harnessv2.PromptID]harnessv2.EventType,
+	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
+) *httptest.Server {
+	t.Helper()
 	mux := http.NewServeMux()
 	limits := harnessv2.DefaultProtocolLimits()
 	var descriptorMu sync.Mutex
@@ -2083,7 +2423,49 @@ func newDispatcherRuntimeServer(
 		}
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity(1, now), Accepted: &harnessv2.AcceptedEvent{AcceptedAt: now, Lease: request.Lease, ACPVersion: harnessv2.ACPProfileV1}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(2, now.Add(time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "hello from runtime"}}})
-		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventCompleted, Identity: identity(3, now.Add(2*time.Millisecond)), Completed: &harnessv2.CompletedEvent{StopReason: harnessv2.ACPStopReasonEndTurn, Result: harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "hello from runtime"}}, Model: profile.Model}}})
+		terminalType := harnessv2.EventCompleted
+		if selected := terminalEvents[request.Metadata.PromptID]; selected != "" {
+			terminalType = selected
+		}
+		terminal := harnessv2.Event{
+			Protocol: harnessv2.ProtocolVersion,
+			Type:     terminalType,
+			Identity: identity(3, now.Add(2*time.Millisecond)),
+		}
+		switch terminalType {
+		case harnessv2.EventCompleted:
+			terminal.Completed = &harnessv2.CompletedEvent{
+				StopReason: harnessv2.ACPStopReasonEndTurn,
+				Result: harnessv2.PromptResult{
+					Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "hello from runtime"}},
+					Model:   profile.Model,
+				},
+			}
+		case harnessv2.EventCancelled:
+			terminal.Cancelled = &harnessv2.CancelledEvent{
+				StopReason: harnessv2.ACPStopReasonCancelled,
+				Reason:     "cancelled by deterministic test runtime",
+			}
+		case harnessv2.EventFailed:
+			terminal.Failed = &harnessv2.FailedEvent{
+				StopReason: harnessv2.ACPStopReasonRefusal,
+				Code:       "deterministic_failure",
+				Message:    "deterministic test runtime failure",
+			}
+		case harnessv2.EventOutcomeUnknown:
+			terminal.OutcomeUnknown = &harnessv2.OutcomeUnknownEvent{
+				Code:              "deterministic_outcome_unknown",
+				Message:           "deterministic test runtime could not prove settlement",
+				ForcedTermination: true,
+			}
+		default:
+			t.Errorf("unsupported deterministic terminal event %q", terminalType)
+			return
+		}
+		if err := encoder.Encode(terminal); err != nil {
+			t.Errorf("encode terminal event: %v", err)
+			return
+		}
 		if err := encoder.Close(); err != nil {
 			t.Errorf("close encoder: %v", err)
 		}
@@ -2461,6 +2843,12 @@ func TestACPDispatcherSettlesExpiredTaskBeforeRuntimePoolAdmission(t *testing.T)
 	}, corev1alpha1.TaskExecutionReason("TaskTimeout"), "task deadline exceeded before runtime admission", false)
 }
 
+func TestACPDispatcherSettlesDefaultExpiredTaskBeforeRuntimePoolAdmission(t *testing.T) {
+	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
+		task.CreationTimestamp = metav1.NewTime(time.Now().UTC().Add(-defaultACPTaskTimeout - time.Minute))
+	}, corev1alpha1.TaskExecutionReason("TaskTimeout"), "task deadline exceeded before runtime admission", false)
+}
+
 func TestACPDispatcherSettlesExpiredSessionTaskBeforeRuntimePoolAdmission(t *testing.T) {
 	timeout := metav1.Duration{Duration: time.Minute}
 	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
@@ -2674,8 +3062,12 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 		}
 	}
 	rateLimited := &harnessv2.ClientError{StatusCode: http.StatusTooManyRequests, Code: harnessv2.ErrorCodeRateLimited, Retryable: true}
-	if err := dispatcher.handlePrePromptClientError(ctx, task.DeepCopy(), attemptID, fence, rateLimited); err != nil {
+	retrying, err := dispatcher.handlePrePromptClientError(ctx, task.DeepCopy(), attemptID, fence, rateLimited)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !retrying {
+		t.Fatal("rate-limited RuntimeSession start was not classified as a retry")
 	}
 	attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
 	if err != nil {

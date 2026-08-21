@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -74,6 +76,60 @@ func TestBrokerArtifactAuthorizerRequestsExactCapability(t *testing.T) {
 	if _, err := artifactcap.Verify(secret, issued.Capability, presented, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestArtifactClientPreservesBrokerAuthorizationClassification(t *testing.T) {
+	data := []byte("workspace")
+	digest := artifactcap.DigestBytes(data)
+	artifactID, err := artifactcap.ArtifactIDForDigest(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference := harnessv2.ArtifactReference{
+		ArtifactID: harnessv2.ArtifactID(artifactID), Digest: digest,
+		SizeBytes: int64(len(data)), MediaType: artifactcap.MediaTypeWorkspaceTar,
+	}
+	metadata := OperationMetadata{Namespace: "default", TaskID: "task", OperationID: "workspace-prepare-prompt"}
+	tests := []struct {
+		name          string
+		status        int
+		retryable     bool
+		wantStatus    int
+		wantRetryable bool
+	}{
+		{name: "transient broker outage", status: http.StatusServiceUnavailable, retryable: true, wantStatus: http.StatusServiceUnavailable, wantRetryable: true},
+		{name: "broker authorization denial", status: http.StatusForbidden, retryable: false, wantStatus: http.StatusForbidden, wantRetryable: false},
+		{name: "successful status error is normalized", status: http.StatusOK, retryable: false, wantStatus: http.StatusBadGateway, wantRetryable: true},
+		{name: "redirect status error is normalized", status: http.StatusTemporaryRedirect, retryable: false, wantStatus: http.StatusBadGateway, wantRetryable: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			authorizer := failingArtifactAuthorizerForTest{err: apiError(
+				ErrArtifactTransport, "artifact_authorization_rejected", "broker rejected authorization",
+				test.status, test.retryable, nil,
+			)}
+			client, err := newArtifactClient("http://artifact.example", nil, authorizer, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = client.upload(context.Background(), OperationWorkspacePrepare, metadata, 1, reference, bytes.NewReader(data))
+			var operationErr *operationError
+			if !errors.As(err, &operationErr) {
+				t.Fatalf("upload error = %v, want operationError", err)
+			}
+			if operationErr.status != test.wantStatus || operationErr.retryable != test.wantRetryable || operationErr.code != "artifact_authorization_failed" {
+				t.Fatalf("upload authorization classification = status %d retryable %t code %q, want %d/%t/artifact_authorization_failed", operationErr.status, operationErr.retryable, operationErr.code, test.wantStatus, test.wantRetryable)
+			}
+		})
+	}
+}
+
+type failingArtifactAuthorizerForTest struct {
+	err error
+}
+
+func (a failingArtifactAuthorizerForTest) Authorize(context.Context, ArtifactAuthorizationRequest) (artifactcap.Authorization, error) {
+	return artifactcap.Authorization{}, a.err
 }
 
 func TestLoadConfigFromEnvUsesArtifactBrokerWithoutSigningKey(t *testing.T) {

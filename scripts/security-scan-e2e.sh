@@ -55,6 +55,8 @@ general_worker_image="${ORKA_GENERAL_WORKER_IMAGE:-orka-general-worker:security-
 fake_runtime_image="${ORKA_SECURITY_SCAN_FAKE_RUNTIME_IMAGE:-orka-acp-security-fixture:security-scan-e2e-${e2e_run_id}}"
 
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/security-scan-e2e.XXXXXX")"
+diagnostics_root="${ORKA_SECURITY_SCAN_DIAGNOSTICS_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/security-scan-e2e-diagnostics}"
+diagnostics_dir="${diagnostics_root}/${e2e_run_id}"
 kind_config="${ORKA_SECURITY_SCAN_KIND_CONFIG:-${work_dir}/kind-config.yaml}"
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
 manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
@@ -64,6 +66,7 @@ api_auth_header_file="${work_dir}/api-auth-header"
 kubeconfig_file="${work_dir}/kubeconfig"
 kind_lock_dir=""
 registry_owner="security-scan-e2e-${e2e_run_id}"
+diagnostics_collected="0"
 
 run() {
   printf '+ ' >&2
@@ -86,10 +89,267 @@ restore_manager_kustomization() {
   fi
 }
 
+capture_redacted() {
+  local output_file="$1"
+  shift
+  "$@" 2>&1 | redact >"${output_file}" || true
+}
+
+collect_security_scan_diagnostics() {
+  if [[ "${diagnostics_collected}" == "1" ]]; then
+    return 0
+  fi
+  diagnostics_collected="1"
+
+  mkdir -p "${diagnostics_dir}/jobs" "${diagnostics_dir}/runtime"
+  chmod 700 "${diagnostics_root}" "${diagnostics_dir}" "${diagnostics_dir}/jobs" "${diagnostics_dir}/runtime" 2>/dev/null || true
+  log "Collecting redacted SecurityScan diagnostics in ${diagnostics_dir}"
+
+  jq -n \
+    --arg collectedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg runID "${e2e_run_id}" \
+    --arg cluster "${kind_cluster}" \
+    --arg namespace "${test_namespace}" \
+    '{collectedAt:$collectedAt,runID:$runID,cluster:$cluster,namespace:$namespace}' \
+    >"${diagnostics_dir}/metadata.json"
+
+  kubectl -n "${test_namespace}" get repositoryscans -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {
+        name: .metadata.name,
+        namespace: .metadata.namespace,
+        uid: .metadata.uid,
+        generation: .metadata.generation,
+        creationTimestamp: .metadata.creationTimestamp,
+        labels: .metadata.labels
+      },
+      spec: {
+        provider: .spec.provider,
+        repoURL: .spec.repoURL,
+        owner: .spec.owner,
+        repository: .spec.repository,
+        branch: .spec.branch,
+        ref: .spec.ref,
+        subPath: .spec.subPath,
+        analysisAgentRef: .spec.analysisAgentRef
+      },
+      status: .status
+    }]}' | redact >"${diagnostics_dir}/repository-scans.json" || true
+
+  kubectl -n "${test_namespace}" get tasks \
+    -l "orka.ai/security-target in (${scan_name},${bad_scan_name})" -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {
+        name: .metadata.name,
+        namespace: .metadata.namespace,
+        uid: .metadata.uid,
+        generation: .metadata.generation,
+        creationTimestamp: .metadata.creationTimestamp,
+        labels: .metadata.labels,
+        ownerReferences: .metadata.ownerReferences
+      },
+      spec: {
+        type: .spec.type,
+        image: .spec.image,
+        command: .spec.command,
+        timeout: .spec.timeout,
+        priority: .spec.priority,
+        agentRef: .spec.agentRef,
+        workspace: (if .spec.workspace == null then null else {
+          intent: .spec.workspace.intent,
+          gitRepo: .spec.workspace.gitRepo,
+          branch: .spec.workspace.branch,
+          ref: .spec.workspace.ref
+        } end)
+      },
+      status: .status
+    }]}' | redact >"${diagnostics_dir}/tasks.json" || true
+
+  kubectl -n "${test_namespace}" get agents -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {name: .metadata.name, namespace: .metadata.namespace, uid: .metadata.uid, generation: .metadata.generation},
+      spec: {runtime: .spec.runtime, model: .spec.model},
+      status: .status
+    }]}' | redact >"${diagnostics_dir}/agents.json" || true
+
+  kubectl -n "${test_namespace}" get runtimepools -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {
+        name: .metadata.name,
+        namespace: .metadata.namespace,
+        uid: .metadata.uid,
+        generation: .metadata.generation,
+        creationTimestamp: .metadata.creationTimestamp,
+        labels: .metadata.labels,
+        ownerReferences: .metadata.ownerReferences
+      },
+      spec: {
+        trustDomain: .spec.trustDomain,
+        runtimeNamespace: .spec.runtimeNamespace,
+        runtime: (if .spec.runtime == null then null else {
+          image: .spec.runtime.image,
+          profile: (if .spec.runtime.profile == null then null else {
+            protocolVersion: .spec.runtime.profile.protocolVersion,
+            digest: .spec.runtime.profile.digest,
+            digestSchemaVersion: .spec.runtime.profile.digestSchemaVersion,
+            acpProfile: .spec.runtime.profile.acpProfile,
+            providerKind: .spec.runtime.profile.providerKind,
+            model: .spec.runtime.profile.model,
+            modelLimits: .spec.runtime.profile.modelLimits,
+            agentConfigurationDigest: .spec.runtime.profile.agentConfigurationDigest,
+            toolPolicyDigest: .spec.runtime.profile.toolPolicyDigest,
+            approvalPolicyDigest: .spec.runtime.profile.approvalPolicyDigest,
+            mcpConfigurationDigest: .spec.runtime.profile.mcpConfigurationDigest,
+            workspaceIntent: .spec.runtime.profile.workspaceIntent,
+            proxyCredentialRole: .spec.runtime.profile.proxyCredentialRole,
+            proxyCredentialScope: .spec.runtime.profile.proxyCredentialScope,
+            resourceClass: .spec.runtime.profile.resourceClass
+          } end)
+        } end),
+        desiredReplicas: .spec.desiredReplicas,
+        capacity: .spec.capacity,
+        coldStartTimeoutSeconds: .spec.coldStartTimeoutSeconds
+      },
+      status: .status
+    }]}' | redact >"${diagnostics_dir}/runtime-pools.json" || true
+
+  kubectl -n "${test_namespace}" get promptattempts -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {name: .metadata.name, namespace: .metadata.namespace, uid: .metadata.uid, labels: .metadata.labels},
+      spec: {
+        id: .spec.id,
+        taskUid: .spec.taskUid,
+        attempt: .spec.attempt,
+        promptId: .spec.promptId,
+        requestDigest: .spec.requestDigest,
+        bindingDigest: .spec.bindingDigest,
+        snapshotDigest: .spec.snapshotDigest
+      },
+      status: .status
+    }]}' | redact >"${diagnostics_dir}/prompt-attempts.json" || true
+
+  kubectl -n "${test_namespace}" get externaleffects -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {
+        name: .metadata.name,
+        namespace: .metadata.namespace,
+        uid: .metadata.uid,
+        creationTimestamp: .metadata.creationTimestamp,
+        labels: .metadata.labels
+      },
+      spec: {
+        id: .spec.id,
+        kind: .spec.kind,
+        identityNamespace: .spec.identityNamespace,
+        aggregateId: .spec.aggregateId,
+        operationId: .spec.operationId,
+        requestDigest: .spec.requestDigest
+      },
+      status: {
+        state: .status.state,
+        responseDigest: .status.responseDigest,
+        leaseOwner: .status.leaseOwner,
+        leaseExpiresAt: .status.leaseExpiresAt,
+        attempts: .status.attempts,
+        controllerEpochName: .status.controllerEpochName,
+        controllerEpoch: .status.controllerEpoch,
+        controllerEpochLeaseResourceVersion: .status.controllerEpochLeaseResourceVersion,
+        version: .status.version,
+        createdAt: .status.createdAt,
+        updatedAt: .status.updatedAt
+      }
+    }]}' | redact >"${diagnostics_dir}/external-effects.json" || true
+
+  kubectl -n "${test_namespace}" get runtimesessioncontrols -o json 2>/dev/null |
+    jq '{items: [.items[] | {
+      metadata: {name: .metadata.name, namespace: .metadata.namespace, uid: .metadata.uid, labels: .metadata.labels},
+      spec: {
+        sessionUid: .spec.sessionUid,
+        requestDigest: .spec.requestDigest,
+        owner: .spec.owner,
+        runtimePoolRef: .spec.runtimePoolRef,
+        runtimePoolUid: .spec.runtimePoolUid,
+        runtimeProfileDigest: .spec.runtimeProfileDigest,
+        profileDigestSchemaVersion: .spec.profileDigestSchemaVersion
+      },
+      status: {
+        generation: .status.generation,
+        lifecycle: .status.lifecycle,
+        availability: .status.availability,
+        mutationLeaseGeneration: .status.mutationLeaseGeneration,
+        mutationLease: .status.mutationLease,
+        blockedReason: .status.blockedReason,
+        relatedPromptAttemptId: .status.relatedPromptAttemptId,
+        relatedPublicationId: .status.relatedPublicationId,
+        lineage: .status.lineage,
+        controllerEpochName: .status.controllerEpochName,
+        controllerEpoch: .status.controllerEpoch,
+        controllerEpochLeaseResourceVersion: .status.controllerEpochLeaseResourceVersion,
+        lastOperationId: .status.lastOperationId,
+        lastOperationDigest: .status.lastOperationDigest,
+        version: .status.version,
+        createdAt: .status.createdAt,
+        updatedAt: .status.updatedAt
+      }
+    }]}' | redact >"${diagnostics_dir}/runtime-session-controls.json" || true
+
+  capture_redacted "${diagnostics_dir}/cluster-resources.txt" kubectl get nodes,pods -A -o wide
+  capture_redacted "${diagnostics_dir}/namespace-resources.txt" kubectl -n "${test_namespace}" \
+    get deployments,pods,services,jobs,agents,tasks,runtimepools,promptattempts,externaleffects,runtimesessioncontrols -o wide
+  capture_redacted "${diagnostics_dir}/events.txt" kubectl -n "${test_namespace}" \
+    get events --sort-by=.metadata.creationTimestamp
+  capture_redacted "${diagnostics_dir}/controller.log" kubectl -n "${orka_namespace}" \
+    logs deployment/"${orka_controller_deployment}" --all-containers=true --timestamps=true --tail=2000
+  capture_redacted "${diagnostics_dir}/controller-describe.txt" kubectl -n "${orka_namespace}" \
+    describe deployment/"${orka_controller_deployment}"
+
+  local job_name
+  while IFS= read -r job_name; do
+    [[ -n "${job_name}" ]] || continue
+    capture_redacted "${diagnostics_dir}/jobs/${job_name}.log" kubectl -n "${test_namespace}" \
+      logs job/"${job_name}" --all-containers=true --timestamps=true --tail=2000
+    capture_redacted "${diagnostics_dir}/jobs/${job_name}.describe.txt" kubectl -n "${test_namespace}" \
+      describe job/"${job_name}"
+  done < <(kubectl -n "${test_namespace}" get jobs -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+
+  local runtime_namespace runtime_pod
+  while IFS= read -r runtime_namespace; do
+    [[ -n "${runtime_namespace}" ]] || continue
+    capture_redacted "${diagnostics_dir}/runtime/${runtime_namespace}-resources.txt" kubectl -n "${runtime_namespace}" \
+      get deployments,pods,services,networkpolicies,poddisruptionbudgets -o wide
+    capture_redacted "${diagnostics_dir}/runtime/${runtime_namespace}-events.txt" kubectl -n "${runtime_namespace}" \
+      get events --sort-by=.metadata.creationTimestamp
+    while IFS= read -r runtime_pod; do
+      [[ -n "${runtime_pod}" ]] || continue
+      capture_redacted "${diagnostics_dir}/runtime/${runtime_namespace}-${runtime_pod}.log" kubectl -n "${runtime_namespace}" \
+        logs pod/"${runtime_pod}" --all-containers=true --timestamps=true --tail=2000
+      capture_redacted "${diagnostics_dir}/runtime/${runtime_namespace}-${runtime_pod}.previous.log" kubectl -n "${runtime_namespace}" \
+        logs pod/"${runtime_pod}" --all-containers=true --timestamps=true --tail=2000 --previous
+      capture_redacted "${diagnostics_dir}/runtime/${runtime_namespace}-${runtime_pod}.describe.txt" kubectl -n "${runtime_namespace}" \
+        describe pod/"${runtime_pod}"
+    done < <(kubectl -n "${runtime_namespace}" get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+  done < <(
+    {
+      printf '%s\n' "${orka_namespace}" "orka-runtimes"
+      kubectl -n "${test_namespace}" get runtimepools \
+        -o jsonpath='{range .items[*]}{.spec.runtimeNamespace}{"\n"}{end}' 2>/dev/null || true
+    } | LC_ALL=C sort -u
+  )
+
+  if [[ -f "${api_forward_log}" ]]; then
+    redact <"${api_forward_log}" >"${diagnostics_dir}/api-port-forward.log"
+  fi
+  log "Redacted SecurityScan diagnostics are ready at ${diagnostics_dir}"
+}
+
 on_exit() {
   local status="$1"
   local cleanup_status=0
   set +e
+  if [[ "${status}" -ne 0 ]] &&
+    [[ "$(kubectl config current-context 2>/dev/null || true)" == "kind-${kind_cluster}" ]]; then
+    collect_security_scan_diagnostics || warn "SecurityScan diagnostic collection was incomplete"
+  fi
   stop_api_forward
   if [[ "$(kubectl config current-context 2>/dev/null || true)" == "kind-${kind_cluster}" ]]; then
     kubectl -n "${test_namespace}" delete serviceaccount "${api_identity_name}" \
@@ -434,7 +694,7 @@ wait_repo_phase() {
   local timeout_seconds
   timeout_seconds="$(duration_to_seconds "${wait_timeout}")"
   local deadline=$((SECONDS + timeout_seconds))
-  local phase
+  local phase message
 
   log "Waiting for RepositoryScan/${name} phase ${expected}"
   while (( SECONDS < deadline )); do
@@ -442,6 +702,16 @@ wait_repo_phase() {
     if [[ "${phase}" == "${expected}" ]]; then
       return 0
     fi
+    case "${phase}" in
+      Ready|Error|Suspended)
+        message="$(
+          kubectl -n "${test_namespace}" get repositoryscan "${name}" -o json 2>/dev/null |
+            jq -r '[.status.conditions[]? | select(.type == "Ready")][-1].message // empty' |
+            redact
+        )"
+        die "RepositoryScan/${name} entered terminal phase ${phase} while waiting for ${expected}${message:+: ${message}}"
+        ;;
+    esac
     sleep 5
   done
   die "RepositoryScan/${name} did not reach phase ${expected}; current phase ${phase:-<empty>}"
