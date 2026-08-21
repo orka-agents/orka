@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -899,7 +900,7 @@ func TestReapIdlePoolsDeletesStoppedWorkspacePools(t *testing.T) {
 	}
 	plain := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default", Name: "acp-codex-0123456789abcdef", UID: types.UID("plain-pool-uid"),
+			Namespace: corev1.NamespaceDefault, Name: "acp-codex-0123456789abcdef", UID: types.UID("plain-pool-uid"),
 			Annotations: map[string]string{acpRuntimeLastDemandAnnotation: now.Add(-3 * time.Hour).Format(time.RFC3339Nano)},
 		},
 		Spec:   corev1alpha1.RuntimePoolSpec{DesiredReplicas: 0},

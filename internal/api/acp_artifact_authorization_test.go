@@ -43,7 +43,7 @@ func TestACPArtifactAuthorizationBrokerIssuesExactUploadCapability(t *testing.T)
 	}
 	controllerToken := strings.Repeat("t", 32)
 	operationSecret := []byte(strings.Repeat("s", 32))
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1-randomized", Labels: map[string]string{"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(poolUID), runtimePoolCredentialEpochLabelAPI: "1"}}, Data: map[string][]byte{runtimePoolControllerTokenKeyAPI: []byte(controllerToken), runtimePoolCapabilitySecretKeyAPI: operationSecret}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1-randomized", Labels: map[string]string{runtimePoolAuthLabelAPI: runtimePoolAuthLabelValueAPI, runtimePoolUIDLabelAPI: string(poolUID), runtimePoolCredentialEpochLabelAPI: "1"}}, Data: map[string][]byte{runtimePoolControllerTokenKeyAPI: []byte(controllerToken), runtimePoolCapabilitySecretKeyAPI: operationSecret}}
 	taskUID := types.UID("task-uid")
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: taskUID}, Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{State: corev1alpha1.TaskExecutionStateSettling, PromptID: "prompt-1", RuntimeSessionUID: "session-1", RuntimeInstanceID: "runtime-1"}}}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, secret, task).Build()
@@ -127,7 +127,7 @@ func TestACPArtifactAuthorizationBrokerAuthenticatesBeforeBody(t *testing.T) {
 	}
 	controllerToken := strings.Repeat("t", 32)
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1", Labels: map[string]string{"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(poolUID)}},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1", Labels: map[string]string{runtimePoolAuthLabelAPI: runtimePoolAuthLabelValueAPI, runtimePoolUIDLabelAPI: string(poolUID)}},
 		Data:       map[string][]byte{runtimePoolControllerTokenKeyAPI: []byte(controllerToken), runtimePoolCapabilitySecretKeyAPI: []byte(strings.Repeat("s", 32))},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, secret).Build()
@@ -202,7 +202,7 @@ func TestACPArtifactAuthorizationBrokerRejectsStaleCachedRevocationState(t *test
 	authSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "orka-runtimes", Name: "pool-auth-e1", UID: "old-secret-uid",
-			Labels: map[string]string{"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(poolUID)},
+			Labels: map[string]string{runtimePoolAuthLabelAPI: runtimePoolAuthLabelValueAPI, runtimePoolUIDLabelAPI: string(poolUID)},
 		},
 		Data: map[string][]byte{
 			runtimePoolControllerTokenKeyAPI:  []byte(controllerToken),
@@ -269,7 +269,7 @@ func TestACPArtifactAuthorizationBrokerRejectsStaleCachedRevocationState(t *test
 				replacementPool.UID = "replacement-pool-uid"
 				replacementSecret := authSecret.DeepCopy()
 				replacementSecret.UID = "replacement-secret-uid"
-				replacementSecret.Labels["orka.ai/runtime-pool-uid"] = string(replacementPool.UID)
+				replacementSecret.Labels[runtimePoolUIDLabelAPI] = string(replacementPool.UID)
 				return []client.Object{replacementPool, replacementSecret, task.DeepCopy()}
 			},
 		},

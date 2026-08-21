@@ -1495,7 +1495,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplateAuthSecret(
 		}
 		var secrets corev1.SecretList
 		if err := r.sandboxReader().List(ctx, &secrets, client.InNamespace(namespace), client.MatchingLabels{
-			runtimePoolAuthLabel: "true",
+			runtimePoolAuthLabel: booleanTrueValue,
 			runtimePoolUIDLabel:  string(pool.UID),
 		}); err != nil {
 			return nil, fmt.Errorf("list deployed RuntimePool auth Secrets: %w", err)

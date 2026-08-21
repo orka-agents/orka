@@ -128,6 +128,9 @@ func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
 const (
 	runtimePoolControllerTokenKeyAPI   = "controller-token"
 	runtimePoolCapabilitySecretKeyAPI  = "capability-secret"
+	runtimePoolAuthLabelAPI            = "orka.ai/runtime-pool-auth"
+	runtimePoolAuthLabelValueAPI       = "true"
+	runtimePoolUIDLabelAPI             = "orka.ai/runtime-pool-uid"
 	runtimePoolCredentialEpochLabelAPI = "orka.ai/runtime-pool-controller-epoch"
 )
 
@@ -161,7 +164,7 @@ func (s *Server) resolveArtifactRuntimePoolByIdentity(ctx context.Context, poolN
 	}
 	var secrets corev1.SecretList
 	if err := reader.List(ctx, &secrets, client.InNamespace(pool.Status.ActiveInstance.PodNamespace), client.MatchingLabels{
-		"orka.ai/runtime-pool-auth": "true", "orka.ai/runtime-pool-uid": string(pool.UID),
+		runtimePoolAuthLabelAPI: runtimePoolAuthLabelValueAPI, runtimePoolUIDLabelAPI: string(pool.UID),
 	}); err != nil {
 		return nil, nil, err
 	}

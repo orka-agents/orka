@@ -47,6 +47,8 @@ const (
 	substrateTestActorDNSSuffix    = "actors.test.example"
 	substrateTestWorkerNamespace   = "ate-workers"
 	substrateTestWorkerPoolName    = "orka-workers"
+	substrateTestWorkerPodName     = "worker-0"
+	substrateTestWorkerPodUID      = "worker-0-uid"
 	substrateTestObjectNameField   = "name"
 	substrateTestObjectImageField  = "image"
 	substrateTestAttackerManagedBy = "attacker"
@@ -190,7 +192,7 @@ func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID strin
 	}
 	actor.Status = "STATUS_RUNNING"
 	actor.PodNamespace = substrateTestWorkerNamespace
-	actor.PodName = "worker-0"
+	actor.PodName = substrateTestWorkerPodName
 	actor.PodIP = "10.99.0.5"
 	if f.afterResume != nil {
 		f.afterResume(actor)
@@ -324,8 +326,8 @@ func runtimePoolSubstrateTestReconciler(
 	pool := runtimePoolSubstrateTestObject()
 	worker := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Namespace: substrateTestWorkerNamespace,
-		Name:      "worker-0",
-		UID:       "worker-0-uid",
+		Name:      substrateTestWorkerPodName,
+		UID:       substrateTestWorkerPodUID,
 		Labels:    map[string]string{substrateWorkerPoolLabel: substrateTestWorkerPoolName},
 	}}
 	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, substrateTestBaseTemplate(), worker)
@@ -389,6 +391,7 @@ func substrateTestDerivedTemplate(t *testing.T, r *RuntimePoolReconciler, pool *
 	return template
 }
 
+//nolint:gocyclo // The materialization, fencing, and network-policy invariants form one end-to-end scenario.
 func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
@@ -444,8 +447,8 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 		t.Fatalf("read exact worker Pod fence: %v", err)
 	}
 	if workerPodFence == nil || workerPodFence.ActorID != actorID ||
-		workerPodFence.Namespace != substrateTestWorkerNamespace || workerPodFence.Name != "worker-0" ||
-		workerPodFence.UID != "worker-0-uid" {
+		workerPodFence.Namespace != substrateTestWorkerNamespace || workerPodFence.Name != substrateTestWorkerPodName ||
+		workerPodFence.UID != substrateTestWorkerPodUID {
 		t.Fatalf("exact worker Pod fence = %#v, want actor %q Pod %s/worker-0 UID worker-0-uid", workerPodFence, actorID, substrateTestWorkerNamespace)
 	}
 	var policies networkingv1.NetworkPolicyList
@@ -905,7 +908,7 @@ func TestSubstrateRuntimePoolRefusesActorWithUnexpectedTemplateBeforeBootstrap(t
 		TemplateName:      "credential-capture",
 		Status:            "STATUS_RUNNING",
 		PodNamespace:      substrateTestWorkerNamespace,
-		PodName:           "worker-0",
+		PodName:           substrateTestWorkerPodName,
 	}
 	seedAttempts := 0
 	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
@@ -1065,7 +1068,7 @@ func assertSubstrateDerivedTemplate(
 	var authSecrets corev1.SecretList
 	if err := r.List(context.Background(), &authSecrets, client.InNamespace(pool.Namespace), client.MatchingLabels{
 		runtimePoolUIDLabel:  string(pool.UID),
-		runtimePoolAuthLabel: "true",
+		runtimePoolAuthLabel: booleanTrueValue,
 	}); err != nil || len(authSecrets.Items) != 1 {
 		t.Fatalf("list RuntimePool auth Secret = %d, %v, want one", len(authSecrets.Items), err)
 	}
@@ -1136,7 +1139,7 @@ func TestSubstrateRuntimePoolServesThroughRouterHost(t *testing.T) {
 		active.RuntimeInstanceID != substrateActorInstanceUID(actorID)+".actor-boot" {
 		t.Fatalf("ActiveInstance = %#v, want route-host address with actor instance identity", active)
 	}
-	if active.PodNamespace != pool.Namespace || active.PodName != "worker-0" {
+	if active.PodNamespace != pool.Namespace || active.PodName != substrateTestWorkerPodName {
 		t.Fatalf("ActiveInstance namespace/name = %s/%s, want RuntimePool credential namespace %s and internal worker name", active.PodNamespace, active.PodName, pool.Namespace)
 	}
 	if strings.Contains(active.PodUID, actorID) || strings.Contains(active.RuntimeInstanceID, actorID) {
@@ -1263,7 +1266,7 @@ func TestSubstrateRuntimePoolRecyclesActorOnCredentialSeedConflict(t *testing.T)
 }
 
 func TestSubstrateRuntimePoolRecyclesActorWhenPhysicalWorkerChanges(t *testing.T) {
-	for _, replacementName := range []string{"worker-0", "worker-1"} {
+	for _, replacementName := range []string{substrateTestWorkerPodName, "worker-1"} {
 		t.Run(replacementName, func(t *testing.T) {
 			supervisor := &fakeRuntimePoolSupervisorClient{}
 			control := newFakeSubstrateActorControl()
@@ -1283,7 +1286,7 @@ func TestSubstrateRuntimePoolRecyclesActorWhenPhysicalWorkerChanges(t *testing.T
 			}
 
 			worker := &corev1.Pod{}
-			key := types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}
+			key := types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}
 			if err := r.Get(context.Background(), key, worker); err != nil {
 				t.Fatalf("get original worker Pod: %v", err)
 			}
@@ -1338,8 +1341,8 @@ func TestSubstrateRuntimePoolRotatesConsumedBootstrapBeforeReplacementActor(t *t
 	if err != nil || oldBinding == nil {
 		t.Fatalf("bootstrap instance binding = %#v, error=%v, want the served Actor binding", oldBinding, err)
 	}
-	if oldBinding.AuthSecretUID != oldAuth.UID || oldBinding.WorkloadUID != types.UID("worker-0-uid") {
-		t.Fatalf("bootstrap instance binding = %#v, want auth Secret %q and worker Pod %q", oldBinding, oldAuth.UID, "worker-0-uid")
+	if oldBinding.AuthSecretUID != oldAuth.UID || oldBinding.WorkloadUID != substrateTestWorkerPodUID {
+		t.Fatalf("bootstrap instance binding = %#v, want auth Secret %q and worker Pod %q", oldBinding, oldAuth.UID, substrateTestWorkerPodUID)
 	}
 
 	for range 8 {
@@ -1499,7 +1502,7 @@ func TestSubstrateTeardownDestroysLabeledWorkerPodBeforeSettling(t *testing.T) {
 	if len(control.settled) != 0 {
 		t.Fatal("actor settled while its workload memory still existed")
 	}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("worker pod get after teardown = %v, want deleted", err)
 	}
 
@@ -1532,7 +1535,7 @@ func TestSubstrateTeardownMissingActorProvesExactWorkerPodAbsent(t *testing.T) {
 	if err != nil || gone {
 		t.Fatalf("teardown with missing Actor and live exact worker Pod = (%v, %v), want in-progress", gone, err)
 	}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("exact worker Pod after missing-Actor teardown = %v, want deleted", err)
 	}
 	if current.Annotations[substrateActorWorkloadAbsentAnnotation] != "" {
@@ -1580,7 +1583,7 @@ func TestSubstrateRuntimePoolMissingActorDoesNotReportStoppedBeforeWorkerAbsence
 	if got.Annotations[substrateActorRecyclingAnnotation] != actorID {
 		t.Fatalf("missing-Actor recycling annotation = %q, want %q", got.Annotations[substrateActorRecyclingAnnotation], actorID)
 	}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("exact worker Pod after missing-Actor scale-down = %v, want deleted", err)
 	}
 }
@@ -1595,7 +1598,7 @@ func TestSubstrateTeardownDestroysWorkerPodWhileActorSuspending(t *testing.T) {
 	current := runtimePoolTestGetPool(t, r, pool)
 
 	worker := &corev1.Pod{}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, worker); err != nil {
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}, worker); err != nil {
 		t.Fatalf("get worker pod: %v", err)
 	}
 
@@ -1653,7 +1656,7 @@ func TestSubstrateTeardownUsesFrozenWorkerPlacementAfterTemplateMutation(t *test
 	}
 
 	worker := &corev1.Pod{}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, worker); err != nil {
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}, worker); err != nil {
 		t.Fatalf("get original-placement worker pod: %v", err)
 	}
 	gone, err := r.teardownSubstrateActor(context.Background(), &current, control, actorID)
@@ -1725,7 +1728,7 @@ func TestSubstrateTeardownUsesExactPodFenceAfterLabelDrift(t *testing.T) {
 	current := runtimePoolTestGetPool(t, r, pool)
 
 	worker := &corev1.Pod{}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, worker); err != nil {
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}, worker); err != nil {
 		t.Fatalf("get exact worker Pod: %v", err)
 	}
 	worker.Labels = nil
@@ -1736,7 +1739,7 @@ func TestSubstrateTeardownUsesExactPodFenceAfterLabelDrift(t *testing.T) {
 	if err != nil || gone {
 		t.Fatalf("teardown after exact worker Pod label drift = (%v, %v), want deletion in progress", gone, err)
 	}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, &corev1.Pod{}); err != nil {
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}, &corev1.Pod{}); err != nil {
 		if !apierrors.IsNotFound(err) {
 			t.Fatalf("get exact worker Pod after teardown: %v", err)
 		}
@@ -1755,7 +1758,7 @@ func TestSubstrateTeardownPreservesSameNamePodReplacement(t *testing.T) {
 	delete(control.actors, actorID)
 
 	worker := &corev1.Pod{}
-	key := types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}
+	key := types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}
 	if err := r.Get(context.Background(), key, worker); err != nil {
 		t.Fatalf("get exact worker Pod: %v", err)
 	}
@@ -1794,7 +1797,7 @@ func TestSubstrateTeardownPromotesValidatedReplacementFenceBeforeDeletion(t *tes
 	current := runtimePoolTestGetPool(t, r, pool)
 
 	worker := &corev1.Pod{}
-	key := types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}
+	key := types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}
 	if err := r.Get(context.Background(), key, worker); err != nil {
 		t.Fatalf("get exact worker Pod: %v", err)
 	}
@@ -1924,7 +1927,7 @@ func TestSubstrateRuntimePoolRecyclesProviderSuspendedActor(t *testing.T) {
 	if len(control.deleted) != 0 {
 		t.Fatalf("deleted actors before workload absence proof = %v, want none", control.deleted)
 	}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("suspended actor worker Pod get = %v, want deleted before Actor", err)
 	}
 	got := runtimePoolTestGetPool(t, r, pool)
@@ -2319,7 +2322,7 @@ func TestSubstrateRuntimePoolFinalizerDrainsLiveActorBeforeTeardown(t *testing.T
 	if len(control.settled) != 0 || len(control.deleted) != 0 {
 		t.Fatalf("live Actor was torn down before finalizer drain quiescence: settled=%v deleted=%v", control.settled, control.deleted)
 	}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, &corev1.Pod{}); err != nil {
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: substrateTestWorkerPodName}, &corev1.Pod{}); err != nil {
 		t.Fatalf("worker Pod was removed before finalizer drain quiescence: %v", err)
 	}
 

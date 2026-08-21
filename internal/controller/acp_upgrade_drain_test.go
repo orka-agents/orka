@@ -815,7 +815,7 @@ func upgradeDrainRuntimePoolFixture(t *testing.T) (*corev1alpha1.RuntimePool, co
 			Namespace: pool.Namespace,
 			Name:      runtimePoolChildName(runtimePoolResourceName(pool.Namespace, pool.Name), "auth-e7"),
 			Labels: map[string]string{
-				runtimePoolAuthLabel:            "true",
+				runtimePoolAuthLabel:            booleanTrueValue,
 				runtimePoolUIDLabel:             string(pool.UID),
 				runtimePoolCredentialEpochLabel: "7",
 			},

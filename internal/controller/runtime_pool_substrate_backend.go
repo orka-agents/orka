@@ -74,6 +74,7 @@ const (
 	runtimePoolSubstrateControllerEgressSuffix = "substrate-controller-egress"
 	substrateObjectSpecField                   = "spec"
 	substrateObjectLabelsField                 = "labels"
+	substrateActorTemplateAPIVersion           = "v1alpha1"
 
 	// substrateActorBootedAnnotation records the exact actor ID whose workload
 	// this pool booted from scratch. It makes boot idempotent across controller
@@ -143,7 +144,7 @@ type substrateRuntimePoolWorkerPodFenceRecord struct {
 
 // +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
 
-var substrateActorTemplateGVK = schema.GroupVersionKind{Group: "ate.dev", Version: "v1alpha1", Kind: "ActorTemplate"}
+var substrateActorTemplateGVK = schema.GroupVersionKind{Group: "ate.dev", Version: substrateActorTemplateAPIVersion, Kind: "ActorTemplate"}
 
 func runtimePoolSubstrateTemplateName(base string) string {
 	return runtimePoolChildName(base, runtimePoolSubstrateTemplateSuffix)

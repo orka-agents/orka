@@ -392,7 +392,7 @@ func TestWorkspaceRuntimePoolMaterializesProviderWorkload(t *testing.T) {
 	credentialSecrets := 0
 	for i := range secrets.Items {
 		secret := &secrets.Items[i]
-		if secret.Labels[runtimePoolAuthLabel] != "true" && secret.Labels[runtimePoolProviderCredentialLabel] != "true" {
+		if secret.Labels[runtimePoolAuthLabel] != booleanTrueValue && secret.Labels[runtimePoolProviderCredentialLabel] != booleanTrueValue {
 			continue
 		}
 		credentialSecrets++
@@ -550,7 +550,7 @@ func TestWorkspaceRuntimePoolDiscardsUnboundPrivateAuthSecretAfterBindingPatchFa
 	}
 	var secrets corev1.SecretList
 	if err := r.List(context.Background(), &secrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
+		runtimePoolAuthLabel: booleanTrueValue, runtimePoolUIDLabel: string(pool.UID),
 	}); err != nil {
 		t.Fatalf("list unbound private auth Secrets: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestWorkspaceRuntimePoolDiscardsUnboundPrivateAuthSecretAfterBindingPatchFa
 	}
 	secrets = corev1.SecretList{}
 	if err := r.List(context.Background(), &secrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
+		runtimePoolAuthLabel: booleanTrueValue, runtimePoolUIDLabel: string(pool.UID),
 	}); err != nil {
 		t.Fatalf("list recovered private auth Secrets: %v", err)
 	}
