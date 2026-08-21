@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -35,6 +36,31 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxextcontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 )
+
+type failPrivateAuthFinalBindingPatchClient struct {
+	client.Client
+	failed bool
+}
+
+func (c *failPrivateAuthFinalBindingPatchClient) Patch(
+	ctx context.Context,
+	object client.Object,
+	patch client.Patch,
+	options ...client.PatchOption,
+) error {
+	if pool, ok := object.(*corev1alpha1.RuntimePool); ok && !c.failed {
+		for key, value := range pool.Annotations {
+			value = strings.TrimSpace(value)
+			if strings.HasPrefix(key, runtimePoolPrivateAuthBindingPrefix) &&
+				value != "" &&
+				!strings.HasPrefix(value, runtimePoolPrivateAuthPendingValuePrefix) {
+				c.failed = true
+				return errors.New("transient private auth binding patch failure")
+			}
+		}
+	}
+	return c.Client.Patch(ctx, object, patch, options...)
+}
 
 func runtimePoolWorkspaceTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -312,6 +338,66 @@ func TestWorkspaceRuntimePoolRejectsUnboundPrivateAuthSecret(t *testing.T) {
 	}
 	if metav1.IsControlledBy(current, pool) {
 		t.Fatal("controller adopted the forged private auth Secret")
+	}
+}
+
+func TestWorkspaceRuntimePoolRecoversReservedPrivateAuthSecretAfterBindingPatchFailure(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	r := runtimePoolTestReconciler(t, scheme, nil, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	cfg, err := r.runtimePoolConfig(&current)
+	if err != nil {
+		t.Fatalf("runtimePoolConfig() error = %v", err)
+	}
+	failingClient := &failPrivateAuthFinalBindingPatchClient{Client: r.Client}
+	r.Client = failingClient
+
+	if _, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(context.Background(), &current, cfg, "7"); err == nil ||
+		!strings.Contains(err.Error(), "transient private auth binding patch failure") {
+		t.Fatalf("initial private auth Secret ensure error = %v, want transient binding failure", err)
+	}
+	if !failingClient.failed {
+		t.Fatal("final private auth Secret binding patch was not intercepted")
+	}
+
+	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch)
+	persisted := runtimePoolTestGetPool(t, r, pool)
+	pendingName, pending, err := parseRuntimePoolPrivateSecretPendingBinding(persisted.Annotations[bindingKey])
+	if err != nil || !pending {
+		t.Fatalf("persisted private auth binding = %q, pending=%v, error=%v", persisted.Annotations[bindingKey], pending, err)
+	}
+	var secrets corev1.SecretList
+	if err := r.List(context.Background(), &secrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
+		runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
+	}); err != nil {
+		t.Fatalf("list reserved private auth Secrets: %v", err)
+	}
+	matches := runtimePoolAuthSecretsForEpoch(secrets.Items, cfg.controllerEpoch)
+	if len(matches) != 1 || matches[0].Name != pendingName {
+		t.Fatalf("reserved private auth Secrets = %#v, want exactly %q", matches, pendingName)
+	}
+
+	recovered, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(context.Background(), &persisted, cfg, "7")
+	if err != nil {
+		t.Fatalf("recover reserved private auth Secret: %v", err)
+	}
+	if recovered.Name != pendingName || recovered.UID == "" {
+		t.Fatalf("recovered private auth Secret = %s/%s, want %q with UID", recovered.Name, recovered.UID, pendingName)
+	}
+	boundPool := runtimePoolTestGetPool(t, r, pool)
+	boundName, boundUID, err := parseRuntimePoolPrivateSecretBinding(boundPool.Annotations[bindingKey])
+	if err != nil || boundName != recovered.Name || boundUID != recovered.UID {
+		t.Fatalf("final private auth binding = %q, parsed %s/%s, error=%v", boundPool.Annotations[bindingKey], boundName, boundUID, err)
+	}
+	secrets = corev1.SecretList{}
+	if err := r.List(context.Background(), &secrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
+		runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
+	}); err != nil {
+		t.Fatalf("list recovered private auth Secrets: %v", err)
+	}
+	if matches := runtimePoolAuthSecretsForEpoch(secrets.Items, cfg.controllerEpoch); len(matches) != 1 {
+		t.Fatalf("private auth Secret count after recovery = %d, want one", len(matches))
 	}
 }
 

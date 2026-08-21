@@ -79,6 +79,7 @@ const (
 	runtimePoolTemplateRevisionAnnotation        = "orka.ai/runtime-template-revision"
 	runtimePoolPIDsAnnotation                    = "orka.ai/runtime-pids-limit"
 	runtimePoolPrivateAuthBindingPrefix          = "orka.ai/private-auth-secret-e"
+	runtimePoolPrivateAuthPendingValuePrefix     = "pending:"
 
 	runtimePoolControllerTokenKey  = "controller-token"
 	runtimePoolCapabilitySecretKey = "capability-secret"
@@ -1512,8 +1513,38 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 		reader = r.Client
 	}
 	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch)
+	authKeys := map[string]int{
+		runtimePoolControllerTokenKey:  32,
+		runtimePoolCapabilitySecretKey: 32,
+		runtimePoolBootstrapNonceKey:   32,
+	}
+	authLabels := map[string]string{
+		runtimePoolAuthLabel:            "true",
+		runtimePoolCredentialEpochLabel: epoch,
+	}
 	binding := strings.TrimSpace(pool.Annotations[bindingKey])
 	if binding != "" {
+		pendingName, pending, err := parseRuntimePoolPrivateSecretPendingBinding(binding)
+		if err != nil {
+			return nil, err
+		}
+		if pending {
+			secret := &corev1.Secret{}
+			err = reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: pendingName}, secret)
+			if apierrors.IsNotFound(err) {
+				secret, err = r.createRuntimePoolSecret(ctx, pool, cfg, pendingName, authKeys, authLabels)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("resume reserved private RuntimePool auth Secret creation: %w", err)
+			}
+			if !runtimePoolPrivateAuthSecretMatchesPool(secret, pool, cfg) {
+				return nil, fmt.Errorf("reserved private RuntimePool auth Secret does not carry the exact immutable RuntimePool ownership identity")
+			}
+			if err := r.bindPrivateRuntimePoolAuthSecret(ctx, pool, bindingKey, secret); err != nil {
+				return nil, err
+			}
+			return secret, nil
+		}
 		name, uid, err := parseRuntimePoolPrivateSecretBinding(binding)
 		if err != nil {
 			return nil, err
@@ -1525,8 +1556,7 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 		if secret.UID != uid {
 			return nil, fmt.Errorf("bound private RuntimePool auth Secret UID changed")
 		}
-		if !runtimePoolPrivateAuthSecretOwnedByPool(secret, pool, cfg) ||
-			len(runtimePoolAuthSecretsForEpoch([]corev1.Secret{*secret}, cfg.controllerEpoch)) != 1 {
+		if !runtimePoolPrivateAuthSecretMatchesPool(secret, pool, cfg) {
 			return nil, fmt.Errorf("bound private RuntimePool auth Secret does not carry the exact immutable RuntimePool ownership identity")
 		}
 		return secret, nil
@@ -1548,14 +1578,10 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 		return nil, fmt.Errorf("generate private RuntimePool auth Secret name: %w", err)
 	}
 	name := runtimePoolChildName(cfg.baseName, "auth-e"+epoch+"-"+suffix)
-	secret, err := r.createRuntimePoolSecret(ctx, pool, cfg, name, map[string]int{
-		runtimePoolControllerTokenKey:  32,
-		runtimePoolCapabilitySecretKey: 32,
-		runtimePoolBootstrapNonceKey:   32,
-	}, map[string]string{
-		runtimePoolAuthLabel:            "true",
-		runtimePoolCredentialEpochLabel: epoch,
-	})
+	if err := r.reservePrivateRuntimePoolAuthSecret(ctx, pool, bindingKey, name); err != nil {
+		return nil, err
+	}
+	secret, err := r.createRuntimePoolSecret(ctx, pool, cfg, name, authKeys, authLabels)
 	if err != nil {
 		return nil, err
 	}
@@ -1567,6 +1593,22 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 
 func runtimePoolPrivateAuthSecretBindingAnnotation(epoch int64) string {
 	return runtimePoolPrivateAuthBindingPrefix + strconv.FormatInt(epoch, 10)
+}
+
+func runtimePoolPrivateAuthSecretPendingBinding(name string) string {
+	return runtimePoolPrivateAuthPendingValuePrefix + strings.TrimSpace(name)
+}
+
+func parseRuntimePoolPrivateSecretPendingBinding(binding string) (string, bool, error) {
+	binding = strings.TrimSpace(binding)
+	if !strings.HasPrefix(binding, runtimePoolPrivateAuthPendingValuePrefix) {
+		return "", false, nil
+	}
+	name := strings.TrimSpace(strings.TrimPrefix(binding, runtimePoolPrivateAuthPendingValuePrefix))
+	if len(validation.IsDNS1123Subdomain(name)) != 0 {
+		return "", true, fmt.Errorf("pending private RuntimePool auth Secret binding is invalid")
+	}
+	return name, true, nil
 }
 
 func parseRuntimePoolPrivateSecretBinding(binding string) (string, types.UID, error) {
@@ -1588,6 +1630,39 @@ func runtimePoolPrivateAuthSecretOwnedByPool(
 	return secret.Namespace != pool.Namespace || metav1.IsControlledBy(secret, pool)
 }
 
+func runtimePoolPrivateAuthSecretMatchesPool(
+	secret *corev1.Secret,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) bool {
+	return runtimePoolPrivateAuthSecretOwnedByPool(secret, pool, cfg) &&
+		len(runtimePoolAuthSecretsForEpoch([]corev1.Secret{*secret}, cfg.controllerEpoch)) == 1
+}
+
+func (r *RuntimePoolReconciler) reservePrivateRuntimePoolAuthSecret(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	bindingKey, name string,
+) error {
+	pending := runtimePoolPrivateAuthSecretPendingBinding(name)
+	current := strings.TrimSpace(pool.Annotations[bindingKey])
+	if current != "" && current != pending {
+		return fmt.Errorf("private RuntimePool auth Secret binding changed before creation")
+	}
+	if current == pending {
+		return nil
+	}
+	base := pool.DeepCopy()
+	if pool.Annotations == nil {
+		pool.Annotations = map[string]string{}
+	}
+	pool.Annotations[bindingKey] = pending
+	if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("reserve private RuntimePool auth Secret binding: %w", err)
+	}
+	return nil
+}
+
 func (r *RuntimePoolReconciler) bindPrivateRuntimePoolAuthSecret(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -1598,8 +1673,9 @@ func (r *RuntimePoolReconciler) bindPrivateRuntimePoolAuthSecret(
 		return fmt.Errorf("created private RuntimePool auth Secret has no immutable UID")
 	}
 	binding := secret.Name + "/" + string(secret.UID)
+	pending := runtimePoolPrivateAuthSecretPendingBinding(secret.Name)
 	current := strings.TrimSpace(pool.Annotations[bindingKey])
-	if current != "" && current != binding {
+	if current != pending && current != binding {
 		return fmt.Errorf("private RuntimePool auth Secret binding changed")
 	}
 	if current == binding {
