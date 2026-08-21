@@ -24,14 +24,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/harness"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t *testing.T) {
 	const namespace = "default"
 	const upstreamOKBody = `{"ok":true}`
 	var lastTxnToken atomic.Value
+	var upstreamCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
 		lastTxnToken.Store(r.Header.Get("Txn-Token"))
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(upstreamOKBody))
@@ -114,6 +119,30 @@ func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t 
 			t.Fatalf("enforcement-off Txn-Token header = %q, want task authority", got)
 		}
 	})
+	t.Run("enforcement off refuses controller service account despite matching task scope", func(t *testing.T) {
+		t.Setenv(workerenv.ContextTokenOutboundScope, "reports.read")
+		t.Setenv(workerenv.ServiceAccountToken, "controller-service-account-token")
+		exchanger := &recordingContextTokenExchanger{}
+		executor := newExecutor(false, newTask([]string{"reports.read"}, "", ""))
+		executor.TransactionExchange = &workerexecutor.TransactionExchangeConfig{
+			TTS: contexttoken.TTSConfig{
+				Endpoint:    acpMCPTestTTSEndpoint,
+				TokenSource: contexttoken.TTSTokenSourceServiceAccount,
+			},
+			Exchanger: exchanger,
+		}
+		callsBefore := upstreamCalls.Load()
+		if _, err := executor.ExecuteHarnessV1BrokeredTool(ctx, namespace, tool.DeepCopy(), request); err == nil ||
+			!strings.Contains(err.Error(), "cannot use a service account subject token") {
+			t.Fatalf("controller service account authority error = %v", err)
+		}
+		if calls := exchanger.calls.Load(); calls != 0 {
+			t.Fatalf("controller service account subject reached TTS exchanger %d times: %#v", calls, exchanger.request)
+		}
+		if calls := upstreamCalls.Load(); calls != callsBefore {
+			t.Fatalf("controller service account authority reached Tool %d times, want %d", calls, callsBefore)
+		}
+	})
 	t.Run("missing authenticated task fails closed under enforcement", func(t *testing.T) {
 		executor := newExecutor(true, authorizedTask.DeepCopy())
 		if _, err := executor.ExecuteHarnessV1BrokeredTool(context.Background(), namespace, tool.DeepCopy(), request); err == nil ||
@@ -124,7 +153,7 @@ func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t 
 	t.Run("authenticated namespace mismatch fails closed under enforcement", func(t *testing.T) {
 		executor := newExecutor(true, authorizedTask.DeepCopy())
 		mismatched := withHarnessV1AuthenticatedTask(context.Background(), harnessV1AuthenticatedTask{
-			Name: authenticated.Name, Namespace: "other-namespace", UID: authenticated.UID,
+			Name: authenticated.Name, Namespace: acpMCPTestOtherNamespace, UID: authenticated.UID,
 		})
 		if _, err := executor.ExecuteHarnessV1BrokeredTool(mismatched, namespace, tool.DeepCopy(), request); err == nil ||
 			!strings.Contains(err.Error(), "task authority is unavailable") {

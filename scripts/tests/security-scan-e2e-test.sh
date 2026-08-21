@@ -49,6 +49,37 @@ grep -F 'repoURL: https://github.com/sozercan/vekil' "${manifest_capture}" >/dev
 grep -F 'owner: sozercan' "${manifest_capture}" >/dev/null
 grep -F 'repository: vekil' "${manifest_capture}" >/dev/null
 
+apply_authority_resources
+grep -F 'kind: Tool' "${manifest_capture}" >/dev/null
+grep -F 'name: authority-probe' "${manifest_capture}" >/dev/null
+grep -F 'brokeredToolClass: read' "${manifest_capture}" >/dev/null
+grep -F 'url: http://security-scan-authority-observer.orka-system.svc.cluster.local:8080/tool' "${manifest_capture}" >/dev/null
+grep -F 'defaultAllowedTools:' "${manifest_capture}" >/dev/null
+grep -F 'defaultAllowBash: false' "${manifest_capture}" >/dev/null
+
+expected_subject_digest="$(sha256_value "${authority_subject_token}")"
+expected_transaction_digest="$(sha256_value "${authority_exchanged_token}")"
+authority_observer_stats() {
+  jq -n \
+    --arg subject "${expected_subject_digest}" \
+    --arg transaction "${expected_transaction_digest}" \
+    '{ttsCalls:1,toolCalls:1,subjectTokenDigest:$subject,transactionTokenDigest:$transaction}'
+}
+assert_positive_authority_stats
+
+authority_observer_stats() {
+  jq -n '{ttsCalls:0,toolCalls:0,subjectTokenDigest:"",transactionTokenDigest:""}'
+}
+assert_negative_authority_stats
+
+authority_observer_stats() {
+  jq -n '{ttsCalls:1,toolCalls:0,subjectTokenDigest:"sha256:unexpected",transactionTokenDigest:""}'
+}
+if (assert_negative_authority_stats >/dev/null 2>&1); then
+  echo "service-account authority gate accepted a TTS call" >&2
+  exit 1
+fi
+
 repository_phase="Error"
 kubectl() {
   if [[ "$*" == *"get repositoryscan ${scan_name} -o jsonpath={.status.phase}"* ]]; then
@@ -210,6 +241,8 @@ fi
 
 # shellcheck disable=SC2016 # The harness source must contain this literal variable reference.
 grep -Fq 'ACP_CODEX_RUNTIME_IMG="${fake_runtime_ref}"' "${security_script}"
+grep -Fq 'patch_controller_images serviceAccount' "${security_script}"
+grep -Fq '.ttsCalls == 0 and .toolCalls == 0' "${security_script}"
 if grep -Fq 'tasks do not support arbitrary task env' "${security_script}"; then
   echo "legacy negative-only compatibility gate remains" >&2
   exit 1

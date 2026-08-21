@@ -82,12 +82,12 @@ jobs:
           kubectl version --client=true
           jq --version
 
-      - name: Verify security scan harness-v2 assertions
+      - name: Verify security scan and ACP authority assertions
         run: |
           bash -n scripts/security-scan-e2e.sh scripts/tests/security-scan-e2e-test.sh
           bash scripts/tests/security-scan-e2e-test.sh
 
-      - name: Run security scan e2e
+      - name: Run security scan and ACP authority e2e
         env:
           ORKA_SECURITY_SCAN_DIAGNOSTICS_DIR: ${{ runner.temp }}/security-scan-e2e-diagnostics
         run: bash scripts/security-scan-e2e.sh

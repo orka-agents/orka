@@ -41,6 +41,16 @@ read -r target_owner target_repository < <(parse_github_repository_identity "${t
 agent_name="${ORKA_SECURITY_SCAN_AGENT:-security-scan-e2e-agent}"
 scan_name="${ORKA_SECURITY_SCAN_NAME:-security-goof}"
 bad_scan_name="${ORKA_SECURITY_BAD_SCAN_NAME:-security-goof-malformed-result}"
+authority_observer_name="${ORKA_SECURITY_SCAN_AUTHORITY_OBSERVER_NAME:-security-scan-authority-observer}"
+authority_agent_name="${ORKA_SECURITY_SCAN_AUTHORITY_AGENT:-security-scan-authority-agent}"
+authority_tool_name="${ORKA_SECURITY_SCAN_AUTHORITY_TOOL:-authority-probe}"
+authority_positive_task="${ORKA_SECURITY_SCAN_AUTHORITY_POSITIVE_TASK:-authority-incoming}"
+authority_negative_task="${ORKA_SECURITY_SCAN_AUTHORITY_NEGATIVE_TASK:-authority-service-account}"
+authority_positive_secret="${ORKA_SECURITY_SCAN_AUTHORITY_POSITIVE_SECRET:-authority-incoming-token}"
+authority_negative_secret="${ORKA_SECURITY_SCAN_AUTHORITY_NEGATIVE_SECRET:-authority-service-account-token}"
+authority_scope="${ORKA_SECURITY_SCAN_AUTHORITY_SCOPE:-authority.execute}"
+authority_subject_token="authority-subject-${e2e_run_id}"
+authority_exchanged_token="authority-exchanged-token"
 api_identity_name="${ORKA_SECURITY_SCAN_API_IDENTITY:-security-scan-e2e}"
 api_local_port="${ORKA_SECURITY_SCAN_API_LOCAL_PORT:-18086}"
 keep_cluster="${KEEP_CLUSTER:-0}"
@@ -601,15 +611,87 @@ DOCKERFILE
   run docker build -t "${fake_runtime_image}" -f "${dockerfile}" .
 }
 
-patch_controller_images() {
-  local rollout_id
-  rollout_id="${e2e_run_id}"
+apply_authority_observer() {
+  local image="$1"
+  log "Deploying deterministic TTS and Tool authority observer ${authority_observer_name}"
+  kubectl apply -f - <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${authority_observer_name}
+  namespace: ${test_namespace}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ${authority_observer_name}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ${authority_observer_name}
+    spec:
+      containers:
+        - name: observer
+          image: ${image}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/bin/node"]
+          env:
+            - name: ORKA_SECURITY_SCAN_AUTHORITY_OBSERVER
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /stats
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 1
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 250m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${authority_observer_name}
+  namespace: ${test_namespace}
+spec:
+  selector:
+    app.kubernetes.io/name: ${authority_observer_name}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+YAML
+  run kubectl -n "${test_namespace}" rollout status deployment/"${authority_observer_name}" --timeout=2m
+}
 
-  log "Configuring Orka controller worker images"
+patch_controller_images() {
+  local token_source="${1:-incoming}"
+  local rollout_id="${e2e_run_id}-${token_source}"
+  local tts_endpoint="http://${authority_observer_name}.${test_namespace}.svc.cluster.local:8080/token"
+
+  log "Configuring Orka controller worker images and ${token_source} brokered TTS authority"
   kubectl -n "${orka_namespace}" get deployment "${orka_controller_deployment}" -o json |
     jq \
       --arg generalImage "${general_worker_image}" \
-      --arg rolloutID "${rollout_id}" '
+      --arg rolloutID "${rollout_id}" \
+      --arg outboundScope "${authority_scope}" \
+      --arg tokenSource "${token_source}" \
+      --arg ttsEndpoint "${tts_endpoint}" '
       def upsert_arg($name; $value):
         . as $args
         | if any($args[]?; startswith($name + "=")) then
@@ -618,13 +700,18 @@ patch_controller_images() {
             $args + [$name + "=" + $value]
           end;
       .spec.template.metadata.annotations = ((.spec.template.metadata.annotations // {}) + {
-        "orka.ai/security-scan-e2e-run": $rolloutID
+        "orka.ai/security-scan-e2e-run": $rolloutID,
+        "orka.ai/security-scan-e2e-tts-source": $tokenSource
       })
       |
       .spec.template.spec.containers |= map(
         if .name == "manager" then
           .imagePullPolicy = "IfNotPresent"
-          | .args = ((.args // []) | upsert_arg("--general-worker-image"; $generalImage))
+          | .args = ((.args // [])
+            | upsert_arg("--general-worker-image"; $generalImage)
+            | upsert_arg("--context-token-tts-endpoint"; $ttsEndpoint)
+            | upsert_arg("--context-token-tts-token-source"; $tokenSource)
+            | upsert_arg("--context-token-outbound-scope"; $outboundScope))
         else . end
       )
     ' | kubectl apply -f -
@@ -642,8 +729,240 @@ reset_e2e_resources() {
   run kubectl -n "${test_namespace}" delete task \
     -l "orka.ai/security-target=${bad_scan_name}" \
     --ignore-not-found=true --wait=true --timeout=2m
-  run kubectl -n "${test_namespace}" delete agent "${agent_name}" \
+  run kubectl -n "${test_namespace}" delete task "${authority_positive_task}" "${authority_negative_task}" \
     --ignore-not-found=true --wait=true --timeout=2m
+  run kubectl -n "${test_namespace}" delete secret "${authority_positive_secret}" "${authority_negative_secret}" \
+    --ignore-not-found=true --wait=true --timeout=2m
+  run kubectl -n "${test_namespace}" delete agent "${agent_name}" "${authority_agent_name}" \
+    --ignore-not-found=true --wait=true --timeout=2m
+  run kubectl -n "${test_namespace}" delete tool "${authority_tool_name}" \
+    --ignore-not-found=true --wait=true --timeout=2m
+}
+
+apply_authority_resources() {
+  local observer_url="http://${authority_observer_name}.${test_namespace}.svc.cluster.local:8080/tool"
+  log "Creating deterministic ACP v2 custom Tool authority fixtures"
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: ${authority_tool_name}
+  namespace: ${test_namespace}
+spec:
+  description: Deterministic ACP v2 transaction-authority probe
+  brokeredToolClass: read
+  parameters:
+    type: object
+    properties:
+      probe:
+        type: string
+    required: ["probe"]
+    additionalProperties: false
+  http:
+    url: ${observer_url}
+    method: POST
+    timeout: 15s
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: ${authority_agent_name}
+  namespace: ${test_namespace}
+spec:
+  runtime:
+    contractVersion: orka.harness.v2
+    type: codex
+    defaultMaxTurns: 1
+    defaultAllowedTools:
+      - ${authority_tool_name}
+    defaultAllowBash: false
+  model:
+    name: gpt-5.4
+YAML
+}
+
+sha256_value() {
+  local output
+  output="$(printf '%s' "$1" | openssl dgst -sha256)"
+  printf 'sha256:%s\n' "${output##*= }"
+}
+
+authority_observer_proxy_path() {
+  printf '/api/v1/namespaces/%s/services/http:%s:8080/proxy' "${test_namespace}" "${authority_observer_name}"
+}
+
+authority_observer_stats() {
+  kubectl get --raw="$(authority_observer_proxy_path)/stats"
+}
+
+reset_authority_observer() {
+  printf '{}\n' | kubectl create --raw="$(authority_observer_proxy_path)/reset" -f - >/dev/null
+  authority_observer_stats | jq -e '
+    .ttsCalls == 0 and .toolCalls == 0 and
+    .subjectTokenDigest == "" and .transactionTokenDigest == ""
+  ' >/dev/null || die "authority observer did not reset to zero"
+}
+
+create_authority_task() {
+  local task_name="$1"
+  local secret_name="$2"
+  local transaction_id="$3"
+  local task_uid=""
+  local deadline=$((SECONDS + 60))
+
+  log "Creating paused ACP v2 authority Task/${task_name}"
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: ${task_name}
+  namespace: ${test_namespace}
+  labels:
+    orka.ai/security-scan-authority-e2e: "true"
+  annotations:
+    orka.ai/transaction-token-pending: "true"
+spec:
+  type: agent
+  agentRef:
+    name: ${authority_agent_name}
+  prompt: orka-authority-probe
+  workspace:
+    intent: read
+    gitRepo: ${target_repo}
+    branch: ${target_branch}
+    ref: ${target_ref}
+  agentRuntime:
+    maxTurns: 1
+    allowedTools:
+      - ${authority_tool_name}
+    allowBash: false
+  timeout: 8m
+  transaction:
+    profile: transaction-token
+    id: ${transaction_id}
+    scope: ${authority_scope}
+    scopes:
+      - ${authority_scope}
+YAML
+
+  while ((SECONDS < deadline)); do
+    task_uid="$(kubectl -n "${test_namespace}" get task "${task_name}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+    [[ -n "${task_uid}" ]] && break
+    sleep 1
+  done
+  [[ -n "${task_uid}" ]] || die "Task/${task_name} did not receive a UID while paused"
+
+  kubectl apply -f - <<YAML
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${secret_name}
+  namespace: ${test_namespace}
+  ownerReferences:
+    - apiVersion: core.orka.ai/v1alpha1
+      kind: Task
+      name: ${task_name}
+      uid: ${task_uid}
+type: Opaque
+stringData:
+  token: ${authority_subject_token}
+YAML
+
+  local patch
+  patch="$(jq -nc --arg secret "${secret_name}" '{metadata:{annotations:{"orka.ai/transaction-token-secret":$secret,"orka.ai/transaction-token-pending":null}}}')"
+  run kubectl -n "${test_namespace}" patch task "${task_name}" --type=merge -p "${patch}"
+}
+
+wait_authority_task_phase() {
+  local task_name="$1"
+  local expected="$2"
+  local timeout_seconds
+  timeout_seconds="$(duration_to_seconds "${wait_timeout}")"
+  local deadline=$((SECONDS + timeout_seconds))
+  local phase=""
+
+  log "Waiting for authority Task/${task_name} phase ${expected}"
+  while ((SECONDS < deadline)); do
+    phase="$(kubectl -n "${test_namespace}" get task "${task_name}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [[ "${phase}" == "${expected}" ]]; then
+      return 0
+    fi
+    case "${phase}" in
+      Succeeded|Failed|Cancelled)
+        die "authority Task/${task_name} entered phase ${phase} while waiting for ${expected}"
+        ;;
+    esac
+    sleep 3
+  done
+  die "authority Task/${task_name} did not reach phase ${expected}; current phase ${phase:-<empty>}"
+}
+
+assert_positive_authority_task() {
+  local task_name="$1"
+  kubectl -n "${test_namespace}" get task "${task_name}" -o json | jq -e '
+    .status.phase == "Succeeded" and
+    .status.agentExecutionBinding.contractVersion == "orka.harness.v2" and
+    .status.agentExecutionBinding.backend == "runtime-pool" and
+    .status.execution.state == "Succeeded" and
+    (.status.execution.runtimeSessionUID | length) > 0 and
+    (.status.execution.promptID | length) > 0 and
+    .status.resultRef.available == true
+  ' >/dev/null || die "incoming-token authority Task did not complete through ACP v2"
+}
+
+assert_negative_authority_task() {
+  local task_name="$1"
+  kubectl -n "${test_namespace}" get task "${task_name}" -o json | jq -e '
+    .status.phase == "Failed" and
+    .status.agentExecutionBinding.contractVersion == "orka.harness.v2" and
+    .status.agentExecutionBinding.backend == "runtime-pool" and
+    .status.execution.state == "Failed" and
+    (.status.execution.runtimeSessionUID | length) > 0 and
+    (.status.execution.promptID | length) > 0
+  ' >/dev/null || die "service-account authority Task did not fail after entering ACP v2 prompt execution"
+}
+
+assert_positive_authority_stats() {
+  local stats expected_subject expected_transaction
+  stats="$(authority_observer_stats)" || die "could not read authority observer stats"
+  expected_subject="$(sha256_value "${authority_subject_token}")"
+  expected_transaction="$(sha256_value "${authority_exchanged_token}")"
+  if ! jq -e --arg subject "${expected_subject}" --arg transaction "${expected_transaction}" '
+    .ttsCalls == 1 and .toolCalls == 1 and
+    .subjectTokenDigest == $subject and .transactionTokenDigest == $transaction
+  ' <<<"${stats}" >/dev/null; then
+    printf '%s\n' "${stats}" >"${work_dir}/authority-positive-stats.json"
+    die "incoming-token authority path did not produce one digest-verified TTS and Tool call"
+  fi
+}
+
+assert_negative_authority_stats() {
+  local stats
+  stats="$(authority_observer_stats)" || die "could not read authority observer stats"
+  if ! jq -e '
+    .ttsCalls == 0 and .toolCalls == 0 and
+    .subjectTokenDigest == "" and .transactionTokenDigest == ""
+  ' <<<"${stats}" >/dev/null; then
+    printf '%s\n' "${stats}" >"${work_dir}/authority-negative-stats.json"
+    die "service-account authority path reached the TTS or Tool endpoint"
+  fi
+}
+
+run_acp_authority_gate() {
+  apply_authority_resources
+  create_authority_task "${authority_positive_task}" "${authority_positive_secret}" "authority-incoming"
+  wait_authority_task_phase "${authority_positive_task}" "Succeeded"
+  assert_positive_authority_task "${authority_positive_task}"
+  assert_positive_authority_stats
+
+  reset_authority_observer
+  patch_controller_images serviceAccount
+
+  create_authority_task "${authority_negative_task}" "${authority_negative_secret}" "authority-service-account"
+  wait_authority_task_phase "${authority_negative_task}" "Failed"
+  assert_negative_authority_task "${authority_negative_task}"
+  assert_negative_authority_stats
+  log "ACP v2 custom Tool transaction-authority gate passed"
 }
 
 apply_agent() {
@@ -988,11 +1307,13 @@ main() {
     ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
   run kubectl wait --for=condition=Established crd/repositoryscans.core.orka.ai --timeout=60s
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
-  patch_controller_images
+  apply_authority_observer "${fake_runtime_ref}"
+  patch_controller_images incoming
+  reset_e2e_resources
+  run_acp_authority_gate
+
   create_api_identity
   start_api_forward
-
-  reset_e2e_resources
   apply_agent
 
   apply_repository_scan "${scan_name}"
@@ -1004,7 +1325,7 @@ main() {
   wait_repo_phase "${bad_scan_name}" "Error"
   log "Verifying malformed terminal results fail closed after successful ACP execution"
   assert_malformed_result_gate
-  log "SecurityScan harness-v2 execution, ingestion, idempotency, and malformed-result gates passed"
+  log "SecurityScan and ACP v2 custom Tool authority gates passed"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
