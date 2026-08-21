@@ -125,6 +125,11 @@ reason projected to `Task.status.executionWorkspace`.
   credential bootstrap endpoint.
 - The controller also needs Pod `get`/`list`/`delete` in the provider worker
   namespace for the credential-safe teardown of live actors.
+- The referenced WorkerPool must be dedicated to Orka ACP runtimes. The
+  controller needs NetworkPolicy CRUD in its namespace and installs an
+  egress-only default deny plus DNS, controller API, and provider-proxy
+  allowlists selecting `ate.dev/worker-pool` before any Actor receives
+  credentials. Those policies remain until the Actor is gone.
 - The Substrate control plane and router share the cluster with Orka;
   cross-cluster topologies are unsupported and fail closed.
 - The Actor's egress must reach the Orka controller API and the provider

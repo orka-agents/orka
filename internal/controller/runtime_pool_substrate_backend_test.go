@@ -20,6 +20,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -253,6 +254,49 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	}
 	if got.Annotations[substrateActorBootedAnnotation] != actorID {
 		t.Fatalf("booted annotation = %q, want %q", got.Annotations[substrateActorBootedAnnotation], actorID)
+	}
+	var policies networkingv1.NetworkPolicyList
+	if err := r.List(context.Background(), &policies, client.InNamespace("ate-workers"), client.MatchingLabels{
+		runtimePoolKeyLabel: runtimePoolKey(pool.Namespace, pool.Name),
+	}); err != nil {
+		t.Fatalf("list Substrate RuntimePool NetworkPolicies: %v", err)
+	}
+	if len(policies.Items) != 4 {
+		t.Fatalf("Substrate RuntimePool NetworkPolicy count = %d, want 4", len(policies.Items))
+	}
+	for i := range policies.Items {
+		policy := policies.Items[i]
+		if policy.Spec.PodSelector.MatchLabels[substrateWorkerPoolLabel] != "orka-workers" {
+			t.Fatalf("NetworkPolicy %q selector = %#v, want exact WorkerPool label", policy.Name, policy.Spec.PodSelector)
+		}
+		if len(policy.Spec.PolicyTypes) != 1 || policy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress || len(policy.Spec.Ingress) != 0 {
+			t.Fatalf("NetworkPolicy %q types/ingress = %v/%v, want egress-only confinement", policy.Name, policy.Spec.PolicyTypes, policy.Spec.Ingress)
+		}
+	}
+}
+
+func TestSubstrateRuntimePoolRejectsForeignWorkerEgressPolicy(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	base := runtimePoolResourceName(pool.Namespace, pool.Name)
+	foreign := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+		Name: runtimePoolChildName(base, runtimePoolSubstrateDenyEgressSuffix), Namespace: "ate-workers",
+	}}
+	if err := r.Create(context.Background(), foreign); err != nil {
+		t.Fatalf("create foreign NetworkPolicy: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	if len(control.created) != 0 || len(control.resumed) != 0 {
+		t.Fatalf("foreign egress policy allowed actor startup: created=%v resumed=%v", control.created, control.resumed)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "NetworkPolicy") ||
+		!strings.Contains(got.Status.Message, "ownership identity") {
+		t.Fatalf("status = %s/%q, want fail-closed foreign NetworkPolicy rejection", got.Status.Lifecycle, got.Status.Message)
 	}
 }
 

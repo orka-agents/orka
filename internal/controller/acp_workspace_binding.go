@@ -126,6 +126,9 @@ func resolveACPWorkspaceBinding(
 	sessionKey := ""
 	switch reuse {
 	case corev1alpha1.WorkspaceReusePolicyNone:
+		if task.Spec.SessionRef != nil && strings.TrimSpace(task.Spec.SessionRef.Name) != "" {
+			return nil, fmt.Errorf("execution workspace reusePolicy none cannot be used with spec.sessionRef; use reusePolicy session")
+		}
 		sessionKey = "task:" + string(task.UID)
 	case corev1alpha1.WorkspaceReusePolicySession:
 		// Sessions and RuntimePools are both namespace-local, so the session

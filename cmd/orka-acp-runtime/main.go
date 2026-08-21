@@ -27,7 +27,7 @@ func main() {
 		// for the controller to seed the pool credentials.
 		logger.Info("awaiting controller credential bootstrap")
 		bootstrapCtx, cancelBootstrap := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-		seeded, err := supervisor.AwaitCredentialBootstrap(bootstrapCtx, supervisor.DefaultCredentialBootstrapTimeout)
+		seeded, err := supervisor.AwaitCredentialBootstrap(bootstrapCtx)
 		cancelBootstrap()
 		if err != nil {
 			logger.Error("credential bootstrap failed", "error", err)

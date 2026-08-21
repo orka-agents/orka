@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -198,7 +199,7 @@ func TestAwaitCredentialBootstrapSeedsAndReleasesListener(t *testing.T) {
 	}
 	result := make(chan awaited, 1)
 	go func() {
-		request, err := AwaitCredentialBootstrap(context.Background(), time.Minute)
+		request, err := AwaitCredentialBootstrap(context.Background())
 		result <- awaited{request: request, err: err}
 	}()
 
@@ -253,7 +254,7 @@ func TestAwaitCredentialBootstrapSeedsAndReleasesListener(t *testing.T) {
 	}
 }
 
-func TestAwaitCredentialBootstrapTimesOut(t *testing.T) {
+func TestAwaitCredentialBootstrapStopsWhenContextIsCancelled(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
@@ -264,7 +265,9 @@ func TestAwaitCredentialBootstrapTimesOut(t *testing.T) {
 	t.Setenv(EnvCredentialBootstrapNonce, "pool-nonce")
 	t.Setenv(EnvListenAddress, address)
 
-	if _, err := AwaitCredentialBootstrap(context.Background(), 50*time.Millisecond); err == nil {
-		t.Fatal("expected timeout error when nothing seeds credentials")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := AwaitCredentialBootstrap(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AwaitCredentialBootstrap error = %v, want context cancellation", err)
 	}
 }

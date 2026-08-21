@@ -14,16 +14,20 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
 func runtimePoolWorkspaceTestScheme(t *testing.T) *runtime.Scheme {
@@ -243,6 +247,83 @@ func TestWorkspaceRuntimePoolColdStartTimeout(t *testing.T) {
 	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
 		condition == nil || condition.Reason != runtimePoolRolloutReasonTimedOut {
 		t.Fatalf("cold-start status/condition = %s/%#v, want Degraded/RolloutTimedOut", status.Lifecycle, condition)
+	}
+}
+
+func TestWorkspaceRuntimePoolPreservesExplicitClaimFailure(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("workspace claim was not materialized")
+	}
+	claim.Status.Conditions = []metav1.Condition{{
+		Type:    string(sandboxv1beta1.SandboxConditionReady),
+		Status:  metav1.ConditionFalse,
+		Reason:  "ProvisioningFailed",
+		Message: "provider capacity exhausted",
+	}}
+	if err := r.Update(context.Background(), claim); err != nil {
+		t.Fatalf("update failed SandboxClaim: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		condition == nil || condition.Status != metav1.ConditionFalse ||
+		condition.Reason != corev1alpha1.RuntimePoolReasonRolloutFailed ||
+		!strings.Contains(status.Message, "provider capacity exhausted") {
+		t.Fatalf("claim failure status/condition = %s/%s %q/%#v, want Degraded/Closed explicit RolloutFailed", status.Lifecycle, status.AdmissionState, status.Message, condition)
+	}
+}
+
+func TestWorkspaceRuntimePoolFinalizationPreservesIsolationUntilClaimGone(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	pool.Finalizers = []string{runtimePoolFinalizer}
+	deletedAt := metav1.NewTime(runtimePoolTestNow)
+	pool.DeletionTimestamp = &deletedAt
+	base := runtimePoolResourceName(pool.Namespace, pool.Name)
+	labels := map[string]string{runtimePoolKeyLabel: runtimePoolKey(pool.Namespace, pool.Name)}
+	claim := &sandboxextv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:       runtimePoolSandboxClaimName(base),
+		Namespace:  pool.Namespace,
+		Finalizers: []string{"test.orka.ai/hold-provider-cleanup"},
+	}}
+	policy := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+		Name: runtimePoolChildName(base, "deny-all"), Namespace: pool.Namespace, Labels: labels,
+	}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: "pool-auth", Namespace: pool.Namespace, Labels: labels,
+	}}
+	r := runtimePoolTestReconciler(t, scheme, nil, pool, claim, policy, secret)
+
+	result := runtimePoolReconcile(t, r, pool)
+	if result.RequeueAfter == 0 {
+		t.Fatalf("finalization result = %#v, want requeue while provider claim remains", result)
+	}
+	currentClaim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), currentClaim); err != nil {
+		t.Fatalf("get terminating SandboxClaim: %v", err)
+	}
+	if currentClaim.DeletionTimestamp.IsZero() {
+		t.Fatal("provider SandboxClaim deletion was not initiated")
+	}
+	for _, object := range []client.Object{policy, secret} {
+		check := object.DeepCopyObject().(client.Object)
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(object), check); err != nil {
+			t.Fatalf("isolation child %T was removed before provider teardown completed: %v", object, err)
+		}
+	}
+	currentPool := runtimePoolTestGetPool(t, r, pool)
+	if !controllerutil.ContainsFinalizer(&currentPool, runtimePoolFinalizer) {
+		t.Fatal("RuntimePool finalizer was removed before provider teardown completed")
 	}
 }
 

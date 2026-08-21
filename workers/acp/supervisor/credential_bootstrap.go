@@ -39,10 +39,6 @@ const (
 	EnvCredentialBootstrapNonce = "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"
 
 	credentialBootstrapMaxBodyBytes = 64 << 10
-	// DefaultCredentialBootstrapTimeout bounds how long an unseeded supervisor
-	// waits before exiting; provider golden-snapshot builds checkpoint the
-	// waiting process well before this.
-	DefaultCredentialBootstrapTimeout = 30 * time.Minute
 )
 
 // CredentialBootstrapRequest is the one-time seeding payload.
@@ -137,13 +133,10 @@ func (s *credentialBootstrapState) handler() http.Handler {
 // shuts the phase server down and returns the seeded values. The caller
 // exports them as the read-once bootstrap variables and proceeds with the
 // normal configuration load.
-func AwaitCredentialBootstrap(ctx context.Context, timeout time.Duration) (CredentialBootstrapRequest, error) {
+func AwaitCredentialBootstrap(ctx context.Context) (CredentialBootstrapRequest, error) {
 	nonce := strings.TrimSpace(os.Getenv(EnvCredentialBootstrapNonce))
 	if nonce == "" {
 		return CredentialBootstrapRequest{}, errors.New("credential bootstrap nonce is not configured")
-	}
-	if timeout <= 0 {
-		timeout = DefaultCredentialBootstrapTimeout
 	}
 	state := &credentialBootstrapState{nonce: nonce, received: make(chan struct{})}
 	listenAddress := strings.TrimSpace(os.Getenv(EnvListenAddress))
@@ -161,15 +154,13 @@ func AwaitCredentialBootstrap(ctx context.Context, timeout time.Duration) (Crede
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- server.ListenAndServe() }()
 
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	select {
 	case <-state.received:
 	case err := <-serveResult:
 		return CredentialBootstrapRequest{}, fmt.Errorf("credential bootstrap server exited before seeding: %w", err)
-	case <-waitCtx.Done():
+	case <-ctx.Done():
 		_ = server.Close()
-		return CredentialBootstrapRequest{}, fmt.Errorf("credential bootstrap was not seeded: %w", waitCtx.Err())
+		return CredentialBootstrapRequest{}, fmt.Errorf("credential bootstrap was not seeded: %w", ctx.Err())
 	}
 	// Release the listener so the fully configured supervisor can bind the
 	// same address; in-flight bootstrap responses have already been written.

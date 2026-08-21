@@ -2721,10 +2721,6 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	remaining, err := r.deleteRuntimePoolChildren(ctx, cfg)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
 	if pool.Spec.ExecutionWorkspace != nil {
 		var workspaceRemaining bool
 		var workspaceErr error
@@ -2736,7 +2732,13 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 		if workspaceErr != nil {
 			return ctrl.Result{}, workspaceErr
 		}
-		remaining = remaining || workspaceRemaining
+		if workspaceRemaining {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+	}
+	remaining, err := r.deleteRuntimePoolChildren(ctx, cfg)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 	if remaining {
 		return ctrl.Result{RequeueAfter: time.Second}, nil

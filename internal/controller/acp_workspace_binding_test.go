@@ -116,6 +116,15 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			wantErr: "requires spec.sessionRef.name",
 		},
 		{
+			name: "task-scoped workspace with sessionRef fails closed",
+			task: func() *corev1alpha1.Task {
+				task := workspaceBindingTestTask(nil)
+				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
+				return task
+			}(),
+			wantErr: "reusePolicy none cannot be used with spec.sessionRef",
+		},
+		{
 			name: "classRef fails closed",
 			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 				ws.Enabled = false

@@ -42,6 +42,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,6 +51,7 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -58,8 +61,12 @@ import (
 )
 
 const (
-	runtimePoolSubstrateTemplateSuffix = "actor-template"
-	runtimePoolSubstrateActorSuffix    = "actor"
+	runtimePoolSubstrateTemplateSuffix         = "actor-template"
+	runtimePoolSubstrateActorSuffix            = "actor"
+	runtimePoolSubstrateDenyEgressSuffix       = "substrate-deny-egress"
+	runtimePoolSubstrateDNSEgressSuffix        = "substrate-dns-egress"
+	runtimePoolSubstrateProviderEgressSuffix   = "substrate-provider-egress"
+	runtimePoolSubstrateControllerEgressSuffix = "substrate-controller-egress"
 
 	// substrateActorBootedAnnotation records the exact actor ID whose workload
 	// this pool booted from scratch. It makes boot idempotent across controller
@@ -258,7 +265,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		replicas = 1
 	}
 	status := r.baseRuntimePoolStatus(pool, replicas)
-	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionPodSecurityReady, metav1.ConditionTrue, "ProviderIsolated", "provider-owned gVisor isolation hosts the runtime workload")
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionPodSecurityReady, metav1.ConditionUnknown, "ProviderIsolationPending", "provider-owned gVisor isolation is awaiting controller-enforced egress confinement")
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionQuotaReady, metav1.ConditionTrue, "ResourcesAdmitted", "provider worker capacity admitted the runtime workload")
 
 	if strings.TrimSpace(pool.Annotations[substrateActorRecyclingAnnotation]) != "" {
@@ -336,7 +343,19 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
-	if derivedTemplate != nil && (templateIntegrityErr != nil || templateRevision != desired.revision) {
+	rolloutPending := derivedTemplate != nil && (templateIntegrityErr != nil || templateRevision != desired.revision)
+	policyTemplate := desired.object
+	if actor != nil {
+		policyTemplate = derivedTemplate
+	}
+	if actor != nil || (pool.Spec.DesiredReplicas > 0 && !rolloutPending) {
+		if err := r.ensureSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, policyTemplate); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionPodSecurityReady, metav1.ConditionTrue, "ProviderIsolated", "provider-owned gVisor isolation and controller-enforced default-deny egress host the runtime workload")
+	}
+
+	if rolloutPending {
 		return r.reconcileSubstrateRuntimePoolRollout(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, templateNamespace, desired, status)
 	}
 
@@ -576,6 +595,33 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolRollout(
 
 	if actor == nil {
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		if err := r.ensureSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, desired.object); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+		oldNamespace, oldWorkerPool, err := substrateRuntimePoolWorkerPlacementFromTemplate(derivedTemplate)
+		if err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+		newNamespace, newWorkerPool, err := substrateRuntimePoolWorkerPlacementFromTemplate(desired.object)
+		if err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+		if oldNamespace != newNamespace {
+			remaining, deleteErr := r.deleteSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, derivedTemplate)
+			if deleteErr != nil {
+				return ctrl.Result{}, deleteErr
+			}
+			if remaining {
+				status.ActiveInstance = nil
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+				status.Message = "old provider worker egress policies are terminating before the runtime template changes"
+				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+			}
+		} else if oldWorkerPool != newWorkerPool {
+			// Same-namespace policies use deterministic names; ensuring the new
+			// placement above atomically retargeted their Pod selector.
+			status.Message = "provider worker egress policies were retargeted to the new WorkerPool"
+		}
 		if err := r.updateSubstrateActorTemplate(ctx, derivedTemplate, desired.object); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
@@ -955,6 +1001,13 @@ func (r *RuntimePoolReconciler) substrateRuntimePoolWorkerPlacement(
 	if template == nil {
 		return "", "", fmt.Errorf("RuntimePool derived substrate ActorTemplate is unavailable during actor teardown")
 	}
+	return substrateRuntimePoolWorkerPlacementFromTemplate(template)
+}
+
+func substrateRuntimePoolWorkerPlacementFromTemplate(template *unstructured.Unstructured) (string, string, error) {
+	if template == nil {
+		return "", "", fmt.Errorf("RuntimePool substrate ActorTemplate is required for WorkerPool placement")
+	}
 	workerPool, found, err := unstructured.NestedString(template.Object, "spec", "workerPoolRef", "name")
 	if err != nil || !found || strings.TrimSpace(workerPool) == "" {
 		return "", "", fmt.Errorf("RuntimePool derived substrate ActorTemplate has no workerPoolRef.name")
@@ -971,6 +1024,168 @@ func (r *RuntimePoolReconciler) substrateRuntimePoolWorkerPlacement(
 		return "", "", fmt.Errorf("RuntimePool derived substrate ActorTemplate has no WorkerPool namespace")
 	}
 	return workerNamespace, strings.TrimSpace(workerPool), nil
+}
+
+func (r *RuntimePoolReconciler) ensureSubstrateRuntimePoolNetworkPolicies(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	template *unstructured.Unstructured,
+) error {
+	workerNamespace, workerPool, err := substrateRuntimePoolWorkerPlacementFromTemplate(template)
+	if err != nil {
+		return err
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	for _, desired := range r.substrateRuntimePoolNetworkPolicies(cfg, workerNamespace, workerPool) {
+		current := &networkingv1.NetworkPolicy{}
+		key := types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}
+		if err := reader.Get(ctx, key, current); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return fmt.Errorf("read Substrate RuntimePool NetworkPolicy %q: %w", desired.Name, err)
+			}
+			policy := desired.DeepCopy()
+			policy.Labels = mergeStringMap(policy.Labels, cfg.labels)
+			if err := r.setRuntimePoolControllerReference(pool, policy); err != nil {
+				return err
+			}
+			if err := r.Create(ctx, policy); err != nil {
+				return fmt.Errorf("create Substrate RuntimePool NetworkPolicy %q: %w", desired.Name, err)
+			}
+			continue
+		}
+		if !substrateRuntimePoolNetworkPolicyOwnedByPool(current, pool, cfg) {
+			return fmt.Errorf("same-name Substrate RuntimePool NetworkPolicy %q does not carry the exact RuntimePool ownership identity", desired.Name)
+		}
+		if apiequality.Semantic.DeepEqual(current.Spec, desired.Spec) {
+			continue
+		}
+		base := current.DeepCopy()
+		current.Labels = mergeStringMap(current.Labels, cfg.labels)
+		current.Spec = desired.Spec
+		if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
+			return fmt.Errorf("update Substrate RuntimePool NetworkPolicy %q: %w", desired.Name, err)
+		}
+	}
+	return nil
+}
+
+func (r *RuntimePoolReconciler) substrateRuntimePoolNetworkPolicies(
+	cfg runtimePoolConfig,
+	workerNamespace, workerPool string,
+) []networkingv1.NetworkPolicy {
+	selector := metav1.LabelSelector{MatchLabels: map[string]string{substrateWorkerPoolLabel: workerPool}}
+	controllerNamespace := controllerNamespaceForRuntimePool(r.ControllerNamespace)
+	return []networkingv1.NetworkPolicy{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDenyEgressSuffix), Namespace: workerNamespace},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: selector,
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDNSEgressSuffix), Namespace: workerNamespace},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: selector,
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+				Egress: []networkingv1.NetworkPolicyEgressRule{{
+					To: []networkingv1.NetworkPolicyPeer{{
+						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: metav1.NamespaceSystem}},
+						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"k8s-app": "kube-dns"}},
+					}},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: new(corev1.ProtocolUDP), Port: new(intstr.FromInt32(53))},
+						{Protocol: new(corev1.ProtocolTCP), Port: new(intstr.FromInt32(53))},
+					},
+				}},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: runtimePoolChildName(cfg.baseName, runtimePoolSubstrateProviderEgressSuffix), Namespace: workerNamespace},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: selector,
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+				Egress: []networkingv1.NetworkPolicyEgressRule{{
+					To: []networkingv1.NetworkPolicyPeer{{
+						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: cfg.providerProxy.namespace}},
+						PodSelector:       &metav1.LabelSelector{MatchLabels: cloneStringMap(cfg.providerProxy.podLabels)},
+					}},
+					Ports: []networkingv1.NetworkPolicyPort{{Protocol: new(corev1.ProtocolTCP), Port: new(intstr.FromInt32(cfg.providerProxy.port))}},
+				}},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: runtimePoolChildName(cfg.baseName, runtimePoolSubstrateControllerEgressSuffix), Namespace: workerNamespace},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: selector,
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+				Egress: []networkingv1.NetworkPolicyEgressRule{{
+					To: []networkingv1.NetworkPolicyPeer{{
+						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: controllerNamespace}},
+						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolNetworkRoleLabel: "controller"}},
+					}},
+					Ports: []networkingv1.NetworkPolicyPort{{Protocol: new(corev1.ProtocolTCP), Port: new(intstr.FromInt32(r.ControllerAPIPort))}},
+				}},
+			},
+		},
+	}
+}
+
+func substrateRuntimePoolNetworkPolicyOwnedByPool(
+	policy *networkingv1.NetworkPolicy,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) bool {
+	if policy == nil || pool == nil {
+		return false
+	}
+	for key, value := range cfg.labels {
+		if value == "" || policy.Labels[key] != value {
+			return false
+		}
+	}
+	return policy.Namespace != pool.Namespace || metav1.IsControlledBy(policy, pool)
+}
+
+func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolNetworkPolicies(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	template *unstructured.Unstructured,
+) (bool, error) {
+	workerNamespace, workerPool, err := substrateRuntimePoolWorkerPlacementFromTemplate(template)
+	if err != nil {
+		return false, err
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	remaining := false
+	for _, desired := range r.substrateRuntimePoolNetworkPolicies(cfg, workerNamespace, workerPool) {
+		current := &networkingv1.NetworkPolicy{}
+		key := types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}
+		if err := reader.Get(ctx, key, current); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return false, fmt.Errorf("read Substrate RuntimePool NetworkPolicy %q for cleanup: %w", desired.Name, err)
+		}
+		if !substrateRuntimePoolNetworkPolicyOwnedByPool(current, pool, cfg) {
+			return false, fmt.Errorf("refusing to delete foreign Substrate RuntimePool NetworkPolicy %q", desired.Name)
+		}
+		if current.DeletionTimestamp.IsZero() {
+			if err := r.Delete(ctx, current, deleteCurrentObjectPreconditions(current)...); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("delete Substrate RuntimePool NetworkPolicy %q: %w", desired.Name, err)
+			}
+		}
+		remaining = true
+	}
+	return remaining, nil
 }
 
 func (r *RuntimePoolReconciler) setSubstrateActorBootedAnnotation(
@@ -1345,11 +1560,30 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 		// is gone.
 		return true, nil
 	}
-	template := &unstructured.Unstructured{}
-	template.SetGroupVersionKind(substrateActorTemplateGVK)
-	template.SetNamespace(templateNamespace)
-	template.SetName(runtimePoolSubstrateTemplateName(cfg.baseName))
-	if err := r.Delete(ctx, template); err == nil {
+	template, err := r.getSubstrateActorTemplate(ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName))
+	if err != nil {
+		return false, err
+	}
+	placementTemplate := template
+	if placementTemplate == nil {
+		placementTemplate, err = r.getSubstrateActorTemplate(ctx, templateNamespace, substrateSpec.BaseTemplateName)
+		if err != nil {
+			return false, err
+		}
+	}
+	if placementTemplate != nil {
+		policiesRemaining, policyErr := r.deleteSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, placementTemplate)
+		if policyErr != nil {
+			return false, policyErr
+		}
+		if policiesRemaining {
+			return true, nil
+		}
+	}
+	if template == nil {
+		return false, nil
+	}
+	if err := r.Delete(ctx, template, deleteCurrentObjectPreconditions(template)...); err == nil {
 		// Deletion is asynchronous. Keep the finalizer until an uncached
 		// follow-up observes NotFound so a terminating template cannot outlive
 		// the RuntimePool ownership record.

@@ -883,6 +883,12 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["delete", "get", "list"]
+# The ACP runtime shares the provider worker Pod network namespace. Orka owns
+# egress-only default-deny and DNS/controller/provider-proxy allowlists that
+# select this dedicated WorkerPool before any Actor receives credentials.
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

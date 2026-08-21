@@ -150,6 +150,12 @@ Agent Sandbox backends, with these Substrate-specific mappings:
 - Credential-safe teardown additionally requires Pod `get`/`list`/`delete` in
   the provider worker namespace, so the controller can destroy a live
   workload's memory before settling and deleting its actor.
+- The referenced WorkerPool is dedicated to Orka ACP runtimes. Before an
+  Actor is created or credential-seeded, the controller materializes an
+  egress-only default deny plus DNS, controller API, and provider-proxy
+  allowlists selecting the upstream `ate.dev/worker-pool` label. The
+  controller therefore also needs NetworkPolicy CRUD in the worker namespace;
+  finalization retains those policies until the Actor is proven gone.
 - The Substrate control plane and router are reachable from the Orka
   controller; the actor's egress must reach the Orka controller API and the
   provider proxy (Vekil). Cross-cluster topologies are not supported: the

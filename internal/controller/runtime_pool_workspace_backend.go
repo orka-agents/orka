@@ -133,7 +133,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	status := r.baseRuntimePoolStatus(pool, countRuntimePoolPods(pods))
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionPodSecurityReady, metav1.ConditionTrue, "PodSecurityConfigured", "runtime Pod security controls are configured")
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionQuotaReady, metav1.ConditionTrue, "ResourcesAdmitted", "runtime resources were admitted")
-	r.applySandboxClaimFailureConditions(pool, claim, &status)
+	if r.applySandboxClaimFailureConditions(pool, claim, &status) {
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
 
 	if claim != nil && !runtimePoolSandboxChildOwnedByPool(claim, pool, cfg) {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
@@ -839,9 +841,9 @@ func (r *RuntimePoolReconciler) applySandboxClaimFailureConditions(
 	pool *corev1alpha1.RuntimePool,
 	claim *sandboxextv1beta1.SandboxClaim,
 	status *corev1alpha1.RuntimePoolStatus,
-) {
+) bool {
 	if claim == nil || status == nil {
-		return
+		return false
 	}
 	for i := range claim.Status.Conditions {
 		condition := claim.Status.Conditions[i]
@@ -854,8 +856,15 @@ func (r *RuntimePoolReconciler) applySandboxClaimFailureConditions(
 			continue
 		}
 		message := sanitizeRuntimePoolMessage("provider workspace claim is not ready: " + condition.Message)
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = message
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, message)
 		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, message)
+		return true
 	}
+	return false
 }
 
 // pruneStaleWorkspaceRuntimePoolSecrets removes epoch-scoped credential Secrets
