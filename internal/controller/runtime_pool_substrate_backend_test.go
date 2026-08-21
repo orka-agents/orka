@@ -803,14 +803,26 @@ func TestSubstrateRuntimePoolFinalizerDeletesActorTemplateAndSecrets(t *testing.
 	if substrateTestDerivedTemplate(t, r, pool) == nil {
 		t.Fatal("derived template was not materialized")
 	}
+	// Disabling new Substrate dispatch must not strand existing provider
+	// resources or the RuntimePool cleanup finalizer.
+	r.SubstrateEnabled = false
 	current := runtimePoolTestGetPool(t, r, pool)
 	if err := r.Delete(context.Background(), &current); err != nil {
 		t.Fatalf("delete pool: %v", err)
 	}
-	for range 5 {
+	templateDeletionObservedBeforePoolGone := false
+	for range 6 {
 		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}})
 		if err != nil {
 			t.Fatalf("finalize reconcile: %v", err)
+		}
+		if substrateTestDerivedTemplate(t, r, pool) == nil {
+			var deletingPool corev1alpha1.RuntimePool
+			if getErr := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &deletingPool); getErr == nil {
+				templateDeletionObservedBeforePoolGone = true
+			} else if !apierrors.IsNotFound(getErr) {
+				t.Fatalf("get deleting pool after template deletion: %v", getErr)
+			}
 		}
 		if result.RequeueAfter == 0 {
 			break
@@ -821,6 +833,9 @@ func TestSubstrateRuntimePoolFinalizerDeletesActorTemplateAndSecrets(t *testing.
 	}
 	if substrateTestDerivedTemplate(t, r, pool) != nil {
 		t.Fatal("derived template survived finalization")
+	}
+	if !templateDeletionObservedBeforePoolGone {
+		t.Fatal("RuntimePool finalizer did not wait for ActorTemplate deletion to be observed")
 	}
 	var secrets corev1.SecretList
 	if err := r.List(context.Background(), &secrets, nil...); err == nil {

@@ -1623,10 +1623,16 @@ func runtimePoolManagedCredentialSecret(secret *corev1.Secret, cfg runtimePoolCo
 	}
 	if suffix := runtimePoolAuthSuffixPattern.FindString(secret.Name); suffix != "" &&
 		runtimePoolChildName(cfg.baseName, suffix) == secret.Name {
-		return secret.Labels[runtimePoolAuthLabel] == scheduledRunLabelValue &&
-			len(secret.Data) == 3 && len(secret.Data[runtimePoolControllerTokenKey]) > 0 &&
-			len(secret.Data[runtimePoolCapabilitySecretKey]) > 0 &&
-			len(secret.Data[runtimePoolBootstrapNonceKey]) > 0
+		if secret.Labels[runtimePoolAuthLabel] != scheduledRunLabelValue ||
+			len(secret.Data[runtimePoolControllerTokenKey]) == 0 ||
+			len(secret.Data[runtimePoolCapabilitySecretKey]) == 0 {
+			return false
+		}
+		// Pre-workspace RuntimePool auth Secrets had exactly the two control
+		// credentials. Keep recognizing that historical shape so epoch rotation
+		// can prune it after no live workload references it.
+		return len(secret.Data) == 2 ||
+			(len(secret.Data) == 3 && len(secret.Data[runtimePoolBootstrapNonceKey]) > 0)
 	}
 	if suffix := runtimePoolProviderSuffixPattern.FindString(secret.Name); suffix != "" &&
 		runtimePoolChildName(cfg.baseName, suffix) == secret.Name {

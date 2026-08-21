@@ -513,6 +513,16 @@ func TestRuntimePoolReconcilerPrunesStaleEpochSecretsAfterAuthenticatedRollout(t
 	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: oldAuthName}, oldAuth); err != nil {
 		t.Fatalf("get old epoch auth Secret: %v", err)
 	}
+	legacyAuth := oldAuth.DeepCopy()
+	legacyAuth.ObjectMeta = metav1.ObjectMeta{
+		Name:      runtimePoolAuthSuffixPattern.ReplaceAllString(oldAuthName, "auth-e6"),
+		Namespace: pool.Namespace,
+		Labels:    cloneStringMap(oldAuth.Labels),
+	}
+	delete(legacyAuth.Data, runtimePoolBootstrapNonceKey)
+	if err := r.Create(context.Background(), legacyAuth); err != nil {
+		t.Fatalf("create stale legacy two-key auth Secret: %v", err)
+	}
 	unrelated := oldAuth.DeepCopy()
 	unrelated.ObjectMeta = metav1.ObjectMeta{Name: "user-managed-auth", Namespace: pool.Namespace, Labels: cloneStringMap(oldAuth.Labels)}
 	if err := r.Create(context.Background(), unrelated); err != nil {
@@ -645,6 +655,9 @@ func TestRuntimePoolReconcilerPrunesStaleEpochSecretsAfterAuthenticatedRollout(t
 		secret := &secrets.Items[i]
 		if secret.Name == unrelated.Name {
 			continue
+		}
+		if secret.Name == legacyAuth.Name {
+			t.Fatalf("stale legacy two-key RuntimePool auth Secret survived epoch rotation: %s", secret.Name)
 		}
 		if !strings.Contains(secret.Name, "-e8") {
 			t.Fatalf("stale RuntimePool Secret survived epoch rotation: %s", secret.Name)

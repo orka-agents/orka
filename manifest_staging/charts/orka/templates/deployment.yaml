@@ -323,6 +323,9 @@ spec:
             {{- if gt (int .Values.controller.maxTasksPerNamespace) 0 }}
             - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
             {{- end }}
+            {{- if or .Values.controller.agentSandbox.enabled .Values.controller.substrate.enabled }}
+            - --acp-workspace-dispatch-enabled=true
+            {{- end }}
             {{- with .Values.controller.executionWorkspace }}
             - --execution-workspace-default-provider={{ .defaultProvider | default "agent-sandbox" }}
             {{- end }}

@@ -32,5 +32,23 @@ func TestStaticChartValidatesAgentSandboxControllerMode(t *testing.T) {
 		if !strings.Contains(output, "--agent-sandbox-enabled=true") {
 			t.Fatalf("harness-v2 render is missing the agent sandbox flag:\n%s", output)
 		}
+		if !strings.Contains(output, "--acp-workspace-dispatch-enabled=true") {
+			t.Fatalf("harness-v2 render is missing the workspace dispatch flag:\n%s", output)
+		}
 	})
+}
+
+func TestStaticChartEnablesWorkspaceDispatchForSubstrate(t *testing.T) {
+	output, err := helmTemplateStaticChart(t,
+		"--set", "controller.substrate.enabled=true",
+		"--show-only", "templates/deployment.yaml",
+	)
+	if err != nil {
+		t.Fatalf("helm template rejected harness-v2 Substrate: %v\n%s", err, output)
+	}
+	for _, want := range []string{"--acp-workspace-dispatch-enabled=true", "--substrate-enabled=true"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("harness-v2 render is missing %q:\n%s", want, output)
+		}
+	}
 }

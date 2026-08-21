@@ -145,6 +145,13 @@ func (r *RuntimePoolReconciler) substrateActorControl() (workspace.SubstrateRunt
 	if !r.SubstrateEnabled {
 		return nil, fmt.Errorf("substrate provider is disabled; Substrate-backed workspace RuntimePools fail closed")
 	}
+	return r.substrateActorControlForCleanup()
+}
+
+// substrateActorControlForCleanup remains available after the provider flag is
+// disabled so existing Actors cannot strand RuntimePool finalizers. The enable
+// gate controls new workload reconciliation, not mandatory provider cleanup.
+func (r *RuntimePoolReconciler) substrateActorControlForCleanup() (workspace.SubstrateRuntimeActorControl, error) {
 	factory := r.SubstrateActorControlFactory
 	if factory == nil {
 		factory = defaultSubstrateRuntimeActorControlFactory
@@ -1257,7 +1264,7 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 	}
 	templateNamespace := substrateSpec.BaseTemplateNamespace
 	actorID := runtimePoolSubstrateActorID(cfg.baseName)
-	control, err := r.substrateActorControl()
+	control, err := r.substrateActorControlForCleanup()
 	if err != nil {
 		return false, err
 	}
@@ -1273,18 +1280,20 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 		// is gone.
 		return true, nil
 	}
-	remaining := !gone
-
 	template := &unstructured.Unstructured{}
 	template.SetGroupVersionKind(substrateActorTemplateGVK)
 	template.SetNamespace(templateNamespace)
 	template.SetName(runtimePoolSubstrateTemplateName(cfg.baseName))
-	if err := r.Delete(ctx, template); err != nil &&
-		!apierrors.IsNotFound(err) && !apimeta.IsNoMatchError(err) && !k8sRuntimeIsMissingKindError(err) {
+	if err := r.Delete(ctx, template); err == nil {
+		// Deletion is asynchronous. Keep the finalizer until an uncached
+		// follow-up observes NotFound so a terminating template cannot outlive
+		// the RuntimePool ownership record.
+		return true, nil
+	} else if !apierrors.IsNotFound(err) && !apimeta.IsNoMatchError(err) && !k8sRuntimeIsMissingKindError(err) {
 		return false, fmt.Errorf("delete RuntimePool substrate actor template: %w", err)
 	}
 
 	// Pool Secrets live in the runtime namespace and are swept by the generic
 	// pool child cleanup; nothing secret ever exists in the template namespace.
-	return remaining, nil
+	return false, nil
 }
