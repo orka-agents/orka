@@ -67,7 +67,7 @@ func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t 
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	authenticated := harnessV1AuthenticatedTask{Name: "task", Namespace: namespace, UID: "task-uid"}
+	authenticated := harnessV1AuthenticatedTask{Name: acpDispatcherTestTaskName, Namespace: namespace, UID: acpDispatcherTaskUID}
 	newTask := func(scopes []string, constraint string, tokenSecret string) *corev1alpha1.Task {
 		task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 			Name: authenticated.Name, Namespace: authenticated.Namespace, UID: types.UID(authenticated.UID),
@@ -100,14 +100,14 @@ func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t 
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "task-txn-token", Namespace: namespace,
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task",
+					APIVersion: corev1alpha1.GroupVersion.String(), Kind: taskResourceKind,
 					Name: authenticated.Name, UID: types.UID(authenticated.UID),
 				}},
 			},
 			Data: map[string][]byte{"token": []byte("task-scoped-token-off")},
 		}
 		executor := newExecutor(false,
-			newTask([]string{"reports.read"}, "other-credential", tokenSecret.Name), tokenSecret)
+			newTask([]string{brokeredTestReportScope}, "other-credential", tokenSecret.Name), tokenSecret)
 		result, err := executor.ExecuteHarnessV1BrokeredTool(ctx, namespace, tool.DeepCopy(), request)
 		if err != nil {
 			t.Fatalf("enforcement-off execution error = %v", err)
@@ -142,10 +142,10 @@ func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t 
 		)
 	})
 	t.Run("enforcement off refuses controller service account despite matching task scope", func(t *testing.T) {
-		t.Setenv(workerenv.ContextTokenOutboundScope, "reports.read")
+		t.Setenv(workerenv.ContextTokenOutboundScope, brokeredTestReportScope)
 		t.Setenv(workerenv.ServiceAccountToken, "controller-service-account-token")
 		exchanger := &recordingContextTokenExchanger{}
-		executor := newExecutor(false, newTask([]string{"reports.read"}, "", ""))
+		executor := newExecutor(false, newTask([]string{brokeredTestReportScope}, "", ""))
 		executor.TransactionExchange = &workerexecutor.TransactionExchangeConfig{
 			TTS: contexttoken.TTSConfig{
 				Endpoint:    acpMCPTestTTSEndpoint,
@@ -199,7 +199,7 @@ func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t 
 		}
 	})
 	t.Run("task without credential-read scope is refused", func(t *testing.T) {
-		executor := newExecutor(true, newTask([]string{"reports.read"}, "", ""))
+		executor := newExecutor(true, newTask([]string{brokeredTestReportScope}, "", ""))
 		if _, err := executor.ExecuteHarnessV1BrokeredTool(ctx, namespace, tool.DeepCopy(), request); err == nil ||
 			!strings.Contains(err.Error(), "not authorized by task transaction authority") {
 			t.Fatalf("unauthorized scope error = %v", err)
@@ -217,7 +217,7 @@ func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t 
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "task-txn-token", Namespace: namespace,
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task",
+					APIVersion: corev1alpha1.GroupVersion.String(), Kind: taskResourceKind,
 					Name: authenticated.Name, UID: types.UID(authenticated.UID),
 				}},
 			},
