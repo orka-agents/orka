@@ -572,6 +572,48 @@ func TestWorkspaceRuntimePoolRejectsUnownedProviderChildren(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolScaleDownIgnoresSandboxTemplateOwnershipDrift(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace children were not materialized")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.70")
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-template-drift", false)
+	runtimePoolReconcile(t, r, pool)
+
+	delete(template.Labels, runtimePoolUIDLabel)
+	if err := r.Update(context.Background(), template); err != nil {
+		t.Fatalf("drift SandboxTemplate ownership: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("scale ownership-drifted workspace to zero: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if supervisor.drainCalls != 1 {
+		t.Fatalf("drain calls after SandboxTemplate ownership drift = %d, status %s/%s %q, want 1", supervisor.drainCalls, status.Lifecycle, status.AdmissionState, status.Message)
+	}
+	if _, _, claim = runtimePoolWorkspaceTestChildren(t, r, pool); claim == nil {
+		t.Fatal("claim was deleted before authenticated drain quiescence")
+	}
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining ||
+		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionDraining ||
+		strings.Contains(status.Message, "ownership identity") {
+		t.Fatalf("ownership-drifted scale-down status = %s/%s %q, want authenticated Draining", status.Lifecycle, status.AdmissionState, status.Message)
+	}
+}
+
 func TestWorkspaceRuntimePoolRecyclesClaimBeforeRepairingTamperedTemplate(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()

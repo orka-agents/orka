@@ -57,7 +57,7 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["ate.dev"]
     resources: ["actortemplates"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
   {{- end }}
   - apiGroups: ["batch"]
     resources: ["jobs"]

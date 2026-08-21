@@ -200,6 +200,25 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	readyPods := readyRuntimePoolPods(pods)
+	if len(readyPods) > 1 {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleAmbiguous
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAmbiguous
+		status.ActiveInstance = nil
+		status.Message = fmt.Sprintf("found %d Ready runtime Pods; exact-instance admission is closed", len(readyPods))
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRuntimeAmbiguous, status.Message)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRuntimeAmbiguous, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+
+	if pool.Spec.DesiredReplicas == 0 {
+		// Scale-down depends on the independently ownership-validated claim and
+		// exact runtime Pod, not mutable SandboxTemplate metadata. Always let an
+		// idle pool drain and delete its live claim before surfacing template
+		// ownership drift that matters only to rollout or replacement.
+		return r.reconcileWorkspaceRuntimePoolScaleDown(ctx, pool, cfg, claim, pods, readyPods, status)
+	}
+
 	if sandboxTemplate != nil {
 		if !runtimePoolSandboxChildOwnedByPool(sandboxTemplate, pool, cfg) {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxTemplate does not carry the exact RuntimePool ownership identity"))
@@ -254,23 +273,8 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		}
 	}
 
-	readyPods := readyRuntimePoolPods(pods)
-	if len(readyPods) > 1 {
-		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleAmbiguous
-		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAmbiguous
-		status.ActiveInstance = nil
-		status.Message = fmt.Sprintf("found %d Ready runtime Pods; exact-instance admission is closed", len(readyPods))
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRuntimeAmbiguous, status.Message)
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRuntimeAmbiguous, status.Message)
-		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
-	}
-
 	if sandboxTemplate != nil && runtimePoolSandboxTemplateNeedsRollout(sandboxTemplate, desiredTemplate) {
 		return r.reconcileWorkspaceRuntimePoolRollout(ctx, pool, cfg, sandboxTemplate, claim, pods, desiredTemplate, status)
-	}
-
-	if pool.Spec.DesiredReplicas == 0 {
-		return r.reconcileWorkspaceRuntimePoolScaleDown(ctx, pool, cfg, claim, pods, readyPods, authSecret, status)
 	}
 
 	if sandboxTemplate == nil {
@@ -538,7 +542,6 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 	claim *sandboxextv1beta1.SandboxClaim,
 	pods []corev1.Pod,
 	readyPods []corev1.Pod,
-	authSecret *corev1.Secret,
 	status corev1alpha1.RuntimePoolStatus,
 ) (ctrl.Result, error) {
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
@@ -577,7 +580,27 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
-	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, &readyPods[0]), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
+	pod := &readyPods[0]
+	deployedTemplate := runtimePoolPodTemplateSpec(pod)
+	validationPool, validationConfig, err := runtimePoolPodTemplateValidationTarget(pool, deployedTemplate)
+	if err != nil {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.ActiveInstance = nil
+		status.Message = sanitizeRuntimePoolMessage("deployed runtime identity is invalid during scale-down: " + err.Error())
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	deployedAuthSecret, err := r.runtimePoolPodTemplateAuthSecret(ctx, pool, cfg.namespace, deployedTemplate.Spec)
+	if err != nil {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.ActiveInstance = nil
+		status.Message = sanitizeRuntimePoolMessage("resolve deployed runtime credentials during scale-down: " + err.Error())
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, pod), string(deployedAuthSecret.Data[runtimePoolControllerTokenKey]), deployedAuthSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -586,12 +609,20 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
-	active, err := validateRuntimePoolProbe(pool, cfg, &readyPods[0], probe, r.now())
+	active, err := validateRuntimePoolProbe(validationPool, validationConfig, pod, probe, r.now())
 	if err != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
 		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if pool.Status.ActiveInstance != nil && !runtimePoolRolloutActiveInstanceMatches(pool.Status.ActiveInstance, active) {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.ActiveInstance = nil
+		status.Message = "authenticated runtime identity changed before scale-down drain"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -603,9 +634,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 	if !probe.Status.Drain.Requested {
 		if err := r.supervisorClientForPool(pool).RequestDrain(
 			ctx,
-			runtimePoolInstanceEndpoint(pool, &readyPods[0]),
-			string(authSecret.Data[runtimePoolControllerTokenKey]),
-			authSecret.Data[runtimePoolCapabilitySecretKey],
+			runtimePoolInstanceEndpoint(pool, pod),
+			string(deployedAuthSecret.Data[runtimePoolControllerTokenKey]),
+			deployedAuthSecret.Data[runtimePoolCapabilitySecretKey],
 			probe.Status,
 			"runtime_pool_scale_to_zero",
 		); err != nil {
@@ -1090,6 +1121,19 @@ func sandboxTemplatePodTemplateSpec(template *sandboxextv1beta1.SandboxTemplate)
 			Annotations: cloneStringMap(template.Spec.PodTemplate.ObjectMeta.Annotations),
 		},
 		Spec: *template.Spec.PodTemplate.Spec.DeepCopy(),
+	}
+}
+
+func runtimePoolPodTemplateSpec(pod *corev1.Pod) corev1.PodTemplateSpec {
+	if pod == nil {
+		return corev1.PodTemplateSpec{}
+	}
+	return corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      cloneStringMap(pod.Labels),
+			Annotations: cloneStringMap(pod.Annotations),
+		},
+		Spec: *pod.Spec.DeepCopy(),
 	}
 }
 
