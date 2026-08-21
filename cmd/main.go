@@ -1491,10 +1491,11 @@ func main() {
 			AdmissionGate:        acpAdmissionGate,
 			IdlePoolTTL:          acpIdlePoolTTL,
 			MCPRegistry:          acpMCPRegistry,
-		}
-		if substrateEnabled {
-			acpDispatcher.SubstrateRouterURL = substrateConfig.RouterURL
-			acpDispatcher.SubstrateActorDNSSuffix = substrateConfig.ActorDNSSuffix
+			// Keep routing available after new Substrate admission is disabled:
+			// existing Tasks and RuntimeSessions still need authenticated recovery,
+			// cancellation, finalization, drain, and cleanup against their actors.
+			SubstrateRouterURL:      substrateConfig.RouterURL,
+			SubstrateActorDNSSuffix: substrateConfig.ActorDNSSuffix,
 		}
 		if err := mgr.Add(acpDispatcher); err != nil {
 			setupLog.Error(err, "unable to add ACP dispatcher")
@@ -1508,6 +1509,7 @@ func main() {
 			&controller.KubernetesACPUpgradeDrainBarrierObserver{Reader: mgr.GetAPIReader(), Outbox: sqliteStore},
 			acpAdmissionGate, acpUpgradeDrainOptions,
 		)
+		upgradeDrain.SubstrateConfig = substrateConfig
 		if err := mgr.Add(upgradeDrain); err != nil {
 			setupLog.Error(err, "unable to add ACP planned-upgrade drain coordinator")
 			os.Exit(1)

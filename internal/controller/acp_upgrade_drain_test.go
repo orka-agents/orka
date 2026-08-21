@@ -149,6 +149,60 @@ func TestACPUpgradeDrainCoordinatorCompletesExactInstanceDrain(t *testing.T) {
 	}
 }
 
+func TestACPUpgradeDrainCoordinatorDrainsSubstrateActorWithoutPod(t *testing.T) {
+	scheme := upgradeDrainTestScheme(t)
+	pool, pod, auth, supervisor := upgradeDrainRuntimePoolFixture(t)
+	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+		Provider:      corev1alpha1.WorkspaceProviderSubstrate,
+		BindingDigest: "sha256:" + strings.Repeat("a", 64),
+		Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+			BaseTemplateNamespace: "ate-demo",
+			BaseTemplateName:      "orka-codex",
+		},
+	}
+	const actorID = "acp-ws-codex-actor"
+	routeHost := actorID + ".actors.local"
+	instanceUID := substrateActorInstanceUID(actorID)
+	providerGeneration := pod.Annotations[runtimePoolProviderTokenGenerationAnnotation]
+	pool.Status.ActiveInstance.PodName = actorID
+	pool.Status.ActiveInstance.PodAddress = routeHost
+	pool.Status.ActiveInstance.PodUID = instanceUID
+	pool.Status.ActiveInstance.ProviderTokenGeneration = providerGeneration
+	pool.Status.ActiveInstance.RuntimeInstanceID = runtimePoolRuntimeInstanceID(types.UID(instanceUID), "boot-upgrade")
+	syntheticPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID(instanceUID)}}
+	supervisor.probe = runtimePoolValidProbe(pool, syntheticPod, "boot-upgrade", false)
+	supervisor.expectedEndpoint = "http://" + routeHost
+
+	fence := store.ControllerEpochFence{Name: store.DefaultControllerEpochName, Epoch: 7, HolderID: "controller-7"}
+	epochRecord, epochLease := upgradeDrainEpochObjects(fence)
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RuntimePool{}).
+		WithObjects(pool, auth, epochRecord, epochLease).
+		Build()
+	coordinator := NewACPUpgradeDrainCoordinator(
+		kubeClient,
+		kubeClient,
+		fixedUpgradeDrainEpochSource{fence: fence},
+		&fakeUpgradeDrainEpochStore{current: store.ControllerEpoch{Name: fence.Name, Epoch: fence.Epoch, HolderID: fence.HolderID}},
+		ACPUpgradeDrainBarrierObserverFunc(func(context.Context) (ACPUpgradeDrainBarrierSnapshot, error) {
+			return ACPUpgradeDrainBarrierSnapshot{}, nil
+		}),
+		NewACPAdmissionGate(),
+		testUpgradeDrainOptions(),
+	)
+	coordinator.SupervisorClient = supervisor
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := coordinator.Trigger(ctx); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+	if supervisor.drainCallCount() != 1 {
+		t.Fatalf("Substrate actor drain calls = %d, want 1", supervisor.drainCallCount())
+	}
+}
+
 func TestACPUpgradeDrainRejectsStaleIdentityAndInvalidCredentials(t *testing.T) {
 	tests := []struct {
 		name   string
