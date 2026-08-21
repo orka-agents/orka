@@ -548,7 +548,7 @@ DOCKERFILE
 
 install_agent_sandbox() {
   log "Installing upstream agent-sandbox ${agent_sandbox_version}"
-  run kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/manifest.yaml"
+  run kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/sandbox.yaml"
   run kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/extensions.yaml"
 
   for crd in \
