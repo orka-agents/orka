@@ -2,12 +2,11 @@
 
 Validation steps for `$agent-sandbox-deploy`. Read after the standard workflow completes.
 
-> **Known gate:** Workspace-provider-backed RuntimeSession dispatch is flag-gated behind `--agent-sandbox-enabled` **and** `--acp-workspace-dispatch-enabled`. With the dispatch flag off (the default in this skill's deployments), a `Task.spec.execution.workspace` agent Task fails closed with `WorkspaceValidationFailed`. The Task must omit `templateRef`; ACP RuntimeSessions run only controller-rendered sandbox templates. Plain Codex/Claude Tasks run through controller-owned ACP RuntimePools and validate the model path separately.
+> **Known gate:** Workspace-provider-backed RuntimeSession dispatch is flag-gated behind `--agent-sandbox-enabled` **and** `--acp-workspace-dispatch-enabled`. Manual skill deployments leave the dispatch flag off unless explicitly enabled, so a `Task.spec.execution.workspace` agent Task then fails closed with `WorkspaceValidationFailed`. The bundled E2E enables both gates and runs a real Codex prompt against a local Responses-compatible fixture. The Task must omit `templateRef`; ACP RuntimeSessions run only controller-rendered sandbox templates.
 
-Do **not** use an execution-workspace agent Task as the success criterion yet.
-Validate the three current surfaces separately: installation/configuration,
-direct workspace-adapter lifecycle, and the model path through a plain agent
-Task.
+Validate the relevant surfaces separately: installation/configuration, direct
+workspace-adapter lifecycle, fixture-backed workspace ACP execution, and
+external model access when configured.
 
 - **Model path through ACP** (requires the optional `AGENTIC=1` step and
   vekil ready): run a plain agent Task with no `execution.workspace` and wait
@@ -49,14 +48,11 @@ YAML
   wait --for=jsonpath='{.status.phase}'=Succeeded task/orka-live-model-smoke --timeout=10m
 ```
 
-- **Model-free installation/configuration and direct workspace-adapter
-  paths**: run `scripts/live-agent-sandbox-e2e.sh` from the `Model-free CI
-  parity` section for a self-contained cluster bring-up with a model-free/
-  no-network runtime. It verifies provider installation, applies the controller
-  flags and confirms rollout, then exercises claim → ready → router exec →
-  delete and retained release/reuse → claim cleanup through
-  `AgentSandboxExecutor`. It skips only the full Orka agent Task
-  workspace path while the ACP workspace-dispatch gate is present.
+- **No-external-model provider and workspace ACP paths**: run
+  `scripts/live-agent-sandbox-e2e.sh` from the CI parity section. It verifies
+  provider installation, direct claim → ready → router exec → delete/reuse
+  cleanup, enables workspace dispatch, then executes a real Codex prompt through
+  a workspace-backed RuntimePool using a local Responses-compatible fixture.
 
 To demonstrate the API shape while the dispatch flag is off, run it as an
 **expected-failure** check and wait for the gate instead of `Succeeded`:
@@ -103,25 +99,24 @@ YAML
   task/orka-live-sandbox-smoke --timeout=2m
 ```
 
-With `--acp-workspace-dispatch-enabled` set (plus real digest-pinned ACP
-runtime images and provider-proxy model access), the same Task binds a
+With `--acp-workspace-dispatch-enabled` set (plus a digest-pinned ACP runtime
+image and either the local fixture or provider-proxy model access), the same Task binds a
 dedicated `acp-ws-<runtime>-<hash>` RuntimePool whose SandboxClaim hosts the
 RuntimeSession, and this becomes a live success smoke waiting for `Succeeded`.
 Orka Task status stays provider-neutral (`status.executionWorkspace` carries
 provider/phase/reason only, never claim or sandbox names) — read the
 RuntimePool status and upstream agent-sandbox resources for lifecycle detail.
 
-## Model-free CI parity
+## No-external-model CI parity
 
 `scripts/live-agent-sandbox-e2e.sh` (run by the `Live Agent Sandbox E2E`
-workflow) uses a model-free/no-network runtime. It creates the named kind cluster
-when absent or reuses it when present. After validating installation, router
-health, and controller-flag rollout, it runs a direct `AgentSandboxExecutor`
-smoke that creates SandboxClaims, waits for readiness, executes through the
-router, deletes one claim, retains and reuses another, and performs final claim
-cleanup. It skips only the full Orka agent Task workspace smoke, so it proves the
-provider-adapter path but not Task-to-workspace controller routing, Task status/
-result wiring, ACP Task execution, or model access:
+workflow) uses a local Responses-compatible fixture and no external model
+access. It creates the named kind cluster when absent or reuses it when present.
+After validating installation, router health, and controller-flag rollout, it
+runs the direct `AgentSandboxExecutor` lifecycle and a workspace-backed ACP Task
+through the real Codex supervisor, waits for `Succeeded`, verifies provider-
+neutral status, and cleans up. Set `ORKA_AGENT_SANDBOX_ACP_TASK_SMOKE=0` only
+when intentionally skipping the ACP Task portion:
 
 ```bash
 bash scripts/live-agent-sandbox-e2e.sh

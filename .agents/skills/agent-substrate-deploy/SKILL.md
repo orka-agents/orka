@@ -1,6 +1,6 @@
 ---
 name: agent-substrate-deploy
-description: Stand up Agent Substrate (warm, suspendable, gVisor-isolated Actors) on a dedicated local kind cluster wired to Orka, validate the direct Substrate/MCP smoke paths, and treat workspace-backed Orka agent Tasks as expected-failure/future API checks until harness support lands. Use when the user asks to install, enable, deploy, configure, validate, demo, or troubleshoot the Orka substrate execution-workspace provider, WorkerPool, ActorTemplate, or Substrate-backed MCP Tools.
+description: Stand up Agent Substrate (gVisor-isolated Actors) on a dedicated local kind cluster wired to Orka and validate direct Substrate/MCP plus fixture-backed workspace ACP Task paths. Use when the user asks to install, enable, deploy, configure, validate, demo, or troubleshoot the Orka substrate execution-workspace provider, WorkerPool, ActorTemplate, or Substrate-backed MCP Tools.
 ---
 
 # Agent Substrate Deploy
@@ -9,12 +9,11 @@ Stand up [Agent Substrate](https://github.com/agent-substrate/substrate) and an
 Orka-compatible `WorkerPool` + `ActorTemplate` on a local kind cluster, wire Orka
 with `--substrate-*` flags, then validate the direct Substrate actor/router and
 MCP tool paths. `type: agent` Tasks whose `spec.execution.workspace` uses
-`provider: substrate` are flag-gated: without `--acp-workspace-dispatch-enabled`
-(the default in this skill's deployments) they fail closed, so treat them as
-expected-failure checks; with the flag, a required infrastructure `templateRef`,
-and real digest-pinned ACP runtime images plus provider-proxy model access, the
-Task's RuntimeSession is hosted in a Substrate Actor behind a dedicated
-`acp-ws-*` RuntimePool (ADR 0025).
+`provider: substrate` are flag-gated: without
+`--acp-workspace-dispatch-enabled` they fail closed. The bundled installer/E2E
+enables the gate by default, uses the required infrastructure `templateRef`,
+and runs a real Codex prompt against a local Responses-compatible fixture in a
+Substrate Actor behind a dedicated `acp-ws-*` RuntimePool (ADR 0025).
 
 This skill is for **local/kind evaluation and validation**, not production. Orka
 does not install or manage Substrate (CRDs, control plane, router, snapshot
@@ -179,17 +178,16 @@ is a larger task; confirm scope before attempting it.
 
 ## Validate
 
-> **Current boundary:** this skill validates direct Substrate Actor and MCP
-> behavior only. Orka ACP RuntimeSessions do not yet map to Substrate Actors;
-> execution-workspace-backed agent Tasks remain future integration evidence,
-> not a success criterion. The removed v1 harness-wrapper path must not be
-> reintroduced. Validate plain Codex/Claude ACP Tasks with
-> `scripts/live-acp-runtime-e2e.sh` instead.
+> **Current boundary:** the bundled E2E validates direct Substrate Actor and MCP
+> behavior plus one fixture-backed workspace ACP Task. The removed v1
+> harness-wrapper path must not be reintroduced; suspension and snapshot restore
+> remain prohibited for ACP RuntimePools.
 
 The installer leaves a fully wired cluster. During standup it smoke-tests direct
-actor create/resume/exec/suspend/delete and Substrate-backed MCP tool lifecycle.
-It does **not** currently smoke-test retained workspace reuse for Orka agent
-Tasks because ACP RuntimeSession-to-Actor dispatch is not yet wired.
+actor create/resume/exec/suspend/delete, Substrate-backed MCP tool lifecycle,
+and a workspace-backed ACP Task through the real Codex supervisor and local
+Responses-compatible fixture. Retained session reuse is not yet part of this
+initial ACP happy-path smoke.
 
 If you skipped the kubeconfig export in the workflow above, do it before any
 manual `kubectl` commands — the e2e standup uses an isolated kubeconfig and does
@@ -284,17 +282,15 @@ Set `KEEP_CLUSTER=1` to inspect the cluster after a failure.
 
 Read `references/validate.md` before treating anything as proven. The bundled
 e2e validates the **direct** Substrate path (actor create/resume/router/daemon
-exec/suspend/delete) and Substrate-backed MCP tool lifecycle. A **plain** agent
-Task with no `execution.workspace` can validate the harness/model path separately
-after the model setup in step 4; the bundled e2e does not run that Task.
+exec/suspend/delete), Substrate-backed MCP tool lifecycle, and a fixture-backed
+workspace ACP Task that reaches `Succeeded`.
 
-With `--acp-workspace-dispatch-enabled` unset (this skill's default), enabled
-provider-based `spec.execution.workspace` requests are rejected during agent
-execution planning and the e2e skips those checks; `references/validate.md`
-covers the expected-failure form. Substrate ACP dispatch additionally requires
-`templateRef` naming the operator infrastructure ActorTemplate, and never
-suspends actors — operators must not enable provider-side idle suspension for
-ACP templates.
+The bundled E2E enables `--acp-workspace-dispatch-enabled` unless
+`SUBSTRATE_E2E_ACP_TASK_SMOKE=0`. A manual deployment with the flag unset must
+reject enabled provider-based `spec.execution.workspace` requests during agent
+execution planning. Substrate ACP dispatch additionally requires `templateRef`
+naming the operator infrastructure ActorTemplate, and never suspends actors —
+operators must not enable provider-side idle suspension for ACP templates.
 
 ## Troubleshooting
 

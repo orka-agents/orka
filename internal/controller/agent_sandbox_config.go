@@ -222,7 +222,7 @@ func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, t
 	if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil || !task.Spec.Execution.Workspace.Enabled {
 		return nil, nil
 	}
-	if err := r.validateExecutionWorkspace(task); err != nil {
+	if err := r.validateExecutionWorkspaceRequest(task); err != nil {
 		return nil, err
 	}
 

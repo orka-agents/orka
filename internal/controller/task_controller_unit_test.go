@@ -1137,7 +1137,7 @@ func TestResolveExecutionWorkspaceRequestRejectsLegacyTemplateRef(t *testing.T) 
 	}
 }
 
-func TestValidateExecutionWorkspace(t *testing.T) {
+func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 	executionWorkspace := func(mutators ...func(*corev1alpha1.ExecutionWorkspaceSpec)) *corev1alpha1.ExecutionWorkspaceSpec {
 		// ACP RuntimeSessions run in controller-rendered sandbox templates, so a
 		// valid request omits templateRef entirely.
@@ -1446,7 +1446,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 				SubstrateConfig:             tt.substrateConfig,
 			}
 
-			err := r.validateExecutionWorkspace(tt.task)
+			err := r.validateExecutionWorkspaceRequest(tt.task)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("expected no error, got %v", err)
@@ -1461,6 +1461,26 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
 			}
 		})
+	}
+}
+
+func TestValidateExecutionWorkspaceDefersACPProviderChecksUntilContractRouting(t *testing.T) {
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+		Type: corev1alpha1.TaskTypeAgent,
+		Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+			Enabled: true,
+			TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+				Name: "legacy-harness-template",
+			},
+		}},
+	}}
+	r := &TaskReconciler{AgentSandboxEnabled: true}
+
+	if err := r.validateExecutionWorkspace(task); err != nil {
+		t.Fatalf("validateExecutionWorkspace() error = %v, want provider checks deferred to planAgentExecution", err)
+	}
+	if err := r.validateExecutionWorkspaceRequest(task); err == nil || !strings.Contains(err.Error(), "templateRef must be omitted") {
+		t.Fatalf("validateExecutionWorkspaceRequest() error = %v, want ACP templateRef rejection retained by direct resolver", err)
 	}
 }
 
@@ -6000,7 +6020,10 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeCodex,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	template := &sandboxextv1alpha1.SandboxTemplate{
@@ -6010,7 +6033,11 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 		ObjectMeta: metav1.ObjectMeta{Name: template.Name, Namespace: defaultNS},
 	}
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "workspace-valid-but-unsupported", Namespace: defaultNS},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "workspace-valid-but-unsupported",
+			Namespace: defaultNS,
+			UID:       "task-uid-workspace-template-ref",
+		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
@@ -6029,6 +6056,7 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 	}
 	r := newUnitReconciler(scheme, task, agent, template, warmPool)
 	r.AgentSandboxEnabled = true
+	r.ACPRuntimeEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -6063,13 +6091,17 @@ func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t 
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeCodex,
+				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "workspace-validation-fails",
 			Namespace: defaultNS,
+			UID:       "task-uid-workspace-validation",
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
@@ -6088,6 +6120,7 @@ func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t 
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
 	r := newUnitReconciler(scheme, task, agent)
+	r.ACPRuntimeEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -6104,7 +6137,7 @@ func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t 
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
-	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderSubstrate, "orka-codex", "requires substrate to be enabled")
+	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderSubstrate, "orka-codex", "provider substrate is disabled")
 	assertNoJobsForTask(t, r, task)
 }
 

@@ -9,12 +9,14 @@ package controller
 // Workspace-provider-backed RuntimePools materialize their single runtime
 // instance through an externally operated execution-workspace provider
 // (Phase 1: kubernetes-sigs Agent Sandbox) instead of a controller-owned
-// Deployment. The rendered supervisor Pod template, image allowlist,
-// epoch-scoped Secrets, authenticated fence probe, admission gates, drain
-// semantics, and every prompt-level operation are identical to plain pools:
-// the provider owns only the physical workload. Provider-native identifiers
-// (claim, sandbox, template names) never enter public Task status; the
-// sanitized RuntimePool status is the only projection surface.
+// Deployment. The rendered supervisor Pod template and image allowlist remain
+// controller-owned, but the provider-visible template carries no credentials:
+// after exact Sandbox materialization is attested, the controller seeds the
+// supervisor through the signed one-time bootstrap endpoint. The authenticated
+// fence probe, admission gates, drain semantics, and every prompt-level
+// operation remain identical to plain pools. Provider-native identifiers
+// (claim, sandbox, template names) never enter public Task status; the sanitized
+// RuntimePool status is the only projection surface.
 //
 // Lifecycle mapping onto the provider-neutral execution-workspace contract:
 //   - Acquire      -> ensure SandboxTemplate + SandboxWarmPool + SandboxClaim
@@ -32,12 +34,19 @@ package controller
 //     fail closed before any workspace or RuntimePool demand exists.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,8 +56,10 @@ import (
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	sandboxextcontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 const (
@@ -57,6 +68,8 @@ const (
 	runtimePoolSandboxClaimSuffix                = "sandbox-claim"
 	runtimePoolSandboxTemplateRevisionAnnotation = "orka.ai/sandbox-template-revision"
 )
+
+var errWorkspaceCredentialConflict = errors.New("workspace supervisor credential bootstrap conflict")
 
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims;sandboxtemplates;sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch
@@ -116,6 +129,15 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 ) (ctrl.Result, error) {
 	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
 	desiredTemplate := r.runtimePoolPodTemplate(pool, cfg, selector, authSecret.Name, providerSecret.Name)
+	bootstrapNonce := strings.TrimSpace(string(authSecret.Data[runtimePoolBootstrapNonceKey]))
+	if bootstrapNonce == "" {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("RuntimePool auth Secret is missing the credential bootstrap nonce"))
+	}
+	bootstrapPublicKey, err := harnessv2.CredentialBootstrapPublicKey(authSecret.Data[runtimePoolCapabilitySecretKey])
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("derive RuntimePool credential bootstrap public key: %w", err))
+	}
+	desiredTemplate = runtimePoolWorkspaceBootstrapTemplate(desiredTemplate, bootstrapNonce, bootstrapPublicKey)
 
 	sandboxTemplate, err := r.getRuntimePoolSandboxTemplate(ctx, cfg)
 	if err != nil {
@@ -268,6 +290,50 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 	}
+	if claim != nil && len(readyPods) == 1 {
+		materialized, err := r.attestWorkspaceRuntimePoolMaterialization(ctx, claim, sandboxTemplate, &readyPods[0])
+		if err != nil {
+			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
+				return ctrl.Result{}, errors.Join(err, deleteErr)
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = sanitizeRuntimePoolMessage("provider workspace materialization does not match the validated controller template: " + err.Error())
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		if !materialized {
+			r.applyProviderRuntimePoolColdStartStatus(pool, &status, "waiting for the provider Sandbox materialization record before credential bootstrap")
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		alreadyComplete, seedErr := r.seedWorkspaceSupervisorCredentials(
+			ctx, runtimePoolInstanceEndpoint(pool, &readyPods[0]), bootstrapNonce, authSecret, providerSecret,
+		)
+		if errors.Is(seedErr, errWorkspaceCredentialConflict) {
+			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {
+				return ctrl.Result{}, errors.Join(seedErr, deleteErr)
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "provider workspace was credential-seeded by another party; recycling the exact instance"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		if seedErr != nil {
+			r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("credential bootstrap is not complete: "+seedErr.Error()))
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		if alreadyComplete {
+			// A 404 means the one-time bootstrap listener has already handed off
+			// to the authenticated supervisor. The exact fence probe below is
+			// still required before this instance can be admitted.
+			status.Message = "provider workspace credential bootstrap already completed; verifying the exact authenticated instance"
+		}
+	}
 	return r.reconcileRuntimePoolServing(ctx, pool, cfg, pods, readyPods, authSecret, status)
 }
 
@@ -346,7 +412,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 	if err != nil {
 		return r.finishRuntimePoolRolloutFailure(ctx, pool, status, err)
 	}
-	deployedAuthSecret, err := r.runtimePoolPodTemplateAuthSecret(ctx, cfg.namespace, deployedTemplate.Spec)
+	deployedAuthSecret, err := r.runtimePoolPodTemplateAuthSecret(ctx, pool, cfg.namespace, deployedTemplate.Spec)
 	if err != nil {
 		return r.finishRuntimePoolRolloutFailure(ctx, pool, status, err)
 	}
@@ -614,6 +680,256 @@ func ignoreSandboxAPIAbsence(operation string, err error) error {
 
 func k8sRuntimeIsMissingKindError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no kind is registered")
+}
+
+func runtimePoolWorkspaceBootstrapTemplate(
+	template corev1.PodTemplateSpec,
+	nonce, publicKey string,
+) corev1.PodTemplateSpec {
+	result := *template.DeepCopy()
+	if len(result.Spec.Containers) != 1 {
+		return result
+	}
+	container := &result.Spec.Containers[0]
+	env := make([]corev1.EnvVar, 0, len(container.Env)+2)
+	for i := range container.Env {
+		switch container.Env[i].Name {
+		case "ORKA_ACP_CONTROLLER_TOKEN_FILE", "ORKA_ACP_CAPABILITY_SECRET_FILE", "ORKA_ACP_PROVIDER_TOKEN_FILE",
+			"ORKA_ACP_CONTROLLER_TOKEN_BOOTSTRAP", "ORKA_ACP_CAPABILITY_SECRET_BOOTSTRAP", "ORKA_ACP_PROVIDER_TOKEN_BOOTSTRAP":
+			continue
+		default:
+			env = append(env, container.Env[i])
+		}
+	}
+	env = append(env,
+		corev1.EnvVar{Name: "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE", Value: nonce},
+		corev1.EnvVar{Name: harnessv2.CredentialBootstrapPublicKeyEnv, Value: publicKey},
+	)
+	container.Env = env
+	container.EnvFrom = nil
+	mounts := container.VolumeMounts[:0]
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name != runtimePoolAuthVolume && container.VolumeMounts[i].Name != runtimePoolProviderCapabilityVolume {
+			mounts = append(mounts, container.VolumeMounts[i])
+		}
+	}
+	container.VolumeMounts = mounts
+	volumes := result.Spec.Volumes[:0]
+	for i := range result.Spec.Volumes {
+		if result.Spec.Volumes[i].Name != runtimePoolAuthVolume && result.Spec.Volumes[i].Name != runtimePoolProviderCapabilityVolume {
+			volumes = append(volumes, result.Spec.Volumes[i])
+		}
+	}
+	result.Spec.Volumes = volumes
+	result.Annotations[runtimePoolTemplateRevisionAnnotation] = runtimePoolPodTemplateRevision(result)
+	return result
+}
+
+func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
+	ctx context.Context,
+	claim *sandboxextv1beta1.SandboxClaim,
+	template *sandboxextv1beta1.SandboxTemplate,
+	pod *corev1.Pod,
+) (bool, error) {
+	if claim == nil || template == nil || pod == nil {
+		return false, nil
+	}
+	sandbox := &sandboxv1beta1.Sandbox{}
+	err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}, sandbox)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, ignoreSandboxAPIAbsence("read RuntimePool sandbox materialization", err)
+	}
+	if claim.UID != "" && !metav1.IsControlledBy(sandbox, claim) {
+		return false, fmt.Errorf("provider Sandbox is not controlled by the exact SandboxClaim")
+	}
+	if sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation] != template.Name {
+		return false, fmt.Errorf("provider Sandbox does not record the validated SandboxTemplate")
+	}
+	expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
+	sandboxextcontrollers.ApplySandboxSecureDefaults(template, expectedSpec)
+	if !apiequality.Semantic.DeepEqual(*expectedSpec, sandbox.Spec.PodTemplate.Spec) {
+		return false, fmt.Errorf("provider Sandbox PodSpec differs from the validated SandboxTemplate revision")
+	}
+	if !apiequality.Semantic.DeepEqual(template.Spec.VolumeClaimTemplates, sandbox.Spec.VolumeClaimTemplates) {
+		return false, fmt.Errorf("provider Sandbox volume claims differ from the validated SandboxTemplate revision")
+	}
+	if !reflect.DeepEqual(template.Spec.PodTemplate.ObjectMeta.Annotations, sandbox.Spec.PodTemplate.ObjectMeta.Annotations) {
+		return false, fmt.Errorf("provider Sandbox Pod annotations differ from the validated SandboxTemplate revision")
+	}
+	materializedLabels := cloneStringMap(sandbox.Spec.PodTemplate.ObjectMeta.Labels)
+	delete(materializedLabels, sandboxextv1beta1.SandboxIDLabel)
+	delete(materializedLabels, sandboxv1beta1.SandboxTemplateRefHashLabel)
+	if !reflect.DeepEqual(template.Spec.PodTemplate.ObjectMeta.Labels, materializedLabels) {
+		return false, fmt.Errorf("provider Sandbox Pod labels differ from the validated SandboxTemplate revision")
+	}
+	if sandbox.UID != "" && !metav1.IsControlledBy(pod, sandbox) {
+		return false, fmt.Errorf("runtime Pod is not controlled by the attested provider Sandbox")
+	}
+	if claim.UID != "" && pod.Labels[sandboxextv1beta1.SandboxIDLabel] != string(claim.UID) {
+		return false, fmt.Errorf("runtime Pod does not carry the exact SandboxClaim identity")
+	}
+	if !runtimePoolWorkspacePodSpecsMatch(sandbox.Spec.PodTemplate.Spec, pod.Spec) {
+		return false, fmt.Errorf("runtime PodSpec differs from the attested provider Sandbox")
+	}
+	return true, nil
+}
+
+// runtimePoolWorkspacePodSpecsMatch compares the realized Pod against the
+// attested Sandbox template before any credentials cross the network. The
+// provider may adopt an existing Pod without reconciling its spec, so owner
+// references and identity labels are not sufficient proof. Normalize only
+// fields populated by the core API server, admission, or scheduler; every
+// container, volume, security, network, and runtime field remains fail-closed.
+func runtimePoolWorkspacePodSpecsMatch(expected, actual corev1.PodSpec) bool {
+	expectedSpec := normalizeRuntimePoolWorkspacePodSpec(expected)
+	actualSpec := normalizeRuntimePoolWorkspacePodSpec(actual)
+
+	// These fields are derived from cluster scheduling/admission state rather
+	// than from the provider-visible Sandbox template.
+	expectedSpec.NodeName, actualSpec.NodeName = "", ""
+	expectedSpec.Priority, actualSpec.Priority = nil, nil
+	expectedSpec.PreemptionPolicy, actualSpec.PreemptionPolicy = nil, nil
+	expectedSpec.Overhead, actualSpec.Overhead = nil, nil
+	if len(expectedSpec.ImagePullSecrets) == 0 {
+		actualSpec.ImagePullSecrets = nil
+	}
+	if expectedSpec.PriorityClassName == "" {
+		actualSpec.PriorityClassName = ""
+	}
+
+	return apiequality.Semantic.DeepEqual(expectedSpec, actualSpec)
+}
+
+func normalizeRuntimePoolWorkspacePodSpec(spec corev1.PodSpec) corev1.PodSpec {
+	result := *spec.DeepCopy()
+	if result.DNSPolicy == "" {
+		result.DNSPolicy = corev1.DNSClusterFirst
+	}
+	if result.RestartPolicy == "" {
+		result.RestartPolicy = corev1.RestartPolicyAlways
+	}
+	if result.SecurityContext == nil {
+		result.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	if result.TerminationGracePeriodSeconds == nil {
+		result.TerminationGracePeriodSeconds = new(int64)
+		*result.TerminationGracePeriodSeconds = corev1.DefaultTerminationGracePeriodSeconds
+	}
+	if result.SchedulerName == "" {
+		result.SchedulerName = corev1.DefaultSchedulerName
+	}
+	if result.EnableServiceLinks == nil {
+		result.EnableServiceLinks = new(bool)
+		*result.EnableServiceLinks = corev1.DefaultEnableServiceLinks
+	}
+	if result.ServiceAccountName == "" {
+		result.ServiceAccountName = runtimePoolDefaultServiceAccountName
+	}
+	for i := range result.InitContainers {
+		normalizeRuntimePoolWorkspaceContainer(&result.InitContainers[i])
+	}
+	for i := range result.Containers {
+		normalizeRuntimePoolWorkspaceContainer(&result.Containers[i])
+	}
+	result.Tolerations = runtimePoolWorkspaceExplicitTolerations(result.Tolerations)
+	return result
+}
+
+func normalizeRuntimePoolWorkspaceContainer(container *corev1.Container) {
+	if container == nil {
+		return
+	}
+	if container.TerminationMessagePath == "" {
+		container.TerminationMessagePath = corev1.TerminationMessagePathDefault
+	}
+	if container.TerminationMessagePolicy == "" {
+		container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	}
+	for i := range container.Ports {
+		if container.Ports[i].Protocol == "" {
+			container.Ports[i].Protocol = corev1.ProtocolTCP
+		}
+	}
+	for i := range container.Env {
+		fieldRef := container.Env[i].ValueFrom
+		if fieldRef != nil && fieldRef.FieldRef != nil && fieldRef.FieldRef.APIVersion == "" {
+			fieldRef.FieldRef.APIVersion = "v1"
+		}
+	}
+}
+
+func runtimePoolWorkspaceExplicitTolerations(tolerations []corev1.Toleration) []corev1.Toleration {
+	result := make([]corev1.Toleration, 0, len(tolerations))
+	for i := range tolerations {
+		toleration := tolerations[i]
+		if toleration.Operator == corev1.TolerationOpExists && toleration.Effect == corev1.TaintEffectNoExecute &&
+			(toleration.Key == corev1.TaintNodeNotReady || toleration.Key == corev1.TaintNodeUnreachable) {
+			continue
+		}
+		result = append(result, toleration)
+	}
+	return result
+}
+
+func (r *RuntimePoolReconciler) seedWorkspaceSupervisorCredentials(
+	ctx context.Context,
+	endpoint, nonce string,
+	authSecret, providerSecret *corev1.Secret,
+) (bool, error) {
+	request := harnessv2.CredentialBootstrapRequest{
+		ControllerToken:  strings.TrimSpace(string(authSecret.Data[runtimePoolControllerTokenKey])),
+		CapabilitySecret: strings.TrimSpace(string(authSecret.Data[runtimePoolCapabilitySecretKey])),
+		ProviderToken:    strings.TrimSpace(string(providerSecret.Data[runtimePoolProviderTokenKey])),
+	}
+	if err := request.Validate(); err != nil {
+		return false, fmt.Errorf("pool credentials are incomplete: %w", err)
+	}
+	if r.WorkspaceCredentialSeeder != nil {
+		return r.WorkspaceCredentialSeeder(ctx, endpoint, nonce, authSecret.Data[runtimePoolCapabilitySecretKey], request)
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return false, err
+	}
+	seedCtx, cancel := context.WithTimeout(ctx, runtimePoolProbeTimeout)
+	defer cancel()
+	httpRequest, err := http.NewRequestWithContext(
+		seedCtx, http.MethodPut, strings.TrimRight(endpoint, "/")+harnessv2.CredentialBootstrapPath, bytes.NewReader(payload),
+	)
+	if err != nil {
+		return false, err
+	}
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set(harnessv2.CredentialBootstrapNonceHeader, nonce)
+	signature, err := harnessv2.SignCredentialBootstrap(authSecret.Data[runtimePoolCapabilitySecretKey], nonce, payload)
+	if err != nil {
+		return false, fmt.Errorf("sign credential bootstrap request: %w", err)
+	}
+	httpRequest.Header.Set(harnessv2.CredentialBootstrapSignatureHeader, signature)
+	httpClient := r.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: runtimePoolProbeTimeout, Transport: harnessv2.NewProxylessTransport()}
+	}
+	isolationClient := *httpClient
+	isolationClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := isolationClient.Do(httpRequest)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close() //nolint:errcheck // response body is unused
+	switch response.StatusCode {
+	case http.StatusCreated, http.StatusOK:
+		return false, nil
+	case http.StatusConflict:
+		return false, errWorkspaceCredentialConflict
+	case http.StatusNotFound:
+		return true, nil
+	default:
+		return false, fmt.Errorf("credential bootstrap returned status %d", response.StatusCode)
+	}
 }
 
 func (r *RuntimePoolReconciler) createRuntimePoolSandboxTemplate(
@@ -970,6 +1286,7 @@ func runtimePoolPodTemplateValidationTarget(
 
 func (r *RuntimePoolReconciler) runtimePoolPodTemplateAuthSecret(
 	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
 	namespace string,
 	podSpec corev1.PodSpec,
 ) (*corev1.Secret, error) {
@@ -981,12 +1298,32 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplateAuthSecret(
 			break
 		}
 	}
-	if secretName == "" {
-		return nil, fmt.Errorf("deployed RuntimePool auth Secret reference is missing")
-	}
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret); err != nil {
-		return nil, fmt.Errorf("get deployed RuntimePool auth Secret: %w", err)
+	var secret *corev1.Secret
+	if secretName != "" {
+		secret = &corev1.Secret{}
+		if err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret); err != nil {
+			return nil, fmt.Errorf("get deployed RuntimePool auth Secret: %w", err)
+		}
+	} else {
+		epochText := ""
+		if len(podSpec.Containers) == 1 {
+			epochText = strings.TrimSpace(runtimePoolLiteralEnvironment(podSpec.Containers[0].Env)["ORKA_ACP_CONTROLLER_EPOCH"])
+		}
+		epoch, err := strconv.ParseInt(epochText, 10, 64)
+		if err != nil || epoch <= 0 {
+			return nil, fmt.Errorf("deployed RuntimePool auth Secret reference is missing")
+		}
+		var secrets corev1.SecretList
+		if err := r.sandboxReader().List(ctx, &secrets, client.InNamespace(namespace), client.MatchingLabels{
+			runtimePoolAuthLabel: "true",
+			runtimePoolUIDLabel:  string(pool.UID),
+		}); err != nil {
+			return nil, fmt.Errorf("list deployed RuntimePool auth Secrets: %w", err)
+		}
+		secret, err = runtimePoolAuthSecretForEpoch(secrets.Items, epoch)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if strings.TrimSpace(string(secret.Data[runtimePoolControllerTokenKey])) == "" ||
 		len(secret.Data[runtimePoolCapabilitySecretKey]) == 0 {

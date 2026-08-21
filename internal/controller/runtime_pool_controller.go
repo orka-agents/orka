@@ -71,6 +71,9 @@ const (
 	runtimePoolUIDLabel                          = "orka.ai/runtime-pool-uid"
 	runtimePoolNetworkRoleLabel                  = "orka.ai/network-role"
 	runtimePoolAuthLabel                         = "orka.ai/runtime-pool-auth"
+	runtimePoolCredentialEpochLabel              = "orka.ai/runtime-pool-controller-epoch"
+	runtimePoolProviderCredentialLabel           = "orka.ai/runtime-pool-provider-credential"
+	runtimePoolProviderGenerationLabel           = "orka.ai/runtime-pool-provider-generation"
 	runtimePoolProfileAnnotation                 = "orka.ai/runtime-profile-digest"
 	runtimePoolProviderTokenGenerationAnnotation = "orka.ai/provider-token-generation"
 	runtimePoolTemplateRevisionAnnotation        = "orka.ai/runtime-template-revision"
@@ -90,10 +93,11 @@ const (
 	runtimePoolProviderTokenPath    = "/var/run/secrets/orka/provider/token"
 	runtimePoolOperationHeader      = "X-Orka-Operation-Capability"
 
-	runtimePoolAuthVolume     = "pool-auth"
-	runtimePoolSessionsVolume = "sessions"
-	runtimePoolTempVolume     = "tmp"
-	runtimePoolHomeVolume     = "home"
+	runtimePoolAuthVolume               = "pool-auth"
+	runtimePoolProviderCapabilityVolume = "provider-capability"
+	runtimePoolSessionsVolume           = "sessions"
+	runtimePoolTempVolume               = "tmp"
+	runtimePoolHomeVolume               = "home"
 
 	runtimePoolProviderCodex              = "codex"
 	runtimePoolProviderClaude             = "claude"
@@ -101,6 +105,7 @@ const (
 	runtimePoolProviderOpencode           = "opencode"
 	runtimePoolResourceClassStandard      = "standard"
 	runtimePoolDefaultControllerNamespace = "orka-system"
+	runtimePoolDefaultServiceAccountName  = "default"
 
 	runtimePoolRolloutReasonDraining       = "RolloutDraining"
 	runtimePoolRolloutReasonQuiescent      = "RolloutQuiescent"
@@ -130,8 +135,8 @@ const (
 
 var (
 	digestPinnedImagePattern         = regexp.MustCompile(`^[^\s@]+@sha256:[a-f0-9]{64}$`)
-	runtimePoolAuthSuffixPattern     = regexp.MustCompile(`auth-e[1-9][0-9]*$`)
-	runtimePoolProviderSuffixPattern = regexp.MustCompile(`provider-e[1-9][0-9]*-g[0-9a-f]{16}$`)
+	runtimePoolAuthSuffixPattern     = regexp.MustCompile(`auth-e[1-9][0-9]*(?:-[0-9a-f]{24})?$`)
+	runtimePoolProviderSuffixPattern = regexp.MustCompile(`provider-e[1-9][0-9]*-g[0-9a-f]{16}(?:-[0-9a-f]{24})?$`)
 )
 
 // RuntimePoolProbeResult is the authenticated, exact-instance supervisor view
@@ -330,6 +335,10 @@ type RuntimePoolReconciler struct {
 	// SubstrateCredentialSeeder overrides the credential bootstrap PUT for
 	// tests; production seeds through the router transport.
 	SubstrateCredentialSeeder func(ctx context.Context, routeHost, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) error
+	// WorkspaceCredentialSeeder overrides the Agent Sandbox credential
+	// bootstrap PUT for tests. Production seeds the exact attested Pod endpoint
+	// directly after provider materialization is verified.
+	WorkspaceCredentialSeeder func(ctx context.Context, endpoint, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) (alreadyComplete bool, err error)
 
 	SupervisorClient RuntimePoolSupervisorClient
 	HTTPClient       *http.Client
@@ -1403,17 +1412,113 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecrets(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (*corev1.Secret, *corev1.Secret, error) {
+	if pool.Spec.ExecutionWorkspace != nil &&
+		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderAgentSandbox {
+		return r.ensurePrivateWorkspaceRuntimePoolSecrets(ctx, pool, cfg)
+	}
+
+	epoch := strconv.FormatInt(cfg.controllerEpoch, 10)
 	authName := runtimePoolChildName(cfg.baseName, "auth-e"+strconv.FormatInt(cfg.controllerEpoch, 10))
 	auth, err := r.ensureRuntimePoolSecret(ctx, pool, cfg, authName, map[string]int{
 		runtimePoolControllerTokenKey:  32,
 		runtimePoolCapabilitySecretKey: 32,
 		runtimePoolBootstrapNonceKey:   32,
-	}, map[string]string{runtimePoolAuthLabel: "true"})
+	}, map[string]string{
+		runtimePoolAuthLabel:            "true",
+		runtimePoolCredentialEpochLabel: epoch,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
 	providerName := runtimePoolChildName(cfg.baseName, "provider-e"+strconv.FormatInt(cfg.controllerEpoch, 10)+"-g"+cfg.providerProxy.tokenGeneration)
-	provider, err := r.ensureRuntimePoolProviderSecret(ctx, pool, cfg, providerName)
+	provider, err := r.ensureRuntimePoolProviderSecret(ctx, pool, cfg, providerName, map[string]string{
+		runtimePoolProviderCredentialLabel: "true",
+		runtimePoolCredentialEpochLabel:    epoch,
+		runtimePoolProviderGenerationLabel: cfg.providerProxy.tokenGeneration,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return auth, provider, nil
+}
+
+// ensurePrivateWorkspaceRuntimePoolSecrets gives Agent Sandbox bootstrap
+// credentials unpredictable names that never enter the provider-visible
+// template. A principal that can mutate SandboxTemplate objects but cannot
+// read Secrets therefore cannot mount the credentials into a raced workload;
+// the controller seeds them only after exact Sandbox materialization checks.
+func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolSecrets(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) (*corev1.Secret, *corev1.Secret, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	epoch := strconv.FormatInt(cfg.controllerEpoch, 10)
+
+	var authSecrets corev1.SecretList
+	if err := reader.List(ctx, &authSecrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
+		runtimePoolAuthLabel: "true",
+		runtimePoolUIDLabel:  string(pool.UID),
+	}); err != nil {
+		return nil, nil, err
+	}
+	authMatches := runtimePoolAuthSecretsForEpoch(authSecrets.Items, cfg.controllerEpoch)
+	if len(authMatches) > 1 {
+		return nil, nil, fmt.Errorf("workspace RuntimePool requires exactly one private auth Secret for controller epoch %d", cfg.controllerEpoch)
+	}
+	authName := ""
+	if len(authMatches) == 1 {
+		authName = authMatches[0].Name
+	} else {
+		suffix, err := r.randomHex(12)
+		if err != nil {
+			return nil, nil, fmt.Errorf("generate private RuntimePool auth Secret name: %w", err)
+		}
+		authName = runtimePoolChildName(cfg.baseName, "auth-e"+epoch+"-"+suffix)
+	}
+	auth, err := r.ensureRuntimePoolSecret(ctx, pool, cfg, authName, map[string]int{
+		runtimePoolControllerTokenKey:  32,
+		runtimePoolCapabilitySecretKey: 32,
+		runtimePoolBootstrapNonceKey:   32,
+	}, map[string]string{
+		runtimePoolAuthLabel:            "true",
+		runtimePoolCredentialEpochLabel: epoch,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var providerSecrets corev1.SecretList
+	if err := reader.List(ctx, &providerSecrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
+		runtimePoolManagedByLabel: "orka",
+		runtimePoolUIDLabel:       string(pool.UID),
+	}); err != nil {
+		return nil, nil, err
+	}
+	providerMatches := runtimePoolProviderSecretsForGeneration(
+		providerSecrets.Items, cfg.controllerEpoch, cfg.providerProxy.tokenGeneration,
+	)
+	if len(providerMatches) > 1 {
+		return nil, nil, fmt.Errorf("workspace RuntimePool requires exactly one private provider Secret for controller epoch %d and token generation %s", cfg.controllerEpoch, cfg.providerProxy.tokenGeneration)
+	}
+	providerName := ""
+	if len(providerMatches) == 1 {
+		providerName = providerMatches[0].Name
+	} else {
+		suffix, err := r.randomHex(12)
+		if err != nil {
+			return nil, nil, fmt.Errorf("generate private RuntimePool provider Secret name: %w", err)
+		}
+		providerName = runtimePoolChildName(cfg.baseName, "provider-e"+epoch+"-g"+cfg.providerProxy.tokenGeneration+"-"+suffix)
+	}
+	provider, err := r.ensureRuntimePoolProviderSecret(ctx, pool, cfg, providerName, map[string]string{
+		runtimePoolProviderCredentialLabel: "true",
+		runtimePoolCredentialEpochLabel:    epoch,
+		runtimePoolProviderGenerationLabel: cfg.providerProxy.tokenGeneration,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1642,11 +1747,35 @@ func runtimePoolManagedCredentialSecret(secret *corev1.Secret, cfg runtimePoolCo
 	return false
 }
 
+func runtimePoolProviderSecretsForGeneration(
+	secrets []corev1.Secret,
+	epoch int64,
+	generation string,
+) []corev1.Secret {
+	epochValue := strconv.FormatInt(epoch, 10)
+	legacySuffix := "provider-e" + epochValue + "-g" + generation
+	randomSuffixPrefix := legacySuffix + "-"
+	matched := make([]corev1.Secret, 0, 1)
+	for i := range secrets {
+		secretEpoch := strings.TrimSpace(secrets[i].Labels[runtimePoolCredentialEpochLabel])
+		secretGeneration := strings.TrimSpace(secrets[i].Labels[runtimePoolProviderGenerationLabel])
+		labeledMatch := secretEpoch == epochValue && secretGeneration == generation
+		legacyMatch := secretEpoch == "" && secretGeneration == "" &&
+			(strings.HasSuffix(secrets[i].Name, legacySuffix) ||
+				strings.HasPrefix(runtimePoolProviderSuffixPattern.FindString(secrets[i].Name), randomSuffixPrefix))
+		if labeledMatch || legacyMatch {
+			matched = append(matched, *secrets[i].DeepCopy())
+		}
+	}
+	return matched
+}
+
 func (r *RuntimePoolReconciler) ensureRuntimePoolProviderSecret(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 	name string,
+	extraLabels map[string]string,
 ) (*corev1.Secret, error) {
 	reader := r.APIReader
 	if reader == nil {
@@ -1657,7 +1786,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolProviderSecret(
 	err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret)
 	if apierrors.IsNotFound(err) {
 		secret = &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cfg.namespace, Labels: cloneStringMap(cfg.labels)},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cfg.namespace, Labels: mergeStringMap(cloneStringMap(cfg.labels), extraLabels)},
 			Type:       corev1.SecretTypeOpaque,
 			Immutable:  new(true),
 			Data:       map[string][]byte{runtimePoolProviderTokenKey: bytes.Clone(cfg.providerProxy.token)},
@@ -1678,6 +1807,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolProviderSecret(
 	}
 	base := secret.DeepCopy()
 	secret.Labels = mergeStringMap(secret.Labels, cfg.labels)
+	secret.Labels = mergeStringMap(secret.Labels, extraLabels)
 	if err := r.setRuntimePoolControllerReference(pool, secret); err != nil {
 		return nil, err
 	}
@@ -1905,7 +2035,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 				Resources: runtimePoolResourceRequirements(pool.Spec.Runtime.Profile.ResourceClass),
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: runtimePoolAuthVolume, MountPath: "/var/run/secrets/orka/auth", ReadOnly: true},
-					{Name: "provider-capability", MountPath: "/var/run/secrets/orka/provider", ReadOnly: true},
+					{Name: runtimePoolProviderCapabilityVolume, MountPath: "/var/run/secrets/orka/provider", ReadOnly: true},
 					{Name: runtimePoolSessionsVolume, MountPath: "/sessions"},
 					{Name: runtimePoolTempVolume, MountPath: "/tmp"},
 					{Name: runtimePoolHomeVolume, MountPath: "/home/worker"},
@@ -1920,7 +2050,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 					{Key: runtimePoolControllerTokenKey, Path: runtimePoolControllerTokenKey, Mode: &mode},
 					{Key: runtimePoolCapabilitySecretKey, Path: runtimePoolCapabilitySecretKey, Mode: &mode},
 				}}}},
-				{Name: "provider-capability", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: providerSecretName, DefaultMode: &mode, Items: []corev1.KeyToPath{{Key: runtimePoolProviderTokenKey, Path: "token", Mode: &mode}}}}},
+				{Name: runtimePoolProviderCapabilityVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: providerSecretName, DefaultMode: &mode, Items: []corev1.KeyToPath{{Key: runtimePoolProviderTokenKey, Path: "token", Mode: &mode}}}}},
 				{Name: runtimePoolSessionsVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("4Gi"))}}},
 				{Name: runtimePoolTempVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("512Mi"))}}},
 				{Name: runtimePoolHomeVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("256Mi"))}}},
@@ -3023,6 +3153,18 @@ func (r *RuntimePoolReconciler) randomSecret(size int) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+func (r *RuntimePoolReconciler) randomHex(size int) (string, error) {
+	reader := r.Rand
+	if reader == nil {
+		reader = rand.Reader
+	}
+	data := make([]byte, size)
+	if _, err := io.ReadFull(reader, data); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(data), nil
 }
 
 func (r *RuntimePoolReconciler) now() time.Time {

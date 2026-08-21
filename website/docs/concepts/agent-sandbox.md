@@ -43,8 +43,9 @@ spec:
 Task
   -> workspace binding frozen into the immutable execution snapshot
   -> dedicated single-session RuntimePool (acp-ws-<runtime>-<hash>)
-  -> controller-rendered SandboxTemplate + zero-replica SandboxWarmPool
+  -> credential-free controller-rendered SandboxTemplate + zero-replica SandboxWarmPool
   -> one SandboxClaim; the sandbox Pod runs the immutable ACP runtime image
+  -> exact Sandbox blueprint attestation + controller-signed credential bootstrap
   -> the authenticated exact-instance fence probe selects the ActiveInstance
   -> ephemeral RuntimeSession, fenced prompts, workspace validation,
      optional clean-room Workspace/Publisher transaction — all unchanged
@@ -71,9 +72,9 @@ RuntimePool demand exists, with the reason projected to
 
 - unsupported providers (only `agent-sandbox` and `substrate` are implemented; see the [Substrate](substrate.md) page for the Phase 2 backend);
 - `templateRef` — ACP RuntimeSessions run only controller-rendered sandbox
-  templates, because the immutable runtime image, epoch-scoped Secret mounts,
-  and fence environment cannot be hosted by an operator template without
-  exposing credentials through the provider API;
+  templates, because the immutable runtime image, fence environment,
+  materialization attestation, and signed bootstrap key must be rendered as one
+  exact unit. The provider-visible template carries no credential references;
 - `cleanupPolicy: retain`, `onDetach`, `boot`, `poolRef`, `snapshot`,
   `hibernation`;
 - any workspace request on the harness-v1 path — there is no cross-mode

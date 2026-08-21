@@ -55,8 +55,8 @@ SandboxClaim (provider-owned)   the physical workspace hosting exactly one
 
 | Contract step        | Owner and mechanism |
 | -------------------- | ------------------- |
-| Acquire              | Pool reconciler ensures a controller-rendered `SandboxTemplate` (exact supervisor Pod template: image allowlist, epoch-scoped Secret mounts, fence env, hardened security context), a zero-replica `SandboxWarmPool` (claims always cold-start from the exact current template), and one `SandboxClaim`, for the exact pool generation (template revision digest). |
-| WaitReady            | claim → sandbox → Pod Ready, then the existing authenticated exact-instance probe validates protocol, profile digest, fence, and instance identity before publishing `ActiveInstance`. |
+| Acquire              | Pool reconciler ensures a controller-rendered, credential-free `SandboxTemplate` (exact supervisor image, fence env, bootstrap nonce/public key, hardened security context), a zero-replica `SandboxWarmPool`, and one `SandboxClaim` for the exact pool generation. Auth/provider Secrets use unpredictable names that never enter provider objects. |
+| WaitReady            | claim → sandbox → Pod Ready; Orka attests the provider's immutable `Sandbox` blueprint against the validated template, performs a controller-signed one-time credential bootstrap, then runs the authenticated exact-instance probe before publishing `ActiveInstance`. |
 | CreateRuntimeSession | Existing fenced `PUT /v2/runtime-sessions/{id}` against the `ActiveInstance`. |
 | ExecutePrompt        | Existing fenced, digest-sealed prompt stream; duplicate/replay classification unchanged. |
 | Cancel               | Existing fenced cancel with proven settlement; unproven outcomes settle to `OutcomeUnknown`. |
@@ -69,9 +69,10 @@ SandboxClaim (provider-owned)   the physical workspace hosting exactly one
 
 The workspace request distills to a canonical binding
 `{provider, reusePolicy, cleanupPolicy, workspaceSlot, sessionKey}` where
-`sessionKey` is `task:<taskUID>` (reuse `none`) or `session:<sessionRef.name>`
-(reuse `session`). The binding digest folds into the RuntimePool identity
-digest, producing `acp-ws-<runtime>-<hash16>` pools that can never collide with
+`sessionKey` is `task:<taskUID>` (reuse `none`) or
+`session:<immutable SessionControl UID>` (reuse `session`). The binding digest
+folds into the RuntimePool identity digest, producing
+`acp-ws-<runtime>-<hash16>` pools that can never collide with
 shared plain pools. The binding is frozen into the write-once execution
 snapshot; snapshot verification recomputes the digest, the session key against
 the immutable Task identity, and the pool name exactly, and the dispatcher
@@ -110,11 +111,10 @@ treats the missing pool as cleanup proof and fresh demand recreates it by name.
 - Substrate, `cleanupPolicy: retain`, `templateRef`, `boot`, `poolRef`,
   `snapshot`, `hibernation`, and `onDetach` are rejected before any workspace
   or RuntimePool demand exists.
-- `templateRef` is rejected because the supervisor's immutable image,
-  epoch-scoped Secret mounts, and fence environment cannot be hosted by an
-  operator-provided template without moving credentials through the provider
-  API; ACP workspaces run only controller-rendered templates. Claim-side env
-  and volume injection are `Disallowed`.
+- `templateRef` is rejected because the supervisor's immutable image, fence
+  environment, materialization attestation, and signed credential-bootstrap
+  key must be controller-rendered. Provider-visible templates carry no
+  credential references; claim-side env and volume injection are `Disallowed`.
 - The provider's managed NetworkPolicy is `Unmanaged`; the pool's own
   default-deny NetworkPolicies select the workspace Pod through propagated
   pool labels, preserving the exact controller-ingress/provider-proxy-egress

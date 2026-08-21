@@ -779,17 +779,27 @@ func runtimePoolACPMCPAuthMaterial(
 // controller epoch (name suffix auth-e<epoch>) from the pool's labeled
 // Secrets.
 func runtimePoolAuthSecretForEpoch(secrets []corev1.Secret, epoch int64) (*corev1.Secret, error) {
-	suffix := "auth-e" + strconv.FormatInt(epoch, 10)
-	var matched []*corev1.Secret
-	for i := range secrets {
-		if strings.HasSuffix(secrets[i].Name, suffix) {
-			matched = append(matched, &secrets[i])
-		}
-	}
+	matched := runtimePoolAuthSecretsForEpoch(secrets, epoch)
 	if len(matched) != 1 {
 		return nil, fmt.Errorf("runtime pool requires exactly one auth Secret for controller epoch %d", epoch)
 	}
-	return matched[0], nil
+	return &matched[0], nil
+}
+
+func runtimePoolAuthSecretsForEpoch(secrets []corev1.Secret, epoch int64) []corev1.Secret {
+	epochValue := strconv.FormatInt(epoch, 10)
+	legacySuffix := "auth-e" + epochValue
+	randomSuffixPrefix := legacySuffix + "-"
+	matched := make([]corev1.Secret, 0, 1)
+	for i := range secrets {
+		secretEpoch := strings.TrimSpace(secrets[i].Labels[runtimePoolCredentialEpochLabel])
+		if secretEpoch == epochValue || (secretEpoch == "" &&
+			(strings.HasSuffix(secrets[i].Name, legacySuffix) ||
+				strings.HasPrefix(runtimePoolAuthSuffixPattern.FindString(secrets[i].Name), randomSuffixPrefix))) {
+			matched = append(matched, *secrets[i].DeepCopy())
+		}
+	}
+	return matched
 }
 
 func writeACPMCPError(w http.ResponseWriter, status int, message string) {

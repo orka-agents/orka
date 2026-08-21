@@ -1,16 +1,16 @@
 ---
 name: agent-sandbox-deploy
-description: Stand up the upstream kubernetes-sigs agent-sandbox workspace provider on a local kind cluster, validate the currently supported install/config, direct workspace-adapter, and plain-agent paths, and treat workspace-backed Orka agent Tasks as expected-failure/future API checks until harness support lands. Use when the user asks to install, enable, deploy, configure, validate, demo, or troubleshoot agent-sandbox execution workspaces for Orka (Task.spec.execution.workspace with provider agent-sandbox).
+description: Stand up the upstream kubernetes-sigs agent-sandbox workspace provider on a local kind cluster and validate direct adapter or workspace-backed ACP Task paths, including the fixture-backed bundled E2E. Use when the user asks to install, enable, deploy, configure, validate, demo, or troubleshoot agent-sandbox execution workspaces for Orka (Task.spec.execution.workspace with provider agent-sandbox).
 ---
 
 # Agent Sandbox Deploy
 
 Stand up the experimental [`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox)
-workspace provider against an Orka controller on a local kind cluster. Today,
-validate install/config, the direct workspace-adapter lifecycle, and the plain
-harness-backed agent path; treat a `type: agent` Task with
-`spec.execution.workspace` as an expected-failure check
-for the documented harness gate until workspace-backed agent Tasks are wired.
+workspace provider against an Orka controller on a local kind cluster. Validate
+install/config, the direct workspace-adapter lifecycle, and workspace-backed
+ACP Tasks. Manual deployments keep `--acp-workspace-dispatch-enabled` off unless
+the operator explicitly enables it; the bundled E2E enables the gate and runs a
+real Codex prompt against a local Responses-compatible fixture.
 
 This skill is for **local/kind evaluation and validation**, not production.
 Orka does not install or manage upstream agent-sandbox CRDs, the router,
@@ -207,20 +207,19 @@ test -x "$kindctl"
      wget -qO- http://127.0.0.1:1337/readyz
    ```
 
-   If you only need model-free confidence, run the CI parity script below. It
-   validates installation/configuration only while workspace-backed agent Tasks
-   remain gated; it is not a claim/readiness/exec/cleanup smoke.
+   If you only need confidence without external model access, run the CI parity
+   script below. It validates the direct claim lifecycle and a fixture-backed
+   workspace ACP prompt without requiring vekil login.
 
 ## Validate
 
-> **Current boundary:** this skill validates the upstream agent-sandbox
-> provider directly. Orka ACP RuntimeSessions do not yet map to sandbox claims;
-> execution-workspace-backed agent Tasks remain expected-future evidence. The
-> removed v1 harness-wrapper path must not be reintroduced. Validate plain
-> Codex/Claude ACP Tasks with `scripts/live-acp-runtime-e2e.sh`.
+> **Current boundary:** Orka ACP RuntimeSessions map to controller-rendered
+> SandboxClaims only when both provider and workspace-dispatch gates are on.
+> The bundled E2E enables both and proves fixture-backed prompt completion; a
+> manual deployment with the dispatch gate off must still fail closed. The
+> removed v1 harness-wrapper path must not be reintroduced.
 
-Do **not** use an execution-workspace agent Task as the success criterion yet.
-Validate the two currently wired paths separately:
+Choose validation according to the deployed gates:
 
 - **Model path through ACP** (requires the optional `AGENTIC=1` step and
   vekil ready): run a plain agent Task with no `execution.workspace` and wait
@@ -262,10 +261,10 @@ YAML
   wait --for=jsonpath='{.status.phase}'=Succeeded task/orka-live-model-smoke --timeout=10m
 ```
 
-- **Installation/configuration parity**: run the model-free CI parity script
-  below when you want a self-contained cluster bring-up with fake model
-  credentials. It verifies the install/config path, but it does **not** exercise
-  claim → ready → exec → cleanup through the direct adapter.
+- **Provider and workspace-ACP parity**: run the bundled E2E below for a
+  self-contained cluster. It exercises direct claim → ready → exec → cleanup
+  and a real Codex prompt through a workspace-backed RuntimePool using a local
+  Responses-compatible fixture.
 
 Workspace-provider-backed RuntimeSession dispatch is flag-gated: it requires
 both `--agent-sandbox-enabled` and `--acp-workspace-dispatch-enabled` on the
@@ -317,8 +316,8 @@ YAML
   task/orka-live-sandbox-smoke --timeout=2m
 ```
 
-With `--acp-workspace-dispatch-enabled` set (plus real, digest-pinned ACP
-runtime images and provider-proxy model access), the same Task instead binds a
+With `--acp-workspace-dispatch-enabled` set (plus a digest-pinned ACP runtime
+image and either the local fixture or provider-proxy model access), the same Task binds a
 dedicated `acp-ws-<runtime>-<hash>` RuntimePool whose SandboxClaim hosts the
 RuntimeSession, and the check becomes a live success smoke waiting for
 `Succeeded`. Orka Task status stays provider-neutral
@@ -326,11 +325,16 @@ RuntimeSession, and the check becomes a live success smoke waiting for
 or sandbox names) — read the RuntimePool status and upstream agent-sandbox
 resources for lifecycle detail.
 
-### Model-free CI parity
+### No-external-model CI parity
 
 `scripts/live-agent-sandbox-e2e.sh` (run by the `Live Agent Sandbox E2E`
-workflow) stands up a clean kind cluster with fake model credentials and **no
-model access**. The script exercises the direct workspace adapter (claim, readiness, router exec, delete, retained reuse, and cleanup) but deliberately skips the unsupported full ACP Task-to-workspace path:
+workflow) stands up a clean kind cluster with a local Responses-compatible
+fixture and no external model access. The script exercises the direct workspace
+adapter (claim, readiness, router exec, delete, retained reuse, and cleanup),
+then runs a workspace-backed ACP Task through the real Codex supervisor and
+waits for fixture-backed prompt success. Set
+`ORKA_AGENT_SANDBOX_ACP_TASK_SMOKE=0` only when intentionally skipping that
+ACP path:
 
 ```bash
 bash scripts/live-agent-sandbox-e2e.sh
@@ -359,15 +363,11 @@ cluster you want to keep.
 ## Validate
 
 Read `references/validate.md` before treating anything as proven. The model-free
-e2e confirms installation/configuration and the direct workspace-adapter
-lifecycle. The model path via a **plain** agent Task with no
-`execution.workspace` is validated separately there.
-
-Valid enabled provider-based `spec.execution.workspace` requests are still
-rejected during agent execution planning by the current harness-runtime gate. Do
-not use a workspace-backed Task as a
-success criterion; `references/validate.md` covers it only as an
-expected-failure/future-API check, alongside model-free CI parity.
+e2e confirms installation/configuration, the direct workspace-adapter lifecycle,
+and fixture-backed workspace ACP Task completion. For a manual deployment, use
+the workspace Task as a success criterion only when
+`--acp-workspace-dispatch-enabled` is on; otherwise verify the documented
+fail-closed `WorkspaceValidationFailed` result.
 
 ## Troubleshooting
 

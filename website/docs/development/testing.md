@@ -221,7 +221,13 @@ Secrets without printing their values and redact provider/GitHub token patterns
 from failure diagnostics.
 
 
-The existing live agent-sandbox workflow exercises the earlier execution-workspace prototype. The current ACP core runtime rejects `Task.spec.execution.workspace`, so this workflow is not an ACP v2 release gate and should not be used as evidence for RuntimePool, workspace validation, or publication behavior. Its prototype assertions include:
+The live agent-sandbox workflow validates both the direct workspace-adapter
+lifecycle and the initial workspace-backed ACP v2 happy path. It builds the
+real Codex supervisor, routes a prompt through a local Responses-compatible
+fixture, waits for the Task to succeed, verifies provider-neutral status, and
+cleans up the dedicated RuntimePool. It does not replace the broader live ACP
+release gate or provide publication evidence. Its direct-adapter assertions
+also include:
 
 - the outer worker re-execs inside the sandbox with `ORKA_AGENT_SANDBOX_DEPTH=1` and sandbox recursion disabled
 - the staged service account token is available to the inner worker while the command runs
@@ -259,7 +265,11 @@ The Agent Substrate workflow (`.github/workflows/agent-substrate-e2e.yml`) is se
 - MCP Actor reuse across forced Tool reconciles without rebooting an already booted Actor
 - pool scale-down plus Tool, lease, bound Actor, and precreated Actor cleanup
 
-The workflow does **not** validate a successful workspace-backed ACP Task. RuntimeSession-to-Substrate Actor dispatch remains deferred, so the supported evidence is the direct Actor path plus Orka-brokered MCP. Built-in Codex, Claude, and Copilot RuntimePools are validated separately by the live ACP workflows.
+The workflow also validates a successful workspace-backed ACP Task by booting
+the real Codex supervisor in a gVisor Actor, routing a prompt through the local
+Responses-compatible fixture, waiting for `Succeeded`, checking provider-
+neutral status, and cleaning up the pool. Broader runtime coverage and
+clean-room publication remain responsibilities of the live ACP workflows.
 
 The patches are source-blob pinned and fail closed when `SUBSTRATE_REF` changes or a patch touches an undeclared path. See `hack/agent-substrate/README.md` for the patch contracts and review procedure. Run the fast static checks with:
 

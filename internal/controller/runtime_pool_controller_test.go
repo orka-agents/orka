@@ -511,7 +511,7 @@ func TestRuntimePoolReconcilerPrunesStaleEpochSecretsAfterAuthenticatedRollout(t
 
 	oldDeployment, oldPod := runtimePoolTestStartServing(t, r, pool, supervisor, "epoch-old-pod", "epoch-old-uid", "10.0.0.63", "epoch-old-boot")
 	oldAuthName := runtimePoolTestVolume(oldDeployment.Spec.Template.Spec.Volumes, "pool-auth").Secret.SecretName
-	oldProviderName := runtimePoolTestVolume(oldDeployment.Spec.Template.Spec.Volumes, "provider-capability").Secret.SecretName
+	oldProviderName := runtimePoolTestVolume(oldDeployment.Spec.Template.Spec.Volumes, runtimePoolProviderCapabilityVolume).Secret.SecretName
 	oldAuth := &corev1.Secret{}
 	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: oldAuthName}, oldAuth); err != nil {
 		t.Fatalf("get old epoch auth Secret: %v", err)
@@ -549,7 +549,7 @@ func TestRuntimePoolReconcilerPrunesStaleEpochSecretsAfterAuthenticatedRollout(t
 			volume.Projected = &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{
 				Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: oldAuthName}},
 			}}}
-		case "provider-capability":
+		case runtimePoolProviderCapabilityVolume:
 			volume.Secret = nil
 		}
 	}
@@ -2002,6 +2002,9 @@ func runtimePoolTestReconciler(
 		},
 		AllowedImages: ACPRuntimeImages{Codex: "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("a", 64)},
 		Rand:          bytes.NewReader(bytes.Repeat([]byte{0x5a}, 4096)), Now: func() time.Time { return runtimePoolTestNow },
+		WorkspaceCredentialSeeder: func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
+			return false, nil
+		},
 	}
 	return r
 }

@@ -2,12 +2,12 @@
 
 Validation steps for `$agent-substrate-deploy`. Read after the standard workflow completes.
 
-> **Known gate:** Substrate-backed ACP RuntimeSession dispatch requires `--substrate-enabled` **and** `--acp-workspace-dispatch-enabled` plus an infrastructure `templateRef`; this skill's deployments leave the dispatch flag off, so a provider-backed agent Task remains expected-failure evidence here. The bundled E2E validates direct Actor create/resume/exec/suspend/delete plus Substrate-backed MCP lifecycle. Validate plain Codex/Claude ACP Tasks separately with `scripts/live-acp-runtime-e2e.sh`.
+> **Known gate:** Substrate-backed ACP RuntimeSession dispatch requires `--substrate-enabled` **and** `--acp-workspace-dispatch-enabled` plus an infrastructure `templateRef`. The bundled installer/E2E enables the dispatch flag by default and validates a real Codex prompt against a local Responses-compatible fixture; set `SUBSTRATE_E2E_ACP_TASK_SMOKE=0` only to skip that path. A manual deployment with the flag off must still fail closed.
 
 The installer leaves a fully wired cluster. During standup it smoke-tests direct
-actor create/resume/exec/suspend/delete and Substrate-backed MCP tool lifecycle.
-It does **not** currently smoke-test retained workspace reuse for Orka agent
-Tasks because those execution-workspace checks are skipped by the ACP workspace-dispatch gate.
+actor create/resume/exec/suspend/delete, Substrate-backed MCP tool lifecycle,
+and a workspace-backed ACP Task through the real Codex supervisor and local
+fixture. Retained session reuse is not part of this initial happy-path smoke.
 
 If you skipped standard workflow step 3 (`Export kubeconfig for follow-up
 kubectl commands`) in `../SKILL.md`, do it before any
@@ -22,7 +22,7 @@ export KUBECONFIG="$(mktemp -t orka-substrate-kubeconfig.XXXXXX)"
 kind export kubeconfig --name "${cluster}" --kubeconfig "${KUBECONFIG}"
 ```
 
-To drive an Orka Task yourself (intended shape; currently gated as noted above):
+To drive an Orka Task yourself on a deployment with workspace dispatch enabled:
 
 ```bash
 cluster="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
@@ -59,8 +59,8 @@ kubectl --context "$ctx" -n default get task substrate-smoke -o yaml
 
 With the dispatch flag off, check `status.executionWorkspace.phase=Failed` and
 `reason=WorkspaceValidationFailed`; provider/template metadata remains sanitized.
-With `--acp-workspace-dispatch-enabled`, an infrastructure `templateRef`, real
-digest-pinned ACP runtime images, and provider-proxy model access, the same Task
+With `--acp-workspace-dispatch-enabled`, an infrastructure `templateRef`, a
+digest-pinned ACP runtime image, and either the local fixture or provider-proxy model access, the same Task
 becomes a live success smoke waiting for `Succeeded`, backed by a dedicated
 `acp-ws-*` RuntimePool whose Actor hosts the supervisor. Status must never
 expose actor IDs, route hosts, snapshot URIs, worker pod IPs, daemon URLs, or
@@ -70,9 +70,10 @@ tokens.
 
 `scripts/agent-substrate-e2e.sh` (the `Agent Substrate E2E` workflow) runs the
 direct Substrate and MCP paths end-to-end without externally supplied model or
-Git credentials. It still generates local bootstrap and harness-auth tokens and
-stores them in cluster Secrets. Run it directly when you want a clean,
-self-contained validation with its own cluster lifecycle:
+Git credentials, then runs the fixture-backed workspace ACP Task by default. It
+still generates local bootstrap and harness-auth tokens and stores them in
+cluster Secrets. Run it directly when you want a clean, self-contained
+validation with its own cluster lifecycle:
 
 ```bash
 PATH="$(go env GOPATH)/bin:$PATH" bash scripts/agent-substrate-e2e.sh

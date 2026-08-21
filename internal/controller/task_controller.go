@@ -3046,6 +3046,24 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	if err := validateExecutionWorkspaceBasics(task, provider); err != nil {
 		return err
 	}
+	return validateExecutionWorkspacePolicyShape(task, ws)
+}
+
+// validateExecutionWorkspaceRequest retains the provider-specific validation
+// used by the legacy workspace request resolver. Agent execution admission
+// deliberately runs only validateExecutionWorkspace before contract routing:
+// planAgentExecution owns ACP-only provider and template gates so harness-v1
+// requests receive the v1-specific unsupported-workspace error.
+func (r *TaskReconciler) validateExecutionWorkspaceRequest(task *corev1alpha1.Task) error {
+	if err := r.validateExecutionWorkspace(task); err != nil {
+		return err
+	}
+	if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil || !task.Spec.Execution.Workspace.Enabled {
+		return nil
+	}
+
+	ws := task.Spec.Execution.Workspace
+	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
 	if err := validateExecutionWorkspaceSubstrateOptions(ws, provider); err != nil {
 		return err
 	}
@@ -3142,6 +3160,17 @@ func (r *TaskReconciler) validateExecutionWorkspaceProviderConfig(
 }
 
 func validateExecutionWorkspacePolicies(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {
+	if err := validateExecutionWorkspacePolicyShape(task, ws); err != nil {
+		return err
+	}
+	if ws.PoolRef != nil && ws.CleanupPolicy == corev1alpha1.WorkspaceCleanupPolicyRetain {
+		return fmt.Errorf("execution workspace poolRef does not support cleanupPolicy %q until substrate workspace reset is available", ws.CleanupPolicy)
+	}
+
+	return nil
+}
+
+func validateExecutionWorkspacePolicyShape(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {
 	if !statusrules.IsOptionalReusePolicy(ws.ReusePolicy) {
 		return fmt.Errorf("unsupported execution workspace reusePolicy %q", ws.ReusePolicy)
 	}
@@ -3149,10 +3178,6 @@ func validateExecutionWorkspacePolicies(task *corev1alpha1.Task, ws *corev1alpha
 	if !statusrules.IsOptionalCleanupPolicy(ws.CleanupPolicy) {
 		return fmt.Errorf("unsupported execution workspace cleanupPolicy %q", ws.CleanupPolicy)
 	}
-	if ws.PoolRef != nil && ws.CleanupPolicy == corev1alpha1.WorkspaceCleanupPolicyRetain {
-		return fmt.Errorf("execution workspace poolRef does not support cleanupPolicy %q until substrate workspace reset is available", ws.CleanupPolicy)
-	}
-
 	if ws.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession && (task.Spec.SessionRef == nil || task.Spec.SessionRef.Name == "") {
 		return fmt.Errorf("execution workspace reusePolicy %q requires spec.sessionRef.name", ws.ReusePolicy)
 	}

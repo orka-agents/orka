@@ -83,12 +83,12 @@ func TestBuildHarnessV1StartTurnRequestUsesStableCanonicalDigest(t *testing.T) {
 	if !request.Deadline.Equal(wantDeadline) {
 		t.Fatalf("deadline = %s, want %s", request.Deadline, wantDeadline)
 	}
-	if request.Metadata["runtimeAuthOnly"] != "true" {
+	if request.Metadata["runtimeAuthOnly"] != booleanTrueValue {
 		t.Fatalf("runtimeAuthOnly metadata = %q, want true", request.Metadata["runtimeAuthOnly"])
 	}
 	for key, want := range map[string]string{
-		harness.MetadataRuntimePolicyFrozen: "true",
-		harness.MetadataAllowedToolsSet:     "true",
+		harness.MetadataRuntimePolicyFrozen: booleanTrueValue,
+		harness.MetadataAllowedToolsSet:     booleanTrueValue,
 		"runtime":                           string(corev1alpha1.AgentRuntimeCodex),
 		"orka.runtimeName":                  string(corev1alpha1.AgentRuntimeCodex),
 		"model":                             "frozen-model",

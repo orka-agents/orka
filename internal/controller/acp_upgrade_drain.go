@@ -862,10 +862,16 @@ func (c *ACPUpgradeDrainCoordinator) runtimePoolAuthSecret(
 	active *corev1alpha1.RuntimePoolActiveInstanceStatus,
 	epoch int64,
 ) (*corev1.Secret, error) {
-	name := runtimePoolChildName(runtimePoolResourceName(pool.Namespace, pool.Name), "auth-e"+strconv.FormatInt(epoch, 10))
-	secret := &corev1.Secret{}
-	if err := c.APIReader.Get(ctx, types.NamespacedName{Namespace: active.PodNamespace, Name: name}, secret); err != nil {
-		return nil, fmt.Errorf("get RuntimePool auth Secret: %w", err)
+	var secrets corev1.SecretList
+	if err := c.APIReader.List(ctx, &secrets, client.InNamespace(active.PodNamespace), client.MatchingLabels{
+		runtimePoolAuthLabel: "true",
+		runtimePoolUIDLabel:  string(pool.UID),
+	}); err != nil {
+		return nil, fmt.Errorf("list RuntimePool auth Secrets: %w", err)
+	}
+	secret, err := runtimePoolAuthSecretForEpoch(secrets.Items, epoch)
+	if err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(string(secret.Data[runtimePoolControllerTokenKey])) == "" || len(secret.Data[runtimePoolCapabilitySecretKey]) == 0 {
 		return nil, fmt.Errorf("RuntimePool auth Secret is missing controller credentials")

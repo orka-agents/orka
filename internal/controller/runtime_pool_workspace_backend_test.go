@@ -7,7 +7,10 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -27,12 +30,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	sandboxextcontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 )
 
 func runtimePoolWorkspaceTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtimePoolTestScheme(t)
+	if err := sandboxv1beta1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme sandbox core: %v", err)
+	}
 	if err := sandboxextv1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme sandbox extensions: %v", err)
 	}
@@ -92,7 +100,83 @@ func runtimePoolWorkspaceReadyPod(
 	pod := runtimePoolReadyPod(pool, pool.Namespace, name, uid, ip)
 	pod.Labels = cloneStringMap(template.Spec.PodTemplate.ObjectMeta.Labels)
 	pod.Annotations = cloneStringMap(template.Spec.PodTemplate.ObjectMeta.Annotations)
+	pod.Spec = *template.Spec.PodTemplate.Spec.DeepCopy()
 	return pod
+}
+
+func runtimePoolWorkspaceTestMaterialization(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+	template *sandboxextv1beta1.SandboxTemplate,
+	ip string,
+) corev1.Pod {
+	t.Helper()
+	base := runtimePoolResourceName(pool.Namespace, pool.Name)
+	claim := &sandboxextv1beta1.SandboxClaim{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: runtimePoolSandboxClaimName(base)}, claim); err != nil {
+		t.Fatalf("Get SandboxClaim for materialization: %v", err)
+	}
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claim.Name,
+			Namespace: claim.Namespace,
+			Annotations: map[string]string{
+				sandboxv1beta1.SandboxTemplateRefAnnotation: template.Name,
+			},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: *template.Spec.SandboxBlueprint.DeepCopy()},
+	}
+	sandboxextcontrollers.ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels = mergeStringMap(
+		sandbox.Spec.PodTemplate.ObjectMeta.Labels,
+		map[string]string{
+			sandboxextv1beta1.SandboxIDLabel:           string(claim.UID),
+			sandboxv1beta1.SandboxTemplateRefHashLabel: sandboxextcontrollers.SandboxTemplateRefHash(template.Name),
+		},
+	)
+	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
+		t.Fatalf("Set Sandbox owner reference: %v", err)
+	}
+	if err := r.Create(context.Background(), sandbox); err != nil {
+		t.Fatalf("Create Sandbox materialization: %v", err)
+	}
+
+	pod := runtimePoolWorkspaceReadyPod(pool, template, "sandbox-pod", "sandbox-pod-uid", ip)
+	pod.Labels[sandboxextv1beta1.SandboxIDLabel] = string(claim.UID)
+	if err := controllerutil.SetControllerReference(sandbox, &pod, r.Scheme); err != nil {
+		t.Fatalf("Set runtime Pod Sandbox owner reference: %v", err)
+	}
+	runtimePoolTestCreatePod(t, r, &pod)
+	return pod
+}
+
+func assertWorkspaceRuntimePoolBootstrapEnvironment(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+	env []corev1.EnvVar,
+) {
+	t.Helper()
+	byName := make(map[string]corev1.EnvVar, len(env))
+	for i := range env {
+		byName[env[i].Name] = env[i]
+	}
+	for _, name := range []string{
+		"ORKA_ACP_CONTROLLER_TOKEN_FILE", "ORKA_ACP_CAPABILITY_SECRET_FILE", "ORKA_ACP_PROVIDER_TOKEN_FILE",
+		"ORKA_ACP_CONTROLLER_TOKEN_BOOTSTRAP", "ORKA_ACP_CAPABILITY_SECRET_BOOTSTRAP", "ORKA_ACP_PROVIDER_TOKEN_BOOTSTRAP",
+	} {
+		if _, found := byName[name]; found {
+			t.Fatalf("provider-visible workspace template exposes credential environment %s", name)
+		}
+	}
+	if strings.TrimSpace(byName["ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"].Value) == "" ||
+		strings.TrimSpace(byName[harnessv2.CredentialBootstrapPublicKeyEnv].Value) == "" {
+		t.Fatal("provider-visible workspace template is missing signed credential-bootstrap material")
+	}
+	baseEnvironment := append([]corev1.EnvVar(nil), env...)
+	baseEnvironment = append(baseEnvironment, corev1.EnvVar{Name: "ORKA_ACP_PROVIDER_TOKEN_FILE", Value: runtimePoolProviderTokenPath})
+	assertRuntimePoolEnvironment(t, r, pool, baseEnvironment)
 }
 
 func TestWorkspaceRuntimePoolMaterializesProviderWorkload(t *testing.T) {
@@ -119,7 +203,17 @@ func TestWorkspaceRuntimePoolMaterializesProviderWorkload(t *testing.T) {
 	assertRuntimePoolPodHardening(t, podSpec)
 	assertRuntimePoolContainerHardening(t, podSpec.Containers[0])
 	assertRuntimePoolBoundedVolumes(t, podSpec.Volumes)
-	assertRuntimePoolEnvironment(t, r, pool, podSpec.Containers[0].Env)
+	assertWorkspaceRuntimePoolBootstrapEnvironment(t, r, pool, podSpec.Containers[0].Env)
+	for _, name := range []string{runtimePoolAuthVolume, runtimePoolProviderCapabilityVolume} {
+		if runtimePoolTestVolume(podSpec.Volumes, name) != nil {
+			t.Fatalf("provider-visible workspace template exposes credential volume %q", name)
+		}
+		for i := range podSpec.Containers[0].VolumeMounts {
+			if podSpec.Containers[0].VolumeMounts[i].Name == name {
+				t.Fatalf("provider-visible workspace template exposes credential mount %q", name)
+			}
+		}
+	}
 	if template.Spec.PodTemplate.ObjectMeta.Labels[runtimePoolKeyLabel] != runtimePoolKey(pool.Namespace, pool.Name) {
 		t.Fatal("sandbox template Pod labels do not carry the pool selector label")
 	}
@@ -141,6 +235,32 @@ func TestWorkspaceRuntimePoolMaterializesProviderWorkload(t *testing.T) {
 	}
 	if len(claim.Spec.Env) != 0 || len(claim.Spec.VolumeClaimTemplates) != 0 {
 		t.Fatal("sandbox claim must not inject env or volumes; credentials never cross the provider API")
+	}
+	serializedTemplate, err := json.Marshal(template)
+	if err != nil {
+		t.Fatalf("Marshal SandboxTemplate: %v", err)
+	}
+	var secrets corev1.SecretList
+	if err := r.List(context.Background(), &secrets, client.InNamespace(pool.Namespace), client.MatchingLabels{runtimePoolUIDLabel: string(pool.UID)}); err != nil {
+		t.Fatalf("List workspace RuntimePool Secrets: %v", err)
+	}
+	privateName := regexp.MustCompile(`-[0-9a-f]{24}$`)
+	credentialSecrets := 0
+	for i := range secrets.Items {
+		secret := &secrets.Items[i]
+		if secret.Labels[runtimePoolAuthLabel] != "true" && secret.Labels[runtimePoolProviderCredentialLabel] != "true" {
+			continue
+		}
+		credentialSecrets++
+		if !privateName.MatchString(secret.Name) {
+			t.Fatalf("workspace credential Secret %q does not have an unpredictable private suffix", secret.Name)
+		}
+		if bytes.Contains(serializedTemplate, []byte(secret.Name)) {
+			t.Fatalf("provider-visible SandboxTemplate exposes private credential Secret %q", secret.Name)
+		}
+	}
+	if credentialSecrets != 2 {
+		t.Fatalf("workspace credential Secret count = %d, want auth and provider Secrets", credentialSecrets)
 	}
 
 	var deployment appsv1.Deployment
@@ -378,11 +498,15 @@ func TestWorkspaceRuntimePoolServesThroughSandboxPod(t *testing.T) {
 	pool := runtimePoolWorkspaceTestObject()
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	seedCalls := 0
+	r.WorkspaceCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
+		seedCalls++
+		return false, nil
+	}
 
 	runtimePoolReconcile(t, r, pool)
 	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
-	pod := runtimePoolWorkspaceReadyPod(pool, template, "sandbox-pod", "sandbox-pod-uid", "10.0.0.71")
-	runtimePoolTestCreatePod(t, r, &pod)
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.71")
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "sandbox-boot", false)
 
 	runtimePoolReconcile(t, r, pool)
@@ -400,6 +524,97 @@ func TestWorkspaceRuntimePoolServesThroughSandboxPod(t *testing.T) {
 	if status.Capacity.MaxResidentSessions != 1 || status.Capacity.MaxRunningPrompts != 1 {
 		t.Fatalf("capacity = %d/%d, want 1/1 single-session workspace pool", status.Capacity.MaxResidentSessions, status.Capacity.MaxRunningPrompts)
 	}
+	if seedCalls != 1 {
+		t.Fatalf("credential bootstrap calls = %d, want 1 after exact Sandbox attestation", seedCalls)
+	}
+}
+
+func TestWorkspaceRuntimePoolRejectsRacedSandboxMaterializationBeforeCredentialSeed(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	seedCalls := 0
+	r.WorkspaceCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
+		seedCalls++
+		return false, nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace children were not materialized")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.74")
+	sandbox := &sandboxv1beta1.Sandbox{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}, sandbox); err != nil {
+		t.Fatalf("Get Sandbox materialization: %v", err)
+	}
+	sandbox.Spec.PodTemplate.Spec.Containers[0].Image = runtimePoolTestTamperedImage
+	if err := r.Update(context.Background(), sandbox); err != nil {
+		t.Fatalf("tamper materialized Sandbox: %v", err)
+	}
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "sandbox-boot", false)
+
+	runtimePoolReconcile(t, r, pool)
+
+	if seedCalls != 0 {
+		t.Fatalf("raced Sandbox received %d credential bootstrap requests before attestation", seedCalls)
+	}
+	if supervisor.probeCalls != 0 {
+		t.Fatalf("raced Sandbox received %d authenticated probes before attestation", supervisor.probeCalls)
+	}
+	if _, _, currentClaim := runtimePoolWorkspaceTestChildren(t, r, pool); currentClaim != nil {
+		t.Fatal("raced SandboxClaim was not recycled")
+	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(status.Message, "materialization") {
+		t.Fatalf("raced materialization status = %s/%s %q, want Degraded/Closed attestation failure", status.Lifecycle, status.AdmissionState, status.Message)
+	}
+}
+
+func TestWorkspaceRuntimePoolRejectsForgedPodBeforeCredentialSeed(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	seedCalls := 0
+	r.WorkspaceCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
+		seedCalls++
+		return false, nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace children were not materialized")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.75")
+	pod.Spec.Containers[0].Image = runtimePoolTestTamperedImage
+	if err := r.Update(context.Background(), &pod); err != nil {
+		t.Fatalf("tamper materialized Pod: %v", err)
+	}
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "sandbox-boot", false)
+
+	runtimePoolReconcile(t, r, pool)
+
+	if seedCalls != 0 {
+		t.Fatalf("forged Pod received %d credential bootstrap requests before attestation", seedCalls)
+	}
+	if supervisor.probeCalls != 0 {
+		t.Fatalf("forged Pod received %d authenticated probes before attestation", supervisor.probeCalls)
+	}
+	if _, _, currentClaim := runtimePoolWorkspaceTestChildren(t, r, pool); currentClaim != nil {
+		t.Fatal("forged Pod SandboxClaim was not recycled")
+	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(status.Message, "PodSpec") {
+		t.Fatalf("forged Pod status = %s/%s %q, want Degraded/Closed PodSpec attestation failure", status.Lifecycle, status.AdmissionState, status.Message)
+	}
 }
 
 func TestWorkspaceRuntimePoolSupervisorRestartRecyclesClaim(t *testing.T) {
@@ -410,8 +625,7 @@ func TestWorkspaceRuntimePoolSupervisorRestartRecyclesClaim(t *testing.T) {
 
 	runtimePoolReconcile(t, r, pool)
 	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
-	pod := runtimePoolWorkspaceReadyPod(pool, template, "sandbox-pod", "sandbox-pod-uid", "10.0.0.72")
-	runtimePoolTestCreatePod(t, r, &pod)
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.72")
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-1", false)
 	runtimePoolReconcile(t, r, pool)
 
@@ -444,8 +658,7 @@ func TestWorkspaceRuntimePoolScaleToZeroDrainsThenDeletesClaim(t *testing.T) {
 
 	runtimePoolReconcile(t, r, pool)
 	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
-	pod := runtimePoolWorkspaceReadyPod(pool, template, "sandbox-pod", "sandbox-pod-uid", "10.0.0.73")
-	runtimePoolTestCreatePod(t, r, &pod)
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.73")
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-1", false)
 	runtimePoolReconcile(t, r, pool)
 
