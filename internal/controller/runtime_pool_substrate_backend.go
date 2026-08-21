@@ -335,13 +335,37 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		}
 	}
 	if actor != nil && strings.TrimSpace(pool.Annotations[substrateActorWorkerPlacementAnnotation]) == "" &&
-		templateOwned && templateIntegrityErr == nil && templateFence != "" &&
-		strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation]) == templateFence {
-		// Backfill pools created before the placement record existed only when
-		// the live template is still the exact object fenced at actor creation.
-		// A changed or recreated template is never trusted for teardown.
-		if err := r.recordSubstrateRuntimePoolWorkerPlacement(ctx, pool, derivedTemplate); err != nil {
-			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		templateOwned && templateIntegrityErr == nil && templateFence != "" {
+		var placementTemplate *unstructured.Unstructured
+		storedFence := strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation])
+		switch storedFence {
+		case templateFence:
+			// The live template is still the exact object fenced at actor creation.
+			placementTemplate = derivedTemplate
+		case "":
+			// Upgrade pools created before template fencing by comparing the live
+			// template with an independently rendered desired template. Never use
+			// an unfenced mutable template directly as the teardown allowlist.
+			if err := loadDesired(); err != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			}
+			if templateRevision == desired.revision {
+				placementTemplate = desired.object
+			}
+		}
+		if placementTemplate != nil {
+			if err := r.recordSubstrateRuntimePoolWorkerPlacement(ctx, pool, placementTemplate); err != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			}
+		}
+	}
+	if actor != nil && strings.TrimSpace(pool.Annotations[substrateActorWorkerPlacementAnnotation]) == "" &&
+		strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation]) == "" {
+		// An unfenced actor whose deployed template no longer matches the
+		// independently rendered desired template has no provable teardown
+		// placement. Close admission without attempting an unsafe Pod deletion.
+		if desiredLoaded && templateRevision != desired.revision {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("cannot prove the worker placement of an unfenced RuntimePool substrate actor"))
 		}
 	}
 

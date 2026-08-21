@@ -430,6 +430,35 @@ func TestSubstrateRuntimePoolRejectsForeignWorkerEgressPolicy(t *testing.T) {
 	}
 }
 
+func TestSubstrateRuntimePoolBackfillsPlacementBeforeRecyclingUnfencedActor(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+
+	legacy := runtimePoolTestGetPool(t, r, pool)
+	base := legacy.DeepCopy()
+	delete(legacy.Annotations, substrateActorTemplateFenceAnnotation)
+	delete(legacy.Annotations, substrateActorWorkerPlacementAnnotation)
+	if err := r.Patch(context.Background(), &legacy, client.MergeFrom(base)); err != nil {
+		t.Fatalf("remove legacy actor fence and placement: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.settled) != 1 || control.settled[0] != substrateTestActorID(pool) {
+		t.Fatalf("settled actors = %v, want the unfenced actor recycling after placement backfill", control.settled)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	workerNamespace, workerPool, err := substrateRuntimePoolWorkerPlacementFromAnnotation(&current)
+	if err != nil || workerNamespace != substrateTestWorkerNamespace || workerPool != substrateTestWorkerPoolName {
+		t.Fatalf("backfilled placement = %q/%q, %v, want %s/%s", workerNamespace, workerPool, err, substrateTestWorkerNamespace, substrateTestWorkerPoolName)
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("unfenced actor status = %s/%s, want Degraded/Closed during recycle", current.Status.Lifecycle, current.Status.AdmissionState)
+	}
+}
+
 func TestSubstrateRuntimePoolRecyclesActorWithUnexpectedTemplateBeforeBootstrap(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()

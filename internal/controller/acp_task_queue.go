@@ -66,6 +66,9 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if err := validateACPWorkspacePreflight(frozenTask); err != nil {
 		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
 	}
+	if err := validateACPRuntimeWorkspaceNamespace(plan, task.Namespace, r.ACPRuntimeNamespace); err != nil {
+		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
+	}
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
@@ -1058,7 +1061,24 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 	return nil
 }
 
+func validateACPRuntimeWorkspaceNamespace(
+	plan ACPRuntimePlan,
+	taskNamespace, configuredRuntimeNamespace string,
+) error {
+	if plan.Workspace == nil || plan.Workspace.Provider != corev1alpha1.WorkspaceProviderSubstrate {
+		return nil
+	}
+	runtimeNamespace := strings.TrimSpace(configuredRuntimeNamespace)
+	if runtimeNamespace == "" {
+		runtimeNamespace = strings.TrimSpace(taskNamespace)
+	}
+	return validateSubstrateTemplateRuntimeNamespace(plan.Workspace.TemplateNamespace, runtimeNamespace)
+}
+
 func (r *TaskReconciler) ensureACPRuntimePool(ctx context.Context, namespace string, plan ACPRuntimePlan) (*corev1alpha1.RuntimePool, error) {
+	if err := validateACPRuntimeWorkspaceNamespace(plan, namespace, r.ACPRuntimeNamespace); err != nil {
+		return nil, err
+	}
 	pool := &corev1alpha1.RuntimePool{}
 	key := types.NamespacedName{Namespace: namespace, Name: plan.PoolName}
 	err := r.Get(ctx, key, pool)

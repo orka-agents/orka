@@ -124,9 +124,17 @@ func validateRuntimePoolExecutionWorkspaceNamespace(
 		pool.Spec.ExecutionWorkspace.Substrate == nil {
 		return nil
 	}
-	templateNamespace := strings.TrimSpace(pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateNamespace)
-	if templateNamespace != "" && templateNamespace == strings.TrimSpace(runtimeNamespace) {
-		return fmt.Errorf("spec.executionWorkspace.substrate.baseTemplateNamespace must differ from the resolved runtime namespace so provider templates cannot resolve RuntimePool Secrets")
+	return validateSubstrateTemplateRuntimeNamespace(
+		pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateNamespace,
+		runtimeNamespace,
+	)
+}
+
+func validateSubstrateTemplateRuntimeNamespace(templateNamespace, runtimeNamespace string) error {
+	templateNamespace = strings.TrimSpace(templateNamespace)
+	runtimeNamespace = strings.TrimSpace(runtimeNamespace)
+	if templateNamespace != "" && templateNamespace == runtimeNamespace {
+		return fmt.Errorf("substrate infrastructure template namespace must differ from the resolved runtime namespace so provider templates cannot resolve RuntimePool Secrets")
 	}
 	return nil
 }
@@ -164,7 +172,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	pods, err := r.listRuntimePoolPods(ctx, cfg)
+	pods, err := r.listWorkspaceRuntimePoolPods(ctx, pool, cfg)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -352,6 +360,21 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		}
 	}
 	return r.reconcileRuntimePoolServing(ctx, pool, cfg, pods, readyPods, authSecret, status)
+}
+
+func (r *RuntimePoolReconciler) listWorkspaceRuntimePoolPods(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) ([]corev1.Pod, error) {
+	list := &corev1.PodList{}
+	if err := r.List(ctx, list, client.InNamespace(cfg.namespace), client.MatchingLabels{
+		runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel],
+		runtimePoolUIDLabel: string(pool.UID),
+	}); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
 }
 
 // reconcileWorkspaceRuntimePoolRollout mirrors the Deployment Recreate rollout:

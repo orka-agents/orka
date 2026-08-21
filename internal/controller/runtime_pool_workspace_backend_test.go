@@ -302,6 +302,36 @@ func TestWorkspaceRuntimePoolMaterializesProviderWorkload(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolIgnoresForeignReadyPodWithSamePoolKey(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil {
+		t.Fatal("workspace template was not materialized")
+	}
+	foreign := runtimePoolWorkspaceReadyPod(pool, template, "foreign-pod", "foreign-pod-uid", "10.0.0.90")
+	foreign.Labels[runtimePoolUIDLabel] = "previous-pool-uid"
+	runtimePoolTestCreatePod(t, r, &foreign)
+
+	legitimate := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.91")
+	supervisor.probe = runtimePoolValidProbe(pool, &legitimate, "workspace-boot", false)
+	runtimePoolReconcile(t, r, pool)
+
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
+		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting ||
+		status.ActiveInstance == nil || status.ActiveInstance.PodUID != string(legitimate.UID) {
+		t.Fatalf("workspace status with foreign Pod = %s/%s active=%#v, want legitimate provider Pod serving", status.Lifecycle, status.AdmissionState, status.ActiveInstance)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&foreign), &corev1.Pod{}); err != nil {
+		t.Fatalf("foreign Pod should be ignored rather than managed: %v", err)
+	}
+}
+
 func TestWorkspaceRuntimePoolRejectsUnboundPrivateAuthSecret(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()

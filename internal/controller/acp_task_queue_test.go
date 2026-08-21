@@ -275,6 +275,86 @@ func TestQueueACPRuntimeTaskRejectsUnsafeRepositoryBeforePoolDemand(t *testing.T
 	}
 }
 
+func TestQueueACPRuntimeTaskRejectsSubstrateTemplateInRuntimeNamespaceBeforePoolDemand(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "shared-substrate-namespace", UID: types.UID("88888888-8888-8888-8888-888888888888"), Generation: 1},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, Prompt: "inspect",
+			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+				Enabled: true, Provider: corev1alpha1.WorkspaceProviderSubstrate,
+				TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: acpTestRuntimeNamespace},
+			}},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: "agent", UID: types.UID("99999999-9999-9999-9999-999999999999"), Generation: 1},
+		Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+		}},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task).Build()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	controlStore := sqlite.NewStore(db, "test")
+	epochs := NewControllerEpochManager(controlStore, "controller-test")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := epochs.CurrentFence(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &TaskReconciler{
+		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
+		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
+		ACPWorkspaceDispatchEnabled: true, SubstrateEnabled: true,
+		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
+	}
+	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
+	if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
+		t.Fatal(err)
+	}
+	var pools corev1alpha1.RuntimePoolList
+	if err := kubeClient.List(ctx, &pools); err != nil {
+		t.Fatal(err)
+	}
+	if len(pools.Items) != 0 {
+		t.Fatalf("shared substrate/runtime namespace created RuntimePools: %#v", pools.Items)
+	}
+	failed := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, failed); err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status.Execution == nil || failed.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed ||
+		failed.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("InvalidWorkspace") ||
+		failed.Status.Execution.Attempt != 0 || failed.Status.Execution.RuntimePoolName != "" ||
+		!strings.Contains(failed.Status.Message, "must differ") {
+		t.Fatalf("shared substrate/runtime namespace status = %#v message=%q", failed.Status.Execution, failed.Status.Message)
+	}
+	attemptID, err := (store.PromptAttemptKey{
+		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1,
+		PromptID: "prompt-" + string(task.UID) + "-1",
+	}).CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlStore.GetPromptAttempt(ctx, attemptID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("shared substrate/runtime namespace durable attempt error = %v, want not found", err)
+	}
+	cancelEpoch()
+	if err := <-epochDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestQueueACPRuntimeTaskReportsInvalidWorkspaceWhenReadCredentialDoesNotExist(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
