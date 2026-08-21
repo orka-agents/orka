@@ -72,7 +72,8 @@ const (
 
 var errWorkspaceCredentialConflict = errors.New("workspace supervisor credential bootstrap conflict")
 
-// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims;sandboxtemplates;sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates;sandboxwarmpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch
 
 func runtimePoolSandboxTemplateName(base string) string {

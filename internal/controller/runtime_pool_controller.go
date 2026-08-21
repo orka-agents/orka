@@ -1607,6 +1607,16 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 	}); err != nil {
 		return nil, err
 	}
+	authoritativePool := &corev1alpha1.RuntimePool{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(pool), authoritativePool); err != nil {
+		return nil, fmt.Errorf("refresh RuntimePool before private auth Secret cleanup: %w", err)
+	}
+	if authoritativePool.UID != pool.UID {
+		return nil, fmt.Errorf("RuntimePool UID changed before private auth Secret cleanup")
+	}
+	if authoritativeBinding := strings.TrimSpace(authoritativePool.Annotations[bindingKey]); authoritativeBinding != "" {
+		return r.boundPrivateWorkspaceRuntimePoolAuthSecret(ctx, authoritativePool, cfg, cfg.controllerEpoch)
+	}
 	matches := runtimePoolAuthSecretsForEpoch(candidates.Items, cfg.controllerEpoch)
 	for i := range matches {
 		if !runtimePoolPrivateAuthSecretMatchesPool(&matches[i], pool, cfg) {

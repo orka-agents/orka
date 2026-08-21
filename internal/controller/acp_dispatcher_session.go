@@ -120,6 +120,32 @@ type acpSessionLineageIdentity struct {
 	WorkspaceSessionUID string
 }
 
+func acpSessionLineageConfigDigest(plan ACPRuntimePlan) (string, error) {
+	if err := harnessv2.ValidateProfileDigest(plan.Digest); err != nil {
+		return "", fmt.Errorf("session lineage runtime profile digest: %w", err)
+	}
+	if plan.Workspace == nil || plan.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
+		return string(plan.Digest), nil
+	}
+	runtimeImage := strings.TrimSpace(plan.Image)
+	if !digestPinnedImagePattern.MatchString(runtimeImage) {
+		return "", fmt.Errorf("session lineage runtime image must be pinned by sha256 digest")
+	}
+	workspaceBindingDigest := strings.TrimSpace(plan.Workspace.BindingDigest)
+	if err := store.ValidateCanonicalDigest("session lineage workspace binding digest", workspaceBindingDigest); err != nil {
+		return "", err
+	}
+	return acpDomainDigest("runtime-session-lineage-configuration/v1", struct {
+		RuntimeProfileDigest   string `json:"runtimeProfileDigest"`
+		RuntimeImage           string `json:"runtimeImage"`
+		WorkspaceBindingDigest string `json:"workspaceBindingDigest"`
+	}{
+		RuntimeProfileDigest:   string(plan.Digest),
+		RuntimeImage:           runtimeImage,
+		WorkspaceBindingDigest: workspaceBindingDigest,
+	})
+}
+
 func (d *ACPDispatcher) prepareTaskSession(
 	ctx context.Context,
 	task *corev1alpha1.Task,

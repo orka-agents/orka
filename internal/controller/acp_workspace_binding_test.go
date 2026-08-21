@@ -613,6 +613,47 @@ func TestSessionWorkspacePoolIdentityRotatesWithSessionUID(t *testing.T) {
 	}
 }
 
+func TestSessionWorkspaceLineageConfigPinsRuntimeImageAndBinding(t *testing.T) {
+	profileDigest := harnessv2.ProfileDigest(testControlDigestForDispatcher("session-workspace-lineage-profile"))
+	plan := ACPRuntimePlan{
+		Image:  "registry.example/orka-acp@sha256:" + strings.Repeat("a", 64),
+		Digest: profileDigest,
+		Workspace: &ACPRuntimeWorkspaceBinding{
+			ReusePolicy:   corev1alpha1.WorkspaceReusePolicySession,
+			BindingDigest: testControlDigestForDispatcher("session-workspace-lineage-binding"),
+		},
+	}
+	baseDigest, err := acpSessionLineageConfigDigest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changedImage := plan
+	changedImage.Image = "registry.example/orka-acp@sha256:" + strings.Repeat("b", 64)
+	changedImageDigest, err := acpSessionLineageConfigDigest(changedImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedBinding := plan
+	changedBinding.Workspace = new(ACPRuntimeWorkspaceBinding)
+	*changedBinding.Workspace = *plan.Workspace
+	changedBinding.Workspace.BindingDigest = testControlDigestForDispatcher("session-workspace-lineage-binding-next")
+	changedBindingDigest, err := acpSessionLineageConfigDigest(changedBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseDigest == changedImageDigest || baseDigest == changedBindingDigest {
+		t.Fatalf("workspace lineage digest did not rotate: base=%s image=%s binding=%s", baseDigest, changedImageDigest, changedBindingDigest)
+	}
+
+	plainPlan := plan
+	plainPlan.Workspace = nil
+	plainDigest, err := acpSessionLineageConfigDigest(plainPlan)
+	if err != nil || plainDigest != string(profileDigest) {
+		t.Fatalf("plain lineage digest = %q, %v, want profile digest %q", plainDigest, err, profileDigest)
+	}
+}
+
 func TestVerifiedSnapshotWorkspaceBindingRejectsTamperedIdentity(t *testing.T) {
 	binding := &corev1alpha1.AgentExecutionBinding{
 		Task: corev1alpha1.AgentExecutionBindingTaskRef{UID: types.UID("11111111-1111-1111-1111-111111111111")},

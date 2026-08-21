@@ -43,6 +43,48 @@ type failPrivateAuthFinalBindingPatchClient struct {
 	deletedPrivateAuth int
 }
 
+type commitPrivateAuthBindingThenErrorClient struct {
+	client.Client
+	failed             bool
+	deletedPrivateAuth int
+}
+
+func (c *commitPrivateAuthBindingThenErrorClient) Patch(
+	ctx context.Context,
+	object client.Object,
+	patch client.Patch,
+	options ...client.PatchOption,
+) error {
+	ambiguousBindingPatch := false
+	if pool, ok := object.(*corev1alpha1.RuntimePool); ok && !c.failed {
+		for key, value := range pool.Annotations {
+			if strings.HasPrefix(key, runtimePoolPrivateAuthBindingPrefix) && strings.TrimSpace(value) != "" {
+				ambiguousBindingPatch = true
+				break
+			}
+		}
+	}
+	if err := c.Client.Patch(ctx, object, patch, options...); err != nil {
+		return err
+	}
+	if ambiguousBindingPatch {
+		c.failed = true
+		return errors.New("ambiguous private auth binding patch result")
+	}
+	return nil
+}
+
+func (c *commitPrivateAuthBindingThenErrorClient) Delete(
+	ctx context.Context,
+	object client.Object,
+	options ...client.DeleteOption,
+) error {
+	if secret, ok := object.(*corev1.Secret); ok && secret.Labels[runtimePoolAuthLabel] == booleanTrueValue {
+		c.deletedPrivateAuth++
+	}
+	return c.Client.Delete(ctx, object, options...)
+}
+
 func (c *failPrivateAuthFinalBindingPatchClient) Patch(
 	ctx context.Context,
 	object client.Object,
@@ -540,6 +582,47 @@ func TestWorkspaceRuntimePoolDiscardsUnboundPrivateAuthSecretAfterBindingPatchFa
 	}
 	if matches := runtimePoolAuthSecretsForEpoch(secrets.Items, cfg.controllerEpoch); len(matches) != 1 {
 		t.Fatalf("private auth Secret count after recovery = %d, want one", len(matches))
+	}
+}
+
+func TestWorkspaceRuntimePoolPreservesAuthoritativelyBoundAuthSecretAfterAmbiguousPatch(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	r := runtimePoolTestReconciler(t, scheme, nil, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	stale := current.DeepCopy()
+	cfg, err := r.runtimePoolConfig(&current)
+	if err != nil {
+		t.Fatalf("runtimePoolConfig() error = %v", err)
+	}
+	authoritativeClient := r.Client
+	ambiguousClient := &commitPrivateAuthBindingThenErrorClient{Client: authoritativeClient}
+	r.Client = ambiguousClient
+	r.APIReader = authoritativeClient
+
+	if _, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(context.Background(), &current, cfg, "7"); err == nil ||
+		!strings.Contains(err.Error(), "ambiguous private auth binding patch result") {
+		t.Fatalf("initial private auth Secret ensure error = %v, want ambiguous committed patch result", err)
+	}
+	if !ambiguousClient.failed {
+		t.Fatal("private auth binding patch did not commit before the simulated transport error")
+	}
+
+	boundPool := runtimePoolTestGetPool(t, r, pool)
+	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch)
+	boundName, boundUID, err := parseRuntimePoolPrivateSecretBinding(boundPool.Annotations[bindingKey])
+	if err != nil {
+		t.Fatalf("authoritative private auth binding = %q, error=%v", boundPool.Annotations[bindingKey], err)
+	}
+	recovered, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(context.Background(), stale, cfg, "7")
+	if err != nil {
+		t.Fatalf("recover authoritatively bound private auth Secret from stale pool: %v", err)
+	}
+	if recovered.Name != boundName || recovered.UID != boundUID {
+		t.Fatalf("recovered private auth Secret = %s/%s, want bound %s/%s", recovered.Name, recovered.UID, boundName, boundUID)
+	}
+	if ambiguousClient.deletedPrivateAuth != 0 {
+		t.Fatalf("deleted authoritatively bound private auth Secrets = %d, want 0", ambiguousClient.deletedPrivateAuth)
 	}
 }
 

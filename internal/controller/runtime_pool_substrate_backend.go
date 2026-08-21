@@ -141,7 +141,7 @@ type substrateRuntimePoolWorkerPodFenceRecord struct {
 	UID       types.UID `json:"uid"`
 }
 
-// +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
 
 var substrateActorTemplateGVK = schema.GroupVersionKind{Group: "ate.dev", Version: "v1alpha1", Kind: "ActorTemplate"}
 

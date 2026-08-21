@@ -61,9 +61,10 @@ Agent Sandbox backends, with these Substrate-specific mappings:
   (`lifecycle: booting`) and a one-time `PUT /v2/credential-bootstrap`
   endpoint, and blocks until seeded. After the actor boots, the pool
   reconciler seeds the pool controller token, HMAC capability secret, and
-  provider-proxy bearer over the router transport. The controller derives an
-  Ed25519 signing seed domain-separately from the pool capability secret and
-  signs the public nonce plus the exact request bytes; the supervisor verifies
+  provider-proxy bearer over the router transport. The controller generates an
+  independent random bootstrap signing seed in the private pool auth Secret,
+  derives an Ed25519 key from that seed with a separate domain, and signs the
+  public nonce plus the exact request bytes; the supervisor verifies
   `X-Orka-Credential-Bootstrap-Signature` using the public key in its template
   before accepting credentials. The first valid signed write wins; an identical
   repeat is acknowledged (idempotent controller retries); a different payload
@@ -71,7 +72,9 @@ Agent Sandbox backends, with these Substrate-specific mappings:
   trusting a workload seeded by another party. The nonce is public per-pool
   entropy stored as a third key of the pool auth Secret — it binds *which*
   workload the controller seeds, while the signature authenticates the
-  controller and payload. All pool Secrets stay in
+  controller and payload. The signing seed is never delivered to the workload
+  and is distinct from the controller token, capability secret, and provider
+  bearer. All pool Secrets stay in
   the controller's runtime namespace; the template namespace never holds
   secret material. The seeded values travel over the same cluster-trusted
   channel that carries every subsequent Authorization header, and the
