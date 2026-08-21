@@ -135,8 +135,6 @@ reason projected to `Task.status.executionWorkspace`.
 
 Task status stays provider-neutral: provider, phase, reason, and policies.
 Route hosts, worker names, snapshot URIs, and every other provider-assigned
-identifier never enter public Task status. The controller-derived actor ID
-appears only inside `status.execution.runtimeInstanceID` — Orka's own
-exact-instance fencing identity, deterministically derived from the pool name
-that status already carries, exactly as Pod-backed pools expose
-`pod:<uid>.<bootID>`.
+identifier never enter public Task status. `status.execution.runtimeInstanceID`
+uses the opaque Orka fence `workspace:<sha256(actorID)>.<bootID>`; the raw Actor
+ID remains internal, exactly as provider routes and worker placement do.

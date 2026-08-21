@@ -349,7 +349,7 @@ func TestSubstrateRuntimePoolRecyclesActorWhenTemplateContentsDoNotMatchRevision
 		t.Fatalf("read derived containers: found=%v err=%v", found, err)
 	}
 	container := containers[0].(map[string]any)
-	container["image"] = "attacker.invalid/runtime:latest"
+	container["image"] = runtimePoolTestTamperedImage
 	containers[0] = container
 	if err := unstructured.SetNestedSlice(derived.Object, containers, "spec", "containers"); err != nil {
 		t.Fatalf("tamper derived container: %v", err)
@@ -530,6 +530,39 @@ func TestSubstrateRuntimePoolRecyclesActorOnCredentialSeedConflict(t *testing.T)
 	if got.Annotations[substrateActorRecyclingAnnotation] != "" {
 		t.Fatal("recycling annotation survived teardown completion")
 	}
+	if got.Annotations[substrateActorCredentialSeededAnnotation] != "" {
+		t.Fatal("credential-seeded annotation survived teardown completion")
+	}
+}
+
+func TestSubstrateRuntimePoolRecyclesActorWhenClosedBootstrapCannotAuthenticate(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{probeErr: errors.New("unauthorized")}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, harnessv2.CredentialBootstrapRequest) error {
+		return errSubstrateCredentialAlreadyComplete
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("status = %s/%s, want Degraded/Closed", got.Status.Lifecycle, got.Status.AdmissionState)
+	}
+	if !strings.Contains(got.Status.Message, "without controller-authenticated proof") {
+		t.Fatalf("message = %q, want unauthenticated-bootstrap recycle reason", got.Status.Message)
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != actorID {
+		t.Fatalf("recycling annotation = %q, want %q", got.Annotations[substrateActorRecyclingAnnotation], actorID)
+	}
+	if len(control.settled) != 1 || control.settled[0] != actorID {
+		t.Fatalf("settled actors = %v, want unauthenticated actor staged for deletion", control.settled)
+	}
+	if got.Annotations[substrateActorCredentialSeededAnnotation] != "" {
+		t.Fatal("unauthenticated actor was recorded as controller-seeded")
+	}
 }
 
 func TestSubstrateRuntimePoolHoldsAdmissionUntilCredentialSeeding(t *testing.T) {
@@ -571,6 +604,10 @@ func TestSubstrateRuntimePoolHoldsAdmissionUntilCredentialSeeding(t *testing.T) 
 	}
 	if seedAttempts < 2 {
 		t.Fatalf("seed attempts = %d, want a retry after the transient failure", seedAttempts)
+	}
+	got = runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorCredentialSeededAnnotation] != substrateTestActorID(pool) {
+		t.Fatal("successfully seeded actor lifetime was not recorded")
 	}
 }
 
@@ -802,6 +839,10 @@ func TestSubstrateRuntimePoolFinalizerDeletesActorTemplateAndSecrets(t *testing.
 	runtimePoolReconcile(t, r, pool)
 	if substrateTestDerivedTemplate(t, r, pool) == nil {
 		t.Fatal("derived template was not materialized")
+	}
+	baseTemplate := substrateTestBaseTemplate()
+	if err := r.Delete(context.Background(), baseTemplate); err != nil {
+		t.Fatalf("delete mutable base template before finalization: %v", err)
 	}
 	// Disabling new Substrate dispatch must not strand existing provider
 	// resources or the RuntimePool cleanup finalizer.

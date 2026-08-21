@@ -49,7 +49,10 @@ var (
 	runtimePoolTestProviderTokenNext = []byte("fedcba9876543210fedcba9876543210")
 )
 
-const runtimePoolTestNextModel = "gpt-next"
+const (
+	runtimePoolTestNextModel     = "gpt-next"
+	runtimePoolTestTamperedImage = "attacker.invalid/runtime:latest"
+)
 
 type fakeRuntimePoolSupervisorClient struct {
 	probe       RuntimePoolProbeResult

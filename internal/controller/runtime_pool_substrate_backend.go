@@ -69,6 +69,9 @@ const (
 	// substrateActorRecyclingAnnotation records an in-progress staged actor
 	// teardown so every reconcile resumes it before any other decision.
 	substrateActorRecyclingAnnotation = "orka.ai/substrate-actor-recycling"
+	// substrateActorCredentialSeededAnnotation records the exact actor lifetime
+	// whose bootstrap payload was accepted or authenticated by this controller.
+	substrateActorCredentialSeededAnnotation = "orka.ai/substrate-actor-credential-seeded"
 
 	// substrateActorListenPort is the conventional actor service port the
 	// provider router forwards to.
@@ -228,6 +231,27 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
+	if actor != nil && derivedTemplate == nil {
+		// A pre-existing or partially reconciled actor still needs a frozen,
+		// controller-owned placement record before credential-safe teardown.
+		// Materializing the already-rendered desired template does not admit or
+		// seed the actor; it only prevents cleanup from depending on the mutable
+		// infrastructure base template.
+		if err := r.createSubstrateActorTemplate(ctx, pool, desired.object); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+		derivedTemplate, err = r.getSubstrateActorTemplate(ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName))
+		if err != nil || derivedTemplate == nil {
+			if err == nil {
+				err = fmt.Errorf("created RuntimePool substrate actor template is not readable yet")
+			}
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+		templateOwned = substrateRuntimeTemplateOwnedByPool(derivedTemplate, desired.object)
+		if templateOwned {
+			templateRevision, templateIntegrityErr = substrateRuntimeTemplateIntegrity(derivedTemplate)
+		}
+	}
 
 	replicas := int32(0)
 	if actor != nil {
@@ -372,7 +396,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	// probe. The PUT is idempotent for identical payloads; a payload conflict
 	// means another party seeded this workload first, so the exact instance is
 	// recycled instead of trusted.
-	if err := r.seedSubstrateSupervisorCredentials(ctx, routeHost, bootstrapNonce, authSecret, providerSecret); err != nil {
+	syntheticPod := substrateSyntheticInstancePod(pool, cfg, templateNamespace, actor, actorID, routeHost)
+	bootstrapAlreadyComplete, err := r.seedSubstrateSupervisorCredentials(ctx, routeHost, bootstrapNonce, authSecret, providerSecret)
+	if err != nil {
 		if errors.Is(err, errSubstrateCredentialConflict) {
 			if recycleErr := r.recycleSubstrateActor(ctx, pool, control, actorID); recycleErr != nil {
 				return ctrl.Result{}, recycleErr
@@ -392,14 +418,44 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
+	if bootstrapAlreadyComplete && pool.Annotations[substrateActorCredentialSeededAnnotation] != actorID {
+		probe, probeErr := r.supervisorClientForPool(pool).Probe(
+			ctx,
+			runtimePoolInstanceEndpoint(pool, syntheticPod),
+			string(authSecret.Data[runtimePoolControllerTokenKey]),
+			authSecret.Data[runtimePoolCapabilitySecretKey],
+		)
+		if probeErr == nil {
+			_, probeErr = validateRuntimePoolProbeForRollout(pool, cfg, syntheticPod, probe, r.now())
+		}
+		if probeErr != nil {
+			if recycleErr := r.recycleSubstrateActor(ctx, pool, control, actorID); recycleErr != nil {
+				return ctrl.Result{}, recycleErr
+			}
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "provider actor completed credential bootstrap without controller-authenticated proof; recycling the exact instance"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+	}
+	if pool.Annotations[substrateActorCredentialSeededAnnotation] != actorID {
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorCredentialSeededAnnotation, actorID); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
-	syntheticPod := substrateSyntheticInstancePod(pool, cfg, templateNamespace, actor, actorID, routeHost)
 	return r.reconcileRuntimePoolServing(ctx, pool, cfg, []corev1.Pod{*syntheticPod}, []corev1.Pod{*syntheticPod}, authSecret, status)
 }
 
 // errSubstrateCredentialConflict marks a seeding payload conflict: the
 // supervisor was already seeded with different credentials.
-var errSubstrateCredentialConflict = errors.New("supervisor credentials were seeded by another party")
+var (
+	errSubstrateCredentialConflict        = errors.New("supervisor credentials were seeded by another party")
+	errSubstrateCredentialAlreadyComplete = errors.New("supervisor credential bootstrap is already complete")
+)
 
 // seedSubstrateSupervisorCredentials performs the one-time, idempotent
 // credential bootstrap PUT against the exact actor route host.
@@ -407,25 +463,29 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 	ctx context.Context,
 	routeHost, nonce string,
 	authSecret, providerSecret *corev1.Secret,
-) error {
+) (bool, error) {
 	request := harnessv2.CredentialBootstrapRequest{
 		ControllerToken:  strings.TrimSpace(string(authSecret.Data[runtimePoolControllerTokenKey])),
 		CapabilitySecret: strings.TrimSpace(string(authSecret.Data[runtimePoolCapabilitySecretKey])),
 		ProviderToken:    strings.TrimSpace(string(providerSecret.Data[runtimePoolProviderTokenKey])),
 	}
 	if err := request.Validate(); err != nil {
-		return fmt.Errorf("pool credentials are incomplete: %w", err)
+		return false, fmt.Errorf("pool credentials are incomplete: %w", err)
 	}
 	if r.SubstrateCredentialSeeder != nil {
-		return r.SubstrateCredentialSeeder(ctx, routeHost, nonce, request)
+		err := r.SubstrateCredentialSeeder(ctx, routeHost, nonce, request)
+		if errors.Is(err, errSubstrateCredentialAlreadyComplete) {
+			return true, nil
+		}
+		return false, err
 	}
 	httpClient, err := r.substrateSupervisorHTTPClient()
 	if err != nil {
-		return err
+		return false, err
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
-		return err
+		return false, err
 	}
 	seedCtx, cancel := context.WithTimeout(ctx, runtimePoolProbeTimeout)
 	defer cancel()
@@ -435,26 +495,27 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 		bytes.NewReader(payload),
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set(harnessv2.CredentialBootstrapNonceHeader, nonce)
 	response, err := httpClient.Do(httpRequest)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer response.Body.Close() //nolint:errcheck // response body is unused
 	switch response.StatusCode {
 	case http.StatusCreated, http.StatusOK:
-		return nil
+		return false, nil
 	case http.StatusConflict:
-		return errSubstrateCredentialConflict
+		return false, errSubstrateCredentialConflict
 	case http.StatusNotFound:
 		// The supervisor already completed bootstrap and replaced the phase
-		// server; the authenticated probe is now the authority.
-		return nil
+		// server; an authenticated probe must prove this actor was seeded with
+		// the controller's exact credentials before it can be trusted.
+		return true, nil
 	default:
-		return fmt.Errorf("credential bootstrap returned status %d", response.StatusCode)
+		return false, fmt.Errorf("credential bootstrap returned status %d", response.StatusCode)
 	}
 }
 
@@ -775,6 +836,9 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorBootedAnnotation, ""); err != nil {
 		return err
 	}
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorCredentialSeededAnnotation, ""); err != nil {
+		return err
+	}
 	return r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorRecyclingAnnotation, "")
 }
 
@@ -879,31 +943,32 @@ func (r *RuntimePoolReconciler) substrateRuntimePoolWorkerPlacement(
 		return "", "", fmt.Errorf("RuntimePool substrate infrastructure template binding is missing")
 	}
 	substrateSpec := pool.Spec.ExecutionWorkspace.Substrate
+	derivedTemplateName := runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name))
 	template, err := r.getSubstrateActorTemplate(
 		ctx,
 		strings.TrimSpace(substrateSpec.BaseTemplateNamespace),
-		strings.TrimSpace(substrateSpec.BaseTemplateName),
+		derivedTemplateName,
 	)
 	if err != nil {
 		return "", "", err
 	}
 	if template == nil {
-		return "", "", fmt.Errorf("RuntimePool substrate infrastructure ActorTemplate is unavailable during actor teardown")
+		return "", "", fmt.Errorf("RuntimePool derived substrate ActorTemplate is unavailable during actor teardown")
 	}
 	workerPool, found, err := unstructured.NestedString(template.Object, "spec", "workerPoolRef", "name")
 	if err != nil || !found || strings.TrimSpace(workerPool) == "" {
-		return "", "", fmt.Errorf("RuntimePool substrate infrastructure ActorTemplate has no workerPoolRef.name")
+		return "", "", fmt.Errorf("RuntimePool derived substrate ActorTemplate has no workerPoolRef.name")
 	}
 	workerNamespace, _, err := unstructured.NestedString(template.Object, "spec", "workerPoolRef", "namespace")
 	if err != nil {
-		return "", "", fmt.Errorf("RuntimePool substrate infrastructure ActorTemplate has an invalid workerPoolRef.namespace")
+		return "", "", fmt.Errorf("RuntimePool derived substrate ActorTemplate has an invalid workerPoolRef.namespace")
 	}
 	workerNamespace = strings.TrimSpace(workerNamespace)
 	if workerNamespace == "" {
 		workerNamespace = template.GetNamespace()
 	}
 	if workerNamespace == "" {
-		return "", "", fmt.Errorf("RuntimePool substrate infrastructure ActorTemplate has no WorkerPool namespace")
+		return "", "", fmt.Errorf("RuntimePool derived substrate ActorTemplate has no WorkerPool namespace")
 	}
 	return workerNamespace, strings.TrimSpace(workerPool), nil
 }
@@ -1212,8 +1277,8 @@ func (r *RuntimePoolReconciler) substrateTemplateAuthSecret(
 }
 
 // pruneStaleSubstrateRuntimePoolSecrets removes epoch-scoped credential
-// Secrets in the template namespace that are no longer referenced by the
-// current names or the deployed derived template.
+// Secrets in the runtime namespace that are no longer current. The provider
+// template namespace remains credential-free.
 func (r *RuntimePoolReconciler) pruneStaleSubstrateRuntimePoolSecrets(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,

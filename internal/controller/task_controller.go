@@ -3128,13 +3128,10 @@ func (r *TaskReconciler) validateExecutionWorkspaceProviderConfig(
 			return fmt.Errorf("execution workspace provider %q requires substrate to be enabled", provider)
 		}
 		cfg := r.SubstrateConfig.WithDefaults()
-		var err error
-		if r.ACPWorkspaceDispatchEnabled {
-			err = cfg.ValidateACPRuntimePool()
-		} else {
-			err = cfg.Validate()
-		}
-		if err != nil {
+		// Agent Tasks always use the ACP RuntimePool backend. The legacy
+		// workspace-agent bootstrap Secret is validated only by the separate
+		// workspace-provider API path and must not mask the ACP dispatch gate.
+		if err := cfg.ValidateACPRuntimePool(); err != nil {
 			return err
 		}
 		if substrateTemplateName(ws, cfg) == "" {

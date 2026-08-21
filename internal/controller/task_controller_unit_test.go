@@ -1330,9 +1330,8 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			wantErr: "processMode \"resident\" is not supported yet",
 		},
 		{
-			name:                        "substrate ACP backend does not require legacy bootstrap secret",
-			substrateEnabled:            true,
-			acpWorkspaceDispatchEnabled: true,
+			name:             "substrate Task validation does not require legacy bootstrap secret before dispatch gate",
+			substrateEnabled: true,
 			substrateConfig: SubstrateConfig{
 				APIInsecureSkipVerify: true,
 			},

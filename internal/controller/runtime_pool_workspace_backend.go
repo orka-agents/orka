@@ -52,9 +52,10 @@ import (
 )
 
 const (
-	runtimePoolSandboxTemplateSuffix = "sandbox-template"
-	runtimePoolSandboxWarmPoolSuffix = "sandbox-pool"
-	runtimePoolSandboxClaimSuffix    = "sandbox-claim"
+	runtimePoolSandboxTemplateSuffix             = "sandbox-template"
+	runtimePoolSandboxWarmPoolSuffix             = "sandbox-pool"
+	runtimePoolSandboxClaimSuffix                = "sandbox-claim"
+	runtimePoolSandboxTemplateRevisionAnnotation = "orka.ai/sandbox-template-revision"
 )
 
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims;sandboxtemplates;sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
@@ -134,6 +135,75 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionQuotaReady, metav1.ConditionTrue, "ResourcesAdmitted", "runtime resources were admitted")
 	r.applySandboxClaimFailureConditions(pool, claim, &status)
 
+	if claim != nil && !runtimePoolSandboxChildOwnedByPool(claim, pool, cfg) {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
+	}
+	if claim != nil && !runtimePoolSandboxClaimMatchesPool(claim, cfg) {
+		if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
+			return ctrl.Result{}, err
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "provider SandboxClaim contents do not match the controller-owned RuntimePool binding; recycling it before use"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+
+	if sandboxTemplate != nil {
+		if !runtimePoolSandboxChildOwnedByPool(sandboxTemplate, pool, cfg) {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxTemplate does not carry the exact RuntimePool ownership identity"))
+		}
+		trustedRevision := strings.TrimSpace(pool.Annotations[runtimePoolSandboxTemplateRevisionAnnotation])
+		observedRevision, revisionErr := runtimePoolSandboxTemplateObjectRevision(sandboxTemplate)
+		desiredRevision := runtimePoolSandboxTemplateSpecRevision(runtimePoolSandboxTemplateSpec(desiredTemplate))
+		if trustedRevision == "" {
+			if claim != nil || len(pods) > 0 {
+				if claim != nil {
+					if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
+						return ctrl.Result{}, err
+					}
+				}
+				status.ActiveInstance = nil
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+				status.Message = "provider SandboxTemplate has no controller-owned integrity record; recycling its workspace before trust is established"
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+			}
+			if revisionErr != nil || observedRevision != desiredRevision {
+				if err := r.updateRuntimePoolSandboxTemplate(ctx, sandboxTemplate, desiredTemplate); err != nil {
+					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+				}
+			}
+			if err := r.setRuntimePoolSandboxTemplateRevision(ctx, pool, desiredRevision); err != nil {
+				return ctrl.Result{}, err
+			}
+		} else if revisionErr != nil || observedRevision != trustedRevision {
+			if claim != nil {
+				if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			if claim != nil || len(pods) > 0 {
+				status.ActiveInstance = nil
+				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+				status.Message = "provider SandboxTemplate failed its controller-owned integrity check; recycling the workspace before template repair"
+				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+			}
+			if observedRevision != desiredRevision {
+				if err := r.updateRuntimePoolSandboxTemplate(ctx, sandboxTemplate, desiredTemplate); err != nil {
+					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+				}
+			}
+			if err := r.setRuntimePoolSandboxTemplateRevision(ctx, pool, desiredRevision); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
 	readyPods := readyRuntimePoolPods(pods)
 	if len(readyPods) > 1 {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleAmbiguous
@@ -162,6 +232,17 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 				err = fmt.Errorf("created RuntimePool sandbox template is not readable yet")
 			}
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+		if !runtimePoolSandboxChildOwnedByPool(sandboxTemplate, pool, cfg) {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("created SandboxTemplate does not carry the exact RuntimePool ownership identity"))
+		}
+		desiredRevision := runtimePoolSandboxTemplateSpecRevision(runtimePoolSandboxTemplateSpec(desiredTemplate))
+		observedRevision, revisionErr := runtimePoolSandboxTemplateObjectRevision(sandboxTemplate)
+		if revisionErr != nil || observedRevision != desiredRevision {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("created SandboxTemplate contents do not match the controller-rendered RuntimePool template"))
+		}
+		if err := r.setRuntimePoolSandboxTemplateRevision(ctx, pool, desiredRevision); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 	if err := r.ensureRuntimePoolSandboxWarmPool(ctx, pool, cfg); err != nil {
@@ -603,6 +684,68 @@ func sandboxTemplatePodTemplateSpec(template *sandboxextv1beta1.SandboxTemplate)
 	}
 }
 
+func runtimePoolSandboxTemplateSpecRevision(spec sandboxextv1beta1.SandboxTemplateSpec) string {
+	revision, err := runtimePoolJSONRevision(spec)
+	if err != nil {
+		panic(fmt.Sprintf("marshal RuntimePool SandboxTemplate revision: %v", err))
+	}
+	return revision
+}
+
+func runtimePoolSandboxTemplateObjectRevision(template *sandboxextv1beta1.SandboxTemplate) (string, error) {
+	if template == nil {
+		return "", fmt.Errorf("RuntimePool SandboxTemplate is required")
+	}
+	revision, err := runtimePoolJSONRevision(template.Spec)
+	if err != nil {
+		return "", fmt.Errorf("compute RuntimePool SandboxTemplate revision: %w", err)
+	}
+	return revision, nil
+}
+
+func runtimePoolSandboxChildOwnedByPool(object client.Object, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) bool {
+	if object == nil || pool == nil || object.GetNamespace() != cfg.namespace {
+		return false
+	}
+	labels := object.GetLabels()
+	for key, value := range cfg.labels {
+		if value == "" || labels[key] != value {
+			return false
+		}
+	}
+	if object.GetNamespace() == pool.Namespace && !metav1.IsControlledBy(object, pool) {
+		return false
+	}
+	return true
+}
+
+func runtimePoolSandboxClaimMatchesPool(claim *sandboxextv1beta1.SandboxClaim, cfg runtimePoolConfig) bool {
+	return claim != nil && claim.Spec.WarmPoolRef.Name == runtimePoolSandboxWarmPoolName(cfg.baseName) &&
+		len(claim.Spec.Env) == 0 && len(claim.Spec.VolumeClaimTemplates) == 0
+}
+
+func (r *RuntimePoolReconciler) setRuntimePoolSandboxTemplateRevision(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	revision string,
+) error {
+	if strings.TrimSpace(revision) == "" {
+		return fmt.Errorf("RuntimePool SandboxTemplate revision is required")
+	}
+	if pool.Annotations[runtimePoolSandboxTemplateRevisionAnnotation] == revision {
+		return nil
+	}
+	base := pool.DeepCopy()
+	if pool.Annotations == nil {
+		pool.Annotations = map[string]string{}
+	}
+	pool.Annotations[runtimePoolSandboxTemplateRevisionAnnotation] = revision
+	if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("record RuntimePool SandboxTemplate revision: %w", err)
+	}
+	return nil
+}
+
 func runtimePoolSandboxTemplateNeedsRollout(template *sandboxextv1beta1.SandboxTemplate, desiredTemplate corev1.PodTemplateSpec) bool {
 	if template == nil {
 		return false
@@ -640,6 +783,9 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSandboxWarmPool(
 	}
 	if err != nil {
 		return ignoreSandboxAPIAbsence("read RuntimePool sandbox warm pool", err)
+	}
+	if !runtimePoolSandboxChildOwnedByPool(warmPool, pool, cfg) {
+		return fmt.Errorf("same-name SandboxWarmPool does not carry the exact RuntimePool ownership identity")
 	}
 	if warmPool.Spec.TemplateRef.Name != runtimePoolSandboxTemplateName(cfg.baseName) ||
 		warmPool.Spec.Replicas == nil || *warmPool.Spec.Replicas != 0 {

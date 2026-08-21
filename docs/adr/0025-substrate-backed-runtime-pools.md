@@ -72,17 +72,19 @@ Agent Sandbox backends, with these Substrate-specific mappings:
   channel that carries every subsequent Authorization header, and the
   supervisor consumes them via the existing read-once bootstrap variables.
 - **Exact-instance identity.** The rendered environment pins
-  `ORKA_ACP_POD_UID=actor:<actorID>`, so the supervisor derives
-  `RuntimeInstanceID = actor:<actorID>.<bootID>` and the controller validates
-  the probe against a synthetic instance carrying the same identity. Every
+  `ORKA_ACP_POD_UID=workspace:<sha256(actorID)>`, so the supervisor derives the
+  opaque `RuntimeInstanceID = workspace:<sha256(actorID)>.<bootID>` and the
+  controller validates the probe against a synthetic instance carrying the
+  same identity. Every
   actor lifetime is exactly one fresh boot (`ResumeActor(boot=true)` once,
   recorded in a pool annotation), so a boot ID can never originate from a
   restored snapshot; a supervisor process restart inside the actor changes the
   boot ID and recycles the exact instance, exactly like the Pod paths. This
-  Orka-derived instance identity is the one actor-related value that appears
-  in public Task status (`status.execution.runtimeInstanceID`, required for
-  fencing, recovery, and artifact authorization); route hosts, worker names,
-  snapshot URIs, and every provider-assigned identifier stay out.
+  opaque Orka-derived fence is the only actor-related value that appears in
+  public Task status (`status.execution.runtimeInstanceID`, required for
+  fencing, recovery, and artifact authorization); the raw Actor ID, route
+  hosts, worker names, snapshot URIs, and every provider-assigned identifier
+  stay out.
 - **Router transport.** The dispatcher and the pool probe client reach
   Substrate instances through a dedicated transport that dials the router for
   any host under the actor DNS suffix while preserving the logical route host

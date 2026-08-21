@@ -810,7 +810,7 @@ func main() {
 			setupLog.Error(substrateConfigErr, "invalid substrate configuration from environment")
 			os.Exit(1)
 		}
-		if err := substrateConfig.Validate(); err != nil {
+		if err := validateEnabledSubstrateConfig(substrateConfig, workspaceProviderAPIEnabled); err != nil {
 			setupLog.Error(err, "invalid substrate configuration")
 			os.Exit(1)
 		}
@@ -1828,6 +1828,13 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func validateEnabledSubstrateConfig(cfg controller.SubstrateConfig, legacyWorkspaceProviderAPIEnabled bool) error {
+	if legacyWorkspaceProviderAPIEnabled {
+		return cfg.Validate()
+	}
+	return cfg.ValidateACPRuntimePool()
 }
 
 func newBrokeredDelegateTaskSubjectTokenResolver(

@@ -21,6 +21,7 @@ import (
 	"k8s.io/utils/ptr"
 	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -146,6 +147,82 @@ func TestWorkspaceRuntimePoolMaterializesProviderWorkload(t *testing.T) {
 	status := runtimePoolTestGetPool(t, r, pool).Status
 	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
 		t.Fatalf("status = %s/%s, want Starting/Closed", status.Lifecycle, status.AdmissionState)
+	}
+}
+
+func TestWorkspaceRuntimePoolRejectsUnownedProviderChildren(t *testing.T) {
+	tests := []struct {
+		name   string
+		object func() client.Object
+	}{
+		{name: "template", object: func() client.Object { return &sandboxextv1beta1.SandboxTemplate{} }},
+		{name: "warm pool", object: func() client.Object { return &sandboxextv1beta1.SandboxWarmPool{} }},
+		{name: "claim", object: func() client.Object { return &sandboxextv1beta1.SandboxClaim{} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtimePoolWorkspaceTestScheme(t)
+			pool := runtimePoolWorkspaceTestObject()
+			base := runtimePoolResourceName(pool.Namespace, pool.Name)
+			object := tt.object()
+			object.SetNamespace(pool.Namespace)
+			switch object.(type) {
+			case *sandboxextv1beta1.SandboxTemplate:
+				object.SetName(runtimePoolSandboxTemplateName(base))
+			case *sandboxextv1beta1.SandboxWarmPool:
+				object.SetName(runtimePoolSandboxWarmPoolName(base))
+			case *sandboxextv1beta1.SandboxClaim:
+				object.SetName(runtimePoolSandboxClaimName(base))
+			}
+			r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool, object)
+
+			runtimePoolReconcile(t, r, pool)
+
+			status := runtimePoolTestGetPool(t, r, pool).Status
+			if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+				status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+				!strings.Contains(status.Message, "ownership identity") {
+				t.Fatalf("unowned %s status = %s/%s %q, want Degraded/Closed ownership failure", tt.name, status.Lifecycle, status.AdmissionState, status.Message)
+			}
+		})
+	}
+}
+
+func TestWorkspaceRuntimePoolRecyclesClaimBeforeRepairingTamperedTemplate(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace children were not materialized")
+	}
+	template.Spec.PodTemplate.Spec.Containers[0].Image = runtimePoolTestTamperedImage
+	if err := r.Update(context.Background(), template); err != nil {
+		t.Fatalf("tamper SandboxTemplate: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.probeCalls != 0 {
+		t.Fatalf("tampered template triggered %d authenticated probes before claim recycling", supervisor.probeCalls)
+	}
+	if _, _, claim = runtimePoolWorkspaceTestChildren(t, r, pool); claim != nil {
+		t.Fatal("tampered SandboxTemplate claim was not recycled")
+	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("tampered template status = %s/%s, want Stopping/Closed", status.Lifecycle, status.AdmissionState)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim = runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("controller did not repair the template and reacquire a claim")
+	}
+	if got := template.Spec.PodTemplate.Spec.Containers[0].Image; got == runtimePoolTestTamperedImage {
+		t.Fatal("controller retained the tampered runtime image")
 	}
 }
 

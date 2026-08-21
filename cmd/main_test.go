@@ -30,6 +30,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -71,6 +72,22 @@ func TestControllerHolderIDIsProcessIncarnationUnique(t *testing.T) {
 	}
 	if first == "workstation" || second == "workstation" {
 		t.Fatal("holder ID omitted its process incarnation")
+	}
+}
+
+func TestValidateEnabledSubstrateConfigSelectsActivePathRequirements(t *testing.T) {
+	cfg := controller.SubstrateConfig{
+		APIEndpoint:           "api.ate-system.svc:443",
+		APIInsecureSkipVerify: true,
+		RouterURL:             "http://atenet-router.ate-system.svc",
+		ActorDNSSuffix:        "actors.resources.substrate.ate.dev",
+	}
+	if err := validateEnabledSubstrateConfig(cfg, false); err != nil {
+		t.Fatalf("ACP-only Substrate configuration rejected: %v", err)
+	}
+	if err := validateEnabledSubstrateConfig(cfg, true); err == nil ||
+		!strings.Contains(err.Error(), "bootstrap token secret name") {
+		t.Fatalf("legacy workspace-provider configuration error = %v, want bootstrap Secret requirement", err)
 	}
 }
 

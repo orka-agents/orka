@@ -2083,7 +2083,7 @@ YAML
   # raw actor ID, actor route host (DNS suffix), assigned worker Pod, and
   # snapshot URIs. The public exact-instance fence is an opaque Orka identity.
   task_yaml="$(kubectl -n orka-system get task orka-ws-substrate-smoke -o yaml)"
-  if ! jq -e '.status.execution.runtimeInstanceID | test("^workspace:[a-f0-9]{64}$")' \
+  if ! jq -e '.status.execution.runtimeInstanceID | test("^workspace:[a-f0-9]{64}\\.[a-f0-9-]{36}$")' \
       <<<"${task_json}" >/dev/null; then
     echo "public Task status did not use an opaque workspace runtime identity" >&2
     return 1

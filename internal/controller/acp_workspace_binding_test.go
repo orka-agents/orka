@@ -453,13 +453,18 @@ func TestProjectACPExecutionWorkspaceStatusTransitions(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
 	reconciler := &TaskReconciler{Client: kubeClient, Scheme: scheme}
+	dispatcher := &ACPDispatcher{Client: kubeClient}
 	ctx := context.Background()
 
+	if err := dispatcher.patchExecutionWorkspaceReuse(ctx, task, true); err != nil {
+		t.Fatalf("project durable session reuse: %v", err)
+	}
 	if err := reconciler.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
 		t.Fatalf("project running: %v", err)
 	}
 	if task.Status.ExecutionWorkspace.Phase != corev1alpha1.ExecutionWorkspacePhaseReady ||
-		task.Status.ExecutionWorkspace.Reason != corev1alpha1.ExecutionWorkspaceReasonReady {
+		task.Status.ExecutionWorkspace.Reason != corev1alpha1.ExecutionWorkspaceReasonReady ||
+		!task.Status.ExecutionWorkspace.Reused {
 		t.Fatalf("running projection = %q/%q, want Ready/WorkspaceReady", task.Status.ExecutionWorkspace.Phase, task.Status.ExecutionWorkspace.Reason)
 	}
 
