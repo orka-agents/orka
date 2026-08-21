@@ -342,3 +342,31 @@ func TestAuthorityObserverRecordsOnlyCountsAndDigests(t *testing.T) {
 		t.Fatalf("observer stats after reset = %#v", stats)
 	}
 }
+
+func TestAuthorityObserverRecordsTransactionlessToolCall(t *testing.T) {
+	observer := &authorityObserver{}
+	toolResponse := httptest.NewRecorder()
+	observer.ServeHTTP(
+		toolResponse,
+		httptest.NewRequest(http.MethodPost, "/tool", strings.NewReader(`{"probe":"authority"}`)),
+	)
+	if toolResponse.Code != http.StatusOK {
+		t.Fatalf("tool response = %d body=%s", toolResponse.Code, toolResponse.Body.String())
+	}
+
+	statsResponse := httptest.NewRecorder()
+	observer.ServeHTTP(statsResponse, httptest.NewRequest(http.MethodGet, "/stats", nil))
+	var stats struct {
+		TTSCalls               int    `json:"ttsCalls"`
+		ToolCalls              int    `json:"toolCalls"`
+		SubjectTokenDigest     string `json:"subjectTokenDigest"`
+		TransactionTokenDigest string `json:"transactionTokenDigest"`
+	}
+	if err := json.Unmarshal(statsResponse.Body.Bytes(), &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.TTSCalls != 0 || stats.ToolCalls != 1 ||
+		stats.SubjectTokenDigest != "" || stats.TransactionTokenDigest != "" {
+		t.Fatalf("transactionless observer stats = %#v", stats)
+	}
+}

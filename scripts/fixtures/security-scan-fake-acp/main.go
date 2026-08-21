@@ -379,13 +379,12 @@ func (o *authorityObserver) handleToken(w http.ResponseWriter, r *http.Request) 
 
 func (o *authorityObserver) handleTool(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimSpace(r.Header.Get("Txn-Token"))
-	if token == "" {
-		http.Error(w, "transaction token is required", http.StatusUnauthorized)
-		return
-	}
 	o.mu.Lock()
 	o.toolCalls++
-	o.transactionTokenDigest = digestValue(token)
+	o.transactionTokenDigest = ""
+	if token != "" {
+		o.transactionTokenDigest = digestValue(token)
+	}
 	o.mu.Unlock()
 	writeJSON(w, map[string]any{"ok": true})
 }
