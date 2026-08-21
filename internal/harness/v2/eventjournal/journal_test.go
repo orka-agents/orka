@@ -316,9 +316,21 @@ func TestJournalFailsClosedAcrossSessionTaskTurns(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()
 	firstMapContext := testMapContext()
+	if _, err := eventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace: firstMapContext.Namespace, StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID: firstMapContext.StreamID, TaskName: firstMapContext.TaskName,
+		SessionName: firstMapContext.SessionName, Type: executionevents.ExecutionEventTypeTaskCreated,
+		Severity: executionevents.ExecutionEventSeverityInfo, Summary: "Task status initialized to Pending",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	firstState, err := (Journal{EventStore: eventStore, MapContext: firstMapContext}).Open(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if firstState.logicalFieldHistorySaturated {
+		t.Fatal("first session task entered fail-closed redaction from its lifecycle event")
 	}
 
 	prefix := "sk-" + strings.Repeat("a", 8)
@@ -359,6 +371,39 @@ func TestJournalFailsClosedAcrossSessionTaskTurns(t *testing.T) {
 	if strings.Contains(appended.Summary+appended.ContentText+string(appended.Content), suffix) ||
 		!strings.Contains(appended.ContentText, executionevents.ExecutionEventRedactedValue) {
 		t.Fatalf("continued session fragment was not failed closed: %#v", appended)
+	}
+}
+
+func TestJournalIgnoresCurrentTaskLifecycleEventForSessionRedaction(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	mapCtx := testMapContext()
+	now := time.Now().UTC()
+	if _, err := eventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace: mapCtx.Namespace, StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID: mapCtx.StreamID, TaskName: mapCtx.TaskName, SessionName: mapCtx.SessionName,
+		Type: executionevents.ExecutionEventTypeTaskCreated, Severity: executionevents.ExecutionEventSeverityInfo,
+		Summary: "Task status initialized to Pending", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := (Journal{EventStore: eventStore, MapContext: mapCtx}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.logicalFieldHistorySaturated {
+		t.Fatal("current task lifecycle event saturated journal redaction history")
+	}
+	event := testUpdateEvent(2, now.Add(time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: "run first-turn checks", Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	appended, isNew, err := state.AppendUpdateIfNew(ctx, event)
+	if err != nil || !isNew || appended == nil || !strings.Contains(appended.ContentText, "run first-turn checks") {
+		t.Fatalf("append first-turn plan = %#v new=%t err=%v", appended, isNew, err)
 	}
 }
 

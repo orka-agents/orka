@@ -283,23 +283,43 @@ func (j Journal) failClosedForExistingSessionHistory(
 	if mapCtx.SessionName == "" {
 		return nil
 	}
-	listed, _, err := j.EventStore.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
-		Namespace: mapCtx.Namespace, SessionName: mapCtx.SessionName, Limit: 1,
-	})
-	if err != nil {
-		return fmt.Errorf("list existing session execution events for redaction: %w", err)
+	var afterSeq int64
+	for {
+		listed, latestSeq, err := j.EventStore.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+			Namespace: mapCtx.Namespace, SessionName: mapCtx.SessionName,
+			AfterSeq: afterSeq, Limit: store.MaxExecutionEventLimit,
+		})
+		if err != nil {
+			return fmt.Errorf("list existing session execution events for redaction: %w", err)
+		}
+		if len(listed) == 0 {
+			return nil
+		}
+		nextSeq := afterSeq
+		for _, sessionEvent := range listed {
+			if sessionEvent.SessionSeq > nextSeq {
+				nextSeq = sessionEvent.SessionSeq
+			}
+			if _, ok := MappedUpdateIdentityFromEvent(sessionEvent.ExecutionEvent); !ok {
+				continue
+			}
+			// A session timeline aggregates multiple task streams, while the exact
+			// logical-field boundaries used for journal redaction are intentionally
+			// not persisted. Once any mapped journal event is durable, redact all
+			// later runtime text rather than risk completing a credential fragment
+			// from an earlier turn or from a pre-recovery append.
+			state.logicalFieldHistory = nil
+			state.logicalFieldHistorySaturated = true
+			return nil
+		}
+		if nextSeq >= latestSeq {
+			return nil
+		}
+		if nextSeq <= afterSeq {
+			return fmt.Errorf("session execution event scan did not advance after sequence %d", afterSeq)
+		}
+		afterSeq = nextSeq
 	}
-	if len(listed) == 0 {
-		return nil
-	}
-	// A session timeline aggregates multiple task streams, while the exact
-	// logical-field boundaries used for redaction are intentionally not
-	// persisted. Once any session event is durable, redact all later runtime
-	// text rather than risk completing a credential fragment from an earlier
-	// turn or from a pre-recovery append.
-	state.logicalFieldHistory = nil
-	state.logicalFieldHistorySaturated = true
-	return nil
 }
 
 func (j Journal) loadAllIdentities(
