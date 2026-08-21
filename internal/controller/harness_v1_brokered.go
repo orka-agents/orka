@@ -7,17 +7,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
 const maxHarnessV1BrokeredTools = 128
@@ -50,6 +54,105 @@ func (f HarnessV1BrokeredToolExecutorFunc) ExecuteHarnessV1BrokeredTool(
 	request harness.ToolCallRequest,
 ) (json.RawMessage, error) {
 	return f(ctx, namespace, tool, request)
+}
+
+// harnessV1AuthenticatedTask carries the dispatcher-verified Task identity of
+// a brokered tool call. The dispatcher stamps it per request immediately
+// before invoking the executor, after the Task passed the immutable
+// binding/snapshot verification, so it is never cached across Tasks.
+type harnessV1AuthenticatedTask struct {
+	Name      string
+	Namespace string
+	UID       string
+}
+
+type harnessV1AuthenticatedTaskContextKey struct{}
+
+func withHarnessV1AuthenticatedTask(ctx context.Context, task harnessV1AuthenticatedTask) context.Context {
+	return context.WithValue(ctx, harnessV1AuthenticatedTaskContextKey{}, task)
+}
+
+func harnessV1AuthenticatedTaskFromContext(ctx context.Context) (harnessV1AuthenticatedTask, bool) {
+	task, ok := ctx.Value(harnessV1AuthenticatedTaskContextKey{}).(harnessV1AuthenticatedTask)
+	return task, ok && task.Name != "" && task.Namespace != "" && task.UID != ""
+}
+
+// KubernetesHarnessV1BrokeredToolExecutor executes brokered harness v1 Tool
+// calls through the shared worker Tool executor. Every execution binds the
+// authenticated Task's transaction token and scopes per request in every
+// authorization mode, mirroring the transaction environment and
+// owner-referenced token Secret the controller stamps into worker Jobs and
+// disabling the executor's process-global token-file fallback inside the
+// controller. Secret-backed credential authorization is additionally enforced
+// when EnforceTransactionCredentialAuth is set, mirroring
+// RegistryACPMCPToolExecutor for the v2 ACP MCP broker; missing Task authority
+// always fails closed.
+type KubernetesHarnessV1BrokeredToolExecutor struct {
+	Reader              client.Reader
+	KubeClient          kubernetes.Interface
+	HTTPClient          *http.Client
+	OutboundAccess      outboundaccess.Resolver
+	TransactionExchange *workerexecutor.TransactionExchangeConfig
+
+	// EnforceTransactionCredentialAuth mirrors the controller-wide
+	// context-token authorization enforcement mode. When set, brokered Tool
+	// executions bind the authenticated Task's transaction and credential
+	// authority before running and fail closed when it cannot be resolved.
+	EnforceTransactionCredentialAuth bool
+	// TransactionCredentialReadScopes lists the transaction scopes that
+	// authorize Secret-backed outbound credentials, matching the scopes the
+	// controller stamps into worker Jobs.
+	TransactionCredentialReadScopes []string
+}
+
+func (e *KubernetesHarnessV1BrokeredToolExecutor) ExecuteHarnessV1BrokeredTool(
+	ctx context.Context,
+	namespace string,
+	tool *corev1alpha1.Tool,
+	request harness.ToolCallRequest,
+) (json.RawMessage, error) {
+	if e == nil || e.KubeClient == nil {
+		return nil, errors.New("harness v1 brokered tool executor is not configured")
+	}
+	executor := workerexecutor.NewToolExecutorForNamespace(namespace, e.KubeClient, e.HTTPClient, e.OutboundAccess)
+	executor.SetTransactionExchangeConfig(e.TransactionExchange)
+	if err := e.bindTaskTransactionAuthority(ctx, namespace, executor); err != nil {
+		return nil, err
+	}
+	execCtx := workerexecutor.WithToolCallID(ctx, request.ToolCallID)
+	execCtx = workerexecutor.WithToolIdempotencyKey(execCtx, request.IdempotencyKey)
+	result, err := executor.Execute(execCtx, tool, request.Input)
+	return json.RawMessage(result), err
+}
+
+// bindTaskTransactionAuthority initializes the per-request executor with the
+// authenticated Task's transaction and credential authority. Transaction
+// tokens/scopes are bound in every mode; only Secret-credential authorization
+// is gated by EnforceTransactionCredentialAuth. Missing Task authority always
+// fails closed.
+func (e *KubernetesHarnessV1BrokeredToolExecutor) bindTaskTransactionAuthority(
+	ctx context.Context,
+	namespace string,
+	executor *workerexecutor.ToolExecutor,
+) error {
+	authenticated, ok := harnessV1AuthenticatedTaskFromContext(ctx)
+	if !ok || authenticated.Namespace != namespace {
+		return errors.New("authenticated harness v1 brokered task authority is unavailable")
+	}
+	if e.Reader == nil {
+		return errors.New("harness v1 brokered task authority requires a Kubernetes reader")
+	}
+	task := &corev1alpha1.Task{}
+	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: authenticated.Namespace, Name: authenticated.Name}, task); err != nil {
+		return fmt.Errorf("load authenticated harness v1 brokered task authority: %w", err)
+	}
+	if string(task.UID) != authenticated.UID {
+		return errors.New("authenticated harness v1 brokered task identity changed")
+	}
+	return bindVerifiedTaskTransactionAuthority(
+		ctx, e.Reader, task, e.TransactionCredentialReadScopes,
+		e.EnforceTransactionCredentialAuth, executor,
+	)
 }
 
 // agentExecutionSnapshotHarnessV1BrokeredTool is the safe, immutable schema
@@ -461,6 +564,13 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 		effectRequest,
 		harnessV1BrokeredToolCallTimeout(tool),
 		func(callCtx context.Context) (harness.ToolCallResult, error) {
+			// The Task passed the dispatcher's immutable binding/snapshot
+			// verification for this attempt; stamp its identity per request so
+			// an enforcing executor can bind the Task's transaction and
+			// credential authority without caching it across Tasks.
+			callCtx = withHarnessV1AuthenticatedTask(callCtx, harnessV1AuthenticatedTask{
+				Name: task.Name, Namespace: task.Namespace, UID: string(task.UID),
+			})
 			output, executeErr := d.BrokeredToolExecutor.ExecuteHarnessV1BrokeredTool(
 				callCtx, task.Namespace, tool.DeepCopy(), request,
 			)

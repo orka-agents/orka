@@ -52,6 +52,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	orkametrics "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
@@ -99,11 +100,12 @@ const (
 	runtimePoolResourceClassStandard      = "standard"
 	runtimePoolDefaultControllerNamespace = "orka-system"
 
-	runtimePoolRolloutReasonDraining  = "RolloutDraining"
-	runtimePoolRolloutReasonQuiescent = "RolloutQuiescent"
-	runtimePoolRolloutReasonStopping  = "RolloutStopping"
-	runtimePoolRolloutReasonStarting  = "RolloutStarting"
-	runtimePoolRolloutReasonTimedOut  = "RolloutTimedOut"
+	runtimePoolRolloutReasonDraining       = "RolloutDraining"
+	runtimePoolRolloutReasonQuiescent      = "RolloutQuiescent"
+	runtimePoolRolloutReasonStopping       = "RolloutStopping"
+	runtimePoolRolloutReasonStarting       = "RolloutStarting"
+	runtimePoolRolloutReasonTimedOut       = "RolloutTimedOut"
+	runtimePoolSchedulingReasonPodNotReady = "PodNotReady"
 
 	runtimePoolIdentityCapacityReasonDraining  = "IdentityCapacityDraining"
 	runtimePoolIdentityCapacityReasonQuiescent = "IdentityCapacityQuiescent"
@@ -351,11 +353,13 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	pool := &corev1alpha1.RuntimePool{}
 	if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
 		if apierrors.IsNotFound(err) {
+			orkametrics.DeleteACPRuntimePool(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 	if !pool.DeletionTimestamp.IsZero() {
+		orkametrics.DeleteACPRuntimePool(pool.Namespace, pool.Name)
 		return r.finalizeRuntimePool(ctx, pool)
 	}
 	if r.CleanupOnly {
@@ -670,7 +674,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 			status.Message = "previously active runtime Pod is not Ready; preserving its exact fence while admission is closed"
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, "PodNotReady", status.Message)
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
@@ -744,6 +748,9 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		if err := r.recycleRuntimePoolInstance(ctx, pool, &readyPods[0]); err != nil {
 			return ctrl.Result{}, err
 		}
+		status.ActiveInstance = nil
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 	case probe.Status.Drain.Requested || probe.Status.Lifecycle == harnessv2.SupervisorLifecycleDraining || probe.Status.Lifecycle == harnessv2.SupervisorLifecycleTerminating:
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
@@ -940,7 +947,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolRollout(
 		return r.reconcileStoppedRuntimePoolRollout(ctx, pool, cfg, pods, desiredTemplate, status)
 	}
 	if len(readyPods) == 0 {
-		return r.reconcileUnreadyRuntimePoolRollout(ctx, pool, deployment, status)
+		return r.reconcileUnreadyRuntimePoolRollout(ctx, pool, deployment, pods, status)
 	}
 	return r.reconcileReadyRuntimePoolRollout(ctx, pool, cfg, deployment, &readyPods[0], desiredTemplate, status)
 }
@@ -955,8 +962,10 @@ func (r *RuntimePoolReconciler) reconcileStoppedRuntimePoolRollout(
 ) (ctrl.Result, error) {
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 	if len(pods) > 0 {
+		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 		status.Message = "waiting for the drained old runtime Pod to terminate before applying the new Recreate template"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonStopping, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
@@ -981,8 +990,14 @@ func (r *RuntimePoolReconciler) reconcileUnreadyRuntimePoolRollout(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	deployment *appsv1.Deployment,
+	pods []corev1.Pod,
 	status corev1alpha1.RuntimePoolStatus,
 ) (ctrl.Result, error) {
+	if reason, message, ok := runtimePoolSchedulingFailure(pods); ok {
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionFalse, reason, message)
+	} else {
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, "no Ready runtime Pod is available during Recreate rollout")
+	}
 	if pool.Status.ActiveInstance != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -1216,8 +1231,10 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionTrue, "ScaledToZero", status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
+		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 		status.Message = "waiting for the quiescent runtime Pod to terminate"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
@@ -2557,16 +2574,76 @@ func (r *RuntimePoolReconciler) finishRuntimePoolStatus(
 	status corev1alpha1.RuntimePoolStatus,
 	requeueAfter time.Duration,
 ) (ctrl.Result, error) {
+	clearRuntimePoolUnfencedProbePressure(&status)
 	status.Message = sanitizeRuntimePoolMessage(status.Message)
 	if reflect.DeepEqual(pool.Status, status) {
+		recordRuntimePoolMetrics(pool, status)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
+	scaledToZero := runtimePoolCompletedScaleToZero(pool.Status, status)
 	base := pool.DeepCopy()
 	pool.Status = status
-	if err := r.Status().Patch(ctx, pool, client.MergeFrom(base)); err != nil {
+	if err := r.Status().Patch(ctx, pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
 	}
+	recordRuntimePoolMetrics(pool, status)
+	if scaledToZero {
+		orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
+	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// Supervisor pressure belongs to one exact authenticated runtime instance.
+// Once that fence is absent, retaining the last probe would publish stale
+// sessions and prompts for a Pod that was lost, rejected, or recycled.
+func clearRuntimePoolUnfencedProbePressure(status *corev1alpha1.RuntimePoolStatus) {
+	if status == nil || status.ActiveInstance != nil {
+		return
+	}
+	status.Capacity.ResidentSessions = 0
+	status.Capacity.RunningPrompts = 0
+	status.Capacity.PendingPermissions = 0
+	status.Capacity.LiveDescendants = 0
+}
+
+func recordRuntimePoolMetrics(pool *corev1alpha1.RuntimePool, status corev1alpha1.RuntimePoolStatus) {
+	if pool == nil {
+		return
+	}
+	orkametrics.RecordACPRuntimePoolStatus(
+		pool.Namespace,
+		pool.Name,
+		status.DesiredReplicas,
+		runtimePoolReadyReplicas(status),
+		status.Capacity.ResidentSessions,
+		status.Capacity.RunningPrompts,
+		status.Capacity.QueuedTasks,
+		string(status.AdmissionState),
+	)
+}
+
+func runtimePoolReadyReplicas(status corev1alpha1.RuntimePoolStatus) int32 {
+	if status.ActiveInstance == nil {
+		return 0
+	}
+	ready := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		return 0
+	}
+	return 1
+}
+
+func runtimePoolCompletedScaleToZero(previous, current corev1alpha1.RuntimePoolStatus) bool {
+	if current.DesiredReplicas != 0 || current.CurrentReplicas != 0 ||
+		current.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped {
+		return false
+	}
+	return previous.DesiredReplicas > 0 || previous.CurrentReplicas > 0 || previous.ActiveInstance != nil ||
+		previous.Lifecycle == corev1alpha1.RuntimePoolLifecycleStarting ||
+		previous.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing ||
+		previous.Lifecycle == corev1alpha1.RuntimePoolLifecycleDraining ||
+		previous.Lifecycle == corev1alpha1.RuntimePoolLifecycleQuiescent ||
+		previous.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopping
 }
 
 func (r *RuntimePoolReconciler) setRuntimePoolCondition(
@@ -2619,6 +2696,7 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 	if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
+	orkametrics.DeleteACPRuntimePool(pool.Namespace, pool.Name)
 	return ctrl.Result{}, nil
 }
 

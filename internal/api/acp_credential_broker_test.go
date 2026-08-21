@@ -50,19 +50,28 @@ func TestPublisherCredentialBrokerReturnsOnlyFrozenOperationCredential(t *testin
 		TaskUID: string(taskUID), Attempt: 1, PromptID: "prompt",
 		CredentialBindings: []corev1alpha1.PromptCredentialBinding{{Role: "SourceRead", Namespace: "default", SecretName: "git-read", SecretKey: "token", SecretUID: "read-secret-uid", ResourceVersion: "7"}},
 	}}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		plannedTask, readSecret, attempt,
-		publisherEffectForTest("workspace-credential-effect", "workspace.prepare", string(taskUID), "workspace-prepare-prompt"),
-	).Build()
+	effect := publisherEffectForTest("workspace-credential-effect", "workspace.prepare", string(taskUID), "workspace-prepare-prompt")
 	request := publisherservice.CredentialMaterialRequest{
 		ParentOperation: publisherservice.OperationWorkspacePrepare,
 		Metadata:        publisherservice.OperationMetadata{Namespace: "default", TaskID: string(taskUID), OperationID: "workspace-prepare-prompt"},
 		Reference:       publisherservice.CredentialReference{Name: "git-read", Kind: publisherservice.CredentialHTTPExtraHeader},
 	}
-	response := callPublisherCredentialBroker(t, kubeClient, publisherToken, request)
 	expected := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:read-canary-token"))
-	if response.Material != expected || response.ResourceVersion != "7" {
-		t.Fatalf("credential response = %#v", response)
+	for _, state := range []corev1alpha1.TaskExecutionState{
+		corev1alpha1.TaskExecutionStateQueued,
+		corev1alpha1.TaskExecutionStateReserved,
+		corev1alpha1.TaskExecutionStatePlanned,
+		corev1alpha1.TaskExecutionStateSessionStarting,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			task := plannedTask.DeepCopy()
+			task.Status.Execution.State = state
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, readSecret.DeepCopy(), attempt.DeepCopy(), effect.DeepCopy()).Build()
+			response := callPublisherCredentialBroker(t, kubeClient, publisherToken, request, effect)
+			if response.Material != expected || response.ResourceVersion != "7" {
+				t.Fatalf("credential response = %#v", response)
+			}
+		})
 	}
 }
 
@@ -100,16 +109,14 @@ func TestPublisherCredentialBrokerBindsPublicationAndForgePurpose(t *testing.T) 
 		CredentialBindings: []corev1alpha1.PromptCredentialBinding{{Role: "Forge", Namespace: "default", SecretName: "git-publish", SecretKey: "token", SecretUID: "publish-secret-uid", ResourceVersion: "11"}},
 	}}
 	prOperation := controller.ACPPublicationOperationID("pr-reconcile", task)
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		task, publication, publishSecret, attempt,
-		publisherEffectForTest("forge-credential-effect", "publisher.pull-request", publicationID, prOperation),
-	).Build()
+	effect := publisherEffectForTest("forge-credential-effect", "publisher.pull-request", publicationID, prOperation)
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, publication, publishSecret, attempt, effect).Build()
 	request := publisherservice.CredentialMaterialRequest{
 		ParentOperation: publisherservice.OperationPullRequestReconcile,
 		Metadata:        publisherservice.OperationMetadata{Namespace: "default", PublicationID: publicationID, OperationID: prOperation},
 		Reference:       publisherservice.CredentialReference{Name: "git-publish", Kind: publisherservice.CredentialForgeToken},
 	}
-	response := callPublisherCredentialBroker(t, kubeClient, publisherToken, request)
+	response := callPublisherCredentialBroker(t, kubeClient, publisherToken, request, effect)
 	if response.Material != "forge-canary-token" || response.ResourceVersion != "11" {
 		t.Fatalf("credential response = %#v", response)
 	}
@@ -181,7 +188,10 @@ func TestPublisherCredentialBrokerUsesFreshSucceededTaskAndPromptAttemptState(t 
 	app := fiber.New()
 	server := &Server{
 		app: app, client: cachedClient,
-		config: ServerConfig{APIReader: apiReader, ControllerEpochs: publisherEpochSourceForTest()},
+		config: ServerConfig{
+			APIReader: apiReader, ControllerEpochs: publisherEpochSourceForTest(),
+			ExternalEffects: publisherEffectReaderForTest(effect),
+		},
 	}
 	server.installACPArtifactAuthorizationBroker()
 	body, err := json.Marshal(request)
@@ -213,12 +223,15 @@ func callPublisherCredentialBroker(
 	kubeClient client.Client,
 	publisherToken string,
 	request publisherservice.CredentialMaterialRequest,
+	effect *corev1alpha1.ExternalEffect,
 ) publisherservice.CredentialMaterialResponse {
 	t.Helper()
 	app := fiber.New()
 	server := &Server{
 		app: app, client: kubeClient,
-		config: ServerConfig{ControllerEpochs: publisherEpochSourceForTest()},
+		config: ServerConfig{
+			ControllerEpochs: publisherEpochSourceForTest(), ExternalEffects: publisherEffectReaderForTest(effect),
+		},
 	}
 	server.installACPArtifactAuthorizationBroker()
 	body, err := json.Marshal(request)

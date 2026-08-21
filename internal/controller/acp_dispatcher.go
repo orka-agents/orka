@@ -36,6 +36,8 @@ const (
 	DefaultACPIdlePoolTTL                                = 15 * time.Minute
 	DefaultACPRuntimePoolReservationTTL                  = 2 * time.Minute
 	DefaultACPRateLimitReconcileInterval                 = time.Second
+	defaultACPTaskTimeout                                = 30 * time.Minute
+	acpTaskTimeoutReason                                 = "TaskTimeout"
 	acpSucceededOperation                                = "succeeded"
 	acpCredentialBlockedOperation                        = "credential-blocked"
 	acpCredentialBlockedMessage                          = "workspace credential changed or became unavailable after queue; refusing to change frozen authority"
@@ -757,6 +759,9 @@ func validateFrozenACPDispatchTarget(
 
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alpha1.Task, target acpDispatchTarget) (retErr error) {
+	var promptTrace *acpSpan
+	defer func() { promptTrace.End(retErr) }()
+
 	reservationLease := newACPRuntimePoolReservationLease(d, target.reservation)
 	if reservationLease != nil {
 		defer func() {
@@ -831,18 +836,29 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		lineage.NamespaceUID = string(taskNamespace.UID)
 	}
-	sessionExecution, err := d.prepareTaskSession(
-		runtimeCtx, task, fence, runtimeFence.RuntimeProfileDigest, mcpBindingDigest,
+	var sessionExecution *acpTaskSession
+	sessionCompleted := false
+	sessionCtx, sessionTrace := startACPSessionSpan(runtimeCtx, task)
+	endSessionTrace := func(err error) {
+		reused := sessionExecution != nil && sessionExecution.Reused
+		sessionTrace.setSessionReused(reused)
+		sessionTrace.setSessionOutcome(acpSessionOutcome(reused, sessionCompleted, err))
+		sessionTrace.End(err)
+	}
+	defer func() { endSessionTrace(retErr) }()
+	sessionExecution, err = d.prepareTaskSession(
+		sessionCtx, task, fence, runtimeFence.RuntimeProfileDigest, mcpBindingDigest,
 		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage,
 	)
 	if err != nil {
+		endSessionTrace(err)
 		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
 			recoveredSession, cleanupErr := d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
 			if cleanupErr != nil {
 				return errors.Join(err, cleanupErr)
 			}
 			if settleErr := d.settlePreSubmissionCancellation(
-				ctx, task, attemptID, fence, "timeout-before-submission", "TaskTimeout", "task deadline exceeded before prompt submission",
+				ctx, task, attemptID, fence, "timeout-before-submission", acpTaskTimeoutReason, "task deadline exceeded before prompt submission",
 			); settleErr != nil {
 				return errors.Join(err, settleErr)
 			}
@@ -855,6 +871,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, err)
 	}
+	sessionTrace.setSessionReused(sessionExecution != nil && sessionExecution.Reused)
 	if sessionExecution != nil && sessionExecution.Turn != nil {
 		defer func() {
 			if sessionExecution.finalized || sessionExecution.requeued {
@@ -895,6 +912,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(taskRuntimeSessionUID(task))
 		runtimeFence.RuntimeSessionGeneration = 1
 	}
+	sessionTrace.setRuntimeSession(string(runtimeFence.RuntimeSessionUID), runtimeFence.RuntimeSessionGeneration)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionReserved, store.PromptExecutionSessionStarting, "session-starting", nil); err != nil {
 		return err
 	}
@@ -1129,7 +1147,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 		}
 		created := false
-		if _, err := runtimeClient.CreateRuntimeSession(runtimeCtx, createRequest); err != nil {
+		if _, err := runtimeClient.CreateRuntimeSession(sessionCtx, createRequest); err != nil {
 			if runtimeSessionRetirementRequired && runtimeSessionCreationMayHaveApplied(err) {
 				runtimeSessionCleanupPending = true
 			}
@@ -1178,7 +1196,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				sessionExecution.requeued = true
 				return nil
 			} else {
-				return d.handlePrePromptClientError(ctx, task, attemptID, fence, err)
+				retrying, handleErr := d.handlePrePromptClientError(ctx, task, attemptID, fence, err)
+				if !retrying {
+					endSessionTrace(err)
+				}
+				return handleErr
 			}
 		} else {
 			created = true
@@ -1213,12 +1235,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 	}
 
-	if err := d.openTaskSessionTurn(runtimeCtx, task, attemptID, fence, sessionExecution); err != nil {
+	if err := d.openTaskSessionTurn(sessionCtx, task, attemptID, fence, sessionExecution); err != nil {
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 			return deadlineErr
 		}
 		return err
 	}
+	sessionCompleted = true
+	endSessionTrace(nil)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionPlanned, store.PromptExecutionSubmitting, "submitting", nil); err != nil {
 		return err
 	}
@@ -1228,6 +1252,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}); err != nil {
 		return err
 	}
+	ctx, promptTrace = startACPPromptSpan(ctx, task)
+	promptTrace.setRuntimeSession(string(runtimeFence.RuntimeSessionUID), runtimeFence.RuntimeSessionGeneration)
+	runtimeCtx = promptTrace.withContext(runtimeCtx)
 
 	var bootstrap string
 	userPrompt := task.Spec.Prompt
@@ -1331,22 +1358,41 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			if err != nil {
 				_ = cleanupRuntimeSession("prompt_admission_reconciliation_stopped")
 				if runtimeContextError(runtimeCtx) != nil {
-					return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventCancelled})
+					return recordACPPromptOutcomeIfSettled(
+						ctx, promptTrace, acpPromptOutcomeCancelled,
+						d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventCancelled}),
+					)
 				}
-				return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventFailed})
+				return recordACPPromptOutcomeIfSettled(
+					ctx, promptTrace, acpPromptOutcomeFailed,
+					d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventFailed}),
+				)
 			}
 			continue
 		}
 		return d.handlePromptStreamError(
-			ctx, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence,
+			ctx, promptTrace, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence,
 			accepted || summary.Accepted, summary.WriteEvidence, runtimeContextError(runtimeCtx), streamErr,
 		)
 	}
 	if terminal == nil {
-		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event")
+		return recordACPPromptOutcomeIfSettled(
+			ctx, promptTrace, acpPromptOutcomeUnknown,
+			d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event"),
+		)
 	}
 	if terminal.Type != harnessv2.EventCompleted {
-		return d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal)
+		outcome := acpPromptOutcomeFailed
+		switch terminal.Type {
+		case harnessv2.EventCancelled:
+			outcome = acpPromptOutcomeCancelled
+		case harnessv2.EventOutcomeUnknown:
+			outcome = acpPromptOutcomeUnknown
+		}
+		return recordACPPromptOutcomeIfSettled(
+			ctx, promptTrace, outcome,
+			d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal),
+		)
 	}
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionRunning, store.PromptExecutionSettling, "settling", nil); err != nil {
 		return err
@@ -1406,6 +1452,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}); patchErr != nil {
 			return patchErr
 		}
+		recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
+		promptTrace.End(nil)
 		if transitionErr := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryConflict, "workspace-validation-failed", "workspace validation failed before a trusted delta was established"); transitionErr != nil {
 			return transitionErr
 		}
@@ -1437,6 +1485,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}); err != nil {
 		return err
 	}
+	recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
+	promptTrace.End(nil)
 
 	var deliveryStatus corev1alpha1.TaskDeliveryStatus
 	publicationID := ""
@@ -2579,9 +2629,21 @@ func runtimeSessionCreateTimeout(target acpDispatchTarget) time.Duration {
 }
 
 func acpTaskDeadline(task *corev1alpha1.Task, now time.Time) (time.Time, bool) {
-	if task == nil || task.Spec.Timeout == nil || task.Spec.Timeout.Duration <= 0 {
+	if task == nil {
 		return time.Time{}, false
 	}
+	timeout := defaultACPTaskTimeout
+	switch {
+	case task.Spec.Timeout != nil && task.Spec.Timeout.Duration > 0:
+		timeout = task.Spec.Timeout.Duration
+	case task.Status.AgentExecutionBinding == nil ||
+		task.Status.AgentExecutionBinding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2:
+		return time.Time{}, false
+	}
+	return taskDeadlineFromTimeout(task, now, timeout), true
+}
+
+func taskDeadlineFromTimeout(task *corev1alpha1.Task, now time.Time, timeout time.Duration) time.Time {
 	now = now.UTC()
 	var startedAt time.Time
 	if !task.CreationTimestamp.IsZero() {
@@ -2592,7 +2654,7 @@ func acpTaskDeadline(task *corev1alpha1.Task, now time.Time) (time.Time, bool) {
 			startedAt = now
 		}
 	}
-	return startedAt.Add(task.Spec.Timeout.Duration), true
+	return startedAt.Add(timeout)
 }
 
 func (d *ACPDispatcher) settleQueuedTaskBeforeAdmission(ctx context.Context, queued *corev1alpha1.Task) (bool, error) {
@@ -2634,7 +2696,7 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	case !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled:
 		operation, reason, message = "cancelled-before-admission", "Cancelled", "task cancelled before runtime admission"
 	case hasDeadline && !now.Before(deadline):
-		operation, reason, message = "timeout-before-admission", "TaskTimeout", "task deadline exceeded before runtime admission"
+		operation, reason, message = "timeout-before-admission", acpTaskTimeoutReason, "task deadline exceeded before runtime admission"
 	default:
 		return false, nil
 	}
@@ -2698,7 +2760,7 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPreSubmissionCleanupTimeout)
 		defer cancel()
 		var terminalErr = context.Canceled
-		if reason == corev1alpha1.TaskExecutionReason("TaskTimeout") {
+		if reason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
 			terminalErr = context.DeadlineExceeded
 		}
 		if err := d.reconcileUnfinalizedTaskSession(cleanupCtx, task, fence, recoveredSession, terminalErr); err != nil {
@@ -2967,7 +3029,7 @@ func (d *ACPDispatcher) handlePreSubmissionContextDone(
 		return false, nil
 	}
 	return true, d.settlePreSubmissionCancellation(
-		ctx, task, attemptID, fence, "timeout-before-submission", "TaskTimeout", "task deadline exceeded before prompt submission",
+		ctx, task, attemptID, fence, "timeout-before-submission", acpTaskTimeoutReason, "task deadline exceeded before prompt submission",
 	)
 }
 
@@ -3762,9 +3824,9 @@ func runtimeSessionStartDiagnostic(err error) (int, harnessv2.ErrorCode, string)
 	return clientErr.StatusCode, clientErr.Code, message
 }
 
-func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, err error) error {
+func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, err error) (bool, error) {
 	if isACPRateLimitedClientError(err) {
-		return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+		return true, d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
 	}
 	status, code, diagnostic := runtimeSessionStartDiagnostic(err)
 	logf.FromContext(ctx).Info(
@@ -3775,13 +3837,14 @@ func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *co
 		"serverMessage", boundedRuntimeSessionServerMessage(err),
 	)
 	if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "runtime-session-start-failed"); transitionErr != nil {
-		return transitionErr
+		return false, transitionErr
 	}
-	return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "RuntimeSessionStartFailed", runtimeSessionStartFailureMessage(err))
+	return false, d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "RuntimeSessionStartFailed", runtimeSessionStartFailureMessage(err))
 }
 
 func (d *ACPDispatcher) handlePromptStreamError(
 	ctx context.Context,
+	promptTrace *acpSpan,
 	runtimeClient *harnessv2.Client,
 	sessionID harnessv2.RuntimeSessionID,
 	task *corev1alpha1.Task,
@@ -3810,15 +3873,26 @@ func (d *ACPDispatcher) handlePromptStreamError(
 	)
 	if runtimeContextErr != nil {
 		if !accepted && writeEvidence.SafeToResendSameIdentity() {
-			if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled-before-acceptance"); transitionErr != nil {
+			operation, terminalReason, message := "cancelled-before-acceptance", corev1alpha1.TaskExecutionReason("Cancelled"), "prompt cancelled before acceptance"
+			if errors.Is(runtimeContextErr, context.DeadlineExceeded) {
+				operation, terminalReason, message = "timeout-before-acceptance", acpTaskTimeoutReason, "task deadline exceeded before prompt acceptance"
+			}
+			if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, operation); transitionErr != nil {
 				return transitionErr
 			}
-			return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancelled before acceptance")
+			return recordACPPromptOutcomeIfSettled(
+				ctx, promptTrace, acpPromptOutcomeCancelled,
+				d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, terminalReason, message),
+			)
 		}
 		now := time.Now().UTC()
 		reason := harnessv2.CancelReasonControllerShutdown
+		terminalReason := corev1alpha1.TaskExecutionReason("Cancelled")
+		terminalMessage := "prompt cancellation settled"
 		if errors.Is(runtimeContextErr, context.DeadlineExceeded) {
 			reason = harnessv2.CancelReasonTaskTimeout
+			terminalReason = acpTaskTimeoutReason
+			terminalMessage = "task deadline cancellation settled"
 		}
 		cancelRequest := harnessv2.CancelPromptRequest{
 			Protocol: harnessv2.ProtocolVersion,
@@ -3832,28 +3906,47 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			if cancelErr == nil && response.SettlementProven {
 				switch response.Settlement.TerminalEvent {
 				case harnessv2.EventCancelled:
-					if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled"); transitionErr != nil {
+					operation := "cancelled"
+					if terminalReason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
+						operation = "timeout-cancelled"
+					}
+					if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, operation); transitionErr != nil {
 						return transitionErr
 					}
-					return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancellation settled")
+					return recordACPPromptOutcomeIfSettled(
+						ctx, promptTrace, acpPromptOutcomeCancelled,
+						d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, terminalReason, terminalMessage),
+					)
 				case harnessv2.EventFailed:
 					if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "cancel-failed"); transitionErr != nil {
 						return transitionErr
 					}
-					return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptFailed", "prompt failed during cancellation")
+					return recordACPPromptOutcomeIfSettled(
+						ctx, promptTrace, acpPromptOutcomeFailed,
+						d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptFailed", "prompt failed during cancellation"),
+					)
 				}
 			}
 		}
-		return d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "prompt cancellation settlement is unknown")
+		return recordACPPromptOutcomeIfSettled(
+			ctx, promptTrace, acpPromptOutcomeUnknown,
+			d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "prompt cancellation settlement is unknown"),
+		)
 	}
 	var clientErr *harnessv2.ClientError
 	if !accepted && errors.As(err, &clientErr) && clientErr.WriteEvidence.SafeToResendSameIdentity() {
 		if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "prompt-not-accepted"); transitionErr != nil {
 			return transitionErr
 		}
-		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptNotAccepted", "prompt transport failed before any request bytes were written")
+		return recordACPPromptOutcomeIfSettled(
+			ctx, promptTrace, acpPromptOutcomeFailed,
+			d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptNotAccepted", "prompt transport failed before any request bytes were written"),
+		)
 	}
-	return d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "accepted prompt outcome is unknown")
+	return recordACPPromptOutcomeIfSettled(
+		ctx, promptTrace, acpPromptOutcomeUnknown,
+		d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "accepted prompt outcome is unknown"),
+	)
 }
 
 func promptStreamDiagnostic(err error) string {

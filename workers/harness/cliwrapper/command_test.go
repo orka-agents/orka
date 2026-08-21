@@ -3,8 +3,10 @@ package cliwrapper
 import (
 	"context"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,6 +19,9 @@ const (
 	envCommandRunnerDrop         = "ORKA_CLIWRAPPER_DROP"
 	envCommandRunnerKeepParent   = "ORKA_CLIWRAPPER_KEEP_PARENT"
 	envCommandRunnerKeepSpec     = "ORKA_CLIWRAPPER_KEEP_SPEC"
+	envCommandRunnerGroupHelper  = "ORKA_CLIWRAPPER_GROUP_HELPER"
+	envCommandRunnerHelperBinary = "ORKA_CLIWRAPPER_HELPER_BINARY"
+	envCommandRunnerHelperReady  = "ORKA_CLIWRAPPER_HELPER_READY"
 )
 
 func TestMain(m *testing.M) {
@@ -31,6 +36,14 @@ func TestMain(m *testing.M) {
 		_, _ = os.Stdout.Write([]byte(
 			os.Getenv(envCommandRunnerKeepParent) + "|" + os.Getenv(envCommandRunnerKeepSpec),
 		))
+		return
+	}
+	if os.Getenv(envCommandRunnerGroupHelper) == "1" {
+		signal.Ignore(syscall.SIGTERM)
+		if err := os.WriteFile(os.Getenv(envCommandRunnerHelperReady), []byte("ready"), 0o600); err != nil {
+			os.Exit(42)
+		}
+		time.Sleep(6 * time.Second)
 		return
 	}
 	os.Exit(m.Run())
@@ -235,28 +248,51 @@ func TestCommandRunnerCancelKillsProcessGroup(t *testing.T) {
 		t.Skip("process groups use Unix signals")
 	}
 	dir := t.TempDir()
-	marker := filepath.Join(dir, "child-done")
+	ready := filepath.Join(dir, "child-ready")
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	runner := CommandRunner{StdoutLimitBytes: 64, StderrLimitBytes: 64, CancelGrace: 10 * time.Millisecond}
 	done := make(chan CommandResult, 1)
 	errCh := make(chan error, 1)
 	go func() {
 		result, err := runner.Run(ctx, &CommandSpec{
 			Path: "/bin/sh",
-			Args: []string{"-c", "(trap '' TERM; sleep 5; touch " + marker + ") & wait"},
+			Args: []string{"-c", `"$ORKA_CLIWRAPPER_HELPER_BINARY" & wait`},
+			Env: []string{
+				envCommandRunnerGroupHelper + "=1",
+				envCommandRunnerHelperBinary + "=" + os.Args[0],
+				envCommandRunnerHelperReady + "=" + ready,
+			},
 		})
 		done <- result
 		errCh <- err
 	}()
-	time.Sleep(20 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat child readiness marker: %v", err)
+		}
+		select {
+		case result := <-done:
+			err := <-errCh
+			t.Fatalf("command exited before child readiness: result=%#v err=%v", result, err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for child readiness")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancelledAt := time.Now()
 	cancel()
 	result := <-done
 	<-errCh
 	if !result.Cancelled {
 		t.Fatalf("Cancelled = false, want true; result=%#v", result)
 	}
-	time.Sleep(250 * time.Millisecond)
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("child marker exists or stat err=%v; process group was not killed", err)
+	if elapsed := time.Since(cancelledAt); elapsed >= 4*time.Second {
+		t.Fatalf("cancellation took %v; child process survived until pipe-drain timeout", elapsed)
 	}
 }

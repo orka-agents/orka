@@ -75,6 +75,13 @@ type ExternalEffectStore interface {
 	TransitionExternalEffect(ctx context.Context, transition ExternalEffectTransition) (*ExternalEffect, error)
 }
 
+// ExternalEffectIdentityReader resolves one exact external-effect identity.
+// Kubernetes-backed authorization paths use this instead of broad LIST reads
+// so a just-committed in-flight lease is observed without cache/list races.
+type ExternalEffectIdentityReader interface {
+	GetExternalEffectByIdentity(ctx context.Context, identity ExternalEffectIdentity) (*ExternalEffect, error)
+}
+
 // OutboxProjectionStore persists restart-safe task/status projection records.
 type OutboxProjectionStore interface {
 	EnqueueOutboxProjection(ctx context.Context, projection *OutboxProjection, fence ControllerEpochFence) (*OutboxProjection, error)

@@ -10,6 +10,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sort"
 	"strconv"
@@ -17,6 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -31,9 +36,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	orkametrics "github.com/orka-agents/orka/internal/metrics"
 )
 
 var (
@@ -781,6 +788,114 @@ func TestRuntimePoolReconcilerRolloutWaitsForReservationsButNotQueuedDemand(t *t
 	}
 }
 
+func TestRuntimePoolReconcilerUnreadyRolloutClearsObservedReadiness(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, pod := runtimePoolTestStartServing(t, r, pool, supervisor, "unready-rollout-pod", "unready-rollout-pod-uid", "10.0.0.82", "unready-rollout-boot")
+
+	r.ProviderProxy.BearerToken = bytes.Clone(runtimePoolTestProviderTokenNext)
+	runtimePoolTestSetPodReady(t, r, &pod, false)
+	runtimePoolReconcile(t, r, pool)
+
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.ActiveInstance == nil || status.ActiveInstance.PodUID != string(pod.UID) {
+		t.Fatalf("active instance = %#v, want the previous runtime fence preserved", status.ActiveInstance)
+	}
+	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != runtimePoolSchedulingReasonPodNotReady {
+		t.Fatalf("scheduling condition = %#v, want Unknown/PodNotReady", condition)
+	}
+	if got := runtimePoolReadyReplicas(status); got != 0 {
+		t.Fatalf("ready replicas = %d, want 0 while no rollout Pod is Ready", got)
+	}
+}
+
+func TestRuntimePoolReconcilerUnreadyRolloutPreservesSchedulingFailure(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	_, pod := runtimePoolTestStartServing(t, r, pool, supervisor, "unschedulable-rollout-pod", "unschedulable-rollout-pod-uid", "10.0.0.83", "unschedulable-rollout-boot")
+
+	r.ProviderProxy.BearerToken = bytes.Clone(runtimePoolTestProviderTokenNext)
+	runtimePoolTestSetPodReady(t, r, &pod, false)
+	currentPod := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
+		t.Fatalf("get runtime Pod: %v", err)
+	}
+	scheduled := findRuntimePoolPodCondition(currentPod.Status.Conditions, corev1.PodScheduled)
+	if scheduled == nil {
+		t.Fatal("runtime Pod has no Scheduled condition")
+	}
+	scheduled.Status = corev1.ConditionFalse
+	scheduled.Reason = corev1.PodReasonUnschedulable
+	scheduled.Message = "insufficient cpu"
+	if err := r.Status().Update(context.Background(), currentPod); err != nil {
+		t.Fatalf("update runtime Pod scheduling: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1.PodReasonUnschedulable || condition.Message != "insufficient cpu" {
+		t.Fatalf("scheduling condition = %#v, want False/Unschedulable with the Pod message", condition)
+	}
+	if got := runtimePoolReadyReplicas(status); got != 0 {
+		t.Fatalf("ready replicas = %d, want 0 while the rollout Pod is unschedulable", got)
+	}
+}
+
+func TestRuntimePoolReconcilerStoppedRolloutClearsObservedReadiness(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	deployment, pod := runtimePoolTestStartServing(t, r, pool, supervisor, "stopping-rollout-pod", "stopping-rollout-pod-uid", "10.0.0.84", "stopping-rollout-boot")
+
+	currentPod := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
+		t.Fatalf("get runtime Pod: %v", err)
+	}
+	currentPod.Finalizers = append(currentPod.Finalizers, "test.orka.ai/hold-termination")
+	if err := r.Update(context.Background(), currentPod); err != nil {
+		t.Fatalf("add runtime Pod test finalizer: %v", err)
+	}
+
+	r.ProviderProxy.BearerToken = bytes.Clone(runtimePoolTestProviderTokenNext)
+	runtimePoolReconcile(t, r, pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "stopping-rollout-boot", true)
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
+	if got := ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name).Spec.Replicas, -1); got != 0 {
+		t.Fatalf("replicas after authenticated drain = %d, want 0", got)
+	}
+
+	if err := r.Delete(context.Background(), currentPod); err != nil {
+		t.Fatalf("delete old runtime Pod: %v", err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
+		t.Fatalf("get terminating runtime Pod: %v", err)
+	}
+	if currentPod.DeletionTimestamp.IsZero() {
+		t.Fatal("runtime Pod is not terminating")
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.ActiveInstance != nil {
+		t.Fatalf("active instance = %#v, want nil while the old runtime Pod terminates", status.ActiveInstance)
+	}
+	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != runtimePoolSchedulingReasonPodNotReady {
+		t.Fatalf("scheduling condition = %#v, want Unknown/PodNotReady", condition)
+	}
+	if got := runtimePoolReadyReplicas(status); got != 0 {
+		t.Fatalf("ready replicas = %d, want 0 while the old rollout Pod terminates", got)
+	}
+}
+
 func TestRuntimePoolReconcilerRolloutFailureAndTimeoutPreserveOldPod(t *testing.T) {
 	t.Run("drain request failure retries without template replacement", func(t *testing.T) {
 		scheme := runtimePoolTestScheme(t)
@@ -902,6 +1017,14 @@ func TestRuntimePoolReconcilerScaleDownRequiresDrainAndQuiescentStatus(t *testin
 	if err := r.Update(context.Background(), &current); err != nil {
 		t.Fatalf("set desired replicas to zero: %v", err)
 	}
+	currentPod := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
+		t.Fatalf("get runtime Pod: %v", err)
+	}
+	currentPod.Finalizers = append(currentPod.Finalizers, "test.orka.ai/hold-termination")
+	if err := r.Update(context.Background(), currentPod); err != nil {
+		t.Fatalf("add runtime Pod test finalizer: %v", err)
+	}
 
 	runtimePoolReconcile(t, r, pool)
 	deployment := runtimePoolTestDeployment(t, r, pool.Namespace, runtimePoolResourceName(pool.Namespace, pool.Name))
@@ -935,6 +1058,149 @@ func TestRuntimePoolReconcilerScaleDownRequiresDrainAndQuiescentStatus(t *testin
 	current = runtimePoolTestGetPool(t, r, pool)
 	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
 		t.Fatalf("status after scale down = %s/%s, want Stopping/Closed", current.Status.Lifecycle, current.Status.AdmissionState)
+	}
+	if err := r.Delete(context.Background(), currentPod); err != nil {
+		t.Fatalf("delete runtime Pod: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance != nil {
+		t.Fatalf("active instance = %#v, want nil while the scaled-down Pod terminates", current.Status.ActiveInstance)
+	}
+	condition := meta.FindStatusCondition(current.Status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != runtimePoolSchedulingReasonPodNotReady {
+		t.Fatalf("scheduling condition = %#v, want Unknown/PodNotReady", condition)
+	}
+	if got := runtimePoolReadyReplicas(current.Status); got != 0 {
+		t.Fatalf("ready replicas = %d, want 0 while the scaled-down Pod terminates", got)
+	}
+}
+
+func TestRuntimePoolCompletedScaleToZero(t *testing.T) {
+	tests := []struct {
+		name     string
+		previous corev1alpha1.RuntimePoolStatus
+		current  corev1alpha1.RuntimePoolStatus
+		want     bool
+	}{
+		{
+			name: "completed",
+			previous: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 1, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopping,
+			},
+			current: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 0, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped,
+			},
+			want: true,
+		},
+		{
+			name: "initially stopped",
+			current: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 0, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped,
+			},
+		},
+		{
+			name: "already stopped",
+			previous: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 0, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped,
+			},
+			current: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 0, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopped,
+			},
+		},
+		{
+			name: "not stopped",
+			previous: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 1, CurrentReplicas: 1, Lifecycle: corev1alpha1.RuntimePoolLifecycleServing,
+			},
+			current: corev1alpha1.RuntimePoolStatus{
+				DesiredReplicas: 0, CurrentReplicas: 0, Lifecycle: corev1alpha1.RuntimePoolLifecycleStopping,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := runtimePoolCompletedScaleToZero(test.previous, test.current); got != test.want {
+				t.Fatalf("runtimePoolCompletedScaleToZero() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRuntimePoolReadyReplicasRequiresReadyCondition(t *testing.T) {
+	active := &corev1alpha1.RuntimePoolActiveInstanceStatus{PodName: "runtime-pod"}
+	tests := []struct {
+		name      string
+		status    corev1alpha1.RuntimePoolStatus
+		wantReady int32
+	}{
+		{
+			name: "selected ready pod",
+			status: corev1alpha1.RuntimePoolStatus{
+				ActiveInstance: active,
+				Conditions: []metav1.Condition{{
+					Type: corev1alpha1.RuntimePoolConditionSchedulingReady, Status: metav1.ConditionTrue,
+				}},
+			},
+			wantReady: 1,
+		},
+		{
+			name: "retained fence for not ready pod",
+			status: corev1alpha1.RuntimePoolStatus{
+				ActiveInstance: active,
+				Conditions: []metav1.Condition{{
+					Type: corev1alpha1.RuntimePoolConditionSchedulingReady, Status: metav1.ConditionUnknown, Reason: runtimePoolSchedulingReasonPodNotReady,
+				}},
+			},
+		},
+		{name: "no selected instance"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := runtimePoolReadyReplicas(test.status); got != test.wantReady {
+				t.Fatalf("runtimePoolReadyReplicas() = %d, want %d", got, test.wantReady)
+			}
+		})
+	}
+}
+
+func TestFinishRuntimePoolStatusCountsScaleToZeroOnceForStaleReconcile(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(0)
+	pool.Name = "scale-zero-idempotent"
+	pool.UID = types.UID("scale-zero-idempotent-uid")
+	pool.Status = corev1alpha1.RuntimePoolStatus{
+		DesiredReplicas: 0,
+		CurrentReplicas: 1,
+		Lifecycle:       corev1alpha1.RuntimePoolLifecycleStopping,
+	}
+	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	stale := current.DeepCopy()
+	stopped := current.Status
+	stopped.CurrentReplicas = 0
+	stopped.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+	stopped.ActiveInstance = nil
+
+	counter := orkametrics.ACPRuntimePoolScaleToZeroTotal.WithLabelValues(pool.Namespace, pool.Name)
+	var beforeMetric dto.Metric
+	if err := counter.Write(&beforeMetric); err != nil {
+		t.Fatalf("read initial scale-to-zero counter: %v", err)
+	}
+	before := beforeMetric.GetCounter().GetValue()
+	if _, err := r.finishRuntimePoolStatus(context.Background(), &current, stopped, runtimePoolRequeue); err != nil {
+		t.Fatalf("first stopped status patch: %v", err)
+	}
+	if _, err := r.finishRuntimePoolStatus(context.Background(), stale, stopped, runtimePoolRequeue); !apierrors.IsConflict(err) {
+		t.Fatalf("stale stopped status patch error = %v, want conflict", err)
+	}
+	var afterMetric dto.Metric
+	if err := counter.Write(&afterMetric); err != nil {
+		t.Fatalf("read final scale-to-zero counter: %v", err)
+	}
+	if got := afterMetric.GetCounter().GetValue() - before; got != 1 {
+		t.Fatalf("scale-to-zero counter delta = %v, want 1", got)
 	}
 }
 
@@ -1104,6 +1370,138 @@ func TestRuntimePoolReconcilerCleanupOnlyFinalizerCleansCrossNamespaceChildren(t
 	}
 }
 
+func TestRuntimePoolReconcilerDeletionRemovesMetricsBeforeCleanupCompletes(t *testing.T) {
+	orkametrics.ACPRuntimePoolDesiredReplicas.Reset()
+	orkametrics.ACPRuntimePoolReadyReplicas.Reset()
+	orkametrics.ACPRuntimePoolSessionsActive.Reset()
+	orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+	orkametrics.ACPRuntimePoolQueuedTasks.Reset()
+	orkametrics.ACPRuntimePoolAdmissionState.Reset()
+	orkametrics.ACPRuntimePoolScaleToZeroTotal.Reset()
+	t.Cleanup(func() {
+		orkametrics.ACPRuntimePoolDesiredReplicas.Reset()
+		orkametrics.ACPRuntimePoolReadyReplicas.Reset()
+		orkametrics.ACPRuntimePoolSessionsActive.Reset()
+		orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+		orkametrics.ACPRuntimePoolQueuedTasks.Reset()
+		orkametrics.ACPRuntimePoolAdmissionState.Reset()
+		orkametrics.ACPRuntimePoolScaleToZeroTotal.Reset()
+	})
+
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	pool.Finalizers = []string{runtimePoolFinalizer}
+	deletedAt := metav1.NewTime(runtimePoolTestNow)
+	pool.DeletionTimestamp = &deletedAt
+	base := runtimePoolResourceName(pool.Namespace, pool.Name)
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name: base, Namespace: pool.Namespace, Finalizers: []string{"test.orka.ai/hold-cleanup"},
+	}}
+	r := runtimePoolTestReconciler(t, scheme, nil, pool, deployment)
+	orkametrics.RecordACPRuntimePoolStatus(pool.Namespace, pool.Name, 1, 1, 2, 1, 3, string(corev1alpha1.RuntimePoolAdmissionAccepting))
+	orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
+	if got := runtimePoolMetricSeriesCount(orkametrics.ACPRuntimePoolDesiredReplicas); got != 1 {
+		t.Fatalf("desired replica series before deletion = %d, want 1", got)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if !controllerutil.ContainsFinalizer(&current, runtimePoolFinalizer) {
+		t.Fatal("RuntimePool finalizer was removed before child cleanup completed")
+	}
+	for name, collector := range map[string]prometheus.Collector{
+		"desired replicas":  orkametrics.ACPRuntimePoolDesiredReplicas,
+		"ready replicas":    orkametrics.ACPRuntimePoolReadyReplicas,
+		"active sessions":   orkametrics.ACPRuntimePoolSessionsActive,
+		"in-flight prompts": orkametrics.ACPRuntimePoolPromptsInFlight,
+		"queued tasks":      orkametrics.ACPRuntimePoolQueuedTasks,
+		"admission state":   orkametrics.ACPRuntimePoolAdmissionState,
+		"scale-to-zero":     orkametrics.ACPRuntimePoolScaleToZeroTotal,
+	} {
+		if got := runtimePoolMetricSeriesCount(collector); got != 0 {
+			t.Fatalf("%s series during deletion = %d, want 0", name, got)
+		}
+	}
+}
+
+func TestACPRuntimePoolMetricsAreExposedAndDeletedFromRegistry(t *testing.T) {
+	orkametrics.ACPRuntimePoolDesiredReplicas.Reset()
+	orkametrics.ACPRuntimePoolReadyReplicas.Reset()
+	orkametrics.ACPRuntimePoolSessionsActive.Reset()
+	orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+	orkametrics.ACPRuntimePoolQueuedTasks.Reset()
+	orkametrics.ACPRuntimePoolAdmissionState.Reset()
+	orkametrics.ACPRuntimePoolScaleToZeroTotal.Reset()
+	t.Cleanup(func() {
+		orkametrics.ACPRuntimePoolDesiredReplicas.Reset()
+		orkametrics.ACPRuntimePoolReadyReplicas.Reset()
+		orkametrics.ACPRuntimePoolSessionsActive.Reset()
+		orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+		orkametrics.ACPRuntimePoolQueuedTasks.Reset()
+		orkametrics.ACPRuntimePoolAdmissionState.Reset()
+		orkametrics.ACPRuntimePoolScaleToZeroTotal.Reset()
+	})
+
+	const namespace = "metrics-test"
+	const poolName = "codex-pool"
+	orkametrics.RecordACPRuntimePoolStatus(namespace, poolName, 2, 1, 3, 4, 5, "Accepting")
+	orkametrics.RecordACPRuntimePoolScaleToZero(namespace, poolName)
+
+	body := scrapeControllerMetrics(t)
+	wantLines := []string{
+		`orka_acp_runtime_pool_desired_replicas{namespace="metrics-test",runtime_pool="codex-pool"} 2`,
+		`orka_acp_runtime_pool_ready_replicas{namespace="metrics-test",runtime_pool="codex-pool"} 1`,
+		`orka_acp_runtime_pool_sessions_active{namespace="metrics-test",runtime_pool="codex-pool"} 3`,
+		`orka_acp_runtime_pool_prompts_in_flight{namespace="metrics-test",runtime_pool="codex-pool"} 4`,
+		`orka_acp_runtime_pool_queued_tasks{namespace="metrics-test",runtime_pool="codex-pool"} 5`,
+		`orka_acp_runtime_pool_admission_state{namespace="metrics-test",runtime_pool="codex-pool",state="accepting"} 1`,
+		`orka_acp_runtime_pool_admission_state{namespace="metrics-test",runtime_pool="codex-pool",state="ambiguous"} 0`,
+		`orka_acp_runtime_pool_admission_state{namespace="metrics-test",runtime_pool="codex-pool",state="closed"} 0`,
+		`orka_acp_runtime_pool_admission_state{namespace="metrics-test",runtime_pool="codex-pool",state="draining"} 0`,
+		`orka_acp_runtime_pool_admission_state{namespace="metrics-test",runtime_pool="codex-pool",state="unknown"} 0`,
+		`orka_acp_runtime_pool_scale_to_zero_total{namespace="metrics-test",runtime_pool="codex-pool"} 1`,
+	}
+	for _, want := range wantLines {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics scrape missing %q", want)
+		}
+	}
+
+	orkametrics.DeleteACPRuntimePool(namespace, poolName)
+	body = scrapeControllerMetrics(t)
+	for _, metricName := range []string{
+		"orka_acp_runtime_pool_desired_replicas",
+		"orka_acp_runtime_pool_ready_replicas",
+		"orka_acp_runtime_pool_sessions_active",
+		"orka_acp_runtime_pool_prompts_in_flight",
+		"orka_acp_runtime_pool_queued_tasks",
+		"orka_acp_runtime_pool_admission_state",
+		"orka_acp_runtime_pool_scale_to_zero_total",
+	} {
+		if strings.Contains(body, metricName+`{namespace="`+namespace+`",runtime_pool="`+poolName+`"`) {
+			t.Fatalf("metrics scrape retained deleted %s series", metricName)
+		}
+	}
+}
+
+func scrapeControllerMetrics(t *testing.T) string {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{}).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("metrics scrape status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	return recorder.Body.String()
+}
+
+func runtimePoolMetricSeriesCount(collector prometheus.Collector) int {
+	metrics := make(chan prometheus.Metric, 16)
+	collector.Collect(metrics)
+	close(metrics)
+	return len(metrics)
+}
+
 func TestRuntimePoolReconcilerPublishesExactActivePodStatus(t *testing.T) {
 	scheme := runtimePoolTestScheme(t)
 	pool := runtimePoolTestObject(1)
@@ -1142,6 +1540,91 @@ func TestRuntimePoolReconcilerPublishesExactActivePodStatus(t *testing.T) {
 		condition := meta.FindStatusCondition(got.Status.Conditions, conditionType)
 		if condition == nil || condition.Status != metav1.ConditionTrue {
 			t.Fatalf("condition %s = %#v, want True", conditionType, condition)
+		}
+	}
+}
+
+func TestRuntimePoolReconcilerUnhealthySupervisorClearsReadinessBeforeRecycle(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	pod := runtimePoolReadyPod(pool, pool.Namespace, "unhealthy-pod", "unhealthy-pod-uid", "10.0.0.48")
+	probe := runtimePoolValidProbe(pool, &pod, "unhealthy-boot", false)
+	probe.Status.Lifecycle = harnessv2.SupervisorLifecycleUnhealthy
+	supervisor := &fakeRuntimePoolSupervisorClient{probe: probe}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, &pod)
+
+	runtimePoolReconcile(t, r, pool)
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("unhealthy status = %s/%s, want Degraded/Closed", status.Lifecycle, status.AdmissionState)
+	}
+	if status.ActiveInstance != nil {
+		t.Fatalf("active instance = %#v, want nil after unhealthy Pod deletion", status.ActiveInstance)
+	}
+	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionSchedulingReady)
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != runtimePoolSchedulingReasonPodNotReady {
+		t.Fatalf("scheduling condition = %#v, want Unknown/PodNotReady", condition)
+	}
+	if got := runtimePoolReadyReplicas(status); got != 0 {
+		t.Fatalf("ready replicas = %d, want 0 after unhealthy Pod deletion", got)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("unhealthy runtime Pod still exists, err=%v", err)
+	}
+}
+
+func TestRuntimePoolReconcilerClearsProbePressureAfterActivePodDisappears(t *testing.T) {
+	orkametrics.ACPRuntimePoolSessionsActive.Reset()
+	orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+	t.Cleanup(func() {
+		orkametrics.ACPRuntimePoolSessionsActive.Reset()
+		orkametrics.ACPRuntimePoolPromptsInFlight.Reset()
+	})
+
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	pod := runtimePoolReadyPod(pool, pool.Namespace, "lost-pressure-pod", "lost-pressure-pod-uid", "10.0.0.49")
+	supervisor := &fakeRuntimePoolSupervisorClient{probe: runtimePoolValidProbe(pool, &pod, "lost-pressure-boot", false)}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, &pod)
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Status.Capacity.ResidentSessions = 3
+	current.Status.Capacity.RunningPrompts = 2
+	current.Status.Capacity.PendingPermissions = 1
+	current.Status.Capacity.LiveDescendants = 4
+	current.Status.Capacity.QueuedTasks = 5
+	current.Status.Capacity.ReservedSessions = 1
+	current.Status.Capacity.FinalizingSessions = 2
+	if err := r.Status().Update(context.Background(), &current); err != nil {
+		t.Fatalf("persist stale pressure fixture: %v", err)
+	}
+	if err := r.Delete(context.Background(), &pod); err != nil {
+		t.Fatalf("delete active runtime Pod: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.ActiveInstance != nil {
+		t.Fatalf("active instance = %#v, want nil after active Pod disappearance", status.ActiveInstance)
+	}
+	if status.Capacity.ResidentSessions != 0 || status.Capacity.RunningPrompts != 0 ||
+		status.Capacity.PendingPermissions != 0 || status.Capacity.LiveDescendants != 0 {
+		t.Fatalf("unfenced probe pressure = %#v, want all supervisor counters cleared", status.Capacity)
+	}
+	if status.Capacity.QueuedTasks != 5 || status.Capacity.ReservedSessions != 1 || status.Capacity.FinalizingSessions != 2 {
+		t.Fatalf("controller-owned capacity = %#v, want queued/reserved/finalizing counters preserved", status.Capacity)
+	}
+	for name, gauge := range map[string]*prometheus.GaugeVec{
+		"active sessions":   orkametrics.ACPRuntimePoolSessionsActive,
+		"in-flight prompts": orkametrics.ACPRuntimePoolPromptsInFlight,
+	} {
+		var metric dto.Metric
+		if err := gauge.WithLabelValues(pool.Namespace, pool.Name).Write(&metric); err != nil {
+			t.Fatalf("read %s gauge: %v", name, err)
+		}
+		if got := metric.GetGauge().GetValue(); got != 0 {
+			t.Fatalf("%s gauge = %v, want 0 after active Pod disappearance", name, got)
 		}
 	}
 }

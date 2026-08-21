@@ -1095,6 +1095,13 @@ Scrape configuration (for example a Prometheus Operator ServiceMonitor) is not s
 | `orka_context_token_tts_exchange_duration_seconds` | Histogram | `result`, `reason` | transaction-token TTS token-exchange latency in seconds |
 | `orka_token_exchange_total` | Counter | `adapter`, `grant_class`, `result`, `reason` | Direct and transaction-token OAuth exchange attempts |
 | `orka_token_exchange_duration_seconds` | Histogram | `adapter`, `grant_class`, `result`, `reason` | OAuth exchange latency in seconds |
+| `orka_acp_runtime_pool_desired_replicas` | Gauge | `namespace`, `runtime_pool` | Desired RuntimePool replicas |
+| `orka_acp_runtime_pool_ready_replicas` | Gauge | `namespace`, `runtime_pool` | Authoritatively selected Ready RuntimePool replicas |
+| `orka_acp_runtime_pool_sessions_active` | Gauge | `namespace`, `runtime_pool` | Authenticated resident RuntimeSession count |
+| `orka_acp_runtime_pool_prompts_in_flight` | Gauge | `namespace`, `runtime_pool` | Authenticated active prompt count |
+| `orka_acp_runtime_pool_queued_tasks` | Gauge | `namespace`, `runtime_pool` | Durable unsatisfied Task demand assigned to the pool |
+| `orka_acp_runtime_pool_admission_state` | Gauge | `namespace`, `runtime_pool`, `state` | One-hot authoritative admission state (`unknown`, `closed`, `accepting`, `draining`, or `ambiguous`) |
+| `orka_acp_runtime_pool_scale_to_zero_total` | Counter | `namespace`, `runtime_pool` | Completed RuntimePool scale-to-zero transitions |
 
 Context-token metrics are described in more detail in [Transaction Tokens](transaction-tokens.md). All context-token labels use low-cardinality values only.
 
@@ -1138,7 +1145,11 @@ copies non-secret OTLP endpoint/protocol/insecure/timeout/compression settings
 to AI worker Pods and intentionally does not copy OTLP headers, certificate or
 client-key env vars, `OTEL_RESOURCE_ATTRIBUTES`, or baggage.
 
-ACP supervisor telemetry is explicit opt-in on the managed RuntimePool workload. Keep endpoint configuration non-secret and do not inject credential-bearing OTLP headers into provider children.
+ACP attempt, RuntimeSession, and publication spans are controller-side and use the
+controller exporter. Managed RuntimePool workloads do not currently receive the
+controller OTLP configuration, and there is no supported supervisor telemetry
+opt-in surface. Do not inject credential-bearing OTLP headers into provider
+children.
 
 ### Instrumented Components
 
@@ -1146,7 +1157,8 @@ ACP supervisor telemetry is explicit opt-in on the managed RuntimePool workload.
 |--------|------|------------|
 | `orka.api` | HTTP/API middleware spans | HTTP request/route/status metadata |
 | `orka.chat` | `chat.request`, `chat.tool_loop.iteration` | session metadata; `chat.iteration`, `orka.tenant`, requested model, tool-call count |
-| `orka.worker` / `orka.acp` | `task.run` and ACP attempt/session spans | `orka.task.id`, namespace, runtime pool/session identity, and agent name when known |
+| `orka.worker` | `task.run` | `orka.task.id`, namespace, and agent name when known |
+| `orka.acp` | `acp.prompt`, `acp.session.create`, `acp.session.continue`, `acp.publication.reconcile` | `orka.task.id`, namespace, attempt/prompt identity, RuntimePool/RuntimeSession identity, prompt/session outcome, publication identity, and agent name when known |
 | `orka.agent` | `agent.step` | iteration, requested model/provider, tool-call count, Orka task metadata |
 | `orka.gen_ai` | `chat {model}` | `gen_ai.*` provider/model/token metadata and `error.type` |
 | `orka.gen_ai` | `execute_tool {tool.name}` | `gen_ai.tool.*`, `orka.tool.name`, `orka.tool.kind`, `orka.tool.result.size_bytes`, parent/child task fields for delegation |
