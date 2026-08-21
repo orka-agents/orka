@@ -192,7 +192,8 @@ grep -Fq 'workflow_dispatch' "${workflow}" || fail 'workflow must support manual
 grep -Fq 'pull_request' "${workflow}" || fail 'workflow must run on pull requests'
 grep -Fq './.github/actions/free-disk-space' "${workflow}" || fail 'workflow must free disk space before Docker-heavy builds'
 grep -Fq './.github/actions/setup-kind' "${workflow}" || fail 'workflow must install kind via the pinned composite action'
-grep -Fq 'go-version-file: go.mod' "${workflow}" || fail 'workflow must pin Go via go.mod'
+grep -Fq "go-version: '1.27'" "${workflow}" || fail 'workflow must select the Go 1.27 release line'
+grep -Fq 'check-latest: true' "${workflow}" || fail 'workflow must resolve the latest Go 1.27 patch'
 grep -Fq 'bash scripts/coexistence-live-e2e.sh' "${workflow}" || fail 'workflow must run the coexistence live E2E script'
 if grep -Fq 'secrets.' "${workflow}"; then
   fail 'coexistence live E2E workflow must remain secret-free'

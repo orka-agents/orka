@@ -19,7 +19,6 @@ func TestLiveRuntimeAgentManifestsPinHarnessV2Contract(t *testing.T) {
 	t.Parallel()
 
 	for _, runtimeType := range []string{"codex", "claude", "copilot", "opencode"} {
-		runtimeType := runtimeType
 		t.Run(runtimeType, func(t *testing.T) {
 			t.Parallel()
 			agent := runtimeAgentManifest(runtimeType+"-agent", runtimeType, "test-model", 5, nil)
@@ -56,7 +55,7 @@ func TestLiveRuntimeManifestsOmitCodexBashPolicy(t *testing.T) {
 		t.Fatal("Codex Task manifest must omit spec.agentRuntime.allowBash")
 	}
 
-	claudeAgent := runtimeAgentManifest("claude-agent", "claude", "claude-test", 5, boolPtr(false))
+	claudeAgent := runtimeAgentManifest("claude-agent", "claude", "claude-test", 5, new(false))
 	claudeAgentRuntime := manifestNestedMap(t, claudeAgent, "spec", "runtime")
 	if got, present := claudeAgentRuntime["defaultAllowBash"]; !present || got != false {
 		t.Fatalf("Claude Agent defaultAllowBash = %#v, present = %t; want false and present", got, present)
@@ -67,7 +66,7 @@ func TestLiveRuntimeManifestsOmitCodexBashPolicy(t *testing.T) {
 		"claude-agent",
 		"reply exactly",
 		3,
-		boolPtr(false),
+		new(false),
 		nil,
 		"",
 		nil,

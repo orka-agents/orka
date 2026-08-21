@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
 
 ARG TARGETARCH
 
@@ -237,7 +237,7 @@ GO
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -o /out/sandbox-runtime /tmp/sandbox-runtime.go
 
-FROM golang:1.26 AS go-runtime
+FROM golang:1.27.0 AS go-runtime
 
 FROM debian:bookworm-slim
 

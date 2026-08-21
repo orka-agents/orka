@@ -11,7 +11,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -48,7 +47,7 @@ func TestPlanACPRuntimeAgentToolReferenceSemantics(t *testing.T) {
 							Model: &corev1alpha1.ModelConfig{Name: "model"},
 							Runtime: &corev1alpha1.AgentCLIRuntime{
 								Type:            runtimeType,
-								ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+								ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 							},
 							Tools: []corev1alpha1.ToolReference{{Name: "web_search", Enabled: test.enabled}},
 						},

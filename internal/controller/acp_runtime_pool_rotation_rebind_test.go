@@ -10,7 +10,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -52,7 +51,7 @@ func TestQueueACPRuntimeTaskKeepsFrozenPoolAfterRuntimeImageRotation(t *testing.
 			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeCodex,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}

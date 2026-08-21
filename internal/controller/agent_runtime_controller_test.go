@@ -13,7 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -998,7 +997,7 @@ func testAgentRuntimeAndSecret(t *testing.T, endpoint string, config conformance
 	runtimeObject := &corev1alpha1.AgentRuntime{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime", Generation: 1},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			Deployment:      corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: endpoint},
 			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{
 				ControllerBearerTokenSecretRef: &corev1alpha1.AgentRuntimeSecretKeyReference{Name: "runtime-auth", Key: "controller-token"},
@@ -1059,7 +1058,7 @@ func testHarnessV1AgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRun
 	runtimeObject := &corev1alpha1.AgentRuntime{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "runtime-v1", Generation: 1},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
+			ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1),
 			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
 				Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: endpoint,
 			},

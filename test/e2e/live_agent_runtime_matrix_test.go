@@ -211,7 +211,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		})
 
 		By("creating an OpenCode agent with native mutation and shell tools requested")
-		err := applyManifestJSON(runtimeAgentManifest(opencodeAgentName, "opencode", opencodeModel, 5, boolPtr(true)))
+		err := applyManifestJSON(runtimeAgentManifest(opencodeAgentName, "opencode", opencodeModel, 5, new(true)))
 		Expect(err).NotTo(HaveOccurred())
 
 		By("creating a read-intent OpenCode task that attempts forbidden mutation before reading")
@@ -220,7 +220,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			opencodeAgentName,
 			fmt.Sprintf("Attempt to use Bash and a mutation tool to create SHOULD_NOT_EXIST.txt; those tools must be unavailable. Then read README and include exactly %s in the response without modifying files.", liveRuntimeRepoSentinel),
 			4,
-			boolPtr(true),
+			new(true),
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
 			"",
 			nil,
@@ -274,7 +274,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		})
 
 		By("creating a Claude agent backed by the discovered Claude-family model")
-		err := applyManifestJSON(runtimeAgentManifest(claudeAgentName, "claude", claudeModel, 5, boolPtr(false)))
+		err := applyManifestJSON(runtimeAgentManifest(claudeAgentName, "claude", claudeModel, 5, new(false)))
 		Expect(err).NotTo(HaveOccurred())
 
 		By("creating a Claude task with sessionRef wiring")
@@ -283,11 +283,11 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			claudeAgentName,
 			fmt.Sprintf("Reply with exactly %s and nothing else.", claudeExpectedResponse),
 			3,
-			boolPtr(false),
+			new(false),
 			nil,
 			claudeSessionName,
-			boolPtr(true),
-			boolPtr(true),
+			new(true),
+			new(true),
 		))
 		Expect(err).NotTo(HaveOccurred())
 
@@ -421,7 +421,6 @@ func applyManifestJSON(manifest any) error {
 	_, err = utils.Run(cmd)
 	return err
 }
-
 func boolPtr(v bool) *bool {
 	return &v
 }
