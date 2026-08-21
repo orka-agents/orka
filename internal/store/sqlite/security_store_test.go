@@ -9,6 +9,7 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -19,9 +20,380 @@ import (
 )
 
 const (
-	testScanRunID2 = "scan-2"
-	testStateOpen  = "open"
+	testFindingStatePROpen = "pr_open"
+	testScanRunID2         = "scan-2"
+	testStateOpen          = "open"
 )
+
+func bundleStatusTestScanRun(id string, status store.BundleStatus) *store.ScanRun {
+	quality := store.LegacyScanQuality()
+	quality.BundleStatus = status
+	return &store.ScanRun{
+		ID:                       id,
+		RunUID:                   "run_" + strings.Repeat("a", 64),
+		Namespace:                "ns1",
+		RepositoryScan:           "repo1",
+		RepositoryScanUID:        "repository-scan-uid-1",
+		RepositoryScanGeneration: 1,
+		TaskName:                 "task-" + id,
+		Mode:                     "manual",
+		Phase:                    "succeeded",
+		StartedAt:                time.Date(2026, time.August, 2, 12, 0, 0, 0, time.UTC),
+		Quality:                  quality,
+		Summary:                  "draft snapshot",
+	}
+}
+
+func latestRunListTestRun(
+	id, namespace, repository, repositoryUID string,
+	repositoryGeneration int64,
+	startedAt time.Time,
+) *store.ScanRun {
+	return &store.ScanRun{
+		ID:                       id,
+		Namespace:                namespace,
+		RepositoryScan:           repository,
+		RepositoryScanUID:        repositoryUID,
+		RepositoryScanGeneration: repositoryGeneration,
+		TaskName:                 "task-" + id,
+		Mode:                     "manual",
+		Phase:                    "succeeded",
+		StartedAt:                startedAt,
+		Quality:                  store.LegacyScanQuality(),
+	}
+}
+
+func TestListLatestScanRunsBatchesByCurrentRepositoryIncarnation(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	baseTime := time.Date(2026, time.August, 4, 12, 0, 0, 0, time.UTC)
+
+	runs := []*store.ScanRun{
+		latestRunListTestRun("scan-repo-a-older", "ns1", "repo-a", "repo-a-uid", 3, baseTime),
+		latestRunListTestRun("scan-repo-a-tie-a", "ns1", "repo-a", "repo-a-uid", 3, baseTime.Add(time.Minute)),
+		latestRunListTestRun("scan-repo-a-tie-z", "ns1", "repo-a", "repo-a-uid", 3, baseTime.Add(time.Minute)),
+		latestRunListTestRun("scan-repo-a-stale-incarnation", "ns1", "repo-a", "repo-a-old-uid", 9, baseTime.Add(2*time.Minute)),
+		latestRunListTestRun("scan-repo-b-latest", "ns1", "repo-b", "repo-b-uid", 1, baseTime.Add(3*time.Minute)),
+		latestRunListTestRun("scan-repo-b-other-namespace", "ns2", "repo-b", "repo-b-uid", 1, baseTime.Add(4*time.Minute)),
+	}
+	for _, run := range runs {
+		if err := s.CreateScanRun(ctx, run); err != nil {
+			t.Fatalf("CreateScanRun(%s) error = %v", run.ID, err)
+		}
+	}
+
+	requested := []store.RepositoryScanIdentity{
+		{Name: "repo-b", UID: "repo-b-uid", Generation: 1},
+		{Name: "repo-a", UID: "repo-a-uid", Generation: 3},
+		{Name: "repo-a", UID: "repo-a-uid", Generation: 3},
+		{Name: "repo-without-runs", UID: "repo-empty-uid", Generation: 1},
+	}
+	got, err := s.ListLatestScanRuns(ctx, "ns1", requested)
+	if err != nil {
+		t.Fatalf("ListLatestScanRuns() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListLatestScanRuns() returned %d runs, want 2: %#v", len(got), got)
+	}
+
+	gotByIdentity := make(map[store.RepositoryScanIdentity]store.ScanRun, len(got))
+	for _, run := range got {
+		identity := store.RepositoryScanIdentity{
+			Name:       run.RepositoryScan,
+			UID:        run.RepositoryScanUID,
+			Generation: run.RepositoryScanGeneration,
+		}
+		gotByIdentity[identity] = run
+	}
+	if run := gotByIdentity[(store.RepositoryScanIdentity{Name: "repo-a", UID: "repo-a-uid", Generation: 3})]; run.ID != "scan-repo-a-tie-z" {
+		t.Fatalf("latest repo-a run = %q, want scan-repo-a-tie-z", run.ID)
+	}
+	if run := gotByIdentity[(store.RepositoryScanIdentity{Name: "repo-b", UID: "repo-b-uid", Generation: 1})]; run.ID != "scan-repo-b-latest" {
+		t.Fatalf("latest repo-b run = %q, want scan-repo-b-latest", run.ID)
+	}
+}
+
+func TestListLatestScanRunsValidatesRepositoryIdentities(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	runs, err := s.ListLatestScanRuns(ctx, "ns1", nil)
+	if err != nil {
+		t.Fatalf("ListLatestScanRuns(empty) error = %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("ListLatestScanRuns(empty) = %#v, want empty", runs)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		identity store.RepositoryScanIdentity
+	}{
+		{name: "missing name", identity: store.RepositoryScanIdentity{UID: "repo-uid", Generation: 1}},
+		{name: "name whitespace", identity: store.RepositoryScanIdentity{Name: " repo", UID: "repo-uid", Generation: 1}},
+		{name: "missing UID", identity: store.RepositoryScanIdentity{Name: "repo", Generation: 1}},
+		{name: "UID whitespace", identity: store.RepositoryScanIdentity{Name: "repo", UID: "repo-uid ", Generation: 1}},
+		{name: "zero generation", identity: store.RepositoryScanIdentity{Name: "repo", UID: "repo-uid"}},
+		{name: "negative generation", identity: store.RepositoryScanIdentity{Name: "repo", UID: "repo-uid", Generation: -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := s.ListLatestScanRuns(ctx, "ns1", []store.RepositoryScanIdentity{tc.identity}); !errors.Is(err, store.ErrValidation) {
+				t.Fatalf("ListLatestScanRuns() error = %v, want ErrValidation", err)
+			}
+		})
+	}
+}
+
+func TestValidateScanRunBundleStatusTransitionGraph(t *testing.T) {
+	statuses := []store.BundleStatus{
+		store.BundleStatusNotStarted,
+		store.BundleStatusDraft,
+		store.BundleStatusSealing,
+		store.BundleStatusSealed,
+		store.BundleStatusRetryableFailed,
+		store.BundleStatusFailed,
+	}
+	allowed := map[store.BundleStatus]map[store.BundleStatus]bool{
+		store.BundleStatusNotStarted: {
+			store.BundleStatusNotStarted: true,
+			store.BundleStatusDraft:      true,
+			store.BundleStatusSealing:    true,
+			store.BundleStatusFailed:     true,
+		},
+		store.BundleStatusDraft: {
+			store.BundleStatusDraft:           true,
+			store.BundleStatusSealing:         true,
+			store.BundleStatusRetryableFailed: true,
+			store.BundleStatusFailed:          true,
+		},
+		store.BundleStatusSealing: {
+			store.BundleStatusSealing:         true,
+			store.BundleStatusSealed:          true,
+			store.BundleStatusRetryableFailed: true,
+			store.BundleStatusFailed:          true,
+		},
+		store.BundleStatusRetryableFailed: {
+			store.BundleStatusRetryableFailed: true,
+			store.BundleStatusSealing:         true,
+			store.BundleStatusFailed:          true,
+		},
+		store.BundleStatusFailed: {
+			store.BundleStatusFailed: true,
+		},
+	}
+
+	for _, current := range statuses {
+		for _, requested := range statuses {
+			t.Run(string(current)+"_to_"+string(requested), func(t *testing.T) {
+				err := validateScanRunBundleStatusTransition(current, requested)
+				if allowed[current][requested] {
+					if err != nil {
+						t.Fatalf("validateScanRunBundleStatusTransition() error = %v", err)
+					}
+					return
+				}
+				if !errors.Is(err, store.ErrConflict) {
+					t.Fatalf("validateScanRunBundleStatusTransition() error = %v, want ErrConflict", err)
+				}
+			})
+		}
+	}
+}
+
+func TestUpdateScanRunRejectedBundleTransitionDoesNotMutateProjection(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   store.BundleStatus
+		requested store.BundleStatus
+	}{
+		{name: "draft cannot jump to sealed", current: store.BundleStatusDraft, requested: store.BundleStatusSealed},
+		{name: "retryable failure cannot return to not started", current: store.BundleStatusRetryableFailed, requested: store.BundleStatusNotStarted},
+		{name: "retryable failure cannot return to draft", current: store.BundleStatusRetryableFailed, requested: store.BundleStatusDraft},
+		{name: "failure cannot return to draft", current: store.BundleStatusFailed, requested: store.BundleStatusDraft},
+		{name: "failure cannot restart sealing", current: store.BundleStatusFailed, requested: store.BundleStatusSealing},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := setupTestStore(t)
+			ctx := context.Background()
+			run := bundleStatusTestScanRun("scan-bundle-transition", tt.current)
+			if err := s.CreateScanRun(ctx, run); err != nil {
+				t.Fatalf("CreateScanRun() error = %v", err)
+			}
+			update, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+			if err != nil {
+				t.Fatalf("GetScanRun() error = %v", err)
+			}
+			update.Quality.BundleStatus = tt.requested
+			update.Summary = "rejected stale projection"
+			if err := s.UpdateScanRun(ctx, update); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("UpdateScanRun() error = %v, want ErrConflict", err)
+			}
+			got, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+			if err != nil {
+				t.Fatalf("GetScanRun(after rejection) error = %v", err)
+			}
+			if got.Quality.BundleStatus != tt.current || got.Summary != run.Summary {
+				t.Fatalf("stored scan run = (%q, %q), want (%q, %q)", got.Quality.BundleStatus, got.Summary, tt.current, run.Summary)
+			}
+		})
+	}
+}
+
+func TestUpdateScanRunRejectsStaleBundleStatusAcrossSealing(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	run := bundleStatusTestScanRun("scan-bundle-stale", store.BundleStatusDraft)
+	if err := s.CreateScanRun(ctx, run); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
+
+	stale, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+	if err != nil {
+		t.Fatalf("GetScanRun(stale) error = %v", err)
+	}
+	sealing := *stale
+	sealing.Quality.BundleStatus = store.BundleStatusSealing
+	sealing.Summary = "sealing snapshot"
+	if err := s.UpdateScanRun(ctx, &sealing); err != nil {
+		t.Fatalf("UpdateScanRun(sealing) error = %v", err)
+	}
+
+	for _, status := range []store.BundleStatus{store.BundleStatusNotStarted, store.BundleStatusDraft} {
+		t.Run(string(status), func(t *testing.T) {
+			staleUpdate := *stale
+			staleUpdate.Quality.BundleStatus = status
+			staleUpdate.Summary = "stale " + string(status) + " snapshot"
+			if err := s.UpdateScanRun(ctx, &staleUpdate); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("UpdateScanRun(stale %s) error = %v, want ErrConflict", status, err)
+			}
+			got, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+			if err != nil {
+				t.Fatalf("GetScanRun(after stale %s) error = %v", status, err)
+			}
+			if got.Quality.BundleStatus != store.BundleStatusSealing || got.Summary != sealing.Summary {
+				t.Fatalf("stored scan run = (%q, %q), want (%q, %q)", got.Quality.BundleStatus, got.Summary,
+					store.BundleStatusSealing, sealing.Summary)
+			}
+		})
+	}
+}
+
+func TestUpdateScanRunAllowsSealingTerminalTransitions(t *testing.T) {
+	for _, status := range []store.BundleStatus{
+		store.BundleStatusSealed,
+		store.BundleStatusRetryableFailed,
+		store.BundleStatusFailed,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			s := setupTestStore(t)
+			ctx := context.Background()
+			run := bundleStatusTestScanRun("scan-bundle-"+string(status), store.BundleStatusSealing)
+			if err := s.CreateScanRun(ctx, run); err != nil {
+				t.Fatalf("CreateScanRun() error = %v", err)
+			}
+
+			transition, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+			if err != nil {
+				t.Fatalf("GetScanRun() error = %v", err)
+			}
+			transition.Quality.BundleStatus = status
+			transition.Summary = "sealer " + string(status)
+			if err := s.UpdateScanRun(ctx, transition); err != nil {
+				t.Fatalf("UpdateScanRun(%s) error = %v", status, err)
+			}
+			got, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+			if err != nil {
+				t.Fatalf("GetScanRun(after %s) error = %v", status, err)
+			}
+			if got.Quality.BundleStatus != status || got.Summary != transition.Summary {
+				t.Fatalf("stored scan run = (%q, %q), want (%q, %q)", got.Quality.BundleStatus, got.Summary,
+					status, transition.Summary)
+			}
+
+			if status == store.BundleStatusSealed {
+				sealedUpdate := *got
+				sealedUpdate.Summary = "mutated after seal"
+				if err := s.UpdateScanRun(ctx, &sealedUpdate); !errors.Is(err, store.ErrConflict) {
+					t.Fatalf("UpdateScanRun(sealed) error = %v, want ErrConflict", err)
+				}
+			}
+		})
+	}
+}
+
+func TestUpdateScanRunConcurrentSealingRejectsStaleCopies(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	run := bundleStatusTestScanRun("scan-bundle-concurrent", store.BundleStatusDraft)
+	if err := s.CreateScanRun(ctx, run); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
+
+	stale, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+	if err != nil {
+		t.Fatalf("GetScanRun(stale) error = %v", err)
+	}
+	sealing := *stale
+	sealing.Quality.BundleStatus = store.BundleStatusSealing
+	sealing.Summary = "sealing snapshot"
+	if err := s.UpdateScanRun(ctx, &sealing); err != nil {
+		t.Fatalf("UpdateScanRun(sealing) error = %v", err)
+	}
+
+	sealer, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+	if err != nil {
+		t.Fatalf("GetScanRun(sealer) error = %v", err)
+	}
+	sealer.Quality.BundleStatus = store.BundleStatusSealed
+	sealer.Summary = "sealed snapshot"
+
+	const staleWriters = 12
+	type updateResult struct {
+		sealer bool
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan updateResult, staleWriters+1)
+	for i := range staleWriters {
+		staleUpdate := *stale
+		if i%2 == 0 {
+			staleUpdate.Quality.BundleStatus = store.BundleStatusNotStarted
+		}
+		staleUpdate.Summary = fmt.Sprintf("stale snapshot %d", i)
+		go func(update store.ScanRun) {
+			<-start
+			results <- updateResult{err: s.UpdateScanRun(ctx, &update)}
+		}(staleUpdate)
+	}
+	go func() {
+		<-start
+		results <- updateResult{sealer: true, err: s.UpdateScanRun(ctx, sealer)}
+	}()
+	close(start)
+
+	for range staleWriters + 1 {
+		result := <-results
+		if result.sealer {
+			if result.err != nil {
+				t.Fatalf("UpdateScanRun(sealer) error = %v", result.err)
+			}
+			continue
+		}
+		if !errors.Is(result.err, store.ErrConflict) {
+			t.Fatalf("UpdateScanRun(stale concurrent copy) error = %v, want ErrConflict", result.err)
+		}
+	}
+
+	got, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+	if err != nil {
+		t.Fatalf("GetScanRun(final) error = %v", err)
+	}
+	if got.Quality.BundleStatus != store.BundleStatusSealed || got.Summary != sealer.Summary {
+		t.Fatalf("final scan run = (%q, %q), want (%q, %q)", got.Quality.BundleStatus, got.Summary,
+			store.BundleStatusSealed, sealer.Summary)
+	}
+}
 
 func testPatchProposalPublication(suffix string) (*store.PatchProposal, *store.PatchProposal) {
 	proposal := &store.PatchProposal{
@@ -354,6 +726,25 @@ func TestSaveThreatModelReplacesCurrentModel(t *testing.T) {
 	}
 }
 
+func TestSaveThreatModelRedactsCredentialContent(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	model := &store.ThreatModel{
+		Namespace: "ns1", RepositoryScan: "repo1", Source: "edited",
+		Content: strings.Join([]string{"Author", "ization: ", "Bear", "er mutable-value-for-redaction"}, ""),
+	}
+	if err := s.SaveThreatModel(ctx, model); err != nil {
+		t.Fatalf("SaveThreatModel() error = %v", err)
+	}
+	got, err := s.GetLatestThreatModel(ctx, "ns1", "repo1")
+	if err != nil {
+		t.Fatalf("GetLatestThreatModel() error = %v", err)
+	}
+	if strings.Contains(got.Content, "mutable-value-for-redaction") || !strings.Contains(got.Content, "[REDACTED]") {
+		t.Fatalf("persisted threat model retained credential: %q", got.Content)
+	}
+}
+
 func TestSaveThreatModelCollapsesExistingVersions(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -422,7 +813,7 @@ func TestUpsertFindingPreservesMostAdvancedStateAndPRMetadata(t *testing.T) {
 		Severity:         "medium",
 		Confidence:       "high",
 		ValidationStatus: "validated",
-		State:            "pr_open",
+		State:            testFindingStatePROpen,
 		PatchProposalID:  "patch-123",
 		PRNumber:         &prNumber,
 		PRURL:            "https://github.com/example/repo/pull/123",
@@ -452,10 +843,10 @@ func TestUpsertFindingPreservesMostAdvancedStateAndPRMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetFinding: %v", err)
 	}
-	if got.State != "pr_open" {
-		t.Fatalf("State = %q, want %q", got.State, "pr_open")
+	if got.State != testFindingStatePROpen {
+		t.Fatalf("State = %q, want %q", got.State, testFindingStatePROpen)
 	}
-	if got.ValidationStatus != "validated" {
+	if got.ValidationStatus != assessmentStatusValidated {
 		t.Fatalf("ValidationStatus = %q, want %q", got.ValidationStatus, "validated")
 	}
 	if got.PatchProposalID != "patch-123" {
@@ -469,6 +860,257 @@ func TestUpsertFindingPreservesMostAdvancedStateAndPRMetadata(t *testing.T) {
 	}
 	if got.Summary != "later summary" {
 		t.Fatalf("Summary = %q, want later summary to keep newer descriptive fields", got.Summary)
+	}
+}
+
+func TestUpsertFindingPreservesCanonicalHistoryProjectionFromUnboundUpsert(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	canonical := &store.Finding{
+		ID:                            "fnd_canonical_monotonic",
+		Namespace:                     "ns1",
+		RepositoryScan:                "repo1",
+		ScanRunID:                     "scan-canonical",
+		SliceID:                       "slice-canonical",
+		Fingerprint:                   "compat-canonical-monotonic",
+		IdentityQuality:               store.IdentityQualityProducerProposed,
+		IdentityAlgorithmVersion:      "producer-v1",
+		SemanticFingerprint:           integrityTestDigest("canonical-semantic"),
+		LegacyFingerprint:             "legacy-canonical",
+		HistoryStatus:                 store.FindingHistoryCanonical,
+		CurrentOccurrenceID:           "occ_canonical_monotonic",
+		Title:                         "Canonical title",
+		Category:                      "injection",
+		Summary:                       "Canonical summary",
+		Severity:                      "high",
+		Confidence:                    "high",
+		Triage:                        "confirmed",
+		ValidationStatus:              "unvalidated",
+		State:                         "open",
+		FilePath:                      "internal/api/canonical.go",
+		Line:                          42,
+		CommitSHA:                     strings.Repeat("a", 40),
+		RootCause:                     "Canonical root cause",
+		Reproduction:                  "Canonical reproduction",
+		Remediation:                   "Canonical remediation",
+		SuggestedAction:               "Canonical action",
+		WhyTestsDoNotAlreadyCoverThis: "Canonical coverage gap",
+		SuggestedRegressionTest:       "Canonical regression test",
+		MinimumFixScope:               "Canonical minimum scope",
+		Evidence: []store.FindingEvidenceRef{{
+			Kind:          "file",
+			Path:          "internal/api/canonical.go",
+			StartLine:     42,
+			EndLine:       45,
+			Symbol:        "canonicalHandler",
+			Quote:         "canonical evidence",
+			ContentSHA256: integrityTestRawDigest("canonical evidence"),
+			ContentSize:   128,
+		}},
+	}
+	if err := s.UpsertFinding(ctx, canonical); err != nil {
+		t.Fatalf("UpsertFinding(canonical): %v", err)
+	}
+
+	prNumber := 123
+	proposal := *canonical
+	proposal.ScanRunID = "scan-proposed"
+	proposal.SliceID = "slice-proposed"
+	proposal.IdentityQuality = store.IdentityQualityProducerProposed
+	proposal.IdentityAlgorithmVersion = "producer-v2"
+	proposal.SemanticFingerprint = integrityTestDigest("producer-semantic")
+	proposal.LegacyFingerprint = "legacy-proposed"
+	proposal.HistoryStatus = store.FindingHistoryLegacyUnrebuildable
+	proposal.CurrentOccurrenceID = "occ_proposed_monotonic"
+	proposal.Title = "Producer title"
+	proposal.Category = "producer-category"
+	proposal.Summary = "Producer summary"
+	proposal.Severity = "low"
+	proposal.Confidence = "low"
+	proposal.Triage = "producer-triage"
+	proposal.FilePath = "producer/path.go"
+	proposal.Line = 7
+	proposal.CommitSHA = strings.Repeat("b", 40)
+	proposal.RootCause = "Producer root cause"
+	proposal.Reproduction = "Producer reproduction"
+	proposal.Remediation = "Producer remediation"
+	proposal.SuggestedAction = "Producer action"
+	proposal.WhyTestsDoNotAlreadyCoverThis = "Producer coverage gap"
+	proposal.SuggestedRegressionTest = "Producer regression test"
+	proposal.MinimumFixScope = "Producer minimum scope"
+	proposal.Evidence = []store.FindingEvidenceRef{{
+		Kind:      "file",
+		Path:      "producer/path.go",
+		StartLine: 7,
+		EndLine:   8,
+		Quote:     "producer evidence",
+	}}
+	proposal.ValidationStatus = "validated"
+	proposal.ValidationJSON = validatedStatusJSON
+	proposal.State = testFindingStatePROpen
+	proposal.PatchProposalID = "patch-proposed"
+	proposal.PRNumber = &prNumber
+	proposal.PRURL = "https://github.com/example/repo/pull/123"
+	if err := s.UpsertFinding(ctx, &proposal); err != nil {
+		t.Fatalf("UpsertFinding(producer proposal): %v", err)
+	}
+
+	got, err := s.GetFinding(ctx, canonical.Namespace, canonical.ID)
+	if err != nil {
+		t.Fatalf("GetFinding(): %v", err)
+	}
+	type occurrenceProjection struct {
+		ScanRunID, SliceID, Fingerprint                                         string
+		IdentityQuality, IdentityAlgorithmVersion, SemanticFingerprint          string
+		LegacyFingerprint, HistoryStatus, CurrentOccurrenceID                   string
+		Title, Category, Summary, Severity, Confidence, Triage                  string
+		FilePath                                                                string
+		Line                                                                    int
+		CommitSHA, RootCause, Reproduction, Remediation, SuggestedAction        string
+		WhyTestsDoNotAlreadyCoverThis, SuggestedRegressionTest, MinimumFixScope string
+		Evidence                                                                []store.FindingEvidenceRef
+	}
+	projection := func(finding *store.Finding) occurrenceProjection {
+		return occurrenceProjection{
+			ScanRunID: finding.ScanRunID, SliceID: finding.SliceID, Fingerprint: finding.Fingerprint,
+			IdentityQuality: finding.IdentityQuality, IdentityAlgorithmVersion: finding.IdentityAlgorithmVersion,
+			SemanticFingerprint: finding.SemanticFingerprint, LegacyFingerprint: finding.LegacyFingerprint,
+			HistoryStatus: finding.HistoryStatus, CurrentOccurrenceID: finding.CurrentOccurrenceID,
+			Title: finding.Title, Category: finding.Category, Summary: finding.Summary, Severity: finding.Severity,
+			Confidence: finding.Confidence, Triage: finding.Triage, FilePath: finding.FilePath, Line: finding.Line,
+			CommitSHA: finding.CommitSHA, RootCause: finding.RootCause, Reproduction: finding.Reproduction,
+			Remediation: finding.Remediation, SuggestedAction: finding.SuggestedAction,
+			WhyTestsDoNotAlreadyCoverThis: finding.WhyTestsDoNotAlreadyCoverThis,
+			SuggestedRegressionTest:       finding.SuggestedRegressionTest, MinimumFixScope: finding.MinimumFixScope,
+			Evidence: finding.Evidence,
+		}
+	}
+	if want := projection(canonical); !reflect.DeepEqual(projection(got), want) {
+		t.Fatalf("unbound upsert hybridized canonical-history occurrence projection:\n got: %#v\nwant: %#v", projection(got), want)
+	}
+	if got.ValidationStatus != canonical.ValidationStatus || got.ValidationJSON != canonical.ValidationJSON ||
+		got.State != canonical.State || got.PatchProposalID != canonical.PatchProposalID ||
+		got.PRNumber != nil || got.PRURL != canonical.PRURL {
+		t.Fatalf("unbound canonical-history source changed lifecycle projection: %#v", got)
+	}
+}
+
+func TestUpsertFindingAllowsLifecycleForMatchingCanonicalHistorySource(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	canonical := &store.Finding{
+		ID:                       "fnd_canonical_matching_lifecycle",
+		Namespace:                "ns1",
+		RepositoryScan:           "repo1",
+		ScanRunID:                "scan-matching",
+		Fingerprint:              "compat-canonical-matching-lifecycle",
+		IdentityQuality:          store.IdentityQualityProducerProposed,
+		IdentityAlgorithmVersion: "producer-v1",
+		SemanticFingerprint:      integrityTestDigest("canonical-matching-lifecycle"),
+		HistoryStatus:            store.FindingHistoryCanonical,
+		CurrentOccurrenceID:      "occ_matching_lifecycle",
+		Title:                    "Canonical title",
+		Summary:                  "Canonical summary",
+		Severity:                 "high",
+		Confidence:               "high",
+		ValidationStatus:         "unvalidated",
+		State:                    testStateOpen,
+	}
+	if err := s.UpsertFinding(ctx, canonical); err != nil {
+		t.Fatalf("UpsertFinding(canonical): %v", err)
+	}
+
+	prNumber := 42
+	proposal := *canonical
+	proposal.IdentityQuality = store.IdentityQualityProducerProposed
+	proposal.IdentityAlgorithmVersion = "producer-v2"
+	proposal.SemanticFingerprint = integrityTestDigest("producer-matching-lifecycle")
+	proposal.HistoryStatus = store.FindingHistoryLegacyUnrebuildable
+	proposal.ValidationStatus = assessmentStatusValidated
+	proposal.ValidationJSON = validatedStatusJSON
+	proposal.State = testFindingStatePROpen
+	proposal.PatchProposalID = "patch-matching"
+	proposal.PRNumber = &prNumber
+	proposal.PRURL = "https://github.com/example/repo/pull/42"
+	if err := s.UpsertFinding(ctx, &proposal); err != nil {
+		t.Fatalf("UpsertFinding(proposal): %v", err)
+	}
+
+	got, err := s.GetFinding(ctx, canonical.Namespace, canonical.ID)
+	if err != nil {
+		t.Fatalf("GetFinding(): %v", err)
+	}
+	if got.ValidationStatus != proposal.ValidationStatus || got.ValidationJSON != proposal.ValidationJSON ||
+		got.State != proposal.State || got.PatchProposalID != proposal.PatchProposalID ||
+		got.PRNumber == nil || *got.PRNumber != prNumber || got.PRURL != proposal.PRURL {
+		t.Fatalf("matching canonical-history source did not advance lifecycle projection: %#v", got)
+	}
+	if got.IdentityQuality != canonical.IdentityQuality || got.CurrentOccurrenceID != canonical.CurrentOccurrenceID ||
+		got.ScanRunID != canonical.ScanRunID || got.Summary != canonical.Summary {
+		t.Fatalf("matching canonical-history source changed retained occurrence projection: %#v", got)
+	}
+}
+
+func TestUpsertFindingLowerQualityLifecycleAllowsOnlyFullyLegacyEmptyBindings(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		scanRunID    string
+		occurrenceID string
+		wantAdvance  bool
+	}{
+		{name: "both empty", wantAdvance: true},
+		{name: "only occurrence bound", occurrenceID: "occ_partial_legacy", wantAdvance: false},
+		{name: "only run bound", scanRunID: "scan-partial-legacy", wantAdvance: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := setupTestStore(t)
+			ctx := context.Background()
+			existing := &store.Finding{
+				ID:                       "fnd_legacy_empty_" + strings.ReplaceAll(tc.name, " ", "_"),
+				Namespace:                "ns1",
+				RepositoryScan:           "repo1",
+				ScanRunID:                tc.scanRunID,
+				Fingerprint:              "compat-legacy-empty-" + tc.name,
+				IdentityQuality:          store.IdentityQualityProducerProposed,
+				IdentityAlgorithmVersion: "producer-v1",
+				HistoryStatus:            store.FindingHistoryLegacyUnrebuildable,
+				CurrentOccurrenceID:      tc.occurrenceID,
+				Title:                    "Existing title",
+				Summary:                  "Existing summary",
+				Severity:                 "medium",
+				Confidence:               "medium",
+				ValidationStatus:         "unvalidated",
+				State:                    testStateOpen,
+			}
+			if err := s.UpsertFinding(ctx, existing); err != nil {
+				t.Fatalf("UpsertFinding(existing): %v", err)
+			}
+
+			prNumber := 7
+			lower := *existing
+			lower.IdentityQuality = store.IdentityQualityLegacy
+			lower.IdentityAlgorithmVersion = store.IdentityAlgorithmLegacyV2
+			lower.ValidationStatus = assessmentStatusValidated
+			lower.ValidationJSON = validatedStatusJSON
+			lower.State = testFindingStatePROpen
+			lower.PatchProposalID = "patch-legacy"
+			lower.PRNumber = &prNumber
+			lower.PRURL = "https://github.com/example/repo/pull/7"
+			if err := s.UpsertFinding(ctx, &lower); err != nil {
+				t.Fatalf("UpsertFinding(lower): %v", err)
+			}
+
+			got, err := s.GetFinding(ctx, existing.Namespace, existing.ID)
+			if err != nil {
+				t.Fatalf("GetFinding(): %v", err)
+			}
+			advanced := got.ValidationStatus == lower.ValidationStatus && got.ValidationJSON == lower.ValidationJSON &&
+				got.State == lower.State && got.PatchProposalID == lower.PatchProposalID &&
+				got.PRNumber != nil && *got.PRNumber == prNumber && got.PRURL == lower.PRURL
+			if advanced != tc.wantAdvance {
+				t.Fatalf("lifecycle advanced = %v, want %v: %#v", advanced, tc.wantAdvance, got)
+			}
+		})
 	}
 }
 
@@ -565,7 +1207,7 @@ func TestUpsertFindingKeepsValidationJSONWhenValidatedStatusIsPreserved(t *testi
 	if err != nil {
 		t.Fatalf("GetFinding: %v", err)
 	}
-	if got.ValidationStatus != "validated" {
+	if got.ValidationStatus != assessmentStatusValidated {
 		t.Fatalf("ValidationStatus = %q, want validated", got.ValidationStatus)
 	}
 	if got.ValidationJSON != initial.ValidationJSON {
@@ -649,6 +1291,96 @@ func TestUpsertFindingPreservesFinalStatesOverOpen(t *testing.T) {
 				t.Fatalf("State = %q, want %q", got.State, finalState)
 			}
 		})
+	}
+}
+
+func TestClearFindingPatchProjectionResetsPatchBackedStateAndMetadata(t *testing.T) {
+	for _, state := range []string{"patch_pending", "patch_ready", testFindingStatePROpen} {
+		t.Run(state, func(t *testing.T) {
+			s := setupTestStore(t)
+			ctx := context.Background()
+			prNumber := 123
+			finding := &store.Finding{
+				ID:               "fnd-clear-" + state,
+				Namespace:        "ns1",
+				RepositoryScan:   "repo1",
+				ScanRunID:        "scan-1",
+				Fingerprint:      "repo1:file.go:clear-" + state,
+				Title:            "Finding",
+				Summary:          "stale patch projection",
+				Severity:         "high",
+				Confidence:       "medium",
+				ValidationStatus: assessmentStatusValidated,
+				State:            state,
+				PatchProposalID:  "patch-123",
+				PRNumber:         &prNumber,
+				PRURL:            "https://github.com/example/repo/pull/123",
+			}
+			if err := s.UpsertFinding(ctx, finding); err != nil {
+				t.Fatalf("UpsertFinding: %v", err)
+			}
+
+			if err := s.ClearFindingPatchProjection(ctx, finding.Namespace, finding.ID, finding.PatchProposalID); err != nil {
+				t.Fatalf("ClearFindingPatchProjection: %v", err)
+			}
+
+			got, err := s.GetFinding(ctx, finding.Namespace, finding.ID)
+			if err != nil {
+				t.Fatalf("GetFinding: %v", err)
+			}
+			if got.State != testStateOpen {
+				t.Fatalf("State = %q, want %q", got.State, testStateOpen)
+			}
+			if got.PatchProposalID != "" {
+				t.Fatalf("PatchProposalID = %q, want empty", got.PatchProposalID)
+			}
+			if got.PRNumber != nil {
+				t.Fatalf("PRNumber = %#v, want nil", got.PRNumber)
+			}
+			if got.PRURL != "" {
+				t.Fatalf("PRURL = %q, want empty", got.PRURL)
+			}
+		})
+	}
+}
+
+func TestClearFindingPatchProjectionPreservesUnrelatedLifecycleState(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	prNumber := 123
+	finding := &store.Finding{
+		ID:               "fnd-clear-dismissed",
+		Namespace:        "ns1",
+		RepositoryScan:   "repo1",
+		ScanRunID:        "scan-1",
+		Fingerprint:      "repo1:file.go:clear-dismissed",
+		Title:            "Finding",
+		Summary:          "stale patch projection on dismissed finding",
+		Severity:         "high",
+		Confidence:       "medium",
+		ValidationStatus: assessmentStatusValidated,
+		State:            "dismissed",
+		PatchProposalID:  "patch-123",
+		PRNumber:         &prNumber,
+		PRURL:            "https://github.com/example/repo/pull/123",
+	}
+	if err := s.UpsertFinding(ctx, finding); err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+
+	if err := s.ClearFindingPatchProjection(ctx, finding.Namespace, finding.ID, finding.PatchProposalID); err != nil {
+		t.Fatalf("ClearFindingPatchProjection: %v", err)
+	}
+
+	got, err := s.GetFinding(ctx, finding.Namespace, finding.ID)
+	if err != nil {
+		t.Fatalf("GetFinding: %v", err)
+	}
+	if got.State != finding.State {
+		t.Fatalf("State = %q, want %q", got.State, finding.State)
+	}
+	if got.PatchProposalID != "" || got.PRNumber != nil || got.PRURL != "" {
+		t.Fatalf("patch projection = (%q, %#v, %q), want cleared", got.PatchProposalID, got.PRNumber, got.PRURL)
 	}
 }
 
@@ -809,5 +1541,238 @@ func TestValidatedFindingsRankHigher(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].ID != "f_validated" {
 		t.Fatalf("recommended findings order = %#v, want validated first", got)
+	}
+}
+
+func TestUpsertFindingReplacesScanRunAndOccurrenceBindingAtomically(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	finding := &store.Finding{
+		ID:                       "fnd_atomic_occurrence_binding",
+		Namespace:                "ns1",
+		RepositoryScan:           "repo1",
+		ScanRunID:                "scan-1",
+		Fingerprint:              "compat-atomic-occurrence-binding",
+		IdentityQuality:          store.IdentityQualityProducerProposed,
+		IdentityAlgorithmVersion: "producer-v1",
+		HistoryStatus:            store.FindingHistoryLegacyUnrebuildable,
+		CurrentOccurrenceID:      "occ_old",
+		Title:                    "Finding",
+		Summary:                  "Summary",
+		Severity:                 "high",
+		Confidence:               "high",
+		ValidationStatus:         "unvalidated",
+		State:                    testStateOpen,
+	}
+	if err := s.UpsertFinding(ctx, finding); err != nil {
+		t.Fatal(err)
+	}
+
+	newRun := *finding
+	newRun.ScanRunID = "scan-2"
+	newRun.CurrentOccurrenceID = ""
+	if err := s.UpsertFinding(ctx, &newRun); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetFinding(ctx, finding.Namespace, finding.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ScanRunID != newRun.ScanRunID || got.CurrentOccurrenceID != "" {
+		t.Fatalf("source binding = (%q, %q), want (%q, empty)", got.ScanRunID, got.CurrentOccurrenceID, newRun.ScanRunID)
+	}
+
+	newOccurrence := newRun
+	newOccurrence.CurrentOccurrenceID = "occ_new"
+	if err := s.UpsertFinding(ctx, &newOccurrence); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetFinding(ctx, finding.Namespace, finding.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ScanRunID != newOccurrence.ScanRunID || got.CurrentOccurrenceID != newOccurrence.CurrentOccurrenceID {
+		t.Fatalf("source binding = (%q, %q), want (%q, %q)", got.ScanRunID, got.CurrentOccurrenceID,
+			newOccurrence.ScanRunID, newOccurrence.CurrentOccurrenceID)
+	}
+}
+
+func TestUpsertFindingSanitizesPersistedProjectionStrings(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	redactionValue := strings.Join([]string{"github", "_pat_", "abcdefghijklmnopqrstuvwxyz1234567890"}, "")
+	finding := &store.Finding{
+		ID:                            "fnd_projection_redaction",
+		Namespace:                     "ns1",
+		RepositoryScan:                "repo1",
+		ScanRunID:                     "scan-1",
+		Fingerprint:                   "compat-projection-redaction",
+		Title:                         "title token=" + redactionValue,
+		Category:                      "category token=" + redactionValue,
+		Summary:                       "summary token=" + redactionValue,
+		Severity:                      "high",
+		Confidence:                    "high",
+		Triage:                        "triage token=" + redactionValue,
+		ValidationStatus:              "validated",
+		State:                         testStateOpen,
+		FilePath:                      "internal/api/handler.go",
+		CommitSHA:                     strings.Repeat("a", 40),
+		RootCause:                     "root token=" + redactionValue,
+		Reproduction:                  "reproduction token=" + redactionValue,
+		Remediation:                   "remediation token=" + redactionValue,
+		SuggestedAction:               "action token=" + redactionValue,
+		WhyTestsDoNotAlreadyCoverThis: "coverage token=" + redactionValue,
+		SuggestedRegressionTest:       "regression token=" + redactionValue,
+		MinimumFixScope:               "scope token=" + redactionValue,
+		ValidationJSON: fmt.Sprintf(
+			`{"status":"validated","%s":"%s"}`,
+			strings.Join([]string{"to", "ken"}, ""), redactionValue,
+		),
+		PRURL: "https://github.com/example/repo/pull/1",
+		Evidence: []store.FindingEvidenceRef{{
+			Kind:  "file",
+			Path:  "internal/api/handler.go",
+			Label: "label token=" + redactionValue,
+			Quote: "quote token=" + redactionValue,
+		}},
+	}
+	if err := s.UpsertFinding(ctx, finding); err != nil {
+		t.Fatalf("UpsertFinding() error = %v", err)
+	}
+	got, err := s.GetFinding(ctx, finding.Namespace, finding.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := fmt.Sprintf("%#v", got)
+	if strings.Contains(persisted, redactionValue) {
+		t.Fatalf("persisted finding retained credential: %s", persisted)
+	}
+	for name, value := range map[string]string{
+		"title": got.Title, "category": got.Category, "summary": got.Summary, "triage": got.Triage,
+		"rootCause": got.RootCause, "reproduction": got.Reproduction, "remediation": got.Remediation,
+		"suggestedAction": got.SuggestedAction, "whyTests": got.WhyTestsDoNotAlreadyCoverThis,
+		"regressionTest": got.SuggestedRegressionTest, "minimumScope": got.MinimumFixScope,
+		"validationJSON": got.ValidationJSON, "evidenceLabel": got.Evidence[0].Label, "evidenceQuote": got.Evidence[0].Quote,
+	} {
+		if !strings.Contains(value, "[REDACTED]") {
+			t.Fatalf("%s = %q, want redaction", name, value)
+		}
+	}
+}
+
+func TestUpsertFindingRejectsCredentialBearingProjectionCoordinates(t *testing.T) {
+	redactionValue := strings.Join([]string{"github", "_pat_", "abcdefghijklmnopqrstuvwxyz1234567890"}, "")
+	base := func() *store.Finding {
+		return &store.Finding{
+			ID: "fnd_projection_reject", Namespace: "ns1", RepositoryScan: "repo1", ScanRunID: "scan-1",
+			Fingerprint: "compat-projection-reject", Title: "Finding", Summary: "Summary", Severity: "high",
+			Confidence: "high", ValidationStatus: "unvalidated", State: testStateOpen,
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*store.Finding)
+	}{
+		{name: "file path", mutate: func(f *store.Finding) { f.FilePath = "internal/token=" + redactionValue }},
+		{name: "PR URL", mutate: func(f *store.Finding) { f.PRURL = "https://user:" + redactionValue + "@example.com/pull/1" }},
+		{name: "patch proposal ID", mutate: func(f *store.Finding) { f.PatchProposalID = redactionValue }},
+		{name: "evidence path", mutate: func(f *store.Finding) {
+			f.Evidence = []store.FindingEvidenceRef{{Kind: "file", Path: "internal/token=" + redactionValue}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := setupTestStore(t)
+			finding := base()
+			tc.mutate(finding)
+			if err := s.UpsertFinding(context.Background(), finding); !errors.Is(err, store.ErrValidation) {
+				t.Fatalf("UpsertFinding() error = %v, want ErrValidation", err)
+			}
+		})
+	}
+}
+
+func TestUpdateScanRunIgnoresStaleTerminalReactivationAfterNewerRun(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		completeNewerRun bool
+	}{
+		{name: "newer run active"},
+		{name: "newer run completed", completeNewerRun: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := setupTestStore(t)
+			ctx := context.Background()
+			first := &store.ScanRun{
+				ID: "scan-z-first", RunUID: "run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				Namespace: "ns", RepositoryScan: "repo", RepositoryScanUID: "repo-uid", RepositoryScanGeneration: 1,
+				TaskName: "task-first", Mode: "initial", Phase: storedScanRunPhasePending,
+				RequestIdempotencyKey: "req-first", IdempotencyKey: "req-first",
+				StartedAt: time.Now().UTC(), Quality: store.LegacyScanQuality(),
+			}
+			if err := s.CreateScanRun(ctx, first); err != nil {
+				t.Fatalf("CreateScanRun(first) error = %v", err)
+			}
+			stale, err := s.GetScanRun(ctx, first.Namespace, first.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			completed, err := s.GetScanRun(ctx, first.Namespace, first.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			completed.Phase = storedScanRunPhaseSucceeded
+			completed.CompletedAt = &now
+			completed.Summary = "completed"
+			completed.Quality.BundleStatus = store.BundleStatusSealing
+			if err := s.UpdateScanRun(ctx, completed); err != nil {
+				t.Fatalf("UpdateScanRun(first sealing) error = %v", err)
+			}
+			completed.Quality.BundleStatus = store.BundleStatusSealed
+			if err := s.UpdateScanRun(ctx, completed); err != nil {
+				t.Fatalf("UpdateScanRun(first sealed) error = %v", err)
+			}
+			second := &store.ScanRun{
+				ID: "scan-a-second", RunUID: "run_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				Namespace: first.Namespace, RepositoryScan: first.RepositoryScan, RepositoryScanUID: first.RepositoryScanUID,
+				RepositoryScanGeneration: first.RepositoryScanGeneration, TaskName: "task-second", Mode: "manual",
+				Phase: storedScanRunPhasePending, RequestIdempotencyKey: "req-second", IdempotencyKey: "req-second",
+				StartedAt: now.Add(-time.Hour), Quality: store.LegacyScanQuality(),
+			}
+			if err := s.CreateScanRun(ctx, second); err != nil {
+				t.Fatalf("CreateScanRun(second) error = %v", err)
+			}
+			wantSecondPhase := storedScanRunPhasePending
+			if tt.completeNewerRun {
+				newerCompleted := now.Add(2 * time.Second)
+				second.Phase = storedScanRunPhaseSucceeded
+				second.CompletedAt = &newerCompleted
+				if err := s.UpdateScanRun(ctx, second); err != nil {
+					t.Fatalf("UpdateScanRun(second terminal) error = %v", err)
+				}
+				wantSecondPhase = storedScanRunPhaseSucceeded
+			}
+			stale.Phase = storedScanRunPhaseRunning
+			stale.CompletedAt = nil
+			stale.Summary = "stale replay"
+			if err := s.UpdateScanRun(ctx, stale); err != nil {
+				t.Fatalf("UpdateScanRun(stale terminal replay) error = %v", err)
+			}
+			gotFirst, err := s.GetScanRun(ctx, first.Namespace, first.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotFirst.Phase != storedScanRunPhaseSucceeded || gotFirst.Summary != "completed" || gotFirst.CompletedAt == nil ||
+				gotFirst.Quality.BundleStatus != store.BundleStatusSealed {
+				t.Fatalf("first run after stale replay = %#v", gotFirst)
+			}
+			gotSecond, err := s.GetScanRun(ctx, second.Namespace, second.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotSecond.Phase != wantSecondPhase {
+				t.Fatalf("second run phase = %q, want %q", gotSecond.Phase, wantSecondPhase)
+			}
+		})
 	}
 }

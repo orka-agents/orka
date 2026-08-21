@@ -73,6 +73,19 @@ func migrate(db *sql.DB) error {
 			namespace  TEXT NOT NULL,
 			task_name  TEXT NOT NULL,
 			data       BLOB NOT NULL,
+			task_uid TEXT NOT NULL DEFAULT '',
+			job_uid TEXT NOT NULL DEFAULT '',
+			pod_uid TEXT NOT NULL DEFAULT '',
+			task_attempt INTEGER NOT NULL DEFAULT 0,
+			producer_kind TEXT NOT NULL DEFAULT 'legacy-unverified',
+			runtime_session_id TEXT NOT NULL DEFAULT '',
+			turn_id TEXT NOT NULL DEFAULT '',
+			correlation_id TEXT NOT NULL DEFAULT '',
+			submission_nonce_digest TEXT NOT NULL DEFAULT '',
+			staging_generation INTEGER NOT NULL DEFAULT 0,
+			content_size INTEGER NOT NULL DEFAULT 0,
+			content_sha256 TEXT NOT NULL DEFAULT '',
+			accepted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (namespace, task_name)
@@ -272,6 +285,19 @@ func migrate(db *sql.DB) error {
 			content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
 			size         INTEGER NOT NULL,
 			data         BLOB NOT NULL,
+			task_uid TEXT NOT NULL DEFAULT '',
+			job_uid TEXT NOT NULL DEFAULT '',
+			pod_uid TEXT NOT NULL DEFAULT '',
+			task_attempt INTEGER NOT NULL DEFAULT 0,
+			producer_kind TEXT NOT NULL DEFAULT 'legacy-unverified',
+			runtime_session_id TEXT NOT NULL DEFAULT '',
+			turn_id TEXT NOT NULL DEFAULT '',
+			correlation_id TEXT NOT NULL DEFAULT '',
+			submission_nonce_digest TEXT NOT NULL DEFAULT '',
+			staging_generation INTEGER NOT NULL DEFAULT 0,
+			content_size INTEGER NOT NULL DEFAULT 0,
+			content_sha256 TEXT NOT NULL DEFAULT '',
+			accepted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (namespace, task_name, filename)
 		)`,
@@ -301,6 +327,8 @@ func migrate(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS security_threat_models (
 			namespace         TEXT NOT NULL,
 			repository_scan   TEXT NOT NULL,
+			repository_scan_uid TEXT NOT NULL DEFAULT '',
+			repository_scan_generation INTEGER NOT NULL DEFAULT 0,
 			version           INTEGER NOT NULL,
 			content           TEXT NOT NULL,
 			source            TEXT NOT NULL,
@@ -391,6 +419,9 @@ func migrate(db *sql.DB) error {
 			namespace         TEXT NOT NULL,
 			repository_scan   TEXT NOT NULL,
 			finding_id        TEXT NOT NULL,
+			occurrence_id     TEXT NOT NULL DEFAULT '',
+			source_scan_run_id TEXT NOT NULL DEFAULT '',
+			source_head_sha   TEXT NOT NULL DEFAULT '',
 			task_name         TEXT NOT NULL,
 			branch            TEXT NOT NULL,
 			diff_artifact     TEXT NOT NULL DEFAULT '',
@@ -856,6 +887,34 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
+	outputColumns := []sqliteColumnMigration{
+		{Name: "task_uid", Definition: "task_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "job_uid", Definition: "job_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "pod_uid", Definition: "pod_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "task_attempt", Definition: "task_attempt INTEGER NOT NULL DEFAULT 0"},
+		{Name: "producer_kind", Definition: "producer_kind TEXT NOT NULL DEFAULT 'legacy-unverified'"},
+		{Name: "runtime_session_id", Definition: "runtime_session_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "turn_id", Definition: "turn_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "correlation_id", Definition: "correlation_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "submission_nonce_digest", Definition: "submission_nonce_digest TEXT NOT NULL DEFAULT ''"},
+		{Name: "staging_generation", Definition: "staging_generation INTEGER NOT NULL DEFAULT 0"},
+		{Name: "content_size", Definition: "content_size INTEGER NOT NULL DEFAULT 0"},
+		{Name: "content_sha256", Definition: "content_sha256 TEXT NOT NULL DEFAULT ''"},
+		{Name: "accepted_at", Definition: "accepted_at TIMESTAMP NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+	}
+	if err := ensureSQLiteColumns(db, "results", outputColumns); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "artifacts", outputColumns); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_results_task_attempt ON results(namespace, task_name, task_uid, task_attempt)`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_artifacts_task_attempt ON artifacts(namespace, task_name, task_uid, task_attempt)`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+
 	if err := ensureSQLiteColumns(db, "sessions", []sqliteColumnMigration{
 		{Name: "owner_type", Definition: "owner_type TEXT NOT NULL DEFAULT ''"},
 		{Name: "owner_ref", Definition: "owner_ref TEXT NOT NULL DEFAULT ''"},
@@ -1036,6 +1095,12 @@ func migrate(db *sql.DB) error {
 	}); err != nil {
 		return err
 	}
+	if err := ensureSQLiteColumns(db, "security_threat_models", []sqliteColumnMigration{
+		{Name: "repository_scan_uid", Definition: "repository_scan_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "repository_scan_generation", Definition: "repository_scan_generation INTEGER NOT NULL DEFAULT 0"},
+	}); err != nil {
+		return err
+	}
 	if err := ensureSQLiteColumns(db, "security_findings", []sqliteColumnMigration{
 		{Name: "slice_id", Definition: "slice_id TEXT NOT NULL DEFAULT ''"},
 		{Name: "category", Definition: "category TEXT NOT NULL DEFAULT ''"},
@@ -1047,6 +1112,14 @@ func migrate(db *sql.DB) error {
 	}); err != nil {
 		return err
 	}
+	if err := ensureSQLiteColumns(db, "security_patch_proposals", []sqliteColumnMigration{
+		{Name: "occurrence_id", Definition: "occurrence_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "source_scan_run_id", Definition: "source_scan_run_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "source_head_sha", Definition: "source_head_sha TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+
 	if err := ensureSQLiteColumns(db, "security_review_slices", []sqliteColumnMigration{
 		{Name: "changed_files_json", Definition: "changed_files_json TEXT NOT NULL DEFAULT '[]'"},
 		{Name: "changed_line_ranges_json", Definition: "changed_line_ranges_json TEXT NOT NULL DEFAULT '[]'"},
@@ -1066,6 +1139,9 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureSecurityReviewSlicesScopedPrimaryKey(db); err != nil {
+		return err
+	}
+	if err := ensureSecurityIntegritySchema(db); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_findings_slice

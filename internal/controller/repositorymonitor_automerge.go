@@ -381,7 +381,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 
 func repositoryMonitorCheckRunConclusionPassing(conclusion string) bool {
 	switch strings.ToLower(strings.TrimSpace(conclusion)) {
-	case "success", "neutral", "skipped":
+	case "success", "neutral", repositoryMonitorVerdictSkipped:
 		return true
 	default:
 		return false

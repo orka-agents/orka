@@ -13,8 +13,11 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -217,6 +220,50 @@ func TestFetchTaskOutputTool_Execute(t *testing.T) {
 			}
 			if !res.Success {
 				t.Errorf("expected success=true, got false")
+			}
+		})
+	}
+}
+
+func TestFetchTaskOutputToolSecurityLegacyFallbackFollowsMode(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "security-task", Namespace: defaultNamespace, UID: types.UID("task-uid"),
+			Labels: map[string]string{labels.LabelCreatedBy: repositorySecurityCreatedBy},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded, Attempts: 1,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+	results := &fakeResultStore{data: map[string][]byte{
+		defaultNamespace + "/" + task.Name: []byte("legacy output"),
+	}}
+	for _, tt := range []struct {
+		name       string
+		mode       security.WorkerOutputBindingMode
+		wantOutput bool
+	}{
+		{name: "audit returns legacy output", mode: security.WorkerOutputBindingAudit, wantOutput: true},
+		{name: "enforce rejects legacy output", mode: security.WorkerOutputBindingEnforce},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := WithToolContext(context.Background(), &ToolContext{
+				Client: newFakeClient(task), Namespace: defaultNamespace, ResultStore: results,
+				WorkerOutputBindingMode: tt.mode,
+			})
+			result, err := (&FetchTaskOutputTool{}).Execute(ctx, json.RawMessage(`{"name":"security-task"}`))
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if tt.wantOutput {
+				if !strings.Contains(result, "legacy output") {
+					t.Fatalf("Execute() = %q, want legacy output", result)
+				}
+				return
+			}
+			if strings.Contains(result, "legacy output") || !strings.Contains(result, "failed to get result") {
+				t.Fatalf("Execute() = %q, want enforce-mode bound read error", result)
 			}
 		})
 	}

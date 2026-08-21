@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -42,23 +43,73 @@ const (
 	maxReviewSliceOwnedFiles  = 24
 	maxReviewSliceContext     = 24
 	maxReviewSliceTests       = 24
+
+	mapperReasonReviewable          = "supported-reviewable-file"
+	mapperReasonAssigned            = "assigned-to-review-slice"
+	mapperReasonUnassigned          = "no-deterministic-review-slice"
+	mapperReasonSymlink             = "symlink"
+	mapperReasonSecretLike          = "secret-like-path"
+	mapperReasonLockfile            = "lockfile"
+	mapperReasonUnsupported         = "unsupported-type"
+	mapperReasonVCSDirectory        = "vcs-directory"
+	mapperReasonDependencyDirectory = "dependency-directory"
+	mapperReasonGeneratedDirectory  = "generated-directory"
+	mapperReasonCacheDirectory      = "cache-directory"
+	mapperReasonVirtualEnvDirectory = "virtualenv-directory"
+	mapperReasonEntrypointCap       = "entrypoint-reference-cap"
+	mapperReasonContextCap          = "context-reference-cap"
+	mapperReasonTestCap             = "test-reference-cap"
 )
 
-// MapRepository returns deterministic review slices for a repository checkout.
-func MapRepository(root string, opts MapperOptions) ([]store.ReviewSlice, error) {
-	files, err := collectFiles(root)
+var (
+	mapperInventoryEntryLimit        = security.MaxMapperInventoryEntries
+	mapperOmittedInventoryEntryLimit = security.MaxMapperOmittedInventoryEntries
+)
+
+// MapperResult contains deterministic review slices and their coverage inventory.
+type MapperResult struct {
+	Slices           []store.ReviewSlice
+	InventorySummary security.MapperInventorySummary
+	DiscoveredFiles  []security.MapperFileInventoryEntry
+	ReviewableFiles  []security.MapperFileInventoryEntry
+	OmittedFiles     []security.MapperFileInventoryEntry
+}
+
+// MapRepository returns deterministic review slices and coverage inventory for
+// the supplied checkout root. The caller supplies the configured scope root;
+// paths outside that root are therefore never eligible for collection.
+func MapRepository(root string, opts MapperOptions) (MapperResult, error) {
+	collection, err := collectFiles(root)
 	if err != nil {
-		return nil, err
+		return MapperResult{}, err
 	}
 
 	builder := newSliceBuilder(opts.RepositoryScan)
-	addGoSlices(builder, files)
-	addNodeSlices(builder, root, files)
-	addPythonSlices(builder, files)
-	addWorkflowAndScriptSlices(builder, files)
-	addConfigSlices(builder, files)
-	addGenericFallbackSlices(builder, files)
-	return builder.slices(), nil
+	addGoSlices(builder, collection.reviewable)
+	addNodeSlices(builder, root, collection.reviewable)
+	addPythonSlices(builder, collection.reviewable)
+	addWorkflowAndScriptSlices(builder, collection.reviewable)
+	addConfigSlices(builder, collection.reviewable)
+	addGenericFallbackSlices(builder, collection.reviewable)
+
+	slices := builder.slices()
+	reviewableFiles, unassigned := reviewableInventory(collection.reviewable, slices)
+	omittedFiles, derivedTruncated, err := boundedOmittedInventory(
+		collection.omitted,
+		unassigned,
+		builder.referenceOmissions,
+	)
+	if err != nil {
+		return MapperResult{}, err
+	}
+
+	return MapperResult{
+		Slices:           slices,
+		InventorySummary: collection.inventorySummary(len(omittedFiles), derivedTruncated),
+		DiscoveredFiles:  normalizeInventory(collection.discovered),
+		ReviewableFiles:  reviewableFiles,
+		OmittedFiles:     omittedFiles,
+	}, nil
 }
 
 type repoFile struct {
@@ -68,9 +119,22 @@ type repoFile struct {
 	Ext  string
 }
 
-func collectFiles(root string) ([]repoFile, error) {
+type fileCollection struct {
+	reviewable []repoFile
+	discovered []security.MapperFileInventoryEntry
+	omitted    []security.MapperFileInventoryEntry
+	total      int
+	limit      int
+}
+
+func collectFiles(root string) (fileCollection, error) {
 	root = filepath.Clean(root)
-	var files []repoFile
+	collection := fileCollection{
+		reviewable: []repoFile{},
+		discovered: []security.MapperFileInventoryEntry{},
+		omitted:    []security.MapperFileInventoryEntry{},
+		limit:      effectiveMapperInventoryEntryLimit(),
+	}
 	err := filepath.WalkDir(root, func(filePath string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -84,18 +148,17 @@ func collectFiles(root string) ([]repoFile, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		if entry.IsDir() {
-			if shouldSkipDir(rel, entry) {
+			if reason := skippedDirectoryReason(rel, entry); reason != "" {
+				collection.addExcluded(rel, reason)
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if entry.Type()&os.ModeSymlink != 0 || likelySecretPath(rel) {
+		if reason := excludedFileReason(rel, entry); reason != "" {
+			collection.addExcluded(rel, reason)
 			return nil
 		}
-		if !isReviewableFile(rel) {
-			return nil
-		}
-		files = append(files, repoFile{
+		collection.addReviewable(repoFile{
 			Path: rel,
 			Dir:  path.Dir(rel),
 			Name: path.Base(rel),
@@ -104,20 +167,118 @@ func collectFiles(root string) ([]repoFile, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return fileCollection{}, err
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	return files, nil
+	sort.Slice(collection.reviewable, func(i, j int) bool { return collection.reviewable[i].Path < collection.reviewable[j].Path })
+	return collection, nil
 }
 
-func shouldSkipDir(rel string, entry fs.DirEntry) bool {
+func effectiveMapperInventoryEntryLimit() int {
+	if mapperInventoryEntryLimit <= 0 || mapperInventoryEntryLimit > security.MaxMapperInventoryEntries {
+		return security.MaxMapperInventoryEntries
+	}
+	return mapperInventoryEntryLimit
+}
+
+func effectiveMapperOmittedInventoryEntryLimit() int {
+	if mapperOmittedInventoryEntryLimit <= 0 ||
+		mapperOmittedInventoryEntryLimit > security.MaxMapperOmittedInventoryEntries {
+		return security.MaxMapperOmittedInventoryEntries
+	}
+	return mapperOmittedInventoryEntryLimit
+}
+
+func (c *fileCollection) retainInventoryEntry() bool {
+	c.total++
+	return len(c.discovered) < c.limit
+}
+
+func (c *fileCollection) addExcluded(filePath, reason string) {
+	if !c.retainInventoryEntry() {
+		return
+	}
+	excluded := inventoryEntry(filePath, security.MapperDispositionExcluded, reason)
+	c.discovered = append(c.discovered, excluded)
+	c.omitted = append(c.omitted, excluded)
+}
+
+func (c *fileCollection) addReviewable(file repoFile) {
+	if !c.retainInventoryEntry() {
+		return
+	}
+	c.reviewable = append(c.reviewable, file)
+	c.discovered = append(c.discovered,
+		inventoryEntry(file.Path, security.MapperDispositionReviewable, mapperReasonReviewable))
+}
+
+func (c fileCollection) inventorySummary(
+	retainedOmissionRecords, truncatedOmissionRecords int,
+) security.MapperInventorySummary {
+	retainedPaths := len(c.discovered)
+	truncatedPaths := c.total - retainedPaths
+	truncatedOmissionRecords = max(truncatedOmissionRecords, 0)
+	totalOmissionRecords := retainedOmissionRecords + truncatedOmissionRecords
+	summary := security.MapperInventorySummary{
+		EntryLimit:       c.limit,
+		TotalEntries:     c.total,
+		RetainedEntries:  retainedPaths,
+		TruncatedEntries: truncatedPaths,
+		Truncated:        truncatedPaths > 0 || truncatedOmissionRecords > 0,
+	}
+	if totalOmissionRecords > 0 {
+		summary.OmissionRecords = &security.MapperOmissionRecordSummary{
+			EntryLimit:       effectiveMapperOmittedInventoryEntryLimit(),
+			TotalRecords:     totalOmissionRecords,
+			RetainedRecords:  retainedOmissionRecords,
+			TruncatedRecords: truncatedOmissionRecords,
+			Truncated:        truncatedOmissionRecords > 0,
+		}
+	}
+	if summary.Truncated {
+		summary.Reason = security.MapperCoverageReasonInventoryEntryLimit
+	}
+	return summary
+}
+
+func skippedDirectoryReason(rel string, entry fs.DirEntry) string {
 	if entry.Type()&os.ModeSymlink != 0 {
-		return true
+		return mapperReasonSymlink
 	}
 	name := path.Base(rel)
 	switch name {
-	case ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build", "coverage", ".next",
-		"target", "bin", ".cache", ".turbo", ".venv", "venv", "__pycache__", ".pytest_cache":
+	case ".git", ".hg", ".svn":
+		return mapperReasonVCSDirectory
+	case "node_modules", "vendor":
+		return mapperReasonDependencyDirectory
+	case "dist", "build", "coverage", ".next", "target", "bin", ".orka-artifacts":
+		return mapperReasonGeneratedDirectory
+	case ".cache", ".turbo", "__pycache__", ".pytest_cache":
+		return mapperReasonCacheDirectory
+	case ".venv", "venv":
+		return mapperReasonVirtualEnvDirectory
+	default:
+		return ""
+	}
+}
+
+func excludedFileReason(rel string, entry fs.DirEntry) string {
+	switch {
+	case entry.Type()&os.ModeSymlink != 0:
+		return mapperReasonSymlink
+	case likelySecretPath(rel):
+		return mapperReasonSecretLike
+	case isLockfile(rel):
+		return mapperReasonLockfile
+	case !isReviewableFile(rel):
+		return mapperReasonUnsupported
+	default:
+		return ""
+	}
+}
+
+func isLockfile(rel string) bool {
+	switch path.Base(rel) {
+	case "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock":
 		return true
 	default:
 		return false
@@ -167,7 +328,7 @@ func isSourceCodePath(rel string) bool {
 
 func isReviewableFile(rel string) bool {
 	name := path.Base(rel)
-	if name == "package-lock.json" || name == "yarn.lock" || name == "pnpm-lock.yaml" || name == "bun.lock" {
+	if isLockfile(rel) {
 		return false
 	}
 	switch strings.ToLower(path.Ext(rel)) {
@@ -185,9 +346,10 @@ func isReviewableFile(rel string) bool {
 }
 
 type sliceBuilder struct {
-	repositoryScan string
-	byID           map[string]store.ReviewSlice
-	claimed        map[string]struct{}
+	repositoryScan     string
+	byID               map[string]store.ReviewSlice
+	claimed            map[string]struct{}
+	referenceOmissions []security.MapperFileInventoryEntry
 }
 
 func newSliceBuilder(repositoryScan string) *sliceBuilder {
@@ -215,7 +377,9 @@ func (b *sliceBuilder) add(slice store.ReviewSlice) {
 		slice.Status = "pending"
 	}
 	normalizeSliceFiles(&slice)
-	for _, bounded := range boundedReviewSlices(slice) {
+	boundedSlices, omitted := boundedReviewSlices(slice)
+	b.referenceOmissions = append(b.referenceOmissions, omitted...)
+	for _, bounded := range boundedSlices {
 		if bounded.ID == "" {
 			bounded.ID = sliceID(b.repositoryScan, bounded.Source, bounded.Title)
 		}
@@ -244,12 +408,23 @@ func normalizeSliceFiles(slice *store.ReviewSlice) {
 	sort.Strings(slice.TrustBoundaries)
 }
 
-func boundedReviewSlices(slice store.ReviewSlice) []store.ReviewSlice {
-	slice.Entrypoints = capFileRefs(slice.Entrypoints, maxReviewSliceEntrypoints)
-	slice.ContextFiles = capFileRefs(slice.ContextFiles, maxReviewSliceContext)
-	slice.Tests = capTestRefs(slice.Tests, maxReviewSliceTests)
+func boundedReviewSlices(slice store.ReviewSlice) ([]store.ReviewSlice, []security.MapperFileInventoryEntry) {
+	omitted := make([]security.MapperFileInventoryEntry, 0, len(slice.Entrypoints)+len(slice.ContextFiles)+len(slice.Tests))
+	var droppedFiles []store.ReviewSliceFile
+	var droppedTests []store.ReviewSliceTest
+	slice.Entrypoints, droppedFiles = capFileRefs(slice.Entrypoints, maxReviewSliceEntrypoints)
+	omitted = appendReferenceOmissions(omitted, droppedFiles, mapperReasonEntrypointCap)
+	slice.ContextFiles, droppedFiles = capFileRefs(slice.ContextFiles, maxReviewSliceContext)
+	omitted = appendReferenceOmissions(omitted, droppedFiles, mapperReasonContextCap)
+	slice.Tests, droppedTests = capTestRefs(slice.Tests, maxReviewSliceTests)
+	for _, test := range droppedTests {
+		if test.Path == "" {
+			continue
+		}
+		omitted = append(omitted, inventoryEntry(test.Path, security.MapperDispositionOmitted, mapperReasonTestCap))
+	}
 	if len(slice.OwnedFiles) <= maxReviewSliceOwnedFiles {
-		return []store.ReviewSlice{slice}
+		return []store.ReviewSlice{slice}, omitted
 	}
 
 	total := (len(slice.OwnedFiles) + maxReviewSliceOwnedFiles - 1) / maxReviewSliceOwnedFiles
@@ -269,7 +444,21 @@ func boundedReviewSlices(slice store.ReviewSlice) []store.ReviewSlice {
 		}
 		out = append(out, bounded)
 	}
-	return out
+	return out, omitted
+}
+
+func appendReferenceOmissions(
+	omitted []security.MapperFileInventoryEntry,
+	files []store.ReviewSliceFile,
+	reason string,
+) []security.MapperFileInventoryEntry {
+	for _, file := range files {
+		if file.Path == "" {
+			continue
+		}
+		omitted = append(omitted, inventoryEntry(file.Path, security.MapperDispositionOmitted, reason))
+	}
+	return omitted
 }
 
 func entrypointsForOwnedFiles(entrypoints, owned []store.ReviewSliceFile) []store.ReviewSliceFile {
@@ -290,18 +479,120 @@ func entrypointsForOwnedFiles(entrypoints, owned []store.ReviewSliceFile) []stor
 	return out
 }
 
-func capFileRefs(files []store.ReviewSliceFile, max int) []store.ReviewSliceFile {
+func capFileRefs(files []store.ReviewSliceFile, max int) ([]store.ReviewSliceFile, []store.ReviewSliceFile) {
 	if max <= 0 || len(files) <= max {
-		return files
+		return files, nil
 	}
-	return append([]store.ReviewSliceFile(nil), files[:max]...)
+	return append([]store.ReviewSliceFile(nil), files[:max]...), append([]store.ReviewSliceFile(nil), files[max:]...)
 }
 
-func capTestRefs(tests []store.ReviewSliceTest, max int) []store.ReviewSliceTest {
+func capTestRefs(tests []store.ReviewSliceTest, max int) ([]store.ReviewSliceTest, []store.ReviewSliceTest) {
 	if max <= 0 || len(tests) <= max {
-		return tests
+		return tests, nil
 	}
-	return append([]store.ReviewSliceTest(nil), tests[:max]...)
+	return append([]store.ReviewSliceTest(nil), tests[:max]...), append([]store.ReviewSliceTest(nil), tests[max:]...)
+}
+
+func inventoryEntry(filePath, disposition, reason string) security.MapperFileInventoryEntry {
+	return security.MapperFileInventoryEntry{Path: filePath, Disposition: disposition, Reason: reason}
+}
+
+func normalizeInventory(entries []security.MapperFileInventoryEntry) []security.MapperFileInventoryEntry {
+	if entries == nil {
+		return []security.MapperFileInventoryEntry{}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Path != entries[j].Path {
+			return entries[i].Path < entries[j].Path
+		}
+		if entries[i].Disposition != entries[j].Disposition {
+			return entries[i].Disposition < entries[j].Disposition
+		}
+		return entries[i].Reason < entries[j].Reason
+	})
+	out := make([]security.MapperFileInventoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		if len(out) > 0 && out[len(out)-1] == entry {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func boundedOmittedInventory(
+	collected, unassigned, references []security.MapperFileInventoryEntry,
+) ([]security.MapperFileInventoryEntry, int, error) {
+	limit := effectiveMapperOmittedInventoryEntryLimit()
+	required := make([]security.MapperFileInventoryEntry, 0, len(collected)+len(unassigned))
+	required = append(required, collected...)
+	required = append(required, unassigned...)
+	required = normalizeInventory(required)
+	if len(required) > limit {
+		return nil, 0, fmt.Errorf(
+			"required mapper omissions exceed %d entries",
+			security.MaxMapperOmittedInventoryEntries,
+		)
+	}
+
+	seen := make(map[security.MapperFileInventoryEntry]struct{}, len(required))
+	for _, entry := range required {
+		seen[entry] = struct{}{}
+	}
+	optional := normalizeInventory(append([]security.MapperFileInventoryEntry(nil), references...))
+	retainedOptional := optional[:0]
+	for _, entry := range optional {
+		if _, ok := seen[entry]; ok {
+			continue
+		}
+		retainedOptional = append(retainedOptional, entry)
+	}
+
+	remaining := limit - len(required)
+	truncated := max(len(retainedOptional)-remaining, 0)
+	retainedOptional = retainedOptional[:min(len(retainedOptional), remaining)]
+	bounded := append(required, retainedOptional...)
+	return normalizeInventory(bounded), truncated, nil
+}
+
+func reviewableInventory(
+	files []repoFile,
+	slices []store.ReviewSlice,
+) ([]security.MapperFileInventoryEntry, []security.MapperFileInventoryEntry) {
+	assigned := referencedSlicePaths(slices)
+	reviewable := make([]security.MapperFileInventoryEntry, 0, len(files))
+	omitted := []security.MapperFileInventoryEntry{}
+	for _, file := range files {
+		if _, ok := assigned[file.Path]; ok {
+			reviewable = append(reviewable, inventoryEntry(file.Path, security.MapperDispositionAssigned, mapperReasonAssigned))
+			continue
+		}
+		entry := inventoryEntry(file.Path, security.MapperDispositionOmitted, mapperReasonUnassigned)
+		reviewable = append(reviewable, entry)
+		omitted = append(omitted, entry)
+	}
+	return normalizeInventory(reviewable), normalizeInventory(omitted)
+}
+
+func referencedSlicePaths(slices []store.ReviewSlice) map[string]struct{} {
+	paths := map[string]struct{}{}
+	for _, slice := range slices {
+		for _, file := range slice.Entrypoints {
+			paths[file.Path] = struct{}{}
+		}
+		for _, file := range slice.OwnedFiles {
+			paths[file.Path] = struct{}{}
+		}
+		for _, file := range slice.ContextFiles {
+			paths[file.Path] = struct{}{}
+		}
+		for _, test := range slice.Tests {
+			if test.Path != "" {
+				paths[test.Path] = struct{}{}
+			}
+		}
+	}
+	return paths
 }
 
 func sliceID(repositoryScan, source, title string) string {
@@ -461,9 +752,6 @@ func nodeFilesForDir(dir string, files []repoFile) []repoFile {
 		if strings.HasPrefix(file.Path, dir+"/") {
 			out = append(out, file)
 		}
-	}
-	if len(out) > 24 {
-		out = out[:24]
 	}
 	return out
 }
@@ -629,9 +917,6 @@ func addGenericFallbackSlices(builder *sliceBuilder, files []repoFile) {
 	for top, topFiles := range byTop {
 		if len(topFiles) == 0 {
 			continue
-		}
-		if len(topFiles) > 24 {
-			topFiles = topFiles[:24]
 		}
 		owned := make([]store.ReviewSliceFile, 0, len(topFiles))
 		for _, file := range topFiles {

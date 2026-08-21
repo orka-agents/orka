@@ -415,6 +415,7 @@ describe('k8sMetadataSchema', () => {
       name: 'my-task',
       namespace: 'default',
       uid: '123e4567-e89b-12d3-a456-426614174000',
+      generation: 7,
       creationTimestamp: '2024-01-01T00:00:00Z',
       labels: { app: 'test' },
       annotations: { note: 'value' },
@@ -432,6 +433,12 @@ describe('k8sMetadataSchema', () => {
 
   it('rejects invalid labels type', () => {
     expect(() => k8sMetadataSchema.parse({ name: 'x', labels: 'invalid' })).toThrow()
+  })
+
+  it('rejects invalid generation values', () => {
+    expect(() => k8sMetadataSchema.parse({ name: 'x', generation: '3' })).toThrow()
+    expect(() => k8sMetadataSchema.parse({ name: 'x', generation: 1.5 })).toThrow()
+    expect(() => k8sMetadataSchema.parse({ name: 'x', generation: -1 })).toThrow()
   })
 })
 

@@ -48,6 +48,37 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
+  # Additive repository-security integrity rollout gates. Enforce output binding,
+  # pinned targets, and hardened analysis currently fail startup until their
+  # unpredictable lease and pinned capability-snapshot prerequisites are available.
+  securityIntegrity:
+    workerOutputBindingMode: audit
+    pinnedScanTargetsEnabled: false
+    qualityStateWritesEnabled: false
+    findingObservationWritesEnabled: false
+    bundleSealingMode: off
+    hardenedAnalysisEnabled: false
+    strictCompletionEnabled: false
+    deepScanEnabled: false
+
+  # Provider-neutral workspace.orka.ai control plane (disabled by default during rollout).
+  # Before enabling it during a Helm upgrade, apply the current chart CRDs explicitly;
+  # Helm does not upgrade CRDs from the crds/ directory and the chart fails closed otherwise.
+  workspaceProvider:
+    # Enable generic provider/class/pool/workspace coordination controllers.
+    apiEnabled: false
+    # Offline helm template --is-upgrade cannot use lookup. Set this only after
+    # independently verifying/applying the current workspace CRD schema.
+    crdUpgradeSchemaVerified: false
+    # Enable the development-only fake provider adapter.
+    fakeProviderEnabled: false
+    # Fail-closed Kubernetes admission required whenever apiEnabled is true.
+    classUseAdmission:
+      enabled: false
+      # Existing TLS Secret with tls.crt and tls.key for the webhook Service DNS name.
+      existingSecret: ""
+      # Base64-encoded PEM CA bundle trusted by the API server.
+      caBundle: ""
   # Operation-scoped ACP artifact transport stored on the controller PVC.
   acpArtifact:
     existingSecret: ""

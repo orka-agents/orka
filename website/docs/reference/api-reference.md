@@ -335,12 +335,31 @@ Common query parameters:
 - `namespace` — Kubernetes namespace to operate in.
 - `limit` — page size for list endpoints that support pagination.
 - `continue` — Kubernetes continue token for `GET /api/v1/security/repositories`.
+- `includeLatestRuns=true` — enriches `GET /api/v1/security/repositories` with one `latestScanRuns` entry per returned repository incarnation when a run exists.
 - `cursor` — store cursor for `GET /api/v1/security/repositories/:name/scans`, `GET /api/v1/security/repositories/:name/slices`, `GET /api/v1/security/repositories/:name/dropped-findings`, and `GET /api/v1/security/repositories/:name/findings`.
 - `severity`, `validationStatus`, `state`, `sliceID`, `category` — filters for `GET /api/v1/security/repositories/:name/findings`.
 - `status` — filter for `GET /api/v1/security/repositories/:name/slices`.
 - `scanRunID`, `sliceID`, `layer` — filters for `GET /api/v1/security/repositories/:name/dropped-findings`. `layer` is one of `validation`, `filter`, or `cap`.
 - `reason` — exact dropped-finding reason filter; use `reason=contains=<text>` for substring matching.
 - `recommended=true` — filters findings to recommended remediation candidates.
+
+### List Repository Scans
+
+**Endpoint:** `GET /api/v1/security/repositories`
+
+Pass `includeLatestRuns=true` to fetch the current page of authorized `RepositoryScan` resources and their latest scan runs in one response:
+
+```json
+{
+  "items": [],
+  "latestScanRuns": [],
+  "metadata": {
+    "continue": ""
+  }
+}
+```
+
+`latestScanRuns` contains at most one run for each repository in `items`. Runs are matched by repository name, UID, and generation before newest-run selection, so runs from a deleted or recreated repository incarnation are excluded. The field is scoped to the authorized repositories on the returned page.
 
 ### Create Repository Scan
 

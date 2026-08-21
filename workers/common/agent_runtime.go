@@ -28,6 +28,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/internal/workspace"
@@ -221,6 +222,7 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 	args = append(args, cfg.GitRepo, workspaceDir)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -295,8 +297,10 @@ type gitRefFetchMode int
 
 const (
 	gitRefFetchDirect gitRefFetchMode = iota
+	gitRefFetchCommit
 	gitRefFetchRemoteBranch
 	gitRefFetchRemoteHeads
+	gitCommitRefFetchDepth = "1000"
 )
 
 func validateReusedGitRemote(ctx context.Context, workspaceDir, expectedRepo string) error {
@@ -337,6 +341,10 @@ func gitRemoteForError(remote string) string {
 }
 
 func fetchGitRef(ctx context.Context, workspaceDir, ref string) (gitRefFetchMode, error) {
+	ref = strings.TrimSpace(ref)
+	if oid, ok := security.NormalizeFullGitObjectID(ref); ok {
+		return fetchGitCommitRef(ctx, workspaceDir, oid)
+	}
 	if branch, ok := gitBranchNameFromRef(ctx, workspaceDir, ref); ok {
 		refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch)
 		if err := execGitContext(ctx, workspaceDir, "fetch", "origin", refspec); err == nil {
@@ -352,7 +360,87 @@ func fetchGitRef(ctx context.Context, workspaceDir, ref string) (gitRefFetchMode
 	return gitRefFetchRemoteHeads, nil
 }
 
+func fetchGitCommitRef(ctx context.Context, workspaceDir, oid string) (gitRefFetchMode, error) {
+	if err := execGitContext(ctx, workspaceDir, "fetch", "--depth=1", "origin", oid); err == nil {
+		fetched, resolveErr := execGitOutputContext(ctx, workspaceDir, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
+		if resolveErr == nil && strings.EqualFold(strings.TrimSpace(fetched), oid) {
+			return gitRefFetchCommit, nil
+		}
+	}
+	if err := fetchGitCommitReachability(ctx, workspaceDir); err != nil {
+		return gitRefFetchCommit, fmt.Errorf("git fetch commit ref %q failed: %w", oid, err)
+	}
+	resolved, resolveErr := execGitOutputContext(ctx, workspaceDir, "rev-parse", "--verify", oid+"^{commit}")
+	if resolveErr != nil || !strings.EqualFold(strings.TrimSpace(resolved), oid) {
+		if err := fetchGitCommitFullReachability(ctx, workspaceDir); err != nil {
+			return gitRefFetchCommit, fmt.Errorf("git fetch commit ref %q failed: %w", oid, err)
+		}
+	}
+	if err := verifyExactGitCommitObject(ctx, workspaceDir, oid); err != nil {
+		return gitRefFetchCommit, fmt.Errorf("git fetch commit ref %q failed: %w", oid, err)
+	}
+	return gitRefFetchCommit, nil
+}
+
+func fetchGitCommitReachability(ctx context.Context, workspaceDir string) error {
+	return execGitContext(
+		ctx, workspaceDir, "fetch", "--depth="+gitCommitRefFetchDepth, "origin",
+		"+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*",
+	)
+}
+
+func fetchGitCommitFullReachability(ctx context.Context, workspaceDir string) error {
+	shallow, err := gitRepositoryIsShallow(ctx, workspaceDir)
+	if err != nil {
+		return err
+	}
+	args := []string{"fetch"}
+	if shallow {
+		args = append(args, "--unshallow")
+	}
+	args = append(
+		args,
+		"origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*",
+	)
+	return execGitContext(ctx, workspaceDir, args...)
+}
+
+func gitRepositoryIsShallow(ctx context.Context, workspaceDir string) (bool, error) {
+	out, err := execGitOutputContext(ctx, workspaceDir, "rev-parse", "--is-shallow-repository")
+	if err != nil {
+		return false, fmt.Errorf("git inspect repository depth failed: %w", err)
+	}
+	switch strings.TrimSpace(out) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("git inspect repository depth returned unexpected result %q", out)
+	}
+}
+
 func checkoutGitRef(ctx context.Context, workspaceDir, ref string, fetchMode gitRefFetchMode) error {
+	if fetchMode == gitRefFetchCommit {
+		oid, ok := security.NormalizeFullGitObjectID(ref)
+		if !ok {
+			return fmt.Errorf("git checkout commit ref %q is not a full object ID", ref)
+		}
+		if err := verifyExactGitCommitObject(ctx, workspaceDir, oid); err != nil {
+			return err
+		}
+		if err := execGitContext(ctx, workspaceDir, "checkout", "--detach", oid); err != nil {
+			return fmt.Errorf("git checkout fetched commit ref %q failed: %w", oid, err)
+		}
+		observed, err := execGitOutputContext(ctx, workspaceDir, "rev-parse", "--verify", "HEAD^{commit}")
+		if err != nil {
+			return fmt.Errorf("git verify checked out commit ref %q failed: %w", oid, err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(observed), oid) {
+			return fmt.Errorf("git checked out commit %q does not match requested object ID %q", observed, oid)
+		}
+		return nil
+	}
 	if fetchMode == gitRefFetchRemoteBranch || fetchMode == gitRefFetchRemoteHeads {
 		if err := checkoutRemoteGitBranch(ctx, workspaceDir, ref); err == nil {
 			return nil
@@ -372,6 +460,17 @@ func checkoutGitRef(ctx context.Context, workspaceDir, ref string, fetchMode git
 		return nil
 	}
 	return fmt.Errorf("git checkout ref %q failed", ref)
+}
+
+func verifyExactGitCommitObject(ctx context.Context, workspaceDir, oid string) error {
+	resolved, err := execGitOutputContext(ctx, workspaceDir, "rev-parse", "--verify", oid+"^{commit}")
+	if err != nil {
+		return fmt.Errorf("git resolve commit object %q failed: %w", oid, err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(resolved), oid) {
+		return fmt.Errorf("git resolved commit %q does not match requested object ID %q", resolved, oid)
+	}
+	return nil
 }
 
 func gitBranchNameFromRef(ctx context.Context, workspaceDir, ref string) (string, bool) {
@@ -463,6 +562,7 @@ func gitSafeDirectoryArgs(dir string, args ...string) []string {
 
 func execGitOutputContext(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", gitSafeDirectoryArgs(dir, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1")
 	cmd.Dir = dir
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
@@ -471,6 +571,7 @@ func execGitOutputContext(ctx context.Context, dir string, args ...string) (stri
 
 func execGitContext(ctx context.Context, dir string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", gitSafeDirectoryArgs(dir, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1")
 	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

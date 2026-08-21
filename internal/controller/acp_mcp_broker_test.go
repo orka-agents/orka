@@ -33,6 +33,8 @@ import (
 
 var apiextensionsJSONForMCPTest = apiextensionsv1.JSON{Raw: json.RawMessage(`{"type":"object"}`)}
 
+const brokerOKResultJSON = `{"ok":true}`
+
 func TestRegistryACPMCPToolExecutorReusesCustomToolExecutorWithIdempotency(t *testing.T) {
 	request, _ := testMCPBrokerRequest(t, harnessv2.MCPToolEffectConsequential)
 	request.Call.ToolName = "custom_tool"
@@ -47,7 +49,7 @@ func TestRegistryACPMCPToolExecutorReusesCustomToolExecutorWithIdempotency(t *te
 			t.Fatalf("custom tool body = %#v err=%v", body, err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(brokerOKResultJSON))
 	}))
 	defer upstream.Close()
 	tool := &corev1alpha1.Tool{
@@ -74,7 +76,7 @@ func TestRegistryACPMCPToolExecutorReusesCustomToolExecutorWithIdempotency(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(result) != `{"ok":true}` {
+	if string(result) != brokerOKResultJSON {
 		t.Fatalf("custom tool result = %s", result)
 	}
 
@@ -97,7 +99,7 @@ func TestRegistryACPMCPToolExecutorBindsTaskTransactionAuthority(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lastTxnToken.Store(r.Header.Get("Txn-Token"))
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(brokerOKResultJSON))
 	}))
 	defer upstream.Close()
 	tool := &corev1alpha1.Tool{
@@ -202,7 +204,7 @@ func TestRegistryACPMCPToolExecutorBindsTaskTransactionAuthority(t *testing.T) {
 		if err != nil {
 			t.Fatalf("authorized execution error = %v", err)
 		}
-		if string(result) != `{"ok":true}` {
+		if string(result) != brokerOKResultJSON {
 			t.Fatalf("authorized result = %s", result)
 		}
 		if got, _ := lastTxnToken.Load().(string); got != "task-scoped-token" {
@@ -384,7 +386,7 @@ func TestACPMCPBrokerRejectsAuthFenceProfileAndInactivePrompt(t *testing.T) {
 			return nil
 		}),
 		Executor: ACPMCPToolExecutorFunc(func(context.Context, harnessv2.MCPBrokerCallRequest, harnessv2.MCPToolDescriptor) (json.RawMessage, error) {
-			return json.RawMessage(`{"ok":true}`), nil
+			return json.RawMessage(brokerOKResultJSON), nil
 		}),
 		Effects: effects,
 	}

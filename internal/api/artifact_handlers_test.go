@@ -24,6 +24,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -311,4 +313,39 @@ func TestDownloadTaskArtifactStoreNotConfigured(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestListTaskArtifactsAuditModeMergesBoundAndLegacy(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "security-task", Namespace: "default", UID: "security-task-uid",
+			Labels: map[string]string{labels.LabelCreatedBy: securityOutputCreatedBy},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, Attempts: 1},
+	}
+	h, app, ss := setupTestHandlersWithArtifactStore(task)
+	h.integrityConfig.WorkerOutputBindingMode = security.WorkerOutputBindingAudit
+	app.Get("/api/v1/tasks/:id/artifacts", h.ListTaskArtifacts)
+
+	ctx := context.Background()
+	require.NoError(t, ss.SaveArtifact(ctx, "default", task.Name, "legacy.txt", "text/plain", []byte("legacy")))
+	require.NoError(t, ss.SaveBoundArtifact(ctx, &store.BoundArtifact{
+		Namespace: "default", TaskName: task.Name, Filename: "bound.json", ContentType: "application/json",
+		Data: []byte(`{"bound":true}`),
+		Provenance: store.OutputProvenance{
+			TaskUID: string(task.UID), TaskAttempt: 1, ProducerKind: store.OutputProducerController,
+			SubmissionNonceDigest: "audit-merge-binding",
+		},
+	}))
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/tasks/security-task/artifacts", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result struct {
+		Artifacts []store.ArtifactMetadata `json:"artifacts"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.Equal(t, []string{"bound.json", "legacy.txt"}, []string{
+		result.Artifacts[0].Filename, result.Artifacts[1].Filename,
+	})
 }

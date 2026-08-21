@@ -11,10 +11,16 @@ import (
 // SaveResult inserts or replaces a task result.
 func (s *Store) SaveResult(ctx context.Context, namespace, taskName string, data []byte) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO results (namespace, task_name, data, created_at, updated_at)
-		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		 ON CONFLICT(namespace, task_name) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`,
-		namespace, taskName, data,
+		`INSERT INTO results (namespace, task_name, data, staging_generation, content_size, created_at, updated_at)
+		 VALUES (?, ?, ?, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		 ON CONFLICT(namespace, task_name) DO UPDATE SET
+		   data = excluded.data,
+		   task_uid = '', job_uid = '', pod_uid = '', task_attempt = 0,
+		   producer_kind = 'legacy-unverified', runtime_session_id = '', turn_id = '', correlation_id = '',
+		   submission_nonce_digest = '', staging_generation = results.staging_generation + 1,
+		   content_size = excluded.content_size, content_sha256 = '',
+		   accepted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP`,
+		namespace, taskName, data, len(data),
 	)
 	return err
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/genai"
@@ -64,6 +65,8 @@ type ToolContext struct {
 	ExecutionMode             executionmode.Mode
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
+	// WorkerOutputBindingMode controls bound-result reads for repository-security tasks.
+	WorkerOutputBindingMode security.WorkerOutputBindingMode
 	// Brokered marks an authenticated controller-side MCP broker execution.
 	// Broker-aware tools must fail closed on missing request-scoped dependencies
 	// instead of falling back to controller process environment or credentials.

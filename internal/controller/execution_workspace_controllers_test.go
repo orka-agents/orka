@@ -428,7 +428,7 @@ func TestExecutionWorkspaceClassReconcilerRequiresReadyPool(t *testing.T) {
 		t.Fatalf("get pool: %v", err)
 	}
 	pool.Status.Conditions[0].Status = metav1.ConditionTrue
-	pool.Status.Conditions[0].Reason = "Ready"
+	pool.Status.Conditions[0].Reason = repositoryMonitorPhaseReady
 	if err := c.Status().Update(ctx, pool); err != nil {
 		t.Fatalf("mark pool ready: %v", err)
 	}

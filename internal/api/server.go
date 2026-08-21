@@ -29,6 +29,7 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/uiembed"
 )
@@ -73,6 +74,7 @@ type ServerConfig struct {
 	OIDC                      OIDCConfig
 	ContextTokens             ContextTokenConfig
 	ContextTokenAuthorization ContextTokenAuthorizationConfig
+	SecurityIntegrity         security.IntegrityConfig
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
@@ -84,6 +86,8 @@ type ServerConfig struct {
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
+	SecurityIntegrityStore    store.SecurityIntegrityStore
+	SecurityBundleStore       store.SecurityBundleStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
 	ExecutionEventStore       store.ExecutionEventStore
 	GatewayEventStore         store.GatewayEventStore
@@ -114,6 +118,8 @@ type Server struct {
 	MemoryStore            store.MemoryStore
 	MemoryProposalStore    store.MemoryProposalStore
 	SecurityStore          store.SecurityStore
+	SecurityIntegrityStore store.SecurityIntegrityStore
+	SecurityBundleStore    store.SecurityBundleStore
 	RepositoryMonitorStore store.RepositoryMonitorStore
 	ExecutionEventStore    store.ExecutionEventStore
 	GatewayEventStore      store.GatewayEventStore
@@ -145,6 +151,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		MemoryStore:            config.MemoryStore,
 		MemoryProposalStore:    config.MemoryProposalStore,
 		SecurityStore:          config.SecurityStore,
+		SecurityIntegrityStore: config.SecurityIntegrityStore,
+		SecurityBundleStore:    config.SecurityBundleStore,
 		RepositoryMonitorStore: config.RepositoryMonitorStore,
 		ExecutionEventStore:    config.ExecutionEventStore,
 		GatewayEventStore:      config.GatewayEventStore,
@@ -159,6 +167,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ExecutionMode:             config.ExecutionMode,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
 		ContextTokenAuthorization: config.ContextTokenAuthorization,
+		IntegrityConfig:           config.SecurityIntegrity,
 		ResultStore:               config.ResultStore,
 		SessionStore:              config.SessionStore,
 		SessionManager:            sessionManager,
@@ -169,6 +178,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		MemoryStore:               config.MemoryStore,
 		MemoryProposalStore:       config.MemoryProposalStore,
 		SecurityStore:             config.SecurityStore,
+		SecurityIntegrityStore:    config.SecurityIntegrityStore,
+		SecurityBundleStore:       config.SecurityBundleStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
 		GatewayEventStore:         config.GatewayEventStore,
@@ -177,10 +188,13 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
+	server.chatHandler.workerOutputBindingMode = config.SecurityIntegrity.WorkerOutputBindingMode
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.openaiHandler.workerOutputBindingMode = config.SecurityIntegrity.WorkerOutputBindingMode
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.anthropicHandler = NewAnthropicCompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.anthropicHandler.workerOutputBindingMode = config.SecurityIntegrity.WorkerOutputBindingMode
 	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.setupMiddleware()
 	server.setupRoutes()
@@ -403,11 +417,17 @@ func (s *Server) setupRoutes() {
 	api.Put("/security/repositories/:name/threat-model", s.handlers.UpdateThreatModel)
 	api.Get("/security/repositories/:name/scans", s.handlers.ListSecurityScanRuns)
 	api.Post("/security/repositories/:name/scans", s.handlers.CreateManualSecurityScan)
+	api.Get("/security/repositories/:name/scans/:runID/bundle", s.handlers.GetSecurityScanBundle)
+	api.Get("/security/repositories/:name/scans/:runID/coverage", s.handlers.GetSecurityScanCoverage)
 	api.Get("/security/repositories/:name/slices", s.handlers.ListSecurityReviewSlices)
 	api.Get("/security/repositories/:name/slices/:sliceID", s.handlers.GetSecurityReviewSlice)
 	api.Get("/security/repositories/:name/dropped-findings", s.handlers.ListSecurityDroppedFindings)
 	api.Get("/security/repositories/:name/findings", s.handlers.ListSecurityFindings)
 	api.Get("/security/findings/:id", s.handlers.GetSecurityFinding)
+	api.Post("/security/findings/:id/decisions", s.handlers.AppendSecurityFindingDecision)
+	api.Get("/security/findings/:id/occurrences", s.handlers.ListSecurityFindingOccurrences)
+	api.Get("/security/findings/:id/decisions", s.handlers.ListSecurityFindingDecisions)
+	api.Get("/security/findings/:id/assessments", s.handlers.ListSecurityFindingAssessments)
 	api.Post("/security/findings/:id/dismiss", s.handlers.DismissSecurityFinding)
 	api.Post("/security/findings/:id/reopen", s.handlers.ReopenSecurityFinding)
 	api.Post("/security/findings/:id/validate", s.handlers.ValidateSecurityFinding)
@@ -488,6 +508,7 @@ func (s *Server) setupRoutes() {
 				MemoryProposalStore: s.MemoryProposalStore,
 				ExecutionEventStore: s.ExecutionEventStore,
 				GatewayEventStore:   s.GatewayEventStore,
+				IntegrityConfig:     s.config.SecurityIntegrity,
 			},
 		)
 		internal := s.app.Group("/internal/v1")

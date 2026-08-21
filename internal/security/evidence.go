@@ -278,7 +278,7 @@ func ToFindingV2(
 	evidence := make([]store.FindingEvidenceRef, 0, len(item.Evidence))
 	for _, ref := range canonicalEvidenceRefs(item.Evidence) {
 		evidence = append(evidence, store.FindingEvidenceRef{
-			Kind:      "file",
+			Kind:      evidenceKindFile,
 			TaskName:  taskName,
 			Path:      ref.Path,
 			StartLine: ref.StartLine,
@@ -293,7 +293,7 @@ func ToFindingV2(
 		filePath = evidence[0].Path
 		line = evidence[0].StartLine
 	}
-	return &store.Finding{
+	finding := &store.Finding{
 		ID:                            FindingID(fingerprint),
 		Namespace:                     namespace,
 		RepositoryScan:                repositoryScan,
@@ -321,6 +321,16 @@ func ToFindingV2(
 		MinimumFixScope:               item.MinimumFixScope,
 		Evidence:                      evidence,
 	}
+	identity := DeriveSemanticIdentityForCandidate(repo.RepoURL, item, finding)
+	finding.IdentityQuality = identity.Quality
+	finding.IdentityAlgorithmVersion = identity.AlgorithmVersion
+	finding.SemanticFingerprint = identity.SemanticFingerprint
+	finding.LegacyFingerprint = fingerprint
+	// Immutable history is established only by controller occurrence
+	// finalization. Direct/gate-off projections remain explicitly unrebuildable.
+	finding.HistoryStatus = store.FindingHistoryLegacyUnrebuildable
+	return finding
+
 }
 
 func canonicalEvidenceRefs(refs []FindingsV2EvidenceRef) []FindingsV2EvidenceRef {

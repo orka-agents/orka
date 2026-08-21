@@ -20,6 +20,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/executionmode"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -38,6 +39,9 @@ func TestNewServer(t *testing.T) {
 		MetricsPort:    9090,
 		WatchNamespace: "default",
 		ExecutionMode:  executionmode.HarnessV1,
+		SecurityIntegrity: security.IntegrityConfig{
+			WorkerOutputBindingMode: security.WorkerOutputBindingAudit,
+		},
 	}
 
 	server := NewServer(fakeClient, nil, config)
@@ -53,6 +57,15 @@ func TestNewServer(t *testing.T) {
 	}
 	if server.config.Port != 8080 {
 		t.Errorf("Port = %d, want 8080", server.config.Port)
+	}
+	for name, mode := range map[string]security.WorkerOutputBindingMode{
+		"chat":      server.chatHandler.workerOutputBindingMode,
+		"openai":    server.openaiHandler.workerOutputBindingMode,
+		"anthropic": server.anthropicHandler.workerOutputBindingMode,
+	} {
+		if mode != security.WorkerOutputBindingAudit {
+			t.Errorf("%s worker output binding mode = %q, want audit", name, mode)
+		}
 	}
 	if server.config.Chat.ExecutionMode != executionmode.HarnessV1 ||
 		server.handlers.executionMode != executionmode.HarnessV1 ||

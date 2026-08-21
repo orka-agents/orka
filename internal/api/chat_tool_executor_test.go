@@ -28,6 +28,7 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
@@ -1165,6 +1166,44 @@ func TestExecuteFetchTaskOutput_Success(t *testing.T) {
 	data := r.Data.(map[string]any)
 	if data["output"] != "result output here" {
 		t.Errorf("output = %v", data["output"])
+	}
+}
+
+func TestExecuteFetchTaskOutputSecurityModePropagation(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "security-task", Namespace: testDefaultNamespace, UID: apitypes.UID("task-uid"),
+			Labels: map[string]string{labels.LabelCreatedBy: "repository-security"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded, Attempts: 1,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+	rs := &fakeResultStore{data: map[string][]byte{
+		testDefaultNamespace + "/" + task.Name: []byte("legacy output"),
+	}}
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
+	e := NewToolExecutor(c, controller.NewSessionManager(&fakeSessionStore{}), testDefaultNamespace, "sess-123", "", false, 5, 30*time.Second, rs)
+	call := llm.ToolCall{ID: "1", Name: "fetch_task_output", Arguments: json.RawMessage(`{"name":"security-task"}`)}
+
+	e.SetWorkerOutputBindingMode(security.WorkerOutputBindingAudit)
+	result, err := e.Execute(context.Background(), call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "legacy output") {
+		t.Fatalf("audit result = %q, want legacy output", result)
+	}
+
+	e.SetWorkerOutputBindingMode(security.WorkerOutputBindingEnforce)
+	result, err = e.Execute(context.Background(), call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result, "legacy output") || !strings.Contains(result, "failed to get result") {
+		t.Fatalf("enforce result = %q, want bound read error", result)
 	}
 }
 

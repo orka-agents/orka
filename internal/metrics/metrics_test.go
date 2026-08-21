@@ -275,3 +275,84 @@ func TestRecordExecutionEventMetrics(t *testing.T) {
 		t.Fatalf("derived failures=%v, want 1", got)
 	}
 }
+
+func TestRecordSecurityIntegrityMetrics(t *testing.T) {
+	SecurityOutputWritesTotal.Reset()
+	SecurityValidationRejectionsTotal.Reset()
+	SecurityIsolationOutcomesTotal.Reset()
+	SecurityInventoryEntriesTotal.Reset()
+	SecurityInventoryReasonClassesTotal.Reset()
+	SecurityTargetVerificationTotal.Reset()
+	SecurityBundleSealingTotal.Reset()
+	SecurityBundleSealingDuration.Reset()
+
+	RecordSecurityOutputWrite("artifact", "enforce", "denied", "wrong_attempt")
+	RecordSecurityValidationRejection("artifact_invalid")
+	RecordSecurityIsolationOutcome("prefer-hardened", "fallback")
+	RecordSecurityIsolationOutcome("require-hardened", "failed")
+	RecordSecurityInventoryEntries("reviewable", "supported-reviewable-file", 3)
+	RecordSecurityInventoryEntries("omitted", "context-reference-cap", 2)
+	RecordSecurityTargetVerification("verified")
+	RecordSecurityBundleSealing("shadow", "success", 0.2)
+
+	if got := getCounterValue(SecurityOutputWritesTotal, "artifact", "enforce", "denied", "wrong_attempt"); got != 1 {
+		t.Fatalf("SecurityOutputWritesTotal = %v", got)
+	}
+	if got := getCounterValue(SecurityValidationRejectionsTotal, "artifact_invalid"); got != 1 {
+		t.Fatalf("SecurityValidationRejectionsTotal = %v", got)
+	}
+	if got := getCounterValue(SecurityIsolationOutcomesTotal, "prefer-hardened", "fallback"); got != 1 {
+		t.Fatalf("SecurityIsolationOutcomesTotal fallback = %v", got)
+	}
+	if got := getCounterValue(SecurityIsolationOutcomesTotal, "require-hardened", "failed"); got != 1 {
+		t.Fatalf("SecurityIsolationOutcomesTotal failed = %v", got)
+	}
+	if got := getCounterValue(SecurityInventoryEntriesTotal, "eligible"); got != 3 {
+		t.Fatalf("SecurityInventoryEntriesTotal eligible = %v", got)
+	}
+	if got := getCounterValue(SecurityInventoryEntriesTotal, "omitted"); got != 2 {
+		t.Fatalf("SecurityInventoryEntriesTotal omitted = %v", got)
+	}
+	if got := getCounterValue(SecurityInventoryReasonClassesTotal, "eligible", "eligible"); got != 3 {
+		t.Fatalf("SecurityInventoryReasonClassesTotal eligible = %v", got)
+	}
+	if got := getCounterValue(SecurityInventoryReasonClassesTotal, "omitted", "truncated"); got != 2 {
+		t.Fatalf("SecurityInventoryReasonClassesTotal truncated = %v", got)
+	}
+	if got := getCounterValue(SecurityTargetVerificationTotal, "verified"); got != 1 {
+		t.Fatalf("SecurityTargetVerificationTotal = %v", got)
+	}
+	if got := getCounterValue(SecurityBundleSealingTotal, "shadow", "success"); got != 1 {
+		t.Fatalf("SecurityBundleSealingTotal = %v", got)
+	}
+	if got := getHistogramCount(SecurityBundleSealingDuration, "shadow", "success"); got != 1 {
+		t.Fatalf("SecurityBundleSealingDuration count = %v", got)
+	}
+}
+
+func TestSecurityMetricLabelsAreBounded(t *testing.T) {
+	SecurityIsolationOutcomesTotal.Reset()
+	SecurityInventoryEntriesTotal.Reset()
+	SecurityInventoryReasonClassesTotal.Reset()
+
+	RecordSecurityIsolationOutcome("tenant/repository", "task-123")
+	RecordSecurityInventoryEntries("path/to/repository", "secret-for-task-123", 2)
+	RecordSecurityInventoryEntries("excluded", "mapper_inventory_entry_limit", 4)
+	RecordSecurityInventoryEntries("omitted", "unreadable", 1)
+
+	if got := getCounterValue(SecurityIsolationOutcomesTotal, "unknown", "unknown"); got != 1 {
+		t.Fatalf("unbounded isolation labels were not collapsed: %v", got)
+	}
+	if got := getCounterValue(SecurityInventoryEntriesTotal, "unknown"); got != 2 {
+		t.Fatalf("unbounded inventory disposition was not collapsed: %v", got)
+	}
+	if got := getCounterValue(SecurityInventoryReasonClassesTotal, "unknown", "other"); got != 2 {
+		t.Fatalf("unbounded inventory reason was not collapsed: %v", got)
+	}
+	if got := getCounterValue(SecurityInventoryReasonClassesTotal, "excluded", "truncated"); got != 4 {
+		t.Fatalf("inventory entry-limit reason class = %v, want 4", got)
+	}
+	if got := getCounterValue(SecurityInventoryReasonClassesTotal, "omitted", "unreadable"); got != 1 {
+		t.Fatalf("inventory unreadable reason class = %v, want 1", got)
+	}
+}

@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/orka-agents/orka/internal/security"
+	storepkg "github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
@@ -149,6 +150,190 @@ func TestWorkspaceRootUsesSubPath(t *testing.T) {
 	if got := workspaceRoot(); got != filepath.Join(workspaceDir, "src") {
 		t.Fatalf("workspaceRoot() = %q", got)
 	}
+}
+
+func TestBuildSecurityMapperArtifactEmitsCoverageAccountableV2(t *testing.T) {
+	root := newMapperGitRepo(t)
+	if err := os.WriteFile(filepath.Join(root, "app.go"), []byte("package app\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(app.go) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# app\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(README.md) error = %v", err)
+	}
+	headOID := commitMapperRepo(t, root, "initial")
+	t.Setenv(workerenv.GitBranch, "main")
+	t.Setenv(workerenv.GitRef, "refs/heads/main")
+
+	artifact, err := buildSecurityMapperArtifact(context.Background(), root, "repo", "", headOID, true)
+	if err != nil {
+		t.Fatalf("buildSecurityMapperArtifact() error = %v", err)
+	}
+	if artifact.SchemaVersion != security.SchemaVersionReviewSlicesV2 {
+		t.Fatalf("schemaVersion = %d, want %d", artifact.SchemaVersion, security.SchemaVersionReviewSlicesV2)
+	}
+	if artifact.CoverageStatus != security.MapperCoverageAccountable {
+		t.Fatalf("coverageStatus = %q, want %q", artifact.CoverageStatus, security.MapperCoverageAccountable)
+	}
+	if artifact.DiscoveredFiles == nil || artifact.ReviewableFiles == nil || artifact.OmittedFiles == nil {
+		t.Fatalf("v2 inventories must be arrays: %#v", artifact)
+	}
+	if artifact.InventorySummary == nil || artifact.InventorySummary.Truncated ||
+		artifact.InventorySummary.TotalEntries != len(artifact.DiscoveredFiles) {
+		t.Fatalf("inventorySummary = %#v, want complete retained inventory", artifact.InventorySummary)
+	}
+	if artifact.TargetReceipt == nil || artifact.TargetReceipt.HeadOID != headOID ||
+		!artifact.TargetReceipt.CleanTrackedWorktree || artifact.TargetReceipt.RequestedBranch != "main" ||
+		artifact.TargetReceipt.RequestedRef != "refs/heads/main" {
+		t.Fatalf("targetReceipt = %#v, want exact clean HEAD and requested refs", artifact.TargetReceipt)
+	}
+	data, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	parsed, err := security.ParseReviewSlicesArtifact(data)
+	if err != nil {
+		t.Fatalf("ParseReviewSlicesArtifact() error = %v", err)
+	}
+	if parsed.CoverageStatus != security.MapperCoverageAccountable {
+		t.Fatalf("parsed coverageStatus = %q, want accountable", parsed.CoverageStatus)
+	}
+}
+
+func TestMapperCoverageForInventoryMarksTruncationPartial(t *testing.T) {
+	status, reasons := mapperCoverageForInventory(security.MapperInventorySummary{
+		EntryLimit:       2,
+		TotalEntries:     5,
+		RetainedEntries:  2,
+		TruncatedEntries: 3,
+		Truncated:        true,
+		Reason:           security.MapperCoverageReasonInventoryEntryLimit,
+	})
+	if status != security.MapperCoveragePartial {
+		t.Fatalf("coverage status = %q, want %q", status, security.MapperCoveragePartial)
+	}
+	if len(reasons) != 1 || reasons[0] != security.MapperCoverageReasonInventoryEntryLimit {
+		t.Fatalf("coverage reasons = %#v, want stable inventory limit reason", reasons)
+	}
+}
+
+func TestBuildMapperTargetReceiptRejectsAbbreviatedHeadAndDirtyWorktree(t *testing.T) {
+	t.Run("abbreviated head", func(t *testing.T) {
+		root := newMapperGitRepo(t)
+		if err := os.WriteFile(filepath.Join(root, "app.go"), []byte("package app\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(app.go) error = %v", err)
+		}
+		headOID := commitMapperRepo(t, root, "initial")
+		if _, err := buildMapperTargetReceipt(context.Background(), root, "", headOID[:12]); err == nil {
+			t.Fatal("buildMapperTargetReceipt() error = nil, want abbreviated head rejected")
+		} else if !strings.Contains(err.Error(), "must be a full") {
+			t.Fatalf("buildMapperTargetReceipt() error = %v, want full object ID rejection", err)
+		}
+	})
+
+	t.Run("untracked reviewable file", func(t *testing.T) {
+		root := newMapperGitRepo(t)
+		if err := os.WriteFile(filepath.Join(root, "app.go"), []byte("package app\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		commitMapperRepo(t, root, "initial")
+		if err := os.WriteFile(filepath.Join(root, "untracked.go"), []byte("package app\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := buildMapperTargetReceipt(context.Background(), root, "", "")
+		if err == nil || !strings.Contains(err.Error(), "not clean") {
+			t.Fatalf("untracked worktree error = %v", err)
+		}
+	})
+
+	t.Run("dirty tracked worktree", func(t *testing.T) {
+		root := newMapperGitRepo(t)
+		path := filepath.Join(root, "app.go")
+		if err := os.WriteFile(path, []byte("package app\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(app.go) error = %v", err)
+		}
+		commitMapperRepo(t, root, "initial")
+		if err := os.WriteFile(path, []byte("package app\n\nfunc dirty() {}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(dirty app.go) error = %v", err)
+		}
+		if _, err := buildMapperTargetReceipt(context.Background(), root, "", ""); err == nil {
+			t.Fatal("buildMapperTargetReceipt() error = nil, want dirty tracked worktree rejected")
+		} else if !strings.Contains(err.Error(), "not clean") {
+			t.Fatalf("buildMapperTargetReceipt() error = %v, want dirty worktree rejection", err)
+		}
+	})
+}
+
+func TestBuildMapperTargetReceiptClassifiesAndBoundsTreeIndex(t *testing.T) {
+	root := newMapperGitRepo(t)
+	for path, content := range map[string]string{
+		".gitattributes": "large.bin filter=lfs\n",
+		"app.go":         "package app\n",
+		"large.bin":      "version https://git-lfs.github.com/spec/v1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, path), []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, err)
+		}
+	}
+	runGit(t, root, "config", "filter.lfs.clean", "cat")
+	runGit(t, root, "config", "filter.lfs.smudge", "cat")
+	runGit(t, root, "config", "filter.lfs.required", "false")
+	symlinkAdded := true
+	if err := os.Symlink("app.go", filepath.Join(root, "app-link")); err != nil {
+		symlinkAdded = false
+	}
+	headOID := commitMapperRepo(t, root, "tree fixtures")
+
+	receipt, err := buildMapperTargetReceipt(context.Background(), root, "base-ref", headOID)
+	if err != nil {
+		t.Fatalf("buildMapperTargetReceipt() error = %v", err)
+	}
+	if receipt.TreeDigest == "" || receipt.SnapshotDigest == "" || receipt.TreeOID == "" {
+		t.Fatalf("target receipt missing digests: %#v", receipt)
+	}
+	if !treeEntryHasDisposition(receipt.TreeIndex, "large.bin", security.MapperTreeDispositionLFS) {
+		t.Fatalf("treeIndex = %#v, want large.bin classified as LFS", receipt.TreeIndex)
+	}
+	if symlinkAdded && !treeEntryHasDisposition(receipt.TreeIndex, "app-link", security.MapperTreeDispositionSymlink) {
+		t.Fatalf("treeIndex = %#v, want app-link classified as symlink", receipt.TreeIndex)
+	}
+	repeated, err := buildMapperTargetReceipt(context.Background(), root, "base-ref", headOID)
+	if err != nil {
+		t.Fatalf("buildMapperTargetReceipt(repeated) error = %v", err)
+	}
+	if !reflect.DeepEqual(receipt, repeated) {
+		t.Fatalf("target receipt is not deterministic:\nfirst=%#v\nsecond=%#v", receipt, repeated)
+	}
+
+	oldLimit := mapperTreeIndexLimit
+	mapperTreeIndexLimit = 2
+	t.Cleanup(func() { mapperTreeIndexLimit = oldLimit })
+	bounded, err := buildMapperTargetReceipt(context.Background(), root, "base-ref", headOID)
+	if err != nil {
+		t.Fatalf("buildMapperTargetReceipt(bounded) error = %v", err)
+	}
+	if !bounded.TreeIndexTruncated || len(bounded.TreeIndex) != 2 || bounded.TreeEntryCount <= len(bounded.TreeIndex) {
+		t.Fatalf("bounded target receipt = %#v, want a two-entry truncated index", bounded)
+	}
+}
+
+func TestParseMapperTreeEntryClassifiesSubmodule(t *testing.T) {
+	record := []byte("160000 commit " + strings.Repeat("a", 40) + "\tdeps/submodule\x00")
+	entry, err := parseMapperTreeEntry(record, "sha1")
+	if err != nil {
+		t.Fatalf("parseMapperTreeEntry() error = %v", err)
+	}
+	if entry.Disposition != security.MapperTreeDispositionSubmodule {
+		t.Fatalf("disposition = %q, want %q", entry.Disposition, security.MapperTreeDispositionSubmodule)
+	}
+}
+
+func treeEntryHasDisposition(entries []security.MapperTreeIndexEntry, path, disposition string) bool {
+	for _, entry := range entries {
+		if entry.Path == path && entry.Disposition == disposition {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPrepareWorkspaceIfConfiguredSetsCredentialsForExistingCheckout(t *testing.T) {
@@ -362,6 +547,47 @@ func TestChangedFilesForSecurityScanFallsBackToFullReviewForDeletedFiles(t *test
 	}
 }
 
+func TestChangedFilesForSecurityScanFallsBackForDivergedBase(t *testing.T) {
+	source := newMapperGitRepo(t)
+	if err := os.WriteFile(filepath.Join(source, "app.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(common) error = %v", err)
+	}
+	commonCommit := commitMapperRepo(t, source, "common")
+
+	runGit(t, source, "checkout", "-b", "rewritten")
+	rewritten := []byte("package main\n\nfunc rewritten() {}\n")
+	if err := os.WriteFile(filepath.Join(source, "app.go"), rewritten, 0o644); err != nil {
+		t.Fatalf("WriteFile(rewritten) error = %v", err)
+	}
+	rewrittenHead := commitMapperRepo(t, source, "rewritten head")
+
+	runGit(t, source, "checkout", "main")
+	original := []byte("package main\n\nfunc original() {}\n")
+	if err := os.WriteFile(filepath.Join(source, "app.go"), original, 0o644); err != nil {
+		t.Fatalf("WriteFile(original) error = %v", err)
+	}
+	divergedBase := commitMapperRepo(t, source, "original head")
+	if commonCommit == divergedBase || commonCommit == rewrittenHead {
+		t.Fatal("divergent history fixture did not create distinct commits")
+	}
+
+	computed, files, lineRanges, diffSummary, message, resolvedHead := changedFilesForSecurityScan(
+		context.Background(), source, divergedBase, rewrittenHead,
+	)
+	if computed || len(files) != 0 || len(lineRanges) != 0 || diffSummary != "" {
+		t.Fatalf(
+			"diverged incremental result = computed:%v files:%#v ranges:%#v summary:%q, want full-scan fallback",
+			computed, files, lineRanges, diffSummary,
+		)
+	}
+	if message != changedFilesDivergedError {
+		t.Fatalf("changedFilesError = %q, want stable %q", message, changedFilesDivergedError)
+	}
+	if resolvedHead != rewrittenHead {
+		t.Fatalf("resolved head = %q, want %q", resolvedHead, rewrittenHead)
+	}
+}
+
 func TestChangedFilesForSecurityScanRejectsNonSHARevisions(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "source")
 	if err := os.Mkdir(source, 0o755); err != nil {
@@ -568,4 +794,149 @@ func runGit(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s failed: %s: %v", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func newMapperGitRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	runGit(t, root, "init", "-b", "main")
+	runGit(t, root, "config", "user.email", "orka@example.com")
+	runGit(t, root, "config", "user.name", "Orka Test")
+	return root
+}
+
+func commitMapperRepo(t *testing.T, root, message string) string {
+	t.Helper()
+	runGit(t, root, "add", "-A")
+	runGit(t, root, "commit", "-m", message)
+	return runGit(t, root, "rev-parse", "HEAD")
+}
+
+func TestCleanTrackedWorktreeIgnoresArtifactDirectoryContents(t *testing.T) {
+	repo := newMapperGitRepo(t)
+	if err := os.MkdirAll(filepath.Join(repo, ".orka-artifacts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifactPath := filepath.Join(repo, ".orka-artifacts", "security-review-slices.json")
+	if err := os.WriteFile(artifactPath, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clean, err := cleanTrackedWorktree(context.Background(), repo)
+	if err != nil || !clean {
+		t.Fatalf("cleanTrackedWorktree(artifacts) = %v, %v", clean, err)
+	}
+	ignoreFile := filepath.Join(repo, ".gitignore")
+	if err := os.WriteFile(ignoreFile, []byte(".orka-artifacts/\nignored.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitMapperRepo(t, repo, "add ignores")
+	if err := os.WriteFile(filepath.Join(repo, "ignored.txt"), []byte("ignored dirty input"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clean, err = cleanTrackedWorktree(context.Background(), repo)
+	if err != nil || clean {
+		t.Fatalf("cleanTrackedWorktree(ignored input) = %v, %v", clean, err)
+	}
+	if err := os.Remove(filepath.Join(repo, "ignored.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "unexpected.txt"), []byte("dirty"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clean, err = cleanTrackedWorktree(context.Background(), repo)
+	if err != nil || clean {
+		t.Fatalf("cleanTrackedWorktree(unexpected) = %v, %v", clean, err)
+	}
+}
+
+func TestBuildSecurityMapperArtifactLegacyModeSkipsPinnedReceipt(t *testing.T) {
+	repo := newMapperGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	head := commitMapperRepo(t, repo, "initial")
+	artifact, err := buildSecurityMapperArtifact(context.Background(), repo, "repo", "", head, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.SchemaVersion != security.SchemaVersionReviewSlices || artifact.TargetReceipt != nil {
+		t.Fatalf("legacy mapper artifact = %#v", artifact)
+	}
+}
+
+func TestMarshalMapperArtifactWithinBudgetTruncatesInventories(t *testing.T) {
+	artifact := &security.ReviewSlicesArtifact{
+		SchemaVersion: security.SchemaVersionReviewSlices,
+		Slices:        []storepkg.ReviewSlice{{ID: "slice_api"}},
+	}
+	longPath := strings.Repeat("a", 4000)
+	for i := range 3000 {
+		artifact.DiscoveredFiles = append(artifact.DiscoveredFiles, security.MapperFileInventoryEntry{
+			Path: fmt.Sprintf("%s/%d.go", longPath, i), Disposition: "discovered", Reason: "source",
+		})
+	}
+	data, err := marshalMapperArtifactWithinBudget(artifact)
+	if err != nil {
+		t.Fatalf("marshalMapperArtifactWithinBudget() error = %v", err)
+	}
+	if len(data) > maxMapperArtifactBytes {
+		t.Fatalf("len(data) = %d, want <= %d", len(data), maxMapperArtifactBytes)
+	}
+	if len(artifact.DiscoveredFiles) != 0 || len(artifact.ReviewableFiles) != 0 || len(artifact.OmittedFiles) != 0 {
+		t.Fatalf("inventories were not truncated: %d/%d/%d",
+			len(artifact.DiscoveredFiles), len(artifact.ReviewableFiles), len(artifact.OmittedFiles))
+	}
+	truncated := false
+	for _, code := range artifact.CoverageReasonCodes {
+		if code == "inventory_truncated" {
+			truncated = true
+		}
+	}
+	if !truncated {
+		t.Fatalf("coverage reason codes = %v, want inventory_truncated", artifact.CoverageReasonCodes)
+	}
+	var decoded security.ReviewSlicesArtifact
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(decoded.Slices) != 1 {
+		t.Fatalf("len(slices) = %d, want slices preserved", len(decoded.Slices))
+	}
+}
+
+func TestMarshalMapperArtifactWithinBudgetKeepsSmallInventories(t *testing.T) {
+	artifact := &security.ReviewSlicesArtifact{
+		SchemaVersion:   security.SchemaVersionReviewSlices,
+		DiscoveredFiles: []security.MapperFileInventoryEntry{{Path: "main.go", Disposition: "discovered", Reason: "source"}},
+	}
+	data, err := marshalMapperArtifactWithinBudget(artifact)
+	if err != nil {
+		t.Fatalf("marshalMapperArtifactWithinBudget() error = %v", err)
+	}
+	var decoded security.ReviewSlicesArtifact
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(decoded.DiscoveredFiles) != 1 {
+		t.Fatalf("small inventory was truncated: %v", decoded.DiscoveredFiles)
+	}
+}
+
+func TestMarshalMapperArtifactWithinBudgetFailsClosedForPinnedV2(t *testing.T) {
+	artifact := &security.ReviewSlicesArtifact{
+		SchemaVersion: security.SchemaVersionReviewSlicesV2,
+	}
+	longPath := strings.Repeat("b", 4000)
+	for i := range 3000 {
+		artifact.DiscoveredFiles = append(artifact.DiscoveredFiles, security.MapperFileInventoryEntry{
+			Path: fmt.Sprintf("%s/%d.go", longPath, i), Disposition: "reviewable", Reason: "source",
+		})
+	}
+	if _, err := marshalMapperArtifactWithinBudget(artifact); err == nil ||
+		!strings.Contains(err.Error(), "cannot be truncated") {
+		t.Fatalf("marshalMapperArtifactWithinBudget(v2 oversized) error = %v, want fail-closed budget error", err)
+	}
+	if len(artifact.DiscoveredFiles) == 0 {
+		t.Fatal("v2 inventories must not be truncated")
+	}
 }

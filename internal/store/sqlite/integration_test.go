@@ -828,6 +828,21 @@ func TestIntegration_MigrateSecurityScanLegacySchema(t *testing.T) {
 		t.Fatalf("sql.Open() error = %v", err)
 	}
 	if _, err := legacyDB.Exec(`
+		CREATE TABLE security_scan_runs (
+			id              TEXT PRIMARY KEY,
+			namespace       TEXT NOT NULL,
+			repository_scan TEXT NOT NULL,
+			task_name       TEXT NOT NULL,
+			mode            TEXT NOT NULL,
+			phase           TEXT NOT NULL,
+			base_commit     TEXT NOT NULL DEFAULT '',
+			head_commit     TEXT NOT NULL DEFAULT '',
+			commit_count    INTEGER NOT NULL DEFAULT 0,
+			summary         TEXT NOT NULL DEFAULT '',
+			error_message   TEXT NOT NULL DEFAULT '',
+			started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			completed_at    TIMESTAMP
+		);
 		CREATE TABLE security_findings (
 			id                TEXT PRIMARY KEY,
 			namespace         TEXT NOT NULL,
@@ -879,6 +894,14 @@ func TestIntegration_MigrateSecurityScanLegacySchema(t *testing.T) {
 		);
 		INSERT INTO security_review_slices (id, namespace, repository_scan, source, title)
 		VALUES ('slice_api', 'ns1', 'repo1', 'legacy', 'Legacy API slice');
+		INSERT INTO security_scan_runs
+			(id, namespace, repository_scan, task_name, mode, phase, base_commit, head_commit, commit_count)
+		VALUES ('scan_legacy', 'ns1', 'repo1', 'legacy-task', 'initial', 'succeeded', '', 'abc123', 1);
+		INSERT INTO security_findings
+			(id, namespace, repository_scan, scan_run_id, fingerprint, title, summary, severity,
+			 confidence, validation_status, state)
+		VALUES ('fnd_legacy', 'ns1', 'repo1', 'scan_legacy', 'legacy-fingerprint', 'Legacy finding',
+			'Legacy summary', 'high', 'medium', 'unvalidated', 'open');
 	`); err != nil {
 		_ = legacyDB.Close()
 		t.Fatalf("seed legacy schema error = %v", err)
@@ -897,10 +920,44 @@ func TestIntegration_MigrateSecurityScanLegacySchema(t *testing.T) {
 	if _, err := secStore.GetReviewSlice(context.Background(), "ns1", "repo1", "slice_api"); err != nil {
 		t.Fatalf("GetReviewSlice() after migration error = %v", err)
 	}
-	for _, column := range []string{"slice_id", "category", "triage", "reproduction", "minimum_fix_scope"} {
+	for _, column := range []string{
+		"slice_id", "category", "triage", "reproduction", "minimum_fix_scope", "identity_quality",
+		"identity_algorithm_version", "semantic_fingerprint", "legacy_fingerprint", "history_status",
+		"current_occurrence_id", "decision_version",
+	} {
 		if !sqliteTableHasColumn(t, db, "security_findings", column) {
 			t.Fatalf("security_findings missing migrated column %q", column)
 		}
+	}
+	for _, column := range []string{
+		"run_uid", "repository_scan_uid", "repository_scan_generation", "request_idempotency_key",
+		"resolved_target_key", "target_receipt_id", "quality_schema_version", "coverage_status",
+		"validation_scope", "authorization_status", "isolation_status",
+	} {
+		if !sqliteTableHasColumn(t, db, "security_scan_runs", column) {
+			t.Fatalf("security_scan_runs missing migrated column %q", column)
+		}
+	}
+
+	legacyRun, err := secStore.GetScanRun(context.Background(), "ns1", "scan_legacy")
+	if err != nil {
+		t.Fatalf("GetScanRun(legacy) error = %v", err)
+	}
+	legacyQuality := store.LegacyScanQuality()
+	if legacyRun.RunUID != "" || legacyRun.ResolvedTargetKey != "" || legacyRun.TargetReceiptID != "" ||
+		!reflect.DeepEqual(legacyRun.Quality, legacyQuality) {
+		t.Fatalf("legacy scan run integrity defaults = %#v, want %#v", legacyRun, legacyQuality)
+	}
+	legacyFinding, err := secStore.GetFinding(context.Background(), "ns1", "fnd_legacy")
+	if err != nil {
+		t.Fatalf("GetFinding(legacy) error = %v", err)
+	}
+	if legacyFinding.IdentityQuality != store.IdentityQualityLegacy ||
+		legacyFinding.IdentityAlgorithmVersion != store.IdentityAlgorithmLegacyV2 ||
+		legacyFinding.LegacyFingerprint != legacyFinding.Fingerprint ||
+		legacyFinding.HistoryStatus != store.FindingHistoryLegacyUnrebuildable ||
+		legacyFinding.CurrentOccurrenceID != "" || legacyFinding.DecisionVersion != 0 {
+		t.Fatalf("legacy finding integrity defaults = %#v", legacyFinding)
 	}
 
 	ctx := context.Background()

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -188,6 +189,88 @@ func TestFetchAndCheckoutWorkspaceRefFetchesPinnedCommitHistory(t *testing.T) {
 	}
 }
 
+func TestFetchAndCheckoutWorkspaceRefFullOIDCannotBeShadowed(t *testing.T) {
+	cloneDir, targetSHA, decoySHA := newWorkspaceGitOIDShadowFixture(t)
+
+	if err := fetchAndCheckoutWorkspaceRef(
+		context.Background(), cloneDir, targetSHA, "https://github.com/example/repo.git",
+	); err != nil {
+		t.Fatalf("fetchAndCheckoutWorkspaceRef: %v", err)
+	}
+	if got := testGitOutput(t, cloneDir, "rev-parse", "HEAD"); got != targetSHA {
+		t.Fatalf("HEAD = %s, want exact target %s instead of shadow branch commit %s", got, targetSHA, decoySHA)
+	}
+	if branch := testGitOutput(t, cloneDir, "branch", "--show-current"); branch != "" {
+		t.Fatalf("branch = %q, want detached HEAD for full object ID", branch)
+	}
+}
+
+func TestFetchAndCheckoutWorkspaceRefFullOIDDeepensPastBoundedRefFetch(t *testing.T) {
+	cloneDir, targetSHA := newWorkspaceGitDeepHistoryFixture(t)
+	rejectDirectWorkspaceGitOIDFetch(t, targetSHA)
+
+	if err := fetchAndCheckoutWorkspaceRef(
+		context.Background(), cloneDir, targetSHA, "https://github.com/example/repo.git",
+	); err != nil {
+		t.Fatalf("fetchAndCheckoutWorkspaceRef: %v", err)
+	}
+	if got := testGitOutput(t, cloneDir, "rev-parse", "HEAD"); got != targetSHA {
+		t.Fatalf("HEAD = %s, want exact deep target %s", got, targetSHA)
+	}
+	if branch := testGitOutput(t, cloneDir, "branch", "--show-current"); branch != "" {
+		t.Fatalf("branch = %q, want detached HEAD for full object ID", branch)
+	}
+	if shallow := testGitOutput(t, cloneDir, "rev-parse", "--is-shallow-repository"); shallow != "false" {
+		t.Fatalf("is-shallow-repository = %q, want full fallback to unshallow the clone", shallow)
+	}
+}
+
+func TestFetchAndCheckoutWorkspaceRefFullOIDDeepensPastSHAshapedTag(t *testing.T) {
+	cloneDir, targetSHA, decoySHA := newWorkspaceGitDeepOIDShadowFixture(t)
+	rejectDirectWorkspaceGitOIDFetch(t, targetSHA)
+
+	if err := fetchAndCheckoutWorkspaceRef(
+		context.Background(), cloneDir, targetSHA, "https://github.com/example/repo.git",
+	); err != nil {
+		t.Fatalf("fetchAndCheckoutWorkspaceRef: %v", err)
+	}
+	if got := testGitOutput(t, cloneDir, "rev-parse", "HEAD"); got != targetSHA {
+		t.Fatalf("HEAD = %s, want exact deep target %s instead of shadow tag commit %s", got, targetSHA, decoySHA)
+	}
+	if branch := testGitOutput(t, cloneDir, "branch", "--show-current"); branch != "" {
+		t.Fatalf("branch = %q, want detached HEAD for full object ID", branch)
+	}
+	if shallow := testGitOutput(t, cloneDir, "rev-parse", "--is-shallow-repository"); shallow != "false" {
+		t.Fatalf("is-shallow-repository = %q, want shadow mismatch to trigger full fallback", shallow)
+	}
+}
+
+func TestFetchAndCheckoutWorkspaceRefExplicitSHAshapedBranchRemainsSymbolic(t *testing.T) {
+	cloneDir, targetSHA, decoySHA := newWorkspaceGitOIDShadowFixture(t)
+
+	if err := fetchAndCheckoutWorkspaceRef(
+		context.Background(), cloneDir, "refs/heads/"+targetSHA, "https://github.com/example/repo.git",
+	); err != nil {
+		t.Fatalf("fetchAndCheckoutWorkspaceRef: %v", err)
+	}
+	if got := testGitOutput(t, cloneDir, "rev-parse", "HEAD"); got != decoySHA {
+		t.Fatalf("HEAD = %s, want explicit branch commit %s", got, decoySHA)
+	}
+}
+
+func TestFetchAndCheckoutWorkspaceRefExplicitSHAshapedTagRemainsSymbolic(t *testing.T) {
+	cloneDir, targetSHA, decoySHA := newWorkspaceGitOIDShadowFixture(t)
+
+	if err := fetchAndCheckoutWorkspaceRef(
+		context.Background(), cloneDir, "refs/tags/"+targetSHA, "https://github.com/example/repo.git",
+	); err != nil {
+		t.Fatalf("fetchAndCheckoutWorkspaceRef: %v", err)
+	}
+	if got := testGitOutput(t, cloneDir, "rev-parse", "HEAD"); got != decoySHA {
+		t.Fatalf("HEAD = %s, want explicit tag commit %s", got, decoySHA)
+	}
+}
+
 func TestWorkspaceGitCommandForcesControllerAskpass(t *testing.T) {
 	t.Setenv(workerenv.GitToken, "token")
 	t.Setenv(workerenv.GitAskpass, "/tmp/attacker-askpass")
@@ -250,6 +333,131 @@ func TestWorkspaceGitCommandUsesGitHubTokenOnlyForGitHubRepos(t *testing.T) {
 	if env[workerenv.GitToken] != "" {
 		t.Fatalf("%s = %q, want no github fallback for non-GitHub repo", workerenv.GitToken, env[workerenv.GitToken])
 	}
+}
+
+func newWorkspaceGitOIDShadowFixture(t *testing.T) (cloneDir, targetSHA, decoySHA string) {
+	t.Helper()
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	if err := os.Mkdir(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, sourceDir, "init")
+	testGit(t, sourceDir, "config", "user.email", "test@example.invalid")
+	testGit(t, sourceDir, "config", "user.name", "Test User")
+	testGit(t, sourceDir, "checkout", "-B", "main")
+	if err := os.WriteFile(filepath.Join(sourceDir, "target.txt"), []byte("target\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, sourceDir, "add", ".")
+	testGit(t, sourceDir, "commit", "-m", "target")
+	targetSHA = testGitOutput(t, sourceDir, "rev-parse", "HEAD")
+
+	if err := os.WriteFile(filepath.Join(sourceDir, "decoy.txt"), []byte("decoy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, sourceDir, "add", ".")
+	testGit(t, sourceDir, "commit", "-m", "decoy")
+	decoySHA = testGitOutput(t, sourceDir, "rev-parse", "HEAD")
+	testGit(t, sourceDir, "branch", targetSHA, decoySHA)
+	testGit(t, sourceDir, "tag", targetSHA, decoySHA)
+
+	originDir := filepath.Join(root, "origin.git")
+	testGit(t, root, "clone", "--bare", sourceDir, originDir)
+	cloneDir = filepath.Join(root, "clone")
+	testGit(t, root, "clone", originDir, cloneDir)
+	return cloneDir, targetSHA, decoySHA
+}
+
+func newWorkspaceGitDeepHistoryFixture(t *testing.T) (cloneDir, targetSHA string) {
+	cloneDir, targetSHA, _ = newWorkspaceGitDeepHistoryFixtureWithShadow(t, false)
+	return cloneDir, targetSHA
+}
+
+func newWorkspaceGitDeepOIDShadowFixture(t *testing.T) (cloneDir, targetSHA, decoySHA string) {
+	return newWorkspaceGitDeepHistoryFixtureWithShadow(t, true)
+}
+
+func newWorkspaceGitDeepHistoryFixtureWithShadow(t *testing.T, shadow bool) (cloneDir, targetSHA, decoySHA string) {
+	t.Helper()
+	depth, err := strconv.Atoi(workspaceRefFetchDepth)
+	if err != nil {
+		t.Fatalf("parse workspaceRefFetchDepth: %v", err)
+	}
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	if err := os.Mkdir(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, sourceDir, "init")
+	testGit(t, sourceDir, "config", "user.email", "test@example.invalid")
+	testGit(t, sourceDir, "config", "user.name", "Test User")
+	testGit(t, sourceDir, "checkout", "-B", "main")
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, sourceDir, "add", "README.md")
+	testGit(t, sourceDir, "commit", "-m", "main")
+	mainCommit := testGitOutput(t, sourceDir, "rev-parse", "HEAD")
+
+	commitCount := depth + 2
+	var stream strings.Builder
+	for i := 1; i <= commitCount; i++ {
+		mark := strconv.Itoa(i)
+		message := "feature " + mark
+		stream.WriteString("commit refs/heads/feature\n")
+		stream.WriteString("mark :" + mark + "\n")
+		stream.WriteString("committer Test User <test@example.invalid> " + strconv.Itoa(i+1) + " +0000\n")
+		stream.WriteString("data " + strconv.Itoa(len(message)) + "\n" + message + "\n")
+		if i == 1 {
+			stream.WriteString("from " + mainCommit + "\n")
+		} else {
+			stream.WriteString("from :" + strconv.Itoa(i-1) + "\n")
+		}
+		stream.WriteByte('\n')
+	}
+	stream.WriteString("done\n")
+	fastImport := exec.Command("git", "fast-import", "--quiet")
+	fastImport.Dir = sourceDir
+	fastImport.Stdin = strings.NewReader(stream.String())
+	if out, err := fastImport.CombinedOutput(); err != nil {
+		t.Fatalf("git fast-import: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	targetSHA = testGitOutput(t, sourceDir, "rev-parse", "feature~"+strconv.Itoa(commitCount-1))
+	decoySHA = testGitOutput(t, sourceDir, "rev-parse", "feature")
+	if shadow {
+		testGit(t, sourceDir, "tag", targetSHA, decoySHA)
+	}
+
+	originDir := filepath.Join(root, "origin.git")
+	testGit(t, root, "clone", "--bare", sourceDir, originDir)
+	cloneDir = filepath.Join(root, "clone")
+	testGit(t, root, "clone", "--depth=1", "--branch", "main", "file://"+originDir, cloneDir)
+	return cloneDir, targetSHA, decoySHA
+}
+
+func rejectDirectWorkspaceGitOIDFetch(t *testing.T, oid string) {
+	t.Helper()
+	realGit := wrapperGitBinary
+	quotedRealGit := strings.ReplaceAll(realGit, "'", "'\"'\"'")
+	shim := filepath.Join(t.TempDir(), "git")
+	script := "#!/bin/sh\n" +
+		"is_fetch=false\n" +
+		"is_oid=false\n" +
+		"for arg in \"$@\"; do\n" +
+		"  [ \"$arg\" = fetch ] && is_fetch=true\n" +
+		"  [ \"$arg\" = " + oid + " ] && is_oid=true\n" +
+		"done\n" +
+		"if [ \"$is_fetch\" = true ] && [ \"$is_oid\" = true ]; then\n" +
+		"  echo 'raw object ID fetch disabled by test fixture' >&2\n" +
+		"  exit 128\n" +
+		"fi\n" +
+		"exec '" + quotedRealGit + "' \"$@\"\n"
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrapperGitBinary = shim
+	t.Cleanup(func() { wrapperGitBinary = realGit })
 }
 
 func newWorkspaceGitFixture(t *testing.T) (cloneDir, featureCommit string) {

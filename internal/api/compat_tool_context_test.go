@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -131,6 +132,15 @@ func TestCompatProxyToolContextSecretReadAuthorizationUsesCredentialSuggestion(t
 	toolErr := ctx.AuthorizeSecretRead(context.Background(), compatToolContextNamespace, "git-creds")
 	if toolErr == nil || toolErr.Type != compatToolAuthFailed || !strings.Contains(toolErr.Suggestion, "git credential secret") {
 		t.Fatalf("AuthorizeSecretRead = %#v, want credential-read suggestion", toolErr)
+	}
+}
+
+func TestCompatProxyToolContextPropagatesWorkerOutputBindingMode(t *testing.T) {
+	ctx := newCompatProxyToolContext(compatProxyToolContextConfig{
+		WorkerOutputBindingMode: security.WorkerOutputBindingEnforce,
+	})
+	if ctx.WorkerOutputBindingMode != security.WorkerOutputBindingEnforce {
+		t.Fatalf("WorkerOutputBindingMode = %q, want enforce", ctx.WorkerOutputBindingMode)
 	}
 }
 

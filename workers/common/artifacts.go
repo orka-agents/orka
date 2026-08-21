@@ -375,6 +375,7 @@ func doPostWithContentType(endpoint string, data []byte, saToken, contentType st
 			return fmt.Errorf("failed to create request: %w", err)
 		}
 		req.Header.Set("Content-Type", contentType)
+		applyOutputBindingHeaders(req)
 		if saToken != "" {
 			req.Header.Set("Authorization", "Bearer "+saToken)
 		}

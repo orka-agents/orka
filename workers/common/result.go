@@ -21,9 +21,12 @@ import (
 )
 
 const (
-	maxRetries      = 5
-	saTokenPath     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-	saNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	outputRuntimeSessionEnv = "ORKA_OUTPUT_RUNTIME_SESSION_ID"
+	outputTurnIDEnv         = "ORKA_OUTPUT_TURN_ID"
+	outputCorrelationIDEnv  = "ORKA_OUTPUT_CORRELATION_ID"
+	maxRetries              = 5
+	saTokenPath             = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	saNamespacePath         = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 	// MaxStructuredSummaryChars bounds agent-written summaries stored in structured
 	// results. Diffs remain intact for workspace handoff, but oversized summaries
@@ -133,6 +136,7 @@ func doPostOnceWithContentType(endpoint string, data []byte, saToken, contentTyp
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", contentType)
+	applyOutputBindingHeaders(req)
 	if saToken != "" {
 		req.Header.Set("Authorization", "Bearer "+saToken)
 	}
@@ -150,6 +154,21 @@ func doPostOnceWithContentType(endpoint string, data []byte, saToken, contentTyp
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+}
+
+func applyOutputBindingHeaders(req *http.Request) {
+	if req == nil {
+		return
+	}
+	for header, envName := range map[string]string{
+		"X-Orka-Runtime-Session-ID": outputRuntimeSessionEnv,
+		"X-Orka-Turn-ID":            outputTurnIDEnv,
+		"X-Orka-Correlation-ID":     outputCorrelationIDEnv,
+	} {
+		if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+			req.Header.Set(header, value)
+		}
+	}
 }
 
 // StructuredResult is an optional structured envelope for task results.

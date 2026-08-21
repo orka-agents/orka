@@ -33,7 +33,8 @@ import (
 )
 
 const (
-	defaultTaskUpdateScope = "orka:tasks:update"
+	contextTokenAuthorizationReasonUnknown = "unknown"
+	defaultTaskUpdateScope                 = "orka:tasks:update"
 
 	// ContextTokenAuthorizationModeOff disables context-token authorization checks.
 	ContextTokenAuthorizationModeOff = "off"
@@ -963,7 +964,7 @@ func redactedContextTokenAuthorizationFailures(failures []string) string {
 
 func contextTokenAuthorizationFailureReason(failures []string) string {
 	if len(failures) == 0 {
-		return "unknown"
+		return contextTokenAuthorizationReasonUnknown
 	}
 	joined := strings.ToLower(strings.Join(failures, "; "))
 	switch {

@@ -417,7 +417,7 @@ func validateValidationEvidenceRef(index int, ref store.FindingEvidenceRef, acce
 		return fmt.Errorf("validation.evidence[%d] may not reference task artifacts", index)
 	}
 	switch strings.TrimSpace(ref.Kind) {
-	case "file":
+	case evidenceKindFile:
 		if !SafeRepoPath(ref.Path) || ref.StartLine <= 0 || ref.EndLine < ref.StartLine {
 			return fmt.Errorf("validation.evidence[%d] has invalid file range", index)
 		}
@@ -446,7 +446,7 @@ func validateValidationEvidenceRef(index int, ref store.FindingEvidenceRef, acce
 
 func validationEvidenceWithinAcceptedFinding(ref store.FindingEvidenceRef, accepted []store.FindingEvidenceRef) bool {
 	for _, candidate := range accepted {
-		if candidate.Kind != "file" || candidate.Path != ref.Path {
+		if candidate.Kind != evidenceKindFile || candidate.Path != ref.Path {
 			continue
 		}
 		if ref.StartLine >= candidate.StartLine && ref.EndLine <= candidate.EndLine {

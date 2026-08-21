@@ -23,11 +23,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
 
-const maxResultSize = 10 << 20 // 10MB
+const (
+	maxResultSize              = 10 << 20 // 10MB
+	defaultArtifactContentType = "application/octet-stream"
+)
 
 // InternalHandlers contains handlers for internal worker endpoints.
 type InternalHandlers struct {
@@ -40,6 +44,7 @@ type InternalHandlers struct {
 	artifactStore       store.ArtifactStore
 	executionEventStore store.ExecutionEventStore
 	gatewayEventStore   store.GatewayEventStore
+	integrityConfig     security.IntegrityConfig
 	memoryStore         store.MemoryStore
 	memoryProposalStore store.MemoryProposalStore
 }
@@ -52,6 +57,7 @@ type InternalHandlersConfig struct {
 	MemoryProposalStore store.MemoryProposalStore
 	ExecutionEventStore store.ExecutionEventStore
 	GatewayEventStore   store.GatewayEventStore
+	IntegrityConfig     security.IntegrityConfig
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
@@ -70,6 +76,7 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		h.memoryProposalStore = configs[0].MemoryProposalStore
 		h.executionEventStore = configs[0].ExecutionEventStore
 		h.gatewayEventStore = configs[0].GatewayEventStore
+		h.integrityConfig = configs[0].IntegrityConfig
 	}
 	return h
 }
@@ -84,8 +91,7 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	// Verify caller namespace matches the URL namespace
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
+	if _, err := h.authorizeOutputWrite(c, "result", namespace, taskName); err != nil {
 		return err
 	}
 
@@ -104,9 +110,12 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 		if len(data) > maxResultSize {
 			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "result exceeds 10MB limit")
 		}
-		ctx := c.Context()
-		if err := h.resultStore.SaveResult(ctx, namespace, taskName, data); err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to save result: %v", err))
+		provenance, err := h.authorizeOutputWrite(c, "result", namespace, taskName)
+		if err != nil {
+			return err
+		}
+		if err := h.saveAuthorizedResult(c.Context(), namespace, taskName, data, provenance); err != nil {
+			return err
 		}
 		return c.SendStatus(fiber.StatusNoContent)
 	}
@@ -123,9 +132,12 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "empty request body")
 	}
 
-	ctx := c.Context()
-	if err := h.resultStore.SaveResult(ctx, namespace, taskName, data); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to save result: %v", err))
+	provenance, err := h.authorizeOutputWrite(c, "result", namespace, taskName)
+	if err != nil {
+		return err
+	}
+	if err := h.saveAuthorizedResult(c.Context(), namespace, taskName, data, provenance); err != nil {
+		return err
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)
@@ -207,7 +219,7 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid filename")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyArtifactUploadCaller(c, namespace, taskName); err != nil {
+	if _, err := h.authorizeOutputWrite(c, "artifact", namespace, taskName); err != nil {
 		return err
 	}
 
@@ -225,12 +237,15 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 
 	contentType := string(c.Request().Header.ContentType())
 	if contentType == "" {
-		contentType = "application/octet-stream"
+		contentType = defaultArtifactContentType
 	}
 
-	ctx := c.Context()
-	if err := h.artifactStore.SaveArtifact(ctx, namespace, taskName, filename, contentType, data); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to save artifact: %v", err))
+	provenance, err := h.authorizeOutputWrite(c, "artifact", namespace, taskName)
+	if err != nil {
+		return err
+	}
+	if err := h.saveAuthorizedArtifact(c.Context(), namespace, taskName, filename, contentType, data, provenance); err != nil {
+		return err
 	}
 
 	return c.SendStatus(fiber.StatusCreated)

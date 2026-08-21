@@ -61,7 +61,7 @@ func (t *FetchTaskOutputTool) Execute(ctx context.Context, args json.RawMessage)
 		return ChatToolErrorResult(internalErrorType, "result store not configured", "")
 	}
 
-	data, err := tc.ResultStore.GetResult(ctx, namespace, name)
+	data, err := toolTaskResult(ctx, tc, task)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return ChatToolErrorResult(errTypeNotFound, "result not found in store", "The result may have been deleted")

@@ -149,6 +149,22 @@ spec:
             value: /var/run/orka/publisher-auth/controller-token
           - name: ORKA_WORKSPACE_PUBLISHER_CAPABILITY_SECRET_FILE
             value: /var/run/orka/publisher-auth/operation-capability-secret
+          - name: ORKA_SECURITY_WORKER_OUTPUT_BINDING_MODE
+            value: audit
+          - name: ORKA_SECURITY_PINNED_SCAN_TARGETS_ENABLED
+            value: "false"
+          - name: ORKA_SECURITY_QUALITY_STATE_WRITES_ENABLED
+            value: "false"
+          - name: ORKA_SECURITY_FINDING_OBSERVATION_WRITES_ENABLED
+            value: "false"
+          - name: ORKA_SECURITY_BUNDLE_SEALING_MODE
+            value: "off"
+          - name: ORKA_SECURITY_HARDENED_ANALYSIS_ENABLED
+            value: "false"
+          - name: ORKA_SECURITY_STRICT_COMPLETION_ENABLED
+            value: "false"
+          - name: ORKA_SECURITY_DEEP_SCAN_ENABLED
+            value: "false"
         ports: []
         securityContext:
           readOnlyRootFilesystem: true

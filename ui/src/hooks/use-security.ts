@@ -8,6 +8,10 @@ interface ListResponse<T> {
   metadata?: { continue?: string }
 }
 
+export interface RepositoryScansResponse extends ListResponse<RepositoryScan> {
+  latestScanRuns?: ScanRun[]
+}
+
 const ALL_FINDINGS_PAGE_LIMIT = '100'
 
 export interface FindingsFilters {
@@ -25,7 +29,10 @@ export function useRepositoryScans() {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['security', 'repositories', namespace],
-    queryFn: () => api.get<ListResponse<RepositoryScan>>('/security/repositories', { namespace }),
+    queryFn: () => api.get<RepositoryScansResponse>('/security/repositories', {
+      namespace,
+      includeLatestRuns: 'true',
+    }),
     refetchInterval: 10000,
   })
 }
@@ -109,6 +116,7 @@ export function useRunSecurityScan(name: string) {
   return useMutation({
     mutationFn: () => api.post<ScanRun>(`/security/repositories/${name}/scans`, { namespace }),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['security', 'repositories', namespace] })
       queryClient.invalidateQueries({ queryKey: ['security', 'scans', namespace, name] })
       queryClient.invalidateQueries({ queryKey: ['security', 'repository', namespace, name] })
     },

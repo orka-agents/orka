@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 import type { ReactNode } from 'react'
@@ -11,12 +11,15 @@ vi.mock('zustand/middleware', () => ({
 }))
 
 import { useUIStore } from '@/stores/ui'
-import { useAllFindings } from './use-security'
+import { useAllFindings, useRepositoryScans, useRunSecurityScan } from './use-security'
 
-function createWrapper() {
-  const queryClient = new QueryClient({
+function createQueryClient() {
+  return new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
   })
+}
+
+function createWrapper(queryClient = createQueryClient()) {
   return ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   )
@@ -76,5 +79,46 @@ describe('useAllFindings', () => {
     expect(requests[0].searchParams.has('cursor')).toBe(false)
     expect(requests[1].searchParams.get('limit')).toBe('100')
     expect(requests[1].searchParams.get('cursor')).toBe('1')
+  })
+})
+
+
+describe('repository scan list batching', () => {
+  it('requests repositories and latest runs in one response', async () => {
+    const requests: URL[] = []
+    server.use(
+      http.get('/api/v1/security/repositories', ({ request }) => {
+        requests.push(new URL(request.url))
+        return HttpResponse.json({ items: [], latestScanRuns: [], metadata: {} })
+      }),
+    )
+
+    const { result } = renderHook(() => useRepositoryScans(), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0].searchParams.get('namespace')).toBe('default')
+    expect(requests[0].searchParams.get('includeLatestRuns')).toBe('true')
+    expect(result.current.data?.latestScanRuns).toEqual([])
+  })
+
+  it('invalidates the combined repository snapshot after starting a scan', async () => {
+    server.use(
+      http.post('/api/v1/security/repositories/:name/scans', () =>
+        HttpResponse.json({ id: 'scan-new', namespace: 'default', repositoryScan: 'repo' }),
+      ),
+    )
+    const queryClient = createQueryClient()
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+    const { result } = renderHook(() => useRunSecurityScan('repo'), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    act(() => result.current.mutate())
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ['security', 'repositories', 'default'],
+    })
   })
 })

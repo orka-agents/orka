@@ -25,6 +25,7 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
@@ -48,6 +49,7 @@ type ToolExecutor struct {
 	toolTimeout               time.Duration
 	watchNamespace            string
 	enforceNamespaceIsolation bool
+	workerOutputBindingMode   security.WorkerOutputBindingMode
 	resultStore               store.ResultStore
 	registry                  *tools.Registry
 	allowedToolNames          map[string]struct{}
@@ -100,6 +102,11 @@ func (e *ToolExecutor) SetAllowedTools(allowedTools []llm.Tool) {
 			e.allowedToolNames[name] = struct{}{}
 		}
 	}
+}
+
+// SetWorkerOutputBindingMode configures repository-security result reads.
+func (e *ToolExecutor) SetWorkerOutputBindingMode(mode security.WorkerOutputBindingMode) {
+	e.workerOutputBindingMode = mode
 }
 
 // SetTaskCreateAuthorizer installs an authorization hook for tools that create Tasks.
@@ -177,6 +184,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		ExecutionMode:             e.executionMode,
 		WatchNamespace:            e.watchNamespace,
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
+		WorkerOutputBindingMode:   e.workerOutputBindingMode,
 		ResultStore:               e.resultStore,
 		SessionDeleter:            e.sessionManager,
 		GenerateTaskName:          e.generateTaskName,

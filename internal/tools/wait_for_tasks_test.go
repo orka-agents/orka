@@ -16,11 +16,13 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/workers/common"
 )
 
@@ -936,6 +938,62 @@ func TestWaitForTasksTool_Execute_TruncatesOversizedStructuredData(t *testing.T)
 	data := waitResult.Results[0].Data
 	if data["truncated"] != true || data["originalBytes"] == nil {
 		t.Fatalf("data = %#v, want truncation marker", data)
+	}
+}
+
+func TestWaitForTasksToolSecurityLegacyFallbackFollowsMode(t *testing.T) {
+	structured, err := json.Marshal(common.StructuredResult{Version: 1, Summary: "legacy summary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "security-task", Namespace: defaultNamespace, UID: types.UID("task-uid"),
+			Labels: map[string]string{labels.LabelCreatedBy: repositorySecurityCreatedBy},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded, Attempts: 1,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(task).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	resultStore := newFakeWaitResultStore(map[string]string{task.Name: string(structured)})
+	for _, tt := range []struct {
+		name        string
+		mode        security.WorkerOutputBindingMode
+		wantSummary bool
+	}{
+		{name: "audit returns legacy result", mode: security.WorkerOutputBindingAudit, wantSummary: true},
+		{name: "enforce rejects legacy result", mode: security.WorkerOutputBindingEnforce},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := WithToolContext(context.Background(), &ToolContext{
+				Namespace: defaultNamespace, ResultStore: resultStore,
+				WorkerOutputBindingMode: tt.mode,
+			})
+			result, err := NewWaitForTasksTool(k8sClient).Execute(ctx, json.RawMessage(`{"tasks":["security-task"],"timeout":"1s"}`))
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var waitResult WaitForTasksResult
+			if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+				t.Fatalf("unmarshal result: %v", err)
+			}
+			got := waitResult.Results[0]
+			if tt.wantSummary {
+				if got.Summary != "legacy summary" || got.Result != "legacy summary" {
+					t.Fatalf("result = %#v, want legacy summary", got)
+				}
+				return
+			}
+			if got.Summary != "" || !strings.Contains(got.Result, "error reading result") {
+				t.Fatalf("result = %#v, want enforce-mode bound read error", got)
+			}
+		})
 	}
 }
 
