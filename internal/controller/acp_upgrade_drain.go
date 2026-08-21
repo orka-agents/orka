@@ -724,6 +724,13 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 	}
 	if pool.Spec.ExecutionWorkspace != nil && active == nil {
 		if pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
+			if pool.Status.ObservedGeneration != pool.Generation {
+				return fmt.Errorf(
+					"workspace stopped status observed generation %d instead of current generation %d",
+					pool.Status.ObservedGeneration,
+					pool.Generation,
+				)
+			}
 			return nil
 		}
 		return fmt.Errorf(

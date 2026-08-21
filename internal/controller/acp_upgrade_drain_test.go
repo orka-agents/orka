@@ -224,6 +224,12 @@ func TestACPUpgradeDrainRequiresStoppedSubstrateLifecycleWithoutActiveInstance(t
 		t.Fatalf("Stopping Substrate pool without active instance error = %v, want teardown proof rejection", err)
 	}
 	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+	pool.Status.ObservedGeneration = pool.Generation - 1
+	if err := coordinator.observeAndDrainRuntimePool(context.Background(), fence, pool, &ACPUpgradeDrainSnapshot{}); err == nil ||
+		!strings.Contains(err.Error(), "instead of current generation") {
+		t.Fatalf("stale Stopped Substrate pool error = %v, want generation-fence rejection", err)
+	}
+	pool.Status.ObservedGeneration = pool.Generation
 	if err := coordinator.observeAndDrainRuntimePool(context.Background(), fence, pool, &ACPUpgradeDrainSnapshot{}); err != nil {
 		t.Fatalf("fully stopped Substrate pool rejected: %v", err)
 	}
