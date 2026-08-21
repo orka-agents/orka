@@ -79,6 +79,11 @@ const (
 	// substrateActorCredentialSeededAnnotation records the exact actor lifetime
 	// whose bootstrap payload was accepted or authenticated by this controller.
 	substrateActorCredentialSeededAnnotation = "orka.ai/substrate-actor-credential-seeded"
+	// substrateActorTemplateFenceAnnotation records the exact Kubernetes
+	// ActorTemplate UID/resourceVersion that was validated before actor
+	// creation. Any template update or delete/recreate changes this fence and
+	// forces the actor to be recycled before credential bootstrap.
+	substrateActorTemplateFenceAnnotation = "orka.ai/substrate-actor-template-fence"
 
 	// substrateActorListenPort is the conventional actor service port the
 	// provider router forwards to.
@@ -144,6 +149,18 @@ func substrateRuntimeTemplateOwnedByPool(
 		}
 	}
 	return true
+}
+
+func substrateRuntimeTemplateFence(template *unstructured.Unstructured) (string, error) {
+	if template == nil {
+		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is required for revision fencing")
+	}
+	uid := strings.TrimSpace(string(template.GetUID()))
+	resourceVersion := strings.TrimSpace(template.GetResourceVersion())
+	if uid == "" || resourceVersion == "" {
+		return "", fmt.Errorf("RuntimePool substrate ActorTemplate is missing its Kubernetes UID/resourceVersion fence")
+	}
+	return uid + "/" + resourceVersion, nil
 }
 
 func runtimePoolIsSubstrateBacked(pool *corev1alpha1.RuntimePool) bool {
@@ -229,9 +246,16 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 	templateOwned := derivedTemplate == nil || substrateRuntimeTemplateOwnedByPool(derivedTemplate, desired.object)
 	templateRevision := ""
+	templateFence := ""
 	templateIntegrityErr := error(nil)
 	if derivedTemplate != nil && templateOwned {
 		templateRevision, templateIntegrityErr = substrateRuntimeTemplateIntegrity(derivedTemplate)
+		if templateIntegrityErr == nil {
+			templateFence, err = substrateRuntimeTemplateFence(derivedTemplate)
+			if err != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			}
+		}
 	}
 	control, err := r.substrateActorControl()
 	if err != nil {
@@ -261,6 +285,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		templateOwned = substrateRuntimeTemplateOwnedByPool(derivedTemplate, desired.object)
 		if templateOwned {
 			templateRevision, templateIntegrityErr = substrateRuntimeTemplateIntegrity(derivedTemplate)
+			if templateIntegrityErr == nil {
+				templateFence, err = substrateRuntimeTemplateFence(derivedTemplate)
+				if err != nil {
+					return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+				}
+			}
 		}
 	}
 
@@ -331,6 +361,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
+	if actor != nil && strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation]) != templateFence {
+		return r.recycleSubstrateActorForTemplateFenceChange(
+			ctx, pool, control, actorID, status,
+			"controller-derived substrate ActorTemplate changed after validation; recycling the exact actor before credential bootstrap",
+		)
+	}
 	if actor != nil && booted && (actor.SuspendedOrSuspending() || actor.SnapshotObserved) {
 		// A booted supervisor holds live pool and provider-proxy credentials in
 		// process memory; a provider-side suspension or snapshot has therefore
@@ -377,20 +413,60 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			}
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
+		if !substrateRuntimeTemplateOwnedByPool(derivedTemplate, desired.object) {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("created RuntimePool substrate ActorTemplate does not carry the exact RuntimePool ownership identity"))
+		}
+		createdRevision, integrityErr := substrateRuntimeTemplateIntegrity(derivedTemplate)
+		if integrityErr != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, integrityErr)
+		}
+		if createdRevision != desired.revision {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("created RuntimePool substrate ActorTemplate does not match the desired runtime revision"))
+		}
+		templateFence, err = substrateRuntimeTemplateFence(derivedTemplate)
+		if err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
 	}
 	if err := r.pruneStaleSubstrateRuntimePoolSecrets(ctx, pool, cfg, authSecret.Name, providerSecret.Name); err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 
 	if actor == nil {
+		if pool.Annotations[substrateActorTemplateFenceAnnotation] != templateFence {
+			if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, templateFence); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		if err := r.verifySubstrateRuntimeTemplateFence(
+			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
+		); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
 		if _, err := control.CreateActor(ctx, actorID, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName)); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+		if err := r.verifySubstrateRuntimeTemplateFence(
+			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
+		); err != nil {
+			return r.recycleSubstrateActorForTemplateFenceChange(
+				ctx, pool, control, actorID, status,
+				"controller-derived substrate ActorTemplate changed during actor creation; recycling the exact actor before credential bootstrap",
+			)
 		}
 		// Boot from scratch exactly once per actor lifetime: a supervisor
 		// lifetime is exactly one boot, so the fence boot ID is never resumed
 		// from a snapshot.
 		if _, err := control.ResumeActor(ctx, actorID, true); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+		if err := r.verifySubstrateRuntimeTemplateFence(
+			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
+		); err != nil {
+			return r.recycleSubstrateActorForTemplateFenceChange(
+				ctx, pool, control, actorID, status,
+				"controller-derived substrate ActorTemplate changed while the actor booted; recycling the exact actor before credential bootstrap",
+			)
 		}
 		if err := r.setSubstrateActorBootedAnnotation(ctx, pool, actorID); err != nil {
 			return ctrl.Result{}, err
@@ -413,6 +489,14 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if !actor.Running() {
 		r.applyProviderRuntimePoolColdStartStatus(pool, &status, "waiting for the provider actor workload to run")
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	if err := r.verifySubstrateRuntimeTemplateFence(
+		ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
+	); err != nil {
+		return r.recycleSubstrateActorForTemplateFenceChange(
+			ctx, pool, control, actorID, status,
+			"controller-derived substrate ActorTemplate changed while the actor booted; recycling the exact actor before credential bootstrap",
+		)
 	}
 
 	// Seed the booted supervisor's credentials before the authenticated
@@ -440,6 +524,14 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			sanitizeRuntimePoolMessage("credential bootstrap is not complete: "+err.Error()),
 		)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	if err := r.verifySubstrateRuntimeTemplateFence(
+		ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
+	); err != nil {
+		return r.recycleSubstrateActorForTemplateFenceChange(
+			ctx, pool, control, actorID, status,
+			"controller-derived substrate ActorTemplate changed during credential bootstrap; recycling the exact actor",
+		)
 	}
 	if bootstrapAlreadyComplete && pool.Annotations[substrateActorCredentialSeededAnnotation] != actorID {
 		probe, probeErr := r.supervisorClientForPool(pool).Probe(
@@ -545,6 +637,26 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 	default:
 		return false, fmt.Errorf("credential bootstrap returned status %d", response.StatusCode)
 	}
+}
+
+func (r *RuntimePoolReconciler) recycleSubstrateActorForTemplateFenceChange(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	control workspace.SubstrateRuntimeActorControl,
+	actorID string,
+	status corev1alpha1.RuntimePoolStatus,
+	message string,
+) (ctrl.Result, error) {
+	if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
+		return ctrl.Result{}, err
+	}
+	status.ActiveInstance = nil
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	status.Message = message
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }
 
 // substrateSyntheticInstancePod adapts the provider actor into the shared
@@ -890,6 +1002,9 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 		return err
 	}
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorCredentialSeededAnnotation, ""); err != nil {
+		return err
+	}
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, ""); err != nil {
 		return err
 	}
 	return r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorRecyclingAnnotation, "")
@@ -1275,6 +1390,31 @@ func (r *RuntimePoolReconciler) setSubstrateRuntimePoolAnnotation(
 	return nil
 }
 
+func (r *RuntimePoolReconciler) verifySubstrateRuntimeTemplateFence(
+	ctx context.Context,
+	namespace, name, expected string,
+) error {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return fmt.Errorf("RuntimePool substrate ActorTemplate fence is not recorded")
+	}
+	template, err := r.getSubstrateActorTemplate(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+	if template == nil {
+		return fmt.Errorf("RuntimePool substrate ActorTemplate disappeared after validation")
+	}
+	observed, err := substrateRuntimeTemplateFence(template)
+	if err != nil {
+		return err
+	}
+	if observed != expected {
+		return fmt.Errorf("RuntimePool substrate ActorTemplate UID/resourceVersion changed after validation")
+	}
+	return nil
+}
+
 func (r *RuntimePoolReconciler) getSubstrateActorTemplate(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
 	template := &unstructured.Unstructured{}
 	template.SetGroupVersionKind(substrateActorTemplateGVK)
@@ -1290,6 +1430,25 @@ func (r *RuntimePoolReconciler) getSubstrateActorTemplate(ctx context.Context, n
 			return nil, fmt.Errorf("read substrate ActorTemplate: the Substrate provider CRDs are not installed; Substrate-backed RuntimePools require an externally operated Substrate installation")
 		}
 		return nil, fmt.Errorf("read substrate ActorTemplate: %w", err)
+	}
+	return template, nil
+}
+
+func (r *RuntimePoolReconciler) getSubstrateActorTemplateForCleanup(
+	ctx context.Context,
+	namespace, name string,
+) (*unstructured.Unstructured, error) {
+	template := &unstructured.Unstructured{}
+	template.SetGroupVersionKind(substrateActorTemplateGVK)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, template); err != nil {
+		if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) || k8sRuntimeIsMissingKindError(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read substrate ActorTemplate for cleanup: %w", err)
 	}
 	return template, nil
 }
@@ -1616,7 +1775,7 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 		// is gone.
 		return true, nil
 	}
-	template, err := r.getSubstrateActorTemplate(ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName))
+	template, err := r.getSubstrateActorTemplateForCleanup(ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName))
 	if err != nil {
 		return false, err
 	}

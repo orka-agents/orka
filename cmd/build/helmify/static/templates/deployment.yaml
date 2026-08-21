@@ -348,6 +348,7 @@ spec:
             {{- with .Values.controller.substrate }}
             {{- if .enabled }}
             - --substrate-enabled=true
+            {{- end }}
             - {{ printf "--substrate-api-endpoint=%s" (.apiEndpoint | default "api.ate-system.svc:443") | quote }}
             {{- if .apiCAFile }}
             - {{ printf "--substrate-api-ca-file=%s" .apiCAFile | quote }}
@@ -370,7 +371,6 @@ spec:
             - --substrate-claim-timeout={{ .claimTimeout | default "2m" }}
             - --substrate-command-timeout={{ .commandTimeout | default "30m" }}
             - --substrate-cleanup-policy={{ .cleanupPolicy | default "delete" }}
-            {{- end }}
             {{- end }}
           env:
             - name: ORKA_AI_WORKER_CLUSTER_ROLE_NAME

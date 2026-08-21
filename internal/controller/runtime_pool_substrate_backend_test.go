@@ -45,13 +45,14 @@ const (
 )
 
 type fakeSubstrateActorControl struct {
-	actors  map[string]*workspace.SubstrateRuntimeActor
-	created []string
-	resumed []string
-	boots   []bool
-	settled []string
-	deleted []string
-	closed  int
+	actors      map[string]*workspace.SubstrateRuntimeActor
+	created     []string
+	resumed     []string
+	boots       []bool
+	settled     []string
+	deleted     []string
+	closed      int
+	afterCreate func()
 }
 
 func newFakeSubstrateActorControl() *fakeSubstrateActorControl {
@@ -74,6 +75,9 @@ func (f *fakeSubstrateActorControl) CreateActor(_ context.Context, actorID, temp
 		Status: substrateTestStatusSuspended,
 	}
 	f.actors[actorID] = actor
+	if f.afterCreate != nil {
+		f.afterCreate()
+	}
 	view := *actor
 	return &view, nil
 }
@@ -118,6 +122,37 @@ func (f *fakeSubstrateActorControl) DeleteActor(_ context.Context, actorID strin
 func (f *fakeSubstrateActorControl) Close() error {
 	f.closed++
 	return nil
+}
+
+type substrateTemplateUIDClient struct {
+	client.Client
+	next int
+}
+
+func (c *substrateTemplateUIDClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if template, ok := obj.(*unstructured.Unstructured); ok &&
+		template.GroupVersionKind() == substrateActorTemplateGVK && template.GetUID() == "" {
+		c.next++
+		template.SetUID(types.UID(fmt.Sprintf("test-substrate-template-%d", c.next)))
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+type substrateTemplateErrorReader struct {
+	client.Reader
+	err error
+}
+
+func (r *substrateTemplateErrorReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	if object.GetObjectKind().GroupVersionKind() == substrateActorTemplateGVK {
+		return r.err
+	}
+	return r.Reader.Get(ctx, key, object, options...)
 }
 
 func runtimePoolSubstrateTestScheme(t *testing.T) *runtime.Scheme {
@@ -166,6 +201,7 @@ func runtimePoolSubstrateTestReconciler(
 	scheme := runtimePoolSubstrateTestScheme(t)
 	pool := runtimePoolSubstrateTestObject()
 	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, substrateTestBaseTemplate())
+	r.Client = &substrateTemplateUIDClient{Client: r.Client}
 	r.SubstrateEnabled = true
 	r.SubstrateConfig = SubstrateConfig{
 		APIEndpoint:           "api.ate-system.svc:443",
@@ -259,6 +295,9 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	if got.Annotations[substrateActorBootedAnnotation] != actorID {
 		t.Fatalf("booted annotation = %q, want %q", got.Annotations[substrateActorBootedAnnotation], actorID)
 	}
+	if got.Annotations[substrateActorTemplateFenceAnnotation] == "" {
+		t.Fatal("validated ActorTemplate UID/resourceVersion fence was not recorded before actor creation")
+	}
 	var policies networkingv1.NetworkPolicyList
 	if err := r.List(context.Background(), &policies, client.InNamespace("ate-workers"), client.MatchingLabels{
 		runtimePoolKeyLabel: runtimePoolKey(pool.Namespace, pool.Name),
@@ -276,6 +315,72 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 		if len(policy.Spec.PolicyTypes) != 1 || policy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress || len(policy.Spec.Ingress) != 0 {
 			t.Fatalf("NetworkPolicy %q types/ingress = %v/%v, want egress-only confinement", policy.Name, policy.Spec.PolicyTypes, policy.Spec.Ingress)
 		}
+	}
+}
+
+func TestSubstrateRuntimePoolRejectsTemplateMutateAndRestoreDuringActorCreation(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+	control.afterCreate = func() {
+		derived := substrateTestDerivedTemplate(t, r, pool)
+		containers, found, err := unstructured.NestedSlice(derived.Object, "spec", "containers")
+		if err != nil || !found || len(containers) != 1 {
+			t.Fatalf("read derived containers before mutate-and-restore: found=%v err=%v", found, err)
+		}
+		container := containers[0].(map[string]any)
+		originalImage := container["image"]
+		container["image"] = runtimePoolTestTamperedImage
+		containers[0] = container
+		if err := unstructured.SetNestedSlice(derived.Object, containers, "spec", "containers"); err != nil {
+			t.Fatalf("mutate derived ActorTemplate: %v", err)
+		}
+		if err := r.Update(context.Background(), derived); err != nil {
+			t.Fatalf("persist mutated derived ActorTemplate: %v", err)
+		}
+
+		restored := substrateTestDerivedTemplate(t, r, pool)
+		containers, found, err = unstructured.NestedSlice(restored.Object, "spec", "containers")
+		if err != nil || !found || len(containers) != 1 {
+			t.Fatalf("read derived containers before restore: found=%v err=%v", found, err)
+		}
+		container = containers[0].(map[string]any)
+		container["image"] = originalImage
+		containers[0] = container
+		if err := unstructured.SetNestedSlice(restored.Object, containers, "spec", "containers"); err != nil {
+			t.Fatalf("restore derived ActorTemplate: %v", err)
+		}
+		if err := r.Update(context.Background(), restored); err != nil {
+			t.Fatalf("persist restored derived ActorTemplate: %v", err)
+		}
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	if len(control.created) != 1 || len(control.resumed) != 0 {
+		t.Fatalf("actor activity after template race = created:%v resumed:%v, want create followed by rejection before boot", control.created, control.resumed)
+	}
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("template race reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+	}
+	if len(control.deleted) != 1 {
+		t.Fatalf("deleted actors = %v, want raced actor recycled", control.deleted)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "changed during actor creation") {
+		t.Fatalf("status = %s/%q, want template-fence rejection", got.Status.Lifecycle, got.Status.Message)
+	}
+	if got.Annotations[substrateActorTemplateFenceAnnotation] != "" {
+		t.Fatal("template fence survived recycle of the raced actor")
+	}
+	if _, err := substrateRuntimeTemplateIntegrity(substrateTestDerivedTemplate(t, r, pool)); err != nil {
+		t.Fatalf("restored template integrity = %v, want content restored while resourceVersion still exposes the race", err)
 	}
 }
 
@@ -1003,6 +1108,38 @@ func TestSubstrateRuntimePoolFinalizerDeletesPoliciesWithoutTemplates(t *testing
 	}
 }
 
+func TestSubstrateRuntimePoolFinalizerToleratesRemovedProviderCRD(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	delete(control.actors, substrateTestActorID(pool))
+	r.APIReader = &substrateTemplateErrorReader{
+		Reader: r.Client,
+		err: &meta.NoKindMatchError{
+			GroupKind:        substrateActorTemplateGVK.GroupKind(),
+			SearchedVersions: []string{substrateActorTemplateGVK.Version},
+		},
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(context.Background(), &current); err != nil {
+		t.Fatalf("delete RuntimePool: %v", err)
+	}
+	for range 8 {
+		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+		if err != nil {
+			t.Fatalf("finalize after provider CRD removal: %v", err)
+		}
+		if result.RequeueAfter == 0 {
+			break
+		}
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("RuntimePool survived provider CRD removal cleanup: %v", err)
+	}
+}
+
 func TestSubstrateRuntimePoolFinalizerPreservesForeignActorTemplate(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
@@ -1055,6 +1192,15 @@ func TestSubstrateRouteHTTPTransportDialsRouterPreservingHost(t *testing.T) {
 	if seenHost != routeHost {
 		t.Fatalf("router saw Host %q, want logical route host %q", seenHost, routeHost)
 	}
+	uppercaseSuffixTransport, err := substrateRouteHTTPTransport(router.URL, strings.ToUpper(substrateTestActorDNSSuffix))
+	if err != nil {
+		t.Fatalf("uppercase DNS suffix transport: %v", err)
+	}
+	uppercaseResponse, err := (&http.Client{Transport: uppercaseSuffixTransport}).Get("http://" + routeHost + "/v2/health")
+	if err != nil {
+		t.Fatalf("case-insensitive actor DNS suffix route failed: %v", err)
+	}
+	_ = uppercaseResponse.Body.Close()
 
 	if _, err := httpClient.Get("http://not-an-actor.example.com/"); err == nil || !strings.Contains(err.Error(), "refuses non-actor host") {
 		t.Fatalf("non-actor host error = %v, want refusal", err)

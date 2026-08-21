@@ -2988,7 +2988,7 @@ func substrateRouteHTTPTransport(routerURL, actorDNSSuffix string) (http.RoundTr
 		}
 		routerAddress = net.JoinHostPort(parsed.Hostname(), port)
 	}
-	suffix := "." + strings.Trim(strings.TrimSpace(actorDNSSuffix), ".")
+	suffix := "." + strings.ToLower(strings.Trim(strings.TrimSpace(actorDNSSuffix), "."))
 	if suffix == "." {
 		return nil, fmt.Errorf("substrate actor DNS suffix is required")
 	}

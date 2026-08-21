@@ -1347,10 +1347,11 @@ func main() {
 		}
 		runtimePoolReconciler.Epochs = controllerEpochManager
 		runtimePoolReconciler.EnablePDB = true
-		if substrateEnabled {
-			runtimePoolReconciler.SubstrateEnabled = true
-			runtimePoolReconciler.SubstrateConfig = substrateConfig
-		}
+		runtimePoolReconciler.SubstrateEnabled = substrateEnabled
+		// Keep the provider connection and trust configuration available after
+		// admission is disabled so existing Substrate-backed pools can still
+		// destroy actors and release their finalizers.
+		runtimePoolReconciler.SubstrateConfig = substrateConfig
 		runtimePoolReconciler.AllowedImages = controller.ACPRuntimeImages{
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,

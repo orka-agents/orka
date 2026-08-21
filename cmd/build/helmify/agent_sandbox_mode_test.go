@@ -52,3 +52,30 @@ func TestStaticChartEnablesWorkspaceDispatchForSubstrate(t *testing.T) {
 		}
 	}
 }
+
+func TestStaticChartPreservesSubstrateCleanupConfigWhenDisabled(t *testing.T) {
+	output, err := helmTemplateStaticChart(t,
+		"--set", "controller.substrate.enabled=false",
+		"--set-string", "controller.substrate.apiEndpoint=cleanup-api.example.test:443",
+		"--set-string", "controller.substrate.apiCAFile=/var/run/substrate/ca.crt",
+		"--set-string", "controller.substrate.routerUrl=https://cleanup-router.example.test",
+		"--set-string", "controller.substrate.actorDnsSuffix=Actors.Example.Test",
+		"--show-only", "templates/deployment.yaml",
+	)
+	if err != nil {
+		t.Fatalf("helm template rejected disabled Substrate cleanup config: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"--substrate-api-endpoint=cleanup-api.example.test:443",
+		"--substrate-api-ca-file=/var/run/substrate/ca.crt",
+		"--substrate-router-url=https://cleanup-router.example.test",
+		"--substrate-actor-dns-suffix=Actors.Example.Test",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("disabled Substrate render is missing cleanup setting %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "--substrate-enabled=true") {
+		t.Fatalf("disabled Substrate render unexpectedly enables admission:\n%s", output)
+	}
+}
