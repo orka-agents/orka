@@ -24,6 +24,7 @@ func TestStaticChartValidatesAgentSandboxControllerMode(t *testing.T) {
 	t.Run("allows harness v2", func(t *testing.T) {
 		output, err := helmTemplateStaticChart(t,
 			"--set", "controller.agentSandbox.enabled=true",
+			"--set", "controller.executionWorkspace.dispatchEnabled=true",
 			"--show-only", "templates/deployment.yaml",
 		)
 		if err != nil {
@@ -34,6 +35,22 @@ func TestStaticChartValidatesAgentSandboxControllerMode(t *testing.T) {
 		}
 		if !strings.Contains(output, "--acp-workspace-dispatch-enabled=true") {
 			t.Fatalf("harness-v2 render is missing the workspace dispatch flag:\n%s", output)
+		}
+	})
+
+	t.Run("provider enablement does not enable dispatch", func(t *testing.T) {
+		output, err := helmTemplateStaticChart(t,
+			"--set", "controller.agentSandbox.enabled=true",
+			"--show-only", "templates/deployment.yaml",
+		)
+		if err != nil {
+			t.Fatalf("helm template rejected harness-v2 agent sandbox: %v\n%s", err, output)
+		}
+		if !strings.Contains(output, "--agent-sandbox-enabled=true") {
+			t.Fatalf("harness-v2 render is missing the agent sandbox flag:\n%s", output)
+		}
+		if strings.Contains(output, "--acp-workspace-dispatch-enabled=true") {
+			t.Fatalf("provider enablement unexpectedly enabled workspace dispatch:\n%s", output)
 		}
 	})
 }
@@ -70,6 +87,7 @@ func TestStaticChartGrantsAgentSandboxRuntimeRBAC(t *testing.T) {
 func TestStaticChartEnablesWorkspaceDispatchForSubstrate(t *testing.T) {
 	output, err := helmTemplateStaticChart(t,
 		"--set", "controller.substrate.enabled=true",
+		"--set", "controller.executionWorkspace.dispatchEnabled=true",
 		"--show-only", "templates/deployment.yaml",
 	)
 	if err != nil {

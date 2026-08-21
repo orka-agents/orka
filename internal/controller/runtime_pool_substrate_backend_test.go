@@ -292,6 +292,16 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	policiesAtActorCreation := 0
+	control.afterCreate = func() {
+		var policies networkingv1.NetworkPolicyList
+		if err := r.List(context.Background(), &policies, client.InNamespace(substrateTestWorkerNamespace), client.MatchingLabels{
+			runtimePoolKeyLabel: runtimePoolKey(pool.Namespace, pool.Name),
+		}); err != nil {
+			t.Fatalf("list Substrate RuntimePool NetworkPolicies during Actor creation: %v", err)
+		}
+		policiesAtActorCreation = len(policies.Items)
+	}
 
 	runtimePoolReconcile(t, r, pool)
 
@@ -301,6 +311,9 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	}
 	if len(control.resumed) != 1 || len(control.boots) != 1 || !control.boots[0] {
 		t.Fatalf("resume calls = %v boots = %v, want one fresh boot", control.resumed, control.boots)
+	}
+	if policiesAtActorCreation != 4 {
+		t.Fatalf("NetworkPolicies present at Actor creation = %d, want 4", policiesAtActorCreation)
 	}
 
 	derived := substrateTestDerivedTemplate(t, r, pool)
@@ -331,26 +344,6 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("list Substrate RuntimePool NetworkPolicies: %v", err)
 	}
-	if len(policies.Items) != 0 {
-		t.Fatalf("Substrate RuntimePool installed NetworkPolicies before credential-free Actor materialization: %#v", policies.Items)
-	}
-	probePod := substrateTestProbePod(pool)
-	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
-	idleWorker := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Namespace: substrateTestWorkerNamespace,
-		Name:      "worker-1",
-		Labels:    map[string]string{substrateWorkerPoolLabel: substrateTestWorkerPoolName},
-	}}
-	if err := r.Create(context.Background(), idleWorker); err != nil {
-		t.Fatalf("create idle WorkerPool Pod: %v", err)
-	}
-	runtimePoolReconcile(t, r, pool)
-	policies = networkingv1.NetworkPolicyList{}
-	if err := r.List(context.Background(), &policies, client.InNamespace(substrateTestWorkerNamespace), client.MatchingLabels{
-		runtimePoolKeyLabel: runtimePoolKey(pool.Namespace, pool.Name),
-	}); err != nil {
-		t.Fatalf("list confined Substrate RuntimePool NetworkPolicies: %v", err)
-	}
 	if len(policies.Items) != 4 {
 		t.Fatalf("Substrate RuntimePool NetworkPolicy count = %d, want 4", len(policies.Items))
 	}
@@ -359,27 +352,16 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 		if policy.Spec.PodSelector.MatchLabels[substrateWorkerPoolLabel] != substrateTestWorkerPoolName {
 			t.Fatalf("NetworkPolicy %q selector = %#v, want exact WorkerPool label", policy.Name, policy.Spec.PodSelector)
 		}
-		if policy.Spec.PodSelector.MatchLabels[runtimePoolUIDLabel] != string(pool.UID) {
-			t.Fatalf("NetworkPolicy %q selector = %#v, want exact RuntimePool UID", policy.Name, policy.Spec.PodSelector)
+		if len(policy.Spec.PodSelector.MatchLabels) != 1 {
+			t.Fatalf("NetworkPolicy %q selector = %#v, want replacement-safe WorkerPool-only selection", policy.Name, policy.Spec.PodSelector)
 		}
 		if len(policy.Spec.PolicyTypes) != 1 || policy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress || len(policy.Spec.Ingress) != 0 {
 			t.Fatalf("NetworkPolicy %q types/ingress = %v/%v, want egress-only confinement", policy.Name, policy.Spec.PolicyTypes, policy.Spec.Ingress)
 		}
 	}
-	confinedWorker := &corev1.Pod{}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, confinedWorker); err != nil {
-		t.Fatalf("get confined worker Pod: %v", err)
-	}
-	if confinedWorker.Labels[runtimePoolUIDLabel] != string(pool.UID) {
-		t.Fatalf("confined worker labels = %#v, want exact RuntimePool UID", confinedWorker.Labels)
-	}
-	idleWorker = &corev1.Pod{}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-1"}, idleWorker); err != nil {
-		t.Fatalf("get idle worker Pod: %v", err)
-	}
-	if idleWorker.Labels[runtimePoolUIDLabel] != "" {
-		t.Fatalf("idle worker was selected for another actor's confinement: %#v", idleWorker.Labels)
-	}
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
 }
 
 func TestSubstrateRuntimePoolRejectsTemplateMutateAndRestoreDuringActorCreation(t *testing.T) {
@@ -468,8 +450,8 @@ func TestSubstrateRuntimePoolRejectsForeignWorkerEgressPolicy(t *testing.T) {
 	runtimePoolReconcile(t, r, pool)
 	runtimePoolReconcile(t, r, pool)
 
-	if len(control.created) != 1 || len(control.resumed) != 1 {
-		t.Fatalf("credential-free Actor materialization = created:%v resumed:%v, want one boot", control.created, control.resumed)
+	if len(control.created) != 0 || len(control.resumed) != 0 {
+		t.Fatalf("foreign policy reached Actor materialization: created:%v resumed:%v", control.created, control.resumed)
 	}
 	if seedAttempts != 0 || supervisor.probeCalls != 0 {
 		t.Fatalf("foreign egress policy reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
@@ -479,6 +461,53 @@ func TestSubstrateRuntimePoolRejectsForeignWorkerEgressPolicy(t *testing.T) {
 		!strings.Contains(got.Status.Message, "NetworkPolicy") ||
 		!strings.Contains(got.Status.Message, "ownership identity") {
 		t.Fatalf("status = %s/%q, want fail-closed foreign NetworkPolicy rejection", got.Status.Lifecycle, got.Status.Message)
+	}
+}
+
+func TestSubstrateRuntimePoolWaitsAfterNetworkPolicyRepairBeforeCredentialSeed(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if seedAttempts != 0 {
+		t.Fatalf("credential seed attempts during initial Actor boot = %d, want 0", seedAttempts)
+	}
+	base := runtimePoolResourceName(pool.Namespace, pool.Name)
+	policy := &networkingv1.NetworkPolicy{}
+	key := types.NamespacedName{
+		Namespace: substrateTestWorkerNamespace,
+		Name:      runtimePoolChildName(base, runtimePoolSubstrateDenyEgressSuffix),
+	}
+	if err := r.Get(context.Background(), key, policy); err != nil {
+		t.Fatalf("get RuntimePool default-deny policy: %v", err)
+	}
+	policy.Spec.PodSelector.MatchLabels[substrateWorkerPoolLabel] = "drifted-worker-pool"
+	if err := r.Update(context.Background(), policy); err != nil {
+		t.Fatalf("drift RuntimePool default-deny policy: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("policy repair reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting ||
+		got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(got.Status.Message, "egress confinement") {
+		t.Fatalf("status = %s/%s %q, want Starting/Closed confinement barrier", got.Status.Lifecycle, got.Status.AdmissionState, got.Status.Message)
+	}
+
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	if seedAttempts != 1 {
+		t.Fatalf("credential seed attempts after confinement barrier = %d, want 1", seedAttempts)
 	}
 }
 
@@ -1205,8 +1234,11 @@ func TestSubstrateRuntimePoolRecyclesProviderSuspendedActor(t *testing.T) {
 	control.actors[actorID].SnapshotObserved = true
 
 	runtimePoolReconcile(t, r, pool)
-	if len(control.deleted) != 1 || control.deleted[0] != actorID {
-		t.Fatalf("deleted actors = %v, want the suspended actor recycled", control.deleted)
+	if len(control.deleted) != 0 {
+		t.Fatalf("deleted actors before workload absence proof = %v, want none", control.deleted)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("suspended actor worker Pod get = %v, want deleted before Actor", err)
 	}
 	got := runtimePoolTestGetPool(t, r, pool)
 	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
@@ -1215,6 +1247,12 @@ func TestSubstrateRuntimePoolRecyclesProviderSuspendedActor(t *testing.T) {
 	if !strings.Contains(got.Status.Message, "suspension is prohibited") {
 		t.Fatalf("message = %q, want suspension prohibition", got.Status.Message)
 	}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.deleted) != 1 || control.deleted[0] != actorID {
+		t.Fatalf("deleted actors = %v, want the workload-free suspended actor recycled", control.deleted)
+	}
+	got = runtimePoolTestGetPool(t, r, pool)
 	if got.Annotations[substrateActorBootedAnnotation] != "" {
 		t.Fatal("booted annotation survived the recycle")
 	}

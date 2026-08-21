@@ -126,8 +126,9 @@ func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
 }
 
 const (
-	runtimePoolControllerTokenKeyAPI  = "controller-token"
-	runtimePoolCapabilitySecretKeyAPI = "capability-secret"
+	runtimePoolControllerTokenKeyAPI   = "controller-token"
+	runtimePoolCapabilitySecretKeyAPI  = "capability-secret"
+	runtimePoolCredentialEpochLabelAPI = "orka.ai/runtime-pool-controller-epoch"
 )
 
 func (s *Server) authorizationReader() client.Reader {
@@ -167,10 +168,12 @@ func (s *Server) resolveArtifactRuntimePoolByIdentity(ctx context.Context, poolN
 	// During graceful epoch replacement both the draining instance's Secret
 	// and the next epoch's Secret exist; select the one mounted by the
 	// pool's exact active instance instead of requiring one Secret globally.
-	suffix := "auth-e" + strconv.FormatInt(pool.Status.ActiveInstance.ControllerEpoch, 10)
+	epoch := strconv.FormatInt(pool.Status.ActiveInstance.ControllerEpoch, 10)
+	legacySuffix := "auth-e" + epoch
 	var matched []*corev1.Secret
 	for i := range secrets.Items {
-		if strings.HasSuffix(secrets.Items[i].Name, suffix) {
+		secretEpoch := strings.TrimSpace(secrets.Items[i].Labels[runtimePoolCredentialEpochLabelAPI])
+		if secretEpoch == epoch || (secretEpoch == "" && strings.HasSuffix(secrets.Items[i].Name, legacySuffix)) {
 			matched = append(matched, &secrets.Items[i])
 		}
 	}

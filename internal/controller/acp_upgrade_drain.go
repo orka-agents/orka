@@ -722,16 +722,16 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 	if active != nil && (active.ControllerEpoch != fence.Epoch || pool.Status.ControllerEpoch != fence.Epoch) {
 		return fmt.Errorf("active instance is fenced to controller epoch %d instead of %d", active.ControllerEpoch, fence.Epoch)
 	}
-	if runtimePoolIsSubstrateBacked(pool) {
-		if active == nil {
-			if pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
-				return nil
-			}
-			return fmt.Errorf(
-				"has no authenticated active instance but Substrate lifecycle %q does not prove the provider actor is stopped",
-				pool.Status.Lifecycle,
-			)
+	if pool.Spec.ExecutionWorkspace != nil && active == nil {
+		if pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
+			return nil
 		}
+		return fmt.Errorf(
+			"has no authenticated active instance but workspace lifecycle %q does not prove the provider workspace is stopped",
+			pool.Status.Lifecycle,
+		)
+	}
+	if runtimePoolIsSubstrateBacked(pool) {
 		pod, err := upgradeDrainSubstrateInstancePod(pool, active)
 		if err != nil {
 			return err

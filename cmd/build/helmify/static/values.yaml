@@ -113,6 +113,8 @@ controller:
 
   # Experimental agent sandbox workspace support (disabled by default)
   executionWorkspace:
+    # Enables dispatch of ACP Tasks into configured execution-workspace providers.
+    dispatchEnabled: false
     # Default provider used when Task execution.workspace.provider is omitted.
     defaultProvider: agent-sandbox
 

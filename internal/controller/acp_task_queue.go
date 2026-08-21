@@ -164,7 +164,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			Reason:        corev1alpha1.ExecutionWorkspaceReasonPending,
 			ReusePolicy:   plan.Workspace.ReusePolicy,
 			CleanupPolicy: plan.Workspace.CleanupPolicy,
-			Reused:        poolPreexisting,
+			Reused:        acpWorkspaceRuntimePoolReused(pool, poolPreexisting),
 			Message:       "RuntimeSession is queued for a workspace-provider-backed RuntimePool",
 			ObservedAt:    &now,
 		}.Status()
@@ -176,6 +176,11 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		r.Recorder.Eventf(task, corev1.EventTypeNormal, "ACPTaskQueued", "Queued attempt %d for RuntimePool %s", attemptNumber, pool.Name)
 	}
 	return ctrl.Result{RequeueAfter: time.Second}, nil
+}
+
+func acpWorkspaceRuntimePoolReused(pool *corev1alpha1.RuntimePool, preexisting bool) bool {
+	return preexisting && pool != nil && pool.Spec.ExecutionWorkspace != nil &&
+		pool.Status.ActiveInstance != nil && pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped
 }
 
 //nolint:gocyclo // Rebinding keeps every queued-attempt fence and optimistic-lock check auditable together.

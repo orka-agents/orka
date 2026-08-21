@@ -105,6 +105,29 @@ func storePromptKey(task *corev1alpha1.Task, status *corev1alpha1.TaskExecutionS
 	return store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: int64(status.Attempt), PromptID: status.PromptID}
 }
 
+func TestACPWorkspaceRuntimePoolReusedRequiresLiveInstance(t *testing.T) {
+	pool := &corev1alpha1.RuntimePool{
+		Spec: corev1alpha1.RuntimePoolSpec{
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{Provider: corev1alpha1.WorkspaceProviderAgentSandbox},
+		},
+	}
+	if acpWorkspaceRuntimePoolReused(pool, false) {
+		t.Fatal("new workspace RuntimePool reported reuse")
+	}
+	if acpWorkspaceRuntimePoolReused(pool, true) {
+		t.Fatal("preexisting RuntimePool without a live instance reported reuse")
+	}
+	pool.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "runtime-1"}
+	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+	if acpWorkspaceRuntimePoolReused(pool, true) {
+		t.Fatal("stopped workspace RuntimePool reported reuse")
+	}
+	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleServing
+	if !acpWorkspaceRuntimePoolReused(pool, true) {
+		t.Fatal("serving workspace RuntimePool with a live instance did not report reuse")
+	}
+}
+
 func TestQueueACPExternalRuntimeTaskFailsClosedWithoutDurableDispatchState(t *testing.T) {
 	const preservedLabel = "sentinel-label"
 	scheme := runtime.NewScheme()
