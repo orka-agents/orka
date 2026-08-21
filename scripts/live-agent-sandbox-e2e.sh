@@ -22,6 +22,7 @@ orka_controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manage
 orka_api_service="${ORKA_API_SERVICE:-orka-api}"
 orka_api_service_port="${ORKA_API_SERVICE_PORT:-8080}"
 orka_api_local_port="${ORKA_API_LOCAL_PORT:-18084}"
+orka_api_client_service_account="${ORKA_API_CLIENT_SERVICE_ACCOUNT:-orka-client}"
 router_api_local_port="${ORKA_AGENT_SANDBOX_ROUTER_LOCAL_PORT:-18085}"
 e2e_run_id="$(sanitize_image_tag "${ORKA_AGENT_SANDBOX_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-agent-sandbox-e2e-${e2e_run_id}}"
@@ -242,7 +243,7 @@ assert_task_result_contains() {
   local api_token result_file status attempts_remaining
 
   wait_for_http "${api_base}/readyz" "Orka API /readyz"
-  api_token="$(kubectl -n "${orka_namespace}" create token orka-client)"
+  api_token="$(kubectl -n "${orka_namespace}" create token "${orka_api_client_service_account}")"
   result_file="${work_dir}/${task_name}-result.json"
   attempts_remaining=15
   while (( attempts_remaining > 0 )); do
@@ -329,6 +330,42 @@ spec:
       targetPort: http
 YAML
   run kubectl -n vekil-system rollout status deployment/vekil --timeout=2m
+}
+
+ensure_api_client_identity() {
+  log "Creating scoped Orka API client identity ${orka_api_client_service_account}"
+  kubectl apply -f - <<YAML
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ${orka_api_client_service_account}
+  namespace: ${orka_namespace}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ${orka_api_client_service_account}
+  namespace: ${orka_namespace}
+rules:
+  - apiGroups: ["core.orka.ai"]
+    resources: ["tasks"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ${orka_api_client_service_account}
+  namespace: ${orka_namespace}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ${orka_api_client_service_account}
+subjects:
+  - kind: ServiceAccount
+    name: ${orka_api_client_service_account}
+    namespace: ${orka_namespace}
+YAML
 }
 
 write_sandbox_fixture_dockerfile() {
@@ -1177,6 +1214,7 @@ main() {
     ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
     ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
   run kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
+  ensure_api_client_identity
   deploy_sandbox_router
   patch_controller_for_agent_sandbox
 
