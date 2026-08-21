@@ -115,6 +115,9 @@ type acpSessionLineageIdentity struct {
 	NamespaceUID    string
 	RuntimeIdentity string
 	ConfigDigest    string
+	// WorkspaceSessionUID is the immutable SessionControl identity frozen into
+	// a session-reused execution-workspace binding.
+	WorkspaceSessionUID string
 }
 
 func (d *ACPDispatcher) prepareTaskSession(
@@ -136,7 +139,9 @@ func (d *ACPDispatcher) prepareTaskSession(
 	if lineage.ConfigDigest == "" {
 		lineage.ConfigDigest = string(profileDigest)
 	}
-	preparation, err := d.planTaskSession(ctx, task, fence, profileDigest, mcpBindingDigest, runtimeInstanceID, supervisorBootID)
+	preparation, err := d.planTaskSession(
+		ctx, task, fence, profileDigest, mcpBindingDigest, runtimeInstanceID, supervisorBootID, lineage.WorkspaceSessionUID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -192,6 +197,7 @@ func (d *ACPDispatcher) planTaskSession(
 	mcpBindingDigest string,
 	runtimeInstanceID harnessv2.RuntimeInstanceID,
 	supervisorBootID harnessv2.SupervisorBootID,
+	expectedSessionUID string,
 ) (*acpTaskSessionPreparation, error) {
 	name := strings.TrimSpace(task.Spec.SessionRef.Name)
 	if name == "" {
@@ -213,6 +219,7 @@ func (d *ACPDispatcher) planTaskSession(
 	}
 	control, err := d.Sessions.EnsureSession(ctx, ACPEnsureSessionRequest{
 		Namespace: task.Namespace, SessionName: name, SessionType: sessionType,
+		ExpectedSessionUID:        expectedSessionUID,
 		RequireExistingTranscript: transcriptBackedPrompt && !task.Spec.SessionRef.Create,
 		Fence:                     fence, CreatedAt: time.Now().UTC(),
 	})

@@ -829,6 +829,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.requeueReservedTask(ctx, task, acpReservedRetryMCPConfiguration, err)
 	}
 	lineage := acpSessionLineageIdentity{RuntimeIdentity: bound.body.RuntimeType}
+	if bound.plan.Workspace != nil && bound.plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+		lineage.WorkspaceSessionUID = bound.plan.Workspace.SessionUID
+	}
 	if task.Spec.SessionRef != nil && d.Sessions.RecordsLineage() {
 		taskNamespace := &corev1.Namespace{}
 		if err := d.APIReader.Get(runtimeCtx, client.ObjectKey{Name: task.Namespace}, taskNamespace); err != nil {

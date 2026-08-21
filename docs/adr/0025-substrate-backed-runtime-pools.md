@@ -47,9 +47,10 @@ Agent Sandbox backends, with these Substrate-specific mappings:
   except `containers` from it and injects the single canonical supervisor
   container: the controller-approved immutable runtime image, the exact fence
   environment as literals, and **no credential material of any kind** (no
-  Secret references, no `valueFrom`, no bootstrap values). The only
-  bootstrap-related field is the public per-pool nonce
-  `ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE`. Template drift (either the rendered
+  Secret references, no `valueFrom`, no secret bootstrap values). The only
+  bootstrap-related fields are the public per-pool nonce
+  `ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE` and the non-secret Ed25519 verification
+  key `ORKA_ACP_CREDENTIAL_BOOTSTRAP_PUBLIC_KEY`. Template drift (either the rendered
   container or the copied infrastructure) changes the revision digest and
   triggers the standard drain-then-replace rollout.
 - **Post-boot credential bootstrap.** Because the provider golden-snapshots
@@ -60,13 +61,17 @@ Agent Sandbox backends, with these Substrate-specific mappings:
   (`lifecycle: booting`) and a one-time `PUT /v2/credential-bootstrap`
   endpoint, and blocks until seeded. After the actor boots, the pool
   reconciler seeds the pool controller token, HMAC capability secret, and
-  provider-proxy bearer over the router transport, gated by the
-  `X-Orka-Credential-Bootstrap-Nonce` header. First write wins; an identical
+  provider-proxy bearer over the router transport. The controller derives an
+  Ed25519 signing seed domain-separately from the pool capability secret and
+  signs the public nonce plus the exact request bytes; the supervisor verifies
+  `X-Orka-Credential-Bootstrap-Signature` using the public key in its template
+  before accepting credentials. The first valid signed write wins; an identical
   repeat is acknowledged (idempotent controller retries); a different payload
   returns 409 and the controller recycles the exact instance rather than
   trusting a workload seeded by another party. The nonce is public per-pool
-  entropy stored as a third key of the pool auth Secret — it fences *which*
-  workload the controller seeds, it grants nothing. All pool Secrets stay in
+  entropy stored as a third key of the pool auth Secret — it binds *which*
+  workload the controller seeds, while the signature authenticates the
+  controller and payload. All pool Secrets stay in
   the controller's runtime namespace; the template namespace never holds
   secret material. The seeded values travel over the same cluster-trusted
   channel that carries every subsequent Authorization header, and the

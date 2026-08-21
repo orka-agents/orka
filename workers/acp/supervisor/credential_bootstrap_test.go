@@ -30,7 +30,11 @@ func validBootstrapRequest() CredentialBootstrapRequest {
 	}
 }
 
-func putBootstrap(t *testing.T, server *httptest.Server, nonce string, body []byte) *http.Response {
+func validBootstrapSigningSecret() []byte {
+	return []byte(strings.Repeat("s", harnessv2.MinCapabilitySecretBytes))
+}
+
+func putBootstrapWithSigningSecret(t *testing.T, server *httptest.Server, nonce string, body, signingSecret []byte) *http.Response {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodPut, server.URL+harnessv2.CredentialBootstrapPath, bytes.NewReader(body))
 	if err != nil {
@@ -39,12 +43,24 @@ func putBootstrap(t *testing.T, server *httptest.Server, nonce string, body []by
 	if nonce != "" {
 		request.Header.Set(harnessv2.CredentialBootstrapNonceHeader, nonce)
 	}
+	if signingSecret != nil {
+		signature, err := harnessv2.SignCredentialBootstrap(signingSecret, nonce, body)
+		if err != nil {
+			t.Fatalf("sign bootstrap request: %v", err)
+		}
+		request.Header.Set(harnessv2.CredentialBootstrapSignatureHeader, signature)
+	}
 	response, err := server.Client().Do(request)
 	if err != nil {
 		t.Fatalf("send bootstrap request: %v", err)
 	}
 	t.Cleanup(func() { _ = response.Body.Close() })
 	return response
+}
+
+func putBootstrap(t *testing.T, server *httptest.Server, nonce string, body []byte) *http.Response {
+	t.Helper()
+	return putBootstrapWithSigningSecret(t, server, nonce, body, validBootstrapSigningSecret())
 }
 
 func TestCredentialBootstrapConfigured(t *testing.T) {
@@ -87,7 +103,11 @@ func TestCredentialBootstrapConfigured(t *testing.T) {
 }
 
 func TestCredentialBootstrapHandlerSemantics(t *testing.T) {
-	state := &credentialBootstrapState{nonce: "pool-nonce", received: make(chan struct{})}
+	publicKey, err := harnessv2.CredentialBootstrapPublicKey(validBootstrapSigningSecret())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &credentialBootstrapState{nonce: "pool-nonce", publicKey: publicKey, received: make(chan struct{})}
 	server := httptest.NewServer(state.handler())
 	defer server.Close()
 
@@ -125,12 +145,23 @@ func TestCredentialBootstrapHandlerSemantics(t *testing.T) {
 		}
 	})
 	t.Run("missing nonce forbidden", func(t *testing.T) {
-		if status := putBootstrap(t, server, "", seedBody).StatusCode; status != http.StatusForbidden {
+		if status := putBootstrapWithSigningSecret(t, server, "", seedBody, nil).StatusCode; status != http.StatusForbidden {
 			t.Fatalf("status = %d, want 403", status)
 		}
 	})
 	t.Run("wrong nonce forbidden", func(t *testing.T) {
 		if status := putBootstrap(t, server, "other-nonce", seedBody).StatusCode; status != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", status)
+		}
+	})
+	t.Run("missing controller signature forbidden", func(t *testing.T) {
+		if status := putBootstrapWithSigningSecret(t, server, "pool-nonce", seedBody, nil).StatusCode; status != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", status)
+		}
+	})
+	t.Run("signature from another pool forbidden", func(t *testing.T) {
+		otherSecret := []byte(strings.Repeat("o", harnessv2.MinCapabilitySecretBytes))
+		if status := putBootstrapWithSigningSecret(t, server, "pool-nonce", seedBody, otherSecret).StatusCode; status != http.StatusForbidden {
 			t.Fatalf("status = %d, want 403", status)
 		}
 	})
@@ -191,6 +222,11 @@ func TestAwaitCredentialBootstrapSeedsAndReleasesListener(t *testing.T) {
 	_ = listener.Close()
 
 	t.Setenv(EnvCredentialBootstrapNonce, "pool-nonce")
+	publicKey, err := harnessv2.CredentialBootstrapPublicKey(validBootstrapSigningSecret())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvCredentialBootstrapPublicKey, publicKey)
 	t.Setenv(EnvListenAddress, address)
 
 	type awaited struct {
@@ -212,6 +248,11 @@ func TestAwaitCredentialBootstrapSeedsAndReleasesListener(t *testing.T) {
 			t.Fatalf("build request: %v", err)
 		}
 		request.Header.Set(harnessv2.CredentialBootstrapNonceHeader, "pool-nonce")
+		signature, signErr := harnessv2.SignCredentialBootstrap(validBootstrapSigningSecret(), "pool-nonce", seedBody)
+		if signErr != nil {
+			t.Fatalf("sign request: %v", signErr)
+		}
+		request.Header.Set(harnessv2.CredentialBootstrapSignatureHeader, signature)
 		response, err := http.DefaultClient.Do(request)
 		if err == nil {
 			status := response.StatusCode
@@ -263,6 +304,11 @@ func TestAwaitCredentialBootstrapStopsWhenContextIsCancelled(t *testing.T) {
 	_ = listener.Close()
 
 	t.Setenv(EnvCredentialBootstrapNonce, "pool-nonce")
+	publicKey, err := harnessv2.CredentialBootstrapPublicKey(validBootstrapSigningSecret())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvCredentialBootstrapPublicKey, publicKey)
 	t.Setenv(EnvListenAddress, address)
 
 	ctx, cancel := context.WithCancel(context.Background())

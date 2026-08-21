@@ -176,9 +176,12 @@ func runtimePoolSubstrateTestReconciler(
 	r.SubstrateActorControlFactory = func(SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error) {
 		return control, nil
 	}
-	r.SubstrateCredentialSeeder = func(_ context.Context, routeHost, nonce string, request harnessv2.CredentialBootstrapRequest) error {
+	r.SubstrateCredentialSeeder = func(_ context.Context, routeHost, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) error {
 		if routeHost == "" || nonce == "" {
 			return fmt.Errorf("seeder called without route host or nonce")
+		}
+		if len(capabilitySecret) < harnessv2.MinCapabilitySecretBytes {
+			return fmt.Errorf("seeder called without a valid capability secret")
 		}
 		if err := request.Validate(); err != nil {
 			return err
@@ -315,7 +318,7 @@ func TestSubstrateRuntimePoolRecyclesActorWithUnexpectedTemplateBeforeBootstrap(
 		PodName:           "worker-0",
 	}
 	seedAttempts := 0
-	r.SubstrateCredentialSeeder = func(context.Context, string, string, harnessv2.CredentialBootstrapRequest) error {
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
 		seedAttempts++
 		return nil
 	}
@@ -382,7 +385,7 @@ func TestSubstrateRuntimePoolRecyclesActorWhenTemplateContentsDoNotMatchRevision
 	control := newFakeSubstrateActorControl()
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
 	seedAttempts := 0
-	r.SubstrateCredentialSeeder = func(context.Context, string, string, harnessv2.CredentialBootstrapRequest) error {
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
 		seedAttempts++
 		return nil
 	}
@@ -468,6 +471,20 @@ func assertSubstrateDerivedTemplate(
 	if strings.TrimSpace(env["ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"].Value) == "" {
 		t.Fatal("derived template is missing the public credential bootstrap nonce")
 	}
+	var authSecrets corev1.SecretList
+	if err := r.List(context.Background(), &authSecrets, client.InNamespace(pool.Namespace), client.MatchingLabels{
+		runtimePoolUIDLabel:  string(pool.UID),
+		runtimePoolAuthLabel: "true",
+	}); err != nil || len(authSecrets.Items) != 1 {
+		t.Fatalf("list RuntimePool auth Secret = %d, %v, want one", len(authSecrets.Items), err)
+	}
+	wantPublicKey, err := harnessv2.CredentialBootstrapPublicKey(authSecrets.Items[0].Data[runtimePoolCapabilitySecretKey])
+	if err != nil {
+		t.Fatalf("derive expected bootstrap public key: %v", err)
+	}
+	if env[harnessv2.CredentialBootstrapPublicKeyEnv].Value != wantPublicKey {
+		t.Fatal("derived template bootstrap public key is not bound to the pool capability secret")
+	}
 	if len(container.Command) != 1 || container.Command[0] != "/usr/local/bin/orka-acp-runtime" {
 		t.Fatalf("derived container command = %v, want the explicit runtime entrypoint (the provider does not read image config)", container.Command)
 	}
@@ -541,7 +558,7 @@ func TestSubstrateRuntimePoolRecyclesActorOnCredentialSeedConflict(t *testing.T)
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
-	r.SubstrateCredentialSeeder = func(context.Context, string, string, harnessv2.CredentialBootstrapRequest) error {
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
 		return errSubstrateCredentialConflict
 	}
 
@@ -584,7 +601,7 @@ func TestSubstrateRuntimePoolRecyclesActorWhenClosedBootstrapCannotAuthenticate(
 	supervisor := &fakeRuntimePoolSupervisorClient{probeErr: errors.New("unauthorized")}
 	control := newFakeSubstrateActorControl()
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
-	r.SubstrateCredentialSeeder = func(context.Context, string, string, harnessv2.CredentialBootstrapRequest) error {
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
 		return errSubstrateCredentialAlreadyComplete
 	}
 
@@ -615,7 +632,7 @@ func TestSubstrateRuntimePoolHoldsAdmissionUntilCredentialSeeding(t *testing.T) 
 	control := newFakeSubstrateActorControl()
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
 	seedAttempts := 0
-	r.SubstrateCredentialSeeder = func(_ context.Context, routeHost, nonce string, request harnessv2.CredentialBootstrapRequest) error {
+	r.SubstrateCredentialSeeder = func(_ context.Context, routeHost, nonce string, _ []byte, request harnessv2.CredentialBootstrapRequest) error {
 		seedAttempts++
 		if routeHost == "" || nonce == "" {
 			t.Fatalf("seeder called without route host or nonce")
@@ -934,6 +951,55 @@ func TestSubstrateRuntimePoolFinalizerDeletesActorTemplateAndSecrets(t *testing.
 	var got corev1alpha1.RuntimePool
 	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &got); !apierrors.IsNotFound(err) {
 		t.Fatalf("pool still present after finalization: %v", err)
+	}
+}
+
+func TestSubstrateRuntimePoolFinalizerDeletesPoliciesWithoutTemplates(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	if derived == nil {
+		t.Fatal("derived template was not materialized")
+	}
+	var policies networkingv1.NetworkPolicyList
+	if err := r.List(context.Background(), &policies, client.MatchingLabels{runtimePoolUIDLabel: string(pool.UID)}); err != nil {
+		t.Fatalf("list RuntimePool policies: %v", err)
+	}
+	if len(policies.Items) != 4 {
+		t.Fatalf("RuntimePool policy count = %d, want 4", len(policies.Items))
+	}
+	delete(control.actors, substrateTestActorID(pool))
+	if err := r.Delete(context.Background(), derived); err != nil {
+		t.Fatalf("delete derived template before finalization: %v", err)
+	}
+	if err := r.Delete(context.Background(), substrateTestBaseTemplate()); err != nil {
+		t.Fatalf("delete base template before finalization: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(context.Background(), &current); err != nil {
+		t.Fatalf("delete RuntimePool: %v", err)
+	}
+	for range 6 {
+		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+		if err != nil {
+			t.Fatalf("finalize reconcile: %v", err)
+		}
+		if result.RequeueAfter == 0 {
+			break
+		}
+	}
+	policies = networkingv1.NetworkPolicyList{}
+	if err := r.List(context.Background(), &policies, client.MatchingLabels{runtimePoolUIDLabel: string(pool.UID)}); err != nil {
+		t.Fatalf("list RuntimePool policies after finalization: %v", err)
+	}
+	if len(policies.Items) != 0 {
+		t.Fatalf("RuntimePool policies survived missing-template finalization: %#v", policies.Items)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("RuntimePool survived finalization: %v", err)
 	}
 }
 

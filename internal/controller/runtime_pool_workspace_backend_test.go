@@ -283,6 +283,41 @@ func TestWorkspaceRuntimePoolPreservesExplicitClaimFailure(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolScaleToZeroCleansUpTerminallyFailedClaim(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if claim == nil {
+		t.Fatal("workspace claim was not materialized")
+	}
+	claim.Status.Conditions = []metav1.Condition{{
+		Type:    string(sandboxv1beta1.SandboxConditionReady),
+		Status:  metav1.ConditionFalse,
+		Reason:  "ProvisioningFailed",
+		Message: "provider capacity exhausted",
+	}}
+	if err := r.Update(context.Background(), claim); err != nil {
+		t.Fatalf("update failed SandboxClaim: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Spec.DesiredReplicas = 0
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("scale failed workspace pool to zero: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if _, _, claim = runtimePoolWorkspaceTestChildren(t, r, pool); claim != nil {
+		t.Fatal("terminally failed SandboxClaim blocked scale-to-zero cleanup")
+	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle == corev1alpha1.RuntimePoolLifecycleDegraded && strings.Contains(status.Message, "provider capacity exhausted") {
+		t.Fatalf("scale-to-zero remained stuck on terminal claim failure: %s/%q", status.Lifecycle, status.Message)
+	}
+}
+
 func TestWorkspaceRuntimePoolFinalizationPreservesIsolationUntilClaimGone(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()
@@ -290,12 +325,23 @@ func TestWorkspaceRuntimePoolFinalizationPreservesIsolationUntilClaimGone(t *tes
 	deletedAt := metav1.NewTime(runtimePoolTestNow)
 	pool.DeletionTimestamp = &deletedAt
 	base := runtimePoolResourceName(pool.Namespace, pool.Name)
-	labels := map[string]string{runtimePoolKeyLabel: runtimePoolKey(pool.Namespace, pool.Name)}
+	labels := map[string]string{
+		runtimePoolManagedByLabel:   "orka",
+		runtimePoolApplicationLabel: "orka-acp-runtime",
+		runtimePoolKeyLabel:         runtimePoolKey(pool.Namespace, pool.Name),
+		runtimePoolNameLabel:        pool.Name,
+		runtimePoolNamespaceLabel:   pool.Namespace,
+		runtimePoolUIDLabel:         string(pool.UID),
+	}
 	claim := &sandboxextv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{
 		Name:       runtimePoolSandboxClaimName(base),
 		Namespace:  pool.Namespace,
+		Labels:     cloneStringMap(labels),
 		Finalizers: []string{"test.orka.ai/hold-provider-cleanup"},
 	}}
+	if err := controllerutil.SetControllerReference(pool, claim, scheme); err != nil {
+		t.Fatalf("set claim owner reference: %v", err)
+	}
 	policy := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
 		Name: runtimePoolChildName(base, "deny-all"), Namespace: pool.Namespace, Labels: labels,
 	}}
@@ -474,6 +520,36 @@ func TestWorkspaceRuntimePoolFinalizerDeletesProviderChildren(t *testing.T) {
 	var got corev1alpha1.RuntimePool
 	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &got); !apierrors.IsNotFound(err) {
 		t.Fatalf("pool still present after finalization: %v", err)
+	}
+}
+
+func TestWorkspaceRuntimePoolFinalizerRefusesForeignProviderChildren(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	pool.Finalizers = []string{runtimePoolFinalizer}
+	deletedAt := metav1.NewTime(runtimePoolTestNow)
+	pool.DeletionTimestamp = &deletedAt
+	base := runtimePoolResourceName(pool.Namespace, pool.Name)
+	foreign := &sandboxextv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:      runtimePoolSandboxClaimName(base),
+		Namespace: pool.Namespace,
+		Labels: map[string]string{
+			runtimePoolManagedByLabel: "another-controller",
+			runtimePoolUIDLabel:       "foreign-pool-uid",
+		},
+	}}
+	r := runtimePoolTestReconciler(t, scheme, nil, pool, foreign)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+	if err == nil || !strings.Contains(err.Error(), "refusing to delete foreign") {
+		t.Fatalf("finalization error = %v, want foreign-resource ownership rejection", err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(foreign), &sandboxextv1beta1.SandboxClaim{}); err != nil {
+		t.Fatalf("foreign SandboxClaim was deleted: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if !controllerutil.ContainsFinalizer(&current, runtimePoolFinalizer) {
+		t.Fatal("RuntimePool finalizer was removed after foreign-resource rejection")
 	}
 }
 

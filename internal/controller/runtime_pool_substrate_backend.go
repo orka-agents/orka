@@ -15,7 +15,7 @@ package controller
 // controller-owned ActorTemplate carries the immutable runtime image, the
 // fence environment, and no credential material — the supervisor boots into
 // an awaiting phase and the controller seeds credentials post-boot through
-// the nonce-gated bootstrap endpoint. Prompt-level operations use the
+// the nonce-bound, controller-signed bootstrap endpoint. Prompt-level operations use the
 // unchanged orka.harness.v2 protocol against the ActiveInstance; only
 // workload materialization and endpoint dialing differ.
 //
@@ -191,7 +191,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	templateNamespace := substrateSpec.BaseTemplateNamespace
 	// The template and the actor never carry credentials: pool Secrets stay in
 	// the controller-owned runtime namespace and are seeded into the booted
-	// supervisor through the nonce-gated credential bootstrap.
+	// supervisor through the nonce-bound, controller-signed credential bootstrap.
 	if err := r.ensureRuntimePoolNamespace(ctx, cfg); err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
@@ -202,6 +202,10 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	bootstrapNonce := strings.TrimSpace(string(authSecret.Data[runtimePoolBootstrapNonceKey]))
 	if bootstrapNonce == "" {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("RuntimePool auth Secret is missing the credential bootstrap nonce"))
+	}
+	bootstrapPublicKey, err := harnessv2.CredentialBootstrapPublicKey(authSecret.Data[runtimePoolCapabilitySecretKey])
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("derive RuntimePool credential bootstrap public key: %w", err))
 	}
 	baseTemplate, err := r.getSubstrateActorTemplate(ctx, templateNamespace, substrateSpec.BaseTemplateName)
 	if err != nil {
@@ -215,7 +219,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 	actorID := runtimePoolSubstrateActorID(cfg.baseName)
 	routeHost := substrateActorRouteHost(actorID, r.SubstrateConfig.ActorDNSSuffix)
-	desired, err := r.renderSubstrateRuntimeTemplate(pool, cfg, baseTemplate, templateNamespace, actorID, bootstrapNonce)
+	desired, err := r.renderSubstrateRuntimeTemplate(pool, cfg, baseTemplate, templateNamespace, actorID, bootstrapNonce, bootstrapPublicKey)
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
@@ -492,7 +496,7 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 		return false, fmt.Errorf("pool credentials are incomplete: %w", err)
 	}
 	if r.SubstrateCredentialSeeder != nil {
-		err := r.SubstrateCredentialSeeder(ctx, routeHost, nonce, request)
+		err := r.SubstrateCredentialSeeder(ctx, routeHost, nonce, authSecret.Data[runtimePoolCapabilitySecretKey], request)
 		if errors.Is(err, errSubstrateCredentialAlreadyComplete) {
 			return true, nil
 		}
@@ -518,6 +522,11 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set(harnessv2.CredentialBootstrapNonceHeader, nonce)
+	signature, err := harnessv2.SignCredentialBootstrap(authSecret.Data[runtimePoolCapabilitySecretKey], nonce, payload)
+	if err != nil {
+		return false, fmt.Errorf("sign credential bootstrap request: %w", err)
+	}
+	httpRequest.Header.Set(harnessv2.CredentialBootstrapSignatureHeader, signature)
 	response, err := httpClient.Do(httpRequest)
 	if err != nil {
 		return false, err
@@ -605,7 +614,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolRollout(
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		if oldNamespace != newNamespace {
-			remaining, deleteErr := r.deleteSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, derivedTemplate)
+			remaining, deleteErr := r.deleteSubstrateRuntimePoolNetworkPoliciesForTemplate(ctx, pool, cfg, derivedTemplate)
 			if deleteErr != nil {
 				return ctrl.Result{}, deleteErr
 			}
@@ -1153,6 +1162,54 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolNetworkPolicies(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
+) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	var policies networkingv1.NetworkPolicyList
+	if err := reader.List(ctx, &policies, client.MatchingLabels{
+		runtimePoolManagedByLabel: "orka",
+		runtimePoolKeyLabel:       runtimePoolKey(pool.Namespace, pool.Name),
+		runtimePoolNameLabel:      pool.Name,
+		runtimePoolNamespaceLabel: pool.Namespace,
+		runtimePoolUIDLabel:       string(pool.UID),
+	}); err != nil {
+		return false, fmt.Errorf("list Substrate RuntimePool NetworkPolicies for cleanup: %w", err)
+	}
+	expectedNames := map[string]struct{}{
+		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDenyEgressSuffix):       {},
+		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDNSEgressSuffix):        {},
+		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateProviderEgressSuffix):   {},
+		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateControllerEgressSuffix): {},
+	}
+	remaining := false
+	for i := range policies.Items {
+		current := &policies.Items[i]
+		if _, expected := expectedNames[current.Name]; !expected {
+			continue
+		}
+		if !substrateRuntimePoolNetworkPolicyOwnedByPool(current, pool, cfg) {
+			return false, fmt.Errorf("refusing to delete foreign Substrate RuntimePool NetworkPolicy %q", current.Name)
+		}
+		if current.DeletionTimestamp.IsZero() {
+			if err := r.Delete(ctx, current, deleteCurrentObjectPreconditions(current)...); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("delete Substrate RuntimePool NetworkPolicy %q: %w", current.Name, err)
+			}
+		}
+		remaining = true
+	}
+	return remaining, nil
+}
+
+// deleteSubstrateRuntimePoolNetworkPoliciesForTemplate removes only the
+// policies placed by one deployed template. Rollout uses this narrower path
+// when the WorkerPool namespace changes so newly created replacement policies
+// in the destination namespace are preserved.
+func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolNetworkPoliciesForTemplate(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
 	template *unstructured.Unstructured,
 ) (bool, error) {
 	workerNamespace, workerPool, err := substrateRuntimePoolWorkerPlacementFromTemplate(template)
@@ -1284,7 +1341,7 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 	baseTemplate *unstructured.Unstructured,
-	templateNamespace, actorID, bootstrapNonce string,
+	templateNamespace, actorID, bootstrapNonce, bootstrapPublicKey string,
 ) (substrateRuntimeTemplateRender, error) {
 	baseSpec, found, err := unstructured.NestedMap(baseTemplate.Object, "spec")
 	if err != nil || !found {
@@ -1298,14 +1355,14 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 	// credentials at all — the supervisor boots into the awaiting-bootstrap
 	// phase and receives credentials from the controller after the real actor
 	// is booted, so a golden snapshot captures a waiting, credential-free
-	// process plus the public per-pool nonce.
+	// process plus the public per-pool nonce and verification key.
 
 	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
 	// Secret names are irrelevant to the rendered container (credentials are
 	// bootstrap-seeded, never template-referenced); the canonical template only
 	// contributes the immutable image, fence identity, and non-secret env.
 	canonical := r.runtimePoolPodTemplate(pool, cfg, selector, "unused-auth", "unused-provider")
-	container := substrateRuntimeContainer(canonical.Spec.Containers[0], templateNamespace, actorID, bootstrapNonce)
+	container := substrateRuntimeContainer(canonical.Spec.Containers[0], templateNamespace, actorID, bootstrapNonce, bootstrapPublicKey)
 
 	containerMap, err := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(&container)
 	if err != nil {
@@ -1345,12 +1402,12 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 // substrateRuntimeContainer adapts the canonical supervisor container to
 // provider hosting: Kubernetes downward-API field refs become exact literals,
 // credential file mounts disappear entirely (the supervisor boots in the
-// awaiting-bootstrap phase gated by the public per-pool nonce), and Pod-only
+// awaiting-bootstrap phase with public nonce and signature verification key), and Pod-only
 // surfaces (mounts, probes, security context) are dropped because the
 // provider's gVisor sandbox owns them.
 func substrateRuntimeContainer(
 	canonical corev1.Container,
-	templateNamespace, actorID, bootstrapNonce string,
+	templateNamespace, actorID, bootstrapNonce, bootstrapPublicKey string,
 ) corev1.Container {
 	container := *canonical.DeepCopy()
 	container.VolumeMounts = nil
@@ -1370,7 +1427,7 @@ func substrateRuntimeContainer(
 	// route transport dials the router, so the logical URL port never matters.
 	container.Ports = []corev1.ContainerPort{{ContainerPort: substrateActorListenPort, Protocol: corev1.ProtocolTCP}}
 
-	env := make([]corev1.EnvVar, 0, len(container.Env)+3)
+	env := make([]corev1.EnvVar, 0, len(container.Env)+4)
 	for _, item := range container.Env {
 		switch item.Name {
 		case "ORKA_ACP_LISTEN_ADDRESS":
@@ -1389,6 +1446,7 @@ func substrateRuntimeContainer(
 		}
 	}
 	env = append(env, corev1.EnvVar{Name: "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE", Value: bootstrapNonce})
+	env = append(env, corev1.EnvVar{Name: harnessv2.CredentialBootstrapPublicKeyEnv, Value: bootstrapPublicKey})
 	container.Env = env
 	return container
 }
@@ -1577,21 +1635,12 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 			return false, fmt.Errorf("same-name RuntimePool substrate ActorTemplate does not carry the exact RuntimePool ownership identity")
 		}
 	}
-	placementTemplate := template
-	if placementTemplate == nil {
-		placementTemplate, err = r.getSubstrateActorTemplate(ctx, templateNamespace, substrateSpec.BaseTemplateName)
-		if err != nil {
-			return false, err
-		}
+	policiesRemaining, policyErr := r.deleteSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg)
+	if policyErr != nil {
+		return false, policyErr
 	}
-	if placementTemplate != nil {
-		policiesRemaining, policyErr := r.deleteSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, placementTemplate)
-		if policyErr != nil {
-			return false, policyErr
-		}
-		if policiesRemaining {
-			return true, nil
-		}
+	if policiesRemaining {
+		return true, nil
 	}
 	if template == nil {
 		return false, nil

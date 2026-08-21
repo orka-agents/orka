@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -26,17 +27,19 @@ import (
 // from an operator-visible template (and may build a per-template golden
 // snapshot by booting and checkpointing an instance), so nothing secret may
 // exist in the process until the controller seeds it. The awaiting-bootstrap
-// phase serves only a minimal health probe and a one-time, nonce-gated
-// credential PUT; the nonce is a public per-pool value baked into the
-// template, so a captured golden snapshot contains a waiting supervisor and a
-// value that grants nothing. The seeded values travel over the same
-// cluster-trusted channel that carries every later Authorization header.
+// phase serves only a minimal health probe and a one-time credential PUT. The
+// provider-visible template carries a public per-pool nonce and Ed25519 public
+// key; the controller signs the nonce plus exact request body with a key
+// derived from the pool capability secret. A captured golden snapshot therefore
+// contains only a waiting supervisor and non-secret verification material.
 
 const (
 	// EnvCredentialBootstrapNonce enables the awaiting-bootstrap phase. The
-	// value is public per-pool entropy: it only fences which controller may
-	// seed this exact workload, first write wins.
+	// value is public per-pool entropy bound into the controller signature.
 	EnvCredentialBootstrapNonce = "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"
+	// EnvCredentialBootstrapPublicKey carries the non-secret per-pool Ed25519
+	// key that authenticates the controller's one-time bootstrap request.
+	EnvCredentialBootstrapPublicKey = harnessv2.CredentialBootstrapPublicKeyEnv
 
 	credentialBootstrapMaxBodyBytes = 64 << 10
 )
@@ -64,15 +67,16 @@ func CredentialBootstrapConfigured() bool {
 }
 
 type credentialBootstrapState struct {
-	mu       sync.Mutex
-	nonce    string
-	seeded   bool
-	request  CredentialBootstrapRequest
-	received chan struct{}
+	mu        sync.Mutex
+	nonce     string
+	publicKey string
+	seeded    bool
+	request   CredentialBootstrapRequest
+	received  chan struct{}
 }
 
 // handle implements the one-time, idempotent seeding endpoint: the first
-// nonce-authorized payload wins; an identical repeat is acknowledged so a
+// controller-signed payload wins; an identical repeat is acknowledged so a
 // controller retry after an ambiguous response converges; a different payload
 // conflicts so the controller can recycle the exact instance.
 func (s *credentialBootstrapState) handle(w http.ResponseWriter, r *http.Request) {
@@ -85,10 +89,28 @@ func (s *credentialBootstrapState) handle(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, credentialBootstrapMaxBodyBytes))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if err := harnessv2.VerifyCredentialBootstrap(
+		s.publicKey,
+		nonce,
+		body,
+		r.Header.Get(harnessv2.CredentialBootstrapSignatureHeader),
+	); err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 	var request CredentialBootstrapRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, credentialBootstrapMaxBodyBytes))
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -138,7 +160,11 @@ func AwaitCredentialBootstrap(ctx context.Context) (CredentialBootstrapRequest, 
 	if nonce == "" {
 		return CredentialBootstrapRequest{}, errors.New("credential bootstrap nonce is not configured")
 	}
-	state := &credentialBootstrapState{nonce: nonce, received: make(chan struct{})}
+	publicKey := strings.TrimSpace(os.Getenv(EnvCredentialBootstrapPublicKey))
+	if publicKey == "" {
+		return CredentialBootstrapRequest{}, errors.New("credential bootstrap public key is not configured")
+	}
+	state := &credentialBootstrapState{nonce: nonce, publicKey: publicKey, received: make(chan struct{})}
 	listenAddress := strings.TrimSpace(os.Getenv(EnvListenAddress))
 	if listenAddress == "" {
 		listenAddress = ":8080"

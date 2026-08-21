@@ -133,9 +133,6 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	status := r.baseRuntimePoolStatus(pool, countRuntimePoolPods(pods))
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionPodSecurityReady, metav1.ConditionTrue, "PodSecurityConfigured", "runtime Pod security controls are configured")
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionQuotaReady, metav1.ConditionTrue, "ResourcesAdmitted", "runtime resources were admitted")
-	if r.applySandboxClaimFailureConditions(pool, claim, &status) {
-		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
-	}
 
 	if claim != nil && !runtimePoolSandboxChildOwnedByPool(claim, pool, cfg) {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("same-name SandboxClaim does not carry the exact RuntimePool ownership identity"))
@@ -150,6 +147,10 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		status.Message = "provider SandboxClaim contents do not match the controller-owned RuntimePool binding; recycling it before use"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	claimFailed := r.applySandboxClaimFailureConditions(pool, claim, &status)
+	if claimFailed && pool.Spec.DesiredReplicas != 0 {
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
 	if sandboxTemplate != nil {
@@ -924,7 +925,11 @@ func (r *RuntimePoolReconciler) pruneStaleWorkspaceRuntimePoolSecrets(
 // deleteRuntimePoolWorkspaceChildren removes provider workload objects during
 // pool finalization. Missing CRDs are tolerated: nothing provider-owned can
 // exist without the provider installation.
-func (r *RuntimePoolReconciler) deleteRuntimePoolWorkspaceChildren(ctx context.Context, cfg runtimePoolConfig) (bool, error) {
+func (r *RuntimePoolReconciler) deleteRuntimePoolWorkspaceChildren(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) (bool, error) {
 	remaining := false
 	objects := []client.Object{
 		&sandboxextv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxClaimName(cfg.baseName), Namespace: cfg.namespace}},
@@ -938,6 +943,9 @@ func (r *RuntimePoolReconciler) deleteRuntimePoolWorkspaceChildren(ctx context.C
 				continue
 			}
 			return false, err
+		}
+		if !runtimePoolSandboxChildOwnedByPool(obj, pool, cfg) {
+			return false, fmt.Errorf("refusing to delete foreign same-name provider resource %T %s/%s", obj, obj.GetNamespace(), obj.GetName())
 		}
 		if err := r.Delete(ctx, obj, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
 			return false, err

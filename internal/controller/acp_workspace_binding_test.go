@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -42,6 +43,7 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 		wantErr                   string
 		wantNil                   bool
 		wantSession               string
+		sessionUID                string
 		enforceNamespaceIsolation bool
 	}{
 		{name: "nil task", task: nil, wantNil: true},
@@ -65,7 +67,21 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
 				return task
 			}(),
-			wantSession: "session:review-loop",
+			sessionUID:  "session-uid-review-loop",
+			wantSession: "session:session-uid-review-loop",
+		},
+		{
+			name: "session reuse rejects non-default workspace slot",
+			task: func() *corev1alpha1.Task {
+				task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+					ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+					ws.WorkspaceSlot = "secondary"
+				})
+				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
+				return task
+			}(),
+			sessionUID: "session-uid-review-loop",
+			wantErr:    "supports only workspaceSlot",
 		},
 		{
 			name:    "substrate without templateRef fails closed",
@@ -145,7 +161,7 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			binding, err := resolveACPWorkspaceBinding(tt.task, corev1alpha1.WorkspaceProviderAgentSandbox, tt.enforceNamespaceIsolation)
+			binding, err := resolveACPWorkspaceBinding(tt.task, corev1alpha1.WorkspaceProviderAgentSandbox, tt.enforceNamespaceIsolation, tt.sessionUID)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
@@ -166,6 +182,9 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			}
 			if binding.SessionKey != tt.wantSession {
 				t.Fatalf("session key = %q, want %q", binding.SessionKey, tt.wantSession)
+			}
+			if binding.SessionUID != tt.sessionUID {
+				t.Fatalf("session UID = %q, want %q", binding.SessionUID, tt.sessionUID)
 			}
 			if binding.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete || binding.WorkspaceSlot != "default" {
 				t.Fatalf("binding defaults = %q/%q, want delete/default", binding.CleanupPolicy, binding.WorkspaceSlot)
@@ -199,7 +218,7 @@ func TestApplyACPWorkspaceBindingToPlanChangesPoolIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binding, err := resolveACPWorkspaceBinding(workspaceBindingTestTask(nil), corev1alpha1.WorkspaceProviderAgentSandbox, false)
+	binding, err := resolveACPWorkspaceBinding(workspaceBindingTestTask(nil), corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
 	if err != nil || binding == nil {
 		t.Fatalf("resolveACPWorkspaceBinding() = %#v, %v", binding, err)
 	}
@@ -263,11 +282,100 @@ func TestAgentExecutionBindingFreezesWorkspaceBinding(t *testing.T) {
 	}
 }
 
+func TestAgentExecutionBindingFreezesImmutableWorkspaceSessionUID(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+	})
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop", Create: true, Append: true}
+	agent := bindingTestAgent()
+	reconciler, durableStore := newBindingTestReconciler(t, task, bindingTestNamespace())
+	reconciler.ExecutionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProviderAgentSandbox
+	reconciler.DurableControlStore = durableStore
+	reconciler.SessionManager = NewSessionManager(durableStore)
+	epochs := NewControllerEpochManager(durableStore, "workspace-session-binding-test")
+	reconciler.ControllerEpochManager = epochs
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	defer func() {
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Errorf("stop epoch manager: %v", err)
+		}
+	}()
+	if _, err := epochs.CurrentFence(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), agent); err != nil || handled {
+		t.Fatalf("ensure session-reused binding = handled=%v err=%v", handled, err)
+	}
+	control, err := durableStore.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	if err != nil {
+		t.Fatalf("load established SessionControl: %v", err)
+	}
+	bound := &corev1alpha1.Task{}
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := reconciler.loadVerifiedBoundExecution(ctx, bound, bound.Status.AgentExecutionBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.plan.Workspace == nil || verified.body.ExecutionWorkspace == nil {
+		t.Fatal("session-reused execution snapshot is missing its workspace binding")
+	}
+	if verified.plan.Workspace.SessionUID != control.SessionUID ||
+		verified.body.ExecutionWorkspace.SessionUID != control.SessionUID ||
+		verified.plan.Workspace.SessionKey != "session:"+control.SessionUID {
+		t.Fatalf("frozen workspace identity = plan %#v snapshot %#v, want Session UID %q", verified.plan.Workspace, verified.body.ExecutionWorkspace, control.SessionUID)
+	}
+}
+
+func TestSessionWorkspacePoolIdentityRotatesWithSessionUID(t *testing.T) {
+	ctx := context.Background()
+	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+	})
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
+	agent := bindingTestAgent()
+	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
+	configuration, err := resolveACPAgentSessionConfiguration(ctx, reconciler.Client, task, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainPlan, err := PlanACPRuntimeWithConfiguration(task, agent, reconciler.ACPRuntimeImages, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-incarnation-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-incarnation-two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPlan, err := applyACPWorkspaceBindingToPlan(plainPlan, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPlan, err := applyACPWorkspaceBindingToPlan(plainPlan, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstPlan.PoolName == secondPlan.PoolName || first.BindingDigest == second.BindingDigest {
+		t.Fatalf("recreated Session reused workspace identity: first=%s/%s second=%s/%s", firstPlan.PoolName, first.BindingDigest, secondPlan.PoolName, second.BindingDigest)
+	}
+}
+
 func TestVerifiedSnapshotWorkspaceBindingRejectsTamperedIdentity(t *testing.T) {
 	binding := &corev1alpha1.AgentExecutionBinding{
 		Task: corev1alpha1.AgentExecutionBindingTaskRef{UID: types.UID("11111111-1111-1111-1111-111111111111")},
 	}
-	frozen, err := resolveACPWorkspaceBinding(workspaceBindingTestTask(nil), corev1alpha1.WorkspaceProviderAgentSandbox, false)
+	frozen, err := resolveACPWorkspaceBinding(workspaceBindingTestTask(nil), corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
 	if err != nil || frozen == nil {
 		t.Fatalf("resolveACPWorkspaceBinding() = %#v, %v", frozen, err)
 	}
@@ -276,6 +384,7 @@ func TestVerifiedSnapshotWorkspaceBindingRejectsTamperedIdentity(t *testing.T) {
 		ReusePolicy:   string(frozen.ReusePolicy),
 		CleanupPolicy: string(frozen.CleanupPolicy),
 		WorkspaceSlot: frozen.WorkspaceSlot,
+		SessionUID:    frozen.SessionUID,
 		SessionKey:    frozen.SessionKey,
 		BindingDigest: frozen.BindingDigest,
 	}
@@ -293,6 +402,7 @@ func TestVerifiedSnapshotWorkspaceBindingRejectsTamperedIdentity(t *testing.T) {
 		ReusePolicy:   corev1alpha1.WorkspaceReusePolicy(tamperedSession.ReusePolicy),
 		CleanupPolicy: corev1alpha1.WorkspaceCleanupPolicy(tamperedSession.CleanupPolicy),
 		WorkspaceSlot: tamperedSession.WorkspaceSlot,
+		SessionUID:    tamperedSession.SessionUID,
 		SessionKey:    tamperedSession.SessionKey,
 	})
 	if err != nil {
@@ -324,7 +434,7 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false)
+	binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,8 +598,17 @@ func TestProjectACPExecutionWorkspaceStatusTransitions(t *testing.T) {
 	}
 
 	task.Status.Execution.State = corev1alpha1.TaskExecutionStateSucceeded
+	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{State: corev1alpha1.TaskDeliveryStateValidating}
 	if err := reconciler.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
-		t.Fatalf("project terminal: %v", err)
+		t.Fatalf("project successful execution with nonterminal delivery: %v", err)
+	}
+	if task.Status.ExecutionWorkspace.Phase != corev1alpha1.ExecutionWorkspacePhaseReady {
+		t.Fatalf("nonterminal delivery projection = %q, want Ready", task.Status.ExecutionWorkspace.Phase)
+	}
+
+	task.Status.Delivery.State = corev1alpha1.TaskDeliveryStateVerifiedExact
+	if err := reconciler.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+		t.Fatalf("project terminal delivery: %v", err)
 	}
 	if task.Status.ExecutionWorkspace.Phase != corev1alpha1.ExecutionWorkspacePhaseReleased ||
 		task.Status.ExecutionWorkspace.Reason != corev1alpha1.ExecutionWorkspaceReasonReleased {

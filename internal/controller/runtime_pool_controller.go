@@ -80,7 +80,8 @@ const (
 	runtimePoolCapabilitySecretKey = "capability-secret"
 	// runtimePoolBootstrapNonceKey holds the public per-pool credential
 	// bootstrap nonce used by provider-hosted supervisors that boot
-	// credential-free. It fences seeding only and grants nothing by itself.
+	// credential-free. It binds a signed request to the exact workload and
+	// grants nothing by itself.
 	runtimePoolBootstrapNonceKey = "bootstrap-nonce"
 	runtimePoolProviderTokenKey  = "token"
 
@@ -328,7 +329,7 @@ type RuntimePoolReconciler struct {
 	SubstrateActorControlFactory func(SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error)
 	// SubstrateCredentialSeeder overrides the credential bootstrap PUT for
 	// tests; production seeds through the router transport.
-	SubstrateCredentialSeeder func(ctx context.Context, routeHost, nonce string, request harnessv2.CredentialBootstrapRequest) error
+	SubstrateCredentialSeeder func(ctx context.Context, routeHost, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) error
 
 	SupervisorClient RuntimePoolSupervisorClient
 	HTTPClient       *http.Client
@@ -2727,7 +2728,7 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 		if runtimePoolIsSubstrateBacked(pool) {
 			workspaceRemaining, workspaceErr = r.deleteSubstrateRuntimePoolChildren(ctx, pool, cfg)
 		} else {
-			workspaceRemaining, workspaceErr = r.deleteRuntimePoolWorkspaceChildren(ctx, cfg)
+			workspaceRemaining, workspaceErr = r.deleteRuntimePoolWorkspaceChildren(ctx, pool, cfg)
 		}
 		if workspaceErr != nil {
 			return ctrl.Result{}, workspaceErr
@@ -2767,9 +2768,12 @@ func (r *RuntimePoolReconciler) runtimePoolConfigForDeletion(pool *corev1alpha1.
 		namespace: namespace,
 		baseName:  runtimePoolResourceName(pool.Namespace, pool.Name),
 		labels: map[string]string{
-			runtimePoolKeyLabel:       runtimePoolKey(pool.Namespace, pool.Name),
-			runtimePoolNamespaceLabel: pool.Namespace,
-			runtimePoolNameLabel:      pool.Name,
+			runtimePoolManagedByLabel:   "orka",
+			runtimePoolApplicationLabel: "orka-acp-runtime",
+			runtimePoolKeyLabel:         runtimePoolKey(pool.Namespace, pool.Name),
+			runtimePoolNamespaceLabel:   pool.Namespace,
+			runtimePoolNameLabel:        pool.Name,
+			runtimePoolUIDLabel:         string(pool.UID),
 		},
 	}, nil
 }

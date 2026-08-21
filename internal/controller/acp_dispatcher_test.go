@@ -3722,7 +3722,7 @@ func TestACPDispatcherGatewayCreateFalseDoesNotCreateMissingTranscript(t *testin
 	dispatcher := &ACPDispatcher{Store: controlStore, Sessions: continuity}
 	_, err := dispatcher.planTaskSession(
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-gateway-missing")),
-		testControlDigestForDispatcher("mcp-gateway-missing"), "runtime", "boot",
+		testControlDigestForDispatcher("mcp-gateway-missing"), "runtime", "boot", "",
 	)
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("missing gateway transcript error = %v, want ErrNotFound", err)
@@ -3732,6 +3732,30 @@ func TestACPDispatcherGatewayCreateFalseDoesNotCreateMissingTranscript(t *testin
 	}
 	if _, err := controlStore.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("missing gateway SessionControl was created: %v", err)
+	}
+}
+
+func TestACPDispatcherRejectsFrozenWorkspaceSessionUIDMismatch(t *testing.T) {
+	ctx := context.Background()
+	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "workspace-session-uid.db"))
+	defer closeStore()
+	continuity := newACPSessionTestContinuity(t, controlStore, ACPBootstrapLimits{})
+	control := ensureACPSessionForTest(t, continuity, fence, "review-loop")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: control.Namespace, Name: "workspace-session-uid", UID: types.UID("88888888-8888-8888-8888-888888888888")},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAgent,
+			Prompt:     "continue",
+			SessionRef: &corev1alpha1.SessionReference{Name: control.SessionName, Append: true},
+		},
+	}
+	dispatcher := &ACPDispatcher{Store: controlStore, Sessions: continuity}
+	_, err := dispatcher.planTaskSession(
+		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-workspace-session-uid")),
+		testControlDigestForDispatcher("mcp-workspace-session-uid"), "runtime", "boot", "different-session-incarnation",
+	)
+	if !errors.Is(err, store.ErrConflict) || !strings.Contains(err.Error(), "immutable UID") {
+		t.Fatalf("Session UID mismatch error = %v, want immutable-identity conflict", err)
 	}
 }
 

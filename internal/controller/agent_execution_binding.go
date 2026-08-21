@@ -82,6 +82,7 @@ type agentExecutionSnapshotWorkspaceBinding struct {
 	ReusePolicy       string `json:"reusePolicy"`
 	CleanupPolicy     string `json:"cleanupPolicy"`
 	WorkspaceSlot     string `json:"workspaceSlot"`
+	SessionUID        string `json:"sessionUID,omitempty"`
 	SessionKey        string `json:"sessionKey"`
 	TemplateNamespace string `json:"templateNamespace,omitempty"`
 	TemplateName      string `json:"templateName,omitempty"`
@@ -199,9 +200,21 @@ func (r *TaskReconciler) resolveAgentExecutionCandidate(
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
-	workspaceBinding, err := resolveACPWorkspaceBinding(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation)
+	workspaceBinding, err := validateACPWorkspaceBindingRequest(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
+	}
+	if workspaceBinding != nil && workspaceBinding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+		sessionUID, sessionErr := r.ensureACPWorkspaceSessionUID(ctx, task)
+		if sessionErr != nil {
+			return nil, fmt.Errorf("establish immutable execution-workspace Session identity: %w", sessionErr)
+		}
+		workspaceBinding, err = resolveACPWorkspaceBinding(
+			task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, sessionUID,
+		)
+		if err != nil {
+			return nil, permanentACPAgentConfiguration(err)
+		}
 	}
 	plan, err = applyACPWorkspaceBindingToPlan(plan, workspaceBinding)
 	if err != nil {
@@ -266,6 +279,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidate(
 			ReusePolicy:       string(workspaceBinding.ReusePolicy),
 			CleanupPolicy:     string(workspaceBinding.CleanupPolicy),
 			WorkspaceSlot:     workspaceBinding.WorkspaceSlot,
+			SessionUID:        workspaceBinding.SessionUID,
 			SessionKey:        workspaceBinding.SessionKey,
 			TemplateNamespace: workspaceBinding.TemplateNamespace,
 			TemplateName:      workspaceBinding.TemplateName,
@@ -561,6 +575,7 @@ func verifiedSnapshotWorkspaceBinding(
 		ReusePolicy:       corev1alpha1.WorkspaceReusePolicy(body.ExecutionWorkspace.ReusePolicy),
 		CleanupPolicy:     corev1alpha1.WorkspaceCleanupPolicy(body.ExecutionWorkspace.CleanupPolicy),
 		WorkspaceSlot:     body.ExecutionWorkspace.WorkspaceSlot,
+		SessionUID:        body.ExecutionWorkspace.SessionUID,
 		SessionKey:        body.ExecutionWorkspace.SessionKey,
 		TemplateNamespace: body.ExecutionWorkspace.TemplateNamespace,
 		TemplateName:      body.ExecutionWorkspace.TemplateName,
@@ -574,7 +589,7 @@ func verifiedSnapshotWorkspaceBinding(
 		if body.SessionRef == nil || strings.TrimSpace(body.SessionRef.Name) == "" {
 			return nil, errors.New("frozen execution workspace session reuse is missing the frozen sessionRef")
 		}
-		wantSessionKey = "session:" + strings.TrimSpace(body.SessionRef.Name)
+		wantSessionKey = "session:" + frozen.SessionUID
 	}
 	if frozen.SessionKey != wantSessionKey {
 		return nil, errors.New("frozen execution workspace session key does not match the immutable Task and session identity")
