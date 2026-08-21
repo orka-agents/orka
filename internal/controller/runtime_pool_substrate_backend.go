@@ -1562,6 +1562,21 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 	if err != nil {
 		return false, err
 	}
+	if template != nil {
+		expected := &unstructured.Unstructured{}
+		expected.SetNamespace(templateNamespace)
+		expected.SetName(runtimePoolSubstrateTemplateName(cfg.baseName))
+		expected.SetLabels(map[string]string{
+			runtimePoolManagedByLabel: "orka",
+			runtimePoolKeyLabel:       runtimePoolKey(pool.Namespace, pool.Name),
+			runtimePoolNameLabel:      pool.Name,
+			runtimePoolNamespaceLabel: pool.Namespace,
+			runtimePoolUIDLabel:       string(pool.UID),
+		})
+		if !substrateRuntimeTemplateOwnedByPool(template, expected) {
+			return false, fmt.Errorf("same-name RuntimePool substrate ActorTemplate does not carry the exact RuntimePool ownership identity")
+		}
+	}
 	placementTemplate := template
 	if placementTemplate == nil {
 		placementTemplate, err = r.getSubstrateActorTemplate(ctx, templateNamespace, substrateSpec.BaseTemplateName)

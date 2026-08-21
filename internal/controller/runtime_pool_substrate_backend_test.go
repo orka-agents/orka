@@ -30,6 +30,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -933,6 +934,36 @@ func TestSubstrateRuntimePoolFinalizerDeletesActorTemplateAndSecrets(t *testing.
 	var got corev1alpha1.RuntimePool
 	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, &got); !apierrors.IsNotFound(err) {
 		t.Fatalf("pool still present after finalization: %v", err)
+	}
+}
+
+func TestSubstrateRuntimePoolFinalizerPreservesForeignActorTemplate(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	derived.SetLabels(map[string]string{runtimePoolManagedByLabel: "attacker"})
+	if err := r.Update(context.Background(), derived); err != nil {
+		t.Fatalf("replace derived template ownership: %v", err)
+	}
+	delete(control.actors, runtimePoolSubstrateActorID(runtimePoolResourceName(pool.Namespace, pool.Name)))
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(context.Background(), &current); err != nil {
+		t.Fatalf("delete pool: %v", err)
+	}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}})
+	if err == nil || !strings.Contains(err.Error(), "exact RuntimePool ownership identity") {
+		t.Fatalf("finalize error = %v, want ownership rejection", err)
+	}
+	if substrateTestDerivedTemplate(t, r, pool) == nil {
+		t.Fatal("foreign same-name ActorTemplate was deleted")
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if !controllerutil.ContainsFinalizer(&got, runtimePoolFinalizer) {
+		t.Fatal("RuntimePool finalizer was removed after ownership rejection")
 	}
 }
 
