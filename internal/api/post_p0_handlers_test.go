@@ -113,9 +113,9 @@ func (s *postP0FailingAppendEventStore) AppendExecutionEvent(
 func TestListSessionEventsAggregatesTaskEvents(t *testing.T) {
 	eventStore := storetest.NewFakeExecutionEventStore()
 	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
-	appendSessionEvent(t, eventStore, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	appendSessionEvent(t, eventStore, taskTimelineTestTaskName, events.ExecutionEventTypeTaskStarted, now)
 	appendSessionEvent(t, eventStore, "task-b", events.ExecutionEventTypeWorkerStarted, now.Add(time.Second))
-	appendSessionEvent(t, eventStore, "task-a", events.ExecutionEventTypeTaskSucceeded, now.Add(2*time.Second))
+	appendSessionEvent(t, eventStore, taskTimelineTestTaskName, events.ExecutionEventTypeTaskSucceeded, now.Add(2*time.Second))
 
 	h, app := setupPostP0Handlers(t, eventStore, &postP0FakeSessionStore{records: map[string]*store.SessionRecord{"default/session-1": {Namespace: "default", Name: "session-1"}}})
 	app.Get("/api/v1/sessions/:id/events", h.ListSessionEvents)
@@ -164,7 +164,7 @@ func TestSessionEventEndpointsHideGatewaySessions(t *testing.T) {
 func TestStreamSessionEventsReconnect(t *testing.T) {
 	eventStore := storetest.NewFakeExecutionEventStore()
 	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
-	appendSessionEvent(t, eventStore, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	appendSessionEvent(t, eventStore, taskTimelineTestTaskName, events.ExecutionEventTypeTaskStarted, now)
 	appendSessionEvent(t, eventStore, "task-b", events.ExecutionEventTypeWorkerStarted, now.Add(time.Second))
 	h, app := setupPostP0Handlers(t, eventStore, &postP0FakeSessionStore{records: map[string]*store.SessionRecord{"default/session-1": {Namespace: "default", Name: "session-1"}}})
 	configureShortTaskEventStream(h)
@@ -990,6 +990,38 @@ func TestForkTaskAPIBoundsForkContextAndMarksTruncated(t *testing.T) {
 	}
 	if out.ForkContext.Events[0].Seq != 6 {
 		t.Fatalf("first retained seq=%d, want 6", out.ForkContext.Events[0].Seq)
+	}
+}
+
+func TestForkTaskAPIMarksCompatibilityScanTruncatedAfterCoalescing(t *testing.T) {
+	eventStore := storetest.NewFakeExecutionEventStore()
+	appendReaderEvent(t, eventStore, store.ExecutionEvent{
+		Type: events.ExecutionEventTypeToolCallCompleted, Summary: taskTimelineToolResultSummary,
+	})
+	content := json.RawMessage(`{"harnessV2":{"taskUID":"task-uid","taskAttempt":1,"promptID":"prompt-1"}}`)
+	for range taskTimelineContextCompatibilityScanLimit + 1 {
+		appendReaderEvent(t, eventStore, store.ExecutionEvent{
+			Type: events.ExecutionEventTypeModelMessage, Content: content, ContentText: "x",
+		})
+	}
+	source := testTask(defaultNamespace, taskTimelineTestTaskName)
+	source.Spec.Type = corev1alpha1.TaskTypeAgent
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/task-a/fork?namespace=default", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var out ForkTaskResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.ForkContext.Truncated || len(out.ForkContext.Events) != 0 {
+		t.Fatalf("fork context = %#v", out.ForkContext)
 	}
 }
 

@@ -143,8 +143,7 @@ func (c *artifactClient) download(ctx context.Context, parent Operation, metadat
 }
 
 func artifactAuthorizationErrorClassification(err error) (int, bool) {
-	var typed *operationError
-	if errors.As(err, &typed) {
+	if typed, ok := errors.AsType[*operationError](err); ok {
 		if typed.status < http.StatusBadRequest || typed.status >= 600 {
 			return http.StatusBadGateway, true
 		}

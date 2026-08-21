@@ -173,11 +173,16 @@ const (
 )
 
 type ToolCallUpdate struct {
-	ToolCallID string         `json:"toolCallID"`
-	Title      string         `json:"title,omitempty"`
-	Kind       string         `json:"kind,omitempty"`
-	Status     ToolCallStatus `json:"status"`
-	Content    []ContentBlock `json:"content,omitempty"`
+	ToolCallID     string         `json:"toolCallID"`
+	Title          string         `json:"title,omitempty"`
+	Kind           string         `json:"kind,omitempty"`
+	Status         ToolCallStatus `json:"status"`
+	Content        []ContentBlock `json:"content,omitempty"`
+	ContentReplace bool           `json:"contentReplace,omitempty"`
+	// ContentOmitted reports that an otherwise present content snapshot was
+	// intentionally omitted to satisfy a transport bound. Receivers must retain
+	// truncation state instead of treating the missing content as complete.
+	ContentOmitted bool `json:"contentOmitted,omitempty"`
 }
 
 func (u ToolCallUpdate) Validate() error {
@@ -198,8 +203,11 @@ func (u ToolCallUpdate) Validate() error {
 	if len(u.Content) > MaxContentBlocks {
 		return fmt.Errorf("tool call content block count exceeds %d", MaxContentBlocks)
 	}
+	if u.ContentOmitted && (len(u.Content) > 0 || u.ContentReplace) {
+		return fmt.Errorf("omitted tool call content must not include content or contentReplace")
+	}
 	for i := range u.Content {
-		if err := u.Content[i].Validate(); err != nil {
+		if err := u.Content[i].ValidateToolOutput(); err != nil {
 			return fmt.Errorf("tool call content block %d: %w", i, err)
 		}
 	}
@@ -245,9 +253,24 @@ func (u PlanUpdate) Validate() error {
 }
 
 type UsageUpdate struct {
-	InputTokens       uint64 `json:"inputTokens,omitempty"`
-	OutputTokens      uint64 `json:"outputTokens,omitempty"`
-	CachedInputTokens uint64 `json:"cachedInputTokens,omitempty"`
+	InputTokens       uint64  `json:"inputTokens,omitempty"`
+	OutputTokens      uint64  `json:"outputTokens,omitempty"`
+	CachedInputTokens uint64  `json:"cachedInputTokens,omitempty"`
+	ContextWindowUsed *uint64 `json:"contextWindowUsed,omitempty"`
+	ContextWindowSize *uint64 `json:"contextWindowSize,omitempty"`
+}
+
+func (u UsageUpdate) Validate() error {
+	if (u.ContextWindowUsed == nil) != (u.ContextWindowSize == nil) {
+		return fmt.Errorf("context window usage requires both used and size")
+	}
+	if u.ContextWindowSize != nil && *u.ContextWindowSize == 0 {
+		return fmt.Errorf("context window size must be positive")
+	}
+	if u.ContextWindowUsed != nil && *u.ContextWindowUsed > *u.ContextWindowSize {
+		return fmt.Errorf("context window used tokens must not exceed size")
+	}
+	return nil
 }
 
 type DiagnosticUpdate struct {
@@ -281,7 +304,10 @@ func (e UpdateEvent) Validate() error {
 		if e.AssistantMessage == nil {
 			return fmt.Errorf("assistant message update requires assistantMessage payload")
 		}
-		return validateBoundedString("assistant message chunk", e.AssistantMessage.Text, true, MaxProtocolStringBytes)
+		if e.AssistantMessage.Text == "" {
+			return fmt.Errorf("assistant message chunk is required")
+		}
+		return validateBoundedString("assistant message chunk", e.AssistantMessage.Text, false, MaxProtocolStringBytes)
 	case UpdateToolCall, UpdateToolCallUpdate:
 		if e.ToolCall == nil {
 			return fmt.Errorf("tool call update requires toolCall payload")
@@ -296,7 +322,7 @@ func (e UpdateEvent) Validate() error {
 		if e.Usage == nil {
 			return fmt.Errorf("usage update requires usage payload")
 		}
-		return nil
+		return e.Usage.Validate()
 	case UpdateDiagnostic:
 		if e.Diagnostic == nil {
 			return fmt.Errorf("diagnostic update requires diagnostic payload")
@@ -370,7 +396,13 @@ func (r PromptResult) Validate() error {
 			return fmt.Errorf("prompt result content block %d: %w", i, err)
 		}
 	}
-	return validateBoundedString("result model", r.Model, false, 256)
+	if err := validateBoundedString("result model", r.Model, false, 256); err != nil {
+		return err
+	}
+	if err := r.Usage.Validate(); err != nil {
+		return fmt.Errorf("result usage: %w", err)
+	}
+	return nil
 }
 
 type CompletedEvent struct {

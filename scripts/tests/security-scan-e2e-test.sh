@@ -30,6 +30,7 @@ source "${security_script}"
 
 [[ "${target_owner}" == "sozercan" ]]
 [[ "${target_repository}" == "vekil" ]]
+[[ "${authority_tool_name}" == "authority-probe" ]]
 
 manifest_capture="${work_dir}/manifest.yaml"
 kubectl() {
@@ -48,6 +49,59 @@ apply_repository_scan "${scan_name}"
 grep -F 'repoURL: https://github.com/sozercan/vekil' "${manifest_capture}" >/dev/null
 grep -F 'owner: sozercan' "${manifest_capture}" >/dev/null
 grep -F 'repository: vekil' "${manifest_capture}" >/dev/null
+
+apply_authority_resources
+grep -F 'kind: OutboundAccessPolicy' "${manifest_capture}" >/dev/null
+grep -F "name: ${authority_policy_name}" "${manifest_capture}" >/dev/null
+grep -F 'gateway:' "${manifest_capture}" >/dev/null
+grep -F "name: ${authority_observer_name}" "${manifest_capture}" >/dev/null
+grep -F 'port: 8080' "${manifest_capture}" >/dev/null
+grep -F 'kind: Tool' "${manifest_capture}" >/dev/null
+grep -F 'name: authority-probe' "${manifest_capture}" >/dev/null
+grep -F 'brokeredToolClass: read' "${manifest_capture}" >/dev/null
+grep -F 'url: https://example.com/tool' "${manifest_capture}" >/dev/null
+grep -F 'outboundAccessPolicyRef:' "${manifest_capture}" >/dev/null
+grep -F 'defaultAllowedTools:' "${manifest_capture}" >/dev/null
+grep -F -- '      - Glob' "${manifest_capture}" >/dev/null
+grep -F -- '      - Grep' "${manifest_capture}" >/dev/null
+grep -F -- '      - Read' "${manifest_capture}" >/dev/null
+grep -F -- "      - ${authority_tool_name}" "${manifest_capture}" >/dev/null
+grep -F 'defaultAllowBash: false' "${manifest_capture}" >/dev/null
+
+create_authority_task "${authority_incoming_task}"
+grep -F 'kind: Task' "${manifest_capture}" >/dev/null
+grep -F "name: ${authority_incoming_task}" "${manifest_capture}" >/dev/null
+grep -F 'prompt: orka-authority-probe' "${manifest_capture}" >/dev/null
+grep -F -- '      - Glob' "${manifest_capture}" >/dev/null
+grep -F -- '      - Grep' "${manifest_capture}" >/dev/null
+grep -F -- '      - Read' "${manifest_capture}" >/dev/null
+grep -F -- "      - ${authority_tool_name}" "${manifest_capture}" >/dev/null
+if grep -F '  transaction:' "${manifest_capture}" >/dev/null; then
+  echo "ACP v2 authority fixture declared unsupported transaction delegation" >&2
+  exit 1
+fi
+
+wait_calls="${work_dir}/authority-wait-calls"
+kubectl() {
+  printf '%s\n' "$*" >>"${wait_calls}"
+}
+wait_authority_resources
+grep -F "condition=Accepted=true outboundaccesspolicy/${authority_policy_name}" "${wait_calls}" >/dev/null
+grep -F "condition=ResolvedRefs=true outboundaccesspolicy/${authority_policy_name}" "${wait_calls}" >/dev/null
+grep -F "jsonpath={.status.available}=true tool/${authority_tool_name}" "${wait_calls}" >/dev/null
+
+authority_observer_stats() {
+  jq -n '{ttsCalls:0,toolCalls:1,subjectTokenDigest:"",transactionTokenDigest:""}'
+}
+assert_transactionless_authority_stats incoming
+
+authority_observer_stats() {
+  jq -n '{ttsCalls:1,toolCalls:1,subjectTokenDigest:"sha256:unexpected",transactionTokenDigest:""}'
+}
+if (assert_transactionless_authority_stats incoming >/dev/null 2>&1); then
+  echo "transactionless authority gate accepted a TTS call" >&2
+  exit 1
+fi
 
 repository_phase="Error"
 kubectl() {
@@ -210,6 +264,9 @@ fi
 
 # shellcheck disable=SC2016 # The harness source must contain this literal variable reference.
 grep -Fq 'ACP_CODEX_RUNTIME_IMG="${fake_runtime_ref}"' "${security_script}"
+grep -Fq 'patch_controller_images serviceAccount' "${security_script}"
+grep -Fq '.ttsCalls == 0 and .toolCalls == 1' "${security_script}"
+grep -Fq 'Creating transactionless ACP v2 authority Task/' "${security_script}"
 if grep -Fq 'tasks do not support arbitrary task env' "${security_script}"; then
   echo "legacy negative-only compatibility gate remains" >&2
   exit 1
@@ -479,11 +536,15 @@ kubectl() {
         status:{phase:"Error",conditions:[{type:"Ready",message:"failed safely"}]}
       }]}'
       ;;
-    *"get tasks "*" -o json"*)
+    *"get tasks -o json"*)
       jq -n '{items:[{
         metadata:{name:"threat-task",namespace:"orka-system",uid:"task-uid",labels:{"orka.ai/security-target":"security-goof"},annotations:{debug:"must-not-be-captured"}},
         spec:{type:"agent",prompt:"sensitive prompt",env:[{name:"API_KEY",value:"diagnostic-secret"}],agentRef:{name:"fixture-agent"},workspace:{intent:"read",gitRepo:"https://github.com/sozercan/vekil",branch:"main",ref:"abc",readCredentialRef:{name:"must-not-be-captured"}}},
         status:{phase:"Failed",message:"runtime failed"}
+      },{
+        metadata:{name:"authority-incoming",namespace:"orka-system",uid:"authority-task-uid",labels:{"orka.ai/security-scan-authority-e2e":"true"}},
+        spec:{type:"agent",prompt:"sensitive authority prompt",agentRef:{name:"security-scan-authority-agent"},workspace:{intent:"read",gitRepo:"https://github.com/sozercan/vekil",branch:"main",ref:"abc"}},
+        status:{phase:"Failed",message:"codex ACP runtime cannot exactly enforce provider-native tool restrictions"}
       }]}'
       ;;
     *"get agents -o json"*)
@@ -558,6 +619,12 @@ jq -e '
   (.items[0].spec | has("prompt") | not) and
   (.items[0].spec | has("env") | not) and
   (.items[0].spec.workspace | has("readCredentialRef") | not)
+' "${diagnostics_dir}/tasks.json" >/dev/null
+jq -e '
+  .items[] | select(.metadata.name == "authority-incoming") |
+  .status.phase == "Failed" and
+  .status.message == "codex ACP runtime cannot exactly enforce provider-native tool restrictions" and
+  (.spec | has("prompt") | not)
 ' "${diagnostics_dir}/tasks.json" >/dev/null
 jq -e '
   (.items[0].metadata | has("annotations") | not) and

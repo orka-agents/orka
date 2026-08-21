@@ -23,6 +23,11 @@ type executionEventStreamKey struct {
 	streamID   string
 }
 
+type executionEventDedupeIndexKey struct {
+	executionEventStreamKey
+	dedupeKey string
+}
+
 type sessionExecutionEventKey struct {
 	namespace   string
 	sessionName string
@@ -35,9 +40,11 @@ type FakeExecutionEventStore struct {
 	events        []store.ExecutionEvent
 	latest        map[executionEventStreamKey]int64
 	latestSession map[sessionExecutionEventKey]int64
+	dedupe        map[executionEventDedupeIndexKey]store.ExecutionEvent
 }
 
 var _ store.ExecutionEventStore = (*FakeExecutionEventStore)(nil)
+var _ store.DeduplicatingExecutionEventStore = (*FakeExecutionEventStore)(nil)
 
 // NewFakeExecutionEventStore creates an empty in-memory execution event store for tests.
 func NewFakeExecutionEventStore() *FakeExecutionEventStore {
@@ -53,11 +60,35 @@ func NewFakeExecutionEventStoreWithClock(now func() time.Time) *FakeExecutionEve
 		now:           now,
 		latest:        make(map[executionEventStreamKey]int64),
 		latestSession: make(map[sessionExecutionEventKey]int64),
+		dedupe:        make(map[executionEventDedupeIndexKey]store.ExecutionEvent),
 	}
 }
 
 // AppendExecutionEvent appends an event and assigns a per-stream sequence when missing.
 func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	appended, _, err := s.appendExecutionEvent(ctx, event, "")
+	return appended, err
+}
+
+// AppendExecutionEventIfAbsent atomically appends an event only when its
+// stream-scoped deduplication key has not already been used.
+func (s *FakeExecutionEventStore) AppendExecutionEventIfAbsent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+) (*store.ExecutionEvent, bool, error) {
+	dedupeKey, err := store.NormalizeExecutionEventDedupeKey(dedupeKey)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.appendExecutionEvent(ctx, event, dedupeKey)
+}
+
+func (s *FakeExecutionEventStore) appendExecutionEvent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+) (*store.ExecutionEvent, bool, error) {
 	started := time.Now()
 	metricStreamType, metricEventType := metricLabelsForExecutionEvent(event)
 	success := false
@@ -65,10 +96,10 @@ func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, even
 		metrics.RecordExecutionEventAppend(metricStreamType, metricEventType, success, time.Since(started).Seconds())
 	}()
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if event == nil {
-		return nil, store.ValidationErrorf("execution event is required")
+		return nil, false, store.ValidationErrorf("execution event is required")
 	}
 	copy := cloneExecutionEvent(*event)
 	copy.Namespace = strings.TrimSpace(copy.Namespace)
@@ -86,19 +117,19 @@ func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, even
 	copy.ToolCallID = strings.TrimSpace(copy.ToolCallID)
 
 	if copy.Namespace == "" {
-		return nil, store.ValidationErrorf("execution event namespace is required")
+		return nil, false, store.ValidationErrorf("execution event namespace is required")
 	}
 	if !events.IsValidExecutionEventStreamType(copy.StreamType) {
-		return nil, store.ValidationErrorf("unsupported execution event stream type %q", copy.StreamType)
+		return nil, false, store.ValidationErrorf("unsupported execution event stream type %q", copy.StreamType)
 	}
 	if copy.StreamID == "" {
-		return nil, store.ValidationErrorf("execution event stream id is required")
+		return nil, false, store.ValidationErrorf("execution event stream id is required")
 	}
 	if !events.IsValidExecutionEventType(copy.Type) {
-		return nil, store.ValidationErrorf("unsupported execution event type %q", copy.Type)
+		return nil, false, store.ValidationErrorf("unsupported execution event type %q", copy.Type)
 	}
 	if err := store.SanitizeExecutionEventPayloadFields(&copy); err != nil {
-		return nil, store.ValidationErrorf("invalid execution event payload: %v", err)
+		return nil, false, store.ValidationErrorf("invalid execution event payload: %v", err)
 	}
 	if copy.CreatedAt.IsZero() {
 		copy.CreatedAt = s.now().UTC()
@@ -108,16 +139,24 @@ func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, even
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	indexKey := executionEventDedupeIndexKey{executionEventStreamKey: key, dedupeKey: dedupeKey}
+	if dedupeKey != "" {
+		if existing, ok := s.dedupe[indexKey]; ok {
+			success = true
+			clone := cloneExecutionEvent(existing)
+			return &clone, false, nil
+		}
+	}
 
 	if existingType, approvalID, conflict := s.existingTerminalApprovalEvent(copy); conflict {
-		return nil, store.TerminalApprovalConflict(existingType, approvalID)
+		return nil, false, store.TerminalApprovalConflict(existingType, approvalID)
 	}
 
 	latest := s.latest[key]
 	if copy.Seq == 0 {
 		copy.Seq = latest + 1
 	} else if copy.Seq <= latest {
-		return nil, store.ValidationErrorf("execution event seq must increase for stream %s/%s/%s", copy.Namespace, copy.StreamType, copy.StreamID)
+		return nil, false, store.ValidationErrorf("execution event seq must increase for stream %s/%s/%s", copy.Namespace, copy.StreamType, copy.StreamID)
 	}
 	copy.ID = strings.TrimSpace(copy.ID)
 	if copy.ID == "" {
@@ -133,10 +172,13 @@ func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, even
 		copy.Internal["sessionSeq"] = s.latestSession[sessionKey]
 	}
 	s.events = append(s.events, cloneExecutionEvent(copy))
+	if dedupeKey != "" {
+		s.dedupe[indexKey] = cloneExecutionEvent(copy)
+	}
 	redacted, truncated := store.ExecutionEventPayloadSanitizationSignals(&copy)
 	metrics.RecordExecutionEventPayloadSanitization(metricStreamType, metricEventType, redacted, truncated)
 	success = true
-	return &copy, nil
+	return &copy, true, nil
 }
 
 // ListExecutionEvents returns events matching filter in ascending sequence order per stream.
@@ -297,6 +339,11 @@ func (s *FakeExecutionEventStore) DeleteExecutionEvents(ctx context.Context, nam
 	}
 	s.events = kept
 	delete(s.latest, key)
+	for dedupeKey := range s.dedupe {
+		if dedupeKey.executionEventStreamKey == key {
+			delete(s.dedupe, dedupeKey)
+		}
+	}
 	return nil
 }
 

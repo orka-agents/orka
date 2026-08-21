@@ -1230,8 +1230,7 @@ func isDuplicateStartRejectedError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var clientErr harness.ClientError
-	if errors.As(err, &clientErr) {
+	if clientErr, ok := errors.AsType[harness.ClientError](err); ok {
 		return clientErr.IsDuplicateTurn()
 	}
 	message := strings.ToLower(err.Error())

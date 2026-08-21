@@ -14,8 +14,9 @@ const (
 	ExecutionEventStreamTypeTask    = events.ExecutionEventStreamTypeTask
 	ExecutionEventStreamTypeSession = events.ExecutionEventStreamTypeSession
 
-	DefaultExecutionEventLimit = 100
-	MaxExecutionEventLimit     = 1000
+	DefaultExecutionEventLimit      = 100
+	MaxExecutionEventLimit          = 1000
+	MaxExecutionEventDedupeKeyBytes = 512
 )
 
 // ExecutionEvent is the store-facing representation of a task execution timeline event.
@@ -197,6 +198,44 @@ type ExecutionEventStore interface {
 	ListSessionExecutionEvents(ctx context.Context, filter SessionExecutionEventFilter) ([]SessionExecutionEvent, int64, error)
 	GetLatestExecutionEventSeq(ctx context.Context, namespace, streamType, streamID string) (int64, error)
 	DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error
+}
+
+// DeduplicatingExecutionEventStore atomically appends one event for a caller-
+// supplied key scoped to its execution-event stream. A repeated key returns the
+// existing event with appended=false.
+type DeduplicatingExecutionEventStore interface {
+	ExecutionEventStore
+	AppendExecutionEventIfAbsent(
+		ctx context.Context,
+		event *ExecutionEvent,
+		dedupeKey string,
+	) (persisted *ExecutionEvent, appended bool, err error)
+}
+
+// AtomicExecutionEventPlanStore persists a deduplicated execution event and
+// its plan projection in one transaction. A repeated event key returns the
+// existing event without changing the current plan projection.
+type AtomicExecutionEventPlanStore interface {
+	DeduplicatingExecutionEventStore
+	AppendExecutionEventWithPlanIfAbsent(
+		ctx context.Context,
+		event *ExecutionEvent,
+		dedupeKey string,
+		plan *PlanState,
+	) (persisted *ExecutionEvent, appended bool, err error)
+}
+
+// NormalizeExecutionEventDedupeKey validates and normalizes an opaque store-
+// internal execution-event deduplication key.
+func NormalizeExecutionEventDedupeKey(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", ValidationErrorf("execution event dedupe key is required")
+	}
+	if len(value) > MaxExecutionEventDedupeKeyBytes {
+		return "", ValidationErrorf("execution event dedupe key exceeds %d bytes", MaxExecutionEventDedupeKeyBytes)
+	}
+	return value, nil
 }
 
 // SanitizeExecutionEventPayloadFields applies the shared event redaction and

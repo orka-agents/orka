@@ -283,9 +283,9 @@ func buildPRMonitorPrompt(args map[string]any) string {
 
 	b.WriteString("1. Call list_pull_requests to list open PRs")
 	if repoURL != "" {
-		b.WriteString(fmt.Sprintf(" with repo_url %q", repoURL))
+		fmt.Fprintf(&b, " with repo_url %q", repoURL)
 	}
-	b.WriteString(fmt.Sprintf(" and per_page %d.\n", perPage))
+	fmt.Fprintf(&b, " and per_page %d.\n", perPage)
 	b.WriteString("2. For each non-draft PR, call check_pr_review_marker with pr_number")
 	b.WriteString(repoArgText)
 	b.WriteString(". Omit head_sha unless you already know it; the tool fetches the current head SHA and returns the marker to use. Skip PRs that already have a marker for the same head SHA.\n")
@@ -298,7 +298,7 @@ func buildPRMonitorPrompt(args map[string]any) string {
 	b.WriteString("5. Post exactly one GitHub review with post_review_comment using pr_number")
 	b.WriteString(repoArgText)
 	b.WriteString(". Include the marker returned by check_pr_review_marker in the review body so future runs skip the same head SHA.\n")
-	b.WriteString(fmt.Sprintf("6. Use review event %s unless the analysis clearly requires REQUEST_CHANGES.\n", reviewEvent))
+	fmt.Fprintf(&b, "6. Use review event %s unless the analysis clearly requires REQUEST_CHANGES.\n", reviewEvent)
 	b.WriteString("Be conservative: do not approve changes you have not fully reviewed, and do not post duplicate reviews.\n")
 
 	if extra := strings.TrimSpace(chatGetStringArg(args, promptField)); extra != "" {

@@ -59,8 +59,7 @@ func invalidRequest(message string, cause error) error {
 }
 
 func errorResponse(err error, metadata OperationMetadata, requestDigest string) (int, ErrorResponse, bool) {
-	var typed *operationError
-	if errors.As(err, &typed) {
+	if typed, ok := errors.AsType[*operationError](err); ok {
 		return typed.status, ErrorResponse{
 			Code: typed.code, Message: typed.message, Retryable: typed.retryable,
 			OperationID: metadata.OperationID, RequestDigest: requestDigest,

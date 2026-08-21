@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1057,8 +1058,8 @@ func boundInitialMessages(messages []llm.Message) []llm.Message {
 		return nil
 	}
 	mandatory := len(messages) - 1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == roleUser {
+	for i, message := range slices.Backward(messages) {
+		if message.Role == roleUser {
 			mandatory = i
 			break
 		}

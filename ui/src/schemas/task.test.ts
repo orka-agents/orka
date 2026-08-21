@@ -19,6 +19,7 @@ import {
   taskStatusSchema,
   k8sMetadataSchema,
   taskSchema,
+  taskEventsResponseSchema,
 } from './task'
 import type { Task, TaskSpec, TaskStatus, TaskType, TaskPhase } from './task'
 
@@ -461,6 +462,46 @@ describe('taskSchema', () => {
 
   it('rejects missing spec', () => {
     expect(() => taskSchema.parse({ metadata: { name: 'x' } })).toThrow()
+  })
+
+  it('preserves an enriched plan at iteration zero', () => {
+    const task = taskSchema.parse({
+      metadata: { name: 'planned', namespace: 'default' },
+      spec: { type: 'agent', agentRef: { name: 'planner' } },
+      status: { phase: 'Running', iteration: 0 },
+      plan: { summary: 'inspect', progressPct: 25, planDocument: '# Plan' },
+    })
+    expect(task.plan?.summary).toBe('inspect')
+    expect(task.plan?.progressPct).toBe(25)
+  })
+})
+
+describe('taskEventsResponseSchema', () => {
+  it('preserves model telemetry', () => {
+    const response = taskEventsResponseSchema.parse({
+      namespace: 'default',
+      streamType: 'task',
+      streamID: 'task-1',
+      afterSeq: 0,
+      latestSeq: 1,
+      events: [{
+        id: 'event-1',
+        namespace: 'default',
+        streamType: 'task',
+        streamID: 'task-1',
+        seq: 1,
+        type: 'ModelUsageUpdated',
+        severity: 'info',
+        cachedInputTokens: 42,
+        contextWindowUsed: 53,
+        contextWindowSize: 200,
+        createdAt: '2026-08-20T00:00:00Z',
+      }],
+    })
+
+    expect(response.events[0].cachedInputTokens).toBe(42)
+    expect(response.events[0].contextWindowUsed).toBe(53)
+    expect(response.events[0].contextWindowSize).toBe(200)
   })
 })
 

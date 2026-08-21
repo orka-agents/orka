@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -195,8 +196,8 @@ func runtimeAuthProxyAddNoProxyHosts(env []string, hosts ...string) []string {
 
 func runtimeAuthProxyEffectiveEnvValue(env []string, name string) string {
 	prefix := name + "="
-	for i := len(env) - 1; i >= 0; i-- {
-		if after, ok := strings.CutPrefix(env[i], prefix); ok {
+	for _, e := range slices.Backward(env) {
+		if after, ok := strings.CutPrefix(e, prefix); ok {
 			return after
 		}
 	}

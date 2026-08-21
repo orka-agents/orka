@@ -18,6 +18,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/taskterminal"
 )
@@ -179,6 +180,12 @@ func (d *ACPDispatcher) recoverRestoredTaskIncarnation(
 		return true, err
 	}
 	if err := validateRestoredTaskSourceAttempt(task, attempt, attemptID); err != nil {
+		return true, err
+	}
+	attempt, err = d.reconcileRestoredJournaledPromptTerminal(
+		ctx, task, types.UID(sourceUID), attempt, fence,
+	)
+	if err != nil {
 		return true, err
 	}
 
@@ -665,8 +672,17 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		return d.patchRecoveredTaskReserved(ctx, task, fence.Epoch, false)
 	case store.PromptExecutionSubmitting, store.PromptExecutionSubmittedUnknown,
 		store.PromptExecutionAccepted, store.PromptExecutionRunning, store.PromptExecutionSettling:
+		if recovered, err := d.recoverJournaledPromptTerminal(ctx, task, attempt, fence); err != nil {
+			return err
+		} else if recovered {
+			return nil
+		}
 		const reason = "RuntimeLost"
 		const message = "controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
+		recoveredAt := time.Now().UTC()
+		if err := d.closeRecoveredPromptJournal(ctx, task, recoveredAt, message); err != nil {
+			return err
+		}
 		if err := d.persistOutcomeUnknown(ctx, attempt.ID, fence, reason, message); err != nil {
 			return err
 		}
@@ -690,6 +706,320 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 	default:
 		return fmt.Errorf("unsupported stale prompt attempt state %s", attempt.ExecutionState)
 	}
+}
+
+func (d *ACPDispatcher) closeRecoveredPromptJournal(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	at time.Time,
+	diagnostic string,
+) error {
+	identity, ok := mappedPromptRecoveryIdentity(task)
+	if !ok || d.EventStore == nil {
+		return nil
+	}
+	state, err := (v2eventjournal.Journal{
+		EventStore:       d.EventStore,
+		MapContext:       mappedPromptRecoveryContext(task),
+		RecoveryIdentity: identity,
+	}).Open(ctx)
+	if err != nil {
+		return err
+	}
+	if err := state.AppendPersistedToolClosuresIfNew(ctx, at); err != nil {
+		return err
+	}
+	_, _, err = state.AppendPromptStreamFailureIfNew(ctx, at, diagnostic)
+	return err
+}
+
+func mappedPromptRecoveryIdentity(task *corev1alpha1.Task) (v2eventjournal.MappedUpdateIdentity, bool) {
+	if task == nil {
+		return v2eventjournal.MappedUpdateIdentity{}, false
+	}
+	return mappedPromptRecoveryIdentityForTaskUID(task, task.UID)
+}
+
+func mappedPromptRecoveryIdentityForTaskUID(
+	task *corev1alpha1.Task,
+	taskUID types.UID,
+) (v2eventjournal.MappedUpdateIdentity, bool) {
+	if task == nil || task.Status.Execution == nil || taskUID == "" {
+		return v2eventjournal.MappedUpdateIdentity{}, false
+	}
+	execution := task.Status.Execution
+	if execution.Attempt < 1 || strings.TrimSpace(execution.PromptID) == "" ||
+		strings.TrimSpace(execution.RuntimeInstanceID) == "" ||
+		strings.TrimSpace(execution.RuntimeSessionSupervisorBootID) == "" ||
+		strings.TrimSpace(execution.RuntimeSessionUID) == "" || execution.RuntimeSessionGeneration < 1 {
+		return v2eventjournal.MappedUpdateIdentity{}, false
+	}
+	return v2eventjournal.MappedUpdateIdentity{
+		Protocol:                 harnessv2.ProtocolVersion,
+		RuntimeInstanceID:        harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
+		SupervisorBootID:         harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID),
+		RuntimeSessionUID:        harnessv2.RuntimeSessionUID(execution.RuntimeSessionUID),
+		RuntimeSessionGeneration: uint64(execution.RuntimeSessionGeneration),
+		TaskUID:                  harnessv2.TaskUID(taskUID),
+		TaskAttempt:              uint32(execution.Attempt),
+		PromptID:                 harnessv2.PromptID(execution.PromptID),
+	}, true
+}
+
+func (d *ACPDispatcher) reconcileRestoredJournaledPromptTerminal(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	sourceUID types.UID,
+	attempt *store.PromptAttempt,
+	fence store.ControllerEpochFence,
+) (*store.PromptAttempt, error) {
+	if attempt == nil || d.EventStore == nil {
+		return attempt, nil
+	}
+	switch attempt.ExecutionState {
+	case store.PromptExecutionAccepted, store.PromptExecutionRunning, store.PromptExecutionSettling,
+		store.PromptExecutionSucceeded:
+	default:
+		return attempt, nil
+	}
+	identity, ok := mappedPromptRecoveryIdentityForTaskUID(task, sourceUID)
+	if !ok {
+		return attempt, nil
+	}
+	evidence, err := (v2eventjournal.Journal{
+		EventStore:       d.EventStore,
+		MapContext:       mappedPromptRecoveryContext(task),
+		RecoveryIdentity: identity,
+	}).FindPromptTerminal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if evidence == nil {
+		evidence, err = d.recoverSettlingResultTerminal(ctx, task, attempt, identity)
+		if err != nil || evidence == nil {
+			return attempt, err
+		}
+	}
+	switch evidence.TerminalEvent {
+	case harnessv2.EventCompleted:
+		if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return attempt, nil
+			}
+			return nil, err
+		}
+		if attempt.ExecutionState == store.PromptExecutionSucceeded {
+			if err := d.publishTaskResultReference(ctx, task); err != nil {
+				return nil, err
+			}
+			return attempt, nil
+		}
+		if attempt.ExecutionState != store.PromptExecutionSettling {
+			if err := d.transitionAttempt(
+				ctx, attempt.ID, fence, attempt.ExecutionState, store.PromptExecutionSettling,
+				"recover-restored-journal-terminal-settling", nil,
+			); err != nil {
+				return nil, err
+			}
+		}
+		if err := d.transitionAttempt(
+			ctx, attempt.ID, fence, store.PromptExecutionSettling, store.PromptExecutionSucceeded,
+			"recover-restored-journal-terminal-succeeded", nil,
+		); err != nil {
+			return nil, err
+		}
+		if err := d.publishTaskResultReference(ctx, task); err != nil {
+			return nil, err
+		}
+	case harnessv2.EventCancelled:
+		if err := d.transitionAttemptToTerminal(
+			ctx, attempt.ID, fence, store.PromptExecutionCancelled, "recover-restored-journal-terminal-cancelled",
+		); err != nil {
+			return nil, err
+		}
+	case harnessv2.EventOutcomeUnknown:
+		if err := d.persistOutcomeUnknown(
+			ctx, attempt.ID, fence, "RuntimeLost", "journaled prompt outcome is unknown",
+		); err != nil {
+			return nil, err
+		}
+	default:
+		if err := d.transitionAttemptToTerminal(
+			ctx, attempt.ID, fence, store.PromptExecutionFailed, "recover-restored-journal-terminal-failed",
+		); err != nil {
+			return nil, err
+		}
+	}
+	return d.Store.GetPromptAttempt(ctx, attempt.ID)
+}
+
+func mappedPromptRecoveryContext(task *corev1alpha1.Task) v2eventjournal.MapContext {
+	if task == nil {
+		return v2eventjournal.MapContext{}
+	}
+	return v2eventjournal.MapContext{
+		Namespace: task.Namespace, TaskName: task.Name, StreamID: task.Name, SessionName: taskSessionName(task),
+	}
+}
+
+func (d *ACPDispatcher) recoverJournaledPromptTerminal(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	fence store.ControllerEpochFence,
+) (bool, error) {
+	identity, ok := mappedPromptRecoveryIdentity(task)
+	if !ok || d.EventStore == nil {
+		return false, nil
+	}
+	evidence, err := (v2eventjournal.Journal{
+		EventStore:       d.EventStore,
+		MapContext:       mappedPromptRecoveryContext(task),
+		RecoveryIdentity: identity,
+	}).FindPromptTerminal(ctx)
+	if err != nil {
+		return false, err
+	}
+	if evidence == nil {
+		evidence, err = d.recoverSettlingResultTerminal(ctx, task, attempt, identity)
+		if err != nil || evidence == nil {
+			return false, err
+		}
+	}
+	if evidence.TerminalEvent != harnessv2.EventCompleted {
+		session, err := d.recoveredTaskSession(ctx, task, attempt)
+		if err != nil {
+			return true, err
+		}
+		return true, d.finishNonSuccessWithCancellationReason(
+			ctx, task, attempt.ID, fence, session, harnessv2.Event{Type: evidence.TerminalEvent}, evidence.CancellationReason,
+		)
+	}
+	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return true, err
+	}
+	switch attempt.ExecutionState {
+	case store.PromptExecutionAccepted, store.PromptExecutionRunning:
+		if err := d.transitionAttempt(
+			ctx, attempt.ID, fence, attempt.ExecutionState, store.PromptExecutionSettling,
+			"recover-journal-terminal-settling", nil,
+		); err != nil {
+			return true, err
+		}
+	case store.PromptExecutionSettling:
+	default:
+		return false, nil
+	}
+	if err := d.transitionAttempt(
+		ctx, attempt.ID, fence, store.PromptExecutionSettling, store.PromptExecutionSucceeded,
+		"recover-journal-terminal-succeeded", nil,
+	); err != nil {
+		return true, err
+	}
+	attempt, err = d.Store.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		return true, err
+	}
+	if attempt.DeliveryState == store.PromptDeliveryNotRequested {
+		if err := d.transitionDelivery(
+			ctx, attempt.ID, fence, store.PromptDeliveryNotRequested, store.PromptDeliveryValidating,
+			"recover-journal-terminal-workspace-validation", "",
+		); err != nil {
+			return true, err
+		}
+		attempt, err = d.Store.GetPromptAttempt(ctx, attempt.ID)
+		if err != nil {
+			return true, err
+		}
+	}
+	if err := d.publishTaskResultReference(ctx, task); err != nil {
+		return true, err
+	}
+	if err := d.recoverSucceededTaskProjection(ctx, task, attempt, fence); err != nil {
+		return true, err
+	}
+	return true, d.patchRecoveredTerminalEpoch(ctx, task, fence.Epoch)
+}
+
+func (d *ACPDispatcher) recoverSettlingResultTerminal(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	identity v2eventjournal.MappedUpdateIdentity,
+) (*v2eventjournal.PromptTerminalEvidence, error) {
+	if attempt.ExecutionState != store.PromptExecutionSettling || attempt.Version < 2 {
+		return nil, nil
+	}
+	receiptVersion := attempt.Version - 1
+	operationID := acpSettlingOperation + "-" + strconv.FormatInt(receiptVersion, 10)
+	var result []byte
+	receipts, ok := d.ResultStore.(store.PromptResultReceiptStore)
+	if !ok {
+		return nil, fmt.Errorf("ACP settling recovery requires a result store with prompt result receipts")
+	}
+	receipt, receiptErr := receipts.GetPromptResultReceipt(ctx, attempt.ID)
+	switch {
+	case receiptErr == nil:
+		digest, err := acpSettlingTransitionDigest(attempt.ID, receiptVersion, receipt.Data)
+		if err != nil {
+			return nil, err
+		}
+		if receipt.Namespace != task.Namespace || receipt.TaskName != task.Name ||
+			receipt.OperationID != operationID || receipt.OperationDigest != digest ||
+			attempt.LastOperationID != operationID || attempt.LastOperationDigest != digest {
+			return nil, nil
+		}
+		result = receipt.Data
+		if err := d.persistTaskResult(ctx, task, result); err != nil {
+			return nil, err
+		}
+	case errors.Is(receiptErr, store.ErrNotFound):
+		var err error
+		result, err = d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		digest, err := acpSettlingTransitionDigest(attempt.ID, receiptVersion, result)
+		if err != nil {
+			return nil, err
+		}
+		if attempt.LastOperationID != operationID || attempt.LastOperationDigest != digest {
+			return nil, nil
+		}
+	default:
+		return nil, receiptErr
+	}
+	if attempt.UpdatedAt.IsZero() {
+		return nil, fmt.Errorf("settling prompt attempt %s has no receipt timestamp", attempt.ID)
+	}
+	journal := v2eventjournal.Journal{
+		EventStore:       d.EventStore,
+		MapContext:       mappedPromptRecoveryContext(task),
+		RecoveryIdentity: identity,
+	}
+	state, err := journal.Open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := state.AppendPersistedToolClosuresIfNew(ctx, attempt.UpdatedAt.UTC()); err != nil {
+		return nil, err
+	}
+	settlement := harnessv2.PromptSettlement{
+		TerminalEvent: harnessv2.EventCompleted,
+		Outcome:       harnessv2.PromptOutcomeSucceeded,
+		StopReason:    harnessv2.ACPStopReasonEndTurn,
+		SettledAt:     attempt.UpdatedAt.UTC(),
+	}
+	if _, _, err := state.AppendPromptSettlementIfNew(ctx, settlement, ""); err != nil {
+		return nil, err
+	}
+	return journal.FindPromptTerminal(ctx)
 }
 
 func taskScopedRuntimeSessionCleanupDigest(
@@ -1253,6 +1583,12 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 }
 
 func (d *ACPDispatcher) recoverSucceededTaskProjection(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, fence store.ControllerEpochFence) error {
+	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
+		return err
+	}
+	if err := d.publishTaskResultReference(ctx, task); err != nil {
+		return err
+	}
 	if !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
 		switch attempt.DeliveryState {
 		case store.PromptDeliveryValidating:

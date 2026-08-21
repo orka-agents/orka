@@ -652,8 +652,7 @@ func sleepContext(ctx context.Context, duration time.Duration) error {
 }
 
 func normalizeError(op string, err error) error {
-	var workspaceErr *workspace.Error
-	if errors.As(err, &workspaceErr) {
+	if workspaceErr, ok := errors.AsType[*workspace.Error](err); ok {
 		return workspaceErr
 	}
 	return workspace.NewError(op, workspace.ErrorKindUnknown, "operation failed", false, err)

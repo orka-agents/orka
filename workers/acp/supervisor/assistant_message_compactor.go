@@ -122,7 +122,7 @@ func (c *assistantMessageCompactor) flush() acp.PromptEvent {
 		Content: struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
-		}{Type: "text", Text: c.text.String()},
+		}{Type: acpContentTypeText, Text: c.text.String()},
 		Meta: c.meta,
 	})
 	if err != nil {
@@ -174,7 +174,7 @@ func decodeAssistantMessageChunk(event acp.PromptEvent) (assistantMessageChunk, 
 		return envelope, false
 	}
 	if json.Unmarshal(event.Update.Update, &envelope) != nil ||
-		envelope.SessionUpdate != acpUpdateAgentMessageChunk || envelope.Content.Type != "text" {
+		envelope.SessionUpdate != acpUpdateAgentMessageChunk || envelope.Content.Type != acpContentTypeText {
 		return assistantMessageChunk{}, false
 	}
 	return envelope, true

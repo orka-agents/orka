@@ -1744,7 +1744,14 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 			prompt.sequence--
 			return nil, nil
 		}
-		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity, Update: update}, nil
+		mapped := &harnessv2.Event{
+			Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity, Update: update,
+		}
+		if err := boundACPToolContentToEventLine(mapped, s.cfg.Capabilities.Limits.MaxEventLineBytes); err != nil {
+			prompt.sequence--
+			return nil, err
+		}
+		return mapped, nil
 	case acp.PromptEventPermissionRequested:
 		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout))
 		if err != nil {

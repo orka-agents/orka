@@ -158,8 +158,7 @@ func (r *gitRunner) run(ctx context.Context, box *gitSandbox, directory string, 
 		return result, apiError(ErrSCMTransport, "scm_output_limit", "Git output exceeded the configured limit", 502, false, err)
 	}
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if _, ok := errors.AsType[*exec.ExitError](err); ok {
 			return result, apiError(ErrSCMTransport, "scm_failure", "Git operation failed", 502, true, err)
 		}
 		return result, apiError(ErrSCMTransport, "scm_unavailable", "Git operation could not be started", 503, true, err)
@@ -238,8 +237,7 @@ func (b *gitBlobBatch) classifyPrematureExit(message string, readErr error) erro
 		return apiError(ErrSCMTransport, "scm_output_limit", "Git output exceeded the configured limit", 502, false, waitErr)
 	}
 	if waitErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) {
+		if _, ok := errors.AsType[*exec.ExitError](waitErr); ok {
 			return apiError(ErrSCMTransport, "scm_failure", "Git batch operation failed", 502, true, waitErr)
 		}
 		return apiError(ErrSCMTransport, "scm_unavailable", "Git batch operation could not complete", 503, true, waitErr)
@@ -329,8 +327,7 @@ func (b *gitBlobBatch) finish() error {
 		return apiError(ErrSCMTransport, "scm_output_limit", "Git output exceeded the configured limit", 502, false, waitErr)
 	}
 	if waitErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) {
+		if _, ok := errors.AsType[*exec.ExitError](waitErr); ok {
 			return apiError(ErrSCMTransport, "scm_failure", "Git batch operation failed", 502, true, waitErr)
 		}
 		return apiError(ErrSCMTransport, "scm_unavailable", "Git batch operation could not complete", 503, true, waitErr)

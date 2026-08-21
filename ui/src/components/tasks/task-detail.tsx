@@ -25,6 +25,7 @@ import { useTaskTrace, useTaskApprovals } from '@/hooks/use-execution-events'
 import { useTaskArtifacts } from '@/hooks/use-task-artifacts'
 import { ApiError } from '@/lib/api-client'
 import { useNavigate, useSearch } from '@tanstack/react-router'
+import type { ExecutionEvent, PlanState } from '@/schemas/task'
 
 function timeAgo(ts?: string): string {
   if (!ts) return '-'
@@ -33,6 +34,28 @@ function timeAgo(ts?: string): string {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`
   return `${Math.floor(s / 86400)}d ago`
+}
+
+function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
+  let latest: ExecutionEvent | undefined
+  for (const event of events) {
+    if (event.type === 'PlanUpdated' && (!latest || event.seq > latest.seq)) {
+      latest = event
+    }
+  }
+  if (!latest) return undefined
+
+  const content = latest.content
+  const fields = content && typeof content === 'object' && !Array.isArray(content)
+    ? content as Record<string, unknown>
+    : undefined
+
+  return {
+    summary: latest.summary,
+    progressPct: typeof fields?.progressPct === 'number' ? fields.progressPct : undefined,
+    goalComplete: typeof fields?.goalComplete === 'boolean' ? fields.goalComplete : undefined,
+    planDocument: latest.contentText,
+  }
 }
 
 
@@ -52,6 +75,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const taskEventsStreamStatus = taskEventsUnsupported ? 'unsupported' : taskEventsFailed ? 'error' : undefined
   const forkSupported = !taskEventsUnsupported && !taskEventsFailed
   const taskEvents = taskEventsResponse?.events ?? []
+  const plan = task?.plan ?? latestEventPlan(taskEvents)
+  const hasPlanHistory = Boolean(plan) || (task?.status?.iteration ?? 0) > 0 ||
+    taskEvents.some((event) => event.type === 'PlanUpdated')
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
   const search = useSearch({ from: '/tasks/$taskId' })
@@ -61,7 +87,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const [tabState, setTabState] = useState<{ override: string | null; seen?: string }>({ override: null })
   if (tabState.seen !== search.tab) setTabState({ override: null, seen: search.tab })
   const availableTabs = new Set(['runtime', 'overview', 'execution', 'timeline', 'trace', 'approvals', 'result', 'logs'])
-  if ((task?.status?.iteration ?? 0) > 0) availableTabs.add('plan')
+  if (hasPlanHistory) availableTabs.add('plan')
   if ((task?.status?.childTasks?.length ?? 0) > 0) availableTabs.add('children')
   const requestedTab = tabState.override ?? search.tab ?? 'runtime'
   const activeTab = availableTabs.has(requestedTab) ? requestedTab : 'runtime'
@@ -186,7 +212,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <TabsTrigger value="approvals">Approvals</TabsTrigger>
           <TabsTrigger value="result">Result</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
-          {(task.status?.iteration ?? 0) > 0 && (
+          {hasPlanHistory && (
             <TabsTrigger value="plan">Plan</TabsTrigger>
           )}
           {(task.status?.childTasks?.length ?? 0) > 0 && (
@@ -268,19 +294,15 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             </CardContent>
           </Card>
 
-          {(task.status?.iteration ?? 0) > 0 && (
+          {hasPlanHistory && (
             <Card>
               <CardHeader>
-                <CardTitle>Autonomous Loop</CardTitle>
+                <CardTitle>Plan</CardTitle>
               </CardHeader>
               <CardContent>
                 <RunTimeline
                   task={task}
-                  plan={
-                    (task as Record<string, unknown>).plan as
-                      | import('@/schemas/task').PlanState
-                      | undefined
-                  }
+                  plan={plan}
                   events={taskEvents}
                 />
               </CardContent>
@@ -418,37 +440,26 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <StructuredLogViewer taskId={taskId} taskPhase={task.status?.phase} />
         </TabsContent>
 
-        {(task.status?.iteration ?? 0) > 0 && (
+        {hasPlanHistory && (
           <TabsContent value="plan">
             <Card>
               <CardHeader>
-                <CardTitle>Autonomous Plan</CardTitle>
+                <CardTitle>Agent Plan</CardTitle>
               </CardHeader>
               <CardContent>
-                {(() => {
-                  const plan = (task as Record<string, unknown>).plan as
-                    | import('@/schemas/task').PlanState
-                    | undefined
-                  return (
-                    <div className="space-y-4">
-                      <RunTimeline
-                        task={task}
-                        plan={plan}
-                        events={taskEvents}
-                      />
-                      {plan?.planDocument && (
-                        <div>
-                          <p className="mb-1 text-xs font-medium text-muted-foreground">
-                            Plan document
-                          </p>
-                          <pre className="rounded-md bg-muted p-4 whitespace-pre-wrap max-h-[600px] overflow-y-auto text-xs">
-                            {plan.planDocument}
-                          </pre>
-                        </div>
-                      )}
+                <div className="space-y-4">
+                  <RunTimeline task={task} plan={plan} events={taskEvents} />
+                  {plan?.planDocument && (
+                    <div>
+                      <p className="mb-1 text-xs font-medium text-muted-foreground">
+                        Plan document
+                      </p>
+                      <pre className="rounded-md bg-muted p-4 whitespace-pre-wrap max-h-[600px] overflow-y-auto text-xs">
+                        {plan.planDocument}
+                      </pre>
                     </div>
-                  )
-                })()}
+                  )}
+                </div>
               </CardContent>
             </Card>
           </TabsContent>

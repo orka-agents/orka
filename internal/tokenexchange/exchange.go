@@ -1180,8 +1180,7 @@ func exchangeFailureReason(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
 	}
-	var exchangeErr *ExchangeError
-	if errors.As(err, &exchangeErr) {
+	if exchangeErr, ok := errors.AsType[*ExchangeError](err); ok {
 		switch {
 		case exchangeErr.StatusCode == http.StatusUnauthorized || exchangeErr.StatusCode == http.StatusForbidden:
 			return "client_auth"

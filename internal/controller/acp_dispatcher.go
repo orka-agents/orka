@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -25,6 +27,7 @@ import (
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
+	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -38,6 +41,9 @@ const (
 	DefaultACPRateLimitReconcileInterval                 = time.Second
 	defaultACPTaskTimeout                                = 30 * time.Minute
 	acpTaskTimeoutReason                                 = "TaskTimeout"
+	acpTaskTimeoutCancellationSettledMessage             = "task deadline cancellation settled"
+	acpCancelledOperation                                = "cancelled"
+	acpSettlingOperation                                 = "settling"
 	acpSucceededOperation                                = "succeeded"
 	acpCredentialBlockedOperation                        = "credential-blocked"
 	acpCredentialBlockedMessage                          = "workspace credential changed or became unavailable after queue; refusing to change frozen authority"
@@ -72,6 +78,8 @@ type ACPDispatcher struct {
 	APIReader                client.Reader
 	Store                    store.DurableControlStore
 	ResultStore              store.ResultStore
+	EventStore               store.ExecutionEventStore
+	PlanStore                store.PlanStore
 	Snapshots                store.AgentExecutionSnapshotStore
 	Epochs                   *ControllerEpochManager
 	Sessions                 *ACPSessionContinuity
@@ -120,8 +128,17 @@ func (d *ACPDispatcher) substrateRouteHTTPClient() (*http.Client, error) {
 func (d *ACPDispatcher) NeedLeaderElection() bool { return true }
 
 func (d *ACPDispatcher) Start(ctx context.Context) error {
-	if d.Client == nil || d.Store == nil || d.ResultStore == nil || d.Snapshots == nil || d.Epochs == nil {
-		return fmt.Errorf("ACP dispatcher requires Kubernetes client, durable control store, result store, immutable snapshot store, and epoch manager")
+	if d.Client == nil || d.Store == nil || d.ResultStore == nil || d.EventStore == nil || d.PlanStore == nil || d.Snapshots == nil || d.Epochs == nil {
+		return fmt.Errorf("ACP dispatcher requires Kubernetes client, durable control store, result store, execution event store, plan store, immutable snapshot store, and epoch manager")
+	}
+	if _, ok := d.EventStore.(store.DeduplicatingExecutionEventStore); !ok {
+		return fmt.Errorf("ACP dispatcher requires an execution event store with atomic deduplication")
+	}
+	if _, ok := d.EventStore.(store.AtomicExecutionEventPlanStore); !ok {
+		return fmt.Errorf("ACP dispatcher requires an execution event store with atomic plan projection")
+	}
+	if _, ok := d.ResultStore.(store.PromptResultReceiptStore); !ok {
+		return fmt.Errorf("ACP dispatcher requires a result store with prompt result receipts")
 	}
 	if d.APIReader == nil {
 		d.APIReader = d.Client
@@ -1252,6 +1269,39 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 	}
 
+	agentName := ""
+	if task.Status.AgentExecutionBinding != nil && task.Status.AgentExecutionBinding.Agent != nil {
+		agentName = task.Status.AgentExecutionBinding.Agent.Name
+	} else if task.Spec.AgentRef != nil {
+		agentName = task.Spec.AgentRef.Name
+	}
+	journalState, err := (v2eventjournal.Journal{
+		EventStore: d.EventStore,
+		MapContext: v2eventjournal.MapContext{
+			Namespace: task.Namespace, TaskName: task.Name, SessionName: taskSessionName(task),
+			AgentName: agentName, StreamID: task.Name, Provider: profile.ProviderKind, Model: profile.Model,
+		},
+		RecoveryIdentity: v2eventjournal.MappedUpdateIdentity{
+			Protocol:          harnessv2.ProtocolVersion,
+			RuntimeInstanceID: runtimeFence.RuntimeInstanceID, SupervisorBootID: runtimeFence.SupervisorBootID,
+			RuntimeSessionUID: runtimeFence.RuntimeSessionUID, RuntimeSessionGeneration: runtimeFence.RuntimeSessionGeneration,
+			TaskUID: harnessv2.TaskUID(task.UID), TaskAttempt: uint32(task.Status.Execution.Attempt),
+			PromptID: harnessv2.PromptID(task.Status.Execution.PromptID),
+		},
+	}).Open(ctx)
+	if err != nil {
+		openErr := fmt.Errorf("open ACP execution event journal: %w", err)
+		if sessionExecution != nil {
+			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+				ctx, task, attemptID, fence, openErr, &sessionExecution.Binding,
+			); requeueErr != nil {
+				return errors.Join(openErr, requeueErr)
+			}
+			sessionExecution.requeued = true
+			return nil
+		}
+		return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, openErr)
+	}
 	if err := d.openTaskSessionTurn(sessionCtx, task, attemptID, fence, sessionExecution); err != nil {
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 			return deadlineErr
@@ -1280,8 +1330,23 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		userPrompt = sessionExecution.UserPrompt
 	}
 	var terminal *harnessv2.Event
+	var lastAssistantUpdate *harnessv2.Event
 	var assistant strings.Builder
 	assistantOverflow := false
+	flushInterruptedOutput := func(flushCtx context.Context) error {
+		persistableAssistant, assistantContentOmitted := assistantTranscriptForPersistence(
+			assistant.String(), assistantOverflow,
+		)
+		var assistantEvent *harnessv2.Event
+		var assistantOrderSequence uint64
+		if lastAssistantUpdate != nil && (persistableAssistant != "" || assistantContentOmitted) {
+			assistantEvent = lastAssistantUpdate
+			assistantOrderSequence = lastAssistantUpdate.Identity.Sequence
+		}
+		return journalState.AppendBufferedStreamsIfNew(
+			flushCtx, assistantEvent, assistantOrderSequence, persistableAssistant, assistantContentOmitted,
+		)
+	}
 	accepted := false
 	admissionRetry := 0
 	for {
@@ -1303,6 +1368,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			switch event.Type {
 			case harnessv2.EventAccepted:
 				runtimeSessionSettlementRequired = true
+				if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, event); err != nil {
+					return acpUpdatePersistenceError(err, nil)
+				}
 				if !accepted {
 					if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionSubmitting, store.PromptExecutionAccepted, "accepted", nil); err != nil {
 						return err
@@ -1330,6 +1398,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				}
 			case harnessv2.EventUpdate:
 				if event.Update != nil && event.Update.AssistantMessage != nil {
+					copy := event
+					lastAssistantUpdate = &copy
 					text := event.Update.AssistantMessage.Text
 					if !assistantOverflow {
 						if maxResultBytes < 1 || len(text) > maxResultBytes-assistant.Len() {
@@ -1338,6 +1408,33 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 							assistant.WriteString(text)
 						}
 					}
+				}
+				var planState *store.PlanState
+				var planErr error
+				if event.Update != nil && event.Update.Plan != nil {
+					projection := journalState.ProjectPlanUpdate(*event.Update.Plan)
+					planState = &store.PlanState{
+						TaskName: task.Name, Namespace: task.Namespace, Iteration: int(task.Status.Iteration),
+						Summary: projection.Summary, ProgressPct: projection.ProgressPct,
+						GoalComplete: projection.GoalComplete, PlanDocument: projection.Document,
+					}
+				}
+				var journalErr error
+				if planState == nil {
+					_, _, journalErr = journalState.AppendUpdateIfNew(ctx, event)
+				} else if _, ok := d.EventStore.(store.AtomicExecutionEventPlanStore); ok {
+					_, _, journalErr = journalState.AppendPlanUpdateIfNew(ctx, event, planState)
+				} else {
+					// Direct unit tests may use separate fake stores without starting
+					// the dispatcher. Production startup requires the atomic path above.
+					planErr = saveACPPlanUpdateWithRetry(ctx, d.PlanStore, task.Namespace, task.Name, planState)
+					_, _, journalErr = journalState.AppendUpdateIfNew(ctx, event)
+					planErr = reconcileACPPlanUpdateAfterJournal(
+						ctx, d.PlanStore, task.Namespace, task.Name, planState, planErr, journalErr,
+					)
+				}
+				if persistenceErr := acpUpdatePersistenceError(journalErr, planErr); persistenceErr != nil {
+					return persistenceErr
 				}
 			case harnessv2.EventPermissionRequested:
 				return d.resolvePromptPermission(runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, event)
@@ -1387,18 +1484,78 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 			continue
 		}
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		if persistErr := flushInterruptedOutput(flushCtx); persistErr != nil {
+			streamErr = acpUpdatePersistenceError(persistErr, nil)
+		}
+		cancel()
 		return d.handlePromptStreamError(
-			ctx, promptTrace, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence,
+			ctx, promptTrace, runtimeClient, createRequest.RuntimeSessionID, task, attemptID, fence, runtimeFence, journalState,
 			accepted || summary.Accepted, summary.WriteEvidence, runtimeContextError(runtimeCtx), streamErr,
 		)
 	}
 	if terminal == nil {
+		if err := flushInterruptedOutput(ctx); err != nil {
+			logf.FromContext(ctx).Error(err, "persist unterminated ACP buffered streams", "namespace", task.Namespace, "task", task.Name)
+			return recordACPPromptOutcomeIfSettled(
+				ctx, promptTrace, acpPromptOutcomeFailed,
+				d.failPromptForExecutionEventPersistence(
+					ctx, task, attemptID, fence, "unterminated buffered stream persistence failed",
+				),
+			)
+		}
+		if err := appendPromptStreamFailureLifecycleIfNew(
+			ctx, journalState, time.Now().UTC(), harnessv2.ErrMissingTerminalEvent,
+		); err != nil {
+			logf.FromContext(ctx).Error(err, "persist unterminated ACP prompt lifecycle", "namespace", task.Namespace, "task", task.Name)
+			return recordACPPromptOutcomeIfSettled(
+				ctx, promptTrace, acpPromptOutcomeFailed,
+				d.failPromptForExecutionEventPersistence(
+					ctx, task, attemptID, fence, "unterminated prompt lifecycle persistence failed",
+				),
+			)
+		}
 		return recordACPPromptOutcomeIfSettled(
 			ctx, promptTrace, acpPromptOutcomeUnknown,
 			d.markOutcomeUnknown(ctx, task, attemptID, fence, "MissingTerminal", "ACP stream ended without a terminal event"),
 		)
 	}
+	flushTerminalOutput := func(transcript string, contentOmitted bool) error {
+		var assistantEvent *harnessv2.Event
+		var assistantOrderSequence uint64
+		if transcript != "" || contentOmitted {
+			assistantEvent = terminal
+			assistantOrderSequence = terminal.Identity.Sequence
+			if lastAssistantUpdate != nil {
+				assistantOrderSequence = lastAssistantUpdate.Identity.Sequence
+			}
+		}
+		return journalState.AppendBufferedStreamsIfNew(
+			ctx, assistantEvent, assistantOrderSequence, transcript, contentOmitted,
+		)
+	}
 	if terminal.Type != harnessv2.EventCompleted {
+		persistableAssistant, assistantContentOmitted := assistantTranscriptForPersistence(
+			assistant.String(), assistantOverflow,
+		)
+		if err := flushTerminalOutput(persistableAssistant, assistantContentOmitted); err != nil {
+			logf.FromContext(ctx).Error(err, "persist terminal ACP buffered streams", "namespace", task.Namespace, "task", task.Name)
+			return recordACPPromptOutcomeIfSettled(
+				ctx, promptTrace, acpPromptOutcomeFailed,
+				d.failPromptForExecutionEventPersistence(
+					ctx, task, attemptID, fence, "terminal buffered stream persistence failed",
+				),
+			)
+		}
+		if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, *terminal); err != nil {
+			logf.FromContext(ctx).Error(err, "persist terminal ACP prompt lifecycle", "namespace", task.Namespace, "task", task.Name)
+			return recordACPPromptOutcomeIfSettled(
+				ctx, promptTrace, acpPromptOutcomeFailed,
+				d.failPromptForExecutionEventPersistence(
+					ctx, task, attemptID, fence, "terminal prompt lifecycle persistence failed",
+				),
+			)
+		}
 		outcome := acpPromptOutcomeFailed
 		switch terminal.Type {
 		case harnessv2.EventCancelled:
@@ -1411,15 +1568,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, *terminal),
 		)
 	}
-	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionRunning, store.PromptExecutionSettling, "settling", nil); err != nil {
-		return err
-	}
-	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
-		status.State = corev1alpha1.TaskExecutionStateSettling
-		status.LastTransitionTime = nowMeta()
-	}); err != nil {
-		return err
-	}
 	settlement := harnessv2.PromptSettlement{TerminalEvent: terminal.Type, Outcome: harnessv2.PromptOutcomeSucceeded, StopReason: harnessv2.ACPStopReasonEndTurn, SettledAt: terminal.Identity.Timestamp}
 	settlementDigest, err := harnessv2.CanonicalPromptSettlementDigest(settlement)
 	if err != nil {
@@ -1428,6 +1576,39 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	resultText, err := completedPromptResultText(terminal, assistant.String(), assistantOverflow)
 	if err != nil {
 		return err
+	}
+	persistableAssistant, assistantContentOmitted := completedAssistantTranscriptForPersistence(
+		assistant.String(), assistantOverflow, resultText,
+	)
+	if err := d.transitionAttemptToSettlingWithResult(ctx, task, attemptID, fence, []byte(resultText)); err != nil {
+		return err
+	}
+	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
+		status.State = corev1alpha1.TaskExecutionStateSettling
+		status.LastTransitionTime = nowMeta()
+	}); err != nil {
+		return err
+	}
+	if err := flushTerminalOutput(persistableAssistant, assistantContentOmitted); err != nil {
+		logf.FromContext(ctx).Error(err, "persist terminal ACP buffered streams", "namespace", task.Namespace, "task", task.Name)
+		return d.failPromptForExecutionEventPersistence(
+			ctx, task, attemptID, fence, "terminal buffered stream persistence failed",
+		)
+	}
+	if _, _, err := journalState.AppendTerminalUsageIfNew(ctx, *terminal); err != nil {
+		logf.FromContext(ctx).Error(err, "persist terminal ACP usage", "namespace", task.Namespace, "task", task.Name)
+		return d.failPromptForExecutionEventPersistence(
+			ctx, task, attemptID, fence, "terminal usage persistence failed",
+		)
+	}
+	if err := d.persistTaskResult(ctx, task, []byte(resultText)); err != nil {
+		return err
+	}
+	if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, *terminal); err != nil {
+		logf.FromContext(ctx).Error(err, "persist terminal ACP prompt lifecycle", "namespace", task.Namespace, "task", task.Name)
+		return d.failPromptForExecutionEventPersistence(
+			ctx, task, attemptID, fence, "terminal prompt lifecycle persistence failed",
+		)
 	}
 	if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryNotRequested, store.PromptDeliveryValidating, "validate-workspace", ""); err != nil {
 		return err
@@ -1445,8 +1626,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	delta, err := runtimeClient.CreateWorkspaceDelta(runtimeCtx, createRequest.RuntimeSessionID, deltaRequest)
 	if err != nil {
 		httpStatus, code, kind := 0, harnessv2.ErrorCode(""), harnessv2.ClientErrorKind("")
-		var clientErr *harnessv2.ClientError
-		if errors.As(err, &clientErr) {
+		if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
 			httpStatus, code, kind = clientErr.StatusCode, clientErr.Code, clientErr.Kind
 		}
 		logf.FromContext(ctx).Info(
@@ -1456,7 +1636,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			"kind", kind,
 			"serverMessage", boundedRuntimeSessionServerMessage(err),
 		)
-		if saveErr := d.saveTaskResult(ctx, task, []byte(resultText)); saveErr != nil {
+		if saveErr := d.publishTaskResultReference(ctx, task); saveErr != nil {
 			return saveErr
 		}
 		if transitionErr := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionSettling, store.PromptExecutionSucceeded, acpSucceededOperation, nil); transitionErr != nil {
@@ -1486,7 +1666,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.failTaskForDelivery(ctx, task, status, "workspace validation failed")
 	}
 	runtimePublicationFinalizationRequired = delta.Delta.State == harnessv2.WorkspaceDeltaPrepared
-	if err := d.saveTaskResult(ctx, task, []byte(resultText)); err != nil {
+	if err := d.publishTaskResultReference(ctx, task); err != nil {
 		return err
 	}
 	// ACP settlement is authoritative for execution. Delivery may still fail or
@@ -1640,6 +1820,101 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 	}
 	return d.completeSuccessWithDelivery(ctx, task, deliveryStatus, "ACP task completed")
+}
+
+func saveACPPlanUpdateWithRetry(
+	ctx context.Context,
+	planStore store.PlanStore,
+	namespace,
+	taskName string,
+	plan *store.PlanState,
+) error {
+	if err := planStore.SavePlan(ctx, namespace, taskName, plan); err != nil {
+		if retryErr := planStore.SavePlan(ctx, namespace, taskName, plan); retryErr != nil {
+			return errors.Join(
+				fmt.Errorf("save ACP plan update: %w", err),
+				fmt.Errorf("retry ACP plan update: %w", retryErr),
+			)
+		}
+	}
+	return nil
+}
+
+func reconcileACPPlanUpdateAfterJournal(
+	ctx context.Context,
+	planStore store.PlanStore,
+	namespace,
+	taskName string,
+	plan *store.PlanState,
+	planErr,
+	journalErr error,
+) error {
+	if planErr == nil || journalErr != nil {
+		return planErr
+	}
+	if err := planStore.SavePlan(ctx, namespace, taskName, plan); err != nil {
+		return errors.Join(planErr, fmt.Errorf("reconcile ACP plan update after journal append: %w", err))
+	}
+	return nil
+}
+
+type acpExecutionUpdatePersistenceError struct {
+	err        error
+	journalErr error
+	planErr    error
+}
+
+const acpExecutionEventPersistenceFailureReason = "ExecutionEventPersistenceFailed"
+
+func (e *acpExecutionUpdatePersistenceError) Error() string {
+	if e == nil || e.err == nil {
+		return "ACP execution update persistence failed"
+	}
+	return e.err.Error()
+}
+
+func (e *acpExecutionUpdatePersistenceError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (e *acpExecutionUpdatePersistenceError) journalFailed() bool {
+	return e != nil && e.journalErr != nil
+}
+
+func acpUpdatePersistenceError(journalErr, planErr error) error {
+	persistenceErr := &acpExecutionUpdatePersistenceError{}
+	var failures []error
+	if journalErr != nil {
+		persistenceErr.journalErr = fmt.Errorf("persist ACP execution update: %w", journalErr)
+		failures = append(failures, persistenceErr.journalErr)
+	}
+	if planErr != nil {
+		persistenceErr.planErr = fmt.Errorf("persist ACP plan update: %w", planErr)
+		failures = append(failures, persistenceErr.planErr)
+	}
+	if len(failures) == 0 {
+		return nil
+	}
+	persistenceErr.err = errors.Join(failures...)
+	return persistenceErr
+}
+
+func assistantTranscriptForPersistence(streamed string, overflow bool) (string, bool) {
+	if overflow {
+		return "", true
+	}
+	return streamed, false
+}
+
+func completedAssistantTranscriptForPersistence(streamed string, overflow bool, result string) (string, bool) {
+	transcript, omitted := assistantTranscriptForPersistence(streamed, overflow)
+	if transcript == "" && !omitted {
+		transcript = result
+	}
+	return transcript, omitted
 }
 
 func completedPromptResultText(terminal *harnessv2.Event, streamed string, streamedOverflow bool) (string, error) {
@@ -3134,6 +3409,70 @@ func (d *ACPDispatcher) transitionAttempt(ctx context.Context, id string, fence 
 	return err
 }
 
+func acpPromptResultDigest(result []byte) string {
+	sum := sha256.Sum256(result)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func acpSettlingTransitionDigest(id string, version int64, result []byte) (string, error) {
+	return acpDomainDigest("attempt-transition", map[string]any{
+		"id": id, "from": store.PromptExecutionRunning, "to": store.PromptExecutionSettling,
+		"operation": acpSettlingOperation, "version": version, "resultDigest": acpPromptResultDigest(result),
+	})
+}
+
+func (d *ACPDispatcher) transitionAttemptToSettlingWithResult(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	id string,
+	fence store.ControllerEpochFence,
+	result []byte,
+) error {
+	if task == nil || strings.TrimSpace(task.Namespace) == "" || strings.TrimSpace(task.Name) == "" {
+		return fmt.Errorf("task identity is required for prompt settling")
+	}
+	receipts, ok := d.ResultStore.(store.PromptResultReceiptStore)
+	if !ok {
+		return fmt.Errorf("ACP prompt settling requires a result store with prompt result receipts")
+	}
+	attempt, err := d.Store.GetPromptAttempt(ctx, id)
+	if err != nil {
+		return err
+	}
+	expectedVersion := attempt.Version
+	if attempt.ExecutionState == store.PromptExecutionSettling {
+		expectedVersion--
+	}
+	if expectedVersion < 1 {
+		return fmt.Errorf("prompt attempt %s has invalid settling receipt version %d", id, expectedVersion)
+	}
+	digest, err := acpSettlingTransitionDigest(id, expectedVersion, result)
+	if err != nil {
+		return err
+	}
+	operationID := acpSettlingOperation + "-" + strconv.FormatInt(expectedVersion, 10)
+	if err := receipts.SavePromptResultReceipt(ctx, store.PromptResultReceipt{
+		AttemptID: id, Namespace: task.Namespace, TaskName: task.Name,
+		OperationID: operationID, OperationDigest: digest, Data: result,
+	}); err != nil {
+		return err
+	}
+	if attempt.ExecutionState == store.PromptExecutionSettling {
+		if attempt.LastOperationID == operationID && attempt.LastOperationDigest == digest {
+			return nil
+		}
+		return fmt.Errorf("prompt attempt %s settling receipt does not match the task result", id)
+	}
+	if attempt.ExecutionState != store.PromptExecutionRunning {
+		return fmt.Errorf("prompt attempt %s state is %s, want %s", id, attempt.ExecutionState, store.PromptExecutionRunning)
+	}
+	_, err = d.Store.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+		ID: id, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: store.PromptExecutionRunning,
+		NewState: store.PromptExecutionSettling, OperationID: operationID, OperationDigest: digest, UpdatedAt: time.Now().UTC(),
+	})
+	return err
+}
+
 func (d *ACPDispatcher) transitionDelivery(ctx context.Context, id string, fence store.ControllerEpochFence, from, to store.PromptDeliveryState, operation, reason string) error {
 	attempt, err := d.Store.GetPromptAttempt(ctx, id)
 	if err != nil {
@@ -3526,10 +3865,11 @@ func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.T
 	})
 }
 
-func (d *ACPDispatcher) saveTaskResult(ctx context.Context, task *corev1alpha1.Task, result []byte) error {
-	if err := d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
-		return err
-	}
+func (d *ACPDispatcher) persistTaskResult(ctx context.Context, task *corev1alpha1.Task, result []byte) error {
+	return d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result)
+}
+
+func (d *ACPDispatcher) publishTaskResultReference(ctx context.Context, task *corev1alpha1.Task) error {
 	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &corev1alpha1.Task{}
@@ -3861,14 +4201,14 @@ func (d *ACPDispatcher) handlePromptStreamError(
 	attemptID string,
 	fence store.ControllerEpochFence,
 	runtimeFence harnessv2.Fence,
+	journalState *v2eventjournal.State,
 	accepted bool,
 	writeEvidence harnessv2.RequestWriteEvidence,
 	runtimeContextErr error,
 	err error,
 ) error {
 	httpStatus, code, kind := 0, harnessv2.ErrorCode(""), harnessv2.ClientErrorKind("")
-	var streamClientErr *harnessv2.ClientError
-	if errors.As(err, &streamClientErr) {
+	if streamClientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
 		httpStatus, code, kind = streamClientErr.StatusCode, streamClientErr.Code, streamClientErr.Kind
 	}
 	logf.FromContext(ctx).Info(
@@ -3881,6 +4221,11 @@ func (d *ACPDispatcher) handlePromptStreamError(
 		"kind", kind,
 		"diagnostic", promptStreamDiagnostic(err),
 	)
+	if persistenceErr, ok := errors.AsType[*acpExecutionUpdatePersistenceError](err); ok {
+		return d.handlePromptUpdatePersistenceFailure(
+			ctx, runtimeClient, sessionID, task, attemptID, fence, runtimeFence, journalState, accepted, persistenceErr,
+		)
+	}
 	if runtimeContextErr != nil {
 		if !accepted && writeEvidence.SafeToResendSameIdentity() {
 			operation, terminalReason, message := "cancelled-before-acceptance", corev1alpha1.TaskExecutionReason("Cancelled"), "prompt cancelled before acceptance"
@@ -3902,7 +4247,7 @@ func (d *ACPDispatcher) handlePromptStreamError(
 		if errors.Is(runtimeContextErr, context.DeadlineExceeded) {
 			reason = harnessv2.CancelReasonTaskTimeout
 			terminalReason = acpTaskTimeoutReason
-			terminalMessage = "task deadline cancellation settled"
+			terminalMessage = acpTaskTimeoutCancellationSettledMessage
 		}
 		cancelRequest := harnessv2.CancelPromptRequest{
 			Protocol: harnessv2.ProtocolVersion,
@@ -3914,9 +4259,20 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			defer cancel()
 			response, cancelErr := runtimeClient.CancelPrompt(cancelCtx, sessionID, cancelRequest)
 			if cancelErr == nil && response.SettlementProven {
+				if lifecycleErr := appendPromptSettlementLifecycleDetached(
+					ctx, journalState, response.Settlement, reason,
+				); lifecycleErr != nil {
+					logf.FromContext(ctx).Error(lifecycleErr, "persist proven ACP prompt settlement", "namespace", task.Namespace, "task", task.Name)
+					return recordACPPromptOutcomeIfSettled(
+						ctx, promptTrace, acpPromptOutcomeFailed,
+						d.failPromptForExecutionEventPersistence(
+							ctx, task, attemptID, fence, "proven prompt settlement lifecycle persistence failed",
+						),
+					)
+				}
 				switch response.Settlement.TerminalEvent {
 				case harnessv2.EventCancelled:
-					operation := "cancelled"
+					operation := acpCancelledOperation
 					if terminalReason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
 						operation = "timeout-cancelled"
 					}
@@ -3935,8 +4291,22 @@ func (d *ACPDispatcher) handlePromptStreamError(
 						ctx, promptTrace, acpPromptOutcomeFailed,
 						d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptFailed", "prompt failed during cancellation"),
 					)
+				default:
+					return recordACPPromptOutcomeIfSettled(
+						ctx, promptTrace, acpPromptOutcomeUnknown,
+						d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "prompt cancellation settled without a recoverable task result"),
+					)
 				}
 			}
+		}
+		if lifecycleErr := appendPromptStreamFailureLifecycleDetached(ctx, journalState, err); lifecycleErr != nil {
+			logf.FromContext(ctx).Error(lifecycleErr, "persist unknown ACP prompt settlement", "namespace", task.Namespace, "task", task.Name)
+			return recordACPPromptOutcomeIfSettled(
+				ctx, promptTrace, acpPromptOutcomeFailed,
+				d.failPromptForExecutionEventPersistence(
+					ctx, task, attemptID, fence, "unknown prompt settlement lifecycle persistence failed",
+				),
+			)
 		}
 		return recordACPPromptOutcomeIfSettled(
 			ctx, promptTrace, acpPromptOutcomeUnknown,
@@ -3953,16 +4323,106 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "PromptNotAccepted", "prompt transport failed before any request bytes were written"),
 		)
 	}
+	if lifecycleErr := appendPromptStreamFailureLifecycleDetached(ctx, journalState, err); lifecycleErr != nil {
+		logf.FromContext(ctx).Error(lifecycleErr, "persist failed ACP prompt stream lifecycle", "namespace", task.Namespace, "task", task.Name)
+		return recordACPPromptOutcomeIfSettled(
+			ctx, promptTrace, acpPromptOutcomeFailed,
+			d.failPromptForExecutionEventPersistence(
+				ctx, task, attemptID, fence, "prompt stream lifecycle persistence failed",
+			),
+		)
+	}
 	return recordACPPromptOutcomeIfSettled(
 		ctx, promptTrace, acpPromptOutcomeUnknown,
 		d.markOutcomeUnknown(ctx, task, attemptID, fence, "RuntimeLost", "accepted prompt outcome is unknown"),
 	)
 }
 
+func (d *ACPDispatcher) handlePromptUpdatePersistenceFailure(
+	ctx context.Context,
+	runtimeClient *harnessv2.Client,
+	sessionID harnessv2.RuntimeSessionID,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	runtimeFence harnessv2.Fence,
+	journalState *v2eventjournal.State,
+	accepted bool,
+	persistenceErr *acpExecutionUpdatePersistenceError,
+) error {
+	if !accepted {
+		return d.failPromptForExecutionEventPersistence(
+			ctx, task, attemptID, fence, "execution update persistence failed before prompt acceptance",
+		)
+	}
+
+	now := time.Now().UTC()
+	cancelRequest := harnessv2.CancelPromptRequest{
+		Protocol: harnessv2.ProtocolVersion,
+		Metadata: mutationMetadata(runtimeFence, task, "cancel-prompt", true, now.Add(30*time.Second)),
+		Reason:   harnessv2.CancelReasonStreamDisconnected, SettlementDeadline: now.Add(20 * time.Second),
+	}
+	if sealErr := sealMutation(&cancelRequest.Metadata.RequestDigest, cancelRequest); sealErr == nil {
+		cancelCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+		defer cancel()
+		response, cancelErr := runtimeClient.CancelPrompt(cancelCtx, sessionID, cancelRequest)
+		if cancelErr == nil && response.SettlementProven {
+			if !persistenceErr.journalFailed() {
+				if lifecycleErr := appendPromptSettlementLifecycleDetached(
+					ctx, journalState, response.Settlement, cancelRequest.Reason,
+				); lifecycleErr != nil {
+					logf.FromContext(ctx).Error(lifecycleErr, "persist ACP prompt settlement after plan persistence failure", "namespace", task.Namespace, "task", task.Name)
+					return d.failPromptForExecutionEventPersistence(
+						ctx, task, attemptID, fence, "prompt settlement lifecycle persistence failed after plan persistence failure",
+					)
+				}
+			}
+			return d.failPromptForExecutionEventPersistence(
+				ctx, task, attemptID, fence, "prompt was settled after execution update persistence failed",
+			)
+		}
+	}
+	if !persistenceErr.journalFailed() {
+		if lifecycleErr := appendPromptStreamFailureLifecycleDetached(ctx, journalState, persistenceErr); lifecycleErr != nil {
+			logf.FromContext(ctx).Error(lifecycleErr, "persist unknown ACP prompt settlement after plan persistence failure", "namespace", task.Namespace, "task", task.Name)
+			return d.failPromptForExecutionEventPersistence(
+				ctx, task, attemptID, fence, "unknown prompt settlement lifecycle persistence failed after plan persistence failure",
+			)
+		}
+	}
+	return d.markOutcomeUnknown(
+		ctx, task, attemptID, fence, acpExecutionEventPersistenceFailureReason,
+		"prompt settlement is unknown after execution update persistence failed",
+	)
+}
+
+func (d *ACPDispatcher) failPromptForExecutionEventPersistence(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	message string,
+) error {
+	if transitionErr := d.transitionAttemptToTerminal(
+		ctx, attemptID, fence, store.PromptExecutionFailed, "event-persistence-failed",
+	); transitionErr != nil {
+		return transitionErr
+	}
+	return d.failTask(
+		ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed,
+		acpExecutionEventPersistenceFailureReason, message,
+	)
+}
+
+const promptStreamMissingTerminalDiagnostic = "runtime stream ended without a terminal event"
+
 func promptStreamDiagnostic(err error) string {
+	var persistenceErr *acpExecutionUpdatePersistenceError
 	switch {
 	case err == nil:
 		return "no stream error"
+	case errors.As(err, &persistenceErr):
+		return "local execution update persistence failed"
 	case errors.Is(err, harnessv2.ErrEventLineTooLarge):
 		return "event line exceeded the negotiated limit"
 	case errors.Is(err, harnessv2.ErrMalformedEvent):
@@ -3980,7 +4440,7 @@ func promptStreamDiagnostic(err error) string {
 	case errors.Is(err, harnessv2.ErrMissingAcceptedEvent):
 		return "runtime stream omitted the accepted event"
 	case errors.Is(err, harnessv2.ErrMissingTerminalEvent):
-		return "runtime stream ended without a terminal event"
+		return promptStreamMissingTerminalDiagnostic
 	case errors.Is(err, harnessv2.ErrBufferedEventOverflow):
 		return "runtime buffered event limit was exceeded"
 	case errors.Is(err, harnessv2.ErrPromptStreamDisconnected):
@@ -3998,6 +4458,38 @@ func promptStreamDiagnostic(err error) string {
 	default:
 		return "non-client prompt stream error"
 	}
+}
+
+func appendPromptStreamFailureLifecycleIfNew(
+	ctx context.Context,
+	journalState *v2eventjournal.State,
+	at time.Time,
+	streamErr error,
+) error {
+	_, _, err := journalState.AppendPromptStreamFailureIfNew(ctx, at, promptStreamDiagnostic(streamErr))
+	return err
+}
+
+func appendPromptStreamFailureLifecycleDetached(
+	ctx context.Context,
+	journalState *v2eventjournal.State,
+	streamErr error,
+) error {
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	return appendPromptStreamFailureLifecycleIfNew(persistCtx, journalState, time.Now().UTC(), streamErr)
+}
+
+func appendPromptSettlementLifecycleDetached(
+	ctx context.Context,
+	journalState *v2eventjournal.State,
+	settlement harnessv2.PromptSettlement,
+	cancellationReason harnessv2.CancelReason,
+) error {
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	_, _, err := journalState.AppendPromptSettlementIfNew(persistCtx, settlement, cancellationReason)
+	return err
 }
 
 func (d *ACPDispatcher) markOutcomeUnknown(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, reason, message string) error {
@@ -4046,20 +4538,40 @@ func (d *ACPDispatcher) persistOutcomeUnknown(ctx context.Context, attemptID str
 }
 
 func (d *ACPDispatcher) finishNonSuccess(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, session *acpTaskSession, terminal harnessv2.Event) error {
+	return d.finishNonSuccessWithCancellationReason(ctx, task, attemptID, fence, session, terminal, "")
+}
+
+func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	session *acpTaskSession,
+	terminal harnessv2.Event,
+	cancellationReason harnessv2.CancelReason,
+) error {
 	switch terminal.Type {
 	case harnessv2.EventCancelled:
-		if err := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, "cancelled"); err != nil {
+		operation := acpCancelledOperation
+		reason := corev1alpha1.TaskExecutionReason("Cancelled")
+		message := "prompt cancelled"
+		if cancellationReason == harnessv2.CancelReasonTaskTimeout {
+			operation = "timeout-cancelled"
+			reason = acpTaskTimeoutReason
+			message = acpTaskTimeoutCancellationSettledMessage
+		}
+		if err := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionCancelled, operation); err != nil {
 			return err
 		}
 		execution := corev1alpha1.TaskExecutionStatus{
 			State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeCancelled,
 			Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
-			Reason: "Cancelled", Message: "prompt cancelled",
+			Reason: reason, Message: message,
 		}
-		if err := d.finalizeTaskSessionMarker(ctx, task, fence, session, "Cancelled", "prompt cancelled", corev1alpha1.TaskPhaseCancelled, execution); err != nil {
+		if err := d.finalizeTaskSessionMarker(ctx, task, fence, session, "Cancelled", message, corev1alpha1.TaskPhaseCancelled, execution); err != nil {
 			return err
 		}
-		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, "Cancelled", "prompt cancelled")
+		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, reason, message)
 	case harnessv2.EventOutcomeUnknown:
 		if err := d.persistOutcomeUnknown(ctx, attemptID, fence, "RuntimeLost", "prompt outcome is unknown"); err != nil {
 			return err

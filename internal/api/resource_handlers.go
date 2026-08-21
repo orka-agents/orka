@@ -372,8 +372,7 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 		if errors.Is(err, errProviderSpecChanged) {
 			return fiber.NewError(fiber.StatusConflict, "provider spec was modified concurrently")
 		}
-		var fiberErr *fiber.Error
-		if errors.As(err, &fiberErr) {
+		if _, ok := errors.AsType[*fiber.Error](err); ok {
 			return err
 		}
 		if apierrors.IsNotFound(err) {
@@ -531,8 +530,7 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 		if errors.Is(err, errToolSpecChanged) {
 			return fiber.NewError(fiber.StatusConflict, "tool spec was modified concurrently")
 		}
-		var fiberErr *fiber.Error
-		if errors.As(err, &fiberErr) {
+		if _, ok := errors.AsType[*fiber.Error](err); ok {
 			return err
 		}
 		if apierrors.IsNotFound(err) {

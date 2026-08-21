@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -173,8 +174,8 @@ func filterClaudeReadOnlyTools(tools []string) []string {
 
 func envEntryValue(env []string, key string) string {
 	prefix := strings.TrimSpace(key) + "="
-	for i := len(env) - 1; i >= 0; i-- {
-		if after, ok := strings.CutPrefix(env[i], prefix); ok {
+	for _, e := range slices.Backward(env) {
+		if after, ok := strings.CutPrefix(e, prefix); ok {
 			return after
 		}
 	}

@@ -4421,7 +4421,7 @@ func TestHandlers_GetTask_WithPlanEnrichment(t *testing.T) {
 			Type: corev1alpha1.TaskTypeAI,
 		},
 		Status: corev1alpha1.TaskStatus{
-			Iteration: 3,
+			Iteration: 0,
 		},
 	}
 
@@ -4440,7 +4440,7 @@ func TestHandlers_GetTask_WithPlanEnrichment(t *testing.T) {
 		ProgressPct:  90,
 		GoalComplete: false,
 		PlanDocument: "# Plan\n- step 1 done",
-		Iteration:    3,
+		Iteration:    0,
 	}))
 
 	app := fiber.New()

@@ -173,8 +173,7 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 		return h.k8sClient.Status().Update(c.Context(), task)
 	})
 	if err != nil {
-		var fiberErr *fiber.Error
-		if errors.As(err, &fiberErr) {
+		if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 			return fiberErr
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update execution workspace status: %v", err))

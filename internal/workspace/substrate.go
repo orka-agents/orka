@@ -1027,8 +1027,7 @@ func (e *SubstrateWorkspaceExecutor) requireBootstrapToken(op string) (string, e
 }
 
 func retryableWorkspaceError(err error) bool {
-	var workspaceErr *Error
-	if errors.As(err, &workspaceErr) {
+	if workspaceErr, ok := errors.AsType[*Error](err); ok {
 		return workspaceErr.Retryable
 	}
 	return true

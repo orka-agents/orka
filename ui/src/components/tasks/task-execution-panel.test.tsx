@@ -174,27 +174,73 @@ describe('TaskExecutionPanel', () => {
         task={makeTask({ status: { phase: 'Succeeded', attempts: 1 } })}
         events={[
           {
-            id: 'event-1',
+            id: 'event-0',
             namespace: 'default',
             streamType: 'task',
             streamID: 'test-task',
             seq: 1,
-            type: 'ModelRequestCompleted',
+            type: 'ModelUsageUpdated',
+            severity: 'info',
+            inputTokens: 50,
+            outputTokens: 10,
+            content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: 'event-1',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: 'test-task',
+            seq: 2,
+            type: 'ModelUsageUpdated',
             severity: 'info',
             provider: 'openai',
             model: 'gpt-4o',
             inputTokens: 100,
             outputTokens: 25,
+            cachedInputTokens: 40,
             stopReason: 'stop',
+            content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: 'event-2',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: 'test-task',
+            seq: 3,
+            type: 'ModelUsageUpdated',
+            severity: 'info',
+            model: 'gpt-4.1',
+            inputTokens: 30,
+            outputTokens: 5,
+            cachedInputTokens: 2,
+            content: { harnessV2: { taskAttempt: 2, promptID: 'prompt-2' } },
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: 'event-3',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: 'test-task',
+            seq: 4,
+            type: 'ModelContextUpdated',
+            severity: 'info',
+            contextWindowUsed: 53,
+            contextWindowSize: 200,
             createdAt: new Date().toISOString(),
           },
         ]}
       />,
     )
     const rollup = screen.getByLabelText('GenAI token rollup')
-    expect(rollup).toHaveTextContent('125 total')
+    expect(rollup).toHaveTextContent('160 total')
+    expect(rollup).not.toHaveTextContent('220 total')
+    expect(rollup).toHaveTextContent('42 cached input')
     expect(rollup).toHaveTextContent('gpt-4o')
     expect(rollup).toHaveTextContent('openai')
+    expect(screen.getByLabelText('GenAI context window')).toHaveTextContent('53 / 200 tokens used')
+    expect(screen.getByLabelText('GenAI context window')).toHaveTextContent('27%')
   })
 
   it('renders exact runtime pool identity and never-replay unknown outcome guidance', () => {

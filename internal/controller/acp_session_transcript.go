@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -206,8 +207,7 @@ func buildACPBootstrapTranscript(messages []store.SessionMessage, limits ACPBoot
 	selected := make([]encodedMessage, 0, min(limits.MaxMessages, len(encoded)))
 	totalBytes := 0
 	truncated := false
-	for index := len(encoded) - 1; index >= 0; index-- {
-		entry := encoded[index]
+	for _, entry := range slices.Backward(encoded) {
 		if len(selected) >= limits.MaxMessages || totalBytes+len(entry.line) > limits.MaxBytes {
 			truncated = true
 			break

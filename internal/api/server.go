@@ -193,7 +193,7 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 		return fasthttp.RequestConfig{}
 	}
 	rawTarget := string(header.RequestURI())
-	path := strings.SplitN(rawTarget, "?", 2)[0]
+	path, _, _ := strings.Cut(rawTarget, "?")
 	if parsed, err := url.ParseRequestURI(rawTarget); err == nil && parsed.EscapedPath() != "" {
 		path = parsed.EscapedPath()
 	}

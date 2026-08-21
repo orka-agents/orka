@@ -2,14 +2,20 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 const (
@@ -17,6 +23,7 @@ const (
 	protocolVersion = 1
 	fieldJSONRPC    = "jsonrpc"
 	fieldResult     = "result"
+	fieldType       = "type"
 	contentTypeText = "text"
 
 	methodInitialize    = "initialize"
@@ -29,9 +36,12 @@ const (
 	threatModelKind = "orka.security.threat-model.v1"
 	findingsKind    = "orka.security.findings.v1"
 
-	malformedScanMarker = "malformed-result"
-	providerSessionID   = "security-scan-fixture-session"
-	apiKeyAuthMethod    = "api-key"
+	malformedScanMarker  = "malformed-result"
+	providerSessionID    = "security-scan-fixture-session"
+	apiKeyAuthMethod     = "api-key"
+	authorityProbeMarker = "orka-authority-probe"
+	authorityProbeTool   = "authority-probe"
+	authorityObserverEnv = "ORKA_SECURITY_SCAN_AUTHORITY_OBSERVER"
 )
 
 type rpcMessage struct {
@@ -43,6 +53,29 @@ type rpcMessage struct {
 
 type promptRequest struct {
 	Prompt []contentBlock `json:"prompt"`
+}
+
+type newSessionRequest struct {
+	MCPServers []mcpServer `json:"mcpServers"`
+}
+
+type mcpServer struct {
+	Type    string       `json:"type"`
+	Name    string       `json:"name"`
+	URL     string       `json:"url"`
+	Headers []httpHeader `json:"headers"`
+}
+
+type httpHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type mcpRPCResponse struct {
+	Result json.RawMessage `json:"result"`
+	Error  *struct {
+		Code int `json:"code"`
+	} `json:"error"`
 }
 
 type authenticateRequest struct {
@@ -60,6 +93,13 @@ type evidenceCandidate struct {
 }
 
 func main() {
+	if os.Getenv(authorityObserverEnv) == "1" {
+		if err := serveAuthorityObserver(); err != nil {
+			fmt.Fprintln(os.Stderr, "security scan authority observer failed")
+			os.Exit(2)
+		}
+		return
+	}
 	if err := serve(os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "security scan ACP fixture failed")
 		os.Exit(2)
@@ -71,6 +111,7 @@ func serve(input io.Reader, output io.Writer) error {
 	scanner.Buffer(make([]byte, 64<<10), 2<<20)
 	writer := bufio.NewWriter(output)
 	defer writer.Flush() //nolint:errcheck
+	var sessionMCP *mcpServer
 
 	for scanner.Scan() {
 		var message rpcMessage
@@ -118,6 +159,11 @@ func serve(input io.Reader, output io.Writer) error {
 				return err
 			}
 		case methodSessionNew:
+			var request newSessionRequest
+			if err := json.Unmarshal(message.Params, &request); err != nil {
+				return err
+			}
+			sessionMCP = selectOrkaMCPServer(request.MCPServers)
 			if err := writeMessage(writer, map[string]any{
 				fieldJSONRPC: jsonRPCVersion,
 				"id":         decodeID(message.ID),
@@ -130,7 +176,18 @@ func serve(input io.Reader, output io.Writer) error {
 			if err := json.Unmarshal(message.Params, &request); err != nil {
 				return err
 			}
-			result, err := terminalResult(promptText(request.Prompt))
+			prompt := promptText(request.Prompt)
+			var result []byte
+			var err error
+			if strings.Contains(prompt, authorityProbeMarker) {
+				if sessionMCP == nil {
+					err = errors.New("authority probe MCP server is unavailable")
+				} else if err = callAuthorityProbe(*sessionMCP); err == nil {
+					result = []byte(`{"authorityProbe":true}`)
+				}
+			} else {
+				result, err = terminalResult(prompt)
+			}
 			if err != nil {
 				if writeErr := writeMessage(writer, map[string]any{
 					fieldJSONRPC: jsonRPCVersion,
@@ -169,6 +226,199 @@ func serve(input io.Reader, output io.Writer) error {
 		}
 	}
 	return scanner.Err()
+}
+
+func selectOrkaMCPServer(servers []mcpServer) *mcpServer {
+	for index := range servers {
+		server := &servers[index]
+		if server.Type == "http" && server.Name == "orka" && strings.TrimSpace(server.URL) != "" {
+			copy := *server
+			copy.Headers = append([]httpHeader(nil), server.Headers...)
+			return &copy
+		}
+	}
+	return nil
+}
+
+func callAuthorityProbe(server mcpServer) error {
+	if _, err := callMCP(server, "authority-init", "initialize", map[string]any{
+		"protocolVersion": "2025-06-18",
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "orka-security-scan-fixture", "version": "1"},
+	}); err != nil {
+		return err
+	}
+	listed, err := callMCP(server, "authority-list", "tools/list", map[string]any{})
+	if err != nil {
+		return err
+	}
+	var tools struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(listed, &tools); err != nil {
+		return errors.New("authority probe MCP tool list was invalid")
+	}
+	found := false
+	for _, tool := range tools.Tools {
+		if tool.Name == authorityProbeTool {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.New("authority probe MCP tool was unavailable")
+	}
+	called, err := callMCP(server, "authority-call", "tools/call", map[string]any{
+		"name":      authorityProbeTool,
+		"arguments": map[string]any{"probe": "authority"},
+	})
+	if err != nil {
+		return err
+	}
+	var result struct {
+		IsError bool `json:"isError"`
+	}
+	if err := json.Unmarshal(called, &result); err != nil || result.IsError {
+		return errors.New("authority probe MCP tool call failed")
+	}
+	return nil
+}
+
+func callMCP(server mcpServer, id, method string, params any) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": jsonRPCVersion,
+		"id":      id,
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL, bytes.NewReader(body))
+	if err != nil {
+		return nil, errors.New("create authority probe MCP request")
+	}
+	request.Header.Set("Content-Type", "application/json")
+	for _, header := range server.Headers {
+		request.Header.Set(header.Name, header.Value)
+	}
+	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
+	if err != nil {
+		return nil, errors.New("authority probe MCP request failed")
+	}
+	defer response.Body.Close() //nolint:errcheck
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, errors.New("authority probe MCP request was rejected")
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return nil, errors.New("read authority probe MCP response")
+	}
+	var rpc mcpRPCResponse
+	if err := json.Unmarshal(data, &rpc); err != nil || rpc.Error != nil || len(rpc.Result) == 0 {
+		return nil, errors.New("authority probe MCP response reported an error")
+	}
+	return rpc.Result, nil
+}
+
+type authorityObserver struct {
+	mu sync.Mutex
+
+	ttsCalls               int
+	toolCalls              int
+	subjectTokenDigest     string
+	transactionTokenDigest string
+}
+
+func serveAuthorityObserver() error {
+	server := &http.Server{
+		Addr:              ":8080",
+		Handler:           &authorityObserver{},
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+	return server.ListenAndServe()
+}
+
+func (o *authorityObserver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/token":
+		o.handleToken(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/tool":
+		o.handleTool(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/stats":
+		o.writeStats(w)
+	case r.Method == http.MethodPost && r.URL.Path == "/reset":
+		o.reset(w)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (o *authorityObserver) handleToken(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := r.ParseForm(); err != nil || strings.TrimSpace(r.Form.Get("subject_token")) == "" {
+		http.Error(w, "invalid token exchange", http.StatusBadRequest)
+		return
+	}
+	o.mu.Lock()
+	o.ttsCalls++
+	o.subjectTokenDigest = digestValue(r.Form.Get("subject_token"))
+	o.mu.Unlock()
+	writeJSON(w, map[string]any{
+		"access_token":      "authority-exchanged-token",
+		"issued_token_type": "urn:ietf:params:oauth:token-type:txn_token",
+		"token_type":        "N_A",
+		"expires_in":        120,
+	})
+}
+
+func (o *authorityObserver) handleTool(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimSpace(r.Header.Get("Txn-Token"))
+	o.mu.Lock()
+	o.toolCalls++
+	o.transactionTokenDigest = ""
+	if token != "" {
+		o.transactionTokenDigest = digestValue(token)
+	}
+	o.mu.Unlock()
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (o *authorityObserver) writeStats(w http.ResponseWriter) {
+	o.mu.Lock()
+	stats := map[string]any{
+		"ttsCalls":               o.ttsCalls,
+		"toolCalls":              o.toolCalls,
+		"subjectTokenDigest":     o.subjectTokenDigest,
+		"transactionTokenDigest": o.transactionTokenDigest,
+	}
+	o.mu.Unlock()
+	writeJSON(w, stats)
+}
+
+func (o *authorityObserver) reset(w http.ResponseWriter) {
+	o.mu.Lock()
+	o.ttsCalls = 0
+	o.toolCalls = 0
+	o.subjectTokenDigest = ""
+	o.transactionTokenDigest = ""
+	o.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func writeJSON(w http.ResponseWriter, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func digestValue(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func writeMessage(writer *bufio.Writer, value any) error {

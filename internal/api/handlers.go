@@ -664,7 +664,7 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	}
 
 	resp := taskResponse{Task: *task}
-	if h.planStore != nil && task.Status.Iteration > 0 {
+	if h.planStore != nil {
 		if plan, planErr := h.planStore.GetPlan(ctx, task.Namespace, task.Name); planErr == nil {
 			resp.Plan = &planResponse{
 				Summary:      plan.Summary,
@@ -1353,8 +1353,7 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 		return nil
 	})
 	if err != nil {
-		var fiberErr *fiber.Error
-		if errors.As(err, &fiberErr) {
+		if _, ok := errors.AsType[*fiber.Error](err); ok {
 			return err
 		}
 		if apierrors.IsNotFound(err) {

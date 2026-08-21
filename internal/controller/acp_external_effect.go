@@ -293,8 +293,7 @@ func retryableACPExternalEffectError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var clientErr *publisherservice.ClientError
-	if errors.As(err, &clientErr) {
+	if clientErr, ok := errors.AsType[*publisherservice.ClientError](err); ok {
 		return clientErr.Response.Retryable || clientErr.StatusCode == http.StatusTooManyRequests || clientErr.StatusCode >= 500
 	}
 	if errors.Is(err, store.ErrConflict) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {

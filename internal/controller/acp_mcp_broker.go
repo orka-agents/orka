@@ -102,8 +102,9 @@ type RegistryACPMCPToolExecutor struct {
 	ContextFactory      func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
 
 	// EnforceTransactionCredentialAuth mirrors the controller-wide context-token
-	// authorization enforcement mode. When set, custom-Tool executions bind the
-	// authenticated Task's transaction and credential authority before running.
+	// authorization enforcement mode. Custom-Tool executions always bind the
+	// authenticated Task's transaction authority; this flag gates only its
+	// Secret-credential authorization.
 	EnforceTransactionCredentialAuth bool
 	// TransactionCredentialReadScopes lists the transaction scopes that
 	// authorize Secret-backed outbound credentials, matching the scopes the
@@ -193,17 +194,15 @@ func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
 // executor with the authenticated Task's transaction and credential authority,
 // mirroring the worker Job environment the controller stamps for per-Task
 // execution (setTransactionCredentialAuthorizationEnv/addTransactionEnvVars
-// plus the owner-referenced transaction-token Secret mount). It is a no-op
-// when context-token credential authorization is not enforced, and it fails
-// closed when enforcement is on and the Task's authority cannot be resolved.
+// plus the owner-referenced transaction-token Secret mount). Transaction
+// tokens/scopes are bound in every mode; only Secret-credential authorization
+// is gated by EnforceTransactionCredentialAuth. Missing Task authority always
+// fails closed.
 func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 	ctx context.Context,
 	request harnessv2.MCPBrokerCallRequest,
 	executor *workerexecutor.ToolExecutor,
 ) error {
-	if !e.EnforceTransactionCredentialAuth {
-		return nil
-	}
 	authenticated, ok := ACPMCPAuthenticatedTaskFromContext(ctx)
 	if !ok || authenticated.Namespace != request.Namespace || authenticated.UID != string(request.Metadata.TaskUID) {
 		return errors.New("authenticated ACP MCP task authority is unavailable")
@@ -219,7 +218,8 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 		return errors.New("authenticated ACP MCP task identity changed")
 	}
 	return bindVerifiedTaskTransactionAuthority(
-		ctx, e.Reader, task, e.TransactionCredentialReadScopes, true, executor,
+		ctx, e.Reader, task, e.TransactionCredentialReadScopes,
+		e.EnforceTransactionCredentialAuth, executor,
 	)
 }
 
