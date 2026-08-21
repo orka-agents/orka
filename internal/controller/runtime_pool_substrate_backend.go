@@ -224,27 +224,17 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("derive RuntimePool credential bootstrap public key: %w", err))
 	}
-	baseTemplate, err := r.getSubstrateActorTemplate(ctx, templateNamespace, substrateSpec.BaseTemplateName)
-	if err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
-	}
-	if baseTemplate == nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf(
-			"substrate infrastructure ActorTemplate %s/%s is not found",
-			templateNamespace, substrateSpec.BaseTemplateName,
-		))
-	}
 	actorID := runtimePoolSubstrateActorID(cfg.baseName)
 	routeHost := substrateActorRouteHost(actorID, r.SubstrateConfig.ActorDNSSuffix)
-	desired, err := r.renderSubstrateRuntimeTemplate(pool, cfg, baseTemplate, templateNamespace, actorID, bootstrapNonce, bootstrapPublicKey)
-	if err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
-	}
 	derivedTemplate, err := r.getSubstrateActorTemplate(ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName))
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	templateOwned := derivedTemplate == nil || substrateRuntimeTemplateOwnedByPool(derivedTemplate, desired.object)
+	expectedTemplate := &unstructured.Unstructured{}
+	expectedTemplate.SetNamespace(templateNamespace)
+	expectedTemplate.SetName(runtimePoolSubstrateTemplateName(cfg.baseName))
+	expectedTemplate.SetLabels(cloneStringMap(cfg.labels))
+	templateOwned := derivedTemplate == nil || substrateRuntimeTemplateOwnedByPool(derivedTemplate, expectedTemplate)
 	templateRevision := ""
 	templateFence := ""
 	templateIntegrityErr := error(nil)
@@ -266,12 +256,41 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
+	var desired substrateRuntimeTemplateRender
+	desiredLoaded := false
+	loadDesired := func() error {
+		if desiredLoaded {
+			return nil
+		}
+		baseTemplate, getErr := r.getSubstrateActorTemplate(ctx, templateNamespace, substrateSpec.BaseTemplateName)
+		if getErr != nil {
+			return getErr
+		}
+		if baseTemplate == nil {
+			return fmt.Errorf(
+				"substrate infrastructure ActorTemplate %s/%s is not found",
+				templateNamespace, substrateSpec.BaseTemplateName,
+			)
+		}
+		rendered, renderErr := r.renderSubstrateRuntimeTemplate(
+			pool, cfg, baseTemplate, templateNamespace, actorID, bootstrapNonce, bootstrapPublicKey,
+		)
+		if renderErr != nil {
+			return renderErr
+		}
+		desired = rendered
+		desiredLoaded = true
+		return nil
+	}
 	if actor != nil && derivedTemplate == nil {
 		// A pre-existing or partially reconciled actor still needs a frozen,
 		// controller-owned placement record before credential-safe teardown.
 		// Materializing the already-rendered desired template does not admit or
 		// seed the actor; it only prevents cleanup from depending on the mutable
 		// infrastructure base template.
+		if err := loadDesired(); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
 		if err := r.createSubstrateActorTemplate(ctx, pool, desired.object); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
@@ -282,7 +301,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			}
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
-		templateOwned = substrateRuntimeTemplateOwnedByPool(derivedTemplate, desired.object)
+		templateOwned = substrateRuntimeTemplateOwnedByPool(derivedTemplate, expectedTemplate)
 		if templateOwned {
 			templateRevision, templateIntegrityErr = substrateRuntimeTemplateIntegrity(derivedTemplate)
 			if templateIntegrityErr == nil {
@@ -383,13 +402,23 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
-	rolloutPending := derivedTemplate != nil && (templateIntegrityErr != nil || templateRevision != desired.revision)
-	policyTemplate := desired.object
 	if actor != nil {
-		policyTemplate = derivedTemplate
+		if err := r.ensureSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, derivedTemplate); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionPodSecurityReady, metav1.ConditionTrue, "ProviderIsolated", "provider-owned gVisor isolation and controller-enforced default-deny egress host the runtime workload")
 	}
-	if actor != nil || (pool.Spec.DesiredReplicas > 0 && !rolloutPending) {
-		if err := r.ensureSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, policyTemplate); err != nil {
+
+	if pool.Spec.DesiredReplicas == 0 {
+		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
+	}
+
+	if err := loadDesired(); err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	rolloutPending := derivedTemplate != nil && (templateIntegrityErr != nil || templateRevision != desired.revision)
+	if actor == nil && !rolloutPending {
+		if err := r.ensureSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, desired.object); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionPodSecurityReady, metav1.ConditionTrue, "ProviderIsolated", "provider-owned gVisor isolation and controller-enforced default-deny egress host the runtime workload")
@@ -397,10 +426,6 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 
 	if rolloutPending {
 		return r.reconcileSubstrateRuntimePoolRollout(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, desired, status)
-	}
-
-	if pool.Spec.DesiredReplicas == 0 {
-		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, actor, actorID, routeHost, authSecret, status)
 	}
 
 	if derivedTemplate == nil {
@@ -782,15 +807,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolRollout(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
-	deployedTemplate, err := substrateTemplatePodTemplateSpec(derivedTemplate)
-	if err != nil {
-		return r.finishRuntimePoolRolloutFailure(ctx, pool, status, err)
-	}
-	validationPool, validationConfig, err := runtimePoolPodTemplateValidationTarget(pool, deployedTemplate)
-	if err != nil {
-		return r.finishRuntimePoolRolloutFailure(ctx, pool, status, err)
-	}
-	deployedAuthSecret, err := r.substrateTemplateAuthSecret(ctx, cfg, deployedTemplate)
+	validationPool, validationConfig, deployedAuthSecret, err := r.substrateRuntimePoolDeployedValidationTarget(
+		ctx, pool, cfg, derivedTemplate,
+	)
 	if err != nil {
 		return r.finishRuntimePoolRolloutFailure(ctx, pool, status, err)
 	}
@@ -873,9 +892,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 	control workspace.SubstrateRuntimeActorControl,
+	derivedTemplate *unstructured.Unstructured,
 	actor *workspace.SubstrateRuntimeActor,
 	actorID, routeHost string,
-	authSecret *corev1.Secret,
 	status corev1alpha1.RuntimePoolStatus,
 ) (ctrl.Result, error) {
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
@@ -910,8 +929,14 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
-	syntheticPod := substrateSyntheticInstancePod(pool, cfg, actor, actorID, routeHost)
-	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, syntheticPod), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
+	validationPool, validationConfig, authSecret, err := r.substrateRuntimePoolDeployedValidationTarget(
+		ctx, pool, cfg, derivedTemplate,
+	)
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	syntheticPod := substrateSyntheticInstancePod(validationPool, validationConfig, actor, actorID, routeHost)
+	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(validationPool, syntheticPod), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -920,7 +945,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
-	active, err := validateRuntimePoolProbe(pool, cfg, syntheticPod, probe, r.now())
+	active, err := validateRuntimePoolProbe(validationPool, validationConfig, syntheticPod, probe, r.now())
 	if err != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -937,7 +962,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 	if !probe.Status.Drain.Requested {
 		if err := r.supervisorClientForPool(pool).RequestDrain(
 			ctx,
-			runtimePoolInstanceEndpoint(pool, syntheticPod),
+			runtimePoolInstanceEndpoint(validationPool, syntheticPod),
 			string(authSecret.Data[runtimePoolControllerTokenKey]),
 			authSecret.Data[runtimePoolCapabilitySecretKey],
 			probe.Status,
@@ -1671,6 +1696,35 @@ func substrateTemplatePodTemplateSpec(template *unstructured.Unstructured) (core
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{container}},
 	}, nil
+}
+
+// substrateRuntimePoolDeployedValidationTarget reconstructs the exact
+// identity and epoch-scoped controller credentials of an already materialized
+// Actor. The mutable infrastructure template is not part of runtime identity,
+// so recovery and authenticated teardown rely only on the frozen derived
+// template.
+func (r *RuntimePoolReconciler) substrateRuntimePoolDeployedValidationTarget(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	derivedTemplate *unstructured.Unstructured,
+) (*corev1alpha1.RuntimePool, runtimePoolConfig, *corev1.Secret, error) {
+	deployedTemplate, err := substrateTemplatePodTemplateSpec(derivedTemplate)
+	if err != nil {
+		return nil, runtimePoolConfig{}, nil, err
+	}
+	validationPool, validationConfig, err := runtimePoolPodTemplateValidationTarget(pool, deployedTemplate)
+	if err != nil {
+		return nil, runtimePoolConfig{}, nil, err
+	}
+	// The rendered template records immutable runtime identity, while the
+	// controller-owned namespace remains the stable location of pool Secrets.
+	validationConfig.namespace = cfg.namespace
+	deployedAuthSecret, err := r.substrateTemplateAuthSecret(ctx, cfg, deployedTemplate)
+	if err != nil {
+		return nil, runtimePoolConfig{}, nil, err
+	}
+	return validationPool, validationConfig, deployedAuthSecret, nil
 }
 
 // substrateTemplateAuthSecret resolves the epoch-scoped controller auth Secret

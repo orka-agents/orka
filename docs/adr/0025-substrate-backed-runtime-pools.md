@@ -95,7 +95,10 @@ Agent Sandbox backends, with these Substrate-specific mappings:
   any host under the actor DNS suffix while preserving the logical route host
   as the HTTP Host header (the proven MCP actor pattern), and refuses every
   other host. `ActiveInstance.PodAddress` carries the route host;
-  `PodNamespace/PodName` carry the provider worker placement.
+  `PodNamespace` is the controller-owned runtime namespace containing pool
+  auth Secrets, while `PodName` is copied from the Actor's worker placement.
+  The provider worker namespace remains internal to Substrate control and
+  teardown.
 - **Credential-free golden snapshots.** `snapshotsConfig` is copied verbatim
   (the provider requires it and uses it for the per-template golden-snapshot
   build). That checkpoint is safe because it captures a waiting,

@@ -963,8 +963,16 @@ func TestSubstrateRuntimePoolScaleToZeroDrainsThenDeletesActor(t *testing.T) {
 	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
 	runtimePoolReconcile(t, r, pool)
 
+	// Teardown must authenticate against the frozen derived template even when
+	// the mutable infrastructure template is gone. Simulate the API server's
+	// generation bump for the scale-to-zero spec update as well: the running
+	// Actor remains fenced to the generation it was deployed with.
+	if err := r.Delete(context.Background(), substrateTestBaseTemplate()); err != nil {
+		t.Fatalf("delete mutable base template before scale-down: %v", err)
+	}
 	current := runtimePoolTestGetPool(t, r, pool)
 	current.Spec.DesiredReplicas = 0
+	current.Generation++
 	if err := r.Update(context.Background(), &current); err != nil {
 		t.Fatalf("scale pool to zero: %v", err)
 	}
