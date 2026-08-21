@@ -11,7 +11,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -36,7 +35,7 @@ func TestBuildRuntimeSessionMCPConfigurationInjectsJournaledChildMessagingTools(
 			Model: &corev1alpha1.ModelConfig{Name: "model"},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:                corev1alpha1.AgentRuntimeClaude,
-				ContractVersion:     ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion:     new(corev1alpha1.AgentRuntimeContractHarnessV2),
 				DefaultAllowedTools: []string{providerNativeToolRead},
 			},
 		},
@@ -128,7 +127,7 @@ func TestBuildRuntimeSessionMCPConfigurationSynthesizesDenyOnlyProviderNativeToo
 					Model: &corev1alpha1.ModelConfig{Name: "model"},
 					Runtime: &corev1alpha1.AgentCLIRuntime{
 						Type:            test.provider,
-						ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+						ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 					},
 				},
 			}
@@ -187,7 +186,7 @@ func TestBuildRuntimeSessionMCPConfigurationTranslatesReadOnlyOpenCodeTools(t *t
 			Model: testOpenCodeModelConfig(),
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeOpencode,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -244,7 +243,7 @@ func TestBuildRuntimeSessionMCPConfigurationTranslatesReadOnlyPresetPerRuntime(t
 					Model: tt.model,
 					Runtime: &corev1alpha1.AgentCLIRuntime{
 						Type:            tt.runtime,
-						ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+						ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 					},
 				},
 			}
@@ -387,7 +386,7 @@ func TestBuildRuntimeSessionMCPConfigurationDeliversCanonicalToolDescriptors(t *
 			Model: &corev1alpha1.ModelConfig{Name: "model"},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeClaude,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 			Coordination: &corev1alpha1.CoordinationConfig{ApprovalRequiredTools: []string{"dispatch_work"}},
 		},
@@ -449,7 +448,7 @@ func TestBuildRuntimeSessionMCPConfigurationRejectsControllerLocalTools(t *testi
 			Model: &corev1alpha1.ModelConfig{Name: "model"},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeClaude,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -477,7 +476,7 @@ func TestBuildRuntimeSessionMCPConfigurationClassifiesOpenCodeNativeTools(t *tes
 			Model: testOpenCodeModelConfig(),
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeOpencode,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -528,7 +527,7 @@ func TestBuildRuntimeSessionMCPConfigurationNormalizesOpenCodeMutationAliases(t 
 			Model: testOpenCodeModelConfig(),
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeOpencode,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -585,7 +584,7 @@ func TestBuildRuntimeSessionMCPConfigurationDefaultsOpenCodeToolsOnlyWhenOmitted
 					Model: testOpenCodeModelConfig(),
 					Runtime: &corev1alpha1.AgentCLIRuntime{
 						Type:                corev1alpha1.AgentRuntimeOpencode,
-						ContractVersion:     ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+						ContractVersion:     new(corev1alpha1.AgentRuntimeContractHarnessV2),
 						DefaultAllowedTools: tt.allowedTools,
 					},
 				},
@@ -620,7 +619,7 @@ func TestBuildRuntimeSessionMCPConfigurationOpenCodeReadIntentClosesConsequentia
 			Model: testOpenCodeModelConfig(),
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:                corev1alpha1.AgentRuntimeOpencode,
-				ContractVersion:     ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion:     new(corev1alpha1.AgentRuntimeContractHarnessV2),
 				DefaultAllowedTools: []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep"},
 				DefaultAllowBash:    new(true),
 			},
@@ -664,7 +663,7 @@ func TestBuildRuntimeSessionMCPConfigurationOpenCodeDenyIsCaseInsensitive(t *tes
 			Model: testOpenCodeModelConfig(),
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type: corev1alpha1.AgentRuntimeOpencode, DefaultAllowedTools: []string{"Read", "Bash"},
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -702,7 +701,7 @@ func TestBuildRuntimeSessionMCPConfigurationRejectsUngovernedOpenCodeNativeTools
 			Model: testOpenCodeModelConfig(),
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeOpencode,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -745,7 +744,7 @@ func TestBuildRuntimeSessionMCPConfigurationRejectsUnknownOrUngovernedTools(t *t
 			Model: &corev1alpha1.ModelConfig{Name: "model"},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeClaude,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -776,7 +775,7 @@ func TestBuildRuntimeSessionMCPConfigurationHonorsExplicitEmptyTaskOpenCodeTools
 			Model: testOpenCodeModelConfig(),
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeOpencode,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}

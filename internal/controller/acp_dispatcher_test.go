@@ -25,7 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -636,7 +635,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{
 			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
-				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -1074,7 +1073,7 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 				Spec: corev1alpha1.AgentSpec{
 					Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
 					Runtime: &corev1alpha1.AgentCLIRuntime{
-						Type: corev1alpha1.AgentRuntimeClaude, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+						Type: corev1alpha1.AgentRuntimeClaude, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 						DefaultAllowedTools: []string{toolName},
 					},
 				},
@@ -1249,7 +1248,7 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 		Spec: corev1alpha1.AgentSpec{
 			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
-				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -1478,7 +1477,7 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 		Spec: corev1alpha1.AgentSpec{
 			Model: &corev1alpha1.ModelConfig{Name: acpTestModel},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
-				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}

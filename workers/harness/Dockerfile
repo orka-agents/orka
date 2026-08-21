@@ -1,5 +1,5 @@
 # Build the CLI harness wrapper binary.
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
 
 ARG TARGETARCH
 
@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
     go build -a -o /out/orka-workspace-agent ./cmd/orka-workspace-agent
 
-FROM --platform=$TARGETPLATFORM golang:1.26 AS target-go
+FROM --platform=$TARGETPLATFORM golang:1.27.0 AS target-go
 
 # Runtime stage with common CLI dependencies for generic, Codex, Claude,
 # Copilot, and OpenCode v1 adapters. Deployment admission requires the final

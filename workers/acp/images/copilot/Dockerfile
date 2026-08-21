@@ -2,7 +2,7 @@
 
 # The tag documents the human-readable version; every base image and downloaded
 # provider artifact is selected by an immutable digest.
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.2-bookworm@sha256:47ce5636e9936b2c5cbf708925578ef386b4f8872aec74a67bd13a627d242b19 AS upstream-artifacts
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS upstream-artifacts
 ARG TARGETARCH
 COPY workers/acp/images/artifact-tool.go /tmp/artifact-tool.go
 COPY LICENSE /artifacts/orka-LICENSE
@@ -30,7 +30,7 @@ RUN set -eu; \
       "1fbd0dcc55c66738b1b591632132c927de20c8443dff1d55b4851e378883e402" \
       /artifacts/copilot-LICENSE.md 65536
 
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.2-bookworm@sha256:47ce5636e9936b2c5cbf708925578ef386b4f8872aec74a67bd13a627d242b19 AS supervisor-builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS supervisor-builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
