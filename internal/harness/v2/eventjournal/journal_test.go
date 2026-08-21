@@ -23,6 +23,7 @@ const (
 	testToolKindShell             = "shell"
 	testJournalNamespace          = "default"
 	testJournalTaskName           = "task-1"
+	testJournalSecondTaskName     = "task-2"
 	testJournalDone               = "done"
 	testJournalToolTitle          = "Inspect repository"
 	testJournalOpenToolCallID     = "call-open"
@@ -444,8 +445,8 @@ func TestJournalFailsClosedAcrossSessionTaskTurns(t *testing.T) {
 	}
 
 	secondMapContext := firstMapContext
-	secondMapContext.TaskName = "task-2"
-	secondMapContext.StreamID = "task-2"
+	secondMapContext.TaskName = testJournalSecondTaskName
+	secondMapContext.StreamID = testJournalSecondTaskName
 	secondState, err := (Journal{EventStore: eventStore, MapContext: secondMapContext}).Open(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -468,6 +469,79 @@ func TestJournalFailsClosedAcrossSessionTaskTurns(t *testing.T) {
 	if strings.Contains(appended.Summary+appended.ContentText+string(appended.Content), suffix) ||
 		!strings.Contains(appended.ContentText, executionevents.ExecutionEventRedactedValue) {
 		t.Fatalf("continued session fragment was not failed closed: %#v", appended)
+	}
+}
+
+func TestJournalFailsClosedAcrossNonJournalSessionText(t *testing.T) {
+	tests := []struct {
+		name  string
+		apply func(*store.ExecutionEvent, string)
+	}{
+		{
+			name: "summary",
+			apply: func(event *store.ExecutionEvent, prefix string) {
+				event.Summary = prefix
+			},
+		},
+		{
+			name: "content",
+			apply: func(event *store.ExecutionEvent, prefix string) {
+				event.Content = json.RawMessage(fmt.Sprintf(`{"text":%q}`, prefix))
+			},
+		},
+		{
+			name: "content text",
+			apply: func(event *store.ExecutionEvent, prefix string) {
+				event.ContentText = prefix
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			eventStore := storetest.NewFakeExecutionEventStore()
+			firstMapContext := testMapContext()
+			prefix := testJournalSecretPrefix + strings.Repeat("a", 8)
+			prior := &store.ExecutionEvent{
+				Namespace: firstMapContext.Namespace, StreamType: store.ExecutionEventStreamTypeTask,
+				StreamID: firstMapContext.StreamID, TaskName: firstMapContext.TaskName,
+				SessionName: firstMapContext.SessionName, Type: executionevents.ExecutionEventTypeModelMessage,
+				Severity: executionevents.ExecutionEventSeverityInfo, CreatedAt: time.Now().UTC(),
+			}
+			test.apply(prior, prefix)
+			if _, err := eventStore.AppendExecutionEvent(ctx, prior); err != nil {
+				t.Fatal(err)
+			}
+
+			secondMapContext := firstMapContext
+			secondMapContext.TaskName = testJournalSecondTaskName
+			secondMapContext.StreamID = testJournalSecondTaskName
+			state, err := (Journal{EventStore: eventStore, MapContext: secondMapContext}).Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !state.logicalFieldHistorySaturated {
+				t.Fatal("continued session journal did not fail closed for non-journal text")
+			}
+
+			suffix := strings.Repeat("b", 16)
+			next := testUpdateEvent(2, prior.CreatedAt.Add(time.Millisecond), harnessv2.UpdateEvent{
+				Kind: harnessv2.UpdatePlan,
+				Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+					Content: suffix, Status: harnessv2.PlanEntryInProgress,
+				}}},
+			})
+			next.Identity.TaskUID = "task-uid-2"
+			next.Identity.PromptID = "prompt-2"
+			appended, isNew, err := state.AppendUpdateIfNew(ctx, next)
+			if err != nil || !isNew || appended == nil {
+				t.Fatalf("append continued session fragment = %#v new=%t err=%v", appended, isNew, err)
+			}
+			if strings.Contains(appended.Summary+appended.ContentText+string(appended.Content), suffix) ||
+				!strings.Contains(appended.ContentText, executionevents.ExecutionEventRedactedValue) {
+				t.Fatalf("continued session fragment was not failed closed: %#v", appended)
+			}
+		})
 	}
 }
 

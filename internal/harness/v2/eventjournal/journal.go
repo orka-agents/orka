@@ -300,14 +300,15 @@ func (j Journal) failClosedForExistingSessionHistory(
 			if sessionEvent.SessionSeq > nextSeq {
 				nextSeq = sessionEvent.SessionSeq
 			}
-			if _, ok := MappedUpdateIdentityFromEvent(sessionEvent.ExecutionEvent); !ok {
+			if _, ok := MappedUpdateIdentityFromEvent(sessionEvent.ExecutionEvent); !ok &&
+				!executionEventCarriesSessionRedactionText(sessionEvent.ExecutionEvent) {
 				continue
 			}
 			// A session timeline aggregates multiple task streams, while the exact
 			// logical-field boundaries used for journal redaction are intentionally
-			// not persisted. Once any mapped journal event is durable, redact all
-			// later runtime text rather than risk completing a credential fragment
-			// from an earlier turn or from a pre-recovery append.
+			// not persisted. Once any mapped journal event or other public text event
+			// is durable, redact all later runtime text rather than risk completing a
+			// credential fragment from an earlier turn or from a pre-recovery append.
 			state.logicalFieldHistory = nil
 			state.logicalFieldHistorySaturated = true
 			return nil
@@ -319,6 +320,49 @@ func (j Journal) failClosedForExistingSessionHistory(
 			return fmt.Errorf("session execution event scan did not advance after sequence %d", afterSeq)
 		}
 		afterSeq = nextSeq
+	}
+}
+
+func executionEventCarriesSessionRedactionText(event store.ExecutionEvent) bool {
+	if strings.TrimSpace(event.ContentText) != "" || len(event.Content) > 0 {
+		return true
+	}
+	if strings.TrimSpace(event.Summary) == "" {
+		return false
+	}
+	// Lifecycle summaries are controller-owned status descriptions, not runtime
+	// text. Ignore them so the first task turn does not begin in fail-closed mode.
+	switch event.Type {
+	case executionevents.ExecutionEventTypeTaskCreated,
+		executionevents.ExecutionEventTypeTaskPhaseChanged,
+		executionevents.ExecutionEventTypeTaskJobCreated,
+		executionevents.ExecutionEventTypeTaskStarted,
+		executionevents.ExecutionEventTypeTaskSucceeded,
+		executionevents.ExecutionEventTypeTaskFailed,
+		executionevents.ExecutionEventTypeTaskCancelled,
+		executionevents.ExecutionEventTypeWorkerStarted,
+		executionevents.ExecutionEventTypeWorkerCompleted,
+		executionevents.ExecutionEventTypeWorkerFailed,
+		executionevents.ExecutionEventTypeWorkspacePreparationStarted,
+		executionevents.ExecutionEventTypeWorkspacePreparationCompleted,
+		executionevents.ExecutionEventTypeWorkspacePreparationFailed,
+		executionevents.ExecutionEventTypeAgentRuntimeStarted,
+		executionevents.ExecutionEventTypeAgentRuntimeCompleted,
+		executionevents.ExecutionEventTypeAgentRuntimeFailed,
+		executionevents.ExecutionEventTypeAgentRuntimeCancelled,
+		executionevents.ExecutionEventTypeGatewayDeliveryCompleted,
+		executionevents.ExecutionEventTypeArtifactUploadCompleted,
+		executionevents.ExecutionEventTypeArtifactUploadFailed,
+		executionevents.ExecutionEventTypeTaskForkRequested,
+		executionevents.ExecutionEventTypeTaskForkCreated,
+		executionevents.ExecutionEventTypeApprovalRequested,
+		executionevents.ExecutionEventTypeApprovalApproved,
+		executionevents.ExecutionEventTypeApprovalDeclined,
+		executionevents.ExecutionEventTypeApprovalExpired,
+		executionevents.ExecutionEventTypeApprovalCancelled:
+		return false
+	default:
+		return true
 	}
 }
 
