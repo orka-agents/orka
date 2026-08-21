@@ -155,6 +155,24 @@ func (r *substrateTemplateErrorReader) Get(
 	return r.Reader.Get(ctx, key, object, options...)
 }
 
+type substrateNamespaceScopedNetworkPolicyReader struct {
+	client.Reader
+}
+
+func (r *substrateNamespaceScopedNetworkPolicyReader) List(
+	ctx context.Context,
+	list client.ObjectList,
+	options ...client.ListOption,
+) error {
+	if _, ok := list.(*networkingv1.NetworkPolicyList); ok {
+		applied := (&client.ListOptions{}).ApplyOptions(options)
+		if applied.Namespace == "" {
+			return errors.New("cluster-wide NetworkPolicy list is forbidden")
+		}
+	}
+	return r.Reader.List(ctx, list, options...)
+}
+
 func runtimePoolSubstrateTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtimePoolTestScheme(t)
@@ -970,6 +988,7 @@ func TestSubstrateRuntimePoolScaleToZeroDrainsThenDeletesActor(t *testing.T) {
 	if err := r.Delete(context.Background(), substrateTestBaseTemplate()); err != nil {
 		t.Fatalf("delete mutable base template before scale-down: %v", err)
 	}
+	r.SubstrateEnabled = false
 	current := runtimePoolTestGetPool(t, r, pool)
 	current.Spec.DesiredReplicas = 0
 	current.Generation++
@@ -1084,6 +1103,11 @@ func TestSubstrateRuntimePoolFinalizerDeletesPoliciesWithoutTemplates(t *testing
 	if len(policies.Items) != 4 {
 		t.Fatalf("RuntimePool policy count = %d, want 4", len(policies.Items))
 	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if got := current.Annotations[substrateNetworkPolicyNamespacesAnnotation]; got != "ate-workers" {
+		t.Fatalf("recorded NetworkPolicy namespaces = %q, want ate-workers", got)
+	}
+	r.APIReader = &substrateNamespaceScopedNetworkPolicyReader{Reader: r.Client}
 	delete(control.actors, substrateTestActorID(pool))
 	if err := r.Delete(context.Background(), derived); err != nil {
 		t.Fatalf("delete derived template before finalization: %v", err)
@@ -1091,7 +1115,7 @@ func TestSubstrateRuntimePoolFinalizerDeletesPoliciesWithoutTemplates(t *testing
 	if err := r.Delete(context.Background(), substrateTestBaseTemplate()); err != nil {
 		t.Fatalf("delete base template before finalization: %v", err)
 	}
-	current := runtimePoolTestGetPool(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
 	if err := r.Delete(context.Background(), &current); err != nil {
 		t.Fatalf("delete RuntimePool: %v", err)
 	}

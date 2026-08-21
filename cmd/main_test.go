@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -37,6 +38,12 @@ import (
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
+
+func TestManagerSchemeRegistersAgentSandboxCoreAPI(t *testing.T) {
+	if _, err := scheme.New(sandboxv1beta1.GroupVersion.WithKind(sandboxv1beta1.SandboxKind)); err != nil {
+		t.Fatalf("create core Sandbox from manager scheme: %v", err)
+	}
+}
 
 func TestBrokeredDelegateTaskSubjectTokenResolverUsesOwnedIncomingSecret(t *testing.T) {
 	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{

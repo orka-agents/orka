@@ -622,7 +622,7 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 		return err
 	}
 	if runtimePoolIsSubstrateBacked(pool) {
-		control, controlErr := r.substrateActorControl()
+		control, controlErr := r.substrateActorControlForCleanup()
 		if controlErr != nil {
 			return controlErr
 		}

@@ -38,6 +38,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -52,6 +54,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -84,6 +87,12 @@ const (
 	// creation. Any template update or delete/recreate changes this fence and
 	// forces the actor to be recycled before credential bootstrap.
 	substrateActorTemplateFenceAnnotation = "orka.ai/substrate-actor-template-fence"
+	// substrateNetworkPolicyNamespacesAnnotation records every provider worker
+	// namespace where this pool materialized egress policies. Cross-namespace
+	// policies cannot carry a RuntimePool owner reference, and finalization must
+	// remain namespace-scoped under the operator-provided RoleBindings even if
+	// the derived ActorTemplate is later removed.
+	substrateNetworkPolicyNamespacesAnnotation = "orka.ai/substrate-network-policy-namespaces"
 
 	// substrateActorListenPort is the conventional actor service port the
 	// provider router forwards to.
@@ -168,16 +177,10 @@ func runtimePoolIsSubstrateBacked(pool *corev1alpha1.RuntimePool) bool {
 		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderSubstrate
 }
 
-func (r *RuntimePoolReconciler) substrateActorControl() (workspace.SubstrateRuntimeActorControl, error) {
-	if !r.SubstrateEnabled {
-		return nil, fmt.Errorf("substrate provider is disabled; Substrate-backed workspace RuntimePools fail closed")
-	}
-	return r.substrateActorControlForCleanup()
-}
-
 // substrateActorControlForCleanup remains available after the provider flag is
-// disabled so existing Actors cannot strand RuntimePool finalizers. The enable
-// gate controls new workload reconciliation, not mandatory provider cleanup.
+// disabled so existing Actors can drain and cannot strand RuntimePool
+// finalizers. The enable gate controls new workload reconciliation, not
+// mandatory provider cleanup.
 func (r *RuntimePoolReconciler) substrateActorControlForCleanup() (workspace.SubstrateRuntimeActorControl, error) {
 	factory := r.SubstrateActorControlFactory
 	if factory == nil {
@@ -247,7 +250,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			}
 		}
 	}
-	control, err := r.substrateActorControl()
+	control, err := r.substrateActorControlForCleanup()
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
@@ -411,6 +414,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 
 	if pool.Spec.DesiredReplicas == 0 {
 		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
+	}
+	if !r.SubstrateEnabled {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("substrate provider is disabled; existing RuntimePool admission remains closed until it scales to zero"))
 	}
 
 	if err := loadDesired(); err != nil {
@@ -1173,6 +1179,54 @@ func substrateRuntimePoolWorkerPlacementFromTemplate(template *unstructured.Unst
 	return workerNamespace, strings.TrimSpace(workerPool), nil
 }
 
+func substrateRuntimePoolNetworkPolicyNamespaces(pool *corev1alpha1.RuntimePool) ([]string, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("RuntimePool is required for Substrate NetworkPolicy cleanup")
+	}
+	raw := strings.TrimSpace(pool.Annotations[substrateNetworkPolicyNamespacesAnnotation])
+	if raw == "" {
+		return nil, nil
+	}
+	seen := map[string]struct{}{}
+	namespaces := make([]string, 0, strings.Count(raw, ",")+1)
+	for item := range strings.SplitSeq(raw, ",") {
+		namespace := strings.TrimSpace(item)
+		if errs := k8svalidation.IsDNS1123Label(namespace); len(errs) != 0 {
+			return nil, fmt.Errorf("RuntimePool recorded an invalid Substrate NetworkPolicy namespace")
+		}
+		if _, duplicate := seen[namespace]; duplicate {
+			continue
+		}
+		seen[namespace] = struct{}{}
+		namespaces = append(namespaces, namespace)
+	}
+	sort.Strings(namespaces)
+	return namespaces, nil
+}
+
+func (r *RuntimePoolReconciler) recordSubstrateRuntimePoolNetworkPolicyNamespace(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	namespace string,
+) error {
+	namespace = strings.TrimSpace(namespace)
+	if errs := k8svalidation.IsDNS1123Label(namespace); len(errs) != 0 {
+		return fmt.Errorf("substrate NetworkPolicy namespace is invalid")
+	}
+	namespaces, err := substrateRuntimePoolNetworkPolicyNamespaces(pool)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(namespaces, namespace) {
+		return nil
+	}
+	namespaces = append(namespaces, namespace)
+	sort.Strings(namespaces)
+	return r.setSubstrateRuntimePoolAnnotation(
+		ctx, pool, substrateNetworkPolicyNamespacesAnnotation, strings.Join(namespaces, ","),
+	)
+}
+
 func (r *RuntimePoolReconciler) ensureSubstrateRuntimePoolNetworkPolicies(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -1181,6 +1235,12 @@ func (r *RuntimePoolReconciler) ensureSubstrateRuntimePoolNetworkPolicies(
 ) error {
 	workerNamespace, workerPool, err := substrateRuntimePoolWorkerPlacementFromTemplate(template)
 	if err != nil {
+		return err
+	}
+	// Record the namespace before creating any cross-namespace child so a
+	// controller crash or later template deletion cannot make cleanup depend on
+	// a cluster-wide NetworkPolicy list.
+	if err := r.recordSubstrateRuntimePoolNetworkPolicyNamespace(ctx, pool, workerNamespace); err != nil {
 		return err
 	}
 	reader := r.APIReader
@@ -1302,20 +1362,36 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolNetworkPolicies(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
+	template *unstructured.Unstructured,
 ) (bool, error) {
+	namespaces, err := substrateRuntimePoolNetworkPolicyNamespaces(pool)
+	if err != nil {
+		return false, err
+	}
+	if template != nil {
+		workerNamespace, _, placementErr := substrateRuntimePoolWorkerPlacementFromTemplate(template)
+		if placementErr != nil {
+			return false, placementErr
+		}
+		found := slices.Contains(namespaces, workerNamespace)
+		if !found {
+			namespaces = append(namespaces, workerNamespace)
+			sort.Strings(namespaces)
+		}
+	}
+	if len(namespaces) == 0 {
+		return false, nil
+	}
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
-	var policies networkingv1.NetworkPolicyList
-	if err := reader.List(ctx, &policies, client.MatchingLabels{
+	labels := client.MatchingLabels{
 		runtimePoolManagedByLabel: "orka",
 		runtimePoolKeyLabel:       runtimePoolKey(pool.Namespace, pool.Name),
 		runtimePoolNameLabel:      pool.Name,
 		runtimePoolNamespaceLabel: pool.Namespace,
 		runtimePoolUIDLabel:       string(pool.UID),
-	}); err != nil {
-		return false, fmt.Errorf("list Substrate RuntimePool NetworkPolicies for cleanup: %w", err)
 	}
 	expectedNames := map[string]struct{}{
 		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDenyEgressSuffix):       {},
@@ -1324,20 +1400,26 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolNetworkPolicies(
 		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateControllerEgressSuffix): {},
 	}
 	remaining := false
-	for i := range policies.Items {
-		current := &policies.Items[i]
-		if _, expected := expectedNames[current.Name]; !expected {
-			continue
+	for _, namespace := range namespaces {
+		var policies networkingv1.NetworkPolicyList
+		if err := reader.List(ctx, &policies, client.InNamespace(namespace), labels); err != nil {
+			return false, fmt.Errorf("list Substrate RuntimePool NetworkPolicies in namespace %s for cleanup: %w", namespace, err)
 		}
-		if !substrateRuntimePoolNetworkPolicyOwnedByPool(current, pool, cfg) {
-			return false, fmt.Errorf("refusing to delete foreign Substrate RuntimePool NetworkPolicy %q", current.Name)
-		}
-		if current.DeletionTimestamp.IsZero() {
-			if err := r.Delete(ctx, current, deleteCurrentObjectPreconditions(current)...); err != nil && !apierrors.IsNotFound(err) {
-				return false, fmt.Errorf("delete Substrate RuntimePool NetworkPolicy %q: %w", current.Name, err)
+		for i := range policies.Items {
+			current := &policies.Items[i]
+			if _, expected := expectedNames[current.Name]; !expected {
+				continue
 			}
+			if !substrateRuntimePoolNetworkPolicyOwnedByPool(current, pool, cfg) {
+				return false, fmt.Errorf("refusing to delete foreign Substrate RuntimePool NetworkPolicy %q", current.Name)
+			}
+			if current.DeletionTimestamp.IsZero() {
+				if err := r.Delete(ctx, current, deleteCurrentObjectPreconditions(current)...); err != nil && !apierrors.IsNotFound(err) {
+					return false, fmt.Errorf("delete Substrate RuntimePool NetworkPolicy %q: %w", current.Name, err)
+				}
+			}
+			remaining = true
 		}
-		remaining = true
 	}
 	return remaining, nil
 }
@@ -1410,7 +1492,7 @@ func (r *RuntimePoolReconciler) setSubstrateRuntimePoolAnnotation(
 		pool.Annotations[key] = value
 	}
 	if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil {
-		return fmt.Errorf("record RuntimePool substrate actor lifecycle annotation: %w", err)
+		return fmt.Errorf("record RuntimePool substrate annotation: %w", err)
 	}
 	return nil
 }
@@ -1848,7 +1930,7 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 			return false, fmt.Errorf("same-name RuntimePool substrate ActorTemplate does not carry the exact RuntimePool ownership identity")
 		}
 	}
-	policiesRemaining, policyErr := r.deleteSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg)
+	policiesRemaining, policyErr := r.deleteSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, template)
 	if policyErr != nil {
 		return false, policyErr
 	}
