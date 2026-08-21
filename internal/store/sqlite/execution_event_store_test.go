@@ -16,6 +16,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const concurrentDedupeTaskName = "task-dedupe-concurrent"
+
 //nolint:gocyclo // Keeps append/list/latest/delete coverage together for store lifecycle readability.
 func TestExecutionEventStoreAppendListLatestDelete(t *testing.T) {
 	s := setupDiskStore(t)
@@ -270,8 +272,8 @@ func TestExecutionEventStoreAppendIfAbsentConcurrentAcrossStoreInstances(t *test
 			event, appended, err := stores[i%len(stores)].AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
 				Namespace:  "default",
 				StreamType: store.ExecutionEventStreamTypeTask,
-				StreamID:   "task-dedupe-concurrent",
-				TaskName:   "task-dedupe-concurrent",
+				StreamID:   concurrentDedupeTaskName,
+				TaskName:   concurrentDedupeTaskName,
 				Type:       events.ExecutionEventTypeToolCallStarted,
 			}, "shared-event-key")
 			results <- result{event: event, appended: appended, err: err}
@@ -297,7 +299,7 @@ func TestExecutionEventStoreAppendIfAbsentConcurrentAcrossStoreInstances(t *test
 	}
 
 	listed, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-dedupe-concurrent",
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: concurrentDedupeTaskName,
 	})
 	if err != nil {
 		t.Fatal(err)

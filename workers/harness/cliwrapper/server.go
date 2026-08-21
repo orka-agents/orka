@@ -1415,8 +1415,8 @@ func turnTerminalFailure(turn *turnState) (bool, string) {
 	}
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
-	for i := len(turn.frames) - 1; i >= 0; i-- {
-		if turn.frames[i].Type == harness.FrameTurnFailed {
+	for _, v := range slices.Backward(turn.frames) {
+		if v.Type == harness.FrameTurnFailed {
 			return true, "turn_failed"
 		}
 	}
@@ -2397,10 +2397,10 @@ func (t *turnState) hasTerminal() bool {
 func (t *turnState) terminalFrame() (harness.HarnessEventFrame, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for i := len(t.frames) - 1; i >= 0; i-- {
-		switch t.frames[i].Type {
+	for _, v := range slices.Backward(t.frames) {
+		switch v.Type {
 		case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
-			return t.frames[i], true
+			return v, true
 		}
 	}
 	return harness.HarnessEventFrame{}, false

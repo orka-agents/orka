@@ -2,6 +2,7 @@ package fork
 
 import (
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -152,8 +153,8 @@ func BuildContextWithLimits(
 		ordered = ordered[len(ordered)-maxEvents:]
 	}
 	ctx := Context{SourceNamespace: namespace, SourceTask: taskName, AfterSeq: afterSeq, Truncated: truncated}
-	for i := len(ordered) - 1; i >= 0; i-- {
-		summary := eventSummaryFromStore(ordered[i])
+	for _, o := range slices.Backward(ordered) {
+		summary := eventSummaryFromStore(o)
 		kept, compacted := prependEventWithinLimit(&ctx, summary, maxBytes)
 		if !kept {
 			truncated = true

@@ -1544,8 +1544,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	delta, err := runtimeClient.CreateWorkspaceDelta(runtimeCtx, createRequest.RuntimeSessionID, deltaRequest)
 	if err != nil {
 		httpStatus, code, kind := 0, harnessv2.ErrorCode(""), harnessv2.ClientErrorKind("")
-		var clientErr *harnessv2.ClientError
-		if errors.As(err, &clientErr) {
+		if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
 			httpStatus, code, kind = clientErr.StatusCode, clientErr.Code, clientErr.Kind
 		}
 		logf.FromContext(ctx).Info(
@@ -4109,8 +4108,7 @@ func (d *ACPDispatcher) handlePromptStreamError(
 	err error,
 ) error {
 	httpStatus, code, kind := 0, harnessv2.ErrorCode(""), harnessv2.ClientErrorKind("")
-	var streamClientErr *harnessv2.ClientError
-	if errors.As(err, &streamClientErr) {
+	if streamClientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
 		httpStatus, code, kind = streamClientErr.StatusCode, streamClientErr.Code, streamClientErr.Kind
 	}
 	logf.FromContext(ctx).Info(
@@ -4123,8 +4121,7 @@ func (d *ACPDispatcher) handlePromptStreamError(
 		"kind", kind,
 		"diagnostic", promptStreamDiagnostic(err),
 	)
-	var persistenceErr *acpExecutionUpdatePersistenceError
-	if errors.As(err, &persistenceErr) {
+	if persistenceErr, ok := errors.AsType[*acpExecutionUpdatePersistenceError](err); ok {
 		return d.handlePromptUpdatePersistenceFailure(
 			ctx, runtimeClient, sessionID, task, attemptID, fence, runtimeFence, journalState, accepted, persistenceErr,
 		)

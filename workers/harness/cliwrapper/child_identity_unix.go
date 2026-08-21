@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,8 +79,8 @@ func chownTree(path string, uid, gid int, excludePaths ...string) error {
 	}); err != nil {
 		return err
 	}
-	for i := len(paths) - 1; i >= 0; i-- {
-		if err := os.Lchown(paths[i], uid, gid); err != nil {
+	for _, path := range slices.Backward(paths) {
+		if err := os.Lchown(path, uid, gid); err != nil {
 			return err
 		}
 	}

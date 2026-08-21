@@ -267,8 +267,7 @@ func (s *Server) readBody(writer http.ResponseWriter, request *http.Request) ([]
 	defer reader.Close() //nolint:errcheck
 	body, err := io.ReadAll(reader)
 	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			return nil, apiError(ErrInvalidRequest, "request_too_large", "request body exceeds the configured limit", http.StatusRequestEntityTooLarge, false, nil)
 		}
 		return nil, invalidRequest("request body could not be read", err)
@@ -359,8 +358,7 @@ func classifyPublisherError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var typed *operationError
-	if errors.As(err, &typed) {
+	if _, ok := errors.AsType[*operationError](err); ok {
 		return err
 	}
 	switch {

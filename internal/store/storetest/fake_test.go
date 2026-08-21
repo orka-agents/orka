@@ -12,6 +12,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const fakeDedupeTaskName = "task-dedupe"
+
 func TestExecutionEventStoreFakeAppendsMonotonicSeqPerStream(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
@@ -84,8 +86,8 @@ func TestExecutionEventStoreFakeAppendIfAbsent(t *testing.T) {
 	event := &store.ExecutionEvent{
 		Namespace:  "default",
 		StreamType: store.ExecutionEventStreamTypeTask,
-		StreamID:   "task-dedupe",
-		TaskName:   "task-dedupe",
+		StreamID:   fakeDedupeTaskName,
+		TaskName:   fakeDedupeTaskName,
 		Type:       events.ExecutionEventTypeTaskStarted,
 	}
 
@@ -99,7 +101,7 @@ func TestExecutionEventStoreFakeAppendIfAbsent(t *testing.T) {
 	}
 
 	listed, err := fake.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-dedupe",
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: fakeDedupeTaskName,
 	})
 	if err != nil {
 		t.Fatal(err)

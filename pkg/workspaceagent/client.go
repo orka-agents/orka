@@ -498,8 +498,7 @@ func sanitizeTransportError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
+	if _, ok := errors.AsType[*url.Error](err); ok {
 		return errors.New("transport error")
 	}
 	return errors.New("transport error")

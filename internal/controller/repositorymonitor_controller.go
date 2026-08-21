@@ -844,8 +844,7 @@ func repositoryMonitorRunFailureState(err error) string {
 	if err == nil {
 		return ""
 	}
-	var ghErr *repositoryMonitorGitHubAPIError
-	if errors.As(err, &ghErr) {
+	if ghErr, ok := errors.AsType[*repositoryMonitorGitHubAPIError](err); ok {
 		if ghErr.StatusCode == http.StatusTooManyRequests || (ghErr.StatusCode == http.StatusForbidden && repositoryMonitorGitHubErrorLooksRateLimited(ghErr.Body)) {
 			return "github_rate_limited"
 		}

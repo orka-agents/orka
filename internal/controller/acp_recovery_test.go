@@ -41,7 +41,16 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-const acpTestModel = "gpt-test"
+const (
+	acpTestModel                     = "gpt-test"
+	acpRecoveryOutcomeUnknownMessage = "outcome unknown"
+	acpRecoveryStatusSubresource     = "status"
+	acpRecoveryRuntimeInstanceID     = "runtime-instance"
+	acpRecoveryRuntimeSessionUID     = "runtime-session"
+	acpRecoveryToolTitle             = "Inspect repository"
+	acpRecoveryToolKind              = "read"
+	acpRecoveryPromptFailedMessage   = "prompt failed"
+)
 
 type missingRecoveryPromptAttemptStore struct {
 	store.DurableControlStore
@@ -260,17 +269,17 @@ func TestACPDispatcherRecoversMatchedJournaledNonSuccessTerminal(t *testing.T) {
 		wantPhase   corev1alpha1.TaskPhase
 	}{
 		{
-			name: "failed", terminal: harnessv2.EventFailed, wantState: store.PromptExecutionFailed,
+			name: acpPromptOutcomeFailed, terminal: harnessv2.EventFailed, wantState: store.PromptExecutionFailed,
 			wantTask: corev1alpha1.TaskExecutionStateFailed, wantOutcome: corev1alpha1.TaskExecutionOutcomeFailed,
 			wantPhase: corev1alpha1.TaskPhaseFailed,
 		},
 		{
-			name: "cancelled", terminal: harnessv2.EventCancelled, wantState: store.PromptExecutionCancelled,
+			name: acpCancelledOperation, terminal: harnessv2.EventCancelled, wantState: store.PromptExecutionCancelled,
 			wantTask: corev1alpha1.TaskExecutionStateCancelled, wantOutcome: corev1alpha1.TaskExecutionOutcomeCancelled,
 			wantPhase: corev1alpha1.TaskPhaseCancelled,
 		},
 		{
-			name: "outcome unknown", terminal: harnessv2.EventOutcomeUnknown, wantState: store.PromptExecutionOutcomeUnknown,
+			name: acpRecoveryOutcomeUnknownMessage, terminal: harnessv2.EventOutcomeUnknown, wantState: store.PromptExecutionOutcomeUnknown,
 			wantTask: corev1alpha1.TaskExecutionStateOutcomeUnknown, wantOutcome: corev1alpha1.TaskExecutionOutcomeOutcomeUnknown,
 			wantPhase: corev1alpha1.TaskPhaseFailed,
 		},
@@ -413,7 +422,7 @@ func TestACPDispatcherRetriesResultReferenceForSucceededAttempt(t *testing.T) {
 			opts ...client.SubResourcePatchOption,
 		) error {
 			task, isTask := obj.(*corev1alpha1.Task)
-			if subresource == "status" && isTask && task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+			if subresource == acpRecoveryStatusSubresource && isTask && task.Status.ResultRef != nil && task.Status.ResultRef.Available {
 				if resultReferencePatches.Add(1) == 1 {
 					return injectedErr
 				}
@@ -554,8 +563,8 @@ func configureRecoveryJournalIdentity(t *testing.T, fixture *recoveryFixture) *c
 	if err := fixture.kubeClient.Get(fixture.ctx, types.NamespacedName{Namespace: "default", Name: "task"}, task); err != nil {
 		t.Fatal(err)
 	}
-	task.Status.Execution.RuntimeInstanceID = "runtime-instance"
-	task.Status.Execution.RuntimeSessionUID = "runtime-session"
+	task.Status.Execution.RuntimeInstanceID = acpRecoveryRuntimeInstanceID
+	task.Status.Execution.RuntimeSessionUID = acpRecoveryRuntimeSessionUID
 	task.Status.Execution.RuntimeSessionGeneration = 1
 	task.Status.Execution.RuntimeSessionSupervisorBootID = "supervisor-boot"
 	if err := fixture.kubeClient.Status().Update(fixture.ctx, task); err != nil {
@@ -612,7 +621,7 @@ func appendRecoveryOpenPrompt(t *testing.T, fixture *recoveryFixture, task *core
 		Update: &harnessv2.UpdateEvent{
 			Kind: harnessv2.UpdateToolCall,
 			ToolCall: &harnessv2.ToolCallUpdate{
-				ToolCallID: "recovery-tool", Title: "Inspect repository", Kind: "read",
+				ToolCallID: "recovery-tool", Title: acpRecoveryToolTitle, Kind: acpRecoveryToolKind,
 				Status: harnessv2.ToolCallStatusInProgress,
 			},
 		},
@@ -662,12 +671,12 @@ func appendRecoveryPromptTerminal(
 			}}},
 		}
 	case harnessv2.EventCancelled:
-		event.Cancelled = &harnessv2.CancelledEvent{StopReason: harnessv2.ACPStopReasonCancelled, Reason: "cancelled"}
+		event.Cancelled = &harnessv2.CancelledEvent{StopReason: harnessv2.ACPStopReasonCancelled, Reason: acpCancelledOperation}
 	case harnessv2.EventOutcomeUnknown:
-		event.OutcomeUnknown = &harnessv2.OutcomeUnknownEvent{Code: "runtime_lost", Message: "outcome unknown"}
+		event.OutcomeUnknown = &harnessv2.OutcomeUnknownEvent{Code: "runtime_lost", Message: acpRecoveryOutcomeUnknownMessage}
 	default:
 		event.Failed = &harnessv2.FailedEvent{
-			StopReason: harnessv2.ACPStopReasonRefusal, Code: "prompt_failed", Message: "prompt failed",
+			StopReason: harnessv2.ACPStopReasonRefusal, Code: "prompt_failed", Message: acpRecoveryPromptFailedMessage,
 		}
 	}
 	mapped, err := v2eventjournal.MapPromptLifecycle(event, v2eventjournal.MapContext{

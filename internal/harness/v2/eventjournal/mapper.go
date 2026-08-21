@@ -29,6 +29,11 @@ const (
 	mappedPromptStreamFailureCode     = "prompt_stream_error"
 	mappedPromptSettlementFailureCode = "prompt_cancellation_failed"
 	mappedPromptSettlementUnknownCode = "prompt_settlement_outcome_unknown"
+	mappedHarnessV2ContentKey         = "harnessV2"
+	mappedControllerSynthesizedKey    = "controllerSynthesized"
+	mappedUpdateKindContentKey        = "updateKind"
+	mappedJournalKindContentKey       = "journalKind"
+	mappedModelRequestIDContentKey    = "modelRequestID"
 )
 
 type mappedJournalRecordKind uint8
@@ -648,11 +653,11 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 	}
 
 	content := map[string]any{
-		"harnessV2":  mappedUpdateIdentity(event),
-		"updateKind": event.Update.Kind,
+		mappedHarnessV2ContentKey:  mappedUpdateIdentity(event),
+		mappedUpdateKindContentKey: event.Update.Kind,
 	}
 	if options.journalKind != "" {
-		content["journalKind"] = options.journalKind
+		content[mappedJournalKindContentKey] = options.journalKind
 	}
 	mapped := &store.ExecutionEvent{
 		Namespace:   mapCtx.Namespace,
@@ -867,14 +872,14 @@ func mapRecoveredToolStreamClosure(
 		return nil, fmt.Errorf("tool recovery timestamp is required")
 	}
 	content, err := json.Marshal(map[string]any{
-		"harnessV2":             identity,
-		"updateKind":            harnessv2.UpdateToolCallUpdate,
-		"journalKind":           mappedToolStreamClosureKind,
-		"toolCallID":            started.ToolCallID,
-		"status":                harnessv2.ToolCallStatusFailed,
-		"outcome":               harnessv2.EventOutcomeUnknown,
-		"controllerSynthesized": true,
-		"contentOmitted":        streamedTextTruncatedOrOmittedReason,
+		mappedHarnessV2ContentKey:      identity,
+		mappedUpdateKindContentKey:     harnessv2.UpdateToolCallUpdate,
+		mappedJournalKindContentKey:    mappedToolStreamClosureKind,
+		"toolCallID":                   started.ToolCallID,
+		"status":                       harnessv2.ToolCallStatusFailed,
+		"outcome":                      harnessv2.EventOutcomeUnknown,
+		mappedControllerSynthesizedKey: true,
+		"contentOmitted":               streamedTextTruncatedOrOmittedReason,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal recovered harness v2 tool closure: %w", err)
@@ -968,8 +973,8 @@ func mapPromptLifecycleWithHistory(
 		return nil, nil, fmt.Errorf("invalid lifecycle identity: %w", err)
 	}
 	content := map[string]any{
-		"harnessV2":      mappedUpdateIdentity(event),
-		"modelRequestID": string(event.Identity.PromptID),
+		mappedHarnessV2ContentKey:      mappedUpdateIdentity(event),
+		mappedModelRequestIDContentKey: string(event.Identity.PromptID),
 	}
 	mapped := &store.ExecutionEvent{
 		Namespace:   mapCtx.Namespace,
@@ -991,7 +996,7 @@ func mapPromptLifecycleWithHistory(
 		if err := event.Accepted.Validate(); err != nil {
 			return nil, nil, fmt.Errorf("invalid accepted payload: %w", err)
 		}
-		content["journalKind"] = mappedPromptAcceptedKind
+		content[mappedJournalKindContentKey] = mappedPromptAcceptedKind
 		content["acceptedAt"] = event.Accepted.AcceptedAt.UTC()
 		content["acpVersion"] = event.Accepted.ACPVersion
 		mapped.Type = executionevents.ExecutionEventTypeModelRequestStarted
@@ -1010,7 +1015,7 @@ func mapPromptLifecycleWithHistory(
 			model = fields[0]
 			publishedFields = published
 		}
-		content["journalKind"] = mappedPromptTerminalKind
+		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
 		content["terminalEvent"] = event.Type
 		content["stopReason"] = event.Completed.StopReason
 		mapped.Type = executionevents.ExecutionEventTypeModelRequestCompleted
@@ -1026,7 +1031,7 @@ func mapPromptLifecycleWithHistory(
 			history, historySaturated, event.Cancelled.Reason,
 		)
 		publishedFields = published
-		content["journalKind"] = mappedPromptTerminalKind
+		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
 		content["terminalEvent"] = event.Type
 		content["stopReason"] = event.Cancelled.StopReason
 		content["reason"] = fields[0]
@@ -1044,7 +1049,7 @@ func mapPromptLifecycleWithHistory(
 			history, historySaturated, event.Failed.Code, event.Failed.Message,
 		)
 		publishedFields = published
-		content["journalKind"] = mappedPromptTerminalKind
+		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
 		content["terminalEvent"] = event.Type
 		content["stopReason"] = event.Failed.StopReason
 		content["code"] = fields[0]
@@ -1063,7 +1068,7 @@ func mapPromptLifecycleWithHistory(
 			history, historySaturated, event.OutcomeUnknown.Code, event.OutcomeUnknown.Message,
 		)
 		publishedFields = published
-		content["journalKind"] = mappedPromptTerminalKind
+		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
 		content["terminalEvent"] = event.Type
 		content["stopReason"] = event.Type
 		content["code"] = fields[0]
@@ -1118,13 +1123,13 @@ func mapPromptStreamFailure(
 		history, historySaturated, mappedPromptStreamFailureCode, diagnostic,
 	)
 	content := map[string]any{
-		"harnessV2":             identity,
-		"modelRequestID":        string(identity.PromptID),
-		"journalKind":           mappedPromptTerminalKind,
-		"terminalEvent":         harnessv2.EventOutcomeUnknown,
-		"controllerSynthesized": true,
-		"code":                  fields[0],
-		"message":               fields[1],
+		mappedHarnessV2ContentKey:      identity,
+		mappedModelRequestIDContentKey: string(identity.PromptID),
+		mappedJournalKindContentKey:    mappedPromptTerminalKind,
+		"terminalEvent":                harnessv2.EventOutcomeUnknown,
+		mappedControllerSynthesizedKey: true,
+		"code":                         fields[0],
+		"message":                      fields[1],
 	}
 	if mapCtx.Provider != "" {
 		content["provider"] = mapCtx.Provider
@@ -1177,15 +1182,15 @@ func mapPromptSettlement(
 		return nil, fmt.Errorf("invalid prompt cancellation reason %q", cancellationReason)
 	}
 	content := map[string]any{
-		"harnessV2":             identity,
-		"modelRequestID":        string(identity.PromptID),
-		"journalKind":           mappedPromptTerminalKind,
-		"terminalEvent":         settlement.TerminalEvent,
-		"outcome":               settlement.Outcome,
-		"stopReason":            settlement.StopReason,
-		"settledAt":             settlement.SettledAt.UTC(),
-		"controllerSynthesized": true,
-		"settlementProven":      true,
+		mappedHarnessV2ContentKey:      identity,
+		mappedModelRequestIDContentKey: string(identity.PromptID),
+		mappedJournalKindContentKey:    mappedPromptTerminalKind,
+		"terminalEvent":                settlement.TerminalEvent,
+		"outcome":                      settlement.Outcome,
+		"stopReason":                   settlement.StopReason,
+		"settledAt":                    settlement.SettledAt.UTC(),
+		mappedControllerSynthesizedKey: true,
+		"settlementProven":             true,
 	}
 	if cancellationReason != "" {
 		content["cancellationReason"] = cancellationReason
@@ -1284,8 +1289,8 @@ func MapAssistantTranscript(
 	}
 
 	contentBody := map[string]any{
-		"harnessV2":  mappedUpdateIdentity(event),
-		"updateKind": mappedAssistantTranscriptKind,
+		mappedHarnessV2ContentKey:  mappedUpdateIdentity(event),
+		mappedUpdateKindContentKey: mappedAssistantTranscriptKind,
 	}
 	if contentOmitted {
 		contentBody["contentOmitted"] = streamedTextTruncatedOrOmittedReason

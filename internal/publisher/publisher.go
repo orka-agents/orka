@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -187,8 +188,7 @@ func ensureTrustedDirectory(directory string) error {
 		}
 		current = parent
 	}
-	for i := len(missing) - 1; i >= 0; i-- {
-		child := missing[i]
+	for _, child := range slices.Backward(missing) {
 		if err := os.Mkdir(child, 0o700); err != nil && !os.IsExist(err) {
 			return err
 		}

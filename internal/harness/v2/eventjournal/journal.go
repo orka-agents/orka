@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -69,8 +70,7 @@ func (j Journal) FindPromptTerminal(ctx context.Context) (*PromptTerminalEvidenc
 		if err != nil {
 			return nil, fmt.Errorf("list mapped harness v2 prompt terminals: %w", err)
 		}
-		for index := len(listed) - 1; index >= 0; index-- {
-			event := listed[index]
+		for _, event := range slices.Backward(listed) {
 			if event.Seq > pageEnd {
 				continue
 			}
@@ -391,8 +391,7 @@ func (j Journal) loadCurrentPromptIdentities(
 		if err != nil {
 			return fmt.Errorf("list current-prompt mapped harness v2 updates: %w", err)
 		}
-		for index := len(listed) - 1; index >= 0; index-- {
-			event := listed[index]
+		for _, event := range slices.Backward(listed) {
 			if event.Seq > pageEnd {
 				continue
 			}

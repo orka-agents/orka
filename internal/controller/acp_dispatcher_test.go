@@ -45,6 +45,19 @@ import (
 	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
 )
 
+const (
+	acpDispatcherTestNamespace       = "default"
+	acpDispatcherTestTaskName        = "task"
+	acpDispatcherMissingTerminalTask = "missing-terminal"
+	acpDispatcherRuntimeSession      = "runtime-session"
+	acpDispatcherTaskUID             = "task-uid"
+	acpDispatcherRuntimeSessionUID   = "runtime-session-uid"
+	acpDispatcherToolCallID          = "call-1"
+	acpDispatcherToolTitle           = "Inspect repository"
+	acpDispatcherToolKind            = "file_read"
+	acpDispatcherToolResultPath      = "README.md"
+)
+
 // dispatchQueuedTask reserves the queued Task on its RuntimePool and executes
 // the reserved attempt, mirroring the dispatcher's production reserve/execute
 // sequence.
@@ -247,8 +260,8 @@ func TestAssistantTranscriptForPersistenceOmitsOverflowedPrefix(t *testing.T) {
 func TestSaveACPPlanUpdateWithRetry(t *testing.T) {
 	t.Run("transient failure", func(t *testing.T) {
 		planStore := &retryPlanStore{saveErrors: []error{errors.New("transient")}}
-		plan := &store.PlanState{TaskName: "task", Namespace: "default", Summary: "working"}
-		if err := saveACPPlanUpdateWithRetry(context.Background(), planStore, "default", "task", plan); err != nil {
+		plan := &store.PlanState{TaskName: acpDispatcherTestTaskName, Namespace: acpDispatcherTestNamespace, Summary: "working"}
+		if err := saveACPPlanUpdateWithRetry(context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, plan); err != nil {
 			t.Fatalf("save plan with retry: %v", err)
 		}
 		if planStore.saveCalls != 2 || planStore.lastPlan != plan {
@@ -260,7 +273,7 @@ func TestSaveACPPlanUpdateWithRetry(t *testing.T) {
 		firstErr := errors.New("first")
 		retryErr := errors.New("retry")
 		planStore := &retryPlanStore{saveErrors: []error{firstErr, retryErr}}
-		err := saveACPPlanUpdateWithRetry(context.Background(), planStore, "default", "task", &store.PlanState{})
+		err := saveACPPlanUpdateWithRetry(context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, &store.PlanState{})
 		if !errors.Is(err, firstErr) || !errors.Is(err, retryErr) {
 			t.Fatalf("persistent save error = %v", err)
 		}
@@ -273,10 +286,10 @@ func TestSaveACPPlanUpdateWithRetry(t *testing.T) {
 		firstErr := errors.New("first")
 		retryErr := errors.New("retry")
 		planStore := &retryPlanStore{saveErrors: []error{firstErr, retryErr}}
-		plan := &store.PlanState{TaskName: "task", Namespace: "default", Summary: "working"}
-		planErr := saveACPPlanUpdateWithRetry(context.Background(), planStore, "default", "task", plan)
+		plan := &store.PlanState{TaskName: acpDispatcherTestTaskName, Namespace: acpDispatcherTestNamespace, Summary: "working"}
+		planErr := saveACPPlanUpdateWithRetry(context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, plan)
 		if err := reconcileACPPlanUpdateAfterJournal(
-			context.Background(), planStore, "default", "task", plan, planErr, nil,
+			context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, plan, planErr, nil,
 		); err != nil {
 			t.Fatalf("reconcile plan after journal append: %v", err)
 		}
@@ -290,7 +303,7 @@ func TestSaveACPPlanUpdateWithRetry(t *testing.T) {
 		journalErr := errors.New("journal unavailable")
 		planStore := &retryPlanStore{}
 		err := reconcileACPPlanUpdateAfterJournal(
-			context.Background(), planStore, "default", "task", &store.PlanState{}, planErr, journalErr,
+			context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, &store.PlanState{}, planErr, journalErr,
 		)
 		if !errors.Is(err, planErr) || planStore.saveCalls != 0 {
 			t.Fatalf("pre-journal reconciliation error = %v calls=%d", err, planStore.saveCalls)
@@ -763,7 +776,7 @@ func TestAppendPromptStreamFailureLifecycleIfNewClosesMissingTerminal(t *testing
 	journalState, err := (v2eventjournal.Journal{
 		EventStore: eventStore,
 		MapContext: v2eventjournal.MapContext{
-			Namespace: "default", TaskName: "missing-terminal", StreamID: "missing-terminal",
+			Namespace: acpDispatcherTestNamespace, TaskName: acpDispatcherMissingTerminalTask, StreamID: acpDispatcherMissingTerminalTask,
 		},
 	}).Open(ctx)
 	if err != nil {
@@ -775,9 +788,9 @@ func TestAppendPromptStreamFailureLifecycleIfNewClosesMissingTerminal(t *testing
 		Type:     harnessv2.EventAccepted,
 		Identity: harnessv2.EventIdentity{
 			RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id",
-			RuntimeSessionUID: "runtime-session", RuntimeSessionGeneration: 1,
-			TaskUID: "task-uid", TaskAttempt: 1, PromptID: "prompt-missing-terminal", Sequence: 1,
-			RequestDigest: harnessv2.RequestDigest(testControlDigestForDispatcher("missing-terminal")), Timestamp: now,
+			RuntimeSessionUID: acpDispatcherRuntimeSession, RuntimeSessionGeneration: 1,
+			TaskUID: acpDispatcherTaskUID, TaskAttempt: 1, PromptID: "prompt-missing-terminal", Sequence: 1,
+			RequestDigest: harnessv2.RequestDigest(testControlDigestForDispatcher(acpDispatcherMissingTerminalTask)), Timestamp: now,
 		},
 		Accepted: &harnessv2.AcceptedEvent{
 			AcceptedAt: now,
@@ -796,7 +809,7 @@ func TestAppendPromptStreamFailureLifecycleIfNewClosesMissingTerminal(t *testing
 		t.Fatal(err)
 	}
 	listed, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "missing-terminal",
+		Namespace: acpDispatcherTestNamespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: acpDispatcherMissingTerminalTask,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -823,7 +836,7 @@ func TestPromptUpdatePersistenceFailureCancelsAndFailsWithoutRuntimeLost(t *test
 	taskUID := types.UID("96969696-9696-9696-9696-969696969696")
 	promptID := "prompt-event-persistence-1"
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "event-persistence", UID: taskUID},
+		ObjectMeta: metav1.ObjectMeta{Namespace: acpDispatcherTestNamespace, Name: "event-persistence", UID: taskUID},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "persist updates"},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1, Execution: &corev1alpha1.TaskExecutionStatus{
 			State: corev1alpha1.TaskExecutionStateRunning, Attempt: 1, PromptID: promptID,
@@ -895,7 +908,7 @@ func TestPromptUpdatePersistenceFailureCancelsAndFailsWithoutRuntimeLost(t *test
 		RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1,
 		RuntimeProfileDigest:       harnessv2.ProfileDigest(testControlDigestForDispatcher("event-persistence-profile")),
 		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
-		RuntimeSessionUID:          "runtime-session-uid", RuntimeSessionGeneration: 1,
+		RuntimeSessionUID:          acpDispatcherRuntimeSessionUID, RuntimeSessionGeneration: 1,
 	}
 	currentEpoch, err := controlStore.GetControllerEpoch(ctx, fence.Name)
 	if err != nil {
@@ -963,7 +976,7 @@ func newPromptStreamLifecycleFixture(
 	const promptID = "prompt-stream-lifecycle-1"
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default", Name: "stream-lifecycle", UID: types.UID("95959595-9595-9595-9595-959595959595"),
+			Namespace: acpDispatcherTestNamespace, Name: "stream-lifecycle", UID: types.UID("95959595-9595-9595-9595-959595959595"),
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "persist prompt lifecycle"},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1, Execution: &corev1alpha1.TaskExecutionStatus{
@@ -1029,7 +1042,7 @@ func newPromptStreamLifecycleFixture(
 		RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1,
 		RuntimeProfileDigest:       harnessv2.ProfileDigest(testControlDigestForDispatcher("stream-lifecycle-profile")),
 		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
-		RuntimeSessionUID:          "runtime-session-uid", RuntimeSessionGeneration: 1,
+		RuntimeSessionUID:          acpDispatcherRuntimeSessionUID, RuntimeSessionGeneration: 1,
 	}
 	currentEpoch, err := controlStore.GetControllerEpoch(ctx, fence.Name)
 	if err != nil {
@@ -1170,7 +1183,7 @@ func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 		wantTerminal harnessv2.EventType
 	}{
 		{
-			name: "cancelled",
+			name: acpCancelledOperation,
 			settlement: harnessv2.PromptSettlement{
 				TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
 				StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
@@ -1179,12 +1192,12 @@ func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 			wantAttempt: store.PromptExecutionCancelled, wantTerminal: harnessv2.EventCancelled,
 		},
 		{
-			name: "failed",
+			name: acpPromptOutcomeFailed,
 			settlement: harnessv2.PromptSettlement{
 				TerminalEvent: harnessv2.EventFailed, Outcome: harnessv2.PromptOutcomeFailed,
 				StopReason: harnessv2.ACPStopReasonRefusal, SettledAt: time.Now().UTC(),
 			},
-			wantState: corev1alpha1.TaskExecutionStateFailed, wantReason: "PromptFailed",
+			wantState: corev1alpha1.TaskExecutionStateFailed, wantReason: harnessV1ReasonFailed,
 			wantAttempt: store.PromptExecutionFailed, wantTerminal: harnessv2.EventFailed,
 		},
 	} {
@@ -3216,8 +3229,8 @@ func newDispatcherRuntimeServerWithTerminalEvents(
 		}
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity(1, now), Accepted: &harnessv2.AcceptedEvent{AcceptedAt: now, Lease: request.Lease, ACPVersion: harnessv2.ACPProfileV1}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(2, now.Add(time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "hello "}}})
-		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(3, now.Add(2*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: "call-1", Title: "Inspect repository", Kind: "file_read", Status: harnessv2.ToolCallStatusPending}}})
-		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(4, now.Add(3*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: "call-1", Title: "Inspect repository", Status: harnessv2.ToolCallStatusCompleted, Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "README.md"}}}}})
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(3, now.Add(2*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: acpDispatcherToolCallID, Title: acpDispatcherToolTitle, Kind: acpDispatcherToolKind, Status: harnessv2.ToolCallStatusPending}}})
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(4, now.Add(3*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: acpDispatcherToolCallID, Title: acpDispatcherToolTitle, Status: harnessv2.ToolCallStatusCompleted, Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: acpDispatcherToolResultPath}}}}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(5, now.Add(4*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdatePlan, Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{Content: "inspect repository", Status: harnessv2.PlanEntryCompleted}, {Content: "verify result", Status: harnessv2.PlanEntryInProgress}}}}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(6, now.Add(5*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateDiagnostic, Diagnostic: &harnessv2.DiagnosticUpdate{Code: "provider_retry", Message: "provider retry recovered", Retryable: true}}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(7, now.Add(6*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "from runtime"}}})

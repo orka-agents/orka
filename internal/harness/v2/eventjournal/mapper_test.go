@@ -11,6 +11,21 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const (
+	mapperTestToolCallID    = "call-1"
+	mapperTestToolKind      = "file_read"
+	mapperTestDone          = "done"
+	mapperTestNamespace     = "default"
+	mapperTestTaskName      = "task-1"
+	mapperTestSessionName   = "session-1"
+	mapperTestAgentName     = "agent-1"
+	mapperTestToolKindShell = "shell"
+	mapperTestProvider      = "openai"
+	mapperTestSecretPrefix  = "sk-"
+	mapperTestServedModel   = "served-model"
+	mapperTestPromptID      = "prompt-1"
+)
+
 func TestMapUpdateMapsACPUpdateKinds(t *testing.T) {
 	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	mapCtx := testMapContext()
@@ -31,27 +46,27 @@ func TestMapUpdateMapsACPUpdateKinds(t *testing.T) {
 		{
 			name: "tool started",
 			update: harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{
-				ToolCallID: "call-1", Title: "Read the repository", Kind: "file_read", Status: harnessv2.ToolCallStatusPending,
+				ToolCallID: mapperTestToolCallID, Title: "Read the repository", Kind: mapperTestToolKind, Status: harnessv2.ToolCallStatusPending,
 				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "README.md"}},
 			}},
 			wantType: executionevents.ExecutionEventTypeToolCallStarted, wantSeverity: executionevents.ExecutionEventSeverityInfo,
-			wantToolName: "file_read", wantToolID: safeMappedToolCallID("call-1"),
+			wantToolName: mapperTestToolKind, wantToolID: safeMappedToolCallID(mapperTestToolCallID),
 		},
 		{
 			name: "tool completed",
 			update: harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
-				ToolCallID: "call-1", Title: "Read the repository", Kind: "file_read", Status: harnessv2.ToolCallStatusCompleted,
+				ToolCallID: mapperTestToolCallID, Title: "Read the repository", Kind: mapperTestToolKind, Status: harnessv2.ToolCallStatusCompleted,
 			}},
 			wantType: executionevents.ExecutionEventTypeToolCallCompleted, wantSeverity: executionevents.ExecutionEventSeverityInfo,
-			wantToolName: "file_read", wantToolID: safeMappedToolCallID("call-1"),
+			wantToolName: mapperTestToolKind, wantToolID: safeMappedToolCallID(mapperTestToolCallID),
 		},
 		{
 			name: "tool failed",
 			update: harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
-				ToolCallID: "call-2", Kind: "shell", Status: harnessv2.ToolCallStatusFailed,
+				ToolCallID: "call-2", Kind: mapperTestToolKindShell, Status: harnessv2.ToolCallStatusFailed,
 			}},
 			wantType: executionevents.ExecutionEventTypeToolCallFailed, wantSeverity: executionevents.ExecutionEventSeverityError,
-			wantToolName: "shell", wantToolID: safeMappedToolCallID("call-2"),
+			wantToolName: mapperTestToolKindShell, wantToolID: safeMappedToolCallID("call-2"),
 		},
 		{
 			name: "plan",
@@ -118,7 +133,7 @@ func TestMapUsagePreservesPromotedTelemetryContent(t *testing.T) {
 	if content["inputTokens"] != float64(100) || content["outputTokens"] != float64(25) || content["cachedInputTokens"] != float64(60) {
 		t.Fatalf("usage content = %#v", content)
 	}
-	if content["provider"] != "openai" || content["model"] != "gpt-test" {
+	if content["provider"] != mapperTestProvider || content["model"] != "gpt-test" {
 		t.Fatalf("model content = %#v", content)
 	}
 }
@@ -166,11 +181,11 @@ func TestMapZeroUsageSnapshotRemainsTokenTelemetry(t *testing.T) {
 
 func TestMapDiagnosticRedactsCredentialSplitAcrossFields(t *testing.T) {
 	message := strings.Repeat("a", 24)
-	secret := "sk-" + message
+	secret := mapperTestSecretPrefix + message
 	mapped, err := MapUpdate(testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdateDiagnostic,
 		Diagnostic: &harnessv2.DiagnosticUpdate{
-			Code: "sk-", Message: message,
+			Code: mapperTestSecretPrefix, Message: message,
 		},
 	}), testMapContext())
 	if err != nil {
@@ -191,11 +206,11 @@ func TestMapDiagnosticRedactsCredentialSplitAcrossFields(t *testing.T) {
 
 func TestMapTerminalToolMetadataRedactsCredentialSplitAcrossFields(t *testing.T) {
 	kind := strings.Repeat("b", 24)
-	secret := "sk-" + kind
+	secret := mapperTestSecretPrefix + kind
 	mapped, err := MapUpdate(testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdateToolCallUpdate,
 		ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-split-metadata", Title: "sk-", Kind: kind, Status: harnessv2.ToolCallStatusCompleted,
+			ToolCallID: "call-split-metadata", Title: mapperTestSecretPrefix, Kind: kind, Status: harnessv2.ToolCallStatusCompleted,
 		},
 	}), testMapContext())
 	if err != nil {
@@ -220,7 +235,7 @@ func TestMapTerminalToolRedactsCredentialSplitAcrossMetadataAndOutput(t *testing
 	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdateToolCallUpdate,
 		ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-split-output", Title: "sk-", Kind: "read", Status: harnessv2.ToolCallStatusCompleted,
+			ToolCallID: "call-split-output", Title: mapperTestSecretPrefix, Kind: "read", Status: harnessv2.ToolCallStatusCompleted,
 		},
 	})
 	mapped, err := mapToolUpdateWithContent(event, testMapContext(), output, false, false)
@@ -232,7 +247,7 @@ func TestMapTerminalToolRedactsCredentialSplitAcrossMetadataAndOutput(t *testing
 		t.Fatal(err)
 	}
 	title, _ := content["title"].(string)
-	if title+mapped.ContentText == "sk-"+output || title == "sk-" || mapped.ContentText == output {
+	if title+mapped.ContentText == mapperTestSecretPrefix+output || title == mapperTestSecretPrefix || mapped.ContentText == output {
 		t.Fatalf("tool metadata/output reconstruct credential: title=%q output=%q", title, mapped.ContentText)
 	}
 	if title != executionevents.ExecutionEventRedactedValue || mapped.ContentText != executionevents.ExecutionEventRedactedValue {
@@ -243,17 +258,17 @@ func TestMapTerminalToolRedactsCredentialSplitAcrossMetadataAndOutput(t *testing
 func TestProjectPlanUpdateRedactsCredentialSplitAcrossEntries(t *testing.T) {
 	suffix := strings.Repeat("d", 24)
 	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
-		{Content: "sk-", Status: harnessv2.PlanEntryCompleted},
+		{Content: mapperTestSecretPrefix, Status: harnessv2.PlanEntryCompleted},
 		{Content: suffix, Status: harnessv2.PlanEntryInProgress},
 	}})
-	if strings.Contains(projection.Document, "sk-") || strings.Contains(projection.Document, suffix) ||
+	if strings.Contains(projection.Document, mapperTestSecretPrefix) || strings.Contains(projection.Document, suffix) ||
 		!strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) {
 		t.Fatalf("plan document exposed split credential: %q", projection.Document)
 	}
 }
 
 func TestProjectPlanUpdateRedactsCredentialSplitAcrossEntrySubset(t *testing.T) {
-	prefix := "sk-" + strings.Repeat("a", 8)
+	prefix := mapperTestSecretPrefix + strings.Repeat("a", 8)
 	suffix := strings.Repeat("b", 16)
 	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
 		{Content: prefix, Status: harnessv2.PlanEntryCompleted},
@@ -268,7 +283,7 @@ func TestProjectPlanUpdateRedactsCredentialSplitAcrossEntrySubset(t *testing.T) 
 
 func TestProjectPlanUpdateRedactsCredentialSplitAcrossFourFieldSubset(t *testing.T) {
 	fragment := strings.Repeat("a", 7)
-	prefix := "sk-" + fragment
+	prefix := mapperTestSecretPrefix + fragment
 	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
 		{Content: prefix, Status: harnessv2.PlanEntryCompleted},
 		{Content: "!", Status: harnessv2.PlanEntryPending},
@@ -286,10 +301,10 @@ func TestProjectPlanUpdateRedactsCredentialSplitAcrossArbitraryFieldOrder(t *tes
 	right := strings.Repeat("b", 10)
 	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
 		{Content: left, Status: harnessv2.PlanEntryCompleted},
-		{Content: "sk-", Status: harnessv2.PlanEntryPending},
+		{Content: mapperTestSecretPrefix, Status: harnessv2.PlanEntryPending},
 		{Content: right, Status: harnessv2.PlanEntryInProgress},
 	}})
-	if strings.Contains(projection.Document, left) || strings.Contains(projection.Document, "sk-") ||
+	if strings.Contains(projection.Document, left) || strings.Contains(projection.Document, mapperTestSecretPrefix) ||
 		strings.Contains(projection.Document, right) ||
 		!strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) {
 		t.Fatalf("plan document exposed credential reconstructed in arbitrary field order: %q", projection.Document)
@@ -347,7 +362,7 @@ func TestMapPromptLifecycle(t *testing.T) {
 	completed.Completed = &harnessv2.CompletedEvent{
 		StopReason: harnessv2.ACPStopReasonEndTurn,
 		Result: harnessv2.PromptResult{
-			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "done"}}, Model: "served-model",
+			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: mapperTestDone}}, Model: mapperTestServedModel,
 		},
 	}
 	finished, err := MapPromptLifecycle(completed, testMapContext())
@@ -361,8 +376,8 @@ func TestMapPromptLifecycle(t *testing.T) {
 	if err := json.Unmarshal(finished.Content, &content); err != nil {
 		t.Fatal(err)
 	}
-	if content["modelRequestID"] != "prompt-1" || content["provider"] != "openai" ||
-		content["model"] != "served-model" || content["stopReason"] != string(harnessv2.ACPStopReasonEndTurn) {
+	if content[mappedModelRequestIDContentKey] != mapperTestPromptID || content["provider"] != mapperTestProvider ||
+		content["model"] != mapperTestServedModel || content["stopReason"] != string(harnessv2.ACPStopReasonEndTurn) {
 		t.Fatalf("completed lifecycle content = %#v", content)
 	}
 }
@@ -401,7 +416,7 @@ func TestMapUpdateOmitsUnredactedStreamText(t *testing.T) {
 		{
 			Kind: harnessv2.UpdateToolCallUpdate,
 			ToolCall: &harnessv2.ToolCallUpdate{
-				ToolCallID: "call-stream", Kind: "shell", Status: harnessv2.ToolCallStatusInProgress,
+				ToolCallID: "call-stream", Kind: mapperTestToolKindShell, Status: harnessv2.ToolCallStatusInProgress,
 				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "tool-stream-fragment"}},
 			},
 		},
@@ -419,7 +434,7 @@ func TestMapUpdateOmitsUnredactedStreamText(t *testing.T) {
 }
 
 func TestMapAssistantTranscriptRedactsCompleteText(t *testing.T) {
-	credential := "sk-" + strings.Repeat("a", 24)
+	credential := mapperTestSecretPrefix + strings.Repeat("a", 24)
 	capabilityURL := "https://account.blob.core.windows.net/output.txt?sp=r&sig=usable-secret#download"
 	transcript := "hello Authorization: Bearer " + credential + " world\n" + capabilityURL
 	mapped, err := MapAssistantTranscript(testTerminalEvent(3, time.Now().UTC()), testMapContext(), transcript, false)
@@ -498,8 +513,8 @@ func TestProjectPlanUpdateKeepsFullPlanForStoreAndBoundsEvent(t *testing.T) {
 
 func testMapContext() MapContext {
 	return MapContext{
-		Namespace: "default", TaskName: "task-1", SessionName: "session-1", AgentName: "agent-1",
-		StreamID: "task-1", Provider: "openai", Model: "gpt-test",
+		Namespace: mapperTestNamespace, TaskName: mapperTestTaskName, SessionName: mapperTestSessionName, AgentName: mapperTestAgentName,
+		StreamID: "task-1", Provider: mapperTestProvider, Model: "gpt-test",
 	}
 }
 
@@ -509,7 +524,7 @@ func testUpdateEvent(sequence uint64, at time.Time, update harnessv2.UpdateEvent
 		Type:     harnessv2.EventUpdate,
 		Identity: harnessv2.EventIdentity{
 			RuntimeInstanceID: "runtime-1", SupervisorBootID: "boot-1", RuntimeSessionUID: "session-uid-1",
-			RuntimeSessionGeneration: 1, TaskUID: "task-uid-1", TaskAttempt: 1, PromptID: "prompt-1",
+			RuntimeSessionGeneration: 1, TaskUID: "task-uid-1", TaskAttempt: 1, PromptID: mapperTestPromptID,
 			Sequence: sequence, RequestDigest: harnessv2.RequestDigest("sha256:" + strings.Repeat("a", 64)), Timestamp: at,
 		},
 		Update: &update,

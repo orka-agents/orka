@@ -474,8 +474,7 @@ func classifyPromptErrorOutcome(err error, written bool) PromptOutcome {
 	if !written {
 		return PromptOutcomeFailed
 	}
-	var rpcErr *RPCError
-	if errors.As(err, &rpcErr) {
+	if _, ok := errors.AsType[*RPCError](err); ok {
 		// A structured JSON-RPC error proves that the adapter received and
 		// conclusively rejected or failed the prompt. Only loss of the response
 		// after the request write leaves the outcome ambiguous.

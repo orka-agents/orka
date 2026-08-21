@@ -1353,8 +1353,7 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 		return nil
 	})
 	if err != nil {
-		var fiberErr *fiber.Error
-		if errors.As(err, &fiberErr) {
+		if _, ok := errors.AsType[*fiber.Error](err); ok {
 			return err
 		}
 		if apierrors.IsNotFound(err) {

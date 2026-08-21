@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -351,8 +352,8 @@ func setTemporaryEnvEntries(entries []string) func() {
 	restores = append(restores, setTemporaryEnv("XDG_CONFIG_DIRS", "/tmp/orka-empty-git-config-dirs"))
 	restores = append(restores, setTemporaryEnv("PATH", wrapperSafeCommandPath))
 	return func() {
-		for i := len(restores) - 1; i >= 0; i-- {
-			restores[i]()
+		for _, restore := range slices.Backward(restores) {
+			restore()
 		}
 	}
 }

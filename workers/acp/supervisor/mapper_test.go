@@ -14,6 +14,24 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
+const (
+	supervisorTestSessionUpdateKey  = "sessionUpdate"
+	supervisorTestContentKey        = "content"
+	supervisorTestTypeKey           = "type"
+	supervisorTestTextKey           = "text"
+	supervisorTestEntriesKey        = "entries"
+	supervisorTestToolCallIDKey     = "toolCallId"
+	supervisorTestStatusKey         = "status"
+	supervisorTestTitleKey          = "title"
+	supervisorTestKindKey           = "kind"
+	supervisorTestReadKind          = "read"
+	supervisorTestPlanUpdate        = "plan"
+	supervisorTestToolCallUpdate    = "tool_call_update"
+	supervisorTestResourceLinkType  = "resource_link"
+	supervisorTestCompletedStatus   = "completed"
+	supervisorTestProviderSessionID = "provider-session"
+)
+
 func TestMapACPUpdateDecodesAgentMessageContent(t *testing.T) {
 	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
 		"sessionUpdate":"agent_message_chunk",
@@ -197,7 +215,10 @@ func TestMapACPUpdateOmitsInvalidPlanTelemetry(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			raw, err := json.Marshal(map[string]any{"sessionUpdate": "plan", "entries": test.entries})
+			raw, err := json.Marshal(map[string]any{
+				supervisorTestSessionUpdateKey: supervisorTestPlanUpdate,
+				supervisorTestEntriesKey:       test.entries,
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -213,8 +234,8 @@ func TestMapACPToolCallContentOmitsSnapshotOverBlockLimit(t *testing.T) {
 	items := make([]map[string]any, harnessv2.MaxContentBlocks+1)
 	for index := range items {
 		items[index] = map[string]any{
-			"type":    "content",
-			"content": map[string]any{"type": "text", "text": "tool output"},
+			supervisorTestTypeKey:    supervisorTestContentKey,
+			supervisorTestContentKey: map[string]any{supervisorTestTypeKey: acpContentTypeText, supervisorTestTextKey: "tool output"},
 		}
 	}
 	raw, err := json.Marshal(items)
@@ -239,7 +260,7 @@ func TestMapACPToolCallContentOmitsSnapshotOverBlockLimit(t *testing.T) {
 func TestProjectACPContentBlockOmitsOversizedTelemetry(t *testing.T) {
 	oversizedText := strings.Repeat("x", harnessv2.MaxPromptContentBytes+1)
 	oversizedResource, err := json.Marshal(map[string]any{
-		"uri": "file:///workspace/output.txt", "mimeType": "text/plain", "text": oversizedText,
+		"uri": "file:///workspace/output.txt", "mimeType": "text/plain", supervisorTestTextKey: oversizedText,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -248,16 +269,16 @@ func TestProjectACPContentBlockOmitsOversizedTelemetry(t *testing.T) {
 		name  string
 		block acp.ContentBlock
 	}{
-		{name: "text", block: acp.ContentBlock{Type: acpContentTypeText, Text: oversizedText}},
+		{name: acpContentTypeText, block: acp.ContentBlock{Type: acpContentTypeText, Text: oversizedText}},
 		{name: "resource text", block: acp.ContentBlock{Type: "resource", Resource: oversizedResource}},
 		{name: "resource URI", block: acp.ContentBlock{
-			Type: "resource_link", URI: "https://example.com/" + strings.Repeat("x", harnessv2.MaxResourceURIBytes),
+			Type: supervisorTestResourceLinkType, URI: "https://example.com/" + strings.Repeat("x", harnessv2.MaxResourceURIBytes),
 		}},
 		{name: "resource name", block: acp.ContentBlock{
-			Type: "resource_link", URI: "https://example.com/output", Name: strings.Repeat("x", harnessv2.MaxContentNameBytes+1),
+			Type: supervisorTestResourceLinkType, URI: "https://example.com/output", Name: strings.Repeat("x", harnessv2.MaxContentNameBytes+1),
 		}},
 		{name: "resource MIME type", block: acp.ContentBlock{
-			Type: "resource_link", URI: "https://example.com/output", MIMEType: strings.Repeat("x", harnessv2.MaxContentMIMETypeBytes+1),
+			Type: supervisorTestResourceLinkType, URI: "https://example.com/output", MIMEType: strings.Repeat("x", harnessv2.MaxContentMIMETypeBytes+1),
 		}},
 	}
 	for _, test := range tests {
@@ -272,13 +293,13 @@ func TestProjectACPContentBlockOmitsOversizedTelemetry(t *testing.T) {
 
 func TestMapACPUpdateMarksOversizedToolContentOmitted(t *testing.T) {
 	raw, err := json.Marshal(map[string]any{
-		"sessionUpdate": "tool_call_update",
-		"toolCallId":    "call-oversized-content",
-		"status":        "completed",
-		"content": []map[string]any{{
-			"type": "content",
-			"content": map[string]any{
-				"type": "text", "text": strings.Repeat("x", harnessv2.MaxPromptContentBytes+1),
+		supervisorTestSessionUpdateKey: supervisorTestToolCallUpdate,
+		supervisorTestToolCallIDKey:    "call-oversized-content",
+		supervisorTestStatusKey:        supervisorTestCompletedStatus,
+		supervisorTestContentKey: []map[string]any{{
+			supervisorTestTypeKey: supervisorTestContentKey,
+			supervisorTestContentKey: map[string]any{
+				supervisorTestTypeKey: acpContentTypeText, supervisorTestTextKey: strings.Repeat("x", harnessv2.MaxPromptContentBytes+1),
 			},
 		}},
 	})
@@ -333,12 +354,12 @@ func TestMapRuntimeEventBoundsAggregateToolContentToEventLine(t *testing.T) {
 	prompt := &promptState{request: testStartPromptRequest(t, cfg, fence)}
 	text := strings.Repeat("x", 600<<10)
 	raw, err := json.Marshal(map[string]any{
-		"sessionUpdate": "tool_call_update",
-		"toolCallId":    "call-aggregate-content",
-		"status":        "completed",
-		"content": []map[string]any{
-			{"type": "content", "content": map[string]any{"type": "text", "text": text}},
-			{"type": "content", "content": map[string]any{"type": "text", "text": text}},
+		supervisorTestSessionUpdateKey: supervisorTestToolCallUpdate,
+		supervisorTestToolCallIDKey:    "call-aggregate-content",
+		supervisorTestStatusKey:        supervisorTestCompletedStatus,
+		supervisorTestContentKey: []map[string]any{
+			{supervisorTestTypeKey: supervisorTestContentKey, supervisorTestContentKey: map[string]any{supervisorTestTypeKey: acpContentTypeText, supervisorTestTextKey: text}},
+			{supervisorTestTypeKey: supervisorTestContentKey, supervisorTestContentKey: map[string]any{supervisorTestTypeKey: acpContentTypeText, supervisorTestTextKey: text}},
 		},
 	})
 	if err != nil {
@@ -346,7 +367,7 @@ func TestMapRuntimeEventBoundsAggregateToolContentToEventLine(t *testing.T) {
 	}
 	mapped, err := server.mapRuntimeEvent(state, prompt, acp.PromptEvent{
 		Type: acp.PromptEventUpdate, Timestamp: time.Now().UTC(),
-		Update: &acp.SessionNotification{SessionID: "provider-session", Update: raw},
+		Update: &acp.SessionNotification{SessionID: supervisorTestProviderSessionID, Update: raw},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -497,10 +518,10 @@ func TestMapACPUpdateBoundsProviderToolCallTitle(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			raw, err := json.Marshal(map[string]any{
-				"sessionUpdate": "tool_call",
-				"toolCallId":    "call-1",
-				"title":         test.title,
-				"kind":          "execute",
+				supervisorTestSessionUpdateKey: acpUpdateToolCall,
+				supervisorTestToolCallIDKey:    "call-1",
+				supervisorTestTitleKey:         test.title,
+				supervisorTestKindKey:          "execute",
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -529,10 +550,10 @@ func TestMapACPUpdateRedactsProviderToolCallTitleBeforeBounding(t *testing.T) {
 	prefix := strings.Repeat("x", maxACPToolCallTitleBytes-9) + " "
 	credential := "sk-" + strings.Repeat("a", 24)
 	raw, err := json.Marshal(map[string]any{
-		"sessionUpdate": "tool_call",
-		"toolCallId":    "call-credential",
-		"title":         prefix + credential,
-		"kind":          "execute",
+		supervisorTestSessionUpdateKey: acpUpdateToolCall,
+		supervisorTestToolCallIDKey:    "call-credential",
+		supervisorTestTitleKey:         prefix + credential,
+		supervisorTestKindKey:          "execute",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -570,7 +591,7 @@ func TestMapRuntimeEventSuppressesStatuslessToolOutputBurstWithoutWeakeningRateL
 	mapEvent := func(prompt *promptState, state *sessionState, eventType acp.PromptEventType, update string, at time.Time) *harnessv2.Event {
 		event := acp.PromptEvent{Type: eventType, Timestamp: at}
 		if update != "" {
-			event.Update = &acp.SessionNotification{SessionID: "provider-session", Update: json.RawMessage(update)}
+			event.Update = &acp.SessionNotification{SessionID: supervisorTestProviderSessionID, Update: json.RawMessage(update)}
 		}
 		mapped, err := server.mapRuntimeEvent(state, prompt, event)
 		if err != nil {
@@ -679,8 +700,8 @@ func TestMapRuntimeEventSuppressesStatuslessToolOutputBurstWithoutWeakeningRateL
 func TestMapACPUpdateCanonicalizesOversizedToolCallIDAcrossEvents(t *testing.T) {
 	rawID := strings.Repeat("provider-tool-call-", 24)
 	encoded, err := json.Marshal(map[string]any{
-		"sessionUpdate": "tool_call", "toolCallId": rawID,
-		"title": "Read repository", "kind": "read", "status": "pending",
+		supervisorTestSessionUpdateKey: acpUpdateToolCall, supervisorTestToolCallIDKey: rawID,
+		supervisorTestTitleKey: "Read repository", supervisorTestKindKey: supervisorTestReadKind, supervisorTestStatusKey: "pending",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -690,8 +711,8 @@ func TestMapACPUpdateCanonicalizesOversizedToolCallIDAcrossEvents(t *testing.T) 
 		t.Fatal(err)
 	}
 	encoded, err = json.Marshal(map[string]any{
-		"sessionUpdate": "tool_call_update", "toolCallId": rawID,
-		"title": "Read repository", "kind": "read", "status": "completed",
+		supervisorTestSessionUpdateKey: supervisorTestToolCallUpdate, supervisorTestToolCallIDKey: rawID,
+		supervisorTestTitleKey: "Read repository", supervisorTestKindKey: supervisorTestReadKind, supervisorTestStatusKey: supervisorTestCompletedStatus,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -732,7 +753,7 @@ func TestMapACPUpdateCanonicalizesOversizedToolCallIDAcrossEvents(t *testing.T) 
 	}
 
 	permissionToolCall, err := json.Marshal(map[string]any{
-		"toolCallId": rawID, "name": "Read", "title": "Read repository",
+		supervisorTestToolCallIDKey: rawID, "name": "Read", supervisorTestTitleKey: "Read repository",
 	})
 	if err != nil {
 		t.Fatal(err)

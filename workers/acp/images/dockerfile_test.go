@@ -180,7 +180,7 @@ func TestCopilotPinIsNewerThanCredentiallessBYOKACPFixBoundary(t *testing.T) {
 func parseVersionCore(t *testing.T, version string) [3]int {
 	t.Helper()
 	var parsed [3]int
-	core := strings.SplitN(version, "-", 2)[0]
+	core, _, _ := strings.Cut(version, "-")
 	if count, err := fmt.Sscanf(core, "%d.%d.%d", &parsed[0], &parsed[1], &parsed[2]); err != nil || count != len(parsed) {
 		t.Fatalf("parse Copilot CLI version %q: parsed %d components: %v", version, count, err)
 	}

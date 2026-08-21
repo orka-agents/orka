@@ -410,8 +410,7 @@ func (e *githubAPIError) Error() string {
 
 // isTransientHTTPError returns true if the error represents a transient GitHub API error (429 or 5xx).
 func isTransientHTTPError(err error) bool {
-	var apiErr *githubAPIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*githubAPIError](err); ok {
 		return apiErr.StatusCode == 429 || apiErr.StatusCode >= 500
 	}
 	return false

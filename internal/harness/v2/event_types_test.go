@@ -2,14 +2,19 @@ package v2
 
 import "testing"
 
+const (
+	eventTypesTestToolCallID = "call-1"
+	eventTypesTestResultText = "done"
+)
+
 func TestToolCallUpdateValidateRequiresOmittedContentToBeEmpty(t *testing.T) {
 	for _, update := range []ToolCallUpdate{
 		{
-			ToolCallID: "call-1", Status: ToolCallStatusCompleted, ContentOmitted: true,
+			ToolCallID: eventTypesTestToolCallID, Status: ToolCallStatusCompleted, ContentOmitted: true,
 			Content: []ContentBlock{{Type: ContentBlockText, Text: "partial"}},
 		},
 		{
-			ToolCallID: "call-1", Status: ToolCallStatusCompleted, ContentOmitted: true, ContentReplace: true,
+			ToolCallID: eventTypesTestToolCallID, Status: ToolCallStatusCompleted, ContentOmitted: true, ContentReplace: true,
 		},
 	} {
 		if err := update.Validate(); err == nil {
@@ -17,7 +22,7 @@ func TestToolCallUpdateValidateRequiresOmittedContentToBeEmpty(t *testing.T) {
 		}
 	}
 	if err := (ToolCallUpdate{
-		ToolCallID: "call-1", Status: ToolCallStatusCompleted, ContentOmitted: true,
+		ToolCallID: eventTypesTestToolCallID, Status: ToolCallStatusCompleted, ContentOmitted: true,
 	}).Validate(); err != nil {
 		t.Fatalf("validate omitted tool content: %v", err)
 	}
@@ -43,7 +48,7 @@ func TestPromptResultValidateRejectsInvalidContextWindowUsage(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			result := PromptResult{
-				Content: []ContentBlock{{Type: ContentBlockText, Text: "done"}},
+				Content: []ContentBlock{{Type: ContentBlockText, Text: eventTypesTestResultText}},
 				Usage:   test.usage,
 			}
 			if err := result.Validate(); err == nil {

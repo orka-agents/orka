@@ -684,8 +684,7 @@ func (d *HarnessV1Dispatcher) handleStartTurnError(
 	fence store.ControllerEpochFence,
 	startErr error,
 ) error {
-	var clientErr harness.ClientError
-	if errors.As(startErr, &clientErr) {
+	if clientErr, ok := errors.AsType[harness.ClientError](startErr); ok {
 		switch {
 		case clientErr.RemoteAccepted:
 			accepted, err := d.transitionAttempt(ctx, attempt, fence, store.HarnessV1AttemptAccepted, "accepted-response-invalid", store.HarnessV1AttemptUpdates{})

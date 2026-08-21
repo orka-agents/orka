@@ -578,17 +578,17 @@ func toolExecutionErrorType(err error) string {
 	}
 	message := err.Error()
 	const httpPrefix = "tool returned HTTP "
-	if idx := strings.Index(message, httpPrefix); idx >= 0 {
-		statusText := message[idx+len(httpPrefix):]
-		code := ""
+	if _, after, ok := strings.Cut(message, httpPrefix); ok {
+		statusText := after
+		var code strings.Builder
 		for _, r := range statusText {
 			if r < '0' || r > '9' {
 				break
 			}
-			code += string(r)
+			code.WriteString(string(r))
 		}
-		if code != "" {
-			return "http_status_" + code
+		if code.String() != "" {
+			return "http_status_" + code.String()
 		}
 	}
 	return fmt.Sprintf("%T", err)

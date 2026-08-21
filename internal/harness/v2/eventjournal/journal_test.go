@@ -19,7 +19,19 @@ import (
 	"github.com/orka-agents/orka/internal/store/storetest"
 )
 
-const testToolKindShell = "shell"
+const (
+	testToolKindShell             = "shell"
+	testJournalNamespace          = "default"
+	testJournalTaskName           = "task-1"
+	testJournalDone               = "done"
+	testJournalToolTitle          = "Inspect repository"
+	testJournalOpenToolCallID     = "call-open"
+	testJournalMetadataToolCallID = "call-metadata"
+	testJournalRuntimeCode        = "runtime"
+	testJournalServedModel        = "served-model"
+	testJournalPromptID           = "prompt-1"
+	testJournalSecretPrefix       = "sk-"
+)
 
 func TestJournalDeduplicatesWithinPassAndAcrossRecovery(t *testing.T) {
 	ctx := context.Background()
@@ -63,7 +75,7 @@ func TestJournalDeduplicatesWithinPassAndAcrossRecovery(t *testing.T) {
 	}
 
 	listed, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-1", Limit: 10,
+		Namespace: testJournalNamespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: testJournalTaskName, Limit: 10,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +88,7 @@ func TestJournalDeduplicatesWithinPassAndAcrossRecovery(t *testing.T) {
 func TestJournalPlanReplaySurvivesSQLiteReopen(t *testing.T) {
 	const (
 		firstPlanSummary  = "first"
-		secondPlanSummary = "done"
+		secondPlanSummary = testJournalDone
 	)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "journal-reopen.db")
@@ -97,7 +109,7 @@ func TestJournalPlanReplaySurvivesSQLiteReopen(t *testing.T) {
 		}},
 	})
 	firstPlan := &store.PlanState{
-		Namespace: "default", TaskName: "task-1", Summary: firstPlanSummary,
+		Namespace: testJournalNamespace, TaskName: testJournalTaskName, Summary: firstPlanSummary,
 		ProgressPct: 50, PlanDocument: "# First",
 	}
 	if appended, isNew, err := state.AppendPlanUpdateIfNew(ctx, firstEvent, firstPlan); err != nil || !isNew || appended == nil {
@@ -126,7 +138,7 @@ func TestJournalPlanReplaySurvivesSQLiteReopen(t *testing.T) {
 	if duplicate, isNew, err := recovered.AppendPlanUpdateIfNew(ctx, firstEvent, &stalePlan); err != nil || isNew || duplicate != nil {
 		t.Fatalf("reopened duplicate = %#v new=%t err=%v", duplicate, isNew, err)
 	}
-	persisted, err := reopenedStore.GetPlan(ctx, "default", "task-1")
+	persisted, err := reopenedStore.GetPlan(ctx, testJournalNamespace, testJournalTaskName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,13 +153,13 @@ func TestJournalPlanReplaySurvivesSQLiteReopen(t *testing.T) {
 		}},
 	})
 	secondPlan := &store.PlanState{
-		Namespace: "default", TaskName: "task-1", Summary: secondPlanSummary,
+		Namespace: testJournalNamespace, TaskName: testJournalTaskName, Summary: secondPlanSummary,
 		ProgressPct: 100, GoalComplete: true, PlanDocument: "# Done",
 	}
 	if appended, isNew, err := recovered.AppendPlanUpdateIfNew(ctx, secondEvent, secondPlan); err != nil || !isNew || appended == nil || appended.Seq != 2 {
 		t.Fatalf("post-reopen plan append = %#v new=%t err=%v", appended, isNew, err)
 	}
-	persisted, err = reopenedStore.GetPlan(ctx, "default", "task-1")
+	persisted, err = reopenedStore.GetPlan(ctx, testJournalNamespace, testJournalTaskName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +360,7 @@ func TestJournalRedactsCredentialSplitAcrossPlanUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := "sk-" + strings.Repeat("a", 8)
+	prefix := testJournalSecretPrefix + strings.Repeat("a", 8)
 	suffix := strings.Repeat("b", 16)
 	first := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdatePlan,
@@ -418,7 +430,7 @@ func TestJournalFailsClosedAcrossSessionTaskTurns(t *testing.T) {
 		t.Fatal("first session task entered fail-closed redaction from its lifecycle event")
 	}
 
-	prefix := "sk-" + strings.Repeat("a", 8)
+	prefix := testJournalSecretPrefix + strings.Repeat("a", 8)
 	suffix := strings.Repeat("b", 16)
 	first := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdatePlan,
@@ -499,7 +511,7 @@ func TestJournalRedactsCredentialSplitAcrossDiagnosticUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := "sk-" + strings.Repeat("a", 8)
+	prefix := testJournalSecretPrefix + strings.Repeat("a", 8)
 	suffix := strings.Repeat("b", 16)
 	updates := []harnessv2.DiagnosticUpdate{
 		{Code: "x", Message: prefix, Retryable: true},
@@ -623,7 +635,7 @@ func TestJournalRedactsCredentialSplitAcrossPlanAndDiagnosticUpdates(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := "sk-" + strings.Repeat("a", 10)
+	prefix := testJournalSecretPrefix + strings.Repeat("a", 10)
 	suffix := strings.Repeat("b", 14)
 	plan := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdatePlan,
@@ -637,7 +649,7 @@ func TestJournalRedactsCredentialSplitAcrossPlanAndDiagnosticUpdates(t *testing.
 	diagnostic := testUpdateEvent(3, plan.Identity.Timestamp.Add(time.Millisecond), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdateDiagnostic,
 		Diagnostic: &harnessv2.DiagnosticUpdate{
-			Code: "runtime", Message: suffix, Retryable: true,
+			Code: testJournalRuntimeCode, Message: suffix, Retryable: true,
 		},
 	})
 	if appended, isNew, err := state.AppendUpdateIfNew(ctx, diagnostic); err != nil || !isNew || appended == nil {
@@ -659,7 +671,7 @@ func TestJournalRedactsCredentialSplitAcrossPlanAndAssistantTranscript(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := "sk-" + strings.Repeat("a", 10)
+	prefix := testJournalSecretPrefix + strings.Repeat("a", 10)
 	suffix := strings.Repeat("b", 14)
 	now := time.Now().UTC()
 	plan := testUpdateEvent(2, now, harnessv2.UpdateEvent{
@@ -691,7 +703,7 @@ func TestJournalRedactsCredentialSplitAcrossPlanAndToolMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := "sk-" + strings.Repeat("a", 10)
+	prefix := testJournalSecretPrefix + strings.Repeat("a", 10)
 	suffix := strings.Repeat("b", 14)
 	now := time.Now().UTC()
 	plan := testUpdateEvent(2, now, harnessv2.UpdateEvent{
@@ -729,7 +741,7 @@ func TestJournalRedactsCredentialSplitIntoTerminalUsageModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	prefix := "sk-" + strings.Repeat("a", 10)
+	prefix := testJournalSecretPrefix + strings.Repeat("a", 10)
 	suffix := strings.Repeat("b", 14)
 	plan := testUpdateEvent(2, now, harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdatePlan,
@@ -744,7 +756,7 @@ func TestJournalRedactsCredentialSplitIntoTerminalUsageModel(t *testing.T) {
 	terminal.Completed = &harnessv2.CompletedEvent{
 		StopReason: harnessv2.ACPStopReasonEndTurn,
 		Result: harnessv2.PromptResult{
-			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "done"}},
+			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: testJournalDone}},
 			Model:   suffix,
 			Usage:   harnessv2.UsageUpdate{InputTokens: 1},
 		},
@@ -786,7 +798,7 @@ func TestJournalRedactsCredentialSplitIntoTerminalLifecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			now := time.Now().UTC()
-			prefix := "sk-" + strings.Repeat("a", 10)
+			prefix := testJournalSecretPrefix + strings.Repeat("a", 10)
 			suffix := strings.Repeat("b", 14)
 			plan := testUpdateEvent(2, now, harnessv2.UpdateEvent{
 				Kind: harnessv2.UpdatePlan,
@@ -806,7 +818,7 @@ func TestJournalRedactsCredentialSplitIntoTerminalLifecycle(t *testing.T) {
 				terminal.Completed = &harnessv2.CompletedEvent{
 					StopReason: harnessv2.ACPStopReasonEndTurn,
 					Result: harnessv2.PromptResult{
-						Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "done"}},
+						Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: testJournalDone}},
 						Model:   suffix,
 					},
 				}
@@ -816,10 +828,10 @@ func TestJournalRedactsCredentialSplitIntoTerminalLifecycle(t *testing.T) {
 				}
 			case harnessv2.EventFailed:
 				terminal.Failed = &harnessv2.FailedEvent{
-					StopReason: harnessv2.ACPStopReasonRefusal, Code: "runtime", Message: suffix,
+					StopReason: harnessv2.ACPStopReasonRefusal, Code: testJournalRuntimeCode, Message: suffix,
 				}
 			case harnessv2.EventOutcomeUnknown:
-				terminal.OutcomeUnknown = &harnessv2.OutcomeUnknownEvent{Code: "runtime", Message: suffix}
+				terminal.OutcomeUnknown = &harnessv2.OutcomeUnknownEvent{Code: testJournalRuntimeCode, Message: suffix}
 			}
 			if appended, isNew, err := state.AppendPromptLifecycleIfNew(ctx, terminal); err != nil || !isNew || appended == nil {
 				t.Fatalf("append terminal lifecycle = %#v new=%t err=%v", appended, isNew, err)
@@ -862,7 +874,7 @@ func TestJournalRedactsCredentialSplitIntoPromptStreamFailure(t *testing.T) {
 	if appended, isNew, err := state.AppendPromptLifecycleIfNew(ctx, accepted); err != nil || !isNew || appended == nil {
 		t.Fatalf("append accepted lifecycle = %#v new=%t err=%v", appended, isNew, err)
 	}
-	prefix := "sk-" + strings.Repeat("a", 10)
+	prefix := testJournalSecretPrefix + strings.Repeat("a", 10)
 	suffix := strings.Repeat("b", 14)
 	plan := testUpdateEvent(2, now.Add(time.Millisecond), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdatePlan,
@@ -1041,7 +1053,7 @@ func TestJournalRedactsCredentialsSplitAcrossAssistantChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	credential := "sk-" + strings.Repeat("a", 24)
+	credential := testJournalSecretPrefix + strings.Repeat("a", 24)
 	chunks := []string{"hello", " ", credential[:9], credential[9:] + " world"}
 	transcript := strings.Join(chunks, "")
 	now := time.Now().UTC()
@@ -1097,15 +1109,15 @@ func TestJournalPersistsTerminalUsageSeparatelyFromAssistantTranscript(t *testin
 	terminal.Completed = &harnessv2.CompletedEvent{
 		StopReason: harnessv2.ACPStopReasonEndTurn,
 		Result: harnessv2.PromptResult{
-			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "done"}},
-			Model:   "served-model",
+			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: testJournalDone}},
+			Model:   testJournalServedModel,
 			Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 40},
 		},
 	}
 	if appended, isNew, err := state.AppendTerminalUsageIfNew(ctx, terminal); err != nil || !isNew || appended == nil {
 		t.Fatalf("append terminal usage = %#v new=%t err=%v", appended, isNew, err)
 	}
-	if appended, isNew, err := state.AppendAssistantTranscriptIfNew(ctx, terminal, "done", false); err != nil || !isNew || appended == nil {
+	if appended, isNew, err := state.AppendAssistantTranscriptIfNew(ctx, terminal, testJournalDone, false); err != nil || !isNew || appended == nil {
 		t.Fatalf("append assistant transcript = %#v new=%t err=%v", appended, isNew, err)
 	}
 	if duplicate, isNew, err := state.AppendTerminalUsageIfNew(ctx, terminal); err != nil || isNew || duplicate != nil {
@@ -1124,7 +1136,7 @@ func TestJournalPersistsTerminalUsageSeparatelyFromAssistantTranscript(t *testin
 	if err := json.Unmarshal(listed[0].Content, &usageContent); err != nil {
 		t.Fatal(err)
 	}
-	if usageContent["model"] != "served-model" {
+	if usageContent["model"] != testJournalServedModel {
 		t.Fatalf("terminal usage content = %#v", usageContent)
 	}
 
@@ -1135,7 +1147,7 @@ func TestJournalPersistsTerminalUsageSeparatelyFromAssistantTranscript(t *testin
 	if duplicate, isNew, err := recovered.AppendTerminalUsageIfNew(ctx, terminal); err != nil || isNew || duplicate != nil {
 		t.Fatalf("recovered terminal usage = %#v new=%t err=%v", duplicate, isNew, err)
 	}
-	if duplicate, isNew, err := recovered.AppendAssistantTranscriptIfNew(ctx, terminal, "done", false); err != nil || isNew || duplicate != nil {
+	if duplicate, isNew, err := recovered.AppendAssistantTranscriptIfNew(ctx, terminal, testJournalDone, false); err != nil || isNew || duplicate != nil {
 		t.Fatalf("recovered assistant transcript = %#v new=%t err=%v", duplicate, isNew, err)
 	}
 }
@@ -1162,7 +1174,7 @@ func TestJournalPersistsPromptLifecycleWithRecoveryDeduplication(t *testing.T) {
 	terminal := testTerminalEvent(2, now.Add(time.Second))
 	terminal.Completed = &harnessv2.CompletedEvent{
 		StopReason: harnessv2.ACPStopReasonEndTurn,
-		Result:     harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "done"}}},
+		Result:     harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: testJournalDone}}},
 	}
 	if appended, isNew, err := state.AppendPromptLifecycleIfNew(ctx, accepted); err != nil || !isNew || appended == nil {
 		t.Fatalf("append accepted lifecycle = %#v new=%t err=%v", appended, isNew, err)
@@ -1228,7 +1240,7 @@ func TestJournalPersistsPromptStreamFailureWithRecoveryDeduplication(t *testing.
 	if err := json.Unmarshal(listed[1].Content, &content); err != nil {
 		t.Fatal(err)
 	}
-	if content["controllerSynthesized"] != true || content["modelRequestID"] != "prompt-1" ||
+	if content[mappedControllerSynthesizedKey] != true || content[mappedModelRequestIDContentKey] != testJournalPromptID ||
 		content["code"] != mappedPromptStreamFailureCode || content["message"] != "runtime prompt transport failed" {
 		t.Fatalf("prompt stream failure content = %#v", content)
 	}
@@ -1351,7 +1363,7 @@ func TestJournalPersistsAssistantTextOnNonTerminalStreamClosure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	credential := "sk-" + strings.Repeat("d", 24)
+	credential := testJournalSecretPrefix + strings.Repeat("d", 24)
 	fragments := []string{"before " + credential[:10], credential[10:] + " after"}
 	now := time.Now().UTC()
 	var last harnessv2.Event
@@ -1449,7 +1461,7 @@ func TestJournalRedactsCredentialsSplitAcrossToolUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	credential := "sk-" + strings.Repeat("b", 24)
+	credential := testJournalSecretPrefix + strings.Repeat("b", 24)
 	fragments := []string{"before " + credential[:10], credential[10:] + " after"}
 	now := time.Now().UTC()
 	for index, fragment := range fragments {
@@ -1569,14 +1581,14 @@ func TestJournalPersistsBufferedToolOutputOnStreamClosure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	credential := "sk-" + strings.Repeat("z", 24)
+	credential := testJournalSecretPrefix + strings.Repeat("z", 24)
 	now := time.Now().UTC()
 	fragments := []string{"before " + credential[:10], credential[10:] + " after"}
 	for index, fragment := range fragments {
 		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index)*time.Millisecond), harnessv2.UpdateEvent{
 			Kind: harnessv2.UpdateToolCallUpdate,
 			ToolCall: &harnessv2.ToolCallUpdate{
-				ToolCallID: "call-open", Title: "Inspect repository", Kind: testToolKindShell,
+				ToolCallID: testJournalOpenToolCallID, Title: testJournalToolTitle, Kind: testToolKindShell,
 				Status:  harnessv2.ToolCallStatusInProgress,
 				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: fragment}},
 			},
@@ -1600,7 +1612,7 @@ func TestJournalPersistsBufferedToolOutputOnStreamClosure(t *testing.T) {
 	if len(listed) != 2 || listed[1].Type != executionevents.ExecutionEventTypeToolCallFailed ||
 		listed[1].Severity != executionevents.ExecutionEventSeverityError ||
 		listed[1].ContentText != "before "+executionevents.ExecutionEventRedactedValue+" after" ||
-		listed[1].ToolName != testToolKindShell || listed[1].Summary != "Inspect repository" {
+		listed[1].ToolName != testToolKindShell || listed[1].Summary != testJournalToolTitle {
 		t.Fatalf("persisted tool stream closure = %#v", listed)
 	}
 }
@@ -1757,7 +1769,7 @@ func TestJournalTerminalizesContentFreeToolAfterPersistedStart(t *testing.T) {
 	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdateToolCall,
 		ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-open", Title: "Inspect repository", Kind: testToolKindShell, Status: harnessv2.ToolCallStatusPending,
+			ToolCallID: testJournalOpenToolCallID, Title: testJournalToolTitle, Kind: testToolKindShell, Status: harnessv2.ToolCallStatusPending,
 		},
 	})
 	if appended, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew || appended == nil {
@@ -1843,17 +1855,17 @@ func TestJournalRedactsToolMetadataSplitAcrossLifecycleUpdates(t *testing.T) {
 	}
 
 	suffix := strings.Repeat("c", 24)
-	credential := "sk-" + suffix
+	credential := testJournalSecretPrefix + suffix
 	now := time.Now().UTC()
 	updates := []harnessv2.UpdateEvent{
 		{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-metadata", Title: "sk-", Status: harnessv2.ToolCallStatusPending,
+			ToolCallID: testJournalMetadataToolCallID, Title: testJournalSecretPrefix, Status: harnessv2.ToolCallStatusPending,
 		}},
 		{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-metadata", Kind: suffix, Status: harnessv2.ToolCallStatusInProgress,
+			ToolCallID: testJournalMetadataToolCallID, Kind: suffix, Status: harnessv2.ToolCallStatusInProgress,
 		}},
 		{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
-			ToolCallID: "call-metadata", Status: harnessv2.ToolCallStatusCompleted,
+			ToolCallID: testJournalMetadataToolCallID, Status: harnessv2.ToolCallStatusCompleted,
 		}},
 	}
 	for index, update := range updates {
@@ -1904,7 +1916,7 @@ func TestJournalOmitsOversizedToolStreamContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	credential := "sk-" + strings.Repeat("c", 24)
+	credential := testJournalSecretPrefix + strings.Repeat("c", 24)
 	now := time.Now().UTC()
 	for index := range 9 {
 		status := harnessv2.ToolCallStatusInProgress
@@ -2221,7 +2233,7 @@ func TestToolContentFragmentOmitsOpaqueResourceURI(t *testing.T) {
 func listJournalEvents(t *testing.T, ctx context.Context, eventStore store.ExecutionEventStore) []store.ExecutionEvent {
 	t.Helper()
 	listed, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-1", Limit: 100,
+		Namespace: testJournalNamespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: testJournalTaskName, Limit: 100,
 	})
 	if err != nil {
 		t.Fatal(err)

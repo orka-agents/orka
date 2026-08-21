@@ -244,8 +244,7 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgents(c fiber.Ctx, namespac
 		repairSpec.IssueWorkflow.Implementation.Enabled = nil
 		repairSpec.Agents.Implementer = spec.Agents.Repairer
 		if err := h.validateRepositoryMonitorImplementerAgent(c, namespace, repairSpec); err != nil {
-			var fiberErr *fiber.Error
-			if errors.As(err, &fiberErr) {
+			if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 				return fiber.NewError(fiberErr.Code, strings.ReplaceAll(fiberErr.Message, "implementer", "repairer"))
 			}
 			return err

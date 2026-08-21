@@ -916,28 +916,28 @@ func buildGitHubActionPrompt(action string, payload githubLabelWebhookPayload, t
 	var b strings.Builder
 	b.WriteString("You are an Orka agent task triggered by a GitHub label.\n\n")
 	b.WriteString("Trigger details:\n")
-	b.WriteString(fmt.Sprintf("- Label: %s\n", payload.Label.Name))
-	b.WriteString(fmt.Sprintf("- Action: %s\n", action))
-	b.WriteString(fmt.Sprintf("- Repository: %s\n", payload.Repository.FullName))
-	b.WriteString(fmt.Sprintf("- Target: %s #%d\n", target.Kind, target.Number))
-	b.WriteString(fmt.Sprintf("- URL: %s\n", target.HTMLURL))
+	fmt.Fprintf(&b, "- Label: %s\n", payload.Label.Name)
+	fmt.Fprintf(&b, "- Action: %s\n", action)
+	fmt.Fprintf(&b, "- Repository: %s\n", payload.Repository.FullName)
+	fmt.Fprintf(&b, "- Target: %s #%d\n", target.Kind, target.Number)
+	fmt.Fprintf(&b, "- URL: %s\n", target.HTMLURL)
 	if payload.Sender.Login != "" {
-		b.WriteString(fmt.Sprintf("- Triggered by: %s\n", payload.Sender.Login))
+		fmt.Fprintf(&b, "- Triggered by: %s\n", payload.Sender.Login)
 	}
 	if target.IsPR {
-		b.WriteString(fmt.Sprintf("- Base branch: %s\n", target.BaseBranch))
-		b.WriteString(fmt.Sprintf("- Head branch: %s\n", target.HeadBranch))
+		fmt.Fprintf(&b, "- Base branch: %s\n", target.BaseBranch)
+		fmt.Fprintf(&b, "- Head branch: %s\n", target.HeadBranch)
 		if target.HeadSHA != "" {
-			b.WriteString(fmt.Sprintf("- Head SHA: %s\n", target.HeadSHA))
+			fmt.Fprintf(&b, "- Head SHA: %s\n", target.HeadSHA)
 		}
 	}
 	if workspace != nil {
-		b.WriteString(fmt.Sprintf("- Workspace repo: %s\n", workspace.GitRepo))
+		fmt.Fprintf(&b, "- Workspace repo: %s\n", workspace.GitRepo)
 		if workspace.Branch != "" {
-			b.WriteString(fmt.Sprintf("- Workspace branch: %s\n", workspace.Branch))
+			fmt.Fprintf(&b, "- Workspace branch: %s\n", workspace.Branch)
 		}
 		if workspace.PushBranch != "" {
-			b.WriteString(fmt.Sprintf("- Push branch: %s\n", workspace.PushBranch))
+			fmt.Fprintf(&b, "- Push branch: %s\n", workspace.PushBranch)
 			b.WriteString("- Push handling: do not commit or push yourself; leave final workspace changes uncommitted so Orka can commit and push them.\n")
 		}
 	}
@@ -970,7 +970,7 @@ func buildGitHubActionPrompt(action string, payload githubLabelWebhookPayload, t
 	case githubActionToIssues:
 		b.WriteString("Break the request into small, independently implementable GitHub issues. Prefer tracer-bullet vertical slices with acceptance criteria. If you can create issues with available GitHub credentials, do so; otherwise return issue drafts with titles, bodies, and labels.\n")
 	default:
-		b.WriteString(fmt.Sprintf("Perform the requested %q action for this GitHub target. Keep changes scoped, run relevant verification, and summarize the outcome.\n", action))
+		fmt.Fprintf(&b, "Perform the requested %q action for this GitHub target. Keep changes scoped, run relevant verification, and summarize the outcome.\n", action)
 	}
 
 	b.WriteString("\nSafety constraints:\n")

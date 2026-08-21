@@ -218,8 +218,7 @@ func ShouldRetry(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
-	var pe *ProviderError
-	if errors.As(err, &pe) {
+	if pe, ok := errors.AsType[*ProviderError](err); ok {
 		return pe.IsRetryable()
 	}
 	return true // network errors, unknown errors → retry
@@ -230,8 +229,7 @@ func ShouldFallback(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
-	var pe *ProviderError
-	if errors.As(err, &pe) {
+	if pe, ok := errors.AsType[*ProviderError](err); ok {
 		return pe.IsProviderDown()
 	}
 	return true // non-ProviderError (network) → try another provider
@@ -239,8 +237,7 @@ func ShouldFallback(err error) bool {
 
 // IsContextTooLongErr reports whether err indicates the context/token limit was exceeded.
 func IsContextTooLongErr(err error) bool {
-	var pe *ProviderError
-	if errors.As(err, &pe) {
+	if pe, ok := errors.AsType[*ProviderError](err); ok {
 		return pe.IsContextTooLong()
 	}
 	return false

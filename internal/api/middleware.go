@@ -102,8 +102,7 @@ func NewTracingMiddleware() fiber.Handler {
 
 		status := c.Response().StatusCode()
 		if err != nil && status < fiber.StatusBadRequest {
-			var fiberErr *fiber.Error
-			if errors.As(err, &fiberErr) {
+			if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 				status = fiberErr.Code
 			} else {
 				status = fiber.StatusInternalServerError

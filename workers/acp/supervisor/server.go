@@ -91,8 +91,7 @@ func sessionCreationFailed(stage string, err error) error {
 }
 
 func sessionCreationStage(err error) string {
-	var creation *sessionCreationError
-	if errors.As(err, &creation) {
+	if creation, ok := errors.AsType[*sessionCreationError](err); ok {
 		return creation.stage
 	}
 	return "unclassified"
@@ -914,8 +913,7 @@ func defaultDuration(value, fallback time.Duration) time.Duration {
 }
 
 func safeError(err error) string {
-	var creation *sessionCreationError
-	if errors.As(err, &creation) {
+	if creation, ok := errors.AsType[*sessionCreationError](err); ok {
 		return "runtime session failed during " + creation.stage
 	}
 	return "runtime operation failed; consult bounded supervisor diagnostics"
