@@ -1509,6 +1509,7 @@ func TestWorkspaceRuntimePoolFinalizerDrainsLiveInstanceBeforeClaimDeletion(t *t
 	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.75")
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-finalizer", false)
 	runtimePoolReconcile(t, r, pool)
+	r.AllowedImages.Codex = "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("9", 64)
 
 	current := runtimePoolTestGetPool(t, r, pool)
 	if err := r.Delete(context.Background(), &current); err != nil {

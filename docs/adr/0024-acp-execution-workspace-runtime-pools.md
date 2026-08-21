@@ -111,13 +111,17 @@ treats the missing pool as cleanup proof and fresh demand recreates it by name.
 
 ### Fail-closed boundaries
 
-- Substrate, `cleanupPolicy: retain`, `templateRef`, `boot`, `poolRef`,
-  `snapshot`, `hibernation`, and `onDetach` are rejected before any workspace
-  or RuntimePool demand exists.
-- `templateRef` is rejected because the supervisor's immutable image, fence
-  environment, materialization attestation, and signed credential-bootstrap
-  key must be controller-rendered. Provider-visible templates carry no
-  credential references; claim-side env and volume injection are `Disallowed`.
+- Unsupported options—`cleanupPolicy: retain`, `boot`, `poolRef`, `snapshot`,
+  `hibernation`, and `onDetach`—are rejected before any workspace or RuntimePool
+  demand exists.
+- Agent Sandbox `templateRef` is rejected because the supervisor's immutable
+  image, fence environment, materialization attestation, and signed
+  credential-bootstrap key must be controller-rendered. Provider-visible
+  templates carry no credential references; claim-side env and volume
+  injection are `Disallowed`.
+- Substrate follows ADR 0025 instead: its infrastructure `templateRef` is
+  required, while the controller derives and owns the immutable runtime
+  ActorTemplate that carries the supervisor contract without credentials.
 - The provider's managed NetworkPolicy is `Unmanaged`; the pool's own
   default-deny NetworkPolicies select the workspace Pod through propagated
   pool labels, preserving the exact controller-ingress/provider-proxy-egress

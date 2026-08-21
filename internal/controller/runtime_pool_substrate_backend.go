@@ -397,7 +397,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		desiredLoaded = true
 		return nil
 	}
-	if actor != nil && derivedTemplate == nil {
+	if actor != nil && derivedTemplate == nil && pool.Spec.DesiredReplicas != 0 {
 		// A pre-existing or partially reconciled actor still needs a frozen,
 		// controller-owned placement record before credential-safe teardown.
 		// Materializing the already-rendered desired template does not admit or
@@ -499,6 +499,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		// derived-template ownership cannot block the Stopped barrier required
 		// before deletion finalization checks and removes provider resources.
 		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, derivedTemplate, nil, actorID, routeHost, status)
+	}
+	if pool.Spec.DesiredReplicas == 0 && derivedTemplate == nil {
+		return r.reconcileSubstrateRuntimePoolScaleDownWithoutTemplate(ctx, pool, control, actorID, status)
 	}
 	if !templateOwned {
 		status.ActiveInstance = nil
@@ -832,6 +835,37 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 
 	return r.reconcileRuntimePoolServing(ctx, pool, cfg, []corev1.Pod{*syntheticPod}, []corev1.Pod{*syntheticPod}, authSecret, status)
+}
+
+// reconcileSubstrateRuntimePoolScaleDownWithoutTemplate stops an actor whose
+// controller-derived template was removed out of band. Authenticated drain can
+// no longer reconstruct the deployed generation, so cleanup falls back to the
+// persisted actor placement and exact worker-Pod fences after controller-owned
+// work is quiescent. teardownSubstrateActor remains fail-closed if those fences
+// are missing, invalid, or no longer identify the actor's workload.
+func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDownWithoutTemplate(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	control workspace.SubstrateRuntimeActorControl,
+	actorID string,
+	status corev1alpha1.RuntimePoolStatus,
+) (ctrl.Result, error) {
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
+	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, "runtime pool is scaling down")
+	if !runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity) ||
+		!runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+		status.Message = "waiting for controller reservations or finalization work before stopping a provider actor with a missing runtime template"
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
+	if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
+		return ctrl.Result{}, err
+	}
+	status.ActiveInstance = nil
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	status.Message = "runtime template is unavailable; stopping the exact provider actor from persisted workload fences"
+	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }
 
 // errSubstrateCredentialConflict marks a seeding payload conflict: the

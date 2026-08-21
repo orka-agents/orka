@@ -502,7 +502,7 @@ func (r *RuntimePoolReconciler) reconcileDeletingWorkspaceRuntimePool(
 ) (ctrl.Result, error) {
 	draining := pool.DeepCopy()
 	draining.Spec.DesiredReplicas = 0
-	cfg, err := r.runtimePoolConfig(draining)
+	cfg, err := r.runtimePoolConfigForDrain(draining)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -537,10 +537,28 @@ type runtimePoolBootstrapInstanceBinding struct {
 }
 
 func (r *RuntimePoolReconciler) runtimePoolConfig(pool *corev1alpha1.RuntimePool) (runtimePoolConfig, error) {
+	return r.runtimePoolConfigWithImageAdmission(pool, true)
+}
+
+// runtimePoolConfigForDrain reconstructs the deployed pool configuration for
+// authenticated deletion-time drain. The image must remain digest-pinned, but
+// an approved-image rotation must not strand the previously admitted workload.
+func (r *RuntimePoolReconciler) runtimePoolConfigForDrain(pool *corev1alpha1.RuntimePool) (runtimePoolConfig, error) {
+	return r.runtimePoolConfigWithImageAdmission(pool, false)
+}
+
+func (r *RuntimePoolReconciler) runtimePoolConfigWithImageAdmission(
+	pool *corev1alpha1.RuntimePool,
+	enforceApprovedImage bool,
+) (runtimePoolConfig, error) {
 	if err := validateRuntimePoolObject(pool); err != nil {
 		return runtimePoolConfig{}, err
 	}
-	if err := r.validateRuntimePoolImage(pool); err != nil {
+	if enforceApprovedImage {
+		if err := r.validateRuntimePoolImage(pool); err != nil {
+			return runtimePoolConfig{}, err
+		}
+	} else if err := validateRuntimePoolImageReference(pool); err != nil {
 		return runtimePoolConfig{}, err
 	}
 	profile, protocol, err := validateRuntimePoolProfile(pool)
@@ -610,11 +628,10 @@ func validateRuntimePoolObject(pool *corev1alpha1.RuntimePool) error {
 }
 
 func (r *RuntimePoolReconciler) validateRuntimePoolImage(pool *corev1alpha1.RuntimePool) error {
-	image := strings.TrimSpace(pool.Spec.Runtime.Image)
-	if !digestPinnedImagePattern.MatchString(image) {
-		return fmt.Errorf("spec.runtime.image must be pinned by sha256 digest")
+	if err := validateRuntimePoolImageReference(pool); err != nil {
+		return err
 	}
-
+	image := strings.TrimSpace(pool.Spec.Runtime.Image)
 	allowedImage := ""
 	switch strings.TrimSpace(pool.Spec.Runtime.Profile.ProviderKind) {
 	case runtimePoolProviderCodex:
@@ -628,6 +645,14 @@ func (r *RuntimePoolReconciler) validateRuntimePoolImage(pool *corev1alpha1.Runt
 	}
 	if allowedImage == "" || image != allowedImage {
 		return fmt.Errorf("spec.runtime.image is not the controller-approved image for provider %q", pool.Spec.Runtime.Profile.ProviderKind)
+	}
+	return nil
+}
+
+func validateRuntimePoolImageReference(pool *corev1alpha1.RuntimePool) error {
+	image := strings.TrimSpace(pool.Spec.Runtime.Image)
+	if !digestPinnedImagePattern.MatchString(image) {
+		return fmt.Errorf("spec.runtime.image must be pinned by sha256 digest")
 	}
 	return nil
 }

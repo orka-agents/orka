@@ -2006,6 +2006,54 @@ func TestSubstrateRuntimePoolScaleToZeroDrainsThenDeletesActor(t *testing.T) {
 	}
 }
 
+func TestSubstrateRuntimePoolScaleToZeroUsesPersistedFencesWhenTemplatesAreGone(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-template-gone", false)
+	runtimePoolReconcile(t, r, pool)
+
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	if derived == nil {
+		t.Fatal("derived ActorTemplate was not materialized")
+	}
+	if err := r.Delete(context.Background(), derived); err != nil {
+		t.Fatalf("delete derived ActorTemplate before scale-down: %v", err)
+	}
+	if err := r.Delete(context.Background(), substrateTestBaseTemplate()); err != nil {
+		t.Fatalf("delete base ActorTemplate before scale-down: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("scale pool to zero: %v", err)
+	}
+
+	for range 10 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
+			break
+		}
+	}
+	if supervisor.drainCalls != 0 {
+		t.Fatalf("drain calls without a deployed template = %d, want 0", supervisor.drainCalls)
+	}
+	if len(control.deleted) != 1 || control.deleted[0] != substrateTestActorID(pool) {
+		t.Fatalf("deleted actors = %v, want the fenced actor removed", control.deleted)
+	}
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped || current.Status.ActiveInstance != nil {
+		t.Fatalf("status = %s (active=%v), want Stopped with no active instance", current.Status.Lifecycle, current.Status.ActiveInstance)
+	}
+	if recreated := substrateTestDerivedTemplate(t, r, pool); recreated != nil {
+		t.Fatal("derived ActorTemplate was rebuilt during fenced scale-down")
+	}
+}
+
 func TestSubstrateRuntimePoolDemandReturnCompletesDrainBeforeReplacement(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
