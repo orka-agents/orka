@@ -17,9 +17,10 @@ import (
 // materialize the workload from a provider-visible template (and may build a
 // golden snapshot by booting and checkpointing an instance), so no credential
 // may exist in the process or its template until the controller seeds it. A
-// public per-pool nonce binds the target workload, while an Ed25519 signature
-// derived from the controller-only pool capability secret authenticates the
-// exact payload against a non-secret public key embedded in the template.
+// public per-instance nonce binds the target workload, while an Ed25519
+// signature derived from a controller-only bootstrap seed authenticates the
+// exact payload against a non-secret public key embedded in the template. The
+// signing seed is distinct from every credential in the request body.
 
 const (
 	// CredentialBootstrapPath is the one-time, idempotent seeding endpoint.
@@ -29,7 +30,7 @@ const (
 	// CredentialBootstrapSignatureHeader carries the controller's Ed25519
 	// signature over the nonce and exact request body.
 	CredentialBootstrapSignatureHeader = "X-Orka-Credential-Bootstrap-Signature"
-	// CredentialBootstrapPublicKeyEnv carries the non-secret per-pool Ed25519
+	// CredentialBootstrapPublicKeyEnv carries the non-secret per-instance Ed25519
 	// public key used by a credential-free provider-hosted supervisor.
 	CredentialBootstrapPublicKeyEnv = "ORKA_ACP_CREDENTIAL_BOOTSTRAP_PUBLIC_KEY"
 
@@ -60,9 +61,9 @@ func (r CredentialBootstrapRequest) Validate() error {
 }
 
 // CredentialBootstrapPublicKey derives and encodes the non-secret Ed25519
-// verification key for one pool capability secret.
-func CredentialBootstrapPublicKey(capabilitySecret []byte) (string, error) {
-	privateKey, err := credentialBootstrapSigningKey(capabilitySecret)
+// verification key for one controller-only bootstrap signing seed.
+func CredentialBootstrapPublicKey(signingSeed []byte) (string, error) {
+	privateKey, err := credentialBootstrapSigningKey(signingSeed)
 	if err != nil {
 		return "", err
 	}
@@ -71,9 +72,9 @@ func CredentialBootstrapPublicKey(capabilitySecret []byte) (string, error) {
 }
 
 // SignCredentialBootstrap signs the public nonce and exact request body with
-// the controller-only key derived from the pool capability secret.
-func SignCredentialBootstrap(capabilitySecret []byte, nonce string, body []byte) (string, error) {
-	privateKey, err := credentialBootstrapSigningKey(capabilitySecret)
+// the controller-only key derived from the bootstrap signing seed.
+func SignCredentialBootstrap(signingSeed []byte, nonce string, body []byte) (string, error) {
+	privateKey, err := credentialBootstrapSigningKey(signingSeed)
 	if err != nil {
 		return "", err
 	}
@@ -105,11 +106,11 @@ func VerifyCredentialBootstrap(publicKeyEncoded, nonce string, body []byte, sign
 	return nil
 }
 
-func credentialBootstrapSigningKey(capabilitySecret []byte) (ed25519.PrivateKey, error) {
-	if len(capabilitySecret) < MinCapabilitySecretBytes {
-		return nil, errors.New("credential bootstrap capability secret is too short")
+func credentialBootstrapSigningKey(signingSeed []byte) (ed25519.PrivateKey, error) {
+	if len(signingSeed) < MinCapabilitySecretBytes {
+		return nil, errors.New("credential bootstrap signing seed is too short")
 	}
-	mac := hmac.New(sha256.New, capabilitySecret)
+	mac := hmac.New(sha256.New, signingSeed)
 	_, _ = mac.Write([]byte(credentialBootstrapSigningSeedDomain))
 	return ed25519.NewKeyFromSeed(mac.Sum(nil)), nil
 }

@@ -1158,6 +1158,11 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 		return nil, false, err
 	}
 	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
+		if plan.Workspace != nil && plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+			return nil, false, store.ValidationErrorf(
+				"execution workspace reusePolicy session cannot change the workspace provider, template, cleanup policy, or slot without replacing the physical workspace; create a new Session or keep the original workspace configuration",
+			)
+		}
 		return nil, false, fmt.Errorf("RuntimePool %s execution workspace binding does not match queued Task", pool.Name)
 	}
 	if pool.Spec.Runtime.Image != plan.Image || pool.Spec.Runtime.Profile.Digest != string(plan.Digest) {

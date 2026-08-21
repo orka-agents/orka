@@ -95,6 +95,25 @@ func runtimePoolWorkspaceTestObject() *corev1alpha1.RuntimePool {
 	return pool
 }
 
+func runtimePoolTestPrivateAuthSecret(
+	t *testing.T,
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+) corev1.Secret {
+	t.Helper()
+	var secrets corev1.SecretList
+	if err := r.List(context.Background(), &secrets, client.InNamespace(pool.Namespace), client.MatchingLabels{
+		runtimePoolAuthLabel: booleanTrueValue,
+		runtimePoolUIDLabel:  string(pool.UID),
+	}); err != nil {
+		t.Fatalf("list private RuntimePool auth Secrets: %v", err)
+	}
+	if len(secrets.Items) != 1 {
+		t.Fatalf("private RuntimePool auth Secret count = %d, want 1", len(secrets.Items))
+	}
+	return secrets.Items[0]
+}
+
 func runtimePoolWorkspaceTestChildren(
 	t *testing.T,
 	r *RuntimePoolReconciler,
@@ -228,6 +247,34 @@ func assertWorkspaceRuntimePoolBootstrapEnvironment(
 	if strings.TrimSpace(byName["ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"].Value) == "" ||
 		strings.TrimSpace(byName[harnessv2.CredentialBootstrapPublicKeyEnv].Value) == "" {
 		t.Fatal("provider-visible workspace template is missing signed credential-bootstrap material")
+	}
+	authSecret := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	if bytes.Equal(authSecret.Data[runtimePoolCapabilitySecretKey], authSecret.Data[runtimePoolBootstrapSigningSeedKey]) {
+		t.Fatal("bootstrap signing seed is not separated from the delivered capability secret")
+	}
+	wantPublicKey, err := harnessv2.CredentialBootstrapPublicKey(authSecret.Data[runtimePoolBootstrapSigningSeedKey])
+	if err != nil {
+		t.Fatalf("derive expected workspace bootstrap public key: %v", err)
+	}
+	publicKey := byName[harnessv2.CredentialBootstrapPublicKeyEnv].Value
+	if publicKey != wantPublicKey {
+		t.Fatal("workspace template bootstrap public key is not bound to the controller-only signing seed")
+	}
+	capabilitySignature, err := harnessv2.SignCredentialBootstrap(
+		authSecret.Data[runtimePoolCapabilitySecretKey],
+		byName["ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"].Value,
+		[]byte("credential-bootstrap-payload"),
+	)
+	if err != nil {
+		t.Fatalf("sign bootstrap proof with delivered capability secret: %v", err)
+	}
+	if err := harnessv2.VerifyCredentialBootstrap(
+		publicKey,
+		byName["ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"].Value,
+		[]byte("credential-bootstrap-payload"),
+		capabilitySignature,
+	); err == nil {
+		t.Fatal("delivered capability secret authorized a credential-bootstrap payload")
 	}
 	baseEnvironment := append([]corev1.EnvVar(nil), env...)
 	baseEnvironment = append(baseEnvironment, corev1.EnvVar{Name: "ORKA_ACP_PROVIDER_TOKEN_FILE", Value: runtimePoolProviderTokenPath})
@@ -410,9 +457,10 @@ func TestWorkspaceRuntimePoolRejectsUnboundPrivateAuthSecret(t *testing.T) {
 		},
 		Immutable: &immutable,
 		Data: map[string][]byte{
-			runtimePoolControllerTokenKey:  bytes.Repeat([]byte("a"), 32),
-			runtimePoolCapabilitySecretKey: bytes.Repeat([]byte("b"), 32),
-			runtimePoolBootstrapNonceKey:   bytes.Repeat([]byte("c"), 32),
+			runtimePoolControllerTokenKey:      bytes.Repeat([]byte("a"), 32),
+			runtimePoolCapabilitySecretKey:     bytes.Repeat([]byte("b"), 32),
+			runtimePoolBootstrapNonceKey:       bytes.Repeat([]byte("c"), 32),
+			runtimePoolBootstrapSigningSeedKey: bytes.Repeat([]byte("d"), 32),
 		},
 	}
 	r := runtimePoolTestReconciler(t, scheme, nil, pool, forged)
@@ -772,7 +820,13 @@ func TestWorkspaceRuntimePoolFinalizationPreservesIsolationUntilClaimGone(t *tes
 	}}
 	r := runtimePoolTestReconciler(t, scheme, nil, pool, claim, policy, secret)
 
-	result := runtimePoolReconcile(t, r, pool)
+	result, gone, err := runtimePoolTestFinalize(r, pool)
+	if err != nil {
+		t.Fatalf("finalize workspace RuntimePool: %v", err)
+	}
+	if gone {
+		t.Fatal("RuntimePool disappeared before provider claim cleanup completed")
+	}
 	if result.RequeueAfter == 0 {
 		t.Fatalf("finalization result = %#v, want requeue while provider claim remains", result)
 	}
@@ -1084,6 +1138,93 @@ func TestWorkspaceRuntimePoolSupervisorRestartRecyclesClaim(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolRotatesConsumedBootstrapBeforeReplacementClaim(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace template and claim were not materialized")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.80")
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-bootstrap-rotation", false)
+	runtimePoolReconcile(t, r, pool)
+
+	oldAuth := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	oldBinding, err := runtimePoolBootstrapInstanceBindingFromAnnotation(new(runtimePoolTestGetPool(t, r, pool)))
+	if err != nil || oldBinding == nil {
+		t.Fatalf("bootstrap instance binding = %#v, error=%v, want the served Pod binding", oldBinding, err)
+	}
+	if oldBinding.AuthSecretUID != oldAuth.UID || oldBinding.WorkloadUID != pod.UID {
+		t.Fatalf("bootstrap instance binding = %#v, want auth Secret %q and Pod %q", oldBinding, oldAuth.UID, pod.UID)
+	}
+
+	if err := r.Delete(context.Background(), claim); err != nil {
+		t.Fatalf("delete disappeared SandboxClaim: %v", err)
+	}
+	sandbox := &sandboxv1beta1.Sandbox{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), sandbox); err == nil {
+		if err := r.Delete(context.Background(), sandbox); err != nil {
+			t.Fatalf("delete disappeared Sandbox: %v", err)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatalf("get disappeared Sandbox: %v", err)
+	}
+	if err := r.Delete(context.Background(), &pod); err != nil {
+		t.Fatalf("delete disappeared sandbox Pod: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if strings.TrimSpace(current.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(7)]) != "" {
+		t.Fatal("consumed auth Secret remained published after physical instance disappearance")
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) == "" {
+		t.Fatal("old physical-instance binding cleared before fresh credentials were published")
+	}
+	if _, _, replacement := runtimePoolWorkspaceTestChildren(t, r, pool); replacement != nil {
+		t.Fatal("replacement claim was acquired before consumed bootstrap material rotated")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&oldAuth), &corev1.Secret{}); err != nil {
+		t.Fatalf("consumed auth Secret disappeared before create-before-publish rotation: %v", err)
+	}
+
+	r.Rand = &runtimePoolTestEntropyReader{next: 100}
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	newAuth := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	if newAuth.UID == oldAuth.UID || newAuth.Name == oldAuth.Name {
+		t.Fatalf("rotated auth Secret retained consumed identity %s/%s", newAuth.Name, newAuth.UID)
+	}
+	if bytes.Equal(newAuth.Data[runtimePoolBootstrapNonceKey], oldAuth.Data[runtimePoolBootstrapNonceKey]) ||
+		bytes.Equal(newAuth.Data[runtimePoolBootstrapSigningSeedKey], oldAuth.Data[runtimePoolBootstrapSigningSeedKey]) {
+		t.Fatal("rotated auth Secret retained consumed bootstrap material")
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(7)]) == "" {
+		t.Fatal("fresh auth Secret was not published before clearing the old instance binding")
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) != "" {
+		t.Fatal("old physical-instance binding survived fresh credential publication")
+	}
+	if _, _, replacement := runtimePoolWorkspaceTestChildren(t, r, pool); replacement != nil {
+		t.Fatal("replacement claim was acquired in the credential-rotation barrier pass")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&oldAuth), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("consumed auth Secret survived rotation: %v", err)
+	}
+
+	for range 6 {
+		runtimePoolReconcile(t, r, pool)
+		if _, _, replacement := runtimePoolWorkspaceTestChildren(t, r, pool); replacement != nil {
+			return
+		}
+	}
+	t.Fatal("replacement claim was not acquired after fresh bootstrap material was published")
+}
+
 func TestWorkspaceRuntimePoolScaleToZeroDrainsThenDeletesClaim(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()
@@ -1222,6 +1363,56 @@ func TestWorkspaceRuntimePoolFinalizerDeletesProviderChildren(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolFinalizerDrainsLiveInstanceBeforeClaimDeletion(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.75")
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-finalizer", false)
+	runtimePoolReconcile(t, r, pool)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(context.Background(), &current); err != nil {
+		t.Fatalf("delete live workspace RuntimePool: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.drainCalls != 1 {
+		t.Fatalf("finalizer drain calls = %d, want 1", supervisor.drainCalls)
+	}
+	if _, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool); claim == nil {
+		t.Fatal("live claim was deleted before authenticated finalizer drain quiescence")
+	}
+
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-finalizer", true)
+	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
+		t.Fatalf("finalizer lifecycle after quiescent probe = %s, want Quiescent", got)
+	}
+	runtimePoolReconcile(t, r, pool)
+	if _, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool); claim != nil {
+		t.Fatal("quiescent claim survived finalizer scale-down")
+	}
+	if err := r.Delete(context.Background(), &pod); err != nil {
+		t.Fatalf("delete cascaded workspace Pod fixture: %v", err)
+	}
+	for range 8 {
+		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+		if err != nil {
+			t.Fatalf("finish drained workspace finalization: %v", err)
+		}
+		if result.RequeueAfter == 0 {
+			break
+		}
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("drained workspace RuntimePool survived finalization: %v", err)
+	}
+}
+
 func TestWorkspaceRuntimePoolFinalizerRefusesForeignProviderChildren(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()
@@ -1239,7 +1430,7 @@ func TestWorkspaceRuntimePoolFinalizerRefusesForeignProviderChildren(t *testing.
 	}}
 	r := runtimePoolTestReconciler(t, scheme, nil, pool, foreign)
 
-	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+	_, _, err := runtimePoolTestFinalize(r, pool)
 	if err == nil || !strings.Contains(err.Error(), "refusing to delete foreign") {
 		t.Fatalf("finalization error = %v, want foreign-resource ownership rejection", err)
 	}

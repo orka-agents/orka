@@ -63,26 +63,28 @@ const (
 	runtimePoolProbeTimeout       = 10 * time.Second
 	runtimePoolPort         int32 = 8080
 
-	runtimePoolManagedByLabel                    = "app.kubernetes.io/managed-by"
-	runtimePoolApplicationLabel                  = "app.kubernetes.io/name"
-	runtimePoolKeyLabel                          = "orka.ai/runtime-pool-key"
-	runtimePoolNameLabel                         = "orka.ai/runtime-pool-name"
-	runtimePoolNamespaceLabel                    = "orka.ai/runtime-pool-namespace"
-	runtimePoolUIDLabel                          = "orka.ai/runtime-pool-uid"
-	runtimePoolNetworkRoleLabel                  = "orka.ai/network-role"
-	runtimePoolAuthLabel                         = "orka.ai/runtime-pool-auth"
-	runtimePoolCredentialEpochLabel              = "orka.ai/runtime-pool-controller-epoch"
-	runtimePoolProviderCredentialLabel           = "orka.ai/runtime-pool-provider-credential"
-	runtimePoolProviderGenerationLabel           = "orka.ai/runtime-pool-provider-generation"
-	runtimePoolProfileAnnotation                 = "orka.ai/runtime-profile-digest"
-	runtimePoolProviderTokenGenerationAnnotation = "orka.ai/provider-token-generation"
-	runtimePoolTemplateRevisionAnnotation        = "orka.ai/runtime-template-revision"
-	runtimePoolPIDsAnnotation                    = "orka.ai/runtime-pids-limit"
-	runtimePoolPrivateAuthBindingPrefix          = "orka.ai/private-auth-secret-e"
+	runtimePoolManagedByLabel                     = "app.kubernetes.io/managed-by"
+	runtimePoolApplicationLabel                   = "app.kubernetes.io/name"
+	runtimePoolKeyLabel                           = "orka.ai/runtime-pool-key"
+	runtimePoolNameLabel                          = "orka.ai/runtime-pool-name"
+	runtimePoolNamespaceLabel                     = "orka.ai/runtime-pool-namespace"
+	runtimePoolUIDLabel                           = "orka.ai/runtime-pool-uid"
+	runtimePoolNetworkRoleLabel                   = "orka.ai/network-role"
+	runtimePoolAuthLabel                          = "orka.ai/runtime-pool-auth"
+	runtimePoolCredentialEpochLabel               = "orka.ai/runtime-pool-controller-epoch"
+	runtimePoolProviderCredentialLabel            = "orka.ai/runtime-pool-provider-credential"
+	runtimePoolProviderGenerationLabel            = "orka.ai/runtime-pool-provider-generation"
+	runtimePoolProfileAnnotation                  = "orka.ai/runtime-profile-digest"
+	runtimePoolProviderTokenGenerationAnnotation  = "orka.ai/provider-token-generation"
+	runtimePoolTemplateRevisionAnnotation         = "orka.ai/runtime-template-revision"
+	runtimePoolPIDsAnnotation                     = "orka.ai/runtime-pids-limit"
+	runtimePoolPrivateAuthBindingPrefix           = "orka.ai/private-auth-secret-e"
+	runtimePoolBootstrapInstanceBindingAnnotation = "orka.ai/bootstrap-instance-binding"
 
-	runtimePoolControllerTokenKey  = "controller-token"
-	runtimePoolCapabilitySecretKey = "capability-secret"
-	// runtimePoolBootstrapNonceKey holds the public per-pool credential
+	runtimePoolControllerTokenKey      = "controller-token"
+	runtimePoolCapabilitySecretKey     = "capability-secret"
+	runtimePoolBootstrapSigningSeedKey = "bootstrap-signing-seed"
+	// runtimePoolBootstrapNonceKey holds the public per-instance credential
 	// bootstrap nonce used by provider-hosted supervisors that boot
 	// credential-free. It binds a signed request to the exact workload and
 	// grants nothing by itself.
@@ -372,6 +374,9 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	if !pool.DeletionTimestamp.IsZero() {
 		orkametrics.DeleteACPRuntimePool(pool.Namespace, pool.Name)
+		if pool.Spec.ExecutionWorkspace != nil && !runtimePoolWorkspaceDeletionDrainComplete(pool) {
+			return r.reconcileDeletingWorkspaceRuntimePool(ctx, pool)
+		}
 		return r.finalizeRuntimePool(ctx, pool)
 	}
 	if r.CleanupOnly {
@@ -474,6 +479,38 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return r.reconcileRuntimePoolServing(ctx, pool, cfg, pods, readyPods, authSecret, status)
 }
 
+func runtimePoolWorkspaceDeletionDrainComplete(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && pool.Status.DesiredReplicas == 0 && pool.Status.CurrentReplicas == 0 &&
+		pool.Status.ActiveInstance == nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped
+}
+
+// reconcileDeletingWorkspaceRuntimePool routes deletion through the same
+// authenticated scale-to-zero state machine as idle shutdown. The local spec
+// override is never persisted; it only closes admission and proves quiescence
+// before finalization removes the provider workload and isolation boundary.
+func (r *RuntimePoolReconciler) reconcileDeletingWorkspaceRuntimePool(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+) (ctrl.Result, error) {
+	draining := pool.DeepCopy()
+	draining.Spec.DesiredReplicas = 0
+	cfg, err := r.runtimePoolConfig(draining)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if runtimePoolIsSubstrateBacked(draining) {
+		return r.reconcileSubstrateBackedRuntimePool(ctx, draining, cfg)
+	}
+	if err := r.ensureRuntimePoolNamespace(ctx, cfg); err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, draining, cfg, err)
+	}
+	authSecret, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, draining, cfg)
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, draining, cfg, err)
+	}
+	return r.reconcileWorkspaceBackedRuntimePool(ctx, draining, cfg, authSecret, providerSecret)
+}
+
 type runtimePoolConfig struct {
 	namespace           string
 	baseName            string
@@ -484,6 +521,11 @@ type runtimePoolConfig struct {
 	protocol            corev1alpha1.RuntimePoolProtocolVersion
 	profile             harnessv2.RuntimeProfile
 	providerProxy       runtimePoolProviderProxyConfig
+}
+
+type runtimePoolBootstrapInstanceBinding struct {
+	AuthSecretUID types.UID `json:"authSecretUID"`
+	WorkloadUID   types.UID `json:"workloadUID"`
 }
 
 func (r *RuntimePoolReconciler) runtimePoolConfig(pool *corev1alpha1.RuntimePool) (runtimePoolConfig, error) {
@@ -1511,9 +1553,10 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 	}
 	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch)
 	authKeys := map[string]int{
-		runtimePoolControllerTokenKey:  32,
-		runtimePoolCapabilitySecretKey: 32,
-		runtimePoolBootstrapNonceKey:   32,
+		runtimePoolControllerTokenKey:      32,
+		runtimePoolCapabilitySecretKey:     32,
+		runtimePoolBootstrapNonceKey:       32,
+		runtimePoolBootstrapSigningSeedKey: 32,
 	}
 	authLabels := map[string]string{
 		runtimePoolAuthLabel:            "true",
@@ -1648,6 +1691,100 @@ func (r *RuntimePoolReconciler) bindPrivateRuntimePoolAuthSecret(
 	pool.Annotations[bindingKey] = binding
 	if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("record private RuntimePool auth Secret binding: %w", err)
+	}
+	return nil
+}
+
+func runtimePoolBootstrapInstanceBindingFromAnnotation(
+	pool *corev1alpha1.RuntimePool,
+) (*runtimePoolBootstrapInstanceBinding, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("RuntimePool is required for bootstrap instance binding")
+	}
+	raw := strings.TrimSpace(pool.Annotations[runtimePoolBootstrapInstanceBindingAnnotation])
+	if raw == "" {
+		return nil, nil
+	}
+	var binding runtimePoolBootstrapInstanceBinding
+	if err := json.Unmarshal([]byte(raw), &binding); err != nil || binding.AuthSecretUID == "" || binding.WorkloadUID == "" {
+		return nil, fmt.Errorf("RuntimePool bootstrap instance binding is invalid")
+	}
+	return &binding, nil
+}
+
+func (r *RuntimePoolReconciler) bindWorkspaceRuntimePoolBootstrapInstance(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	authSecret *corev1.Secret,
+	workloadUID types.UID,
+) error {
+	if authSecret == nil || authSecret.UID == "" || workloadUID == "" {
+		return fmt.Errorf("RuntimePool bootstrap auth Secret and workload UIDs are required")
+	}
+	desired := runtimePoolBootstrapInstanceBinding{AuthSecretUID: authSecret.UID, WorkloadUID: workloadUID}
+	existing, err := runtimePoolBootstrapInstanceBindingFromAnnotation(pool)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		if *existing == desired {
+			return nil
+		}
+		return fmt.Errorf("RuntimePool bootstrap credentials are already bound to another physical workspace instance")
+	}
+	value, err := json.Marshal(desired)
+	if err != nil {
+		return fmt.Errorf("encode RuntimePool bootstrap instance binding: %w", err)
+	}
+	return r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolBootstrapInstanceBindingAnnotation, string(value))
+}
+
+// rotateConsumedWorkspaceRuntimePoolAuthSecret advances private auth Secret
+// rotation after a previously bound physical instance is gone. The first pass
+// unpublishes the consumed Secret binding; the normal create-before-publish
+// path then deletes that unbound Secret and creates fresh credentials. A final
+// pass clears the old instance binding before a replacement workload exists.
+func (r *RuntimePoolReconciler) rotateConsumedWorkspaceRuntimePoolAuthSecret(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	authSecret *corev1.Secret,
+) (bool, error) {
+	binding, err := runtimePoolBootstrapInstanceBindingFromAnnotation(pool)
+	if err != nil || binding == nil {
+		return false, err
+	}
+	if authSecret == nil || authSecret.UID == "" {
+		return false, fmt.Errorf("bound private RuntimePool auth Secret has no immutable UID")
+	}
+	if authSecret.UID == binding.AuthSecretUID {
+		return true, r.patchRuntimePoolAnnotation(
+			ctx, pool, runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch), "",
+		)
+	}
+	return true, r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolBootstrapInstanceBindingAnnotation, "")
+}
+
+func (r *RuntimePoolReconciler) patchRuntimePoolAnnotation(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	key, value string,
+) error {
+	current := pool.Annotations[key]
+	if current == value || (value == "" && current == "") {
+		return nil
+	}
+	base := pool.DeepCopy()
+	if pool.Annotations == nil {
+		pool.Annotations = map[string]string{}
+	}
+	if value == "" {
+		delete(pool.Annotations, key)
+	} else {
+		pool.Annotations[key] = value
+	}
+	if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("record RuntimePool annotation: %w", err)
 	}
 	return nil
 }
@@ -1865,7 +2002,9 @@ func runtimePoolManagedCredentialSecret(secret *corev1.Secret, cfg runtimePoolCo
 		// credentials. Keep recognizing that historical shape so epoch rotation
 		// can prune it after no live workload references it.
 		return len(secret.Data) == 2 ||
-			(len(secret.Data) == 3 && len(secret.Data[runtimePoolBootstrapNonceKey]) > 0)
+			(len(secret.Data) == 3 && len(secret.Data[runtimePoolBootstrapNonceKey]) > 0) ||
+			(len(secret.Data) == 4 && len(secret.Data[runtimePoolBootstrapNonceKey]) > 0 &&
+				len(secret.Data[runtimePoolBootstrapSigningSeedKey]) >= harnessv2.MinCapabilitySecretBytes)
 	}
 	if suffix := runtimePoolProviderSuffixPattern.FindString(secret.Name); suffix != "" &&
 		runtimePoolChildName(cfg.baseName, suffix) == secret.Name {

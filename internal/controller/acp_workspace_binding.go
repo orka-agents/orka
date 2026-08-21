@@ -350,7 +350,18 @@ func applyACPWorkspaceBindingToPlan(plan ACPRuntimePlan, binding *ACPRuntimeWork
 		return ACPRuntimePlan{}, fmt.Errorf("execution workspace binding digest is required")
 	}
 	identityFields := map[string]string{"workspaceBindingDigest": binding.BindingDigest}
-	if binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
+	poolKind := plan.Profile.ProviderKind
+	if binding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+		// One immutable Session UID owns one physical workspace. Keep its pool
+		// name stable across every mutable runtime and workspace-selection input
+		// so an incompatible continuation reaches the existing pool and fails
+		// closed instead of silently materializing a fresh filesystem.
+		identityFields = map[string]string{
+			"sessionUID":    binding.SessionUID,
+			"workspaceSlot": binding.WorkspaceSlot,
+		}
+		poolKind = "session"
+	} else {
 		identityFields["profileDigest"] = string(plan.Digest)
 		identityFields["runtimeImage"] = plan.Image
 	}
@@ -359,7 +370,7 @@ func applyACPWorkspaceBindingToPlan(plan ACPRuntimePlan, binding *ACPRuntimeWork
 		return ACPRuntimePlan{}, err
 	}
 	workspace := *binding
-	plan.PoolName = acpWorkspaceRuntimePoolName(plan.Profile.ProviderKind, harnessv2.ProfileDigest(identity))
+	plan.PoolName = acpWorkspaceRuntimePoolName(poolKind, harnessv2.ProfileDigest(identity))
 	plan.Workspace = &workspace
 	return plan, nil
 }

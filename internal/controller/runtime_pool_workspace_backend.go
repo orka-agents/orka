@@ -152,18 +152,6 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 	authSecret *corev1.Secret,
 	providerSecret *corev1.Secret,
 ) (ctrl.Result, error) {
-	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
-	desiredTemplate := r.runtimePoolPodTemplate(pool, cfg, selector, authSecret.Name, providerSecret.Name)
-	bootstrapNonce := strings.TrimSpace(string(authSecret.Data[runtimePoolBootstrapNonceKey]))
-	if bootstrapNonce == "" {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("RuntimePool auth Secret is missing the credential bootstrap nonce"))
-	}
-	bootstrapPublicKey, err := harnessv2.CredentialBootstrapPublicKey(authSecret.Data[runtimePoolCapabilitySecretKey])
-	if err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("derive RuntimePool credential bootstrap public key: %w", err))
-	}
-	desiredTemplate = runtimePoolWorkspaceBootstrapTemplate(desiredTemplate, bootstrapNonce, bootstrapPublicKey)
-
 	sandboxTemplate, err := r.getRuntimePoolSandboxTemplate(ctx, cfg)
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
@@ -218,6 +206,32 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		// ownership drift that matters only to rollout or replacement.
 		return r.reconcileWorkspaceRuntimePoolScaleDown(ctx, pool, cfg, claim, pods, readyPods, status)
 	}
+	if claim == nil && len(pods) == 0 {
+		rotating, rotateErr := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, authSecret)
+		if rotateErr != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, rotateErr)
+		}
+		if rotating {
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "rotating one-time credential bootstrap material before acquiring a replacement workspace"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+	}
+
+	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
+	desiredTemplate := r.runtimePoolPodTemplate(pool, cfg, selector, authSecret.Name, providerSecret.Name)
+	bootstrapNonce := strings.TrimSpace(string(authSecret.Data[runtimePoolBootstrapNonceKey]))
+	if bootstrapNonce == "" {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("RuntimePool auth Secret is missing the credential bootstrap nonce"))
+	}
+	bootstrapPublicKey, err := harnessv2.CredentialBootstrapPublicKey(authSecret.Data[runtimePoolBootstrapSigningSeedKey])
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("derive RuntimePool credential bootstrap public key: %w", err))
+	}
+	desiredTemplate = runtimePoolWorkspaceBootstrapTemplate(desiredTemplate, bootstrapNonce, bootstrapPublicKey)
 
 	if sandboxTemplate != nil {
 		if !runtimePoolSandboxChildOwnedByPool(sandboxTemplate, pool, cfg) {
@@ -338,6 +352,9 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		if !materialized {
 			r.applyProviderRuntimePoolColdStartStatus(pool, &status, "waiting for the provider Sandbox materialization record before credential bootstrap")
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, authSecret, readyPods[0].UID); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		alreadyComplete, seedErr := r.seedWorkspaceSupervisorCredentials(
 			ctx, runtimePoolInstanceEndpoint(pool, &readyPods[0]), bootstrapNonce, authSecret, providerSecret,
@@ -1009,7 +1026,7 @@ func (r *RuntimePoolReconciler) seedWorkspaceSupervisorCredentials(
 		return false, fmt.Errorf("pool credentials are incomplete: %w", err)
 	}
 	if r.WorkspaceCredentialSeeder != nil {
-		return r.WorkspaceCredentialSeeder(ctx, endpoint, nonce, authSecret.Data[runtimePoolCapabilitySecretKey], request)
+		return r.WorkspaceCredentialSeeder(ctx, endpoint, nonce, authSecret.Data[runtimePoolBootstrapSigningSeedKey], request)
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
@@ -1025,7 +1042,7 @@ func (r *RuntimePoolReconciler) seedWorkspaceSupervisorCredentials(
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set(harnessv2.CredentialBootstrapNonceHeader, nonce)
-	signature, err := harnessv2.SignCredentialBootstrap(authSecret.Data[runtimePoolCapabilitySecretKey], nonce, payload)
+	signature, err := harnessv2.SignCredentialBootstrap(authSecret.Data[runtimePoolBootstrapSigningSeedKey], nonce, payload)
 	if err != nil {
 		return false, fmt.Errorf("sign credential bootstrap request: %w", err)
 	}

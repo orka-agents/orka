@@ -31,7 +31,7 @@ func validBootstrapRequest() CredentialBootstrapRequest {
 }
 
 func validBootstrapSigningSecret() []byte {
-	return []byte(strings.Repeat("s", harnessv2.MinCapabilitySecretBytes))
+	return []byte(strings.Repeat("k", harnessv2.MinCapabilitySecretBytes))
 }
 
 func putBootstrapWithSigningSecret(t *testing.T, server *httptest.Server, nonce string, body, signingSecret []byte) *http.Response {
@@ -116,6 +116,12 @@ func TestCredentialBootstrapHandlerSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal seed: %v", err)
 	}
+
+	t.Run("payload capability secret cannot authorize bootstrap", func(t *testing.T) {
+		if status := putBootstrapWithSigningSecret(t, server, "pool-nonce", seedBody, []byte(seed.CapabilitySecret)).StatusCode; status != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 when the delivered capability secret signs its own payload", status)
+		}
+	})
 
 	t.Run("health serves booting lifecycle without a nonce", func(t *testing.T) {
 		response, err := server.Client().Get(server.URL + "/v2/health")

@@ -307,14 +307,6 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
-	bootstrapNonce := strings.TrimSpace(string(authSecret.Data[runtimePoolBootstrapNonceKey]))
-	if bootstrapNonce == "" {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("RuntimePool auth Secret is missing the credential bootstrap nonce"))
-	}
-	bootstrapPublicKey, err := harnessv2.CredentialBootstrapPublicKey(authSecret.Data[runtimePoolCapabilitySecretKey])
-	if err != nil {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("derive RuntimePool credential bootstrap public key: %w", err))
-	}
 	actorID := runtimePoolSubstrateActorID(cfg.baseName)
 	routeHost := substrateActorRouteHost(actorID, r.SubstrateConfig.ActorDNSSuffix)
 	derivedTemplate, err := r.getSubstrateActorTemplate(ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName))
@@ -346,6 +338,31 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	actor, err := control.GetActor(ctx, actorID)
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	if pool.Spec.DesiredReplicas != 0 && actor == nil &&
+		strings.TrimSpace(pool.Annotations[substrateActorRecyclingAnnotation]) == "" &&
+		!substrateActorWorkloadProofRequired(pool, actorID) {
+		rotating, rotateErr := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, authSecret)
+		if rotateErr != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, rotateErr)
+		}
+		if rotating {
+			status := r.baseRuntimePoolStatus(pool, 0)
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+			status.Message = "rotating one-time credential bootstrap material before creating a replacement actor"
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+	}
+	bootstrapNonce := strings.TrimSpace(string(authSecret.Data[runtimePoolBootstrapNonceKey]))
+	if bootstrapNonce == "" {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("RuntimePool auth Secret is missing the credential bootstrap nonce"))
+	}
+	bootstrapPublicKey, err := harnessv2.CredentialBootstrapPublicKey(authSecret.Data[runtimePoolBootstrapSigningSeedKey])
+	if err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("derive RuntimePool credential bootstrap public key: %w", err))
 	}
 	var desired substrateRuntimeTemplateRender
 	desiredLoaded := false
@@ -469,6 +486,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		status.Message = "recycling the exact provider actor without checkpointing supervisor memory"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	if pool.Spec.DesiredReplicas == 0 && actor == nil {
+		// Once the exact actor workload is independently proven absent, mutable
+		// derived-template ownership cannot block the Stopped barrier required
+		// before deletion finalization checks and removes provider resources.
+		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, derivedTemplate, nil, actorID, routeHost, status)
 	}
 	if !templateOwned {
 		status.ActiveInstance = nil
@@ -713,6 +736,16 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	// means another party seeded this workload first, so the exact instance is
 	// recycled instead of trusted.
 	syntheticPod := substrateSyntheticInstancePod(pool, cfg, actor, actorID, routeHost)
+	workerPodFence, err := substrateRuntimePoolWorkerPodFenceFromAnnotation(pool)
+	if err != nil || workerPodFence == nil {
+		if err == nil {
+			err = fmt.Errorf("provider actor exact worker Pod fence is not recorded")
+		}
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
+	if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, authSecret, workerPodFence.UID); err != nil {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+	}
 	bootstrapAlreadyComplete, err := r.seedSubstrateSupervisorCredentials(ctx, routeHost, bootstrapNonce, authSecret, providerSecret)
 	if err != nil {
 		if errors.Is(err, errSubstrateCredentialConflict) {
@@ -793,7 +826,7 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 		return false, fmt.Errorf("pool credentials are incomplete: %w", err)
 	}
 	if r.SubstrateCredentialSeeder != nil {
-		err := r.SubstrateCredentialSeeder(ctx, routeHost, nonce, authSecret.Data[runtimePoolCapabilitySecretKey], request)
+		err := r.SubstrateCredentialSeeder(ctx, routeHost, nonce, authSecret.Data[runtimePoolBootstrapSigningSeedKey], request)
 		if errors.Is(err, errSubstrateCredentialAlreadyComplete) {
 			return true, nil
 		}
@@ -819,7 +852,7 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set(harnessv2.CredentialBootstrapNonceHeader, nonce)
-	signature, err := harnessv2.SignCredentialBootstrap(authSecret.Data[runtimePoolCapabilitySecretKey], nonce, payload)
+	signature, err := harnessv2.SignCredentialBootstrap(authSecret.Data[runtimePoolBootstrapSigningSeedKey], nonce, payload)
 	if err != nil {
 		return false, fmt.Errorf("sign credential bootstrap request: %w", err)
 	}

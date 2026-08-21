@@ -28,16 +28,17 @@ import (
 // snapshot by booting and checkpointing an instance), so nothing secret may
 // exist in the process until the controller seeds it. The awaiting-bootstrap
 // phase serves only a minimal health probe and a one-time credential PUT. The
-// provider-visible template carries a public per-pool nonce and Ed25519 public
-// key; the controller signs the nonce plus exact request body with a key
-// derived from the pool capability secret. A captured golden snapshot therefore
-// contains only a waiting supervisor and non-secret verification material.
+// provider-visible template carries a public per-instance nonce and Ed25519
+// public key; the controller signs the nonce plus exact request body with a key
+// derived from a separate controller-only bootstrap seed. A captured golden
+// snapshot therefore contains only a waiting supervisor and non-secret
+// verification material.
 
 const (
 	// EnvCredentialBootstrapNonce enables the awaiting-bootstrap phase. The
-	// value is public per-pool entropy bound into the controller signature.
+	// value is public per-instance entropy bound into the controller signature.
 	EnvCredentialBootstrapNonce = "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"
-	// EnvCredentialBootstrapPublicKey carries the non-secret per-pool Ed25519
+	// EnvCredentialBootstrapPublicKey carries the non-secret per-instance Ed25519
 	// key that authenticates the controller's one-time bootstrap request.
 	EnvCredentialBootstrapPublicKey = harnessv2.CredentialBootstrapPublicKeyEnv
 

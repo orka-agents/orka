@@ -306,6 +306,7 @@ func TestSessionWorkspacePoolIdentityRejectsRuntimeProfileRotation(t *testing.T)
 		t.Fatal(err)
 	}
 	rotatedPlainPlan := plainPlan
+	rotatedPlainPlan.Profile.ProviderKind = "rotated-provider"
 	rotatedPlainPlan.Profile.Model = "rotated-model"
 	rotatedPlainPlan.Digest, err = harnessv2.CanonicalProfileDigest(rotatedPlainPlan.Profile)
 	if err != nil {
@@ -331,6 +332,69 @@ func TestSessionWorkspacePoolIdentityRejectsRuntimeProfileRotation(t *testing.T)
 	}
 	if len(pools.Items) != 1 || pools.Items[0].Name != firstPlan.PoolName {
 		t.Fatalf("runtime pools after rejected rotation = %#v, want only %q", pools.Items, firstPlan.PoolName)
+	}
+}
+
+func TestSessionWorkspacePoolIdentityRejectsWorkspaceSelectionRotation(t *testing.T) {
+	ctx := context.Background()
+	firstTask := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+	})
+	firstTask.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
+	reconciler, _ := newBindingTestReconciler(t, firstTask, bindingTestNamespace())
+	configuration, err := resolveACPAgentSessionConfiguration(ctx, reconciler.Client, firstTask, bindingTestAgent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainPlan, err := PlanACPRuntimeWithConfiguration(firstTask, bindingTestAgent(), reconciler.ACPRuntimeImages, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstBinding, err := resolveACPWorkspaceBinding(
+		firstTask, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-uid-review-loop",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPlan, err := applyACPWorkspaceBindingToPlan(plainPlan, firstBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rotatedTask := firstTask.DeepCopy()
+	rotatedTask.Spec.Execution.Workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
+	rotatedTask.Spec.Execution.Workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{
+		Namespace: "ate-demo", Name: "orka-codex-infra",
+	}
+	rotatedBinding, err := resolveACPWorkspaceBinding(
+		rotatedTask, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-uid-review-loop",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedPlan, err := applyACPWorkspaceBindingToPlan(plainPlan, rotatedBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotatedBinding.BindingDigest == firstBinding.BindingDigest {
+		t.Fatal("workspace selection rotation did not change the frozen binding")
+	}
+	if rotatedPlan.PoolName != firstPlan.PoolName {
+		t.Fatalf("session workspace pool rotated with workspace selection: first=%q rotated=%q", firstPlan.PoolName, rotatedPlan.PoolName)
+	}
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, firstPlan); err != nil {
+		t.Fatalf("create session workspace RuntimePool: %v", err)
+	}
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, rotatedPlan); !errors.Is(err, store.ErrValidation) ||
+		!strings.Contains(err.Error(), "cannot change the workspace provider") {
+		t.Fatalf("rotated workspace selection error = %v, want permanent session-workspace rejection", err)
+	}
+	var pools corev1alpha1.RuntimePoolList
+	if err := reconciler.List(ctx, &pools, client.InNamespace(firstTask.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	if len(pools.Items) != 1 || pools.Items[0].Name != firstPlan.PoolName {
+		t.Fatalf("runtime pools after rejected workspace rotation = %#v, want only %q", pools.Items, firstPlan.PoolName)
 	}
 }
 

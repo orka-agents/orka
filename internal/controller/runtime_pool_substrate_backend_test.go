@@ -336,12 +336,12 @@ func runtimePoolSubstrateTestReconciler(
 	r.SubstrateActorControlFactory = func(SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error) {
 		return control, nil
 	}
-	r.SubstrateCredentialSeeder = func(_ context.Context, routeHost, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) error {
+	r.SubstrateCredentialSeeder = func(_ context.Context, routeHost, nonce string, signingSeed []byte, request harnessv2.CredentialBootstrapRequest) error {
 		if routeHost == "" || nonce == "" {
 			return fmt.Errorf("seeder called without route host or nonce")
 		}
-		if len(capabilitySecret) < harnessv2.MinCapabilitySecretBytes {
-			return fmt.Errorf("seeder called without a valid capability secret")
+		if len(signingSeed) < harnessv2.MinCapabilitySecretBytes {
+			return fmt.Errorf("seeder called without a valid signing seed")
 		}
 		if err := request.Validate(); err != nil {
 			return err
@@ -524,9 +524,10 @@ func TestSubstrateRuntimePoolReplacesPredictableUnboundAuthSecret(t *testing.T) 
 		},
 		Immutable: &immutable,
 		Data: map[string][]byte{
-			runtimePoolControllerTokenKey:  []byte(strings.Repeat("a", 32)),
-			runtimePoolCapabilitySecretKey: []byte(strings.Repeat("b", 32)),
-			runtimePoolBootstrapNonceKey:   []byte(strings.Repeat("c", 32)),
+			runtimePoolControllerTokenKey:      []byte(strings.Repeat("a", 32)),
+			runtimePoolCapabilitySecretKey:     []byte(strings.Repeat("b", 32)),
+			runtimePoolBootstrapNonceKey:       []byte(strings.Repeat("c", 32)),
+			runtimePoolBootstrapSigningSeedKey: []byte(strings.Repeat("d", 32)),
 		},
 	}
 	if err := controllerutil.SetControllerReference(pool, forged, r.Scheme); err != nil {
@@ -559,7 +560,8 @@ func TestSubstrateRuntimePoolReplacesPredictableUnboundAuthSecret(t *testing.T) 
 	}
 	if string(bound.Data[runtimePoolControllerTokenKey]) == strings.Repeat("a", 32) ||
 		string(bound.Data[runtimePoolCapabilitySecretKey]) == strings.Repeat("b", 32) ||
-		string(bound.Data[runtimePoolBootstrapNonceKey]) == strings.Repeat("c", 32) {
+		string(bound.Data[runtimePoolBootstrapNonceKey]) == strings.Repeat("c", 32) ||
+		string(bound.Data[runtimePoolBootstrapSigningSeedKey]) == strings.Repeat("d", 32) {
 		t.Fatal("bound private auth Secret retained attacker-selected credential bytes")
 	}
 	derived := substrateTestDerivedTemplate(t, r, pool)
@@ -993,12 +995,12 @@ func assertSubstrateDerivedTemplate(
 	}); err != nil || len(authSecrets.Items) != 1 {
 		t.Fatalf("list RuntimePool auth Secret = %d, %v, want one", len(authSecrets.Items), err)
 	}
-	wantPublicKey, err := harnessv2.CredentialBootstrapPublicKey(authSecrets.Items[0].Data[runtimePoolCapabilitySecretKey])
+	wantPublicKey, err := harnessv2.CredentialBootstrapPublicKey(authSecrets.Items[0].Data[runtimePoolBootstrapSigningSeedKey])
 	if err != nil {
 		t.Fatalf("derive expected bootstrap public key: %v", err)
 	}
 	if env[harnessv2.CredentialBootstrapPublicKeyEnv].Value != wantPublicKey {
-		t.Fatal("derived template bootstrap public key is not bound to the pool capability secret")
+		t.Fatal("derived template bootstrap public key is not bound to the controller-only signing seed")
 	}
 	if len(container.Command) != 1 || container.Command[0] != "/usr/local/bin/orka-acp-runtime" {
 		t.Fatalf("derived container command = %v, want the explicit runtime entrypoint (the provider does not read image config)", container.Command)
@@ -1184,6 +1186,86 @@ func TestSubstrateRuntimePoolRecyclesActorOnCredentialSeedConflict(t *testing.T)
 	if got.Annotations[substrateActorCredentialSeededAnnotation] != "" {
 		t.Fatal("credential-seeded annotation survived teardown completion")
 	}
+}
+
+func TestSubstrateRuntimePoolRotatesConsumedBootstrapBeforeReplacementActor(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		return errSubstrateCredentialConflict
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	actorID := substrateTestActorID(pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-bootstrap-rotation", false)
+	runtimePoolReconcile(t, r, pool)
+
+	oldAuth := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	oldBinding, err := runtimePoolBootstrapInstanceBindingFromAnnotation(&current)
+	if err != nil || oldBinding == nil {
+		t.Fatalf("bootstrap instance binding = %#v, error=%v, want the served Actor binding", oldBinding, err)
+	}
+	if oldBinding.AuthSecretUID != oldAuth.UID || oldBinding.WorkloadUID != types.UID("worker-0-uid") {
+		t.Fatalf("bootstrap instance binding = %#v, want auth Secret %q and worker Pod %q", oldBinding, oldAuth.UID, "worker-0-uid")
+	}
+
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if control.actors[actorID] == nil && !substrateActorWorkloadProofRequired(&current, actorID) {
+			break
+		}
+	}
+	if control.actors[actorID] != nil || substrateActorWorkloadProofRequired(&current, actorID) {
+		t.Fatalf("conflicted Actor teardown did not prove workload absence: actor=%v annotations=%v", control.actors[actorID], current.Annotations)
+	}
+	createdBeforeRotation := len(control.created)
+	r.Rand = &runtimePoolTestEntropyReader{next: 100}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	if strings.TrimSpace(current.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(7)]) != "" {
+		t.Fatal("consumed Substrate auth Secret remained published after Actor teardown")
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) == "" {
+		t.Fatal("old Actor binding cleared before fresh credentials were published")
+	}
+	if len(control.created) != createdBeforeRotation {
+		t.Fatal("replacement Actor was created before consumed bootstrap material rotated")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&oldAuth), &corev1.Secret{}); err != nil {
+		t.Fatalf("consumed Substrate auth Secret disappeared before create-before-publish rotation: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	current = runtimePoolTestGetPool(t, r, pool)
+	newAuth := runtimePoolTestPrivateAuthSecret(t, r, pool)
+	if newAuth.UID == oldAuth.UID || newAuth.Name == oldAuth.Name {
+		t.Fatalf("rotated Substrate auth Secret retained consumed identity %s/%s", newAuth.Name, newAuth.UID)
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(7)]) == "" {
+		t.Fatal("fresh Substrate auth Secret was not published before clearing the old Actor binding")
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation]) != "" {
+		t.Fatal("old Actor binding survived fresh credential publication")
+	}
+	if len(control.created) != createdBeforeRotation {
+		t.Fatal("replacement Actor was created in the credential-rotation barrier pass")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&oldAuth), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("consumed Substrate auth Secret survived rotation: %v", err)
+	}
+
+	for range 10 {
+		runtimePoolReconcile(t, r, pool)
+		if len(control.created) > createdBeforeRotation {
+			return
+		}
+	}
+	t.Fatal("replacement Actor was not created after fresh bootstrap material was published")
 }
 
 func TestSubstrateRuntimePoolRetriesAmbiguousClosedBootstrapWithoutProof(t *testing.T) {
@@ -1817,9 +1899,12 @@ func TestSubstrateRuntimePoolFinalizerDeletesActorTemplateAndSecrets(t *testing.
 	}
 	templateDeletionObservedBeforePoolGone := false
 	for range 6 {
-		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}})
+		result, gone, err := runtimePoolTestFinalize(r, pool)
 		if err != nil {
 			t.Fatalf("finalize reconcile: %v", err)
+		}
+		if gone {
+			break
 		}
 		if substrateTestDerivedTemplate(t, r, pool) == nil {
 			var deletingPool corev1alpha1.RuntimePool
@@ -1893,11 +1978,11 @@ func TestSubstrateRuntimePoolFinalizerDeletesPoliciesWithoutTemplates(t *testing
 		t.Fatalf("delete RuntimePool: %v", err)
 	}
 	for range 6 {
-		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+		result, gone, err := runtimePoolTestFinalize(r, pool)
 		if err != nil {
 			t.Fatalf("finalize reconcile: %v", err)
 		}
-		if result.RequeueAfter == 0 {
+		if gone || result.RequeueAfter == 0 {
 			break
 		}
 	}
@@ -1932,11 +2017,11 @@ func TestSubstrateRuntimePoolFinalizerToleratesRemovedProviderCRD(t *testing.T) 
 		t.Fatalf("delete RuntimePool: %v", err)
 	}
 	for range 8 {
-		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+		result, gone, err := runtimePoolTestFinalize(r, pool)
 		if err != nil {
 			t.Fatalf("finalize after provider CRD removal: %v", err)
 		}
-		if result.RequeueAfter == 0 {
+		if gone || result.RequeueAfter == 0 {
 			break
 		}
 	}
@@ -1964,7 +2049,7 @@ func TestSubstrateRuntimePoolFinalizerPreservesForeignActorTemplate(t *testing.T
 	}
 	var err error
 	for range 4 {
-		_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}})
+		_, _, err = runtimePoolTestFinalize(r, pool)
 		if err != nil {
 			break
 		}
@@ -1978,6 +2063,53 @@ func TestSubstrateRuntimePoolFinalizerPreservesForeignActorTemplate(t *testing.T
 	got := runtimePoolTestGetPool(t, r, pool)
 	if !controllerutil.ContainsFinalizer(&got, runtimePoolFinalizer) {
 		t.Fatal("RuntimePool finalizer was removed after ownership rejection")
+	}
+}
+
+func TestSubstrateRuntimePoolFinalizerDrainsLiveActorBeforeTeardown(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-finalizer", false)
+	runtimePoolReconcile(t, r, pool)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	if err := r.Delete(context.Background(), &current); err != nil {
+		t.Fatalf("delete live Substrate RuntimePool: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.drainCalls != 1 {
+		t.Fatalf("finalizer drain calls = %d, want 1", supervisor.drainCalls)
+	}
+	if len(control.settled) != 0 || len(control.deleted) != 0 {
+		t.Fatalf("live Actor was torn down before finalizer drain quiescence: settled=%v deleted=%v", control.settled, control.deleted)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, &corev1.Pod{}); err != nil {
+		t.Fatalf("worker Pod was removed before finalizer drain quiescence: %v", err)
+	}
+
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-finalizer", true)
+	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
+		t.Fatalf("finalizer lifecycle after quiescent probe = %s, want Quiescent", got)
+	}
+	for range 10 {
+		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)})
+		if err != nil {
+			t.Fatalf("finish drained Substrate finalization: %v", err)
+		}
+		if result.RequeueAfter == 0 {
+			break
+		}
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), &corev1alpha1.RuntimePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("drained Substrate RuntimePool survived finalization: %v", err)
+	}
+	if len(control.deleted) != 1 {
+		t.Fatalf("deleted actors = %v, want one after authenticated finalizer drain", control.deleted)
 	}
 }
 

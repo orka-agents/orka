@@ -2010,12 +2010,24 @@ func runtimePoolTestReconciler(
 			BearerToken: bytes.Clone(runtimePoolTestProviderToken),
 		},
 		AllowedImages: ACPRuntimeImages{Codex: "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("a", 64)},
-		Rand:          bytes.NewReader(bytes.Repeat([]byte{0x5a}, 4096)), Now: func() time.Time { return runtimePoolTestNow },
+		Rand:          &runtimePoolTestEntropyReader{}, Now: func() time.Time { return runtimePoolTestNow },
 		WorkspaceCredentialSeeder: func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
 			return false, nil
 		},
 	}
 	return r
+}
+
+type runtimePoolTestEntropyReader struct {
+	next byte
+}
+
+func (r *runtimePoolTestEntropyReader) Read(buffer []byte) (int, error) {
+	r.next++
+	for i := range buffer {
+		buffer[i] = r.next
+	}
+	return len(buffer), nil
 }
 
 func runtimePoolTestStartServing(
@@ -2155,6 +2167,21 @@ func runtimePoolReconcile(t *testing.T, r *RuntimePoolReconciler, pool *corev1al
 		t.Fatalf("Reconcile: %v", err)
 	}
 	return result
+}
+
+func runtimePoolTestFinalize(
+	r *RuntimePoolReconciler,
+	pool *corev1alpha1.RuntimePool,
+) (ctrl.Result, bool, error) {
+	current := &corev1alpha1.RuntimePool{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, true, nil
+		}
+		return ctrl.Result{}, false, err
+	}
+	result, err := r.finalizeRuntimePool(context.Background(), current)
+	return result, false, err
 }
 
 func runtimePoolReadyPod(pool *corev1alpha1.RuntimePool, namespace, name, uid, ip string) corev1.Pod {
