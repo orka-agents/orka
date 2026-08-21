@@ -44,6 +44,7 @@ bad_scan_name="${ORKA_SECURITY_BAD_SCAN_NAME:-security-goof-malformed-result}"
 authority_observer_name="${ORKA_SECURITY_SCAN_AUTHORITY_OBSERVER_NAME:-security-scan-authority-observer}"
 authority_agent_name="${ORKA_SECURITY_SCAN_AUTHORITY_AGENT:-security-scan-authority-agent}"
 authority_tool_name="${ORKA_SECURITY_SCAN_AUTHORITY_TOOL:-authority-probe}"
+authority_policy_name="${ORKA_SECURITY_SCAN_AUTHORITY_POLICY:-authority-observer-gateway}"
 authority_incoming_task="${ORKA_SECURITY_SCAN_AUTHORITY_INCOMING_TASK:-authority-incoming}"
 authority_service_account_task="${ORKA_SECURITY_SCAN_AUTHORITY_SERVICE_ACCOUNT_TASK:-authority-service-account}"
 authority_scope="${ORKA_SECURITY_SCAN_AUTHORITY_SCOPE:-authority.execute}"
@@ -731,12 +732,25 @@ reset_e2e_resources() {
     --ignore-not-found=true --wait=true --timeout=2m
   run kubectl -n "${test_namespace}" delete tool "${authority_tool_name}" \
     --ignore-not-found=true --wait=true --timeout=2m
+  run kubectl -n "${test_namespace}" delete outboundaccesspolicy "${authority_policy_name}" \
+    --ignore-not-found=true --wait=true --timeout=2m
 }
 
 apply_authority_resources() {
-  local observer_url="http://${authority_observer_name}.${test_namespace}.svc.cluster.local:8080/tool"
   log "Creating deterministic ACP v2 custom Tool authority fixtures"
   kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  name: ${authority_policy_name}
+  namespace: ${test_namespace}
+spec:
+  gateway:
+    serviceRef:
+      name: ${authority_observer_name}
+      port: 8080
+    scheme: http
+---
 apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
@@ -753,9 +767,11 @@ spec:
     required: ["probe"]
     additionalProperties: false
   http:
-    url: ${observer_url}
+    url: https://example.com/tool
     method: POST
     timeout: 15s
+    outboundAccessPolicyRef:
+      name: ${authority_policy_name}
 ---
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
@@ -773,6 +789,16 @@ spec:
   model:
     name: gpt-5.4
 YAML
+}
+
+wait_authority_resources() {
+  log "Waiting for ACP v2 authority policy and Tool readiness"
+  run kubectl -n "${test_namespace}" wait \
+    --for=condition=Accepted=true "outboundaccesspolicy/${authority_policy_name}" --timeout=2m
+  run kubectl -n "${test_namespace}" wait \
+    --for=condition=ResolvedRefs=true "outboundaccesspolicy/${authority_policy_name}" --timeout=2m
+  run kubectl -n "${test_namespace}" wait \
+    --for=jsonpath='{.status.available}'=true "tool/${authority_tool_name}" --timeout=2m
 }
 
 authority_observer_proxy_path() {
@@ -873,6 +899,7 @@ assert_transactionless_authority_stats() {
 
 run_acp_authority_gate() {
   apply_authority_resources
+  wait_authority_resources
   reset_authority_observer
   create_authority_task "${authority_incoming_task}"
   wait_authority_task_phase "${authority_incoming_task}" "Succeeded"

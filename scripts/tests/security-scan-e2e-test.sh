@@ -50,10 +50,16 @@ grep -F 'owner: sozercan' "${manifest_capture}" >/dev/null
 grep -F 'repository: vekil' "${manifest_capture}" >/dev/null
 
 apply_authority_resources
+grep -F 'kind: OutboundAccessPolicy' "${manifest_capture}" >/dev/null
+grep -F "name: ${authority_policy_name}" "${manifest_capture}" >/dev/null
+grep -F 'gateway:' "${manifest_capture}" >/dev/null
+grep -F "name: ${authority_observer_name}" "${manifest_capture}" >/dev/null
+grep -F 'port: 8080' "${manifest_capture}" >/dev/null
 grep -F 'kind: Tool' "${manifest_capture}" >/dev/null
 grep -F 'name: authority-probe' "${manifest_capture}" >/dev/null
 grep -F 'brokeredToolClass: read' "${manifest_capture}" >/dev/null
-grep -F 'url: http://security-scan-authority-observer.orka-system.svc.cluster.local:8080/tool' "${manifest_capture}" >/dev/null
+grep -F 'url: https://example.com/tool' "${manifest_capture}" >/dev/null
+grep -F 'outboundAccessPolicyRef:' "${manifest_capture}" >/dev/null
 grep -F 'defaultAllowedTools:' "${manifest_capture}" >/dev/null
 grep -F 'defaultAllowBash: false' "${manifest_capture}" >/dev/null
 
@@ -65,6 +71,15 @@ if grep -F '  transaction:' "${manifest_capture}" >/dev/null; then
   echo "ACP v2 authority fixture declared unsupported transaction delegation" >&2
   exit 1
 fi
+
+wait_calls="${work_dir}/authority-wait-calls"
+kubectl() {
+  printf '%s\n' "$*" >>"${wait_calls}"
+}
+wait_authority_resources
+grep -F "condition=Accepted=true outboundaccesspolicy/${authority_policy_name}" "${wait_calls}" >/dev/null
+grep -F "condition=ResolvedRefs=true outboundaccesspolicy/${authority_policy_name}" "${wait_calls}" >/dev/null
+grep -F "jsonpath={.status.available}=true tool/${authority_tool_name}" "${wait_calls}" >/dev/null
 
 authority_observer_stats() {
   jq -n '{ttsCalls:0,toolCalls:1,subjectTokenDigest:"",transactionTokenDigest:""}'
