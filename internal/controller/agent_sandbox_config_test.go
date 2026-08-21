@@ -203,6 +203,18 @@ func TestSubstrateConfigValidateRequiresExplicitTrust(t *testing.T) {
 	}
 }
 
+func TestSubstrateConfigValidateACPRuntimePoolDoesNotRequireLegacyBootstrapSecret(t *testing.T) {
+	cfg := DefaultSubstrateConfig()
+	cfg.APIInsecureSkipVerify = true
+
+	if err := cfg.ValidateACPRuntimePool(); err != nil {
+		t.Fatalf("ValidateACPRuntimePool() error = %v", err)
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "bootstrap token secret name") {
+		t.Fatalf("legacy Validate() error = %v, want bootstrap secret requirement", err)
+	}
+}
+
 func TestSubstrateConfigValidateRequiresSessionIdentitySecretWhenRequired(t *testing.T) {
 	cfg := DefaultSubstrateConfig()
 	cfg.APIInsecureSkipVerify = true

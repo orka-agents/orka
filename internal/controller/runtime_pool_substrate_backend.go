@@ -32,6 +32,8 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,7 +95,8 @@ func runtimePoolSubstrateActorID(base string) string {
 }
 
 func substrateActorInstanceUID(actorID string) string {
-	return "actor:" + actorID
+	sum := sha256.Sum256([]byte("orka-substrate-runtime-instance\x00" + strings.TrimSpace(actorID)))
+	return "workspace:" + hex.EncodeToString(sum[:])
 }
 
 func substrateActorRouteHost(actorID, dnsSuffix string) string {
@@ -108,6 +111,29 @@ func substrateActorMatchesRuntimeTemplate(
 		strings.TrimSpace(actor.ActorID) == actorID &&
 		strings.TrimSpace(actor.TemplateNamespace) == templateNamespace &&
 		strings.TrimSpace(actor.TemplateName) == templateName
+}
+
+func substrateRuntimeTemplateOwnedByPool(
+	template, desired *unstructured.Unstructured,
+) bool {
+	if template == nil || desired == nil ||
+		template.GetNamespace() != desired.GetNamespace() || template.GetName() != desired.GetName() {
+		return false
+	}
+	observedLabels := template.GetLabels()
+	desiredLabels := desired.GetLabels()
+	for _, key := range []string{
+		runtimePoolManagedByLabel,
+		runtimePoolKeyLabel,
+		runtimePoolNameLabel,
+		runtimePoolNamespaceLabel,
+		runtimePoolUIDLabel,
+	} {
+		if desiredLabels[key] == "" || observedLabels[key] != desiredLabels[key] {
+			return false
+		}
+	}
+	return true
 }
 
 func runtimePoolIsSubstrateBacked(pool *corev1alpha1.RuntimePool) bool {
@@ -180,6 +206,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
+	templateOwned := derivedTemplate == nil || substrateRuntimeTemplateOwnedByPool(derivedTemplate, desired.object)
+	templateRevision := ""
+	templateIntegrityErr := error(nil)
+	if derivedTemplate != nil && templateOwned {
+		templateRevision, templateIntegrityErr = substrateRuntimeTemplateIntegrity(derivedTemplate)
+	}
 	control, err := r.substrateActorControl()
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
@@ -211,6 +243,15 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
+	if !templateOwned {
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "controller-derived substrate ActorTemplate does not carry the exact RuntimePool ownership identity"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
 
 	booted := pool.Annotations[substrateActorBootedAnnotation] == actorID
 	if actor != nil && !substrateActorMatchesRuntimeTemplate(
@@ -233,6 +274,21 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
+	if actor != nil && templateIntegrityErr != nil {
+		// A same-name template with valid ownership labels is still not trusted
+		// when its declared revision does not match its observed contents. Never
+		// resume, probe, or credential-seed an actor booted from that workload.
+		if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
+			return ctrl.Result{}, err
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "controller-derived substrate ActorTemplate contents do not match their declared revision; recycling the exact actor before credential bootstrap"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
 	if actor != nil && booted && (actor.SuspendedOrSuspending() || actor.SnapshotObserved) {
 		// A booted supervisor holds live pool and provider-proxy credentials in
 		// process memory; a provider-side suspension or snapshot has therefore
@@ -249,7 +305,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
-	if derivedTemplate != nil && substrateRuntimeTemplateNeedsRollout(derivedTemplate, desired.revision) {
+	if derivedTemplate != nil && (templateIntegrityErr != nil || templateRevision != desired.revision) {
 		return r.reconcileSubstrateRuntimePoolRollout(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, templateNamespace, desired, status)
 	}
 
@@ -285,11 +341,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if err := r.setSubstrateActorBootedAnnotation(ctx, pool, actorID); err != nil {
 			return ctrl.Result{}, err
 		}
-		status.ActiveInstance = nil
-		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
-		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = "provider actor is booting the runtime workload"
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		r.applyProviderRuntimePoolColdStartStatus(pool, &status, "provider actor is booting the runtime workload")
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if !booted {
@@ -301,19 +353,11 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if err := r.setSubstrateActorBootedAnnotation(ctx, pool, actorID); err != nil {
 			return ctrl.Result{}, err
 		}
-		status.ActiveInstance = nil
-		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
-		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = "provider actor boot is being recorded before exact-instance admission"
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		r.applyProviderRuntimePoolColdStartStatus(pool, &status, "provider actor boot is being recorded before exact-instance admission")
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if !actor.Running() {
-		status.ActiveInstance = nil
-		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
-		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = "waiting for the provider actor workload to run"
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		r.applyProviderRuntimePoolColdStartStatus(pool, &status, "waiting for the provider actor workload to run")
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
@@ -334,11 +378,11 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
-		status.ActiveInstance = nil
-		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
-		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = sanitizeRuntimePoolMessage("credential bootstrap is not complete: " + err.Error())
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		r.applyProviderRuntimePoolColdStartStatus(
+			pool,
+			&status,
+			sanitizeRuntimePoolMessage("credential bootstrap is not complete: "+err.Error()),
+		)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
@@ -714,7 +758,7 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorRecyclingAnnotation, actorID); err != nil {
 		return err
 	}
-	gone, err := r.teardownSubstrateActor(ctx, control, actorID)
+	gone, err := r.teardownSubstrateActor(ctx, pool, control, actorID)
 	if err != nil {
 		return err
 	}
@@ -736,6 +780,7 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 // teardown is in progress.
 func (r *RuntimePoolReconciler) teardownSubstrateActor(
 	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
 	control workspace.SubstrateRuntimeActorControl,
 	actorID string,
 ) (bool, error) {
@@ -755,7 +800,7 @@ func (r *RuntimePoolReconciler) teardownSubstrateActor(
 	if actor.Suspending() {
 		return false, nil
 	}
-	workloadGone, err := r.destroySubstrateActorWorkload(ctx, actor)
+	workloadGone, err := r.destroySubstrateActorWorkload(ctx, pool, actor)
 	if err != nil {
 		return false, err
 	}
@@ -774,28 +819,41 @@ func (r *RuntimePoolReconciler) teardownSubstrateActor(
 // whether the workload is provably gone.
 func (r *RuntimePoolReconciler) destroySubstrateActorWorkload(
 	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
 	actor *workspace.SubstrateRuntimeActor,
 ) (bool, error) {
+	workerNamespace, workerPool, err := r.substrateRuntimePoolWorkerPlacement(ctx, pool)
+	if err != nil {
+		return false, err
+	}
 	namespace := strings.TrimSpace(actor.PodNamespace)
 	name := strings.TrimSpace(actor.PodName)
 	if namespace == "" || name == "" {
-		// No recorded placement: nothing holds workload memory.
-		return true, nil
+		return false, fmt.Errorf("refusing to settle RuntimePool substrate actor: provider worker placement is unknown")
+	}
+	if namespace != workerNamespace {
+		return false, fmt.Errorf(
+			"refusing to delete Pod %s/%s: provider worker namespace does not match infrastructure WorkerPool namespace %s",
+			namespace, name, workerNamespace,
+		)
 	}
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
 		reader = r.APIReader
 	}
 	pod := &corev1.Pod{}
-	err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, pod)
+	err = reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, pod)
 	if apierrors.IsNotFound(err) {
 		return true, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if strings.TrimSpace(pod.Labels[substrateWorkerPoolLabel]) == "" {
-		return false, fmt.Errorf("refusing to delete Pod %s/%s: it does not carry the %s provider worker label", namespace, name, substrateWorkerPoolLabel)
+	if strings.TrimSpace(pod.Labels[substrateWorkerPoolLabel]) != workerPool {
+		return false, fmt.Errorf(
+			"refusing to delete Pod %s/%s: %s label does not match infrastructure WorkerPool %s",
+			namespace, name, substrateWorkerPoolLabel, workerPool,
+		)
 	}
 	if pod.DeletionTimestamp != nil {
 		return false, nil
@@ -804,6 +862,43 @@ func (r *RuntimePoolReconciler) destroySubstrateActorWorkload(
 		return false, fmt.Errorf("delete provider worker Pod hosting the recycled actor: %w", err)
 	}
 	return false, nil
+}
+
+func (r *RuntimePoolReconciler) substrateRuntimePoolWorkerPlacement(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+) (string, string, error) {
+	if pool == nil || pool.Spec.ExecutionWorkspace == nil || pool.Spec.ExecutionWorkspace.Substrate == nil {
+		return "", "", fmt.Errorf("RuntimePool substrate infrastructure template binding is missing")
+	}
+	substrateSpec := pool.Spec.ExecutionWorkspace.Substrate
+	template, err := r.getSubstrateActorTemplate(
+		ctx,
+		strings.TrimSpace(substrateSpec.BaseTemplateNamespace),
+		strings.TrimSpace(substrateSpec.BaseTemplateName),
+	)
+	if err != nil {
+		return "", "", err
+	}
+	if template == nil {
+		return "", "", fmt.Errorf("RuntimePool substrate infrastructure ActorTemplate is unavailable during actor teardown")
+	}
+	workerPool, found, err := unstructured.NestedString(template.Object, "spec", "workerPoolRef", "name")
+	if err != nil || !found || strings.TrimSpace(workerPool) == "" {
+		return "", "", fmt.Errorf("RuntimePool substrate infrastructure ActorTemplate has no workerPoolRef.name")
+	}
+	workerNamespace, _, err := unstructured.NestedString(template.Object, "spec", "workerPoolRef", "namespace")
+	if err != nil {
+		return "", "", fmt.Errorf("RuntimePool substrate infrastructure ActorTemplate has an invalid workerPoolRef.namespace")
+	}
+	workerNamespace = strings.TrimSpace(workerNamespace)
+	if workerNamespace == "" {
+		workerNamespace = template.GetNamespace()
+	}
+	if workerNamespace == "" {
+		return "", "", fmt.Errorf("RuntimePool substrate infrastructure ActorTemplate has no WorkerPool namespace")
+	}
+	return workerNamespace, strings.TrimSpace(workerPool), nil
 }
 
 func (r *RuntimePoolReconciler) setSubstrateActorBootedAnnotation(
@@ -841,7 +936,11 @@ func (r *RuntimePoolReconciler) setSubstrateRuntimePoolAnnotation(
 func (r *RuntimePoolReconciler) getSubstrateActorTemplate(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
 	template := &unstructured.Unstructured{}
 	template.SetGroupVersionKind(substrateActorTemplateGVK)
-	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, template); err != nil {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, template); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
 		}
@@ -942,17 +1041,18 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 		runtimePoolProviderTokenGenerationAnnotation: cfg.providerProxy.tokenGeneration,
 		runtimePoolPIDsAnnotation:                    "4096",
 	}
-	revision, err := substrateRuntimeTemplateRevision(container, labels, annotations, infrastructure)
-	if err != nil {
-		return substrateRuntimeTemplateRender{}, err
-	}
-	annotations[runtimePoolTemplateRevisionAnnotation] = revision
 
 	object := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
 	object.SetGroupVersionKind(substrateActorTemplateGVK)
 	object.SetName(runtimePoolSubstrateTemplateName(cfg.baseName))
 	object.SetNamespace(templateNamespace)
 	object.SetLabels(labels)
+	object.SetAnnotations(annotations)
+	revision, err := substrateRuntimeTemplateObjectRevision(object)
+	if err != nil {
+		return substrateRuntimeTemplateRender{}, err
+	}
+	annotations[runtimePoolTemplateRevisionAnnotation] = revision
 	object.SetAnnotations(annotations)
 	return substrateRuntimeTemplateRender{object: object, revision: revision}, nil
 }
@@ -1008,29 +1108,42 @@ func substrateRuntimeContainer(
 	return container
 }
 
-func substrateRuntimeTemplateRevision(
-	container corev1.Container,
-	labels, annotations map[string]string,
-	infrastructure map[string]any,
-) (string, error) {
-	podTemplate := corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{Labels: cloneStringMap(labels), Annotations: cloneStringMap(annotations)},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{container}},
+func substrateRuntimeTemplateObjectRevision(template *unstructured.Unstructured) (string, error) {
+	if template == nil {
+		return "", fmt.Errorf("RuntimePool substrate actor template is required")
 	}
-	delete(podTemplate.Annotations, runtimePoolTemplateRevisionAnnotation)
-	payload := map[string]any{
-		"template":       podTemplate,
-		"infrastructure": infrastructure,
+	spec, found, err := unstructured.NestedMap(template.Object, "spec")
+	if err != nil || !found {
+		return "", fmt.Errorf("RuntimePool substrate actor template has no readable spec")
 	}
-	return runtimePoolJSONRevision(payload)
+	annotations := cloneStringMap(template.GetAnnotations())
+	delete(annotations, runtimePoolTemplateRevisionAnnotation)
+	return runtimePoolJSONRevision(map[string]any{
+		"labels":      cloneStringMap(template.GetLabels()),
+		"annotations": annotations,
+		"spec":        spec,
+	})
 }
 
-func substrateRuntimeTemplateNeedsRollout(template *unstructured.Unstructured, desiredRevision string) bool {
+func substrateRuntimeTemplateIntegrity(template *unstructured.Unstructured) (string, error) {
 	if template == nil {
-		return false
+		return "", fmt.Errorf("deployed RuntimePool substrate actor template is missing")
 	}
-	deployed := strings.TrimSpace(template.GetAnnotations()[runtimePoolTemplateRevisionAnnotation])
-	return desiredRevision == "" || deployed != desiredRevision
+	declared := strings.TrimSpace(template.GetAnnotations()[runtimePoolTemplateRevisionAnnotation])
+	if declared == "" {
+		return "", fmt.Errorf("deployed RuntimePool substrate actor template has no declared revision")
+	}
+	observed, err := substrateRuntimeTemplateObjectRevision(template)
+	if err != nil {
+		return "", err
+	}
+	if observed != declared {
+		return "", fmt.Errorf(
+			"deployed RuntimePool substrate actor template revision does not match observed contents (declared %s, observed %s)",
+			runtimePoolShortRevision(declared), runtimePoolShortRevision(observed),
+		)
+	}
+	return declared, nil
 }
 
 // substrateTemplatePodTemplateSpec reconstructs the logical Pod template shape
@@ -1149,7 +1262,7 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 		return false, err
 	}
 	defer control.Close() //nolint:errcheck // best-effort connection teardown
-	gone, err := r.teardownSubstrateActor(ctx, control, actorID)
+	gone, err := r.teardownSubstrateActor(ctx, pool, control, actorID)
 	if err != nil {
 		return false, err
 	}

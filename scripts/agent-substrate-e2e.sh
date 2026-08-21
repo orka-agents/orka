@@ -24,8 +24,9 @@ IMAGE_TAG="${IMAGE_TAG:-agent-substrate-ci}"
 # The workspace-backed ACP Task smoke builds the real Codex runtime image and
 # proves Substrate-backed RuntimePools live: derived ActorTemplate rendering,
 # actor boot under gVisor, and the authenticated Serving probe through the
-# router. It is model-free; prompt-level completion needs provider model
-# access. Set to 0 to skip the runtime image build and smoke.
+# router, then completes a real prompt through the authenticated provider
+# proxy and the local Responses-compatible fixture. Set to 0 to skip the
+# runtime image build and smoke.
 SUBSTRATE_E2E_ACP_TASK_SMOKE="${SUBSTRATE_E2E_ACP_TASK_SMOKE:-1}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 TASK_TIMEOUT_SECONDS="${TASK_TIMEOUT_SECONDS:-900}"
@@ -776,6 +777,77 @@ publish_ateom_image() {
   printf '%s' "${published}"
 }
 
+deploy_responses_fixture() {
+  local image="$1"
+
+  log "Deploying local Responses-compatible provider fixture"
+  kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n vekil-system apply -f - <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vekil
+  labels:
+    app.kubernetes.io/name: vekil
+    app.kubernetes.io/component: responses-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vekil
+      app.kubernetes.io/component: responses-fixture
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vekil
+        app.kubernetes.io/component: responses-fixture
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: responses
+          image: ${image}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 1337
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vekil
+  labels:
+    app.kubernetes.io/name: vekil
+spec:
+  selector:
+    app.kubernetes.io/name: vekil
+    app.kubernetes.io/component: responses-fixture
+  ports:
+    - name: http
+      port: 1337
+      targetPort: http
+YAML
+  kubectl -n vekil-system rollout status deployment/vekil --timeout=2m
+}
+
 create_substrate_resources() {
   local ateom_image="$1"
   local workspace_actor_image="$2"
@@ -981,14 +1053,13 @@ deploy_orka() {
 
   cp -R "${ROOT_DIR}/config" "${tmp_config}/config"
   (cd "${tmp_config}/config/manager" && "${ROOT_DIR}/bin/kustomize" edit set image "controller=${controller_image}")
-  # Agent Substrate validation exercises the workspace provider directly. The
-  # initial ACP release does not dispatch RuntimeSessions to Substrate Actors, so
-  # omit the unrelated clean-room publisher workload and provide only the
-  # controller's required non-secret image metadata and local capability files.
+  (cd "${tmp_config}/config/provider-proxy" && "${ROOT_DIR}/bin/kustomize" edit set image "controller=${controller_image}")
+  # Agent Substrate validation exercises the workspace provider directly. Omit
+  # the unrelated clean-room publisher and SCM proxy workloads, but retain the
+  # authenticated provider proxy used by the real Codex prompt smoke.
   (
     cd "${tmp_config}/config/acp-workload"
     "${ROOT_DIR}/bin/kustomize" edit remove resource ../publisher
-    "${ROOT_DIR}/bin/kustomize" edit remove resource ../provider-proxy
     "${ROOT_DIR}/bin/kustomize" edit remove resource ../scm-egress-proxy
   )
   local placeholder_digest codex_runtime_image
@@ -1033,6 +1104,33 @@ deploy_orka() {
   rm -rf "${capability_dir}"
 
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -
+  # Substrate actor traffic originates from its single-workload WorkerPool Pod
+  # in ate-demo rather than a native orka-runtimes Pod. Keep the same
+  # authenticated proxy boundary while allowing only that provider namespace.
+  kubectl -n orka-system patch networkpolicy orka-provider-auth-proxy --type=json -p '[
+    {
+      "op": "add",
+      "path": "/spec/ingress/-",
+      "value": {
+        "from": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "ate-demo"
+              }
+            }
+          }
+        ],
+        "ports": [
+          {
+            "protocol": "TCP",
+            "port": 8080
+          }
+        ]
+      }
+    }
+  ]'
+  kubectl -n orka-system rollout status deployment/orka-provider-auth-proxy --timeout=5m
 
   local patch
   local workspace_dispatch="false"
@@ -1103,10 +1201,9 @@ deploy_orka() {
                   "--substrate-command-timeout=10m",
                   "--substrate-cleanup-policy=delete",
                   "--acp-workspace-dispatch-enabled=" + $workspaceDispatch,
-                  # RuntimePool reconciliation requires the authenticated
-                  # provider-proxy boundary configuration even though this
-                  # model-free topology deploys no proxy workload; the token
-                  # Secret is created above and mounted by the base manifest.
+                  # RuntimePool reconciliation and prompt execution use the
+                  # authenticated provider-proxy boundary deployed above; the
+                  # token Secret is created above and mounted by the base manifest.
                   "--acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-system.svc:8080",
                   "--acp-provider-proxy-namespace=orka-system",
                   "--acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy",
@@ -1807,10 +1904,10 @@ exercise_direct_substrate() {
 # RuntimePool, the controller renders a derived ActorTemplate from the
 # operator infrastructure template, the actor boots the immutable Codex
 # runtime supervisor under gVisor, and the authenticated exact-instance fence
-# probe reaches Serving through the atenet-router. Model-free: prompt-level
-# completion requires provider model access.
+# probe reaches Serving through the atenet-router, and a real Codex prompt
+# completes through the authenticated provider proxy.
 exercise_workspace_backed_acp_task() {
-  log "Running workspace-backed ACP Task (Substrate) infrastructure smoke"
+  log "Running workspace-backed ACP Task (Substrate) prompt smoke"
 
   # Earlier phases dirty ateom workers: a worker that hosted any workload
   # (including provider golden-snapshot builds) loses its eth0 to the gVisor
@@ -1876,11 +1973,16 @@ YAML
   fi
   log "Workspace-backed Task bound RuntimePool ${pool_name}"
 
-  local derived_template started now
+  local derived_template derived_template_name started now
   started="$(date +%s)"
   while true; do
-    derived_template="$(kubectl -n ate-demo get actortemplates -o name | grep -- '-actor-template' | head -n1 || true)"
-    [[ -n "${derived_template}" ]] && break
+    derived_template_name="$(kubectl -n ate-demo get actortemplates \
+      -l "orka.ai/runtime-pool-name=${pool_name}" \
+      -o json 2>/dev/null | jq -r 'if (.items | length) == 1 then .items[0].metadata.name else "" end' || true)"
+    if [[ -n "${derived_template_name}" ]]; then
+      derived_template="actortemplate.ate.dev/${derived_template_name}"
+      break
+    fi
     now="$(date +%s)"
     if (( now - started >= 240 )); then
       echo "controller did not render a derived ActorTemplate in ate-demo" >&2
@@ -1923,19 +2025,73 @@ YAML
     return 1
   fi
 
-  local actor_id
-  actor_id="$(kubectl -n orka-system get runtimepool "${pool_name}"     -o jsonpath='{.status.activeInstance.podUID}' | sed 's/^actor://')"
-  if [[ -z "${actor_id}" ]]; then
-    echo "Serving pool has no actor-scoped active instance" >&2
+  local actors_json actor_count actor_id worker_pod
+  actors_json="$("${TMP_ROOT}/kubectl-ate" get actors -o json)"
+  actor_count="$(jq -r \
+    --arg namespace ate-demo \
+    --arg template "${derived_template_name}" \
+    '[.actors[]? | select(.actorTemplateNamespace == $namespace and .actorTemplateName == $template)] | length' \
+    <<<"${actors_json}")"
+  if [[ "${actor_count}" != "1" ]]; then
+    echo "expected exactly one provider actor for ate-demo/${derived_template_name}, found ${actor_count}" >&2
+    "${TMP_ROOT}/kubectl-ate" get actors >&2 || true
     return 1
   fi
-  # Provider-native identifiers must never enter public Task status: the
-  # actor route host (DNS suffix), the assigned worker Pod, and snapshot URIs.
-  # The Orka-derived instance identity (actor:<pool>-<revision>-actor.<boot>)
-  # is the controller's own fencing identity and is expected in status, like
-  # pod:<uid>.<boot> for Pod-backed pools.
-  local task_yaml worker_pod
+  actor_id="$(jq -r \
+    --arg namespace ate-demo \
+    --arg template "${derived_template_name}" \
+    '.actors[] | select(.actorTemplateNamespace == $namespace and .actorTemplateName == $template) | .actorId' \
+    <<<"${actors_json}")"
+  worker_pod="$(jq -r \
+    --arg namespace ate-demo \
+    --arg template "${derived_template_name}" \
+    '.actors[] | select(.actorTemplateNamespace == $namespace and .actorTemplateName == $template) | .ateomPodName // empty' \
+    <<<"${actors_json}")"
+
+  log "Waiting for the workspace-backed Task to succeed"
+  local task_json task_yaml phase execution_state execution_outcome result_available
+  started="$(date +%s)"
+  while true; do
+    task_json="$(kubectl -n orka-system get task orka-ws-substrate-smoke -o json 2>/dev/null || true)"
+    phase="$(jq -r '.status.phase // ""' <<<"${task_json}")"
+    execution_state="$(jq -r '.status.execution.state // ""' <<<"${task_json}")"
+    execution_outcome="$(jq -r '.status.execution.outcome // ""' <<<"${task_json}")"
+    result_available="$(jq -r '.status.resultRef.available // false' <<<"${task_json}")"
+    if [[ "${phase}" == "Succeeded" && "${execution_state}" == "Succeeded" &&
+          "${execution_outcome}" == "Succeeded" && "${result_available}" == "true" ]]; then
+      break
+    fi
+    if [[ "${phase}" == "Failed" || "${phase}" == "Cancelled" ||
+          "${execution_state}" == "Failed" || "${execution_state}" == "Cancelled" ]]; then
+      kubectl -n orka-system get task orka-ws-substrate-smoke -o yaml >&2 || true
+      kubectl -n orka-system logs deployment/orka-controller-manager --tail=400 2>/dev/null | grep -iE "session|dispatch|substrate" | tail -60 >&2 || true
+      echo "workspace-backed Task reached terminal failure (phase=${phase:-<empty>}, state=${execution_state:-<empty>}, outcome=${execution_outcome:-<empty>})" >&2
+      return 1
+    fi
+    now="$(date +%s)"
+    if (( now - started >= 300 )); then
+      echo "workspace-backed Task did not succeed (phase=${phase:-<empty>}, state=${execution_state:-<empty>}, outcome=${execution_outcome:-<empty>}, resultAvailable=${result_available})" >&2
+      kubectl -n orka-system get task orka-ws-substrate-smoke -o yaml >&2 || true
+      kubectl -n orka-system get runtimepool "${pool_name}" -o yaml >&2 || true
+      return 1
+    fi
+    sleep 3
+  done
+  log "Workspace-backed Task reached Succeeded/Succeeded with an available result"
+
+  # Provider-native identifiers must never enter final public Task status: the
+  # raw actor ID, actor route host (DNS suffix), assigned worker Pod, and
+  # snapshot URIs. The public exact-instance fence is an opaque Orka identity.
   task_yaml="$(kubectl -n orka-system get task orka-ws-substrate-smoke -o yaml)"
+  if ! jq -e '.status.execution.runtimeInstanceID | test("^workspace:[a-f0-9]{64}$")' \
+      <<<"${task_json}" >/dev/null; then
+    echo "public Task status did not use an opaque workspace runtime identity" >&2
+    return 1
+  fi
+  if grep -Fq "${actor_id}" <<<"${task_yaml}"; then
+    echo "public Task status leaked the provider actor ID" >&2
+    return 1
+  fi
   if grep -q "actors.resources.substrate.ate.dev" <<<"${task_yaml}"; then
     echo "public Task status leaked a provider actor route host" >&2
     return 1
@@ -1944,36 +2100,10 @@ YAML
     echo "public Task status leaked a provider snapshot URI" >&2
     return 1
   fi
-  worker_pod="$("${TMP_ROOT}/kubectl-ate" get actor "${actor_id}" -o json 2>/dev/null | jq -r '.actors[0].ateomPodName // empty' || true)"
   if [[ -n "${worker_pod}" ]] && grep -q "${worker_pod}" <<<"${task_yaml}"; then
     echo "public Task status leaked the provider worker placement ${worker_pod}" >&2
     return 1
   fi
-
-  log "Waiting for the dispatcher to start the RuntimeSession (state Running)"
-  local execution_state
-  started="$(date +%s)"
-  while true; do
-    execution_state="$(kubectl -n orka-system get task orka-ws-substrate-smoke       -o jsonpath='{.status.execution.state}' 2>/dev/null || true)"
-    if [[ "${execution_state}" == "Running" || "${execution_state}" == "Failed" ]]; then
-      break
-    fi
-    now="$(date +%s)"
-    if (( now - started >= 300 )); then
-      echo "RuntimeSession never reached Running on the Substrate-backed pool (state: ${execution_state:-<empty>})" >&2
-      kubectl -n orka-system get task orka-ws-substrate-smoke -o yaml >&2 || true
-      kubectl -n orka-system get runtimepool "${pool_name}" -o yaml >&2 || true
-      return 1
-    fi
-    sleep 3
-  done
-  if [[ "${execution_state}" == "Failed" ]]; then
-    echo "workspace-backed Task RuntimeSession failed instead of reaching Running" >&2
-    kubectl -n orka-system get task orka-ws-substrate-smoke -o yaml >&2 || true
-    kubectl -n orka-system logs deployment/orka-controller-manager --tail=400 2>/dev/null | grep -iE "session|dispatch|substrate" | tail -60 >&2 || true
-    return 1
-  fi
-  log "Workspace-backed Task execution progressed to state ${execution_state} (prompt-level completion requires model access)"
 
   log "Cleaning up the workspace-backed Task and pool"
   kubectl -n orka-system delete task orka-ws-substrate-smoke --wait=true --timeout=4m
@@ -1983,7 +2113,7 @@ YAML
     return 1
   fi
   kubectl -n orka-system delete agent orka-ws-substrate-agent --ignore-not-found=true
-  log "Workspace-backed ACP Task (Substrate) infrastructure smoke passed"
+  log "Workspace-backed ACP Task (Substrate) prompt smoke passed"
 }
 
 main() {
@@ -2034,7 +2164,7 @@ main() {
   log "Building kubectl-ate"
   (cd "${SUBSTRATE_DIR}" && go build -o "${TMP_ROOT}/kubectl-ate" ./cmd/kubectl-ate)
 
-  local registry_ip registry_addr controller_image workspace_push_image workspace_actor_image mcp_push_image mcp_actor_image tool_client_image ateom_image
+  local registry_ip registry_addr controller_image workspace_push_image workspace_actor_image mcp_push_image mcp_actor_image tool_client_image responses_fixture_image ateom_image
   registry_ip="$(docker inspect -f '{{with index .NetworkSettings.Networks "kind"}}{{.IPAddress}}{{end}}' "${KIND_REGISTRY_NAME}")"
   if [[ -z "${registry_ip}" ]]; then
     registry_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{end}}' "${KIND_REGISTRY_NAME}" | head -n1)"
@@ -2050,6 +2180,7 @@ main() {
   mcp_push_image="${registry_addr}/orka/mcp-e2e-server:${IMAGE_TAG}"
   mcp_actor_image="${registry_ip}:5000/orka/mcp-e2e-server:${IMAGE_TAG}"
   tool_client_image="${registry_addr}/orka/tool-e2e-client:${IMAGE_TAG}"
+  responses_fixture_image="${registry_addr}/orka/openai-responses-fixture:${IMAGE_TAG}"
 
   local acp_codex_push_image acp_codex_actor_ref
   acp_codex_push_image="${registry_addr}/orka/acp-codex-runtime:${IMAGE_TAG}"
@@ -2065,6 +2196,8 @@ main() {
   docker push "${mcp_push_image}"
   docker push "${tool_client_image}"
   if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" ]]; then
+    docker build -t "${responses_fixture_image}" -f "${ROOT_DIR}/scripts/fixtures/openai-responses/Dockerfile" "${ROOT_DIR}"
+    docker push "${responses_fixture_image}"
     log "Building immutable Codex ACP runtime image for the workspace-backed Task smoke"
     make -C "${ROOT_DIR}" docker-build-acp-codex-runtime ACP_CODEX_RUNTIME_IMG="${acp_codex_push_image}"
     docker push "${acp_codex_push_image}"
@@ -2078,6 +2211,9 @@ main() {
   log "Publishing Substrate ateom-gvisor image"
   ateom_image="$(publish_ateom_image)"
   create_substrate_resources "${ateom_image}" "${workspace_actor_image}" "${mcp_actor_image}"
+  if [[ "${SUBSTRATE_E2E_ACP_TASK_SMOKE}" == "1" ]]; then
+    deploy_responses_fixture "${responses_fixture_image}"
+  fi
   deploy_orka "${controller_image}" "${acp_codex_actor_ref}"
   exercise_direct_substrate
   exercise_orka_tasks "${tool_client_image}"

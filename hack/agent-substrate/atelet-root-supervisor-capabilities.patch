@@ -35,7 +35,7 @@ index a2ae14c0..67d696a4 100644
 +		// (CHOWN, KILL, SETGID, SETUID): it assigns each session tree to a
 +		// distinct never-reused UID/GID and launches ACP children under that
 +		// identity, and must fail if the drop is unavailable.
-+		processCapabilities = append(processCapabilities, "CAP_CHOWN", "CAP_SETGID", "CAP_SETUID")
++		processCapabilities = append(processCapabilities, "CAP_CHOWN", "CAP_KILL", "CAP_SETGID", "CAP_SETUID")
 +	}
 +
  	ociSpec := &specs.Spec{

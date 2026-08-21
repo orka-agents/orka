@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -695,7 +696,9 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServing(
 		} else {
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, "SchedulingPending", "waiting for a scheduled runtime Pod")
 		}
-		if meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady) == nil {
+		if status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStarting && pool.Spec.ExecutionWorkspace != nil {
+			r.applyProviderRuntimePoolColdStartStatus(pool, &status, status.Message)
+		} else if condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady); condition == nil || condition.Reason == "Reconciling" {
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, "RolloutPending", "waiting for runtime rollout")
 		}
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -1195,6 +1198,47 @@ func (r *RuntimePoolReconciler) runtimePoolRolloutTimedOut(pool *corev1alpha1.Ru
 		timeout = 120 * time.Second
 	}
 	return !condition.LastTransitionTime.IsZero() && !r.now().Before(condition.LastTransitionTime.Add(timeout))
+}
+
+func (r *RuntimePoolReconciler) providerRuntimePoolColdStartTimedOut(pool *corev1alpha1.RuntimePool) bool {
+	if pool == nil || pool.Spec.DesiredReplicas == 0 || pool.Spec.ExecutionWorkspace == nil {
+		return false
+	}
+	condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+	if condition == nil || condition.ObservedGeneration != pool.Generation {
+		return false
+	}
+	if condition.Reason == runtimePoolRolloutReasonTimedOut {
+		return true
+	}
+	if condition.Reason != runtimePoolRolloutReasonStarting {
+		return false
+	}
+	timeout := time.Duration(pool.Spec.ColdStartTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = time.Duration(corev1alpha1.DefaultRuntimePoolColdStartTimeoutSeconds) * time.Second
+	}
+	return !condition.LastTransitionTime.IsZero() && !r.now().Before(condition.LastTransitionTime.Add(timeout))
+}
+
+func (r *RuntimePoolReconciler) applyProviderRuntimePoolColdStartStatus(
+	pool *corev1alpha1.RuntimePool,
+	status *corev1alpha1.RuntimePoolStatus,
+	message string,
+) {
+	status.ActiveInstance = nil
+	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	if r.providerRuntimePoolColdStartTimedOut(pool) {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.Message = "workspace provider runtime did not become ready before the configured cold-start deadline"
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, runtimePoolRolloutReasonTimedOut, status.Message)
+		return
+	}
+	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+	status.Message = message
+	r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+	r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonStarting, status.Message)
 }
 
 func runtimePoolShortRevision(revision string) string {
@@ -2903,7 +2947,23 @@ func runtimePoolInstanceEndpoint(pool *corev1alpha1.RuntimePool, pod *corev1.Pod
 // the actor DNS suffix while preserving the logical route host as the HTTP
 // Host header, exactly like the verified MCP actor routing. Hosts outside the
 // suffix are refused: this transport exists only for actor-routed requests.
-func substrateRouteHTTPTransport(routerURL, actorDNSSuffix string) (*http.Transport, error) {
+type substrateRouteRoundTripper struct {
+	scheme    string
+	transport *http.Transport
+}
+
+func (t *substrateRouteRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request == nil || request.URL == nil {
+		return nil, fmt.Errorf("substrate route request URL is required")
+	}
+	clone := request.Clone(request.Context())
+	urlCopy := *request.URL
+	urlCopy.Scheme = t.scheme
+	clone.URL = &urlCopy
+	return t.transport.RoundTrip(clone)
+}
+
+func substrateRouteHTTPTransport(routerURL, actorDNSSuffix string) (http.RoundTripper, error) {
 	parsed, err := url.Parse(strings.TrimSpace(routerURL))
 	if err != nil || parsed.Host == "" || (parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS) {
 		return nil, fmt.Errorf("substrate router URL is invalid")
@@ -2921,6 +2981,12 @@ func substrateRouteHTTPTransport(routerURL, actorDNSSuffix string) (*http.Transp
 		return nil, fmt.Errorf("substrate actor DNS suffix is required")
 	}
 	transport := harnessv2.NewProxylessTransport()
+	if parsed.Scheme == urlSchemeHTTPS {
+		transport.TLSClientConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: parsed.Hostname(),
+		}
+	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, _, splitErr := net.SplitHostPort(address)
@@ -2932,7 +2998,7 @@ func substrateRouteHTTPTransport(routerURL, actorDNSSuffix string) (*http.Transp
 		}
 		return dialer.DialContext(ctx, network, routerAddress)
 	}
-	return transport, nil
+	return &substrateRouteRoundTripper{scheme: parsed.Scheme, transport: transport}, nil
 }
 
 func (r *RuntimePoolReconciler) randomSecret(size int) (string, error) {

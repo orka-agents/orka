@@ -3128,7 +3128,13 @@ func (r *TaskReconciler) validateExecutionWorkspaceProviderConfig(
 			return fmt.Errorf("execution workspace provider %q requires substrate to be enabled", provider)
 		}
 		cfg := r.SubstrateConfig.WithDefaults()
-		if err := cfg.Validate(); err != nil {
+		var err error
+		if r.ACPWorkspaceDispatchEnabled {
+			err = cfg.ValidateACPRuntimePool()
+		} else {
+			err = cfg.Validate()
+		}
+		if err != nil {
 			return err
 		}
 		if substrateTemplateName(ws, cfg) == "" {

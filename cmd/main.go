@@ -468,7 +468,7 @@ func main() {
 	flag.BoolVar(&agentSandboxEnabled, "agent-sandbox-enabled", agentSandboxEnabled,
 		"Enable experimental agent sandbox workspace execution for agent Tasks.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
-		"Admit workspace-provider-backed ACP RuntimeSession dispatch (requires --agent-sandbox-enabled); when false, Task.spec.execution.workspace agent Tasks fail closed.")
+		"Admit workspace-provider-backed ACP RuntimeSession dispatch (requires the matching --agent-sandbox-enabled or --substrate-enabled provider flag); when false, Task.spec.execution.workspace agent Tasks fail closed.")
 	flag.StringVar(&agentSandboxConfig.RouterURL, "agent-sandbox-router-url", agentSandboxConfig.RouterURL,
 		"Agent sandbox router base URL used by worker Jobs for workspace claims.")
 	flag.StringVar(&agentSandboxConfig.DefaultTemplate, "agent-sandbox-default-template",

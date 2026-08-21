@@ -508,6 +508,9 @@ func TestLoadConfigFromEnvBootstrapSecrets(t *testing.T) {
 	if fileCfg.ControllerBearerToken != strings.Repeat("f", 32) {
 		t.Fatal("mounted secret file did not take precedence over the bootstrap env")
 	}
+	if value, present := os.LookupEnv(EnvControllerTokenBootstrap); present && value != "" {
+		t.Fatal("unused bootstrap secret survived file-backed config load")
+	}
 
 	// Neither the file nor the bootstrap variable fails closed.
 	t.Setenv(EnvControllerTokenFile, "")

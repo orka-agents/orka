@@ -28,13 +28,15 @@ manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-agent-sandbox-e2e-${e2
 publisher_image="${ORKA_WORKSPACE_PUBLISHER_IMAGE:-orka-workspace-publisher:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_fixture_image="${ORKA_AGENT_SANDBOX_FIXTURE_IMAGE:-orka-agent-sandbox-fixture:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_router_image="${ORKA_AGENT_SANDBOX_ROUTER_IMAGE:-orka-agent-sandbox-router:live-agent-sandbox-e2e-${e2e_run_id}}"
+responses_fixture_image="${ORKA_RESPONSES_FIXTURE_IMAGE:-orka-openai-responses-fixture:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_template_name="${ORKA_AGENT_SANDBOX_TEMPLATE:-orka-agent-sandbox-e2e-template}"
 smoke_claim_name="${ORKA_AGENT_SANDBOX_SMOKE_CLAIM:-orka-agent-sandbox-e2e-retained-smoke}"
 # The workspace-backed ACP Task smoke builds the real Codex runtime image and
 # proves the workspace-provider-backed RuntimePool path live against upstream
 # agent-sandbox (admission, claim materialization, authenticated Serving, and
-# cleanup). It is model-free: prompt-level completion is exercised by the live
-# ACP runtime workflows. Set to 0 to skip the runtime image build.
+# cleanup), then completes a real prompt through the authenticated provider
+# proxy and the local Responses-compatible fixture. Set to 0 to skip the
+# runtime image build and smoke.
 acp_task_smoke_enabled="${ORKA_AGENT_SANDBOX_ACP_TASK_SMOKE:-1}"
 acp_codex_runtime_image="${ORKA_ACP_CODEX_RUNTIME_IMAGE:-orka-acp-codex-runtime:live-agent-sandbox-e2e-${e2e_run_id}}"
 acp_runtime_namespace="${ORKA_ACP_RUNTIME_NAMESPACE:-orka-runtimes}"
@@ -101,6 +103,10 @@ dump_diagnostics() {
     echo
     echo "=== ACP Runtime Namespace Resources ==="
     kubectl get pods,secrets,sandboxclaims,sandboxes,sandboxtemplates,sandboxwarmpools -n "${acp_runtime_namespace}" -o wide 2>/dev/null || true
+    echo
+    echo "=== Responses Fixture ==="
+    kubectl get pods,svc,deploy -n vekil-system -o wide 2>/dev/null || true
+    kubectl logs deployment/vekil -n vekil-system --tail=300 2>/dev/null || true
     echo
     echo "=== Workspace-backed ACP Task ==="
     kubectl -n "${acp_task_namespace}" get task "${acp_task_name}" -o yaml 2>/dev/null || true
@@ -226,6 +232,74 @@ wait_for_http() {
   done
 
   die "${description} never became available at ${url}"
+}
+
+deploy_responses_fixture() {
+  log "Deploying local Responses-compatible provider fixture"
+  kubectl -n vekil-system apply -f - <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vekil
+  labels:
+    app.kubernetes.io/name: vekil
+    app.kubernetes.io/component: responses-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vekil
+      app.kubernetes.io/component: responses-fixture
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vekil
+        app.kubernetes.io/component: responses-fixture
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: responses
+          image: ${responses_fixture_image}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 1337
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vekil
+  labels:
+    app.kubernetes.io/name: vekil
+spec:
+  selector:
+    app.kubernetes.io/name: vekil
+    app.kubernetes.io/component: responses-fixture
+  ports:
+    - name: http
+      port: 1337
+      targetPort: http
+YAML
+  run kubectl -n vekil-system rollout status deployment/vekil --timeout=2m
 }
 
 write_sandbox_fixture_dockerfile() {
@@ -867,7 +941,7 @@ wait_for_nonempty_jsonpath() {
 }
 
 # run_workspace_backed_acp_task_smoke proves the Phase-1 workspace-provider
-# adapter live against upstream agent-sandbox, without model access:
+# adapter live against upstream agent-sandbox:
 #   1. a Task.spec.execution.workspace agent Task is admitted (not rejected
 #      with WorkspaceValidationFailed) and binds a dedicated acp-ws-* pool;
 #   2. the pool materializes a controller-rendered SandboxTemplate, a
@@ -875,10 +949,9 @@ wait_for_nonempty_jsonpath() {
 #      provider controller, and the sandbox Pod runs the immutable Codex
 #      runtime image;
 #   3. the authenticated exact-instance fence probe reaches Serving/Accepting;
-#   4. Task status stays provider-neutral (no claim identifiers);
-#   5. pool deletion removes the claim, warm pool, and template.
-# Prompt-level completion needs provider model access and is covered by the
-# live ACP runtime workflows.
+#   4. a real Codex prompt succeeds through the authenticated provider proxy;
+#   5. Task status stays provider-neutral (no claim identifiers);
+#   6. pool deletion removes the claim, warm pool, and template.
 run_workspace_backed_acp_task_smoke() {
   log "Running workspace-backed ACP Task infrastructure smoke"
 
@@ -957,21 +1030,32 @@ YAML
     die "public Task status leaked the provider claim identifier ${claim_name}"
   fi
 
-  log "Waiting for the dispatcher to engage the workspace-backed pool"
-  local started now execution_state
+  log "Waiting for the workspace-backed Task to succeed"
+  local started now task_payload phase execution_state execution_outcome result_available
   started="$(date +%s)"
   while true; do
-    execution_state="$(kubectl -n "${acp_task_namespace}" get task "${acp_task_name}"       -o jsonpath='{.status.execution.state}' 2>/dev/null || true)"
-    if [[ -n "${execution_state}" && "${execution_state}" != "Queued" ]]; then
+    task_payload="$(kubectl -n "${acp_task_namespace}" get task "${acp_task_name}" -o json 2>/dev/null || true)"
+    phase="$(jq -r '.status.phase // ""' <<<"${task_payload}")"
+    execution_state="$(jq -r '.status.execution.state // ""' <<<"${task_payload}")"
+    execution_outcome="$(jq -r '.status.execution.outcome // ""' <<<"${task_payload}")"
+    result_available="$(jq -r '.status.resultRef.available // false' <<<"${task_payload}")"
+    if [[ "${phase}" == "Succeeded" && "${execution_state}" == "Succeeded" &&
+          "${execution_outcome}" == "Succeeded" && "${result_available}" == "true" ]]; then
       break
+    fi
+    if [[ "${phase}" == "Failed" || "${phase}" == "Cancelled" ||
+          "${execution_state}" == "Failed" || "${execution_state}" == "Cancelled" ]]; then
+      kubectl -n "${acp_task_namespace}" get task "${acp_task_name}" -o yaml >&2 || true
+      die "workspace-backed Task reached terminal failure (phase=${phase:-<empty>}, state=${execution_state:-<empty>}, outcome=${execution_outcome:-<empty>})"
     fi
     now="$(date +%s)"
     if (( now - started >= 300 )); then
-      die "dispatcher never engaged the workspace-backed pool (state: ${execution_state:-<empty>})"
+      kubectl -n "${acp_task_namespace}" get task "${acp_task_name}" -o yaml >&2 || true
+      die "workspace-backed Task did not succeed (phase=${phase:-<empty>}, state=${execution_state:-<empty>}, outcome=${execution_outcome:-<empty>}, resultAvailable=${result_available})"
     fi
     sleep 3
   done
-  log "Workspace-backed Task execution progressed to state ${execution_state} (prompt-level completion requires model access and is out of scope here)"
+  log "Workspace-backed Task reached Succeeded/Succeeded with an available result"
 
   workspace_reason="$(kubectl -n "${acp_task_namespace}" get task "${acp_task_name}"     -o jsonpath='{.status.executionWorkspace.reason}')"
   [[ "${workspace_reason}" != "WorkspaceValidationFailed" ]] ||
@@ -1020,6 +1104,8 @@ main() {
   if [[ "${acp_task_smoke_enabled}" == "1" ]]; then
     log "Building immutable Codex ACP runtime image ${acp_codex_runtime_image} for the workspace-backed Task smoke"
     run make docker-build-acp-codex-runtime ACP_CODEX_RUNTIME_IMG="${acp_codex_runtime_image}"
+    log "Building local Responses-compatible provider fixture image ${responses_fixture_image}"
+    run docker build -t "${responses_fixture_image}" -f scripts/fixtures/openai-responses/Dockerfile .
   fi
 
   write_sandbox_fixture_dockerfile
@@ -1031,6 +1117,9 @@ main() {
   run kind load docker-image "${manager_image}" --name "${kind_cluster}"
   run kind load docker-image "${sandbox_fixture_image}" --name "${kind_cluster}"
   run kind load docker-image "${sandbox_router_image}" --name "${kind_cluster}"
+  if [[ "${acp_task_smoke_enabled}" == "1" ]]; then
+    run kind load docker-image "${responses_fixture_image}" --name "${kind_cluster}"
+  fi
 
   local manager_ref publisher_ref
   manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
@@ -1044,6 +1133,10 @@ main() {
 
   log "Bootstrapping test-only admission TLS"
   orka_e2e_bootstrap_admission_tls
+
+  if [[ "${acp_task_smoke_enabled}" == "1" ]]; then
+    deploy_responses_fixture
+  fi
 
   log "Deploying Orka manager (Codex runtime image real when the workspace-backed Task smoke is enabled; other runtimes inert)"
   run make deploy \
@@ -1077,7 +1170,7 @@ main() {
   if [[ "${acp_task_smoke_enabled}" == "1" ]]; then
     run_workspace_backed_acp_task_smoke
   else
-    log "Skipping workspace-backed ACP Task smoke (ORKA_AGENT_SANDBOX_ACP_TASK_SMOKE=0): prompt-level RuntimeSession execution is exercised by the live ACP runtime workflows"
+    log "Skipping workspace-backed ACP Task smoke (ORKA_AGENT_SANDBOX_ACP_TASK_SMOKE=0)"
   fi
   log "Live agent-sandbox installation/configuration/workspace-adapter e2e passed"
 }

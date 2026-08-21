@@ -339,6 +339,35 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 	}
 }
 
+func TestACPRuntimePoolWorkspaceMatchesPlanRequiresExactProviderFields(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("9", 64)
+	plan := ACPRuntimePlan{Workspace: &ACPRuntimeWorkspaceBinding{
+		Provider: corev1alpha1.WorkspaceProviderSubstrate, BindingDigest: digest,
+		TemplateNamespace: "ate-demo", TemplateName: "orka-codex-infra",
+	}}
+	pool := &corev1alpha1.RuntimePool{Spec: corev1alpha1.RuntimePoolSpec{
+		ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+			Provider: corev1alpha1.WorkspaceProviderSubstrate, BindingDigest: digest,
+			Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+				BaseTemplateNamespace: "ate-demo", BaseTemplateName: "orka-codex-infra",
+			},
+		},
+	}}
+	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
+		t.Fatal("exact Substrate workspace binding did not match")
+	}
+
+	pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateName = "other-infrastructure"
+	if acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
+		t.Fatal("Substrate workspace binding ignored the infrastructure template name")
+	}
+	pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateName = plan.Workspace.TemplateName
+	pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateNamespace = "other-namespace"
+	if acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
+		t.Fatal("Substrate workspace binding ignored the infrastructure template namespace")
+	}
+}
+
 func TestReapIdlePoolsDeletesStoppedWorkspacePools(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {

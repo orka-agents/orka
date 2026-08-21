@@ -970,11 +970,11 @@ func parsePositiveInt(name, value string) (int, error) {
 // agent's bootstrap token, the original exec-time environment block remains
 // visible only to same-UID processes inside the same isolation boundary.
 func readRequiredSecret(fileEnvName, bootstrapEnvName string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(bootstrapEnvName))
+	_ = os.Unsetenv(bootstrapEnvName)
 	if strings.TrimSpace(os.Getenv(fileEnvName)) != "" {
 		return readRequiredSecretFile(fileEnvName)
 	}
-	value := strings.TrimSpace(os.Getenv(bootstrapEnvName))
-	_ = os.Unsetenv(bootstrapEnvName)
 	if value == "" {
 		return "", fmt.Errorf("%s must name an absolute file, or %s must carry the read-once bootstrap secret", fileEnvName, bootstrapEnvName)
 	}

@@ -1156,6 +1156,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 		name                        string
 		agentSandboxEnabled         bool
 		substrateEnabled            bool
+		acpWorkspaceDispatchEnabled bool
 		workspaceProviderAPIEnabled bool
 		task                        *corev1alpha1.Task
 		agentSandboxConfig          AgentSandboxConfig
@@ -1329,6 +1330,22 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			wantErr: "processMode \"resident\" is not supported yet",
 		},
 		{
+			name:                        "substrate ACP backend does not require legacy bootstrap secret",
+			substrateEnabled:            true,
+			acpWorkspaceDispatchEnabled: true,
+			substrateConfig: SubstrateConfig{
+				APIInsecureSkipVerify: true,
+			},
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: executionWorkspace(substrateTemplateRef, func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+					}),
+				},
+			}},
+		},
+		{
 			name:             "substrate poolRef accepted",
 			substrateEnabled: true,
 			substrateConfig: SubstrateConfig{
@@ -1424,6 +1441,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			r := &TaskReconciler{
 				AgentSandboxEnabled:         tt.agentSandboxEnabled,
 				SubstrateEnabled:            tt.substrateEnabled,
+				ACPWorkspaceDispatchEnabled: tt.acpWorkspaceDispatchEnabled,
 				WorkspaceProviderAPIEnabled: tt.workspaceProviderAPIEnabled,
 				AgentSandboxConfig:          tt.agentSandboxConfig,
 				SubstrateConfig:             tt.substrateConfig,

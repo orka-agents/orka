@@ -185,8 +185,11 @@ func (c SubstrateConfig) WithDefaults() SubstrateConfig {
 	return c
 }
 
-// Validate rejects unsupported Substrate config values.
-func (c SubstrateConfig) Validate() error {
+// ValidateACPRuntimePool rejects invalid configuration used by the
+// credential-bootstrap Substrate RuntimePool backend. Legacy workspace-agent
+// bootstrap and SessionIdentity settings are intentionally not required: ACP
+// supervisors boot credential-free and receive pool credentials post-boot.
+func (c SubstrateConfig) ValidateACPRuntimePool() error {
 	cfg := c.WithDefaults()
 
 	if strings.TrimSpace(cfg.APIEndpoint) == "" {
@@ -202,6 +205,15 @@ func (c SubstrateConfig) Validate() error {
 	}
 	if strings.TrimSpace(cfg.ActorDNSSuffix) == "" {
 		return fmt.Errorf("substrate actor DNS suffix is required")
+	}
+	return nil
+}
+
+// Validate rejects unsupported legacy Substrate workspace-agent config values.
+func (c SubstrateConfig) Validate() error {
+	cfg := c.WithDefaults()
+	if err := cfg.ValidateACPRuntimePool(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(cfg.BootstrapSecretName) == "" {
 		return fmt.Errorf("substrate workspace bootstrap token secret name is required")

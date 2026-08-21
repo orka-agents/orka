@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,16 +16,19 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -191,7 +195,7 @@ func substrateTestRouteHost(pool *corev1alpha1.RuntimePool) string {
 }
 
 // substrateTestProbePod is the fixture identity the supervisor would advertise:
-// instance UID actor:<id> with the route host as its address.
+// an opaque Orka instance UID with the route host as its address.
 func substrateTestProbePod(pool *corev1alpha1.RuntimePool) corev1.Pod {
 	return corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{UID: types.UID(substrateActorInstanceUID(substrateTestActorID(pool)))},
@@ -262,6 +266,8 @@ func TestSubstrateRuntimePoolRecyclesActorWithUnexpectedTemplateBeforeBootstrap(
 		TemplateNamespace: "attacker-owned",
 		TemplateName:      "credential-capture",
 		Status:            "STATUS_RUNNING",
+		PodNamespace:      "ate-workers",
+		PodName:           "worker-0",
 	}
 	seedAttempts := 0
 	r.SubstrateCredentialSeeder = func(context.Context, string, string, harnessv2.CredentialBootstrapRequest) error {
@@ -303,6 +309,70 @@ func TestSubstrateRuntimePoolRecyclesActorWithUnexpectedTemplateBeforeBootstrap(
 	}
 }
 
+func TestSubstrateRuntimePoolRejectsSquattedDerivedTemplateOwnership(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	squatted := substrateTestBaseTemplate().DeepCopy()
+	squatted.SetName(runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name)))
+	squatted.SetLabels(map[string]string{runtimePoolManagedByLabel: "attacker"})
+	if err := r.Create(context.Background(), squatted); err != nil {
+		t.Fatalf("create squatted derived template: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	if len(control.created) != 0 || len(control.resumed) != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("untrusted template caused actor activity: created=%v resumed=%v probes=%d", control.created, control.resumed, supervisor.probeCalls)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "exact RuntimePool ownership identity") {
+		t.Fatalf("status = %s/%q, want ownership rejection", got.Status.Lifecycle, got.Status.Message)
+	}
+}
+
+func TestSubstrateRuntimePoolRecyclesActorWhenTemplateContentsDoNotMatchRevision(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	containers, found, err := unstructured.NestedSlice(derived.Object, "spec", "containers")
+	if err != nil || !found || len(containers) != 1 {
+		t.Fatalf("read derived containers: found=%v err=%v", found, err)
+	}
+	container := containers[0].(map[string]any)
+	container["image"] = "attacker.invalid/runtime:latest"
+	containers[0] = container
+	if err := unstructured.SetNestedSlice(derived.Object, containers, "spec", "containers"); err != nil {
+		t.Fatalf("tamper derived container: %v", err)
+	}
+	if err := r.Update(context.Background(), derived); err != nil {
+		t.Fatalf("update tampered derived template: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("tampered template received credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+	}
+	if len(control.settled) != 1 {
+		t.Fatalf("settled actors = %v, want tampered-template actor recycled", control.settled)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "contents do not match their declared revision") {
+		t.Fatalf("status = %s/%q, want template-integrity rejection", got.Status.Lifecycle, got.Status.Message)
+	}
+}
+
 //nolint:gocyclo // Every rendered-template invariant is asserted in one place.
 func assertSubstrateDerivedTemplate(
 	t *testing.T,
@@ -312,6 +382,9 @@ func assertSubstrateDerivedTemplate(
 	actorID string,
 ) {
 	t.Helper()
+	if _, err := substrateRuntimeTemplateIntegrity(derived); err != nil {
+		t.Fatalf("derived ActorTemplate integrity: %v", err)
+	}
 	deployed, err := substrateTemplatePodTemplateSpec(derived)
 	if err != nil {
 		t.Fatalf("reconstruct deployed template: %v", err)
@@ -388,6 +461,34 @@ func TestSubstrateRuntimePoolServesThroughRouterHost(t *testing.T) {
 	}
 	if active.PodNamespace != "ate-workers" || active.PodName != "worker-0" {
 		t.Fatalf("ActiveInstance placement = %s/%s, want provider worker placement", active.PodNamespace, active.PodName)
+	}
+	if strings.Contains(active.PodUID, actorID) || strings.Contains(active.RuntimeInstanceID, actorID) {
+		t.Fatalf("public active instance leaked raw provider actor ID %q: %#v", actorID, active)
+	}
+}
+
+func TestSubstrateRuntimePoolColdStartTimeout(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	now := runtimePoolTestNow
+	r.Now = func() time.Time { return now }
+	pool.Spec.ColdStartTimeoutSeconds = 5
+	if err := r.Update(context.Background(), pool); err != nil {
+		t.Fatalf("update cold-start timeout: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	actorID := substrateTestActorID(pool)
+	control.actors[actorID].Status = "STATUS_RESUMING"
+	now = now.Add(6 * time.Second)
+	runtimePoolReconcile(t, r, pool)
+
+	got := runtimePoolTestGetPool(t, r, pool)
+	condition := meta.FindStatusCondition(got.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		condition == nil || condition.Reason != runtimePoolRolloutReasonTimedOut {
+		t.Fatalf("cold-start status/condition = %s/%#v, want Degraded/RolloutTimedOut", got.Status.Lifecycle, condition)
 	}
 }
 
@@ -491,7 +592,7 @@ func TestSubstrateTeardownDestroysLabeledWorkerPodBeforeSettling(t *testing.T) {
 		t.Fatalf("create worker pod: %v", err)
 	}
 
-	gone, err := r.teardownSubstrateActor(context.Background(), control, actorID)
+	gone, err := r.teardownSubstrateActor(context.Background(), pool, control, actorID)
 	if err != nil || gone {
 		t.Fatalf("teardown with live worker = (%v, %v), want in-progress", gone, err)
 	}
@@ -502,14 +603,14 @@ func TestSubstrateTeardownDestroysLabeledWorkerPodBeforeSettling(t *testing.T) {
 		t.Fatalf("worker pod get after teardown = %v, want deleted", err)
 	}
 
-	gone, err = r.teardownSubstrateActor(context.Background(), control, actorID)
+	gone, err = r.teardownSubstrateActor(context.Background(), pool, control, actorID)
 	if err != nil || gone {
 		t.Fatalf("teardown after workload destruction = (%v, %v), want settling", gone, err)
 	}
 	if len(control.settled) != 1 {
 		t.Fatalf("settled = %v, want the memoryless actor settled", control.settled)
 	}
-	gone, err = r.teardownSubstrateActor(context.Background(), control, actorID)
+	gone, err = r.teardownSubstrateActor(context.Background(), pool, control, actorID)
 	if err != nil || !gone {
 		t.Fatalf("final teardown = (%v, %v), want deleted", gone, err)
 	}
@@ -532,12 +633,85 @@ func TestSubstrateTeardownRefusesUnlabeledPod(t *testing.T) {
 	if err := r.Create(context.Background(), bystander); err != nil {
 		t.Fatalf("create bystander pod: %v", err)
 	}
-	if _, err := r.teardownSubstrateActor(context.Background(), control, actorID); err == nil ||
-		!strings.Contains(err.Error(), "provider worker label") {
+	if _, err := r.teardownSubstrateActor(context.Background(), pool, control, actorID); err == nil ||
+		!strings.Contains(err.Error(), substrateWorkerPoolLabel) {
 		t.Fatalf("teardown error = %v, want refusal to delete an unlabeled Pod", err)
 	}
 	if err := r.Get(context.Background(), types.NamespacedName{Namespace: "ate-workers", Name: "worker-0"}, &corev1.Pod{}); err != nil {
 		t.Fatalf("bystander pod must survive: %v", err)
+	}
+}
+
+func TestSubstrateTeardownRefusesUnknownOrMismatchedWorkerPlacement(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*workspace.SubstrateRuntimeActor)
+		pod       *corev1.Pod
+		wantError string
+	}{
+		{
+			name: "missing provider placement",
+			mutate: func(actor *workspace.SubstrateRuntimeActor) {
+				actor.PodNamespace = ""
+				actor.PodName = ""
+			},
+			wantError: "placement is unknown",
+		},
+		{
+			name: "wrong worker namespace",
+			mutate: func(actor *workspace.SubstrateRuntimeActor) {
+				actor.PodNamespace = "other-workers"
+			},
+			wantError: "does not match infrastructure WorkerPool namespace",
+		},
+		{
+			name:   "wrong worker pool label",
+			mutate: func(*workspace.SubstrateRuntimeActor) {},
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "ate-workers", Name: "worker-0",
+				Labels: map[string]string{substrateWorkerPoolLabel: "other-workers"},
+			}},
+			wantError: "does not match infrastructure WorkerPool orka-workers",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+			runtimePoolReconcile(t, r, pool)
+			actorID := substrateTestActorID(pool)
+			tt.mutate(control.actors[actorID])
+			if tt.pod != nil {
+				if err := r.Create(context.Background(), tt.pod.DeepCopy()); err != nil {
+					t.Fatalf("create worker Pod: %v", err)
+				}
+			}
+
+			if _, err := r.teardownSubstrateActor(context.Background(), pool, control, actorID); err == nil ||
+				!strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("teardown error = %v, want %q", err, tt.wantError)
+			}
+			if len(control.settled) != 0 {
+				t.Fatalf("settled actors = %v, want none after placement rejection", control.settled)
+			}
+		})
+	}
+}
+
+func TestGetSubstrateActorTemplateUsesUncachedReader(t *testing.T) {
+	scheme := runtimePoolSubstrateTestScheme(t)
+	template := substrateTestBaseTemplate()
+	cachedClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template).Build()
+	r := &RuntimePoolReconciler{Client: cachedClient, APIReader: apiReader}
+
+	got, err := r.getSubstrateActorTemplate(context.Background(), template.GetNamespace(), template.GetName())
+	if err != nil {
+		t.Fatalf("getSubstrateActorTemplate() error = %v", err)
+	}
+	if got == nil || got.GetUID() != template.GetUID() || got.GetName() != template.GetName() {
+		t.Fatalf("uncached ActorTemplate = %#v, want %s/%s", got, template.GetNamespace(), template.GetName())
 	}
 }
 
@@ -697,6 +871,37 @@ func TestSubstrateRouteHTTPTransportDialsRouterPreservingHost(t *testing.T) {
 	}
 	if parsed, _ := url.Parse(router.URL); parsed != nil && parsed.Scheme != "http" {
 		t.Fatal("test router must be plain HTTP")
+	}
+}
+
+func TestSubstrateRouteHTTPTransportUsesRouterTLSIdentity(t *testing.T) {
+	seenHost := ""
+	router := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHost = r.Host
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer router.Close()
+
+	roundTripper, err := substrateRouteHTTPTransport(router.URL, substrateTestActorDNSSuffix)
+	if err != nil {
+		t.Fatalf("substrateRouteHTTPTransport: %v", err)
+	}
+	routed, ok := roundTripper.(*substrateRouteRoundTripper)
+	if !ok {
+		t.Fatalf("transport type = %T, want substrate route transport", roundTripper)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(router.Certificate())
+	routed.transport.TLSClientConfig.RootCAs = roots
+
+	routeHost := "orka-acp-actor." + substrateTestActorDNSSuffix
+	resp, err := (&http.Client{Transport: routed}).Get("http://" + routeHost + "/v2/health")
+	if err != nil {
+		t.Fatalf("TLS router-dialed request failed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if seenHost != routeHost {
+		t.Fatalf("TLS router saw Host %q, want logical route host %q", seenHost, routeHost)
 	}
 }
 

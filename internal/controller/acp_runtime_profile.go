@@ -177,9 +177,23 @@ func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACP
 	if plan.Workspace == nil {
 		return pool.Spec.ExecutionWorkspace == nil
 	}
-	return pool.Spec.ExecutionWorkspace != nil &&
-		pool.Spec.ExecutionWorkspace.Provider == plan.Workspace.Provider &&
-		pool.Spec.ExecutionWorkspace.BindingDigest == plan.Workspace.BindingDigest
+	workspace := pool.Spec.ExecutionWorkspace
+	if workspace == nil ||
+		workspace.Provider != plan.Workspace.Provider ||
+		workspace.BindingDigest != plan.Workspace.BindingDigest {
+		return false
+	}
+	switch plan.Workspace.Provider {
+	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		return workspace.Substrate == nil &&
+			plan.Workspace.TemplateNamespace == "" && plan.Workspace.TemplateName == ""
+	case corev1alpha1.WorkspaceProviderSubstrate:
+		return workspace.Substrate != nil &&
+			workspace.Substrate.BaseTemplateNamespace == plan.Workspace.TemplateNamespace &&
+			workspace.Substrate.BaseTemplateName == plan.Workspace.TemplateName
+	default:
+		return false
+	}
 }
 
 func acpRuntimePoolBindingMatches(status *corev1alpha1.TaskExecutionStatus, pool *corev1alpha1.RuntimePool) bool {

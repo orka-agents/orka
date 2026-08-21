@@ -10,10 +10,12 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -144,6 +146,26 @@ func TestWorkspaceRuntimePoolMaterializesProviderWorkload(t *testing.T) {
 	status := runtimePoolTestGetPool(t, r, pool).Status
 	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
 		t.Fatalf("status = %s/%s, want Starting/Closed", status.Lifecycle, status.AdmissionState)
+	}
+}
+
+func TestWorkspaceRuntimePoolColdStartTimeout(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	pool.Spec.ColdStartTimeoutSeconds = 5
+	now := runtimePoolTestNow
+	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+	r.Now = func() time.Time { return now }
+
+	runtimePoolReconcile(t, r, pool)
+	now = now.Add(6 * time.Second)
+	runtimePoolReconcile(t, r, pool)
+
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		condition == nil || condition.Reason != runtimePoolRolloutReasonTimedOut {
+		t.Fatalf("cold-start status/condition = %s/%#v, want Degraded/RolloutTimedOut", status.Lifecycle, condition)
 	}
 }
 
