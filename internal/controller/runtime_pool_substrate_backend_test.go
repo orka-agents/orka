@@ -1502,6 +1502,60 @@ func TestSubstrateRuntimePoolScaleToZeroDrainsThenDeletesActor(t *testing.T) {
 	}
 }
 
+func TestSubstrateRuntimePoolDemandReturnCompletesDrainBeforeReplacement(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-reactivate", false)
+	runtimePoolReconcile(t, r, pool)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("scale pool to zero: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.drainCalls != 1 {
+		t.Fatalf("drain calls = %d, want 1", supervisor.drainCalls)
+	}
+
+	current = runtimePoolTestGetPool(t, r, pool)
+	current.Spec.DesiredReplicas = 1
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("restore substrate demand: %v", err)
+	}
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-reactivate", true)
+	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
+		t.Fatalf("lifecycle after demand returned to a drained actor = %s, want Quiescent rollout barrier", got)
+	}
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+		if len(control.deleted) != 0 {
+			break
+		}
+	}
+	if len(control.deleted) != 1 {
+		t.Fatalf("deleted actors = %v, want the drained actor deleted despite renewed demand", control.deleted)
+	}
+
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-replacement", false)
+	for range 8 {
+		runtimePoolReconcile(t, r, pool)
+		if len(control.boots) >= 2 {
+			break
+		}
+	}
+	if len(control.boots) != 2 || !control.boots[1] {
+		t.Fatalf("boots = %v, want renewed demand to boot a replacement actor", control.boots)
+	}
+}
+
 func TestSubstrateRuntimePoolFinalizerDeletesActorTemplateAndSecrets(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -100,6 +101,9 @@ func resolveACPWorkspaceBinding(
 		if templateNamespace == "" {
 			templateNamespace = task.Namespace
 		}
+		if err := validateSubstrateWorkspaceTemplateReference(templateNamespace, templateName); err != nil {
+			return nil, err
+		}
 		if enforceNamespaceIsolation && templateNamespace != task.Namespace {
 			return nil, fmt.Errorf(
 				"cross-namespace execution workspace templateRef is not allowed when namespace isolation is enforced: template %q is in namespace %q, task is in %q",
@@ -172,6 +176,16 @@ func resolveACPWorkspaceBinding(
 	}
 	binding.BindingDigest = digest
 	return binding, nil
+}
+
+func validateSubstrateWorkspaceTemplateReference(namespace, name string) error {
+	if errs := validation.IsDNS1123Label(namespace); len(errs) != 0 {
+		return fmt.Errorf("execution workspace substrate templateRef.namespace %q is invalid: %s", namespace, strings.Join(errs, "; "))
+	}
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) != 0 {
+		return fmt.Errorf("execution workspace substrate templateRef.name %q is invalid: %s", name, strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // validateACPWorkspaceBindingRequest validates provider and capability shape
@@ -413,6 +427,9 @@ func validateACPWorkspaceBindingValues(binding *ACPRuntimeWorkspaceBinding) erro
 	case corev1alpha1.WorkspaceProviderSubstrate:
 		if strings.TrimSpace(binding.TemplateNamespace) == "" || strings.TrimSpace(binding.TemplateName) == "" {
 			return fmt.Errorf("frozen substrate execution workspace binding is missing the infrastructure template reference")
+		}
+		if err := validateSubstrateWorkspaceTemplateReference(binding.TemplateNamespace, binding.TemplateName); err != nil {
+			return fmt.Errorf("frozen substrate execution workspace binding is invalid: %w", err)
 		}
 	default:
 		return fmt.Errorf("frozen execution workspace provider %q is not supported", binding.Provider)

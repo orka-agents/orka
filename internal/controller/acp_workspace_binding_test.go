@@ -113,6 +113,22 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			wantSession: "task:11111111-1111-1111-1111-111111111111",
 		},
 		{
+			name: "substrate rejects invalid template namespace",
+			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: "Bad_NS"}
+			}),
+			wantErr: "templateRef.namespace",
+		},
+		{
+			name: "substrate rejects invalid template name",
+			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "bad/name", Namespace: "ate-demo"}
+			}),
+			wantErr: "templateRef.name",
+		},
+		{
 			name: "substrate cross-namespace template fails under namespace isolation",
 			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate

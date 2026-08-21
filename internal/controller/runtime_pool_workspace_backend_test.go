@@ -1095,6 +1095,58 @@ func TestWorkspaceRuntimePoolScaleToZeroDrainsThenDeletesClaim(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolDemandReturnCompletesDrainBeforeReplacement(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.74")
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-reactivate", false)
+	runtimePoolReconcile(t, r, pool)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Spec.DesiredReplicas = 0
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("scale pool to zero: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.drainCalls != 1 {
+		t.Fatalf("drain calls = %d, want 1", supervisor.drainCalls)
+	}
+
+	current = runtimePoolTestGetPool(t, r, pool)
+	current.Spec.DesiredReplicas = 1
+	current.Generation++
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("restore workspace demand: %v", err)
+	}
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-reactivate", true)
+	runtimePoolReconcile(t, r, pool)
+	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
+		t.Fatalf("lifecycle after demand returned to a drained workspace = %s, want Quiescent rollout barrier", got)
+	}
+	runtimePoolReconcile(t, r, pool)
+	if _, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool); claim != nil {
+		t.Fatal("old drained claim survived renewed demand")
+	}
+
+	if err := r.Delete(context.Background(), &pod); err != nil {
+		t.Fatalf("delete old sandbox Pod: %v", err)
+	}
+	for range 5 {
+		runtimePoolReconcile(t, r, pool)
+		_, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+		if claim != nil {
+			return
+		}
+	}
+	t.Fatal("renewed demand did not create a replacement SandboxClaim")
+}
+
 func TestWorkspaceRuntimePoolFinalizerDeletesProviderChildren(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()
