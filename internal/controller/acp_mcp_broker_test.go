@@ -19,6 +19,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -436,6 +437,77 @@ func TestRuntimePoolAuthSecretForEpochSelectsActiveInstanceSecretDuringRollover(
 		{ObjectMeta: metav1.ObjectMeta{Name: "pool-auth-e11"}},
 	}, 1); err == nil {
 		t.Fatal("suffix must be anchored: auth-e11 must not satisfy epoch 1")
+	}
+}
+
+func TestResolveRuntimePoolAuthSecretUsesPrivateWorkspaceBinding(t *testing.T) {
+	const (
+		runtimeNamespace = "runtime-system"
+		testPoolName     = "pool"
+		testPoolUID      = "pool-uid"
+	)
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: corev1.NamespaceDefault, Name: testPoolName, UID: testPoolUID},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			RuntimeNamespace: runtimeNamespace,
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+			},
+		},
+	}
+	secretName := runtimePoolChildName(
+		runtimePoolResourceName(pool.Namespace, pool.Name),
+		"auth-e1-"+strings.Repeat("a", 24),
+	)
+	boundUID := types.UID("bound-secret-uid")
+	pool.Annotations = map[string]string{
+		runtimePoolPrivateAuthSecretBindingAnnotation(1): secretName + "/" + string(boundUID),
+	}
+	immutable := true
+	labels := map[string]string{
+		runtimePoolManagedByLabel:       runtimePoolManagedByLabelValue,
+		runtimePoolApplicationLabel:     runtimePoolApplicationLabelValue,
+		runtimePoolKeyLabel:             runtimePoolKey(pool.Namespace, pool.Name),
+		runtimePoolNameLabel:            pool.Name,
+		runtimePoolNamespaceLabel:       pool.Namespace,
+		runtimePoolUIDLabel:             string(pool.UID),
+		runtimePoolNetworkRoleLabel:     "provider-client",
+		runtimePoolAuthLabel:            booleanTrueValue,
+		runtimePoolCredentialEpochLabel: "1",
+	}
+	bound := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: runtimeNamespace, Name: secretName, UID: boundUID, Labels: labels},
+		Immutable:  &immutable,
+		Data: map[string][]byte{
+			runtimePoolControllerTokenKey:      []byte(strings.Repeat("t", 32)),
+			runtimePoolCapabilitySecretKey:     []byte(strings.Repeat("c", 32)),
+			runtimePoolBootstrapNonceKey:       []byte(strings.Repeat("n", 32)),
+			runtimePoolBootstrapSigningSeedKey: []byte(strings.Repeat("s", 32)),
+		},
+	}
+	decoy := bound.DeepCopy()
+	decoy.Name = runtimePoolChildName(
+		runtimePoolResourceName(pool.Namespace, pool.Name),
+		"auth-e1-"+strings.Repeat("b", 24),
+	)
+	decoy.UID = "decoy-secret-uid"
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(bound, decoy).Build()
+	selected, err := resolveRuntimePoolAuthSecret(context.Background(), reader, pool, runtimeNamespace, 1)
+	if err != nil || selected.Name != bound.Name || selected.UID != boundUID {
+		t.Fatalf("private auth Secret = %s/%s, error=%v; want bound %s/%s", selected.Name, selected.UID, err, bound.Name, boundUID)
+	}
+
+	replacement := bound.DeepCopy()
+	replacement.UID = "replacement-secret-uid"
+	replacementReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(replacement).Build()
+	if _, err := resolveRuntimePoolAuthSecret(context.Background(), replacementReader, pool, runtimeNamespace, 1); err == nil ||
+		!strings.Contains(err.Error(), "UID changed") {
+		t.Fatalf("recreated private auth Secret error = %v, want immutable UID rejection", err)
 	}
 }
 

@@ -162,6 +162,31 @@ func TestACPUpgradeDrainCoordinatorDrainsSubstrateActorWithoutPod(t *testing.T) 
 			BaseTemplateName:      acpUpgradeDrainTestBaseTemplateName,
 		},
 	}
+	const runtimeNamespace = "runtime-system"
+	pool.Spec.RuntimeNamespace = runtimeNamespace
+	pool.Status.ActiveInstance.PodNamespace = runtimeNamespace
+	auth.Namespace = runtimeNamespace
+	auth.Name = runtimePoolChildName(runtimePoolResourceName(pool.Namespace, pool.Name), "auth-e7-"+strings.Repeat("a", 24))
+	auth.UID = "bound-auth-secret-uid"
+	immutable := true
+	auth.Immutable = &immutable
+	auth.Labels = map[string]string{
+		runtimePoolManagedByLabel:       runtimePoolManagedByLabelValue,
+		runtimePoolApplicationLabel:     runtimePoolApplicationLabelValue,
+		runtimePoolKeyLabel:             runtimePoolKey(pool.Namespace, pool.Name),
+		runtimePoolNameLabel:            pool.Name,
+		runtimePoolNamespaceLabel:       pool.Namespace,
+		runtimePoolUIDLabel:             string(pool.UID),
+		runtimePoolNetworkRoleLabel:     "provider-client",
+		runtimePoolAuthLabel:            booleanTrueValue,
+		runtimePoolCredentialEpochLabel: "7",
+	}
+	auth.Data[runtimePoolBootstrapNonceKey] = []byte(strings.Repeat("n", 32))
+	auth.Data[runtimePoolBootstrapSigningSeedKey] = []byte(strings.Repeat("s", 32))
+	if pool.Annotations == nil {
+		pool.Annotations = map[string]string{}
+	}
+	pool.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(7)] = auth.Name + "/" + string(auth.UID)
 	const actorID = "acp-ws-codex-actor"
 	routeHost := actorID + ".actors.local"
 	instanceUID := substrateActorInstanceUID(actorID)

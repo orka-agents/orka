@@ -879,8 +879,8 @@ func TestWorkspaceRuntimePoolFinalizationPreservesIsolationUntilClaimGone(t *tes
 	pool.DeletionTimestamp = &deletedAt
 	base := runtimePoolResourceName(pool.Namespace, pool.Name)
 	labels := map[string]string{
-		runtimePoolManagedByLabel:   outboundTokenRequestManagedByLabelValue,
-		runtimePoolApplicationLabel: "orka-acp-runtime",
+		runtimePoolManagedByLabel:   runtimePoolManagedByLabelValue,
+		runtimePoolApplicationLabel: runtimePoolApplicationLabelValue,
 		runtimePoolKeyLabel:         runtimePoolKey(pool.Namespace, pool.Name),
 		runtimePoolNameLabel:        pool.Name,
 		runtimePoolNamespaceLabel:   pool.Namespace,

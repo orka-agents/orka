@@ -14,6 +14,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -754,16 +755,7 @@ func runtimePoolACPMCPAuthMaterial(
 	if namespace == "" {
 		namespace = active.PodNamespace
 	}
-	var secrets corev1.SecretList
-	if err := reader.List(ctx, &secrets, client.InNamespace(namespace), client.MatchingLabels{
-		runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
-	}); err != nil {
-		return "", nil, err
-	}
-	// During graceful epoch replacement both the draining instance's Secret
-	// and the next epoch's Secret exist; select the one mounted by the pool's
-	// exact active instance instead of requiring one Secret globally.
-	secret, err := runtimePoolAuthSecretForEpoch(secrets.Items, active.ControllerEpoch)
+	secret, err := resolveRuntimePoolAuthSecret(ctx, reader, pool, namespace, active.ControllerEpoch)
 	if err != nil {
 		return "", nil, err
 	}
@@ -773,6 +765,70 @@ func runtimePoolACPMCPAuthMaterial(
 		return "", nil, fmt.Errorf("runtime pool auth Secret is incomplete")
 	}
 	return bearer, capability, nil
+}
+
+// resolveRuntimePoolAuthSecret resolves the exact controller-auth Secret for
+// one RuntimePool epoch. Provider-workspace pools bind their unpredictable
+// Secret name and immutable UID on the RuntimePool; label-only discovery is
+// intentionally forbidden for those pools. Deployment-backed pools retain
+// epoch selection because their deterministic mounted Secret predates the
+// private binding contract.
+func resolveRuntimePoolAuthSecret(
+	ctx context.Context,
+	reader client.Reader,
+	pool *corev1alpha1.RuntimePool,
+	namespace string,
+	epoch int64,
+) (*corev1.Secret, error) {
+	if reader == nil || pool == nil || strings.TrimSpace(namespace) == "" || epoch <= 0 {
+		return nil, fmt.Errorf("runtime pool auth Secret lookup is incomplete")
+	}
+	if pool.Spec.ExecutionWorkspace != nil {
+		binding := strings.TrimSpace(pool.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(epoch)])
+		if binding == "" {
+			return nil, fmt.Errorf("private RuntimePool auth Secret binding for controller epoch %d is missing", epoch)
+		}
+		name, uid, err := parseRuntimePoolPrivateSecretBinding(binding)
+		if err != nil {
+			return nil, err
+		}
+		secret := &corev1.Secret{}
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, secret); err != nil {
+			return nil, fmt.Errorf("read bound private RuntimePool auth Secret: %w", err)
+		}
+		if secret.UID != uid {
+			return nil, fmt.Errorf("bound private RuntimePool auth Secret UID changed")
+		}
+		cfg := runtimePoolConfig{
+			namespace: namespace,
+			baseName:  runtimePoolResourceName(pool.Namespace, pool.Name),
+			labels: map[string]string{
+				runtimePoolManagedByLabel:   runtimePoolManagedByLabelValue,
+				runtimePoolApplicationLabel: runtimePoolApplicationLabelValue,
+				runtimePoolKeyLabel:         runtimePoolKey(pool.Namespace, pool.Name),
+				runtimePoolNameLabel:        pool.Name,
+				runtimePoolNamespaceLabel:   pool.Namespace,
+				runtimePoolUIDLabel:         string(pool.UID),
+				runtimePoolNetworkRoleLabel: "provider-client",
+			},
+			controllerEpoch: epoch,
+		}
+		if !runtimePoolPrivateAuthSecretMatchesPool(secret, pool, cfg) {
+			return nil, fmt.Errorf("bound private RuntimePool auth Secret does not carry the exact immutable RuntimePool ownership identity")
+		}
+		return secret.DeepCopy(), nil
+	}
+
+	var secrets corev1.SecretList
+	if err := reader.List(ctx, &secrets, client.InNamespace(namespace), client.MatchingLabels{
+		runtimePoolAuthLabel: booleanTrueValue, runtimePoolUIDLabel: string(pool.UID),
+	}); err != nil {
+		return nil, err
+	}
+	// During graceful epoch replacement both the draining instance's Secret
+	// and the next epoch's Secret exist; select the one mounted by the pool's
+	// exact active instance instead of requiring one Secret globally.
+	return runtimePoolAuthSecretForEpoch(secrets.Items, epoch)
 }
 
 // runtimePoolAuthSecretForEpoch selects the auth Secret bound to the given

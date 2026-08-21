@@ -28,6 +28,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const artifactAuthorizationReplacementSecretUID = "replacement-secret-uid"
+
 func TestACPArtifactAuthorizationBrokerIssuesExactUploadCapability(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -181,6 +183,63 @@ func (r *recordingCapabilityReservations) Reserve(_ context.Context, request art
 	return nil
 }
 
+func TestResolveArtifactRuntimePoolByIdentityUsesPrivateWorkspaceBinding(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	poolUID := types.UID("pool-uid")
+	secretName := "pool-auth-e1-" + strings.Repeat("a", 24)
+	boundUID := types.UID("bound-secret-uid")
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default", Name: "pool", UID: poolUID,
+			Annotations: map[string]string{runtimePoolPrivateAuthBindingAPI + "1": secretName + "/" + string(boundUID)},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+			Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+		}},
+		Status: corev1alpha1.RuntimePoolStatus{ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
+			PodNamespace: "orka-runtimes", ControllerEpoch: 1,
+		}},
+	}
+	immutable := true
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "orka-runtimes", Name: secretName, UID: boundUID,
+			Labels: map[string]string{
+				runtimePoolAuthLabelAPI:            runtimePoolAuthLabelValueAPI,
+				runtimePoolUIDLabelAPI:             string(poolUID),
+				runtimePoolCredentialEpochLabelAPI: "1",
+			},
+		},
+		Immutable: &immutable,
+		Data: map[string][]byte{
+			runtimePoolControllerTokenKeyAPI:  []byte(strings.Repeat("t", 32)),
+			runtimePoolCapabilitySecretKeyAPI: []byte(strings.Repeat("c", 32)),
+		},
+	}
+
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, secret).Build()
+	server := &Server{client: reader}
+	_, selected, err := server.resolveArtifactRuntimePoolByIdentity(context.Background(), pool.Namespace, string(pool.UID))
+	if err != nil || selected == nil || selected.UID != boundUID {
+		t.Fatalf("bound artifact auth Secret = %#v, error=%v; want UID %q", selected, err, boundUID)
+	}
+
+	replacement := secret.DeepCopy()
+	replacement.UID = artifactAuthorizationReplacementSecretUID
+	replacementReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool.DeepCopy(), replacement).Build()
+	replacementServer := &Server{client: replacementReader}
+	if _, _, err := replacementServer.resolveArtifactRuntimePoolByIdentity(context.Background(), pool.Namespace, string(pool.UID)); err == nil ||
+		!strings.Contains(err.Error(), "UID changed") {
+		t.Fatalf("recreated artifact auth Secret error = %v, want immutable UID rejection", err)
+	}
+}
+
 func TestACPArtifactAuthorizationBrokerRejectsStaleCachedRevocationState(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -268,7 +327,7 @@ func TestACPArtifactAuthorizationBrokerRejectsStaleCachedRevocationState(t *test
 				replacementPool := pool.DeepCopy()
 				replacementPool.UID = "replacement-pool-uid"
 				replacementSecret := authSecret.DeepCopy()
-				replacementSecret.UID = "replacement-secret-uid"
+				replacementSecret.UID = artifactAuthorizationReplacementSecretUID
 				replacementSecret.Labels[runtimePoolUIDLabelAPI] = string(replacementPool.UID)
 				return []client.Object{replacementPool, replacementSecret, task.DeepCopy()}
 			},
@@ -277,7 +336,7 @@ func TestACPArtifactAuthorizationBrokerRejectsStaleCachedRevocationState(t *test
 			name: "runtime pool auth Secret replacement",
 			currentObjects: func() []client.Object {
 				replacementSecret := authSecret.DeepCopy()
-				replacementSecret.UID = "replacement-secret-uid"
+				replacementSecret.UID = artifactAuthorizationReplacementSecretUID
 				replacementSecret.Data = map[string][]byte{
 					runtimePoolControllerTokenKeyAPI:  []byte(strings.Repeat("r", 32)),
 					runtimePoolCapabilitySecretKeyAPI: []byte(strings.Repeat("n", 32)),

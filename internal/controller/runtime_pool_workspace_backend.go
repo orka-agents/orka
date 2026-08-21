@@ -1400,7 +1400,7 @@ func (r *RuntimePoolReconciler) pruneStaleWorkspaceRuntimePoolSecrets(
 	}
 	var secrets corev1.SecretList
 	if err := reader.List(ctx, &secrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolManagedByLabel: outboundTokenRequestManagedByLabelValue,
+		runtimePoolManagedByLabel: runtimePoolManagedByLabelValue,
 		runtimePoolKeyLabel:       cfg.labels[runtimePoolKeyLabel],
 		runtimePoolUIDLabel:       string(pool.UID),
 	}); err != nil {
@@ -1493,14 +1493,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplateAuthSecret(
 		if err != nil || epoch <= 0 {
 			return nil, fmt.Errorf("deployed RuntimePool auth Secret reference is missing")
 		}
-		var secrets corev1.SecretList
-		if err := r.sandboxReader().List(ctx, &secrets, client.InNamespace(namespace), client.MatchingLabels{
-			runtimePoolAuthLabel: booleanTrueValue,
-			runtimePoolUIDLabel:  string(pool.UID),
-		}); err != nil {
-			return nil, fmt.Errorf("list deployed RuntimePool auth Secrets: %w", err)
-		}
-		secret, err = runtimePoolAuthSecretForEpoch(secrets.Items, epoch)
+		secret, err = resolveRuntimePoolAuthSecret(ctx, r.sandboxReader(), pool, namespace, epoch)
 		if err != nil {
 			return nil, err
 		}

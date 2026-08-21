@@ -3335,16 +3335,9 @@ func (d *ACPDispatcher) runtimeAuthSecret(ctx context.Context, pool *corev1alpha
 	if pool.Status.ActiveInstance == nil {
 		return nil, fmt.Errorf("RuntimePool has no active instance")
 	}
-	var secrets corev1.SecretList
-	if err := d.APIReader.List(ctx, &secrets, client.InNamespace(namespace), client.MatchingLabels{
-		runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
-	}); err != nil {
-		return nil, err
-	}
-	// During graceful epoch replacement the draining instance's Secret and the
-	// next epoch's Secret coexist; select the one bound to the active
-	// instance's epoch instead of requiring exactly one globally.
-	secret, err := runtimePoolAuthSecretForEpoch(secrets.Items, pool.Status.ActiveInstance.ControllerEpoch)
+	secret, err := resolveRuntimePoolAuthSecret(
+		ctx, d.APIReader, pool, namespace, pool.Status.ActiveInstance.ControllerEpoch,
+	)
 	if err != nil {
 		return nil, err
 	}

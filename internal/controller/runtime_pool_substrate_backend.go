@@ -1202,11 +1202,20 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 	}
 	if !actor.Running() {
 		status.ActiveInstance = nil
-		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		if !runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity) {
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+			status.Message = runtimePoolMessageDrainUnauthenticated
+			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
+		if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
+			return ctrl.Result{}, err
+		}
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
 		status.Message = runtimePoolMessageDrainUnauthenticated
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
-		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonStopping, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
 	validationPool, validationConfig, authSecret, err := r.substrateRuntimePoolDeployedValidationTarget(
@@ -1383,8 +1392,7 @@ func (r *RuntimePoolReconciler) teardownSubstrateActor(
 		}
 		return true, nil
 	}
-	workloadAbsent := pool.Annotations[substrateActorWorkloadAbsentAnnotation] == actorID
-	if !workloadAbsent {
+	if pool.Annotations[substrateActorWorkloadAbsentAnnotation] != actorID {
 		workloadGone, err := r.destroySubstrateActorWorkload(ctx, pool, actorID, actor)
 		if err != nil {
 			return false, err
@@ -1395,6 +1403,42 @@ func (r *RuntimePoolReconciler) teardownSubstrateActor(
 		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkloadAbsentAnnotation, actorID); err != nil {
 			return false, err
 		}
+		// Persist the absence proof, then re-read the Actor below and prove its
+		// then-current placement absent immediately before any settle operation.
+		// This also protects a later reconcile that resumes from the marker.
+	}
+
+	actor, err = control.GetActor(ctx, actorID)
+	if err != nil {
+		return false, err
+	}
+	if actor == nil {
+		return true, nil
+	}
+	if !substrateActorMatchesRuntimeTemplate(
+		actor,
+		actorID,
+		workspaceSpec.Substrate.BaseTemplateNamespace,
+		runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name)),
+	) {
+		return false, fmt.Errorf("refusing to recycle foreign RuntimePool substrate actor %q", actorID)
+	}
+	if (actor.Suspended() || actor.Crashed()) &&
+		strings.TrimSpace(actor.PodNamespace) == "" && strings.TrimSpace(actor.PodName) == "" {
+		// The prior exact workload absence proof remains sufficient once the
+		// provider reports a deletable terminal state with no current placement.
+		// Any reported placement still goes through the fresh proof below.
+		if err := control.DeleteActor(ctx, actorID); err != nil {
+			return false, fmt.Errorf("delete RuntimePool substrate actor: %w", err)
+		}
+		return true, nil
+	}
+	workloadGone, err := r.destroySubstrateActorWorkload(ctx, pool, actorID, actor)
+	if err != nil {
+		return false, err
+	}
+	if !workloadGone {
+		return false, nil
 	}
 	if actor.Suspended() || actor.Crashed() {
 		if err := control.DeleteActor(ctx, actorID); err != nil {
@@ -1498,11 +1542,20 @@ func (r *RuntimePoolReconciler) destroySubstrateActorWorkload(
 		replacementFence.ActorID == actorID &&
 		replacementFence.Namespace == strings.TrimSpace(actor.PodNamespace) &&
 		replacementFence.Name == strings.TrimSpace(actor.PodName)
+	stageReplacementFence := func() (bool, error) {
+		if actor == nil {
+			return false, fmt.Errorf("refusing to settle RuntimePool substrate actor: provider worker Pod changed without a current actor placement")
+		}
+		if err := r.verifySubstrateActorWorkerPlacement(ctx, pool, actor); err != nil && !errors.Is(err, errSubstrateWorkerPodFenceConflict) {
+			return false, err
+		}
+		// recordSubstrateRuntimePoolWorkerPodFence persists the validated
+		// replacement separately and deliberately returns a fence conflict.
+		// Cross a reconcile boundary before promoting or deleting it.
+		return false, nil
+	}
 	if placementChanged && !replacementMatchesActor {
-		return false, fmt.Errorf(
-			"refusing to settle RuntimePool substrate actor: provider worker Pod changed from the recorded exact fence %s/%s without a validated replacement fence",
-			fence.Namespace, fence.Name,
-		)
+		return stageReplacementFence()
 	}
 	promoteReplacementFence := func() (bool, error) {
 		if !replacementMatchesActor {
@@ -1539,7 +1592,7 @@ func (r *RuntimePoolReconciler) destroySubstrateActorWorkload(
 	if pod.UID != fence.UID {
 		if actor != nil {
 			if !replacementMatchesActor || replacementFence.UID != pod.UID {
-				return false, fmt.Errorf("refusing to settle RuntimePool substrate actor: same-name worker Pod replacement is not the validated exact replacement fence")
+				return stageReplacementFence()
 			}
 			return promoteReplacementFence()
 		}
@@ -2407,7 +2460,7 @@ func (r *RuntimePoolReconciler) pruneStaleSubstrateRuntimePoolSecrets(
 	}
 	var secrets corev1.SecretList
 	if err := reader.List(ctx, &secrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolManagedByLabel: outboundTokenRequestManagedByLabelValue,
+		runtimePoolManagedByLabel: runtimePoolManagedByLabelValue,
 		runtimePoolKeyLabel:       cfg.labels[runtimePoolKeyLabel],
 		runtimePoolUIDLabel:       string(pool.UID),
 	}); err != nil {
@@ -2466,7 +2519,7 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 		expected.SetNamespace(templateNamespace)
 		expected.SetName(runtimePoolSubstrateTemplateName(cfg.baseName))
 		expected.SetLabels(map[string]string{
-			runtimePoolManagedByLabel: outboundTokenRequestManagedByLabelValue,
+			runtimePoolManagedByLabel: runtimePoolManagedByLabelValue,
 			runtimePoolKeyLabel:       runtimePoolKey(pool.Namespace, pool.Name),
 			runtimePoolNameLabel:      pool.Name,
 			runtimePoolNamespaceLabel: pool.Namespace,

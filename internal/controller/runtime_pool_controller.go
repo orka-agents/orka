@@ -67,7 +67,9 @@ const (
 	runtimePoolPort         int32 = 8080
 
 	runtimePoolManagedByLabel                     = "app.kubernetes.io/managed-by"
+	runtimePoolManagedByLabelValue                = "orka"
 	runtimePoolApplicationLabel                   = "app.kubernetes.io/name"
+	runtimePoolApplicationLabelValue              = "orka-acp-runtime"
 	runtimePoolKeyLabel                           = "orka.ai/runtime-pool-key"
 	runtimePoolNameLabel                          = "orka.ai/runtime-pool-name"
 	runtimePoolNamespaceLabel                     = "orka.ai/runtime-pool-namespace"
@@ -593,8 +595,8 @@ func (r *RuntimePoolReconciler) runtimePoolConfigWithImageAdmission(
 
 	baseName := runtimePoolResourceName(pool.Namespace, pool.Name)
 	labels := map[string]string{
-		runtimePoolManagedByLabel:   "orka",
-		runtimePoolApplicationLabel: "orka-acp-runtime",
+		runtimePoolManagedByLabel:   runtimePoolManagedByLabelValue,
+		runtimePoolApplicationLabel: runtimePoolApplicationLabelValue,
 		runtimePoolKeyLabel:         runtimePoolKey(pool.Namespace, pool.Name),
 		runtimePoolNameLabel:        pool.Name,
 		runtimePoolNamespaceLabel:   pool.Namespace,
@@ -1542,7 +1544,7 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolSecrets(
 
 	var providerSecrets corev1.SecretList
 	if err := reader.List(ctx, &providerSecrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolManagedByLabel: "orka",
+		runtimePoolManagedByLabel: runtimePoolManagedByLabelValue,
 		runtimePoolUIDLabel:       string(pool.UID),
 	}); err != nil {
 		return nil, nil, err
@@ -1894,7 +1896,7 @@ func (r *RuntimePoolReconciler) pruneStaleRuntimePoolSecrets(
 
 	var secrets corev1.SecretList
 	if err := reader.List(ctx, &secrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolManagedByLabel: "orka",
+		runtimePoolManagedByLabel: runtimePoolManagedByLabelValue,
 		runtimePoolKeyLabel:       cfg.labels[runtimePoolKeyLabel],
 		runtimePoolUIDLabel:       string(pool.UID),
 	}); err != nil {
@@ -3218,8 +3220,8 @@ func (r *RuntimePoolReconciler) runtimePoolConfigForDeletion(pool *corev1alpha1.
 		namespace: namespace,
 		baseName:  runtimePoolResourceName(pool.Namespace, pool.Name),
 		labels: map[string]string{
-			runtimePoolManagedByLabel:   "orka",
-			runtimePoolApplicationLabel: "orka-acp-runtime",
+			runtimePoolManagedByLabel:   runtimePoolManagedByLabelValue,
+			runtimePoolApplicationLabel: runtimePoolApplicationLabelValue,
 			runtimePoolKeyLabel:         runtimePoolKey(pool.Namespace, pool.Name),
 			runtimePoolNamespaceLabel:   pool.Namespace,
 			runtimePoolNameLabel:        pool.Name,

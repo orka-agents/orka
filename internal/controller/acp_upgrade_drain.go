@@ -927,14 +927,7 @@ func (c *ACPUpgradeDrainCoordinator) runtimePoolAuthSecret(
 	active *corev1alpha1.RuntimePoolActiveInstanceStatus,
 	epoch int64,
 ) (*corev1.Secret, error) {
-	var secrets corev1.SecretList
-	if err := c.APIReader.List(ctx, &secrets, client.InNamespace(active.PodNamespace), client.MatchingLabels{
-		runtimePoolAuthLabel: booleanTrueValue,
-		runtimePoolUIDLabel:  string(pool.UID),
-	}); err != nil {
-		return nil, fmt.Errorf("list RuntimePool auth Secrets: %w", err)
-	}
-	secret, err := runtimePoolAuthSecretForEpoch(secrets.Items, epoch)
+	secret, err := resolveRuntimePoolAuthSecret(ctx, c.APIReader, pool, active.PodNamespace, epoch)
 	if err != nil {
 		return nil, err
 	}
