@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -143,7 +144,8 @@ func runtimePoolWorkspaceTestMaterialization(
 	}
 
 	pod := runtimePoolWorkspaceReadyPod(pool, template, "sandbox-pod", "sandbox-pod-uid", ip)
-	pod.Labels[sandboxextv1beta1.SandboxIDLabel] = string(claim.UID)
+	pod.Labels = cloneStringMap(sandbox.Spec.PodTemplate.ObjectMeta.Labels)
+	pod.Labels[sandboxcontrollers.SandboxNameHashLabel] = sandboxcontrollers.NameHash(sandbox.Name)
 	if err := controllerutil.SetControllerReference(sandbox, &pod, r.Scheme); err != nil {
 		t.Fatalf("Set runtime Pod Sandbox owner reference: %v", err)
 	}
@@ -271,6 +273,84 @@ func TestWorkspaceRuntimePoolMaterializesProviderWorkload(t *testing.T) {
 	status := runtimePoolTestGetPool(t, r, pool).Status
 	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
 		t.Fatalf("status = %s/%s, want Starting/Closed", status.Lifecycle, status.AdmissionState)
+	}
+}
+
+func TestWorkspaceRuntimePoolRejectsUnboundPrivateAuthSecret(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	immutable := true
+	forged := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "attacker-selected-auth",
+			Namespace: pool.Namespace,
+			Labels: map[string]string{
+				runtimePoolAuthLabel:            booleanTrueValue,
+				runtimePoolUIDLabel:             string(pool.UID),
+				runtimePoolCredentialEpochLabel: "7",
+			},
+		},
+		Immutable: &immutable,
+		Data: map[string][]byte{
+			runtimePoolControllerTokenKey:  bytes.Repeat([]byte("a"), 32),
+			runtimePoolCapabilitySecretKey: bytes.Repeat([]byte("b"), 32),
+			runtimePoolBootstrapNonceKey:   bytes.Repeat([]byte("c"), 32),
+		},
+	}
+	r := runtimePoolTestReconciler(t, scheme, nil, pool, forged)
+
+	runtimePoolReconcile(t, r, pool)
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(status.Message, "refusing to adopt an unbound private RuntimePool auth Secret") {
+		t.Fatalf("status = %s/%s %q, want Degraded/Closed unbound private auth Secret rejection", status.Lifecycle, status.AdmissionState, status.Message)
+	}
+	current := &corev1.Secret{}
+	if getErr := r.Get(context.Background(), client.ObjectKeyFromObject(forged), current); getErr != nil {
+		t.Fatalf("Get forged Secret: %v", getErr)
+	}
+	if metav1.IsControlledBy(current, pool) {
+		t.Fatal("controller adopted the forged private auth Secret")
+	}
+}
+
+func TestWorkspaceRuntimePoolRejectsRecreatedPrivateAuthSecret(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	r := runtimePoolTestReconciler(t, scheme, nil, pool)
+	runtimePoolReconcile(t, r, pool)
+
+	currentPool := runtimePoolTestGetPool(t, r, pool)
+	binding := currentPool.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(7)]
+	name, uid, err := parseRuntimePoolPrivateSecretBinding(binding)
+	if err != nil {
+		t.Fatalf("parse private auth binding: %v", err)
+	}
+	secret := &corev1.Secret{}
+	key := types.NamespacedName{Namespace: pool.Namespace, Name: name}
+	if err := r.Get(context.Background(), key, secret); err != nil {
+		t.Fatalf("Get bound private auth Secret: %v", err)
+	}
+	if secret.UID != uid {
+		t.Fatalf("bound Secret UID = %q, want %q", secret.UID, uid)
+	}
+	replacement := secret.DeepCopy()
+	if err := r.Delete(context.Background(), secret); err != nil {
+		t.Fatalf("Delete bound private auth Secret: %v", err)
+	}
+	replacement.ResourceVersion = ""
+	replacement.UID = "attacker-replacement-uid"
+	if err := r.Create(context.Background(), replacement); err != nil {
+		t.Fatalf("Create replacement private auth Secret: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(status.Message, "auth Secret UID changed") {
+		t.Fatalf("status = %s/%s %q, want Degraded/Closed bound private auth Secret UID rejection", status.Lifecycle, status.AdmissionState, status.Message)
 	}
 }
 
@@ -614,6 +694,48 @@ func TestWorkspaceRuntimePoolRejectsForgedPodBeforeCredentialSeed(t *testing.T) 
 		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
 		!strings.Contains(status.Message, "PodSpec") {
 		t.Fatalf("forged Pod status = %s/%s %q, want Degraded/Closed PodSpec attestation failure", status.Lifecycle, status.AdmissionState, status.Message)
+	}
+}
+
+func TestWorkspaceRuntimePoolRejectsForgedPodLabelsBeforeCredentialSeed(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	seedCalls := 0
+	r.WorkspaceCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
+		seedCalls++
+		return false, nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace children were not materialized")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.76")
+	pod.Labels["attacker.example/allow-egress"] = booleanTrueValue
+	if err := r.Update(context.Background(), &pod); err != nil {
+		t.Fatalf("tamper materialized Pod labels: %v", err)
+	}
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "sandbox-boot", false)
+
+	runtimePoolReconcile(t, r, pool)
+
+	if seedCalls != 0 {
+		t.Fatalf("forged Pod labels received %d credential bootstrap requests before attestation", seedCalls)
+	}
+	if supervisor.probeCalls != 0 {
+		t.Fatalf("forged Pod labels received %d authenticated probes before attestation", supervisor.probeCalls)
+	}
+	if _, _, currentClaim := runtimePoolWorkspaceTestChildren(t, r, pool); currentClaim != nil {
+		t.Fatal("forged Pod-label SandboxClaim was not recycled")
+	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(status.Message, "Pod labels") {
+		t.Fatalf("forged Pod-label status = %s/%s %q, want Degraded/Closed label attestation failure", status.Lifecycle, status.AdmissionState, status.Message)
 	}
 }
 

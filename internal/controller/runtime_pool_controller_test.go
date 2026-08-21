@@ -35,6 +35,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -1989,6 +1990,14 @@ func runtimePoolTestReconciler(
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RuntimePool{}, &appsv1.Deployment{}, &corev1.Pod{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, delegate client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+				if secret, ok := object.(*corev1.Secret); ok && secret.UID == "" {
+					secret.UID = types.UID("test-uid-" + secret.Name)
+				}
+				return delegate.Create(ctx, object, opts...)
+			},
+		}).
 		WithObjects(objects...).
 		Build()
 	r := &RuntimePoolReconciler{

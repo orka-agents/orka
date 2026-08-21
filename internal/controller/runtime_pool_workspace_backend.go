@@ -51,6 +51,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -771,10 +772,22 @@ func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
 	if claim.UID != "" && pod.Labels[sandboxextv1beta1.SandboxIDLabel] != string(claim.UID) {
 		return false, fmt.Errorf("runtime Pod does not carry the exact SandboxClaim identity")
 	}
+	if !runtimePoolWorkspacePodLabelsMatch(sandbox, pod) {
+		return false, fmt.Errorf("runtime Pod labels differ from the attested provider Sandbox")
+	}
 	if !runtimePoolWorkspacePodSpecsMatch(sandbox.Spec.PodTemplate.Spec, pod.Spec) {
 		return false, fmt.Errorf("runtime PodSpec differs from the attested provider Sandbox")
 	}
 	return true, nil
+}
+
+func runtimePoolWorkspacePodLabelsMatch(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) bool {
+	if sandbox == nil || pod == nil {
+		return false
+	}
+	expected := cloneStringMap(sandbox.Spec.PodTemplate.ObjectMeta.Labels)
+	expected[sandboxcontrollers.SandboxNameHashLabel] = sandboxcontrollers.NameHash(sandbox.Name)
+	return reflect.DeepEqual(expected, pod.Labels)
 }
 
 // runtimePoolWorkspacePodSpecsMatch compares the realized Pod against the

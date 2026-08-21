@@ -78,6 +78,7 @@ const (
 	runtimePoolProviderTokenGenerationAnnotation = "orka.ai/provider-token-generation"
 	runtimePoolTemplateRevisionAnnotation        = "orka.ai/runtime-template-revision"
 	runtimePoolPIDsAnnotation                    = "orka.ai/runtime-pids-limit"
+	runtimePoolPrivateAuthBindingPrefix          = "orka.ai/private-auth-secret-e"
 
 	runtimePoolControllerTokenKey  = "controller-token"
 	runtimePoolCapabilitySecretKey = "capability-secret"
@@ -1458,35 +1459,7 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolSecrets(
 	}
 	epoch := strconv.FormatInt(cfg.controllerEpoch, 10)
 
-	var authSecrets corev1.SecretList
-	if err := reader.List(ctx, &authSecrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolAuthLabel: "true",
-		runtimePoolUIDLabel:  string(pool.UID),
-	}); err != nil {
-		return nil, nil, err
-	}
-	authMatches := runtimePoolAuthSecretsForEpoch(authSecrets.Items, cfg.controllerEpoch)
-	if len(authMatches) > 1 {
-		return nil, nil, fmt.Errorf("workspace RuntimePool requires exactly one private auth Secret for controller epoch %d", cfg.controllerEpoch)
-	}
-	authName := ""
-	if len(authMatches) == 1 {
-		authName = authMatches[0].Name
-	} else {
-		suffix, err := r.randomHex(12)
-		if err != nil {
-			return nil, nil, fmt.Errorf("generate private RuntimePool auth Secret name: %w", err)
-		}
-		authName = runtimePoolChildName(cfg.baseName, "auth-e"+epoch+"-"+suffix)
-	}
-	auth, err := r.ensureRuntimePoolSecret(ctx, pool, cfg, authName, map[string]int{
-		runtimePoolControllerTokenKey:  32,
-		runtimePoolCapabilitySecretKey: 32,
-		runtimePoolBootstrapNonceKey:   32,
-	}, map[string]string{
-		runtimePoolAuthLabel:            "true",
-		runtimePoolCredentialEpochLabel: epoch,
-	})
+	auth, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, epoch)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1523,6 +1496,121 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolSecrets(
 		return nil, nil, err
 	}
 	return auth, provider, nil
+}
+
+func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	epoch string,
+) (*corev1.Secret, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch)
+	binding := strings.TrimSpace(pool.Annotations[bindingKey])
+	if binding != "" {
+		name, uid, err := parseRuntimePoolPrivateSecretBinding(binding)
+		if err != nil {
+			return nil, err
+		}
+		secret := &corev1.Secret{}
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret); err != nil {
+			return nil, fmt.Errorf("read bound private RuntimePool auth Secret: %w", err)
+		}
+		if secret.UID != uid {
+			return nil, fmt.Errorf("bound private RuntimePool auth Secret UID changed")
+		}
+		if !runtimePoolPrivateAuthSecretOwnedByPool(secret, pool, cfg) ||
+			len(runtimePoolAuthSecretsForEpoch([]corev1.Secret{*secret}, cfg.controllerEpoch)) != 1 {
+			return nil, fmt.Errorf("bound private RuntimePool auth Secret does not carry the exact immutable RuntimePool ownership identity")
+		}
+		return secret, nil
+	}
+
+	var candidates corev1.SecretList
+	if err := reader.List(ctx, &candidates, client.InNamespace(cfg.namespace), client.MatchingLabels{
+		runtimePoolAuthLabel: "true",
+		runtimePoolUIDLabel:  string(pool.UID),
+	}); err != nil {
+		return nil, err
+	}
+	if matches := runtimePoolAuthSecretsForEpoch(candidates.Items, cfg.controllerEpoch); len(matches) != 0 {
+		return nil, fmt.Errorf("refusing to adopt an unbound private RuntimePool auth Secret for controller epoch %d", cfg.controllerEpoch)
+	}
+
+	suffix, err := r.randomHex(12)
+	if err != nil {
+		return nil, fmt.Errorf("generate private RuntimePool auth Secret name: %w", err)
+	}
+	name := runtimePoolChildName(cfg.baseName, "auth-e"+epoch+"-"+suffix)
+	secret, err := r.createRuntimePoolSecret(ctx, pool, cfg, name, map[string]int{
+		runtimePoolControllerTokenKey:  32,
+		runtimePoolCapabilitySecretKey: 32,
+		runtimePoolBootstrapNonceKey:   32,
+	}, map[string]string{
+		runtimePoolAuthLabel:            "true",
+		runtimePoolCredentialEpochLabel: epoch,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := r.bindPrivateRuntimePoolAuthSecret(ctx, pool, bindingKey, secret); err != nil {
+		return nil, err
+	}
+	return secret, nil
+}
+
+func runtimePoolPrivateAuthSecretBindingAnnotation(epoch int64) string {
+	return runtimePoolPrivateAuthBindingPrefix + strconv.FormatInt(epoch, 10)
+}
+
+func parseRuntimePoolPrivateSecretBinding(binding string) (string, types.UID, error) {
+	name, rawUID, ok := strings.Cut(strings.TrimSpace(binding), "/")
+	if !ok || len(validation.IsDNS1123Subdomain(name)) != 0 || strings.TrimSpace(rawUID) == "" {
+		return "", "", fmt.Errorf("private RuntimePool auth Secret binding is invalid")
+	}
+	return name, types.UID(rawUID), nil
+}
+
+func runtimePoolPrivateAuthSecretOwnedByPool(
+	secret *corev1.Secret,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+) bool {
+	if !runtimePoolManagedCredentialSecret(secret, cfg) {
+		return false
+	}
+	return secret.Namespace != pool.Namespace || metav1.IsControlledBy(secret, pool)
+}
+
+func (r *RuntimePoolReconciler) bindPrivateRuntimePoolAuthSecret(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	bindingKey string,
+	secret *corev1.Secret,
+) error {
+	if secret == nil || secret.UID == "" {
+		return fmt.Errorf("created private RuntimePool auth Secret has no immutable UID")
+	}
+	binding := secret.Name + "/" + string(secret.UID)
+	current := strings.TrimSpace(pool.Annotations[bindingKey])
+	if current != "" && current != binding {
+		return fmt.Errorf("private RuntimePool auth Secret binding changed")
+	}
+	if current == binding {
+		return nil
+	}
+	base := pool.DeepCopy()
+	if pool.Annotations == nil {
+		pool.Annotations = map[string]string{}
+	}
+	pool.Annotations[bindingKey] = binding
+	if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("record private RuntimePool auth Secret binding: %w", err)
+	}
+	return nil
 }
 
 func (r *RuntimePoolReconciler) pruneStaleRuntimePoolSecrets(
@@ -1837,27 +1925,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecret(
 	// read keeps Secret handling correct regardless of cache scope drift.
 	err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret)
 	if apierrors.IsNotFound(err) {
-		data := make(map[string][]byte, len(keys))
-		for key, size := range keys {
-			value, genErr := r.randomSecret(size)
-			if genErr != nil {
-				return nil, fmt.Errorf("generate managed RuntimePool secret: %w", genErr)
-			}
-			data[key] = []byte(value)
-		}
-		secret = &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cfg.namespace, Labels: mergeStringMap(cloneStringMap(cfg.labels), extraLabels)},
-			Type:       corev1.SecretTypeOpaque,
-			Immutable:  new(true),
-			Data:       data,
-		}
-		if err := r.setRuntimePoolControllerReference(pool, secret); err != nil {
-			return nil, err
-		}
-		if err := r.Create(ctx, secret); err != nil {
-			return nil, fmt.Errorf("create managed RuntimePool Secret: %w", err)
-		}
-		return secret, nil
+		return r.createRuntimePoolSecret(ctx, pool, cfg, name, keys, extraLabels)
 	}
 	if err != nil {
 		return nil, err
@@ -1878,6 +1946,37 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecret(
 		if err := r.Patch(ctx, secret, client.MergeFrom(base)); err != nil {
 			return nil, err
 		}
+	}
+	return secret, nil
+}
+
+func (r *RuntimePoolReconciler) createRuntimePoolSecret(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	name string,
+	keys map[string]int,
+	extraLabels map[string]string,
+) (*corev1.Secret, error) {
+	data := make(map[string][]byte, len(keys))
+	for key, size := range keys {
+		value, err := r.randomSecret(size)
+		if err != nil {
+			return nil, fmt.Errorf("generate managed RuntimePool secret: %w", err)
+		}
+		data[key] = []byte(value)
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cfg.namespace, Labels: mergeStringMap(cloneStringMap(cfg.labels), extraLabels)},
+		Type:       corev1.SecretTypeOpaque,
+		Immutable:  new(true),
+		Data:       data,
+	}
+	if err := r.setRuntimePoolControllerReference(pool, secret); err != nil {
+		return nil, err
+	}
+	if err := r.Create(ctx, secret); err != nil {
+		return nil, fmt.Errorf("create managed RuntimePool Secret: %w", err)
 	}
 	return secret, nil
 }
