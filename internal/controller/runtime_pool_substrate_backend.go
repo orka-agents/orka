@@ -101,6 +101,10 @@ const (
 	// record disappears, teardown uses this controller-owned fence to destroy or
 	// independently prove absence of the workload that may still hold secrets.
 	substrateActorWorkerPodFenceAnnotation = "orka.ai/substrate-actor-worker-pod-fence"
+	// substrateActorReplacementWorkerPodFenceAnnotation records a newly
+	// validated provider worker Pod while the prior exact fence is retired.
+	// Teardown promotes it only after proving the old workload absent.
+	substrateActorReplacementWorkerPodFenceAnnotation = "orka.ai/substrate-actor-replacement-worker-pod-fence"
 	// substrateActorWorkloadAbsentAnnotation records the exact actor whose
 	// frozen worker Pod was observed absent before SettleActor. Providers may
 	// clear placement when an actor becomes suspended or crashed, so teardown
@@ -541,7 +545,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if actor != nil && strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation]) != templateFence {
-		return r.recycleSubstrateActorForTemplateFenceChange(
+		return r.recycleSubstrateActorForInstanceMismatch(
 			ctx, pool, control, actorID, status,
 			"controller-derived substrate ActorTemplate changed after validation; recycling the exact actor before credential bootstrap",
 		)
@@ -663,7 +667,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if err := r.verifySubstrateRuntimeTemplateFence(
 			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
 		); err != nil {
-			return r.recycleSubstrateActorForTemplateFenceChange(
+			return r.recycleSubstrateActorForInstanceMismatch(
 				ctx, pool, control, actorID, status,
 				"controller-derived substrate ActorTemplate changed during actor creation; recycling the exact actor before credential bootstrap",
 			)
@@ -678,13 +682,19 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if err := r.verifySubstrateRuntimeTemplateFence(
 			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
 		); err != nil {
-			return r.recycleSubstrateActorForTemplateFenceChange(
+			return r.recycleSubstrateActorForInstanceMismatch(
 				ctx, pool, control, actorID, status,
 				"controller-derived substrate ActorTemplate changed while the actor booted; recycling the exact actor before credential bootstrap",
 			)
 		}
 		if resumedActor != nil && resumedActor.Running() {
 			if err := r.verifySubstrateActorWorkerPlacement(ctx, pool, resumedActor); err != nil {
+				if errors.Is(err, errSubstrateWorkerPodFenceConflict) {
+					return r.recycleSubstrateActorForInstanceMismatch(
+						ctx, pool, control, actorID, status,
+						"provider actor physical worker changed; recycling it before credential bootstrap rotation",
+					)
+				}
 				r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("provider actor placement is not ready: "+err.Error()))
 				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 			}
@@ -708,6 +718,12 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
 		if err := r.verifySubstrateActorWorkerPlacement(ctx, pool, bootCandidate); err != nil {
+			if errors.Is(err, errSubstrateWorkerPodFenceConflict) {
+				return r.recycleSubstrateActorForInstanceMismatch(
+					ctx, pool, control, actorID, status,
+					"provider actor physical worker changed; recycling it before credential bootstrap rotation",
+				)
+			}
 			r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("provider actor placement is not ready: "+err.Error()))
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
@@ -722,13 +738,19 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if err := r.verifySubstrateActorWorkerPlacement(ctx, pool, actor); err != nil {
+		if errors.Is(err, errSubstrateWorkerPodFenceConflict) {
+			return r.recycleSubstrateActorForInstanceMismatch(
+				ctx, pool, control, actorID, status,
+				"provider actor physical worker changed; recycling it before credential bootstrap rotation",
+			)
+		}
 		r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("provider actor placement is not ready: "+err.Error()))
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if err := r.verifySubstrateRuntimeTemplateFence(
 		ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
 	); err != nil {
-		return r.recycleSubstrateActorForTemplateFenceChange(
+		return r.recycleSubstrateActorForInstanceMismatch(
 			ctx, pool, control, actorID, status,
 			"controller-derived substrate ActorTemplate changed while the actor booted; recycling the exact actor before credential bootstrap",
 		)
@@ -748,16 +770,10 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 	if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, authSecret, workerPodFence.UID); err != nil {
 		if errors.Is(err, errRuntimePoolBootstrapInstanceConflict) {
-			if recycleErr := r.recycleSubstrateActor(ctx, pool, control, actorID); recycleErr != nil {
-				return ctrl.Result{}, recycleErr
-			}
-			status.ActiveInstance = nil
-			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
-			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = "provider actor physical worker changed; recycling it before credential bootstrap rotation"
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
-			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+			return r.recycleSubstrateActorForInstanceMismatch(
+				ctx, pool, control, actorID, status,
+				"provider actor physical worker changed; recycling it before credential bootstrap rotation",
+			)
 		}
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
@@ -785,7 +801,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	if err := r.verifySubstrateRuntimeTemplateFence(
 		ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
 	); err != nil {
-		return r.recycleSubstrateActorForTemplateFenceChange(
+		return r.recycleSubstrateActorForInstanceMismatch(
 			ctx, pool, control, actorID, status,
 			"controller-derived substrate ActorTemplate changed during credential bootstrap; recycling the exact actor",
 		)
@@ -823,6 +839,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 var (
 	errSubstrateCredentialConflict        = errors.New("supervisor credentials were seeded by another party")
 	errSubstrateCredentialAlreadyComplete = errors.New("supervisor credential bootstrap is already complete")
+	errSubstrateWorkerPodFenceConflict    = errors.New("provider actor worker Pod does not match the recorded exact Pod fence")
 )
 
 // seedSubstrateSupervisorCredentials performs the one-time, idempotent
@@ -893,7 +910,7 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 	}
 }
 
-func (r *RuntimePoolReconciler) recycleSubstrateActorForTemplateFenceChange(
+func (r *RuntimePoolReconciler) recycleSubstrateActorForInstanceMismatch(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 	control workspace.SubstrateRuntimeActorControl,
@@ -1004,14 +1021,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolRollout(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
-	if !actor.Running() {
-		if pool.Status.ActiveInstance != nil {
-			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
-			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = "cannot authenticate the previous active runtime instance before actor replacement"
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
-			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
-		}
+	if pool.Status.ActiveInstance == nil {
 		if !runtimePoolRolloutControllerWorkIsQuiescent(status.Capacity) {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
 			status.Message = "waiting for controller reservations or finalization work before replacing an unadmitted provider actor"
@@ -1027,6 +1037,13 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolRollout(
 		status.Message = "replacing an unadmitted provider actor before applying the new template"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonStopping, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	if !actor.Running() {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "cannot authenticate the previous active runtime instance before actor replacement"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
 	validationPool, validationConfig, deployedAuthSecret, err := r.substrateRuntimePoolDeployedValidationTarget(
@@ -1132,17 +1149,23 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
-	if !actor.Running() {
-		if pool.Status.ActiveInstance == nil && runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity) {
-			if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
-				return ctrl.Result{}, err
-			}
+	if pool.Status.ActiveInstance == nil {
+		if !runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity) {
 			status.ActiveInstance = nil
-			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
-			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = "stopping a provider actor that is not running"
-			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+			status.Message = "waiting for controller reservations or finalization work before stopping an unadmitted provider actor"
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
+		if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
+			return ctrl.Result{}, err
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "stopping a provider actor that never became active"
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	if !actor.Running() {
 		status.ActiveInstance = nil
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
@@ -1258,6 +1281,9 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 		return err
 	}
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkerPodFenceAnnotation, ""); err != nil {
+		return err
+	}
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorReplacementWorkerPodFenceAnnotation, ""); err != nil {
 		return err
 	}
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkloadAbsentAnnotation, ""); err != nil {
@@ -1427,11 +1453,38 @@ func (r *RuntimePoolReconciler) destroySubstrateActorWorkload(
 			fence.ActorID, actorID,
 		)
 	}
-	if actor != nil && (strings.TrimSpace(actor.PodNamespace) != fence.Namespace || strings.TrimSpace(actor.PodName) != fence.Name) {
+	placementChanged := actor != nil &&
+		(strings.TrimSpace(actor.PodNamespace) != fence.Namespace || strings.TrimSpace(actor.PodName) != fence.Name)
+	replacementFence, err := substrateRuntimePoolReplacementWorkerPodFenceFromAnnotation(pool)
+	if err != nil {
+		return false, err
+	}
+	replacementMatchesActor := actor != nil && replacementFence != nil &&
+		replacementFence.ActorID == actorID &&
+		replacementFence.Namespace == strings.TrimSpace(actor.PodNamespace) &&
+		replacementFence.Name == strings.TrimSpace(actor.PodName)
+	if placementChanged && !replacementMatchesActor {
 		return false, fmt.Errorf(
-			"refusing to settle RuntimePool substrate actor: provider worker Pod changed from the recorded exact fence %s/%s",
+			"refusing to settle RuntimePool substrate actor: provider worker Pod changed from the recorded exact fence %s/%s without a validated replacement fence",
 			fence.Namespace, fence.Name,
 		)
+	}
+	promoteReplacementFence := func() (bool, error) {
+		if !replacementMatchesActor {
+			return false, fmt.Errorf("refusing to settle RuntimePool substrate actor: provider worker Pod changed without a validated replacement fence")
+		}
+		value, err := json.Marshal(replacementFence)
+		if err != nil {
+			return false, fmt.Errorf("encode replacement RuntimePool Substrate worker Pod fence: %w", err)
+		}
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkerPodFenceAnnotation, string(value)); err != nil {
+			return false, err
+		}
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorReplacementWorkerPodFenceAnnotation, ""); err != nil {
+			return false, err
+		}
+		// Cross a reconcile boundary before deleting the promoted exact Pod.
+		return false, nil
 	}
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
@@ -1440,14 +1493,23 @@ func (r *RuntimePoolReconciler) destroySubstrateActorWorkload(
 	pod := &corev1.Pod{}
 	err = reader.Get(ctx, types.NamespacedName{Namespace: fence.Namespace, Name: fence.Name}, pod)
 	if apierrors.IsNotFound(err) {
+		if placementChanged {
+			return promoteReplacementFence()
+		}
 		return true, nil
 	}
 	if err != nil {
 		return false, err
 	}
 	if pod.UID != fence.UID {
-		// A same-name replacement is not the credentialed workload whose UID
-		// was fenced. Do not delete it; the exact old workload is already gone.
+		if actor != nil {
+			if !replacementMatchesActor || replacementFence.UID != pod.UID {
+				return false, fmt.Errorf("refusing to settle RuntimePool substrate actor: same-name worker Pod replacement is not the validated exact replacement fence")
+			}
+			return promoteReplacementFence()
+		}
+		// With no Actor record, a same-name replacement is unrelated to the
+		// fenced workload and must not be deleted.
 		return true, nil
 	}
 	if pod.DeletionTimestamp != nil {
@@ -1465,16 +1527,30 @@ func substrateActorWorkloadProofRequired(pool *corev1alpha1.RuntimePool, actorID
 	}
 	return pool.Annotations[substrateActorBootedAnnotation] == actorID ||
 		pool.Annotations[substrateActorCredentialSeededAnnotation] == actorID ||
-		strings.TrimSpace(pool.Annotations[substrateActorWorkerPodFenceAnnotation]) != ""
+		strings.TrimSpace(pool.Annotations[substrateActorWorkerPodFenceAnnotation]) != "" ||
+		strings.TrimSpace(pool.Annotations[substrateActorReplacementWorkerPodFenceAnnotation]) != ""
 }
 
 func substrateRuntimePoolWorkerPodFenceFromAnnotation(
 	pool *corev1alpha1.RuntimePool,
 ) (*substrateRuntimePoolWorkerPodFenceRecord, error) {
+	return substrateRuntimePoolWorkerPodFenceFromAnnotationKey(pool, substrateActorWorkerPodFenceAnnotation)
+}
+
+func substrateRuntimePoolReplacementWorkerPodFenceFromAnnotation(
+	pool *corev1alpha1.RuntimePool,
+) (*substrateRuntimePoolWorkerPodFenceRecord, error) {
+	return substrateRuntimePoolWorkerPodFenceFromAnnotationKey(pool, substrateActorReplacementWorkerPodFenceAnnotation)
+}
+
+func substrateRuntimePoolWorkerPodFenceFromAnnotationKey(
+	pool *corev1alpha1.RuntimePool,
+	key string,
+) (*substrateRuntimePoolWorkerPodFenceRecord, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("RuntimePool is required for Substrate actor teardown")
 	}
-	raw := strings.TrimSpace(pool.Annotations[substrateActorWorkerPodFenceAnnotation])
+	raw := strings.TrimSpace(pool.Annotations[key])
 	if raw == "" {
 		return nil, nil
 	}
@@ -1519,15 +1595,27 @@ func (r *RuntimePoolReconciler) recordSubstrateRuntimePoolWorkerPodFence(
 	if err != nil {
 		return err
 	}
+	value, err := json.Marshal(desired)
+	if err != nil {
+		return fmt.Errorf("encode RuntimePool Substrate worker Pod fence: %w", err)
+	}
 	if existing != nil {
 		if *existing == desired {
 			return nil
 		}
-		return fmt.Errorf("provider actor worker Pod does not match the recorded exact Pod fence")
-	}
-	value, err := json.Marshal(desired)
-	if err != nil {
-		return fmt.Errorf("encode RuntimePool Substrate worker Pod fence: %w", err)
+		replacement, err := substrateRuntimePoolReplacementWorkerPodFenceFromAnnotation(pool)
+		if err != nil {
+			return err
+		}
+		if replacement != nil && *replacement != desired {
+			return fmt.Errorf("provider actor worker Pod changed again before the prior replacement was fenced")
+		}
+		if replacement == nil {
+			if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorReplacementWorkerPodFenceAnnotation, string(value)); err != nil {
+				return err
+			}
+		}
+		return errSubstrateWorkerPodFenceConflict
 	}
 	return r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkerPodFenceAnnotation, string(value))
 }

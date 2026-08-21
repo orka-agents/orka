@@ -2009,8 +2009,9 @@ func runtimePoolTestReconciler(
 			PodLabels:   map[string]string{"app.kubernetes.io/name": "orka", "app.kubernetes.io/component": "provider-auth-proxy"},
 			BearerToken: bytes.Clone(runtimePoolTestProviderToken),
 		},
-		AllowedImages: ACPRuntimeImages{Codex: "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("a", 64)},
-		Rand:          &runtimePoolTestEntropyReader{}, Now: func() time.Time { return runtimePoolTestNow },
+		AgentSandboxEnabled: true,
+		AllowedImages:       ACPRuntimeImages{Codex: "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("a", 64)},
+		Rand:                &runtimePoolTestEntropyReader{}, Now: func() time.Time { return runtimePoolTestNow },
 		WorkspaceCredentialSeeder: func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
 			return false, nil
 		},

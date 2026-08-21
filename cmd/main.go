@@ -1349,6 +1349,7 @@ func main() {
 		}
 		runtimePoolReconciler.Epochs = controllerEpochManager
 		runtimePoolReconciler.EnablePDB = true
+		runtimePoolReconciler.AgentSandboxEnabled = agentSandboxEnabled
 		runtimePoolReconciler.SubstrateEnabled = substrateEnabled
 		// Keep the provider connection and trust configuration available after
 		// admission is disabled so existing Substrate-backed pools can still

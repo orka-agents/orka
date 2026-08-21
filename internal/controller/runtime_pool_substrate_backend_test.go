@@ -9,7 +9,6 @@ package controller
 import (
 	"context"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -819,6 +818,52 @@ func TestSubstrateRuntimePoolDisabledAdmissionPreservesActiveInstance(t *testing
 	}
 }
 
+func TestSubstrateRuntimePoolRolloutRecyclesUnadmittedRunningActorWithoutProbe(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	r.ControllerEpoch++
+	runtimePoolReconcile(t, r, pool)
+
+	if supervisor.probeCalls != 0 {
+		t.Fatalf("unadmitted running Actor received %d authenticated rollout probes", supervisor.probeCalls)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || got.Status.ActiveInstance != nil {
+		t.Fatalf("rollout status = %s active=%v, want Stopping with no active instance", got.Status.Lifecycle, got.Status.ActiveInstance)
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != substrateTestActorID(pool) {
+		t.Fatalf("recycling annotation = %q, want actor %q", got.Annotations[substrateActorRecyclingAnnotation], substrateTestActorID(pool))
+	}
+}
+
+func TestSubstrateRuntimePoolScaleToZeroRecyclesUnadmittedRunningActorWithoutProbe(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Spec.DesiredReplicas = 0
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("scale unadmitted Substrate pool to zero: %v", err)
+	}
+	runtimePoolReconcile(t, r, pool)
+
+	if supervisor.probeCalls != 0 {
+		t.Fatalf("unadmitted running Actor received %d authenticated scale-down probes", supervisor.probeCalls)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || got.Status.ActiveInstance != nil {
+		t.Fatalf("scale-down status = %s active=%v, want Stopping with no active instance", got.Status.Lifecycle, got.Status.ActiveInstance)
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != substrateTestActorID(pool) {
+		t.Fatalf("recycling annotation = %q, want actor %q", got.Annotations[substrateActorRecyclingAnnotation], substrateTestActorID(pool))
+	}
+}
+
 func TestSubstrateRuntimePoolBackfillsPlacementBeforeRecyclingUnfencedActor(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
@@ -1218,44 +1263,58 @@ func TestSubstrateRuntimePoolRecyclesActorOnCredentialSeedConflict(t *testing.T)
 }
 
 func TestSubstrateRuntimePoolRecyclesActorWhenPhysicalWorkerChanges(t *testing.T) {
-	supervisor := &fakeRuntimePoolSupervisorClient{}
-	control := newFakeSubstrateActorControl()
-	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
-	seedCalls := 0
-	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
-		seedCalls++
-		return nil
-	}
+	for _, replacementName := range []string{"worker-0", "worker-1"} {
+		t.Run(replacementName, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+			seedCalls := 0
+			r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+				seedCalls++
+				return nil
+			}
 
-	runtimePoolReconcile(t, r, pool)
-	authSecret := runtimePoolTestPrivateAuthSecret(t, r, pool)
-	current := runtimePoolTestGetPool(t, r, pool)
-	staleBinding, err := json.Marshal(runtimePoolBootstrapInstanceBinding{
-		AuthSecretUID: authSecret.UID,
-		WorkloadUID:   types.UID("replaced-worker-pod-uid"),
-	})
-	if err != nil {
-		t.Fatalf("encode stale bootstrap binding: %v", err)
-	}
-	current.Annotations[runtimePoolBootstrapInstanceBindingAnnotation] = string(staleBinding)
-	if err := r.Update(context.Background(), &current); err != nil {
-		t.Fatalf("record stale bootstrap binding: %v", err)
-	}
+			runtimePoolReconcile(t, r, pool)
+			probePod := substrateTestProbePod(pool)
+			supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-original-boot", false)
+			runtimePoolReconcile(t, r, pool)
+			if seedCalls != 1 {
+				t.Fatalf("initial credential seed calls = %d, want 1", seedCalls)
+			}
 
-	runtimePoolReconcile(t, r, pool)
+			worker := &corev1.Pod{}
+			key := types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}
+			if err := r.Get(context.Background(), key, worker); err != nil {
+				t.Fatalf("get original worker Pod: %v", err)
+			}
+			if err := r.Delete(context.Background(), worker); err != nil {
+				t.Fatalf("delete original worker Pod: %v", err)
+			}
+			replacement := worker.DeepCopy()
+			replacement.Name = replacementName
+			replacement.ResourceVersion = ""
+			replacement.UID = types.UID(replacementName + "-replacement-uid")
+			if err := r.Create(context.Background(), replacement); err != nil {
+				t.Fatalf("create replacement worker Pod: %v", err)
+			}
+			control.actors[substrateTestActorID(pool)].PodName = replacementName
 
-	if seedCalls != 0 {
-		t.Fatalf("replacement physical worker received %d credential seeds before actor recycling", seedCalls)
-	}
-	got := runtimePoolTestGetPool(t, r, pool)
-	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
-		got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
-		got.Status.ActiveInstance != nil ||
-		!strings.Contains(got.Status.Message, "physical worker changed") {
-		t.Fatalf("replacement physical worker status = %s/%s active=%v message=%q, want Degraded/Closed with no active instance", got.Status.Lifecycle, got.Status.AdmissionState, got.Status.ActiveInstance, got.Status.Message)
-	}
-	if got.Annotations[substrateActorRecyclingAnnotation] != substrateTestActorID(pool) {
-		t.Fatalf("recycling annotation = %q, want actor %q", got.Annotations[substrateActorRecyclingAnnotation], substrateTestActorID(pool))
+			runtimePoolReconcile(t, r, pool)
+
+			if seedCalls != 1 {
+				t.Fatalf("replacement physical worker received %d total credential seeds, want the original seed only", seedCalls)
+			}
+			got := runtimePoolTestGetPool(t, r, pool)
+			if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+				got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+				got.Status.ActiveInstance != nil ||
+				!strings.Contains(got.Status.Message, "physical worker changed") {
+				t.Fatalf("replacement physical worker status = %s/%s active=%v message=%q, want Degraded/Closed with no active instance", got.Status.Lifecycle, got.Status.AdmissionState, got.Status.ActiveInstance, got.Status.Message)
+			}
+			if got.Annotations[substrateActorRecyclingAnnotation] != substrateTestActorID(pool) {
+				t.Fatalf("recycling annotation = %q, want actor %q", got.Annotations[substrateActorRecyclingAnnotation], substrateTestActorID(pool))
+			}
+		})
 	}
 }
 
@@ -1723,6 +1782,59 @@ func TestSubstrateTeardownPreservesSameNamePodReplacement(t *testing.T) {
 	}
 	if current.Annotations[substrateActorWorkloadAbsentAnnotation] != actorID {
 		t.Fatalf("exact workload absence barrier = %q, want %q", current.Annotations[substrateActorWorkloadAbsentAnnotation], actorID)
+	}
+}
+
+func TestSubstrateTeardownPromotesValidatedReplacementFenceBeforeDeletion(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+	actorID := substrateTestActorID(pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+
+	worker := &corev1.Pod{}
+	key := types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}
+	if err := r.Get(context.Background(), key, worker); err != nil {
+		t.Fatalf("get exact worker Pod: %v", err)
+	}
+	if err := r.Delete(context.Background(), worker); err != nil {
+		t.Fatalf("delete exact worker Pod: %v", err)
+	}
+	replacement := worker.DeepCopy()
+	replacement.ResourceVersion = ""
+	replacement.UID = "worker-0-replacement-uid"
+	if err := r.Create(context.Background(), replacement); err != nil {
+		t.Fatalf("create same-name replacement Pod: %v", err)
+	}
+	if err := r.verifySubstrateActorWorkerPlacement(context.Background(), &current, control.actors[actorID]); !errors.Is(err, errSubstrateWorkerPodFenceConflict) {
+		t.Fatalf("replacement placement verification error = %v, want exact-fence conflict", err)
+	}
+
+	gone, err := r.teardownSubstrateActor(context.Background(), &current, control, actorID)
+	if err != nil || gone {
+		t.Fatalf("teardown promoting replacement fence = (%v, %v), want promotion in progress", gone, err)
+	}
+	if len(control.settled) != 0 {
+		t.Fatalf("settled actors = %v, want none before replacement workload deletion", control.settled)
+	}
+	replacementFence, err := substrateRuntimePoolWorkerPodFenceFromAnnotation(&current)
+	if err != nil || replacementFence == nil || replacementFence.UID != replacement.UID {
+		t.Fatalf("promoted worker Pod fence = %#v, error=%v, want UID %q", replacementFence, err, replacement.UID)
+	}
+	if current.Annotations[substrateActorReplacementWorkerPodFenceAnnotation] != "" {
+		t.Fatal("replacement worker Pod fence remained staged after promotion")
+	}
+
+	gone, err = r.teardownSubstrateActor(context.Background(), &current, control, actorID)
+	if err != nil || gone {
+		t.Fatalf("teardown deleting promoted replacement = (%v, %v), want deletion in progress", gone, err)
+	}
+	if err := r.Get(context.Background(), key, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("promoted replacement Pod survived exact fenced deletion: %v", err)
+	}
+	if len(control.settled) != 0 {
+		t.Fatalf("settled actors = %v, want none until replacement workload absence is observed", control.settled)
 	}
 }
 

@@ -333,6 +333,8 @@ type RuntimePoolReconciler struct {
 	// is disabled without adding finalizers or creating runtime resources.
 	CleanupOnly bool
 
+	// AgentSandboxEnabled admits Agent Sandbox-backed workspace pools.
+	AgentSandboxEnabled bool
 	// SubstrateEnabled admits Substrate-backed workspace pools.
 	SubstrateEnabled bool
 	// SubstrateConfig carries the externally operated Substrate control-plane

@@ -206,6 +206,16 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		// ownership drift that matters only to rollout or replacement.
 		return r.reconcileWorkspaceRuntimePoolScaleDown(ctx, pool, cfg, claim, pods, readyPods, status)
 	}
+	if !r.AgentSandboxEnabled {
+		if claim == nil || len(readyPods) == 0 {
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		}
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "agent-sandbox provider is disabled; existing RuntimePool admission remains closed until it scales to zero"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	}
 	if claim == nil && len(pods) == 0 {
 		rotating, rotateErr := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, authSecret)
 		if rotateErr != nil {
@@ -456,14 +466,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
-	if len(readyPods) == 0 {
-		if pool.Status.ActiveInstance != nil {
-			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
-			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = "cannot authenticate the previous active runtime instance before workspace replacement"
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
-			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
-		}
+	if pool.Status.ActiveInstance == nil {
 		if !runtimePoolRolloutControllerWorkIsQuiescent(status.Capacity) {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
 			status.Message = "waiting for controller reservations or finalization work before replacing an unadmitted provider workspace"
@@ -479,6 +482,13 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolRollout(
 		status.Message = "replacing an unadmitted provider workspace before applying the new template"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, runtimePoolRolloutReasonStopping, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	if len(readyPods) == 0 {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "cannot authenticate the previous active runtime instance before workspace replacement"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
 	pod := &readyPods[0]
@@ -591,17 +601,23 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
+	if pool.Status.ActiveInstance == nil {
+		status.ActiveInstance = nil
+		if !runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity) {
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
+			status.Message = "waiting for controller reservations or finalization work before stopping an unadmitted provider workspace"
+			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		}
+		if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
+			return ctrl.Result{}, err
+		}
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "stopping a provider workspace that never became active"
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
 	if len(readyPods) == 0 {
 		status.ActiveInstance = nil
-		if pool.Status.ActiveInstance == nil && runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity) {
-			if err := r.deleteRuntimePoolSandboxClaim(ctx, claim); err != nil {
-				return ctrl.Result{}, err
-			}
-			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
-			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = "stopping a provider workspace that never became active"
-			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
-		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = runtimePoolMessageDrainUnauthenticated

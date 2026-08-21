@@ -1138,6 +1138,62 @@ func TestWorkspaceRuntimePoolSupervisorRestartRecyclesClaim(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimePoolDisabledAdmissionPreservesActiveInstance(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.84")
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "boot-disabled", false)
+	runtimePoolReconcile(t, r, pool)
+	serving := runtimePoolTestGetPool(t, r, pool)
+	if serving.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || serving.Status.ActiveInstance == nil {
+		t.Fatalf("precondition status = %s active=%v, want Serving active instance", serving.Status.Lifecycle, serving.Status.ActiveInstance)
+	}
+	wantRuntimeInstanceID := serving.Status.ActiveInstance.RuntimeInstanceID
+
+	r.AgentSandboxEnabled = false
+	runtimePoolReconcile(t, r, pool)
+	disabled := runtimePoolTestGetPool(t, r, pool)
+	if disabled.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
+		disabled.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		disabled.Status.ActiveInstance == nil ||
+		disabled.Status.ActiveInstance.RuntimeInstanceID != wantRuntimeInstanceID {
+		t.Fatalf("disabled status = %s/%s active=%#v, want serving instance preserved with admission closed", disabled.Status.Lifecycle, disabled.Status.AdmissionState, disabled.Status.ActiveInstance)
+	}
+	if _, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool); claim == nil {
+		t.Fatal("disabling admission deleted the active SandboxClaim")
+	}
+}
+
+func TestWorkspaceRuntimePoolRolloutRecyclesUnadmittedReadyClaimWithoutProbe(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
+	runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.85")
+	r.ControllerEpoch++
+
+	runtimePoolReconcile(t, r, pool)
+
+	if supervisor.probeCalls != 0 {
+		t.Fatalf("unadmitted Ready workspace received %d authenticated rollout probes", supervisor.probeCalls)
+	}
+	if _, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool); claim != nil {
+		t.Fatal("unadmitted Ready workspace claim survived rollout replacement")
+	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || status.ActiveInstance != nil {
+		t.Fatalf("rollout status = %s active=%v, want Stopping with no active instance", status.Lifecycle, status.ActiveInstance)
+	}
+}
+
 func TestWorkspaceRuntimePoolRecyclesClaimWhenPhysicalPodChanges(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()
@@ -1273,6 +1329,35 @@ func TestWorkspaceRuntimePoolRotatesConsumedBootstrapBeforeReplacementClaim(t *t
 		}
 	}
 	t.Fatal("replacement claim was not acquired after fresh bootstrap material was published")
+}
+
+func TestWorkspaceRuntimePoolScaleToZeroRecyclesUnadmittedReadyClaimWithoutProbe(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
+	runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.86")
+	current := runtimePoolTestGetPool(t, r, pool)
+	current.Spec.DesiredReplicas = 0
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("scale unadmitted workspace pool to zero: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	if supervisor.probeCalls != 0 {
+		t.Fatalf("unadmitted Ready workspace received %d authenticated scale-down probes", supervisor.probeCalls)
+	}
+	if _, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool); claim != nil {
+		t.Fatal("unadmitted Ready workspace claim survived scale-down")
+	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || status.ActiveInstance != nil {
+		t.Fatalf("scale-down status = %s active=%v, want Stopping with no active instance", status.Lifecycle, status.ActiveInstance)
+	}
 }
 
 func TestWorkspaceRuntimePoolScaleToZeroDrainsThenDeletesClaim(t *testing.T) {
