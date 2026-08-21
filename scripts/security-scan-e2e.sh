@@ -144,9 +144,16 @@ collect_security_scan_diagnostics() {
       status: .status
     }]}' | redact >"${diagnostics_dir}/repository-scans.json" || true
 
-  kubectl -n "${test_namespace}" get tasks \
-    -l "orka.ai/security-target in (${scan_name},${bad_scan_name})" -o json 2>/dev/null |
-    jq '{items: [.items[] | {
+  kubectl -n "${test_namespace}" get tasks -o json 2>/dev/null |
+    jq \
+      --arg scanName "${scan_name}" \
+      --arg badScanName "${bad_scan_name}" '
+      {items: [.items[] |
+      select(
+        .metadata.labels["orka.ai/security-target"] == $scanName or
+        .metadata.labels["orka.ai/security-target"] == $badScanName or
+        .metadata.labels["orka.ai/security-scan-authority-e2e"] == "true"
+      ) | {
       metadata: {
         name: .metadata.name,
         namespace: .metadata.namespace,
@@ -785,6 +792,9 @@ spec:
     type: codex
     defaultMaxTurns: 1
     defaultAllowedTools:
+      - Glob
+      - Grep
+      - Read
       - ${authority_tool_name}
     defaultAllowBash: false
   model:
@@ -843,6 +853,9 @@ spec:
   agentRuntime:
     maxTurns: 1
     allowedTools:
+      - Glob
+      - Grep
+      - Read
       - ${authority_tool_name}
     allowBash: false
   timeout: 8m

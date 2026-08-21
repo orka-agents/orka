@@ -62,12 +62,20 @@ grep -F 'brokeredToolClass: read' "${manifest_capture}" >/dev/null
 grep -F 'url: https://example.com/tool' "${manifest_capture}" >/dev/null
 grep -F 'outboundAccessPolicyRef:' "${manifest_capture}" >/dev/null
 grep -F 'defaultAllowedTools:' "${manifest_capture}" >/dev/null
+grep -F -- '      - Glob' "${manifest_capture}" >/dev/null
+grep -F -- '      - Grep' "${manifest_capture}" >/dev/null
+grep -F -- '      - Read' "${manifest_capture}" >/dev/null
+grep -F -- "      - ${authority_tool_name}" "${manifest_capture}" >/dev/null
 grep -F 'defaultAllowBash: false' "${manifest_capture}" >/dev/null
 
 create_authority_task "${authority_incoming_task}"
 grep -F 'kind: Task' "${manifest_capture}" >/dev/null
 grep -F "name: ${authority_incoming_task}" "${manifest_capture}" >/dev/null
 grep -F 'prompt: orka-authority-probe' "${manifest_capture}" >/dev/null
+grep -F -- '      - Glob' "${manifest_capture}" >/dev/null
+grep -F -- '      - Grep' "${manifest_capture}" >/dev/null
+grep -F -- '      - Read' "${manifest_capture}" >/dev/null
+grep -F -- "      - ${authority_tool_name}" "${manifest_capture}" >/dev/null
 if grep -F '  transaction:' "${manifest_capture}" >/dev/null; then
   echo "ACP v2 authority fixture declared unsupported transaction delegation" >&2
   exit 1
@@ -528,11 +536,15 @@ kubectl() {
         status:{phase:"Error",conditions:[{type:"Ready",message:"failed safely"}]}
       }]}'
       ;;
-    *"get tasks "*" -o json"*)
+    *"get tasks -o json"*)
       jq -n '{items:[{
         metadata:{name:"threat-task",namespace:"orka-system",uid:"task-uid",labels:{"orka.ai/security-target":"security-goof"},annotations:{debug:"must-not-be-captured"}},
         spec:{type:"agent",prompt:"sensitive prompt",env:[{name:"API_KEY",value:"diagnostic-secret"}],agentRef:{name:"fixture-agent"},workspace:{intent:"read",gitRepo:"https://github.com/sozercan/vekil",branch:"main",ref:"abc",readCredentialRef:{name:"must-not-be-captured"}}},
         status:{phase:"Failed",message:"runtime failed"}
+      },{
+        metadata:{name:"authority-incoming",namespace:"orka-system",uid:"authority-task-uid",labels:{"orka.ai/security-scan-authority-e2e":"true"}},
+        spec:{type:"agent",prompt:"sensitive authority prompt",agentRef:{name:"security-scan-authority-agent"},workspace:{intent:"read",gitRepo:"https://github.com/sozercan/vekil",branch:"main",ref:"abc"}},
+        status:{phase:"Failed",message:"codex ACP runtime cannot exactly enforce provider-native tool restrictions"}
       }]}'
       ;;
     *"get agents -o json"*)
@@ -607,6 +619,12 @@ jq -e '
   (.items[0].spec | has("prompt") | not) and
   (.items[0].spec | has("env") | not) and
   (.items[0].spec.workspace | has("readCredentialRef") | not)
+' "${diagnostics_dir}/tasks.json" >/dev/null
+jq -e '
+  .items[] | select(.metadata.name == "authority-incoming") |
+  .status.phase == "Failed" and
+  .status.message == "codex ACP runtime cannot exactly enforce provider-native tool restrictions" and
+  (.spec | has("prompt") | not)
 ' "${diagnostics_dir}/tasks.json" >/dev/null
 jq -e '
   (.items[0].metadata | has("annotations") | not) and
