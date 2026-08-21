@@ -22,6 +22,7 @@ const (
 	mappedJournalDedupeKeyDomain      = "orka.harness.v2.execution-event.dedupe-key.v1\x00"
 	mappedAssistantTranscriptKind     = "assistant_transcript"
 	mappedToolStreamClosureKind       = "tool_stream_closure"
+	mappedToolTerminalKind            = "tool_terminal"
 	mappedTerminalUsageKind           = "terminal_usage"
 	mappedPromptAcceptedKind          = "prompt_accepted"
 	mappedPromptTerminalKind          = "prompt_terminal"
@@ -139,16 +140,19 @@ func (i MappedUpdateIdentity) samePrompt(other MappedUpdateIdentity) bool {
 
 // Key returns the stable recovery-deduplication key for one protocol update.
 func (i MappedUpdateIdentity) Key() string {
+	return mappedPromptIdentityKey(i) + mappedUpdateIdentityKeySeparator + strconv.FormatUint(i.Sequence, 10)
+}
+
+func mappedPromptIdentityKey(identity MappedUpdateIdentity) string {
 	return strings.Join([]string{
-		i.Protocol,
-		string(i.RuntimeInstanceID),
-		string(i.SupervisorBootID),
-		string(i.RuntimeSessionUID),
-		strconv.FormatUint(i.RuntimeSessionGeneration, 10),
-		string(i.TaskUID),
-		strconv.FormatUint(uint64(i.TaskAttempt), 10),
-		string(i.PromptID),
-		strconv.FormatUint(i.Sequence, 10),
+		identity.Protocol,
+		string(identity.RuntimeInstanceID),
+		string(identity.SupervisorBootID),
+		string(identity.RuntimeSessionUID),
+		strconv.FormatUint(identity.RuntimeSessionGeneration, 10),
+		string(identity.TaskUID),
+		strconv.FormatUint(uint64(identity.TaskAttempt), 10),
+		string(identity.PromptID),
 	}, mappedUpdateIdentityKeySeparator)
 }
 
@@ -187,6 +191,13 @@ func mappedExecutionEventRecord(
 	if err := json.Unmarshal(event.Content, &content); err != nil {
 		return MappedUpdateIdentity{}, "", mappedJournalRecordUpdate, false
 	}
+	if isMappedToolTerminalEvent(event) {
+		kind := mappedJournalRecordUpdate
+		if content.JournalKind == mappedToolStreamClosureKind {
+			kind = mappedJournalRecordToolStreamClosure
+		}
+		return identity, mappedToolTerminalKey(identity, event.ToolCallID), kind, true
+	}
 	if content.JournalKind == mappedToolStreamClosureKind {
 		return identity, mappedToolStreamClosureKey(identity), mappedJournalRecordToolStreamClosure, true
 	}
@@ -207,6 +218,22 @@ func mappedExecutionEventRecord(
 
 func mappedToolStreamClosureKey(identity MappedUpdateIdentity) string {
 	return identity.Key() + mappedUpdateIdentityKeySeparator + mappedToolStreamClosureKind
+}
+
+func mappedToolTerminalKey(identity MappedUpdateIdentity, toolCallID string) string {
+	return strings.Join([]string{
+		mappedPromptIdentityKey(identity),
+		mappedToolTerminalKind,
+		strings.TrimSpace(toolCallID),
+	}, mappedUpdateIdentityKeySeparator)
+}
+
+func isMappedToolTerminalEvent(event store.ExecutionEvent) bool {
+	if strings.TrimSpace(event.ToolCallID) == "" {
+		return false
+	}
+	return event.Type == executionevents.ExecutionEventTypeToolCallCompleted ||
+		event.Type == executionevents.ExecutionEventTypeToolCallFailed
 }
 
 func mappedTerminalUsageKey(identity MappedUpdateIdentity) string {

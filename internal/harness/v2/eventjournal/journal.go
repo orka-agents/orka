@@ -269,7 +269,37 @@ func (j Journal) Open(ctx context.Context) (*State, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := j.failClosedForExistingSessionHistory(ctx, mapCtx, state); err != nil {
+		return nil, err
+	}
 	return state, nil
+}
+
+func (j Journal) failClosedForExistingSessionHistory(
+	ctx context.Context,
+	mapCtx MapContext,
+	state *State,
+) error {
+	if mapCtx.SessionName == "" {
+		return nil
+	}
+	listed, _, err := j.EventStore.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+		Namespace: mapCtx.Namespace, SessionName: mapCtx.SessionName, Limit: 1,
+	})
+	if err != nil {
+		return fmt.Errorf("list existing session execution events for redaction: %w", err)
+	}
+	if len(listed) == 0 {
+		return nil
+	}
+	// A session timeline aggregates multiple task streams, while the exact
+	// logical-field boundaries used for redaction are intentionally not
+	// persisted. Once any session event is durable, redact all later runtime
+	// text rather than risk completing a credential fragment from an earlier
+	// turn or from a pre-recovery append.
+	state.logicalFieldHistory = nil
+	state.logicalFieldHistorySaturated = true
+	return nil
 }
 
 func (j Journal) loadAllIdentities(
@@ -1080,15 +1110,21 @@ func (s *State) appendMappedEvent(
 	operation string,
 ) (*store.ExecutionEvent, bool, error) {
 	key := identity.Key()
-	switch kind {
-	case mappedJournalRecordToolStreamClosure:
-		key = mappedToolStreamClosureKey(identity)
-	case mappedJournalRecordTerminalUsage:
-		key = mappedTerminalUsageKey(identity)
-	case mappedJournalRecordPromptAccepted:
-		key = mappedPromptLifecycleKey(identity, mappedPromptAcceptedKind)
-	case mappedJournalRecordPromptTerminal:
-		key = mappedPromptLifecycleKey(identity, mappedPromptTerminalKind)
+	if isMappedToolTerminalEvent(*mapped) {
+		// Real runtime terminal updates and synthesized recovery closures race
+		// on one prompt-and-tool-scoped key so the first durable outcome wins.
+		key = mappedToolTerminalKey(identity, mapped.ToolCallID)
+	} else {
+		switch kind {
+		case mappedJournalRecordToolStreamClosure:
+			key = mappedToolStreamClosureKey(identity)
+		case mappedJournalRecordTerminalUsage:
+			key = mappedTerminalUsageKey(identity)
+		case mappedJournalRecordPromptAccepted:
+			key = mappedPromptLifecycleKey(identity, mappedPromptAcceptedKind)
+		case mappedJournalRecordPromptTerminal:
+			key = mappedPromptLifecycleKey(identity, mappedPromptTerminalKind)
+		}
 	}
 	deduplicatingStore, ok := s.journal.EventStore.(store.DeduplicatingExecutionEventStore)
 	if !ok {

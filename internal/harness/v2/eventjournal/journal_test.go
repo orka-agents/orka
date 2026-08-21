@@ -125,6 +125,91 @@ func TestJournalDeduplicatesAcrossConcurrentStates(t *testing.T) {
 	}
 }
 
+func TestJournalDeduplicatesRealAndRecoveredToolTerminalOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		closureFirst bool
+		wantType     string
+	}{
+		{
+			name:         "real completion wins",
+			closureFirst: false,
+			wantType:     executionevents.ExecutionEventTypeToolCallCompleted,
+		},
+		{
+			name:         "recovery closure wins",
+			closureFirst: true,
+			wantType:     executionevents.ExecutionEventTypeToolCallFailed,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			eventStore := storetest.NewFakeExecutionEventStore()
+			journal := Journal{EventStore: eventStore, MapContext: testMapContext()}
+			initial, err := journal.Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			now := time.Now().UTC()
+			started := testUpdateEvent(2, now, harnessv2.UpdateEvent{
+				Kind: harnessv2.UpdateToolCall,
+				ToolCall: &harnessv2.ToolCallUpdate{
+					ToolCallID: "call-terminal-race", Status: harnessv2.ToolCallStatusPending,
+				},
+			})
+			if appended, isNew, err := initial.AppendUpdateIfNew(ctx, started); err != nil || !isNew || appended == nil {
+				t.Fatalf("append tool start = %#v new=%t err=%v", appended, isNew, err)
+			}
+
+			recoveryIdentity := mappedUpdateIdentity(started)
+			recoveryIdentity.Sequence = 0
+			openRecovered := func() *State {
+				state, err := (Journal{
+					EventStore: eventStore, MapContext: testMapContext(), RecoveryIdentity: recoveryIdentity,
+				}).Open(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return state
+			}
+			closureState := openRecovered()
+			runtimeState := openRecovered()
+			completed := testUpdateEvent(3, now.Add(time.Millisecond), harnessv2.UpdateEvent{
+				Kind: harnessv2.UpdateToolCallUpdate,
+				ToolCall: &harnessv2.ToolCallUpdate{
+					ToolCallID: "call-terminal-race", Status: harnessv2.ToolCallStatusCompleted,
+				},
+			})
+
+			appendCompletion := func(wantNew bool) {
+				appended, isNew, err := runtimeState.AppendUpdateIfNew(ctx, completed)
+				if err != nil || isNew != wantNew || (isNew && appended == nil) || (!isNew && appended != nil) {
+					t.Fatalf("append real completion = %#v new=%t wantNew=%t err=%v", appended, isNew, wantNew, err)
+				}
+			}
+			appendClosure := func() {
+				if err := closureState.AppendPersistedToolClosuresIfNew(ctx, now.Add(2*time.Millisecond)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.closureFirst {
+				appendClosure()
+				appendCompletion(false)
+			} else {
+				appendCompletion(true)
+				appendClosure()
+			}
+
+			listed := listJournalEvents(t, ctx, eventStore)
+			if len(listed) != 2 || listed[0].Type != executionevents.ExecutionEventTypeToolCallStarted ||
+				listed[1].Type != test.wantType || listed[0].ToolCallID != listed[1].ToolCallID {
+				t.Fatalf("tool terminal race events = %#v", listed)
+			}
+		})
+	}
+}
+
 func TestJournalRecoveryScansOnlyCurrentPromptTail(t *testing.T) {
 	ctx := context.Background()
 	base := storetest.NewFakeExecutionEventStore()
@@ -224,6 +309,56 @@ func TestJournalRedactsCredentialSplitAcrossPlanUpdates(t *testing.T) {
 		!strings.Contains(listed[1].ContentText, executionevents.ExecutionEventRedactedValue) ||
 		!strings.Contains(listed[2].ContentText, "run focused tests") {
 		t.Fatalf("persisted plan updates = %#v", listed)
+	}
+}
+
+func TestJournalFailsClosedAcrossSessionTaskTurns(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	firstMapContext := testMapContext()
+	firstState, err := (Journal{EventStore: eventStore, MapContext: firstMapContext}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prefix := "sk-" + strings.Repeat("a", 8)
+	suffix := strings.Repeat("b", 16)
+	first := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: prefix, Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	if appended, isNew, err := firstState.AppendUpdateIfNew(ctx, first); err != nil || !isNew || appended == nil ||
+		!strings.Contains(appended.ContentText, prefix) {
+		t.Fatalf("append first session fragment = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	secondMapContext := firstMapContext
+	secondMapContext.TaskName = "task-2"
+	secondMapContext.StreamID = "task-2"
+	secondState, err := (Journal{EventStore: eventStore, MapContext: secondMapContext}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !secondState.logicalFieldHistorySaturated {
+		t.Fatal("continued session journal did not enter fail-closed redaction mode")
+	}
+	second := testUpdateEvent(2, first.Identity.Timestamp.Add(time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: suffix, Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	second.Identity.TaskUID = "task-uid-2"
+	second.Identity.PromptID = "prompt-2"
+	appended, isNew, err := secondState.AppendUpdateIfNew(ctx, second)
+	if err != nil || !isNew || appended == nil {
+		t.Fatalf("append second session fragment = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if strings.Contains(appended.Summary+appended.ContentText+string(appended.Content), suffix) ||
+		!strings.Contains(appended.ContentText, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("continued session fragment was not failed closed: %#v", appended)
 	}
 }
 
@@ -1523,7 +1658,7 @@ func TestJournalTerminalizesContentFreeToolAfterPersistedStart(t *testing.T) {
 	if content["journalKind"] != mappedToolStreamClosureKind {
 		t.Fatalf("closure journal kind = %#v", content["journalKind"])
 	}
-	key := mappedToolStreamClosureKey(mappedUpdateIdentity(event))
+	key := mappedToolTerminalKey(mappedUpdateIdentity(event), listed[1].ToolCallID)
 	if persisted, err := state.journal.hasPersistedIdentity(ctx, key); err != nil || !persisted {
 		t.Fatalf("closure persisted=%t err=%v", persisted, err)
 	}
