@@ -29,6 +29,18 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
+const (
+	acpWorkspaceTestSessionName                   = "review-loop"
+	acpWorkspaceTestMissingSessionName            = "missing-session"
+	acpWorkspaceTestOtherNamespace                = "other-namespace"
+	acpWorkspaceTestRuntimePoolName               = "acp-ws-codex-0123456789abcdef"
+	acpWorkspaceTestTemplateName                  = "task-template"
+	acpWorkspaceTestTemplateRefRequiredError      = "requires templateRef.name"
+	acpWorkspaceTestTemplateRefForbiddenError     = "templateRef must be omitted"
+	acpWorkspaceTestCleanupDeleteError            = "always deleted after authenticated drain"
+	acpWorkspaceTestSessionReferenceRequiredError = "requires spec.sessionRef.name"
+)
+
 type failingAgentExecutionSnapshotPersistStore struct {
 	store.AgentExecutionSnapshotStore
 }
@@ -81,7 +93,7 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 				task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 					ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 				})
-				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
+				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName}
 				return task
 			}(),
 			sessionUID:  "session-uid-review-loop",
@@ -94,7 +106,7 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 					ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 					ws.WorkspaceSlot = "secondary"
 				})
-				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
+				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName}
 				return task
 			}(),
 			sessionUID: "session-uid-review-loop",
@@ -103,13 +115,13 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 		{
 			name:    "substrate without templateRef fails closed",
 			task:    workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.Provider = corev1alpha1.WorkspaceProviderSubstrate }),
-			wantErr: "requires templateRef.name",
+			wantErr: acpWorkspaceTestTemplateRefRequiredError,
 		},
 		{
 			name: "substrate with an infrastructure template resolves",
 			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: "ate-demo"}
+				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: substrateTestTemplateNamespace}
 			}),
 			wantSession: "task:11111111-1111-1111-1111-111111111111",
 		},
@@ -117,7 +129,7 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			name: "substrate rejects invalid template namespace",
 			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: "Bad_NS"}
+				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: "Bad_NS"}
 			}),
 			wantErr: "templateRef.namespace",
 		},
@@ -125,7 +137,7 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			name: "substrate rejects invalid template name",
 			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "bad/name", Namespace: "ate-demo"}
+				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "bad/name", Namespace: substrateTestTemplateNamespace}
 			}),
 			wantErr: "templateRef.name",
 		},
@@ -133,7 +145,7 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			name: "substrate cross-namespace template fails under namespace isolation",
 			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: "ate-demo"}
+				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: substrateTestTemplateNamespace}
 			}),
 			enforceNamespaceIsolation: true,
 			wantErr:                   "cross-namespace execution workspace templateRef is not allowed",
@@ -148,14 +160,14 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "operator-template"}
 			}),
-			wantErr: "templateRef must be omitted",
+			wantErr: acpWorkspaceTestTemplateRefForbiddenError,
 		},
 		{
 			name: "retain cleanup fails closed",
 			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 				ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
 			}),
-			wantErr: "always deleted after authenticated drain",
+			wantErr: acpWorkspaceTestCleanupDeleteError,
 		},
 		{
 			name:    "onDetach fails closed",
@@ -172,13 +184,13 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 				ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 			}),
-			wantErr: "requires spec.sessionRef.name",
+			wantErr: acpWorkspaceTestSessionReferenceRequiredError,
 		},
 		{
 			name: "task-scoped workspace with sessionRef fails closed",
 			task: func() *corev1alpha1.Task {
 				task := workspaceBindingTestTask(nil)
-				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
+				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName}
 				return task
 			}(),
 			wantErr: "reusePolicy none cannot be used with spec.sessionRef",
@@ -219,7 +231,7 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 			if binding.SessionUID != tt.sessionUID {
 				t.Fatalf("session UID = %q, want %q", binding.SessionUID, tt.sessionUID)
 			}
-			if binding.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete || binding.WorkspaceSlot != "default" {
+			if binding.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete || binding.WorkspaceSlot != defaultWorkspaceSlotName {
 				t.Fatalf("binding defaults = %q/%q, want delete/default", binding.CleanupPolicy, binding.WorkspaceSlot)
 			}
 			if binding.Provider == corev1alpha1.WorkspaceProviderSubstrate &&
@@ -285,7 +297,7 @@ func TestSessionWorkspacePoolIdentityRejectsRuntimeProfileRotation(t *testing.T)
 	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 	})
-	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName}
 	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
 	configuration, err := resolveACPAgentSessionConfiguration(ctx, reconciler.Client, task, bindingTestAgent())
 	if err != nil {
@@ -340,7 +352,7 @@ func TestSessionWorkspacePoolIdentityRejectsWorkspaceSelectionRotation(t *testin
 	firstTask := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 	})
-	firstTask.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
+	firstTask.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName}
 	reconciler, _ := newBindingTestReconciler(t, firstTask, bindingTestNamespace())
 	configuration, err := resolveACPAgentSessionConfiguration(ctx, reconciler.Client, firstTask, bindingTestAgent())
 	if err != nil {
@@ -364,7 +376,7 @@ func TestSessionWorkspacePoolIdentityRejectsWorkspaceSelectionRotation(t *testin
 	rotatedTask := firstTask.DeepCopy()
 	rotatedTask.Spec.Execution.Workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
 	rotatedTask.Spec.Execution.Workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{
-		Namespace: "ate-demo", Name: "orka-codex-infra",
+		Namespace: substrateTestTemplateNamespace, Name: substrateTestBaseTemplateName,
 	}
 	rotatedBinding, err := resolveACPWorkspaceBinding(
 		rotatedTask, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-uid-review-loop",
@@ -439,7 +451,7 @@ func TestAgentExecutionBindingFreezesImmutableWorkspaceSessionUID(t *testing.T) 
 	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 	})
-	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop", Create: true, Append: true}
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName, Create: true, Append: true}
 	agent := bindingTestAgent()
 	reconciler, durableStore := newBindingTestReconciler(t, task, bindingTestNamespace())
 	reconciler.ExecutionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProviderAgentSandbox
@@ -514,7 +526,7 @@ func TestResolveAgentExecutionCandidateClassifiesMissingWorkspaceSessionAsPerman
 	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 	})
-	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "missing-session", Create: false, Append: true}
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestMissingSessionName, Create: false, Append: true}
 	reconciler, durableStore := newBindingTestReconciler(t, task, bindingTestNamespace())
 	reconciler.ExecutionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProviderAgentSandbox
 	reconciler.DurableControlStore = durableStore
@@ -569,7 +581,7 @@ func TestSessionWorkspacePoolIdentityRotatesWithSessionUID(t *testing.T) {
 	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 	})
-	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName}
 	agent := bindingTestAgent()
 	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
 	configuration, err := resolveACPAgentSessionConfiguration(ctx, reconciler.Client, task, agent)
@@ -799,13 +811,13 @@ func TestACPRuntimePoolWorkspaceMatchesPlanRequiresExactProviderFields(t *testin
 	digest := "sha256:" + strings.Repeat("9", 64)
 	plan := ACPRuntimePlan{Workspace: &ACPRuntimeWorkspaceBinding{
 		Provider: corev1alpha1.WorkspaceProviderSubstrate, BindingDigest: digest,
-		TemplateNamespace: "ate-demo", TemplateName: "orka-codex-infra",
+		TemplateNamespace: substrateTestTemplateNamespace, TemplateName: substrateTestBaseTemplateName,
 	}}
 	pool := &corev1alpha1.RuntimePool{Spec: corev1alpha1.RuntimePoolSpec{
 		ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
 			Provider: corev1alpha1.WorkspaceProviderSubstrate, BindingDigest: digest,
 			Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
-				BaseTemplateNamespace: "ate-demo", BaseTemplateName: "orka-codex-infra",
+				BaseTemplateNamespace: substrateTestTemplateNamespace, BaseTemplateName: substrateTestBaseTemplateName,
 			},
 		},
 	}}
@@ -818,7 +830,7 @@ func TestACPRuntimePoolWorkspaceMatchesPlanRequiresExactProviderFields(t *testin
 		t.Fatal("Substrate workspace binding ignored the infrastructure template name")
 	}
 	pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateName = plan.Workspace.TemplateName
-	pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateNamespace = "other-namespace"
+	pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateNamespace = acpWorkspaceTestOtherNamespace
 	if acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
 		t.Fatal("Substrate workspace binding ignored the infrastructure template namespace")
 	}
@@ -832,7 +844,7 @@ func TestReapIdlePoolsDeletesStoppedWorkspacePools(t *testing.T) {
 	now := time.Now().UTC()
 	stopped := &corev1alpha1.RuntimePool{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default", Name: "acp-ws-codex-0123456789abcdef", UID: types.UID("ws-pool-uid"), Generation: 1,
+			Namespace: defaultNS, Name: acpWorkspaceTestRuntimePoolName, UID: types.UID("ws-pool-uid"), Generation: 1,
 			Annotations: map[string]string{acpRuntimeLastDemandAnnotation: now.Add(-3 * time.Hour).Format(time.RFC3339Nano)},
 		},
 		Spec: corev1alpha1.RuntimePoolSpec{
@@ -893,12 +905,12 @@ func TestReapIdlePoolsDeletesStoppedWorkspacePools(t *testing.T) {
 func TestProjectACPExecutionWorkspaceStatusTransitions(t *testing.T) {
 	scheme := bindingTestScheme(t)
 	task := workspaceBindingTestTask(nil)
-	task.Labels = map[string]string{acpRuntimeTaskPoolLabel: "acp-ws-codex-0123456789abcdef"}
+	task.Labels = map[string]string{acpRuntimeTaskPoolLabel: acpWorkspaceTestRuntimePoolName}
 	task.Status = corev1alpha1.TaskStatus{
 		Phase: corev1alpha1.TaskPhaseRunning,
 		Execution: &corev1alpha1.TaskExecutionStatus{
 			State:           corev1alpha1.TaskExecutionStateRunning,
-			RuntimePoolName: "acp-ws-codex-0123456789abcdef",
+			RuntimePoolName: acpWorkspaceTestRuntimePoolName,
 		},
 		ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
 			Provider: corev1alpha1.WorkspaceProviderAgentSandbox,

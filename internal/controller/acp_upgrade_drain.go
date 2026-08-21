@@ -922,7 +922,7 @@ func (c *ACPUpgradeDrainCoordinator) runtimePoolAuthSecret(
 ) (*corev1.Secret, error) {
 	var secrets corev1.SecretList
 	if err := c.APIReader.List(ctx, &secrets, client.InNamespace(active.PodNamespace), client.MatchingLabels{
-		runtimePoolAuthLabel: "true",
+		runtimePoolAuthLabel: booleanTrueValue,
 		runtimePoolUIDLabel:  string(pool.UID),
 	}); err != nil {
 		return nil, fmt.Errorf("list RuntimePool auth Secrets: %w", err)

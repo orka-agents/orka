@@ -784,7 +784,7 @@ func runtimePoolWorkspaceBootstrapTemplate(
 	env := make([]corev1.EnvVar, 0, len(container.Env)+2)
 	for i := range container.Env {
 		switch container.Env[i].Name {
-		case "ORKA_ACP_CONTROLLER_TOKEN_FILE", "ORKA_ACP_CAPABILITY_SECRET_FILE", "ORKA_ACP_PROVIDER_TOKEN_FILE",
+		case runtimePoolControllerTokenFileEnv, runtimePoolCapabilitySecretFileEnv, runtimePoolProviderTokenFileEnv,
 			"ORKA_ACP_CONTROLLER_TOKEN_BOOTSTRAP", "ORKA_ACP_CAPABILITY_SECRET_BOOTSTRAP", "ORKA_ACP_PROVIDER_TOKEN_BOOTSTRAP":
 			continue
 		default:
@@ -1371,7 +1371,7 @@ func (r *RuntimePoolReconciler) pruneStaleWorkspaceRuntimePoolSecrets(
 	}
 	var secrets corev1.SecretList
 	if err := reader.List(ctx, &secrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolManagedByLabel: "orka",
+		runtimePoolManagedByLabel: outboundTokenRequestManagedByLabelValue,
 		runtimePoolKeyLabel:       cfg.labels[runtimePoolKeyLabel],
 		runtimePoolUIDLabel:       string(pool.UID),
 	}); err != nil {

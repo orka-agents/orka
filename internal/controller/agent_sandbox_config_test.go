@@ -30,6 +30,7 @@ const (
 	testSubstrateBootstrapSecretKey        = "bootstrap-token"
 	testSubstrateSessionIdentitySecretName = "orka-substrate-session-identity"
 	testSubstrateSessionIdentitySecretKey  = "session-token"
+	invalidAgentSandboxTestURL             = "not-a-url"
 )
 
 func TestDefaultAgentSandboxConfig(t *testing.T) {
@@ -232,7 +233,7 @@ func TestSubstrateConfigValidateACPRuntimePoolRejectsInvalidRouting(t *testing.T
 		dnsSuffix string
 		want      string
 	}{
-		{name: "router URL", routerURL: "not-a-url", dnsSuffix: "actors.example.test", want: "router URL is invalid"},
+		{name: "router URL", routerURL: invalidAgentSandboxTestURL, dnsSuffix: "actors.example.test", want: "router URL is invalid"},
 		{name: "DNS suffix", routerURL: "https://router.example.test", dnsSuffix: "actors..example.test", want: "DNS suffix is invalid"},
 	}
 	for _, tt := range tests {
@@ -609,7 +610,7 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 		ws := &corev1alpha1.ExecutionWorkspaceSpec{
 			Enabled: true,
 			TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
-				Name:      "task-template",
+				Name:      acpWorkspaceTestTemplateName,
 				Namespace: testSandboxTemplatesNamespace,
 			},
 		}
@@ -1135,7 +1136,7 @@ func TestResolveExecutionWorkspaceRequestRejectsAgentSandboxTemplateRef(t *testi
 
 	r := &TaskReconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(&sandboxextv1beta1.SandboxWarmPool{
-			ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: testSandboxTemplatesNamespace},
+			ObjectMeta: metav1.ObjectMeta{Name: acpWorkspaceTestTemplateName, Namespace: testSandboxTemplatesNamespace},
 		}).Build(),
 		AgentSandboxEnabled: true,
 	}
@@ -1146,7 +1147,7 @@ func TestResolveExecutionWorkspaceRequestRejectsAgentSandboxTemplateRef(t *testi
 			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
 				Enabled: true,
 				TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
-					Name:      "task-template",
+					Name:      acpWorkspaceTestTemplateName,
 					Namespace: testSandboxTemplatesNamespace,
 				},
 			}},

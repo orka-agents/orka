@@ -179,18 +179,18 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 		{
 			name: "workspace templateRef is rejected for ACP RuntimeSessions",
 			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
-				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "sandbox-template"}
+				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: runtimePoolSandboxTemplateSuffix}
 			}),
 			objects: []client.Object{
-				&sandboxextv1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-template", Namespace: defaultNS}},
-				&sandboxextv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-template", Namespace: defaultNS}},
+				&sandboxextv1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxTemplateSuffix, Namespace: defaultNS}},
+				&sandboxextv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxTemplateSuffix, Namespace: defaultNS}},
 			},
 			agentSandboxEnabled:         true,
 			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
 			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  "templateRef must be omitted",
-			wantWorkspaceStatusErr:      "templateRef must be omitted",
+			wantReason:                  acpWorkspaceTestTemplateRefForbiddenError,
+			wantWorkspaceStatusErr:      acpWorkspaceTestTemplateRefForbiddenError,
 		},
 		{
 			name: "substrate execution workspace without templateRef fails closed before any demand",
@@ -201,14 +201,14 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
 			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  "requires templateRef.name",
-			wantWorkspaceStatusErr:      "requires templateRef.name",
+			wantReason:                  acpWorkspaceTestTemplateRefRequiredError,
+			wantWorkspaceStatusErr:      acpWorkspaceTestTemplateRefRequiredError,
 		},
 		{
 			name: "substrate-backed agent task uses ACP RuntimePool when dispatch is enabled",
 			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
 				workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: "ate-demo"}
+				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: substrateTestTemplateNamespace}
 			}),
 			substrateEnabled:            true,
 			acpRuntimeEnabled:           true,
@@ -219,7 +219,7 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			name: "substrate-backed agent task fails closed when substrate is disabled",
 			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
 				workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: "ate-demo"}
+				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: substrateTestTemplateNamespace}
 			}),
 			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
@@ -236,8 +236,8 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
 			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  "always deleted after authenticated drain",
-			wantWorkspaceStatusErr:      "always deleted after authenticated drain",
+			wantReason:                  acpWorkspaceTestCleanupDeleteError,
+			wantWorkspaceStatusErr:      acpWorkspaceTestCleanupDeleteError,
 		},
 		{
 			name: "workspace session reuse without sessionRef fails closed",
@@ -248,8 +248,8 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
 			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  "requires spec.sessionRef.name",
-			wantWorkspaceStatusErr:      "requires spec.sessionRef.name",
+			wantReason:                  acpWorkspaceTestSessionReferenceRequiredError,
+			wantWorkspaceStatusErr:      acpWorkspaceTestSessionReferenceRequiredError,
 		},
 		{
 			name: "harness v1 agent with execution workspace is rejected with a v1-specific message",

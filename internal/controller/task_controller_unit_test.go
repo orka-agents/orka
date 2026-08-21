@@ -1119,19 +1119,19 @@ func TestResolveExecutionWorkspaceRequestRejectsLegacyTemplateRef(t *testing.T) 
 			Execution: &corev1alpha1.ExecutionSpec{
 				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
 					Enabled:     true,
-					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "task-template"},
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: acpWorkspaceTestTemplateName},
 				},
 			},
 		},
 	}
 	warmPool := &sandboxextv1beta1.SandboxWarmPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: defaultNS},
+		ObjectMeta: metav1.ObjectMeta{Name: acpWorkspaceTestTemplateName, Namespace: defaultNS},
 	}
 	r := newUnitReconciler(scheme, warmPool)
 	r.AgentSandboxEnabled = true
 
 	_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task)
-	if err == nil || !strings.Contains(err.Error(), "templateRef must be omitted") {
+	if err == nil || !strings.Contains(err.Error(), acpWorkspaceTestTemplateRefForbiddenError) {
 		t.Fatalf("resolveExecutionWorkspaceRequest() error = %v, want templateRef rejection", err)
 	}
 }
@@ -1230,7 +1230,7 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 					}),
 				},
 			}},
-			wantErr: "templateRef must be omitted",
+			wantErr: acpWorkspaceTestTemplateRefForbiddenError,
 		},
 		{
 			name:                "empty templateRef name is still a templateRef and is rejected",
@@ -1243,7 +1243,7 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 					}),
 				},
 			}},
-			wantErr: "templateRef must be omitted",
+			wantErr: acpWorkspaceTestTemplateRefForbiddenError,
 		},
 		{
 			name:                "unsupported reusePolicy",
@@ -1392,7 +1392,7 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 					}),
 				},
 			}},
-			wantErr: "requires spec.sessionRef.name",
+			wantErr: acpWorkspaceTestSessionReferenceRequiredError,
 		},
 		{
 			name:                "session reuse with empty sessionRef name",
@@ -1406,7 +1406,7 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 					}),
 				},
 			}},
-			wantErr: "requires spec.sessionRef.name",
+			wantErr: acpWorkspaceTestSessionReferenceRequiredError,
 		},
 		{
 			name:                "valid defaults",
@@ -1478,7 +1478,7 @@ func TestValidateExecutionWorkspaceDefersACPProviderChecksUntilContractRouting(t
 	if err := r.validateExecutionWorkspace(task); err != nil {
 		t.Fatalf("validateExecutionWorkspace() error = %v, want provider checks deferred to planAgentExecution", err)
 	}
-	if err := r.validateExecutionWorkspaceRequest(task); err == nil || !strings.Contains(err.Error(), "templateRef must be omitted") {
+	if err := r.validateExecutionWorkspaceRequest(task); err == nil || !strings.Contains(err.Error(), acpWorkspaceTestTemplateRefForbiddenError) {
 		t.Fatalf("validateExecutionWorkspaceRequest() error = %v, want ACP templateRef rejection retained by direct resolver", err)
 	}
 }
@@ -6026,7 +6026,7 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 		},
 	}
 	template := &sandboxextv1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-template", Namespace: defaultNS},
+		ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxTemplateSuffix, Namespace: defaultNS},
 	}
 	warmPool := &sandboxextv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: template.Name, Namespace: defaultNS},
@@ -6072,7 +6072,7 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
-	if !strings.Contains(updated.Status.Message, "templateRef must be omitted") {
+	if !strings.Contains(updated.Status.Message, acpWorkspaceTestTemplateRefForbiddenError) {
 		t.Fatalf("message = %q, want templateRef rejection", updated.Status.Message)
 	}
 	assertExecutionWorkspaceValidationFailedStatus(
@@ -6080,7 +6080,7 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 		updated.Status.ExecutionWorkspace,
 		corev1alpha1.WorkspaceProviderAgentSandbox,
 		template.Name,
-		"templateRef must be omitted",
+		acpWorkspaceTestTemplateRefForbiddenError,
 	)
 	assertNoJobsForTask(t, r, task)
 }

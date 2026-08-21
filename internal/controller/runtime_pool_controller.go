@@ -91,10 +91,13 @@ const (
 	runtimePoolBootstrapNonceKey = "bootstrap-nonce"
 	runtimePoolProviderTokenKey  = "token"
 
-	runtimePoolControllerTokenPath  = "/var/run/secrets/orka/auth/controller-token"
-	runtimePoolCapabilitySecretPath = "/var/run/secrets/orka/auth/capability-secret"
-	runtimePoolProviderTokenPath    = "/var/run/secrets/orka/provider/token"
-	runtimePoolOperationHeader      = "X-Orka-Operation-Capability"
+	runtimePoolControllerTokenPath     = "/var/run/secrets/orka/auth/controller-token"
+	runtimePoolCapabilitySecretPath    = "/var/run/secrets/orka/auth/capability-secret"
+	runtimePoolProviderTokenPath       = "/var/run/secrets/orka/provider/token"
+	runtimePoolOperationHeader         = "X-Orka-Operation-Capability"
+	runtimePoolControllerTokenFileEnv  = "ORKA_ACP_CONTROLLER_TOKEN_FILE"
+	runtimePoolCapabilitySecretFileEnv = "ORKA_ACP_CAPABILITY_SECRET_FILE"
+	runtimePoolProviderTokenFileEnv    = "ORKA_ACP_PROVIDER_TOKEN_FILE"
 
 	runtimePoolAuthVolume               = "pool-auth"
 	runtimePoolProviderCapabilityVolume = "provider-capability"
@@ -2286,9 +2289,9 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 					{Name: "ORKA_ACP_PROXY_CREDENTIAL_ROLE", Value: cfg.profile.ProxyCredentialRole},
 					{Name: "ORKA_ACP_PROXY_CREDENTIAL_SCOPE", Value: cfg.profile.ProxyCredentialScope},
 					{Name: "ORKA_ACP_RESOURCE_CLASS", Value: cfg.profile.ResourceClass},
-					{Name: "ORKA_ACP_CONTROLLER_TOKEN_FILE", Value: runtimePoolControllerTokenPath},
-					{Name: "ORKA_ACP_CAPABILITY_SECRET_FILE", Value: runtimePoolCapabilitySecretPath},
-					{Name: "ORKA_ACP_PROVIDER_TOKEN_FILE", Value: runtimePoolProviderTokenPath},
+					{Name: runtimePoolControllerTokenFileEnv, Value: runtimePoolControllerTokenPath},
+					{Name: runtimePoolCapabilitySecretFileEnv, Value: runtimePoolCapabilitySecretPath},
+					{Name: runtimePoolProviderTokenFileEnv, Value: runtimePoolProviderTokenPath},
 					{Name: "ORKA_ACP_PROVIDER_TOKEN_GENERATION", Value: cfg.providerProxy.tokenGeneration},
 					{Name: "ORKA_ACP_ARTIFACT_API_URL", Value: strings.TrimRight(r.ControllerAPIURL, "/")},
 					{Name: "ORKA_ACP_WORKSPACE_MAX_ARTIFACT_BYTES", Value: strconv.FormatInt(r.WorkspaceArtifactMaxBytes, 10)},
@@ -2327,7 +2330,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 					{Key: runtimePoolControllerTokenKey, Path: runtimePoolControllerTokenKey, Mode: &mode},
 					{Key: runtimePoolCapabilitySecretKey, Path: runtimePoolCapabilitySecretKey, Mode: &mode},
 				}}}},
-				{Name: runtimePoolProviderCapabilityVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: providerSecretName, DefaultMode: &mode, Items: []corev1.KeyToPath{{Key: runtimePoolProviderTokenKey, Path: "token", Mode: &mode}}}}},
+				{Name: runtimePoolProviderCapabilityVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: providerSecretName, DefaultMode: &mode, Items: []corev1.KeyToPath{{Key: runtimePoolProviderTokenKey, Path: runtimePoolProviderTokenKey, Mode: &mode}}}}},
 				{Name: runtimePoolSessionsVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("4Gi"))}}},
 				{Name: runtimePoolTempVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("512Mi"))}}},
 				{Name: runtimePoolHomeVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("256Mi"))}}},

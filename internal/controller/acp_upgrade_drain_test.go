@@ -31,6 +31,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const acpUpgradeDrainTestBaseTemplateName = "orka-codex"
+
 func TestACPUpgradeDrainOptionsBindManifestFlags(t *testing.T) {
 	options := DefaultACPUpgradeDrainOptions()
 	flags := flag.NewFlagSet("upgrade-drain", flag.ContinueOnError)
@@ -156,8 +158,8 @@ func TestACPUpgradeDrainCoordinatorDrainsSubstrateActorWithoutPod(t *testing.T) 
 		Provider:      corev1alpha1.WorkspaceProviderSubstrate,
 		BindingDigest: "sha256:" + strings.Repeat("a", 64),
 		Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
-			BaseTemplateNamespace: "ate-demo",
-			BaseTemplateName:      "orka-codex",
+			BaseTemplateNamespace: substrateTestTemplateNamespace,
+			BaseTemplateName:      acpUpgradeDrainTestBaseTemplateName,
 		},
 	}
 	const actorID = "acp-ws-codex-actor"
@@ -208,8 +210,8 @@ func TestACPUpgradeDrainRequiresStoppedSubstrateLifecycleWithoutActiveInstance(t
 	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
 		Provider: corev1alpha1.WorkspaceProviderSubstrate,
 		Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
-			BaseTemplateNamespace: "ate-demo",
-			BaseTemplateName:      "orka-codex",
+			BaseTemplateNamespace: substrateTestTemplateNamespace,
+			BaseTemplateName:      acpUpgradeDrainTestBaseTemplateName,
 		},
 	}
 	pool.Status.ActiveInstance = nil

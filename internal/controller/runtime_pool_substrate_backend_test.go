@@ -46,6 +46,9 @@ const (
 	substrateTestActorDNSSuffix    = "actors.test.example"
 	substrateTestWorkerNamespace   = "ate-workers"
 	substrateTestWorkerPoolName    = "orka-workers"
+	substrateTestObjectNameField   = "name"
+	substrateTestObjectImageField  = "image"
+	substrateTestAttackerManagedBy = "attacker"
 )
 
 type fakeSubstrateActorControl struct {
@@ -295,12 +298,12 @@ func runtimePoolSubstrateTestObject() *corev1alpha1.RuntimePool {
 
 func substrateTestBaseTemplate() *unstructured.Unstructured {
 	template := &unstructured.Unstructured{Object: map[string]any{
-		"spec": map[string]any{
-			"workerPoolRef":   map[string]any{"namespace": substrateTestWorkerNamespace, "name": substrateTestWorkerPoolName},
+		substrateObjectSpecField: map[string]any{
+			"workerPoolRef":   map[string]any{"namespace": substrateTestWorkerNamespace, substrateTestObjectNameField: substrateTestWorkerPoolName},
 			"snapshotsConfig": map[string]any{"location": "gs://ate-snapshots/orka"},
 			"runsc":           map[string]any{"amd64": map[string]any{"url": "https://example.invalid/runsc"}},
 			"containers": []any{map[string]any{
-				"name": "operator-base", "image": "example.com/operator@sha256:" + strings.Repeat("1", 64),
+				substrateTestObjectNameField: "operator-base", substrateTestObjectImageField: "example.com/operator@sha256:" + strings.Repeat("1", 64),
 			}},
 		},
 	}}
@@ -330,7 +333,7 @@ func runtimePoolSubstrateTestReconciler(
 	r.SubstrateConfig = SubstrateConfig{
 		APIEndpoint:           "api.ate-system.svc:443",
 		APIInsecureSkipVerify: true,
-		RouterURL:             "http://atenet-router.ate-system.svc",
+		RouterURL:             defaultSubstrateRouterURL,
 		ActorDNSSuffix:        substrateTestActorDNSSuffix,
 	}
 	r.SubstrateActorControlFactory = func(SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error) {
@@ -594,8 +597,8 @@ func TestSubstrateRuntimePoolRejectsTemplateMutateAndRestoreDuringActorCreation(
 			t.Fatalf("read derived containers before mutate-and-restore: found=%v err=%v", found, err)
 		}
 		container := containers[0].(map[string]any)
-		originalImage := container["image"]
-		container["image"] = runtimePoolTestTamperedImage
+		originalImage := container[substrateTestObjectImageField]
+		container[substrateTestObjectImageField] = runtimePoolTestTamperedImage
 		containers[0] = container
 		if err := unstructured.SetNestedSlice(derived.Object, containers, "spec", "containers"); err != nil {
 			t.Fatalf("mutate derived ActorTemplate: %v", err)
@@ -610,7 +613,7 @@ func TestSubstrateRuntimePoolRejectsTemplateMutateAndRestoreDuringActorCreation(
 			t.Fatalf("read derived containers before restore: found=%v err=%v", found, err)
 		}
 		container = containers[0].(map[string]any)
-		container["image"] = originalImage
+		container[substrateTestObjectImageField] = originalImage
 		containers[0] = container
 		if err := unstructured.SetNestedSlice(restored.Object, containers, "spec", "containers"); err != nil {
 			t.Fatalf("restore derived ActorTemplate: %v", err)
@@ -879,7 +882,7 @@ func TestSubstrateRuntimePoolRejectsSquattedDerivedTemplateOwnership(t *testing.
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
 	squatted := substrateTestBaseTemplate().DeepCopy()
 	squatted.SetName(runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name)))
-	squatted.SetLabels(map[string]string{runtimePoolManagedByLabel: "attacker"})
+	squatted.SetLabels(map[string]string{runtimePoolManagedByLabel: substrateTestAttackerManagedBy})
 	if err := r.Create(context.Background(), squatted); err != nil {
 		t.Fatalf("create squatted derived template: %v", err)
 	}
@@ -913,7 +916,7 @@ func TestSubstrateRuntimePoolRecyclesActorWhenTemplateContentsDoNotMatchRevision
 		t.Fatalf("read derived containers: found=%v err=%v", found, err)
 	}
 	container := containers[0].(map[string]any)
-	container["image"] = runtimePoolTestTamperedImage
+	container[substrateTestObjectImageField] = runtimePoolTestTamperedImage
 	containers[0] = container
 	if err := unstructured.SetNestedSlice(derived.Object, containers, "spec", "containers"); err != nil {
 		t.Fatalf("tamper derived container: %v", err)
@@ -973,7 +976,7 @@ func assertSubstrateDerivedTemplate(
 		t.Fatalf("derived listen address/port = %q/%v, want the conventional actor port 80", env["ORKA_ACP_LISTEN_ADDRESS"].Value, container.Ports)
 	}
 	for _, forbidden := range []string{
-		"ORKA_ACP_CONTROLLER_TOKEN_FILE", "ORKA_ACP_CAPABILITY_SECRET_FILE", "ORKA_ACP_PROVIDER_TOKEN_FILE",
+		runtimePoolControllerTokenFileEnv, runtimePoolCapabilitySecretFileEnv, runtimePoolProviderTokenFileEnv,
 		"ORKA_ACP_CONTROLLER_TOKEN_BOOTSTRAP", "ORKA_ACP_CAPABILITY_SECRET_BOOTSTRAP", "ORKA_ACP_PROVIDER_TOKEN_BOOTSTRAP",
 	} {
 		if _, present := env[forbidden]; present {
@@ -1009,7 +1012,7 @@ func assertSubstrateDerivedTemplate(
 	if err := r.List(context.Background(), &templateSecrets, client.InNamespace(substrateTestTemplateNamespace)); err == nil && len(templateSecrets.Items) != 0 {
 		t.Fatalf("template namespace holds %d Secrets; nothing secret may exist there", len(templateSecrets.Items))
 	}
-	if workerPool, _, _ := unstructured.NestedString(derived.Object, "spec", "workerPoolRef", "name"); workerPool != substrateTestWorkerPoolName {
+	if workerPool, _, _ := unstructured.NestedString(derived.Object, substrateObjectSpecField, "workerPoolRef", substrateTestObjectNameField); workerPool != substrateTestWorkerPoolName {
 		t.Fatalf("derived template workerPoolRef = %q, want operator infrastructure copied", workerPool)
 	}
 	if location, _, _ := unstructured.NestedString(derived.Object, "spec", "snapshotsConfig", "location"); location != "gs://ate-snapshots/orka" {
@@ -1020,7 +1023,7 @@ func assertSubstrateDerivedTemplate(
 func TestSubstrateRuntimePoolRejectsTemplateNamespaceContainingPoolSecrets(t *testing.T) {
 	scheme := runtimePoolSubstrateTestScheme(t)
 	pool := runtimePoolSubstrateTestObject()
-	pool.Spec.RuntimeNamespace = "orka-runtimes"
+	pool.Spec.RuntimeNamespace = acpTestRuntimeNamespace
 	pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateNamespace = pool.Spec.RuntimeNamespace
 	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
 	r.RuntimeNamespace = pool.Spec.RuntimeNamespace
@@ -1515,7 +1518,7 @@ func TestSubstrateTeardownUsesFrozenWorkerPlacementAfterTemplateMutation(t *test
 	if err := unstructured.SetNestedField(derived.Object, "other-workers", "spec", "workerPoolRef", "namespace"); err != nil {
 		t.Fatalf("mutate derived template namespace: %v", err)
 	}
-	if err := unstructured.SetNestedField(derived.Object, "other-pool", "spec", "workerPoolRef", "name"); err != nil {
+	if err := unstructured.SetNestedField(derived.Object, "other-pool", substrateObjectSpecField, "workerPoolRef", substrateTestObjectNameField); err != nil {
 		t.Fatalf("mutate derived template WorkerPool: %v", err)
 	}
 	if err := r.Update(context.Background(), derived); err != nil {
@@ -2037,7 +2040,7 @@ func TestSubstrateRuntimePoolFinalizerPreservesForeignActorTemplate(t *testing.T
 
 	runtimePoolReconcile(t, r, pool)
 	derived := substrateTestDerivedTemplate(t, r, pool)
-	derived.SetLabels(map[string]string{runtimePoolManagedByLabel: "attacker"})
+	derived.SetLabels(map[string]string{runtimePoolManagedByLabel: substrateTestAttackerManagedBy})
 	if err := r.Update(context.Background(), derived); err != nil {
 		t.Fatalf("replace derived template ownership: %v", err)
 	}

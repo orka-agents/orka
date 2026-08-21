@@ -20,7 +20,10 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-const acpTestRuntimeNamespace = "orka-runtimes"
+const (
+	acpTestRuntimeNamespace  = "orka-runtimes"
+	acpTestRuntimeInstanceID = "runtime-1"
+)
 
 func TestQueueACPRuntimeTaskCreatesPoolAndDurableAttempt(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -116,7 +119,7 @@ func TestACPWorkspaceRuntimePoolReusedRequiresLiveInstance(t *testing.T) {
 	if acpWorkspaceRuntimePoolReused(pool, true) {
 		t.Fatal("preexisting RuntimePool without a live instance reported reuse")
 	}
-	pool.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "runtime-1"}
+	pool.Status.ActiveInstance = &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: acpTestRuntimeInstanceID}
 	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
 	if acpWorkspaceRuntimePoolReused(pool, true) {
 		t.Fatal("stopped workspace RuntimePool reported reuse")
@@ -308,7 +311,7 @@ func TestQueueACPRuntimeTaskRejectsSubstrateTemplateInRuntimeNamespaceBeforePool
 			Type: corev1alpha1.TaskTypeAgent, Prompt: "inspect",
 			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
 				Enabled: true, Provider: corev1alpha1.WorkspaceProviderSubstrate,
-				TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: acpTestRuntimeNamespace},
+				TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: acpTestRuntimeNamespace},
 			}},
 		},
 	}

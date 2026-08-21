@@ -23,7 +23,10 @@ import (
 
 // defaultWorkspaceSlotName mirrors the API default for
 // Task.spec.execution.workspace.workspaceSlot.
-const defaultWorkspaceSlotName = "default"
+const (
+	defaultWorkspaceSlotName     = "default"
+	acpWorkspaceSessionUIDMapKey = "sessionUID"
+)
 
 // ACPRuntimeWorkspaceBinding is the resolved, canonical execution-workspace
 // binding for one ACP RuntimePool. It carries no provider-native identifiers
@@ -329,14 +332,14 @@ func acpWorkspaceBindingDigest(binding *ACPRuntimeWorkspaceBinding) (string, err
 		return "", fmt.Errorf("execution workspace binding is required")
 	}
 	return acpDomainDigest("execution-workspace-binding", map[string]string{
-		"provider":          string(binding.Provider),
-		"reusePolicy":       string(binding.ReusePolicy),
-		"cleanupPolicy":     string(binding.CleanupPolicy),
-		"workspaceSlot":     binding.WorkspaceSlot,
-		"sessionUID":        binding.SessionUID,
-		"sessionKey":        binding.SessionKey,
-		"templateNamespace": binding.TemplateNamespace,
-		"templateName":      binding.TemplateName,
+		"provider":                   string(binding.Provider),
+		"reusePolicy":                string(binding.ReusePolicy),
+		"cleanupPolicy":              string(binding.CleanupPolicy),
+		"workspaceSlot":              binding.WorkspaceSlot,
+		acpWorkspaceSessionUIDMapKey: binding.SessionUID,
+		"sessionKey":                 binding.SessionKey,
+		"templateNamespace":          binding.TemplateNamespace,
+		"templateName":               binding.TemplateName,
 	})
 }
 
@@ -357,8 +360,8 @@ func applyACPWorkspaceBindingToPlan(plan ACPRuntimePlan, binding *ACPRuntimeWork
 		// so an incompatible continuation reaches the existing pool and fails
 		// closed instead of silently materializing a fresh filesystem.
 		identityFields = map[string]string{
-			"sessionUID":    binding.SessionUID,
-			"workspaceSlot": binding.WorkspaceSlot,
+			acpWorkspaceSessionUIDMapKey: binding.SessionUID,
+			"workspaceSlot":              binding.WorkspaceSlot,
 		}
 		poolKind = "session"
 	} else {

@@ -86,7 +86,7 @@ func runtimePoolWorkspaceTestScheme(t *testing.T) *runtime.Scheme {
 
 func runtimePoolWorkspaceTestObject() *corev1alpha1.RuntimePool {
 	pool := runtimePoolTestObject(1)
-	pool.Name = "acp-ws-codex-0123456789abcdef"
+	pool.Name = acpWorkspaceTestRuntimePoolName
 	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
 		Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
 		BindingDigest: "sha256:" + strings.Repeat("9", 64),
@@ -237,7 +237,7 @@ func assertWorkspaceRuntimePoolBootstrapEnvironment(
 		byName[env[i].Name] = env[i]
 	}
 	for _, name := range []string{
-		"ORKA_ACP_CONTROLLER_TOKEN_FILE", "ORKA_ACP_CAPABILITY_SECRET_FILE", "ORKA_ACP_PROVIDER_TOKEN_FILE",
+		runtimePoolControllerTokenFileEnv, runtimePoolCapabilitySecretFileEnv, runtimePoolProviderTokenFileEnv,
 		"ORKA_ACP_CONTROLLER_TOKEN_BOOTSTRAP", "ORKA_ACP_CAPABILITY_SECRET_BOOTSTRAP", "ORKA_ACP_PROVIDER_TOKEN_BOOTSTRAP",
 	} {
 		if _, found := byName[name]; found {
@@ -796,7 +796,7 @@ func TestWorkspaceRuntimePoolFinalizationPreservesIsolationUntilClaimGone(t *tes
 	pool.DeletionTimestamp = &deletedAt
 	base := runtimePoolResourceName(pool.Namespace, pool.Name)
 	labels := map[string]string{
-		runtimePoolManagedByLabel:   "orka",
+		runtimePoolManagedByLabel:   outboundTokenRequestManagedByLabelValue,
 		runtimePoolApplicationLabel: "orka-acp-runtime",
 		runtimePoolKeyLabel:         runtimePoolKey(pool.Namespace, pool.Name),
 		runtimePoolNameLabel:        pool.Name,
@@ -1462,21 +1462,21 @@ func TestValidateRuntimePoolExecutionWorkspace(t *testing.T) {
 	substratePool := runtimePoolWorkspaceTestObject()
 	substratePool.Spec.ExecutionWorkspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
 	substratePool.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
-		BaseTemplateNamespace: "ate-demo", BaseTemplateName: "orka-codex-infra",
+		BaseTemplateNamespace: substrateTestTemplateNamespace, BaseTemplateName: substrateTestBaseTemplateName,
 	}
 	if err := validateRuntimePoolExecutionWorkspace(substratePool); err != nil {
 		t.Fatalf("valid substrate pool rejected: %v", err)
 	}
-	if err := validateRuntimePoolExecutionWorkspaceNamespace(substratePool, "orka-runtimes"); err != nil {
+	if err := validateRuntimePoolExecutionWorkspaceNamespace(substratePool, acpTestRuntimeNamespace); err != nil {
 		t.Fatalf("separate substrate template namespace rejected: %v", err)
 	}
-	if err := validateRuntimePoolExecutionWorkspaceNamespace(substratePool, "ate-demo"); err == nil ||
+	if err := validateRuntimePoolExecutionWorkspaceNamespace(substratePool, substrateTestTemplateNamespace); err == nil ||
 		!strings.Contains(err.Error(), "must differ") {
 		t.Fatalf("shared template/runtime namespace error = %v, want Secret-boundary rejection", err)
 	}
 	sandboxWithSubstrate := runtimePoolWorkspaceTestObject()
 	sandboxWithSubstrate.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
-		BaseTemplateNamespace: "ate-demo", BaseTemplateName: "orka-codex-infra",
+		BaseTemplateNamespace: substrateTestTemplateNamespace, BaseTemplateName: substrateTestBaseTemplateName,
 	}
 	if err := validateRuntimePoolExecutionWorkspace(sandboxWithSubstrate); err == nil || !strings.Contains(err.Error(), "only valid for provider substrate") {
 		t.Fatalf("sandbox-with-substrate error = %v, want provider mismatch", err)

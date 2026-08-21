@@ -71,6 +71,8 @@ const (
 	runtimePoolSubstrateDNSEgressSuffix        = "substrate-dns-egress"
 	runtimePoolSubstrateProviderEgressSuffix   = "substrate-provider-egress"
 	runtimePoolSubstrateControllerEgressSuffix = "substrate-controller-egress"
+	substrateObjectSpecField                   = "spec"
+	substrateObjectLabelsField                 = "labels"
 
 	// substrateActorBootedAnnotation records the exact actor ID whose workload
 	// this pool booted from scratch. It makes boot idempotent across controller
@@ -1739,7 +1741,7 @@ func (r *RuntimePoolReconciler) substrateRuntimePoolNetworkPolicies(
 				Egress: []networkingv1.NetworkPolicyEgressRule{{
 					To: []networkingv1.NetworkPolicyPeer{{
 						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: controllerNamespace}},
-						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolNetworkRoleLabel: "controller"}},
+						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolNetworkRoleLabel: AgentSandboxNamespaceStrategyController}},
 					}},
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: new(corev1.ProtocolTCP), Port: new(intstr.FromInt32(r.ControllerAPIPort))}},
 				}},
@@ -2051,7 +2053,7 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 		runtimePoolPIDsAnnotation:                    "4096",
 	}
 
-	object := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
+	object := &unstructured.Unstructured{Object: map[string]any{substrateObjectSpecField: spec}}
 	object.SetGroupVersionKind(substrateActorTemplateGVK)
 	object.SetName(runtimePoolSubstrateTemplateName(cfg.baseName))
 	object.SetNamespace(templateNamespace)
@@ -2105,7 +2107,7 @@ func substrateRuntimeContainer(
 			env = append(env, corev1.EnvVar{Name: item.Name, Value: actorID})
 		case "ORKA_ACP_POD_NAMESPACE":
 			env = append(env, corev1.EnvVar{Name: item.Name, Value: templateNamespace})
-		case "ORKA_ACP_CONTROLLER_TOKEN_FILE", "ORKA_ACP_CAPABILITY_SECRET_FILE", "ORKA_ACP_PROVIDER_TOKEN_FILE":
+		case runtimePoolControllerTokenFileEnv, runtimePoolCapabilitySecretFileEnv, runtimePoolProviderTokenFileEnv:
 			// Provider workspaces have no Secret mounts; the read-once
 			// bootstrap variables below replace the file paths.
 		default:
@@ -2122,16 +2124,16 @@ func substrateRuntimeTemplateObjectRevision(template *unstructured.Unstructured)
 	if template == nil {
 		return "", fmt.Errorf("RuntimePool substrate actor template is required")
 	}
-	spec, found, err := unstructured.NestedMap(template.Object, "spec")
+	spec, found, err := unstructured.NestedMap(template.Object, substrateObjectSpecField)
 	if err != nil || !found {
 		return "", fmt.Errorf("RuntimePool substrate actor template has no readable spec")
 	}
 	annotations := cloneStringMap(template.GetAnnotations())
 	delete(annotations, runtimePoolTemplateRevisionAnnotation)
 	return runtimePoolJSONRevision(map[string]any{
-		"labels":      cloneStringMap(template.GetLabels()),
-		"annotations": annotations,
-		"spec":        spec,
+		substrateObjectLabelsField: cloneStringMap(template.GetLabels()),
+		"annotations":              annotations,
+		substrateObjectSpecField:   spec,
 	})
 }
 
@@ -2252,7 +2254,7 @@ func (r *RuntimePoolReconciler) pruneStaleSubstrateRuntimePoolSecrets(
 	}
 	var secrets corev1.SecretList
 	if err := reader.List(ctx, &secrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
-		runtimePoolManagedByLabel: "orka",
+		runtimePoolManagedByLabel: outboundTokenRequestManagedByLabelValue,
 		runtimePoolKeyLabel:       cfg.labels[runtimePoolKeyLabel],
 		runtimePoolUIDLabel:       string(pool.UID),
 	}); err != nil {
@@ -2311,7 +2313,7 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolChildren(
 		expected.SetNamespace(templateNamespace)
 		expected.SetName(runtimePoolSubstrateTemplateName(cfg.baseName))
 		expected.SetLabels(map[string]string{
-			runtimePoolManagedByLabel: "orka",
+			runtimePoolManagedByLabel: outboundTokenRequestManagedByLabelValue,
 			runtimePoolKeyLabel:       runtimePoolKey(pool.Namespace, pool.Name),
 			runtimePoolNameLabel:      pool.Name,
 			runtimePoolNamespaceLabel: pool.Namespace,

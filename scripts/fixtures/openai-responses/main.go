@@ -13,7 +13,18 @@ import (
 	"time"
 )
 
-const maxRequestBytes = 4 << 20
+const (
+	maxRequestBytes             = 4 << 20
+	responseStatusField         = "status"
+	responseTypeField           = "type"
+	responseAnnotationsField    = "annotations"
+	responseSequenceNumberField = "sequence_number"
+	responseOutputIndexField    = "output_index"
+	responseItemIDField         = "item_id"
+	responseContentIndexField   = "content_index"
+	responseOutputTextType      = "output_text"
+	responseTextField           = "text"
+)
 
 var responseSequence atomic.Uint64
 
@@ -54,7 +65,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{responseStatusField: "ok"})
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -93,18 +104,20 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	responseID := fmt.Sprintf("resp_orka_fixture_%d", responseSequence.Add(1))
 	itemID := "msg_" + responseID
 	item := map[string]any{
-		"type":    "message",
-		"role":    "assistant",
-		"id":      itemID,
-		"status":  "completed",
-		"content": []map[string]any{{"type": "output_text", "text": text, "annotations": []any{}}},
+		responseTypeField:   "message",
+		"role":              "assistant",
+		"id":                itemID,
+		responseStatusField: "completed",
+		"content": []map[string]any{{
+			responseTypeField: responseOutputTextType, responseTextField: text, responseAnnotationsField: []any{},
+		}},
 	}
 	completed := map[string]any{
-		"id":       responseID,
-		"status":   "completed",
-		"model":    request.Model,
-		"output":   []any{item},
-		"end_turn": true,
+		"id":                responseID,
+		responseStatusField: "completed",
+		"model":             request.Model,
+		"output":            []any{item},
+		"end_turn":          true,
 		"usage": map[string]any{
 			"input_tokens":          1,
 			"input_tokens_details":  nil,
@@ -123,61 +136,65 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	writeSSE(w, "response.created", map[string]any{
-		"type":            "response.created",
-		"sequence_number": 0,
-		"response":        map[string]any{"id": responseID},
+		responseTypeField:           "response.created",
+		responseSequenceNumberField: 0,
+		"response":                  map[string]any{"id": responseID},
 	})
 	writeSSE(w, "response.output_item.added", map[string]any{
-		"type":            "response.output_item.added",
-		"sequence_number": 1,
-		"output_index":    0,
+		responseTypeField:           "response.output_item.added",
+		responseSequenceNumberField: 1,
+		responseOutputIndexField:    0,
 		"item": map[string]any{
-			"type": "message", "role": "assistant", "id": itemID,
-			"status": "in_progress", "content": []any{},
+			responseTypeField: "message", "role": "assistant", "id": itemID,
+			responseStatusField: "in_progress", "content": []any{},
 		},
 	})
 	writeSSE(w, "response.content_part.added", map[string]any{
-		"type":            "response.content_part.added",
-		"sequence_number": 2,
-		"item_id":         itemID,
-		"output_index":    0,
-		"content_index":   0,
-		"part":            map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+		responseTypeField:           "response.content_part.added",
+		responseSequenceNumberField: 2,
+		responseItemIDField:         itemID,
+		responseOutputIndexField:    0,
+		responseContentIndexField:   0,
+		"part": map[string]any{
+			responseTypeField: responseOutputTextType, responseTextField: "", responseAnnotationsField: []any{},
+		},
 	})
 	writeSSE(w, "response.output_text.delta", map[string]any{
-		"type":            "response.output_text.delta",
-		"sequence_number": 3,
-		"item_id":         itemID,
-		"output_index":    0,
-		"content_index":   0,
-		"delta":           text,
+		responseTypeField:           "response.output_text.delta",
+		responseSequenceNumberField: 3,
+		responseItemIDField:         itemID,
+		responseOutputIndexField:    0,
+		responseContentIndexField:   0,
+		"delta":                     text,
 	})
 	writeSSE(w, "response.output_text.done", map[string]any{
-		"type":            "response.output_text.done",
-		"sequence_number": 4,
-		"item_id":         itemID,
-		"output_index":    0,
-		"content_index":   0,
-		"text":            text,
+		responseTypeField:           "response.output_text.done",
+		responseSequenceNumberField: 4,
+		responseItemIDField:         itemID,
+		responseOutputIndexField:    0,
+		responseContentIndexField:   0,
+		responseTextField:           text,
 	})
 	writeSSE(w, "response.content_part.done", map[string]any{
-		"type":            "response.content_part.done",
-		"sequence_number": 5,
-		"item_id":         itemID,
-		"output_index":    0,
-		"content_index":   0,
-		"part":            map[string]any{"type": "output_text", "text": text, "annotations": []any{}},
+		responseTypeField:           "response.content_part.done",
+		responseSequenceNumberField: 5,
+		responseItemIDField:         itemID,
+		responseOutputIndexField:    0,
+		responseContentIndexField:   0,
+		"part": map[string]any{
+			responseTypeField: responseOutputTextType, responseTextField: text, responseAnnotationsField: []any{},
+		},
 	})
 	writeSSE(w, "response.output_item.done", map[string]any{
-		"type":            "response.output_item.done",
-		"sequence_number": 6,
-		"output_index":    0,
-		"item":            item,
+		responseTypeField:           "response.output_item.done",
+		responseSequenceNumberField: 6,
+		responseOutputIndexField:    0,
+		"item":                      item,
 	})
 	writeSSE(w, "response.completed", map[string]any{
-		"type":            "response.completed",
-		"sequence_number": 7,
-		"response":        completed,
+		responseTypeField:           "response.completed",
+		responseSequenceNumberField: 7,
+		"response":                  completed,
 	})
 }
 

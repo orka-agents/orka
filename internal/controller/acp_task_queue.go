@@ -1101,7 +1101,7 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 			MaxRunningPrompts:   corev1alpha1.DefaultRuntimePoolMaxRunningPrompts,
 		}
 		labels := map[string]string{
-			acpRuntimePoolLabel: "true", acpRuntimeTrustLabel: namespace,
+			acpRuntimePoolLabel: booleanTrueValue, acpRuntimeTrustLabel: namespace,
 			acpRuntimeProfileLabel: strings.TrimPrefix(string(plan.Digest), "sha256:")[:16],
 		}
 		var executionWorkspace *corev1alpha1.RuntimePoolExecutionWorkspaceSpec
