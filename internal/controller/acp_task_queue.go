@@ -73,7 +73,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if reader == nil {
 		reader = r.Client
 	}
-	pool, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan)
+	pool, poolPreexisting, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -164,6 +164,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			Reason:        corev1alpha1.ExecutionWorkspaceReasonPending,
 			ReusePolicy:   plan.Workspace.ReusePolicy,
 			CleanupPolicy: plan.Workspace.CleanupPolicy,
+			Reused:        poolPreexisting,
 			Message:       "RuntimeSession is queued for a workspace-provider-backed RuntimePool",
 			ObservedAt:    &now,
 		}.Status()
@@ -1075,9 +1076,13 @@ func validateACPRuntimeWorkspaceNamespace(
 	return validateSubstrateTemplateRuntimeNamespace(plan.Workspace.TemplateNamespace, runtimeNamespace)
 }
 
-func (r *TaskReconciler) ensureACPRuntimePool(ctx context.Context, namespace string, plan ACPRuntimePlan) (*corev1alpha1.RuntimePool, error) {
+func (r *TaskReconciler) ensureACPRuntimePool(
+	ctx context.Context,
+	namespace string,
+	plan ACPRuntimePlan,
+) (*corev1alpha1.RuntimePool, bool, error) {
 	if err := validateACPRuntimeWorkspaceNamespace(plan, namespace, r.ACPRuntimeNamespace); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	pool := &corev1alpha1.RuntimePool{}
 	key := types.NamespacedName{Namespace: namespace, Name: plan.PoolName}
@@ -1126,22 +1131,23 @@ func (r *TaskReconciler) ensureACPRuntimePool(ctx context.Context, namespace str
 		}
 		if err := r.Create(ctx, pool); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
-				return nil, fmt.Errorf("create RuntimePool: %w", err)
+				return nil, false, fmt.Errorf("create RuntimePool: %w", err)
 			}
 			if err := r.Get(ctx, key, pool); err != nil {
-				return nil, err
+				return nil, false, err
 			}
+			return pool, true, nil
 		}
-		return pool, nil
+		return pool, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if pool.Spec.Runtime.Image != plan.Image || pool.Spec.Runtime.Profile.Digest != string(plan.Digest) {
-		return nil, fmt.Errorf("RuntimePool %s profile does not match queued Task", pool.Name)
+		return nil, false, fmt.Errorf("RuntimePool %s profile does not match queued Task", pool.Name)
 	}
 	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
-		return nil, fmt.Errorf("RuntimePool %s execution workspace binding does not match queued Task", pool.Name)
+		return nil, false, fmt.Errorf("RuntimePool %s execution workspace binding does not match queued Task", pool.Name)
 	}
 	base := pool.DeepCopy()
 	changed := false
@@ -1159,10 +1165,10 @@ func (r *TaskReconciler) ensureACPRuntimePool(ctx context.Context, namespace str
 	}
 	if changed {
 		if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
-	return pool, nil
+	return pool, true, nil
 }
 
 func acpBoundTaskRequestDigest(bound *verifiedAgentExecution, attempt int32, promptID string) (string, error) {

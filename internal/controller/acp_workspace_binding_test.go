@@ -443,9 +443,12 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pool, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan)
+	pool, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan)
 	if err != nil {
 		t.Fatalf("ensureACPRuntimePool() error = %v", err)
+	}
+	if preexisting {
+		t.Fatal("new workspace RuntimePool reported as preexisting")
 	}
 	if pool.Spec.ExecutionWorkspace == nil ||
 		pool.Spec.ExecutionWorkspace.Provider != corev1alpha1.WorkspaceProviderAgentSandbox ||
@@ -458,11 +461,18 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 	if pool.Labels[acpRuntimeWorkspaceProviderLabel] != string(corev1alpha1.WorkspaceProviderAgentSandbox) {
 		t.Fatalf("pool labels = %#v, want workspace provider label", pool.Labels)
 	}
+	reattached, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan)
+	if err != nil {
+		t.Fatalf("reattach workspace RuntimePool: %v", err)
+	}
+	if !preexisting || reattached.UID != pool.UID {
+		t.Fatalf("reattached pool = %s/%t, want existing UID %s", reattached.UID, preexisting, pool.UID)
+	}
 
 	// A frozen plain plan must never bind to a workspace-backed pool.
 	plainPlan := plan
 	plainPlan.Workspace = nil
-	if _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plainPlan); err == nil ||
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plainPlan); err == nil ||
 		!strings.Contains(err.Error(), "execution workspace binding does not match") {
 		t.Fatalf("mismatched pool binding error = %v, want exact-binding rejection", err)
 	}
@@ -577,17 +587,14 @@ func TestProjectACPExecutionWorkspaceStatusTransitions(t *testing.T) {
 			Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
 			Phase:    corev1alpha1.ExecutionWorkspacePhasePending,
 			Reason:   corev1alpha1.ExecutionWorkspaceReasonPending,
+			Reused:   true,
 		},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
 	reconciler := &TaskReconciler{Client: kubeClient, Scheme: scheme}
-	dispatcher := &ACPDispatcher{Client: kubeClient}
 	ctx := context.Background()
 
-	if err := dispatcher.patchExecutionWorkspaceReuse(ctx, task, true); err != nil {
-		t.Fatalf("project durable session reuse: %v", err)
-	}
 	if err := reconciler.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
 		t.Fatalf("project running: %v", err)
 	}

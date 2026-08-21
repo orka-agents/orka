@@ -458,7 +458,11 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 
-	if actor != nil {
+	// Agent Substrate's atelet process pulls the Actor image, runsc binary,
+	// and golden snapshot from inside the WorkerPool Pod. Install confinement
+	// only after that credential-free materialization reports Running, but
+	// still before the supervisor receives any RuntimePool credentials.
+	if actor != nil && actor.Running() {
 		if err := r.ensureSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, derivedTemplate); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
@@ -469,20 +473,20 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, status)
 	}
 	if !r.SubstrateEnabled {
-		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("substrate provider is disabled; existing RuntimePool admission remains closed until it scales to zero"))
+		if actor == nil {
+			status.ActiveInstance = nil
+			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		}
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "substrate provider is disabled; existing RuntimePool admission remains closed until it scales to zero"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
 	if err := loadDesired(); err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}
 	rolloutPending := derivedTemplate != nil && (templateIntegrityErr != nil || templateRevision != desired.revision)
-	if actor == nil && !rolloutPending {
-		if err := r.ensureSubstrateRuntimePoolNetworkPolicies(ctx, pool, cfg, desired.object); err != nil {
-			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
-		}
-		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionPodSecurityReady, metav1.ConditionTrue, "ProviderIsolated", "provider-owned gVisor isolation and controller-enforced default-deny egress host the runtime workload")
-	}
-
 	if rolloutPending {
 		return r.reconcileSubstrateRuntimePoolRollout(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, desired, status)
 	}
@@ -1466,37 +1470,32 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolNetworkPolicies(
 	if reader == nil {
 		reader = r.Client
 	}
-	labels := client.MatchingLabels{
-		runtimePoolManagedByLabel: "orka",
-		runtimePoolKeyLabel:       runtimePoolKey(pool.Namespace, pool.Name),
-		runtimePoolNameLabel:      pool.Name,
-		runtimePoolNamespaceLabel: pool.Namespace,
-		runtimePoolUIDLabel:       string(pool.UID),
-	}
-	expectedNames := map[string]struct{}{
-		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDenyEgressSuffix):       {},
-		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDNSEgressSuffix):        {},
-		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateProviderEgressSuffix):   {},
-		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateControllerEgressSuffix): {},
+	expectedNames := []string{
+		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDenyEgressSuffix),
+		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDNSEgressSuffix),
+		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateProviderEgressSuffix),
+		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateControllerEgressSuffix),
 	}
 	remaining := false
 	for _, namespace := range namespaces {
-		var policies networkingv1.NetworkPolicyList
-		if err := reader.List(ctx, &policies, client.InNamespace(namespace), labels); err != nil {
-			return false, fmt.Errorf("list Substrate RuntimePool NetworkPolicies in namespace %s for cleanup: %w", namespace, err)
-		}
-		for i := range policies.Items {
-			current := &policies.Items[i]
-			if _, expected := expectedNames[current.Name]; !expected {
-				continue
+		for _, name := range expectedNames {
+			current := &networkingv1.NetworkPolicy{}
+			key := types.NamespacedName{Namespace: namespace, Name: name}
+			if err := reader.Get(ctx, key, current); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return false, fmt.Errorf("read Substrate RuntimePool NetworkPolicy %q for cleanup: %w", name, err)
 			}
 			if !substrateRuntimePoolNetworkPolicyOwnedByPool(current, pool, cfg) {
-				return false, fmt.Errorf("refusing to delete foreign Substrate RuntimePool NetworkPolicy %q", current.Name)
+				return false, fmt.Errorf("refusing to delete foreign Substrate RuntimePool NetworkPolicy %q", name)
 			}
-			if current.DeletionTimestamp.IsZero() {
-				if err := r.Delete(ctx, current, deleteCurrentObjectPreconditions(current)...); err != nil && !apierrors.IsNotFound(err) {
-					return false, fmt.Errorf("delete Substrate RuntimePool NetworkPolicy %q: %w", current.Name, err)
-				}
+			if !current.DeletionTimestamp.IsZero() {
+				remaining = true
+				continue
+			}
+			if err := r.Delete(ctx, current, deleteCurrentObjectPreconditions(current)...); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("delete Substrate RuntimePool NetworkPolicy %q: %w", name, err)
 			}
 			remaining = true
 		}

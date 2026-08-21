@@ -203,6 +203,30 @@ func TestACPUpgradeDrainCoordinatorDrainsSubstrateActorWithoutPod(t *testing.T) 
 	}
 }
 
+func TestACPUpgradeDrainRequiresStoppedSubstrateLifecycleWithoutActiveInstance(t *testing.T) {
+	pool, _, _, _ := upgradeDrainRuntimePoolFixture(t)
+	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+		Provider: corev1alpha1.WorkspaceProviderSubstrate,
+		Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
+			BaseTemplateNamespace: "ate-demo",
+			BaseTemplateName:      "orka-codex",
+		},
+	}
+	pool.Status.ActiveInstance = nil
+	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+	fence := store.ControllerEpochFence{Epoch: pool.Status.ControllerEpoch}
+	coordinator := &ACPUpgradeDrainCoordinator{}
+
+	err := coordinator.observeAndDrainRuntimePool(context.Background(), fence, pool, &ACPUpgradeDrainSnapshot{})
+	if err == nil || !strings.Contains(err.Error(), "does not prove the provider actor is stopped") {
+		t.Fatalf("Stopping Substrate pool without active instance error = %v, want teardown proof rejection", err)
+	}
+	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
+	if err := coordinator.observeAndDrainRuntimePool(context.Background(), fence, pool, &ACPUpgradeDrainSnapshot{}); err != nil {
+		t.Fatalf("fully stopped Substrate pool rejected: %v", err)
+	}
+}
+
 func TestACPUpgradeDrainRejectsStaleIdentityAndInvalidCredentials(t *testing.T) {
 	tests := []struct {
 		name   string

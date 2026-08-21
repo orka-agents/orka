@@ -38,6 +38,35 @@ func TestStaticChartValidatesAgentSandboxControllerMode(t *testing.T) {
 	})
 }
 
+func TestStaticChartGrantsAgentSandboxRuntimeRBAC(t *testing.T) {
+	output, err := helmTemplateStaticChart(t,
+		"--set", "controller.agentSandbox.enabled=true",
+		"--show-only", "templates/rbac.yaml",
+	)
+	if err != nil {
+		t.Fatalf("helm template rejected agent sandbox RBAC: %v\n%s", err, output)
+	}
+	start := strings.Index(output, "# Runtime child resources are confined to the v2 installation's runtime namespace.")
+	if start < 0 {
+		t.Fatalf("rendered RBAC is missing the runtime Role:\n%s", output)
+	}
+	runtimeRole := output[start:]
+	if end := strings.Index(runtimeRole, "\n---"); end >= 0 {
+		runtimeRole = runtimeRole[:end]
+	}
+	for _, want := range []string{
+		`apiGroups: ["extensions.agents.x-k8s.io"]`,
+		`resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]`,
+		`verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]`,
+		`apiGroups: ["agents.x-k8s.io"]`,
+		`resources: ["sandboxes"]`,
+	} {
+		if !strings.Contains(runtimeRole, want) {
+			t.Fatalf("runtime Role is missing %q:\n%s", want, runtimeRole)
+		}
+	}
+}
+
 func TestStaticChartEnablesWorkspaceDispatchForSubstrate(t *testing.T) {
 	output, err := helmTemplateStaticChart(t,
 		"--set", "controller.substrate.enabled=true",

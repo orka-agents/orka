@@ -1038,11 +1038,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		runtimeFence.RuntimeSessionGeneration = bound.Generation
 		sessionExecution.Binding = bound
 	}
-	if sessionExecution != nil {
-		if err := d.patchExecutionWorkspaceReuse(ctx, task, sessionExecution.Reused); err != nil {
-			return err
-		}
-	}
 	if reservationLease != nil {
 		if err := reservationLease.renew(runtimeCtx); err != nil {
 			if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
@@ -3516,27 +3511,6 @@ func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.T
 				}
 			}
 		}
-		if err := d.Client.Status().Patch(ctx, latest, client.MergeFrom(base)); err != nil {
-			return err
-		}
-		task.Status = latest.Status
-		return nil
-	})
-}
-
-func (d *ACPDispatcher) patchExecutionWorkspaceReuse(ctx context.Context, task *corev1alpha1.Task, reused bool) error {
-	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latest := &corev1alpha1.Task{}
-		if err := d.Client.Get(ctx, key, latest); err != nil {
-			return err
-		}
-		if latest.Status.ExecutionWorkspace == nil || latest.Status.ExecutionWorkspace.Reused == reused {
-			task.Status = latest.Status
-			return nil
-		}
-		base := latest.DeepCopy()
-		latest.Status.ExecutionWorkspace.Reused = reused
 		if err := d.Client.Status().Patch(ctx, latest, client.MergeFrom(base)); err != nil {
 			return err
 		}

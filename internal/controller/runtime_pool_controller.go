@@ -3238,10 +3238,14 @@ func substrateRouteHTTPTransport(routerURL, actorDNSSuffix string) (http.RoundTr
 		}
 		routerAddress = net.JoinHostPort(parsed.Hostname(), port)
 	}
-	suffix := "." + strings.ToLower(strings.Trim(strings.TrimSpace(actorDNSSuffix), "."))
-	if suffix == "." {
+	normalizedSuffix := strings.ToLower(strings.Trim(strings.TrimSpace(actorDNSSuffix), "."))
+	if normalizedSuffix == "" {
 		return nil, fmt.Errorf("substrate actor DNS suffix is required")
 	}
+	if problems := validation.IsDNS1123Subdomain(normalizedSuffix); len(problems) > 0 {
+		return nil, fmt.Errorf("substrate actor DNS suffix is invalid: %s", strings.Join(problems, "; "))
+	}
+	suffix := "." + normalizedSuffix
 	transport := harnessv2.NewProxylessTransport()
 	if parsed.Scheme == urlSchemeHTTPS {
 		transport.TLSClientConfig = &tls.Config{

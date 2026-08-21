@@ -724,7 +724,13 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 	}
 	if runtimePoolIsSubstrateBacked(pool) {
 		if active == nil {
-			return nil
+			if pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
+				return nil
+			}
+			return fmt.Errorf(
+				"has no authenticated active instance but Substrate lifecycle %q does not prove the provider actor is stopped",
+				pool.Status.Lifecycle,
+			)
 		}
 		pod, err := upgradeDrainSubstrateInstancePod(pool, active)
 		if err != nil {

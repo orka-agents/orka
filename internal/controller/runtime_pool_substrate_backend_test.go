@@ -325,6 +325,18 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("list Substrate RuntimePool NetworkPolicies: %v", err)
 	}
+	if len(policies.Items) != 0 {
+		t.Fatalf("Substrate RuntimePool installed NetworkPolicies before credential-free Actor materialization: %#v", policies.Items)
+	}
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	policies = networkingv1.NetworkPolicyList{}
+	if err := r.List(context.Background(), &policies, client.InNamespace(substrateTestWorkerNamespace), client.MatchingLabels{
+		runtimePoolKeyLabel: runtimePoolKey(pool.Namespace, pool.Name),
+	}); err != nil {
+		t.Fatalf("list confined Substrate RuntimePool NetworkPolicies: %v", err)
+	}
 	if len(policies.Items) != 4 {
 		t.Fatalf("Substrate RuntimePool NetworkPolicy count = %d, want 4", len(policies.Items))
 	}
@@ -409,6 +421,11 @@ func TestSubstrateRuntimePoolRejectsForeignWorkerEgressPolicy(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
 	base := runtimePoolResourceName(pool.Namespace, pool.Name)
 	foreign := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
 		Name: runtimePoolChildName(base, runtimePoolSubstrateDenyEgressSuffix), Namespace: substrateTestWorkerNamespace,
@@ -418,15 +435,84 @@ func TestSubstrateRuntimePoolRejectsForeignWorkerEgressPolicy(t *testing.T) {
 	}
 
 	runtimePoolReconcile(t, r, pool)
+	runtimePoolReconcile(t, r, pool)
 
-	if len(control.created) != 0 || len(control.resumed) != 0 {
-		t.Fatalf("foreign egress policy allowed actor startup: created=%v resumed=%v", control.created, control.resumed)
+	if len(control.created) != 1 || len(control.resumed) != 1 {
+		t.Fatalf("credential-free Actor materialization = created:%v resumed:%v, want one boot", control.created, control.resumed)
+	}
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("foreign egress policy reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
 	}
 	got := runtimePoolTestGetPool(t, r, pool)
 	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
 		!strings.Contains(got.Status.Message, "NetworkPolicy") ||
 		!strings.Contains(got.Status.Message, "ownership identity") {
 		t.Fatalf("status = %s/%q, want fail-closed foreign NetworkPolicy rejection", got.Status.Lifecycle, got.Status.Message)
+	}
+}
+
+func TestSubstrateRuntimePoolFinalizerRejectsNetworkPolicyLabelDrift(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+
+	current := runtimePoolTestGetPool(t, r, pool)
+	cfg, err := r.runtimePoolConfig(&current)
+	if err != nil {
+		t.Fatalf("runtimePoolConfig: %v", err)
+	}
+	name := runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDenyEgressSuffix)
+	policy := &networkingv1.NetworkPolicy{}
+	key := types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: name}
+	if err := r.Get(context.Background(), key, policy); err != nil {
+		t.Fatalf("get RuntimePool NetworkPolicy: %v", err)
+	}
+	base := policy.DeepCopy()
+	policy.Labels[runtimePoolUIDLabel] = "drifted-owner"
+	if err := r.Patch(context.Background(), policy, client.MergeFrom(base)); err != nil {
+		t.Fatalf("drift RuntimePool NetworkPolicy labels: %v", err)
+	}
+
+	remaining, err := r.deleteSubstrateRuntimePoolNetworkPolicies(context.Background(), &current, cfg, nil)
+	if err == nil || !strings.Contains(err.Error(), "refusing to delete foreign") {
+		t.Fatalf("cleanup after ownership-label drift = remaining:%t err:%v, want fail-closed rejection", remaining, err)
+	}
+	if err := r.Get(context.Background(), key, &networkingv1.NetworkPolicy{}); err != nil {
+		t.Fatalf("label-drifted NetworkPolicy was deleted: %v", err)
+	}
+}
+
+func TestSubstrateRuntimePoolDisabledAdmissionPreservesActiveInstance(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	serving := runtimePoolTestGetPool(t, r, pool)
+	if serving.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || serving.Status.ActiveInstance == nil {
+		t.Fatalf("precondition status = %s active=%v, want Serving active instance", serving.Status.Lifecycle, serving.Status.ActiveInstance)
+	}
+	wantRuntimeInstanceID := serving.Status.ActiveInstance.RuntimeInstanceID
+
+	r.SubstrateEnabled = false
+	runtimePoolReconcile(t, r, pool)
+	disabled := runtimePoolTestGetPool(t, r, pool)
+	if disabled.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
+		disabled.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		disabled.Status.ActiveInstance == nil ||
+		disabled.Status.ActiveInstance.RuntimeInstanceID != wantRuntimeInstanceID {
+		t.Fatalf("disabled status = %s/%s active=%#v, want serving instance preserved with admission closed", disabled.Status.Lifecycle, disabled.Status.AdmissionState, disabled.Status.ActiveInstance)
+	}
+	if len(control.deleted) != 0 {
+		t.Fatalf("disabling admission deleted active Actor: %v", control.deleted)
 	}
 }
 
@@ -1241,6 +1327,9 @@ func TestSubstrateRuntimePoolFinalizerDeletesPoliciesWithoutTemplates(t *testing
 	if derived == nil {
 		t.Fatal("derived template was not materialized")
 	}
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
 	var policies networkingv1.NetworkPolicyList
 	if err := r.List(context.Background(), &policies, client.MatchingLabels{runtimePoolUIDLabel: string(pool.UID)}); err != nil {
 		t.Fatalf("list RuntimePool policies: %v", err)

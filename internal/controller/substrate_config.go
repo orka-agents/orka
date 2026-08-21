@@ -206,6 +206,9 @@ func (c SubstrateConfig) ValidateACPRuntimePool() error {
 	if strings.TrimSpace(cfg.ActorDNSSuffix) == "" {
 		return fmt.Errorf("substrate actor DNS suffix is required")
 	}
+	if _, err := substrateRouteHTTPTransport(cfg.RouterURL, cfg.ActorDNSSuffix); err != nil {
+		return err
+	}
 	return nil
 }
 

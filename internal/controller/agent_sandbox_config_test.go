@@ -215,6 +215,29 @@ func TestSubstrateConfigValidateACPRuntimePoolDoesNotRequireLegacyBootstrapSecre
 	}
 }
 
+func TestSubstrateConfigValidateACPRuntimePoolRejectsInvalidRouting(t *testing.T) {
+	tests := []struct {
+		name      string
+		routerURL string
+		dnsSuffix string
+		want      string
+	}{
+		{name: "router URL", routerURL: "not-a-url", dnsSuffix: "actors.example.test", want: "router URL is invalid"},
+		{name: "DNS suffix", routerURL: "https://router.example.test", dnsSuffix: "actors..example.test", want: "DNS suffix is invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultSubstrateConfig()
+			cfg.APIInsecureSkipVerify = true
+			cfg.RouterURL = tt.routerURL
+			cfg.ActorDNSSuffix = tt.dnsSuffix
+			if err := cfg.ValidateACPRuntimePool(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateACPRuntimePool() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestSubstrateConfigValidateRequiresSessionIdentitySecretWhenRequired(t *testing.T) {
 	cfg := DefaultSubstrateConfig()
 	cfg.APIInsecureSkipVerify = true
