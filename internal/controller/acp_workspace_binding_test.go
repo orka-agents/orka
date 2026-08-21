@@ -37,11 +37,12 @@ func workspaceBindingTestTask(mutate func(*corev1alpha1.ExecutionWorkspaceSpec))
 
 func TestResolveACPWorkspaceBinding(t *testing.T) {
 	tests := []struct {
-		name        string
-		task        *corev1alpha1.Task
-		wantErr     string
-		wantNil     bool
-		wantSession string
+		name                      string
+		task                      *corev1alpha1.Task
+		wantErr                   string
+		wantNil                   bool
+		wantSession               string
+		enforceNamespaceIsolation bool
 	}{
 		{name: "nil task", task: nil, wantNil: true},
 		{name: "no workspace", task: bindingTestTask(), wantNil: true},
@@ -78,6 +79,15 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: "ate-demo"}
 			}),
 			wantSession: "task:11111111-1111-1111-1111-111111111111",
+		},
+		{
+			name: "substrate cross-namespace template fails under namespace isolation",
+			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex-infra", Namespace: "ate-demo"}
+			}),
+			enforceNamespaceIsolation: true,
+			wantErr:                   "cross-namespace execution workspace templateRef is not allowed",
 		},
 		{
 			name:    "unknown provider fails closed",
@@ -135,7 +145,7 @@ func TestResolveACPWorkspaceBinding(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			binding, err := resolveACPWorkspaceBinding(tt.task, corev1alpha1.WorkspaceProviderAgentSandbox)
+			binding, err := resolveACPWorkspaceBinding(tt.task, corev1alpha1.WorkspaceProviderAgentSandbox, tt.enforceNamespaceIsolation)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
@@ -189,7 +199,7 @@ func TestApplyACPWorkspaceBindingToPlanChangesPoolIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binding, err := resolveACPWorkspaceBinding(workspaceBindingTestTask(nil), corev1alpha1.WorkspaceProviderAgentSandbox)
+	binding, err := resolveACPWorkspaceBinding(workspaceBindingTestTask(nil), corev1alpha1.WorkspaceProviderAgentSandbox, false)
 	if err != nil || binding == nil {
 		t.Fatalf("resolveACPWorkspaceBinding() = %#v, %v", binding, err)
 	}
@@ -257,7 +267,7 @@ func TestVerifiedSnapshotWorkspaceBindingRejectsTamperedIdentity(t *testing.T) {
 	binding := &corev1alpha1.AgentExecutionBinding{
 		Task: corev1alpha1.AgentExecutionBindingTaskRef{UID: types.UID("11111111-1111-1111-1111-111111111111")},
 	}
-	frozen, err := resolveACPWorkspaceBinding(workspaceBindingTestTask(nil), corev1alpha1.WorkspaceProviderAgentSandbox)
+	frozen, err := resolveACPWorkspaceBinding(workspaceBindingTestTask(nil), corev1alpha1.WorkspaceProviderAgentSandbox, false)
 	if err != nil || frozen == nil {
 		t.Fatalf("resolveACPWorkspaceBinding() = %#v, %v", frozen, err)
 	}
@@ -314,7 +324,7 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox)
+	binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false)
 	if err != nil {
 		t.Fatal(err)
 	}

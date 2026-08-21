@@ -164,7 +164,7 @@ func taskRequestsExecutionWorkspace(task *corev1alpha1.Task) bool {
 // ACP RuntimePool path cannot host, before any workspace or RuntimePool demand
 // exists. A nil plan with rejected=false admits the workspace-backed ACP path.
 func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(task *corev1alpha1.Task) (agentExecutionPlan, bool) {
-	binding, err := resolveACPWorkspaceBinding(task, r.ExecutionWorkspaceDefaultProvider)
+	binding, err := resolveACPWorkspaceBinding(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation)
 	if err != nil {
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
 	}

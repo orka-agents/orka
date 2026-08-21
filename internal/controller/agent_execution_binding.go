@@ -199,7 +199,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidate(
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
-	workspaceBinding, err := resolveACPWorkspaceBinding(task, r.ExecutionWorkspaceDefaultProvider)
+	workspaceBinding, err := resolveACPWorkspaceBinding(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}

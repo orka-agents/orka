@@ -503,8 +503,8 @@ func TestSubstrateRuntimePoolServesThroughRouterHost(t *testing.T) {
 		active.RuntimeInstanceID != substrateActorInstanceUID(actorID)+".actor-boot" {
 		t.Fatalf("ActiveInstance = %#v, want route-host address with actor instance identity", active)
 	}
-	if active.PodNamespace != "ate-workers" || active.PodName != "worker-0" {
-		t.Fatalf("ActiveInstance placement = %s/%s, want provider worker placement", active.PodNamespace, active.PodName)
+	if active.PodNamespace != pool.Namespace || active.PodName != "worker-0" {
+		t.Fatalf("ActiveInstance namespace/name = %s/%s, want RuntimePool credential namespace %s and internal worker name", active.PodNamespace, active.PodName, pool.Namespace)
 	}
 	if strings.Contains(active.PodUID, actorID) || strings.Contains(active.RuntimeInstanceID, actorID) {
 		t.Fatalf("public active instance leaked raw provider actor ID %q: %#v", actorID, active)

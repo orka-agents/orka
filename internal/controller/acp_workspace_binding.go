@@ -55,6 +55,7 @@ type ACPRuntimeWorkspaceBinding struct {
 func resolveACPWorkspaceBinding(
 	task *corev1alpha1.Task,
 	defaultProvider corev1alpha1.WorkspaceProvider,
+	enforceNamespaceIsolation bool,
 ) (*ACPRuntimeWorkspaceBinding, error) {
 	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
 		return nil, nil
@@ -92,6 +93,12 @@ func resolveACPWorkspaceBinding(
 		templateNamespace = strings.TrimSpace(ws.TemplateRef.Namespace)
 		if templateNamespace == "" {
 			templateNamespace = task.Namespace
+		}
+		if enforceNamespaceIsolation && templateNamespace != task.Namespace {
+			return nil, fmt.Errorf(
+				"cross-namespace execution workspace templateRef is not allowed when namespace isolation is enforced: template %q is in namespace %q, task is in %q",
+				templateName, templateNamespace, task.Namespace,
+			)
 		}
 	default:
 		return nil, fmt.Errorf(

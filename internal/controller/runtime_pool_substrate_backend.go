@@ -356,11 +356,11 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 
 	if rolloutPending {
-		return r.reconcileSubstrateRuntimePoolRollout(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, templateNamespace, desired, status)
+		return r.reconcileSubstrateRuntimePoolRollout(ctx, pool, cfg, control, derivedTemplate, actor, actorID, routeHost, desired, status)
 	}
 
 	if pool.Spec.DesiredReplicas == 0 {
-		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, actor, actorID, routeHost, templateNamespace, authSecret, status)
+		return r.reconcileSubstrateRuntimePoolScaleDown(ctx, pool, cfg, control, actor, actorID, routeHost, authSecret, status)
 	}
 
 	if derivedTemplate == nil {
@@ -415,7 +415,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	// probe. The PUT is idempotent for identical payloads; a payload conflict
 	// means another party seeded this workload first, so the exact instance is
 	// recycled instead of trusted.
-	syntheticPod := substrateSyntheticInstancePod(pool, cfg, templateNamespace, actor, actorID, routeHost)
+	syntheticPod := substrateSyntheticInstancePod(pool, cfg, actor, actorID, routeHost)
 	bootstrapAlreadyComplete, err := r.seedSubstrateSupervisorCredentials(ctx, routeHost, bootstrapNonce, authSecret, providerSecret)
 	if err != nil {
 		if errors.Is(err, errSubstrateCredentialConflict) {
@@ -546,21 +546,19 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 func substrateSyntheticInstancePod(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
-	templateNamespace string,
 	actor *workspace.SubstrateRuntimeActor,
 	actorID, routeHost string,
 ) *corev1.Pod {
-	namespace := actor.PodNamespace
-	if namespace == "" {
-		namespace = templateNamespace
-	}
 	name := actor.PodName
 	if name == "" {
 		name = actorID
 	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
+			// The synthetic Pod namespace is the controller-owned RuntimePool
+			// namespace containing the epoch-scoped auth Secrets. Provider worker
+			// placement stays internal to Substrate actor control and teardown.
+			Namespace: cfg.namespace,
 			Name:      name,
 			UID:       types.UID(substrateActorInstanceUID(actorID)),
 			Annotations: map[string]string{
@@ -585,7 +583,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolRollout(
 	control workspace.SubstrateRuntimeActorControl,
 	derivedTemplate *unstructured.Unstructured,
 	actor *workspace.SubstrateRuntimeActor,
-	actorID, routeHost, templateNamespace string,
+	actorID, routeHost string,
 	desired substrateRuntimeTemplateRender,
 	status corev1alpha1.RuntimePoolStatus,
 ) (ctrl.Result, error) {
@@ -675,7 +673,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolRollout(
 	if err != nil {
 		return r.finishRuntimePoolRolloutFailure(ctx, pool, status, err)
 	}
-	deployedSyntheticPod := substrateSyntheticInstancePod(validationPool, validationConfig, templateNamespace, actor, actorID, routeHost)
+	deployedSyntheticPod := substrateSyntheticInstancePod(validationPool, validationConfig, actor, actorID, routeHost)
 	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, deployedSyntheticPod), string(deployedAuthSecret.Data[runtimePoolControllerTokenKey]), deployedAuthSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		return r.finishRuntimePoolRolloutFailure(ctx, pool, status, fmt.Errorf("authenticated rollout status probe failed: %w", err))
@@ -755,7 +753,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 	cfg runtimePoolConfig,
 	control workspace.SubstrateRuntimeActorControl,
 	actor *workspace.SubstrateRuntimeActor,
-	actorID, routeHost, templateNamespace string,
+	actorID, routeHost string,
 	authSecret *corev1.Secret,
 	status corev1alpha1.RuntimePoolStatus,
 ) (ctrl.Result, error) {
@@ -791,7 +789,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
-	syntheticPod := substrateSyntheticInstancePod(pool, cfg, templateNamespace, actor, actorID, routeHost)
+	syntheticPod := substrateSyntheticInstancePod(pool, cfg, actor, actorID, routeHost)
 	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, syntheticPod), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
