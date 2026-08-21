@@ -39,7 +39,8 @@ import (
 
 type failPrivateAuthFinalBindingPatchClient struct {
 	client.Client
-	failed bool
+	failed             bool
+	deletedPrivateAuth int
 }
 
 func (c *failPrivateAuthFinalBindingPatchClient) Patch(
@@ -51,15 +52,24 @@ func (c *failPrivateAuthFinalBindingPatchClient) Patch(
 	if pool, ok := object.(*corev1alpha1.RuntimePool); ok && !c.failed {
 		for key, value := range pool.Annotations {
 			value = strings.TrimSpace(value)
-			if strings.HasPrefix(key, runtimePoolPrivateAuthBindingPrefix) &&
-				value != "" &&
-				!strings.HasPrefix(value, runtimePoolPrivateAuthPendingValuePrefix) {
+			if strings.HasPrefix(key, runtimePoolPrivateAuthBindingPrefix) && value != "" {
 				c.failed = true
 				return errors.New("transient private auth binding patch failure")
 			}
 		}
 	}
 	return c.Client.Patch(ctx, object, patch, options...)
+}
+
+func (c *failPrivateAuthFinalBindingPatchClient) Delete(
+	ctx context.Context,
+	object client.Object,
+	options ...client.DeleteOption,
+) error {
+	if secret, ok := object.(*corev1.Secret); ok && secret.Labels[runtimePoolAuthLabel] == booleanTrueValue {
+		c.deletedPrivateAuth++
+	}
+	return c.Client.Delete(ctx, object, options...)
 }
 
 func runtimePoolWorkspaceTestScheme(t *testing.T) *runtime.Scheme {
@@ -371,7 +381,7 @@ func TestWorkspaceRuntimePoolRejectsUnboundPrivateAuthSecret(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRuntimePoolRecoversReservedPrivateAuthSecretAfterBindingPatchFailure(t *testing.T) {
+func TestWorkspaceRuntimePoolDiscardsUnboundPrivateAuthSecretAfterBindingPatchFailure(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()
 	r := runtimePoolTestReconciler(t, scheme, nil, pool)
@@ -393,27 +403,29 @@ func TestWorkspaceRuntimePoolRecoversReservedPrivateAuthSecretAfterBindingPatchF
 
 	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch)
 	persisted := runtimePoolTestGetPool(t, r, pool)
-	pendingName, pending, err := parseRuntimePoolPrivateSecretPendingBinding(persisted.Annotations[bindingKey])
-	if err != nil || !pending {
-		t.Fatalf("persisted private auth binding = %q, pending=%v, error=%v", persisted.Annotations[bindingKey], pending, err)
+	if binding := strings.TrimSpace(persisted.Annotations[bindingKey]); binding != "" {
+		t.Fatalf("private auth Secret name was published before its UID was bound: %q", binding)
 	}
 	var secrets corev1.SecretList
 	if err := r.List(context.Background(), &secrets, client.InNamespace(cfg.namespace), client.MatchingLabels{
 		runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
 	}); err != nil {
-		t.Fatalf("list reserved private auth Secrets: %v", err)
+		t.Fatalf("list unbound private auth Secrets: %v", err)
 	}
 	matches := runtimePoolAuthSecretsForEpoch(secrets.Items, cfg.controllerEpoch)
-	if len(matches) != 1 || matches[0].Name != pendingName {
-		t.Fatalf("reserved private auth Secrets = %#v, want exactly %q", matches, pendingName)
+	if len(matches) != 1 {
+		t.Fatalf("unbound private auth Secrets = %#v, want exactly one crash orphan", matches)
 	}
 
 	recovered, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(context.Background(), &persisted, cfg, "7")
 	if err != nil {
-		t.Fatalf("recover reserved private auth Secret: %v", err)
+		t.Fatalf("replace unbound private auth Secret: %v", err)
 	}
-	if recovered.Name != pendingName || recovered.UID == "" {
-		t.Fatalf("recovered private auth Secret = %s/%s, want %q with UID", recovered.Name, recovered.UID, pendingName)
+	if failingClient.deletedPrivateAuth != 1 {
+		t.Fatalf("discarded private auth Secrets = %d, want the crash orphan deleted once", failingClient.deletedPrivateAuth)
+	}
+	if recovered.UID == "" {
+		t.Fatalf("replacement private auth Secret = %s/%s, want immutable UID", recovered.Name, recovered.UID)
 	}
 	boundPool := runtimePoolTestGetPool(t, r, pool)
 	boundName, boundUID, err := parseRuntimePoolPrivateSecretBinding(boundPool.Annotations[bindingKey])
