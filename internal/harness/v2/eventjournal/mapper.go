@@ -996,6 +996,13 @@ func mapPromptLifecycleWithHistory(
 		if err := event.Accepted.Validate(); err != nil {
 			return nil, nil, fmt.Errorf("invalid accepted payload: %w", err)
 		}
+		if model != "" {
+			fields, published := redactLogicalFieldsWithHistory(
+				history, historySaturated, model,
+			)
+			model = fields[0]
+			publishedFields = published
+		}
 		content[mappedJournalKindContentKey] = mappedPromptAcceptedKind
 		content["acceptedAt"] = event.Accepted.AcceptedAt.UTC()
 		content["acpVersion"] = event.Accepted.ACPVersion

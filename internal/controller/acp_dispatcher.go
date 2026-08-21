@@ -113,6 +113,9 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 	if _, ok := d.EventStore.(store.AtomicExecutionEventPlanStore); !ok {
 		return fmt.Errorf("ACP dispatcher requires an execution event store with atomic plan projection")
 	}
+	if _, ok := d.ResultStore.(store.PromptResultReceiptStore); !ok {
+		return fmt.Errorf("ACP dispatcher requires a result store with prompt result receipts")
+	}
 	if d.APIReader == nil {
 		d.APIReader = d.Client
 	}
@@ -1498,7 +1501,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	persistableAssistant, assistantContentOmitted := completedAssistantTranscriptForPersistence(
 		assistant.String(), assistantOverflow, resultText,
 	)
-	if err := d.transitionAttemptToSettlingWithResult(ctx, attemptID, fence, []byte(resultText)); err != nil {
+	if err := d.transitionAttemptToSettlingWithResult(ctx, task, attemptID, fence, []byte(resultText)); err != nil {
 		return err
 	}
 	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
@@ -3341,10 +3344,18 @@ func acpSettlingTransitionDigest(id string, version int64, result []byte) (strin
 
 func (d *ACPDispatcher) transitionAttemptToSettlingWithResult(
 	ctx context.Context,
+	task *corev1alpha1.Task,
 	id string,
 	fence store.ControllerEpochFence,
 	result []byte,
 ) error {
+	if task == nil || strings.TrimSpace(task.Namespace) == "" || strings.TrimSpace(task.Name) == "" {
+		return fmt.Errorf("task identity is required for prompt settling")
+	}
+	receipts, ok := d.ResultStore.(store.PromptResultReceiptStore)
+	if !ok {
+		return fmt.Errorf("ACP prompt settling requires a result store with prompt result receipts")
+	}
 	attempt, err := d.Store.GetPromptAttempt(ctx, id)
 	if err != nil {
 		return err
@@ -3361,6 +3372,12 @@ func (d *ACPDispatcher) transitionAttemptToSettlingWithResult(
 		return err
 	}
 	operationID := acpSettlingOperation + "-" + strconv.FormatInt(expectedVersion, 10)
+	if err := receipts.SavePromptResultReceipt(ctx, store.PromptResultReceipt{
+		AttemptID: id, Namespace: task.Namespace, TaskName: task.Name,
+		OperationID: operationID, OperationDigest: digest, Data: result,
+	}); err != nil {
+		return err
+	}
 	if attempt.ExecutionState == store.PromptExecutionSettling {
 		if attempt.LastOperationID == operationID && attempt.LastOperationDigest == digest {
 			return nil

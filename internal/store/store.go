@@ -59,6 +59,26 @@ type ResultStore interface {
 	DeleteResult(ctx context.Context, namespace, taskName string) error
 }
 
+// PromptResultReceipt preserves the exact result bytes behind a fenced prompt
+// settling transition. The receipt is immutable for one PromptAttempt so a
+// controller takeover can repair a result write interrupted after the durable
+// control-plane transition.
+type PromptResultReceipt struct {
+	AttemptID       string
+	Namespace       string
+	TaskName        string
+	OperationID     string
+	OperationDigest string
+	Data            []byte
+}
+
+// PromptResultReceiptStore persists attempt-bound result receipts before the
+// corresponding PromptAttempt enters Settling.
+type PromptResultReceiptStore interface {
+	SavePromptResultReceipt(ctx context.Context, receipt PromptResultReceipt) error
+	GetPromptResultReceipt(ctx context.Context, attemptID string) (*PromptResultReceipt, error)
+}
+
 // SessionStore handles session transcript persistence.
 type SessionStore interface {
 	CreateSession(ctx context.Context, session *SessionRecord) error

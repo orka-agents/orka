@@ -77,6 +77,17 @@ func migrate(db *sql.DB) error {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (namespace, task_name)
 		)`,
+		`CREATE TABLE IF NOT EXISTS prompt_result_receipts (
+			attempt_id       TEXT NOT NULL PRIMARY KEY,
+			namespace        TEXT NOT NULL,
+			task_name        TEXT NOT NULL,
+			operation_id     TEXT NOT NULL,
+			operation_digest TEXT NOT NULL,
+			data             BLOB NOT NULL,
+			created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_prompt_result_receipts_task
+			ON prompt_result_receipts(namespace, task_name)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			namespace     TEXT NOT NULL,
 			name          TEXT NOT NULL,

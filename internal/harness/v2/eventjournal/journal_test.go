@@ -979,6 +979,58 @@ func TestJournalRedactsCredentialSplitIntoPromptStreamFailure(t *testing.T) {
 	}
 }
 
+func TestJournalRedactsCredentialSplitFromAcceptedModel(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	mapCtx := testMapContext()
+	prefix := testJournalSecretPrefix + strings.Repeat("a", 10)
+	suffix := strings.Repeat("b", 14)
+	mapCtx.Model = prefix
+	state, err := (Journal{EventStore: eventStore, MapContext: mapCtx}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
+	accepted.Type = harnessv2.EventAccepted
+	accepted.Update = nil
+	accepted.Accepted = &harnessv2.AcceptedEvent{
+		AcceptedAt: now,
+		Lease: harnessv2.PromptLease{
+			Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+		},
+		ACPVersion: harnessv2.ACPProfileV1,
+	}
+	if appended, isNew, err := state.AppendPromptLifecycleIfNew(ctx, accepted); err != nil || !isNew || appended == nil {
+		t.Fatalf("append accepted lifecycle = %#v new=%t err=%v", appended, isNew, err)
+	}
+	plan := testUpdateEvent(2, now.Add(time.Millisecond), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{
+			Content: suffix, Status: harnessv2.PlanEntryInProgress,
+		}}},
+	})
+	if appended, isNew, err := state.AppendUpdateIfNew(ctx, plan); err != nil || !isNew || appended == nil {
+		t.Fatalf("append plan suffix = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 2 {
+		t.Fatalf("accepted-model events = %#v", listed)
+	}
+	var acceptedContent map[string]any
+	if err := json.Unmarshal(listed[0].Content, &acceptedContent); err != nil {
+		t.Fatal(err)
+	}
+	if acceptedContent["model"] != prefix {
+		t.Fatalf("accepted model = %#v, want fragment preserved", acceptedContent["model"])
+	}
+	if strings.Contains(listed[1].ContentText, suffix) ||
+		!strings.Contains(listed[1].ContentText, executionevents.ExecutionEventRedactedValue) {
+		t.Fatalf("plan suffix reconstructed accepted model credential: %#v", listed[1])
+	}
+}
+
 func TestJournalRetriesAppendOnlyAfterConfirmedAbsence(t *testing.T) {
 	ctx := context.Background()
 	base := storetest.NewFakeExecutionEventStore()
