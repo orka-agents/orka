@@ -87,6 +87,11 @@ const (
 	// creation. Any template update or delete/recreate changes this fence and
 	// forces the actor to be recycled before credential bootstrap.
 	substrateActorTemplateFenceAnnotation = "orka.ai/substrate-actor-template-fence"
+	// substrateActorWorkerPlacementAnnotation freezes the exact WorkerPool
+	// namespace/name admitted before actor creation. Teardown must not trust a
+	// later read of the mutable derived ActorTemplate when selecting the worker
+	// Pod whose memory it destroys.
+	substrateActorWorkerPlacementAnnotation = "orka.ai/substrate-actor-worker-placement"
 	// substrateNetworkPolicyNamespacesAnnotation records every provider worker
 	// namespace where this pool materialized egress policies. Cross-namespace
 	// policies cannot carry a RuntimePool owner reference, and finalization must
@@ -105,6 +110,11 @@ const (
 	// rendered container must state it explicitly.
 	substrateRuntimeEntrypoint = "/usr/local/bin/orka-acp-runtime"
 )
+
+type substrateRuntimePoolWorkerPlacementRecord struct {
+	Namespace  string `json:"namespace"`
+	WorkerPool string `json:"workerPool"`
+}
 
 // +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch;create;update;patch;delete
 
@@ -314,6 +324,25 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				}
 			}
 		}
+		if templateOwned && templateIntegrityErr == nil && templateRevision == desired.revision &&
+			strings.TrimSpace(pool.Annotations[substrateActorWorkerPlacementAnnotation]) == "" {
+			// A deterministic actor may predate the controller-owned template.
+			// Freeze the exact rendered placement as the cleanup allowlist only
+			// after the newly observed template matches that render byte-for-byte.
+			if err := r.recordSubstrateRuntimePoolWorkerPlacement(ctx, pool, desired.object); err != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+			}
+		}
+	}
+	if actor != nil && strings.TrimSpace(pool.Annotations[substrateActorWorkerPlacementAnnotation]) == "" &&
+		templateOwned && templateIntegrityErr == nil && templateFence != "" &&
+		strings.TrimSpace(pool.Annotations[substrateActorTemplateFenceAnnotation]) == templateFence {
+		// Backfill pools created before the placement record existed only when
+		// the live template is still the exact object fenced at actor creation.
+		// A changed or recreated template is never trusted for teardown.
+		if err := r.recordSubstrateRuntimePoolWorkerPlacement(ctx, pool, derivedTemplate); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
+		}
 	}
 
 	replicas := int32(0)
@@ -468,6 +497,9 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, templateFence); err != nil {
 				return ctrl.Result{}, err
 			}
+		}
+		if err := r.recordSubstrateRuntimePoolWorkerPlacement(ctx, pool, derivedTemplate); err != nil {
+			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		if err := r.verifySubstrateRuntimeTemplateFence(
 			ctx, templateNamespace, runtimePoolSubstrateTemplateName(cfg.baseName), templateFence,
@@ -1038,6 +1070,9 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorTemplateFenceAnnotation, ""); err != nil {
 		return err
 	}
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkerPlacementAnnotation, ""); err != nil {
+		return err
+	}
 	return r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorRecyclingAnnotation, "")
 }
 
@@ -1067,14 +1102,17 @@ func (r *RuntimePoolReconciler) teardownSubstrateActor(
 		}
 		return true, nil
 	}
-	if actor.Suspending() {
-		return false, nil
-	}
 	workloadGone, err := r.destroySubstrateActorWorkload(ctx, pool, actor)
 	if err != nil {
 		return false, err
 	}
 	if !workloadGone {
+		return false, nil
+	}
+	if actor.Suspending() {
+		// A provider-initiated suspension may already be in flight, but teardown
+		// must still destroy and verify absence of the live credentialed workload
+		// before waiting for the actor to become deletable.
 		return false, nil
 	}
 	if _, err := control.SettleActor(ctx, actorID); err != nil {
@@ -1092,7 +1130,7 @@ func (r *RuntimePoolReconciler) destroySubstrateActorWorkload(
 	pool *corev1alpha1.RuntimePool,
 	actor *workspace.SubstrateRuntimeActor,
 ) (bool, error) {
-	workerNamespace, workerPool, err := r.substrateRuntimePoolWorkerPlacement(ctx, pool)
+	workerNamespace, workerPool, err := substrateRuntimePoolWorkerPlacementFromAnnotation(pool)
 	if err != nil {
 		return false, err
 	}
@@ -1134,29 +1172,6 @@ func (r *RuntimePoolReconciler) destroySubstrateActorWorkload(
 	return false, nil
 }
 
-func (r *RuntimePoolReconciler) substrateRuntimePoolWorkerPlacement(
-	ctx context.Context,
-	pool *corev1alpha1.RuntimePool,
-) (string, string, error) {
-	if pool == nil || pool.Spec.ExecutionWorkspace == nil || pool.Spec.ExecutionWorkspace.Substrate == nil {
-		return "", "", fmt.Errorf("RuntimePool substrate infrastructure template binding is missing")
-	}
-	substrateSpec := pool.Spec.ExecutionWorkspace.Substrate
-	derivedTemplateName := runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name))
-	template, err := r.getSubstrateActorTemplate(
-		ctx,
-		strings.TrimSpace(substrateSpec.BaseTemplateNamespace),
-		derivedTemplateName,
-	)
-	if err != nil {
-		return "", "", err
-	}
-	if template == nil {
-		return "", "", fmt.Errorf("RuntimePool derived substrate ActorTemplate is unavailable during actor teardown")
-	}
-	return substrateRuntimePoolWorkerPlacementFromTemplate(template)
-}
-
 func substrateRuntimePoolWorkerPlacementFromTemplate(template *unstructured.Unstructured) (string, string, error) {
 	if template == nil {
 		return "", "", fmt.Errorf("RuntimePool substrate ActorTemplate is required for WorkerPool placement")
@@ -1177,6 +1192,47 @@ func substrateRuntimePoolWorkerPlacementFromTemplate(template *unstructured.Unst
 		return "", "", fmt.Errorf("RuntimePool derived substrate ActorTemplate has no WorkerPool namespace")
 	}
 	return workerNamespace, strings.TrimSpace(workerPool), nil
+}
+
+func substrateRuntimePoolWorkerPlacementFromAnnotation(pool *corev1alpha1.RuntimePool) (string, string, error) {
+	if pool == nil {
+		return "", "", fmt.Errorf("RuntimePool is required for Substrate actor teardown")
+	}
+	raw := strings.TrimSpace(pool.Annotations[substrateActorWorkerPlacementAnnotation])
+	if raw == "" {
+		return "", "", fmt.Errorf("RuntimePool admitted Substrate worker placement is not recorded")
+	}
+	var placement substrateRuntimePoolWorkerPlacementRecord
+	if err := json.Unmarshal([]byte(raw), &placement); err != nil {
+		return "", "", fmt.Errorf("RuntimePool recorded an invalid Substrate worker placement")
+	}
+	placement.Namespace = strings.TrimSpace(placement.Namespace)
+	placement.WorkerPool = strings.TrimSpace(placement.WorkerPool)
+	if errs := k8svalidation.IsDNS1123Label(placement.Namespace); len(errs) != 0 {
+		return "", "", fmt.Errorf("RuntimePool recorded an invalid Substrate worker namespace")
+	}
+	if errs := k8svalidation.IsDNS1123Subdomain(placement.WorkerPool); len(errs) != 0 {
+		return "", "", fmt.Errorf("RuntimePool recorded an invalid Substrate WorkerPool name")
+	}
+	return placement.Namespace, placement.WorkerPool, nil
+}
+
+func (r *RuntimePoolReconciler) recordSubstrateRuntimePoolWorkerPlacement(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	template *unstructured.Unstructured,
+) error {
+	workerNamespace, workerPool, err := substrateRuntimePoolWorkerPlacementFromTemplate(template)
+	if err != nil {
+		return err
+	}
+	value, err := json.Marshal(substrateRuntimePoolWorkerPlacementRecord{
+		Namespace: workerNamespace, WorkerPool: workerPool,
+	})
+	if err != nil {
+		return fmt.Errorf("encode RuntimePool Substrate worker placement: %w", err)
+	}
+	return r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkerPlacementAnnotation, string(value))
 }
 
 func substrateRuntimePoolNetworkPolicyNamespaces(pool *corev1alpha1.RuntimePool) ([]string, error) {

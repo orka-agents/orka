@@ -115,6 +115,22 @@ func validateRuntimePoolExecutionWorkspace(pool *corev1alpha1.RuntimePool) error
 	return nil
 }
 
+func validateRuntimePoolExecutionWorkspaceNamespace(
+	pool *corev1alpha1.RuntimePool,
+	runtimeNamespace string,
+) error {
+	if pool == nil || pool.Spec.ExecutionWorkspace == nil ||
+		pool.Spec.ExecutionWorkspace.Provider != corev1alpha1.WorkspaceProviderSubstrate ||
+		pool.Spec.ExecutionWorkspace.Substrate == nil {
+		return nil
+	}
+	templateNamespace := strings.TrimSpace(pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateNamespace)
+	if templateNamespace != "" && templateNamespace == strings.TrimSpace(runtimeNamespace) {
+		return fmt.Errorf("spec.executionWorkspace.substrate.baseTemplateNamespace must differ from the resolved runtime namespace so provider templates cannot resolve RuntimePool Secrets")
+	}
+	return nil
+}
+
 // reconcileWorkspaceBackedRuntimePool converges a workspace-provider-backed
 // pool. It mirrors the Deployment path exactly, replacing only workload
 // materialization: SandboxTemplate + SandboxWarmPool render the supervisor Pod

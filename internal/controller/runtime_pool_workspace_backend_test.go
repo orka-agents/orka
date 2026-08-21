@@ -912,6 +912,13 @@ func TestValidateRuntimePoolExecutionWorkspace(t *testing.T) {
 	if err := validateRuntimePoolExecutionWorkspace(substratePool); err != nil {
 		t.Fatalf("valid substrate pool rejected: %v", err)
 	}
+	if err := validateRuntimePoolExecutionWorkspaceNamespace(substratePool, "orka-runtimes"); err != nil {
+		t.Fatalf("separate substrate template namespace rejected: %v", err)
+	}
+	if err := validateRuntimePoolExecutionWorkspaceNamespace(substratePool, "ate-demo"); err == nil ||
+		!strings.Contains(err.Error(), "must differ") {
+		t.Fatalf("shared template/runtime namespace error = %v, want Secret-boundary rejection", err)
+	}
 	sandboxWithSubstrate := runtimePoolWorkspaceTestObject()
 	sandboxWithSubstrate.Spec.ExecutionWorkspace.Substrate = &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
 		BaseTemplateNamespace: "ate-demo", BaseTemplateName: "orka-codex-infra",

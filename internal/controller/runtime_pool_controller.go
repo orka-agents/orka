@@ -504,6 +504,9 @@ func (r *RuntimePoolReconciler) runtimePoolConfig(pool *corev1alpha1.RuntimePool
 	if err != nil {
 		return runtimePoolConfig{}, err
 	}
+	if err := validateRuntimePoolExecutionWorkspaceNamespace(pool, namespace); err != nil {
+		return runtimePoolConfig{}, err
+	}
 	epoch := r.effectiveControllerEpoch(pool)
 	maxSessions, maxPrompts, err := runtimePoolCapacity(pool)
 	if err != nil {

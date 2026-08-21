@@ -247,8 +247,9 @@ type RuntimePoolExecutionWorkspaceSpec struct {
 type RuntimePoolSubstrateWorkspaceSpec struct {
 	// BaseTemplateNamespace is the namespace of the operator-owned
 	// infrastructure ActorTemplate. Controller-rendered runtime templates are
-	// created in the same namespace so the provider can resolve them; pool
-	// Secrets remain in the controller-owned runtime namespace.
+	// created in the same namespace so the provider can resolve them. It must
+	// differ from the resolved runtime namespace so provider template
+	// principals cannot resolve pool Secrets.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63

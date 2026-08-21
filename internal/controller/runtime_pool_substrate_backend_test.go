@@ -39,9 +39,12 @@ import (
 
 const (
 	substrateTestStatusSuspended   = "STATUS_SUSPENDED"
+	substrateTestStatusSuspending  = "STATUS_SUSPENDING"
 	substrateTestTemplateNamespace = "ate-demo"
 	substrateTestBaseTemplateName  = "orka-codex-infra"
 	substrateTestActorDNSSuffix    = "actors.test.example"
+	substrateTestWorkerNamespace   = "ate-workers"
+	substrateTestWorkerPoolName    = "orka-workers"
 )
 
 type fakeSubstrateActorControl struct {
@@ -91,7 +94,7 @@ func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID strin
 		f.actors[actorID] = actor
 	}
 	actor.Status = "STATUS_RUNNING"
-	actor.PodNamespace = "ate-workers"
+	actor.PodNamespace = substrateTestWorkerNamespace
 	actor.PodName = "worker-0"
 	actor.PodIP = "10.99.0.5"
 	view := *actor
@@ -196,7 +199,7 @@ func runtimePoolSubstrateTestObject() *corev1alpha1.RuntimePool {
 func substrateTestBaseTemplate() *unstructured.Unstructured {
 	template := &unstructured.Unstructured{Object: map[string]any{
 		"spec": map[string]any{
-			"workerPoolRef":   map[string]any{"namespace": "ate-workers", "name": "orka-workers"},
+			"workerPoolRef":   map[string]any{"namespace": substrateTestWorkerNamespace, "name": substrateTestWorkerPoolName},
 			"snapshotsConfig": map[string]any{"location": "gs://ate-snapshots/orka"},
 			"runsc":           map[string]any{"amd64": map[string]any{"url": "https://example.invalid/runsc"}},
 			"containers": []any{map[string]any{
@@ -317,7 +320,7 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 		t.Fatal("validated ActorTemplate UID/resourceVersion fence was not recorded before actor creation")
 	}
 	var policies networkingv1.NetworkPolicyList
-	if err := r.List(context.Background(), &policies, client.InNamespace("ate-workers"), client.MatchingLabels{
+	if err := r.List(context.Background(), &policies, client.InNamespace(substrateTestWorkerNamespace), client.MatchingLabels{
 		runtimePoolKeyLabel: runtimePoolKey(pool.Namespace, pool.Name),
 	}); err != nil {
 		t.Fatalf("list Substrate RuntimePool NetworkPolicies: %v", err)
@@ -327,7 +330,7 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	}
 	for i := range policies.Items {
 		policy := policies.Items[i]
-		if policy.Spec.PodSelector.MatchLabels[substrateWorkerPoolLabel] != "orka-workers" {
+		if policy.Spec.PodSelector.MatchLabels[substrateWorkerPoolLabel] != substrateTestWorkerPoolName {
 			t.Fatalf("NetworkPolicy %q selector = %#v, want exact WorkerPool label", policy.Name, policy.Spec.PodSelector)
 		}
 		if len(policy.Spec.PolicyTypes) != 1 || policy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress || len(policy.Spec.Ingress) != 0 {
@@ -408,7 +411,7 @@ func TestSubstrateRuntimePoolRejectsForeignWorkerEgressPolicy(t *testing.T) {
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
 	base := runtimePoolResourceName(pool.Namespace, pool.Name)
 	foreign := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
-		Name: runtimePoolChildName(base, runtimePoolSubstrateDenyEgressSuffix), Namespace: "ate-workers",
+		Name: runtimePoolChildName(base, runtimePoolSubstrateDenyEgressSuffix), Namespace: substrateTestWorkerNamespace,
 	}}
 	if err := r.Create(context.Background(), foreign); err != nil {
 		t.Fatalf("create foreign NetworkPolicy: %v", err)
@@ -437,7 +440,7 @@ func TestSubstrateRuntimePoolRecyclesActorWithUnexpectedTemplateBeforeBootstrap(
 		TemplateNamespace: "attacker-owned",
 		TemplateName:      "credential-capture",
 		Status:            "STATUS_RUNNING",
-		PodNamespace:      "ate-workers",
+		PodNamespace:      substrateTestWorkerNamespace,
 		PodName:           "worker-0",
 	}
 	seedAttempts := 0
@@ -615,11 +618,35 @@ func assertSubstrateDerivedTemplate(
 	if err := r.List(context.Background(), &templateSecrets, client.InNamespace(substrateTestTemplateNamespace)); err == nil && len(templateSecrets.Items) != 0 {
 		t.Fatalf("template namespace holds %d Secrets; nothing secret may exist there", len(templateSecrets.Items))
 	}
-	if workerPool, _, _ := unstructured.NestedString(derived.Object, "spec", "workerPoolRef", "name"); workerPool != "orka-workers" {
+	if workerPool, _, _ := unstructured.NestedString(derived.Object, "spec", "workerPoolRef", "name"); workerPool != substrateTestWorkerPoolName {
 		t.Fatalf("derived template workerPoolRef = %q, want operator infrastructure copied", workerPool)
 	}
 	if location, _, _ := unstructured.NestedString(derived.Object, "spec", "snapshotsConfig", "location"); location != "gs://ate-snapshots/orka" {
 		t.Fatalf("derived template snapshotsConfig = %q, want operator infrastructure copied (safe: the golden-built instance boots credential-free)", location)
+	}
+}
+
+func TestSubstrateRuntimePoolRejectsTemplateNamespaceContainingPoolSecrets(t *testing.T) {
+	scheme := runtimePoolSubstrateTestScheme(t)
+	pool := runtimePoolSubstrateTestObject()
+	pool.Spec.RuntimeNamespace = "orka-runtimes"
+	pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateNamespace = pool.Spec.RuntimeNamespace
+	r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+	r.RuntimeNamespace = pool.Spec.RuntimeNamespace
+
+	runtimePoolReconcile(t, r, pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(current.Status.Message, "must differ") {
+		t.Fatalf("shared template/runtime namespace status = %s/%s %q, want Degraded/Closed namespace rejection", current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
+	}
+	var secrets corev1.SecretList
+	if err := r.List(context.Background(), &secrets, client.InNamespace(pool.Spec.RuntimeNamespace)); err != nil {
+		t.Fatalf("list runtime namespace Secrets: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("shared template/runtime namespace created %d Secrets before rejection", len(secrets.Items))
 	}
 }
 
@@ -802,11 +829,12 @@ func TestSubstrateTeardownDestroysLabeledWorkerPodBeforeSettling(t *testing.T) {
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
 	runtimePoolReconcile(t, r, pool)
 	actorID := substrateTestActorID(pool)
+	current := runtimePoolTestGetPool(t, r, pool)
 
 	worker := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "ate-workers", Name: "worker-0",
-			Labels: map[string]string{"ate.dev/worker-pool": "orka-workers"},
+			Namespace: substrateTestWorkerNamespace, Name: "worker-0",
+			Labels: map[string]string{substrateWorkerPoolLabel: substrateTestWorkerPoolName},
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "ateom", Image: "example.com/ateom"}}},
 	}
@@ -814,30 +842,116 @@ func TestSubstrateTeardownDestroysLabeledWorkerPodBeforeSettling(t *testing.T) {
 		t.Fatalf("create worker pod: %v", err)
 	}
 
-	gone, err := r.teardownSubstrateActor(context.Background(), pool, control, actorID)
+	gone, err := r.teardownSubstrateActor(context.Background(), &current, control, actorID)
 	if err != nil || gone {
 		t.Fatalf("teardown with live worker = (%v, %v), want in-progress", gone, err)
 	}
 	if len(control.settled) != 0 {
 		t.Fatal("actor settled while its workload memory still existed")
 	}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: "ate-workers", Name: "worker-0"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("worker pod get after teardown = %v, want deleted", err)
 	}
 
-	gone, err = r.teardownSubstrateActor(context.Background(), pool, control, actorID)
+	gone, err = r.teardownSubstrateActor(context.Background(), &current, control, actorID)
 	if err != nil || gone {
 		t.Fatalf("teardown after workload destruction = (%v, %v), want settling", gone, err)
 	}
 	if len(control.settled) != 1 {
 		t.Fatalf("settled = %v, want the memoryless actor settled", control.settled)
 	}
-	gone, err = r.teardownSubstrateActor(context.Background(), pool, control, actorID)
+	gone, err = r.teardownSubstrateActor(context.Background(), &current, control, actorID)
 	if err != nil || !gone {
 		t.Fatalf("final teardown = (%v, %v), want deleted", gone, err)
 	}
 	if len(control.deleted) != 1 {
 		t.Fatalf("deleted = %v, want the settled actor deleted", control.deleted)
+	}
+}
+
+func TestSubstrateTeardownDestroysWorkerPodWhileActorSuspending(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+	actorID := substrateTestActorID(pool)
+	control.actors[actorID].Status = substrateTestStatusSuspending
+	current := runtimePoolTestGetPool(t, r, pool)
+
+	worker := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: substrateTestWorkerNamespace, Name: "worker-0",
+		Labels: map[string]string{substrateWorkerPoolLabel: substrateTestWorkerPoolName},
+	}}
+	if err := r.Create(context.Background(), worker); err != nil {
+		t.Fatalf("create worker pod: %v", err)
+	}
+
+	gone, err := r.teardownSubstrateActor(context.Background(), &current, control, actorID)
+	if err != nil || gone {
+		t.Fatalf("teardown while suspending = (%v, %v), want in-progress", gone, err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(worker), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("worker pod get after suspending teardown = %v, want deleted", err)
+	}
+	if len(control.settled) != 0 || len(control.deleted) != 0 {
+		t.Fatalf("provider calls while suspending = settle %v delete %v, want neither", control.settled, control.deleted)
+	}
+
+	gone, err = r.teardownSubstrateActor(context.Background(), &current, control, actorID)
+	if err != nil || gone {
+		t.Fatalf("teardown after workload absence while suspending = (%v, %v), want waiting", gone, err)
+	}
+	control.actors[actorID].Status = substrateTestStatusSuspended
+	gone, err = r.teardownSubstrateActor(context.Background(), &current, control, actorID)
+	if err != nil || !gone {
+		t.Fatalf("teardown after suspension settled = (%v, %v), want deleted", gone, err)
+	}
+}
+
+func TestSubstrateTeardownUsesFrozenWorkerPlacementAfterTemplateMutation(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+	actorID := substrateTestActorID(pool)
+	current := runtimePoolTestGetPool(t, r, pool)
+	workerNamespace, workerPool, err := substrateRuntimePoolWorkerPlacementFromAnnotation(&current)
+	if err != nil || workerNamespace != substrateTestWorkerNamespace || workerPool != substrateTestWorkerPoolName {
+		t.Fatalf("recorded placement = %q/%q, %v, want ate-workers/orka-workers", workerNamespace, workerPool, err)
+	}
+
+	derived := &unstructured.Unstructured{}
+	derived.SetGroupVersionKind(substrateActorTemplateGVK)
+	key := types.NamespacedName{
+		Namespace: substrateTestTemplateNamespace,
+		Name:      runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name)),
+	}
+	if err := r.Get(context.Background(), key, derived); err != nil {
+		t.Fatalf("get derived template: %v", err)
+	}
+	if err := unstructured.SetNestedField(derived.Object, "other-workers", "spec", "workerPoolRef", "namespace"); err != nil {
+		t.Fatalf("mutate derived template namespace: %v", err)
+	}
+	if err := unstructured.SetNestedField(derived.Object, "other-pool", "spec", "workerPoolRef", "name"); err != nil {
+		t.Fatalf("mutate derived template WorkerPool: %v", err)
+	}
+	if err := r.Update(context.Background(), derived); err != nil {
+		t.Fatalf("update derived template: %v", err)
+	}
+
+	worker := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: substrateTestWorkerNamespace, Name: "worker-0",
+		Labels: map[string]string{substrateWorkerPoolLabel: substrateTestWorkerPoolName},
+	}}
+	if err := r.Create(context.Background(), worker); err != nil {
+		t.Fatalf("create original-placement worker pod: %v", err)
+	}
+	gone, err := r.teardownSubstrateActor(context.Background(), &current, control, actorID)
+	if err != nil || gone {
+		t.Fatalf("teardown after template placement mutation = (%v, %v), want worker deletion in progress", gone, err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(worker), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("original-placement worker pod get after teardown = %v, want deleted", err)
 	}
 }
 
@@ -847,19 +961,20 @@ func TestSubstrateTeardownRefusesUnlabeledPod(t *testing.T) {
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
 	runtimePoolReconcile(t, r, pool)
 	actorID := substrateTestActorID(pool)
+	current := runtimePoolTestGetPool(t, r, pool)
 
 	bystander := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ate-workers", Name: "worker-0"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: substrateTestWorkerNamespace, Name: "worker-0"},
 		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "example.com/app"}}},
 	}
 	if err := r.Create(context.Background(), bystander); err != nil {
 		t.Fatalf("create bystander pod: %v", err)
 	}
-	if _, err := r.teardownSubstrateActor(context.Background(), pool, control, actorID); err == nil ||
+	if _, err := r.teardownSubstrateActor(context.Background(), &current, control, actorID); err == nil ||
 		!strings.Contains(err.Error(), substrateWorkerPoolLabel) {
 		t.Fatalf("teardown error = %v, want refusal to delete an unlabeled Pod", err)
 	}
-	if err := r.Get(context.Background(), types.NamespacedName{Namespace: "ate-workers", Name: "worker-0"}, &corev1.Pod{}); err != nil {
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: substrateTestWorkerNamespace, Name: "worker-0"}, &corev1.Pod{}); err != nil {
 		t.Fatalf("bystander pod must survive: %v", err)
 	}
 }
@@ -890,7 +1005,7 @@ func TestSubstrateTeardownRefusesUnknownOrMismatchedWorkerPlacement(t *testing.T
 			name:   "wrong worker pool label",
 			mutate: func(*workspace.SubstrateRuntimeActor) {},
 			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-				Namespace: "ate-workers", Name: "worker-0",
+				Namespace: substrateTestWorkerNamespace, Name: "worker-0",
 				Labels: map[string]string{substrateWorkerPoolLabel: "other-workers"},
 			}},
 			wantError: "does not match infrastructure WorkerPool orka-workers",
@@ -903,6 +1018,7 @@ func TestSubstrateTeardownRefusesUnknownOrMismatchedWorkerPlacement(t *testing.T
 			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
 			runtimePoolReconcile(t, r, pool)
 			actorID := substrateTestActorID(pool)
+			current := runtimePoolTestGetPool(t, r, pool)
 			tt.mutate(control.actors[actorID])
 			if tt.pod != nil {
 				if err := r.Create(context.Background(), tt.pod.DeepCopy()); err != nil {
@@ -910,7 +1026,7 @@ func TestSubstrateTeardownRefusesUnknownOrMismatchedWorkerPlacement(t *testing.T
 				}
 			}
 
-			if _, err := r.teardownSubstrateActor(context.Background(), pool, control, actorID); err == nil ||
+			if _, err := r.teardownSubstrateActor(context.Background(), &current, control, actorID); err == nil ||
 				!strings.Contains(err.Error(), tt.wantError) {
 				t.Fatalf("teardown error = %v, want %q", err, tt.wantError)
 			}
@@ -1104,7 +1220,7 @@ func TestSubstrateRuntimePoolFinalizerDeletesPoliciesWithoutTemplates(t *testing
 		t.Fatalf("RuntimePool policy count = %d, want 4", len(policies.Items))
 	}
 	current := runtimePoolTestGetPool(t, r, pool)
-	if got := current.Annotations[substrateNetworkPolicyNamespacesAnnotation]; got != "ate-workers" {
+	if got := current.Annotations[substrateNetworkPolicyNamespacesAnnotation]; got != substrateTestWorkerNamespace {
 		t.Fatalf("recorded NetworkPolicy namespaces = %q, want ate-workers", got)
 	}
 	r.APIReader = &substrateNamespaceScopedNetworkPolicyReader{Reader: r.Client}
