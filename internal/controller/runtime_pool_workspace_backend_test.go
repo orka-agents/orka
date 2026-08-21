@@ -154,10 +154,20 @@ func runtimePoolWorkspaceTestMaterialization(
 	if err := r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: runtimePoolSandboxClaimName(base)}, claim); err != nil {
 		t.Fatalf("Get SandboxClaim for materialization: %v", err)
 	}
+	if claim.UID == "" {
+		claim.UID = types.UID("sandbox-claim-uid")
+		if err := r.Update(context.Background(), claim); err != nil {
+			t.Fatalf("assign test SandboxClaim UID: %v", err)
+		}
+	}
 	sandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      claim.Name,
 			Namespace: claim.Namespace,
+			Labels: map[string]string{
+				sandboxextv1beta1.SandboxIDLabel:           string(claim.UID),
+				sandboxv1beta1.SandboxTemplateRefHashLabel: sandboxextcontrollers.SandboxTemplateRefHash(template.Name),
+			},
 			Annotations: map[string]string{
 				sandboxv1beta1.SandboxTemplateRefAnnotation: template.Name,
 			},
@@ -181,6 +191,7 @@ func runtimePoolWorkspaceTestMaterialization(
 
 	pod := runtimePoolWorkspaceReadyPod(pool, template, "sandbox-pod", "sandbox-pod-uid", ip)
 	pod.Labels = cloneStringMap(sandbox.Spec.PodTemplate.ObjectMeta.Labels)
+	delete(pod.Labels, sandboxextv1beta1.SandboxIDLabel)
 	pod.Labels[sandboxcontrollers.SandboxNameHashLabel] = sandboxcontrollers.NameHash(sandbox.Name)
 	if err := controllerutil.SetControllerReference(sandbox, &pod, r.Scheme); err != nil {
 		t.Fatalf("Set runtime Pod Sandbox owner reference: %v", err)
@@ -750,6 +761,9 @@ func TestWorkspaceRuntimePoolServesThroughSandboxPod(t *testing.T) {
 	runtimePoolReconcile(t, r, pool)
 	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
 	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.71")
+	if _, ok := pod.Labels[sandboxextv1beta1.SandboxIDLabel]; ok {
+		t.Fatal("test provider unexpectedly propagated its reserved SandboxClaim UID label onto the Pod")
+	}
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "sandbox-boot", false)
 
 	runtimePoolReconcile(t, r, pool)
@@ -769,6 +783,43 @@ func TestWorkspaceRuntimePoolServesThroughSandboxPod(t *testing.T) {
 	}
 	if seedCalls != 1 {
 		t.Fatalf("credential bootstrap calls = %d, want 1 after exact Sandbox attestation", seedCalls)
+	}
+}
+
+func TestWorkspaceRuntimePoolRejectsForgedSandboxClaimIdentityBeforeCredentialSeed(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	seedCalls := 0
+	r.WorkspaceCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
+		seedCalls++
+		return false, nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace children were not materialized")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.78")
+	sandbox := &sandboxv1beta1.Sandbox{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}, sandbox); err != nil {
+		t.Fatalf("get Sandbox materialization: %v", err)
+	}
+	sandbox.Labels[sandboxextv1beta1.SandboxIDLabel] = "foreign-claim-uid"
+	if err := r.Update(context.Background(), sandbox); err != nil {
+		t.Fatalf("forge Sandbox claim identity: %v", err)
+	}
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "sandbox-boot", false)
+
+	runtimePoolReconcile(t, r, pool)
+
+	if seedCalls != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("forged Sandbox received credential activity: seeds=%d probes=%d", seedCalls, supervisor.probeCalls)
+	}
+	if _, _, currentClaim := runtimePoolWorkspaceTestChildren(t, r, pool); currentClaim != nil {
+		t.Fatal("forged SandboxClaim identity was not recycled")
 	}
 }
 

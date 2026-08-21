@@ -787,6 +787,9 @@ func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
 	if claim.UID != "" && !metav1.IsControlledBy(sandbox, claim) {
 		return false, fmt.Errorf("provider Sandbox is not controlled by the exact SandboxClaim")
 	}
+	if claim.UID != "" && sandbox.Labels[sandboxextv1beta1.SandboxIDLabel] != string(claim.UID) {
+		return false, fmt.Errorf("provider Sandbox does not carry the exact SandboxClaim identity")
+	}
 	if sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation] != template.Name {
 		return false, fmt.Errorf("provider Sandbox does not record the validated SandboxTemplate")
 	}
@@ -801,6 +804,9 @@ func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
 	if !reflect.DeepEqual(template.Spec.PodTemplate.ObjectMeta.Annotations, sandbox.Spec.PodTemplate.ObjectMeta.Annotations) {
 		return false, fmt.Errorf("provider Sandbox Pod annotations differ from the validated SandboxTemplate revision")
 	}
+	if claim.UID != "" && sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxextv1beta1.SandboxIDLabel] != string(claim.UID) {
+		return false, fmt.Errorf("provider Sandbox Pod template does not carry the exact SandboxClaim identity")
+	}
 	materializedLabels := cloneStringMap(sandbox.Spec.PodTemplate.ObjectMeta.Labels)
 	delete(materializedLabels, sandboxextv1beta1.SandboxIDLabel)
 	delete(materializedLabels, sandboxv1beta1.SandboxTemplateRefHashLabel)
@@ -809,9 +815,6 @@ func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
 	}
 	if sandbox.UID != "" && !metav1.IsControlledBy(pod, sandbox) {
 		return false, fmt.Errorf("runtime Pod is not controlled by the attested provider Sandbox")
-	}
-	if claim.UID != "" && pod.Labels[sandboxextv1beta1.SandboxIDLabel] != string(claim.UID) {
-		return false, fmt.Errorf("runtime Pod does not carry the exact SandboxClaim identity")
 	}
 	if !runtimePoolWorkspacePodLabelsMatch(sandbox, pod) {
 		return false, fmt.Errorf("runtime Pod labels differ from the attested provider Sandbox")
@@ -827,6 +830,11 @@ func runtimePoolWorkspacePodLabelsMatch(sandbox *sandboxv1beta1.Sandbox, pod *co
 		return false
 	}
 	expected := cloneStringMap(sandbox.Spec.PodTemplate.ObjectMeta.Labels)
+	// agent-sandbox reserves agents.x-k8s.io/* labels and does not propagate
+	// the claim UID from the Sandbox PodTemplate onto the Pod. The exact claim
+	// identity is instead attested above through the claim -> Sandbox -> Pod
+	// owner chain and the controller-owned claim labels on the Sandbox.
+	delete(expected, sandboxextv1beta1.SandboxIDLabel)
 	expected[sandboxcontrollers.SandboxNameHashLabel] = sandboxcontrollers.NameHash(sandbox.Name)
 	return reflect.DeepEqual(expected, pod.Labels)
 }
