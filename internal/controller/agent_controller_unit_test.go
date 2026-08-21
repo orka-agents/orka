@@ -16,7 +16,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -130,7 +129,7 @@ func TestValidateAgent_OpenCodeRequirements(t *testing.T) {
 			agent.Spec.ProviderRef = nil
 			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeOpencode,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			}
 			agent.Spec.Model = &corev1alpha1.ModelConfig{Name: test.model, ContextWindow: test.contextWindow, MaxTokens: test.maxTokens}
 			if test.secret != "" {
@@ -161,7 +160,7 @@ func TestValidateAgent_OpenCodeRequirements(t *testing.T) {
 		contractVersion *corev1alpha1.AgentRuntimeContractVersion
 	}{
 		{name: "unclassified legacy opencode agent is preserved", contractVersion: nil},
-		{name: "harness v1 opencode agent is preserved", contractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1)},
+		{name: "harness v1 opencode agent is preserved", contractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			agent := baseAgent("opencode-legacy")

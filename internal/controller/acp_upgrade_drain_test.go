@@ -759,15 +759,15 @@ func upgradeDrainEpochObjects(fence store.ControllerEpochFence) (*corev1alpha1.C
 	leaseName := "controller-epoch-authority"
 	holder := fence.HolderID
 	return &corev1alpha1.ControllerEpoch{
-			ObjectMeta: metav1.ObjectMeta{Name: "controller-epoch", Namespace: namespace},
-			Spec:       corev1alpha1.ControllerEpochSpec{Name: fence.Name},
-			Status: corev1alpha1.ControllerEpochStatus{
-				Epoch: fence.Epoch, HolderID: fence.HolderID, LeaseName: leaseName, LeaseResourceVersion: "1",
-			},
-		}, &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Name: leaseName, Namespace: namespace},
-			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
-		}
+		ObjectMeta: metav1.ObjectMeta{Name: "controller-epoch", Namespace: namespace},
+		Spec:       corev1alpha1.ControllerEpochSpec{Name: fence.Name},
+		Status: corev1alpha1.ControllerEpochStatus{
+			Epoch: fence.Epoch, HolderID: fence.HolderID, LeaseName: leaseName, LeaseResourceVersion: "1",
+		},
+	}, &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{Name: leaseName, Namespace: namespace},
+		Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
+	}
 }
 
 func testUpgradeDrainOptions() ACPUpgradeDrainOptions {

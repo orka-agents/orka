@@ -22,7 +22,6 @@ import (
 	types "k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -101,7 +100,7 @@ func bindingTestAgent() *corev1alpha1.Agent {
 			SystemPrompt: &corev1alpha1.PromptSource{Inline: "You are a careful engineer."},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeCodex,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}

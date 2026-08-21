@@ -15,7 +15,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -647,7 +646,7 @@ func TestResolveHarnessV1TargetRequiresSupportedToolMode(t *testing.T) {
 					Namespace: "default", Name: "external-v1", UID: types.UID("external-v1-uid"), Generation: 1,
 				},
 				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-					ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
+					ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1),
 					Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
 						Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: endpoint,
 					},
@@ -729,7 +728,7 @@ func TestResolveHarnessV1ExecutionCandidateFreezesBrokeredToolAuthority(t *testi
 			UID: types.UID(runtimeName + "-uid"), Generation: 1,
 		},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
+			ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1),
 			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
 				Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: runtimeEndpoint,
 			},
@@ -933,7 +932,7 @@ func TestResolveHarnessV1TargetRevalidatesTLSForReadyRuntime(t *testing.T) {
 			Namespace: "default", Name: "stale-ready-v1", UID: types.UID("stale-ready-v1-uid"), Generation: 1,
 		},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
+			ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1),
 			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
 				Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint, Endpoint: endpoint,
 			},
@@ -1384,7 +1383,7 @@ func newHarnessV1CandidateFixture(
 		Spec: corev1alpha1.AgentSpec{
 			Model: &corev1alpha1.ModelConfig{Name: "test-model"},
 			Runtime: &corev1alpha1.AgentCLIRuntime{
-				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1),
+				Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1),
 				DefaultAllowedTools: []string{}, DefaultAllowBash: new(false),
 			},
 		},

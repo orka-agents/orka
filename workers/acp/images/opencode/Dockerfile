@@ -2,7 +2,7 @@
 
 # The tag documents the human-readable version; the manifest-list digest and
 # checksum-verified upstream artifacts make every supported platform immutable.
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.2-bookworm@sha256:47ce5636e9936b2c5cbf708925578ef386b4f8872aec74a67bd13a627d242b19 AS upstream-artifacts
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS upstream-artifacts
 ARG TARGETARCH
 COPY workers/acp/images/artifact-tool.go /tmp/artifact-tool.go
 COPY workers/acp/images/opencode/AGENTS.md /tmp/opencode-AGENTS.md
@@ -88,7 +88,7 @@ RUN set -eu; \
     ldd /opt/ripgrep/bin/rg | grep -Fq 'libc.so.6'; \
     /opt/ripgrep/bin/rg --version | grep -Eq '^ripgrep 15\.2\.0'
 
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.2-bookworm@sha256:47ce5636e9936b2c5cbf708925578ef386b4f8872aec74a67bd13a627d242b19 AS supervisor-builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS supervisor-builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src

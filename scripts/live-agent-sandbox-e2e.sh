@@ -370,7 +370,7 @@ YAML
 
 write_sandbox_fixture_dockerfile() {
   cat >"${fixture_dockerfile}" <<'DOCKERFILE'
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
 
 ARG TARGETARCH
 

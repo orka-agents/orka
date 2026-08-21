@@ -13,7 +13,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -39,7 +38,7 @@ func TestQueueACPRuntimeTaskCreatesPoolAndDurableAttempt(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("22222222-2222-2222-2222-222222222222"), Generation: 3},
 		Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{
 			Type:            corev1alpha1.AgentRuntimeCodex,
-			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 		}},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task).Build()
@@ -241,7 +240,7 @@ func TestQueueACPRuntimeTaskRejectsUnsafeRepositoryBeforePoolDemand(t *testing.T
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("77777777-7777-7777-7777-777777777777"), Generation: 1},
 				Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{
-					Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+					Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 				}},
 			}
 			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task).Build()
@@ -400,7 +399,7 @@ func TestQueueACPRuntimeTaskReportsInvalidWorkspaceWhenReadCredentialDoesNotExis
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: acpTestModel}, Runtime: &corev1alpha1.AgentCLIRuntime{
 			Type:            corev1alpha1.AgentRuntimeCodex,
-			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 		}},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task).Build()

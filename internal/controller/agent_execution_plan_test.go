@@ -7,8 +7,6 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
-	"k8s.io/utils/ptr"
-
 	"context"
 	"strings"
 	"testing"
@@ -92,7 +90,7 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 		{
 			name: "built-in agent classified orka.harness.v1 is rejected",
 			mutateAgent: func(agent *corev1alpha1.Agent) {
-				agent.Spec.Runtime.ContractVersion = ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1)
+				agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV1)
 			},
 			acpRuntimeEnabled: true,
 			wantPath:          agentExecutionPathRejected,
@@ -328,7 +326,7 @@ func plannerExternalRuntime() *corev1alpha1.AgentRuntime {
 	return &corev1alpha1.AgentRuntime{
 		ObjectMeta: metav1.ObjectMeta{Name: "external-v2", Namespace: defaultNS, UID: "external-runtime-uid", Generation: 1},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
-			ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+			ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			Capabilities:    &corev1alpha1.AgentRuntimeCapabilitiesSpec{RuntimeInstanceID: "external-instance", Profile: &profile, WorkspaceGovernance: &governance},
 		},
 		Status: corev1alpha1.AgentRuntimeStatus{Ready: true, ObservedGeneration: 1, ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
@@ -369,7 +367,7 @@ func validPlannerAgent() *corev1alpha1.Agent {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeCodex,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
