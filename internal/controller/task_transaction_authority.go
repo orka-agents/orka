@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
@@ -42,9 +43,14 @@ func bindVerifiedTaskTransactionAuthority(
 		// as (tx != nil && enforced) and mount no transaction token, so a Task
 		// without transaction context has no credential authority to enforce
 		// and no task-scoped token. Empty authority still disables any
-		// controller-process token-file fallback.
+		// controller-process token-file fallback. An explicit disabled exchange
+		// also prevents controller-wide TTS settings from applying to this
+		// transactionless request.
 		executor.SetTransactionCredentialAuthority(false, false, "")
 		executor.SetTransactionAuthority("", nil)
+		executor.SetTransactionExchangeConfig(&workerexecutor.TransactionExchangeConfig{
+			TTS: contexttoken.TTSConfig{TokenSource: contexttoken.TTSTokenSourceNone},
+		})
 		return nil
 	}
 	scopes := append([]string(nil), transaction.Scopes...)

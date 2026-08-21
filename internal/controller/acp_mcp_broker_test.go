@@ -242,6 +242,40 @@ func TestRegistryACPMCPToolExecutorBindsTaskTransactionAuthority(t *testing.T) {
 			t.Fatalf("enforcement-off Txn-Token header = %q, want no controller ambient token", got)
 		}
 	})
+	t.Run("transactionless task skips injected incoming TTS", func(t *testing.T) {
+		ambientTokenFile := filepath.Join(t.TempDir(), "controller-transaction-token")
+		if err := os.WriteFile(ambientTokenFile, []byte("controller-ambient-token"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(workerenv.TransactionTokenFile, ambientTokenFile)
+		t.Setenv(workerenv.ContextTokenTTSEndpoint, acpMCPTestTTSEndpoint)
+		t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
+		task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+			Name: authenticated.Name, Namespace: authenticated.Namespace, UID: "task-uid",
+		}}
+		exchanger := &recordingContextTokenExchanger{}
+		executor := newExecutor(true, task)
+		executor.TransactionExchange = &workerexecutor.TransactionExchangeConfig{
+			TTS: contexttoken.TTSConfig{
+				Endpoint:    acpMCPTestTTSEndpoint,
+				TokenSource: contexttoken.TTSTokenSourceIncoming,
+			},
+			Exchanger: exchanger,
+		}
+		result, err := executor.ExecuteACPMCPTool(ctx, request, descriptor)
+		if err != nil {
+			t.Fatalf("transactionless execution error = %v", err)
+		}
+		if string(result) != acpMCPTestOKBody {
+			t.Fatalf("transactionless result = %s", result)
+		}
+		if calls := exchanger.calls.Load(); calls != 0 {
+			t.Fatalf("transactionless task reached TTS exchanger %d times: %#v", calls, exchanger.request)
+		}
+		if got, _ := lastTxnToken.Load().(string); got != "" {
+			t.Fatalf("transactionless Txn-Token header = %q, want no controller ambient token", got)
+		}
+	})
 	t.Run("enforcement off refuses controller service account despite matching task scope", func(t *testing.T) {
 		t.Setenv(workerenv.TransactionScope, "controller.scope")
 		t.Setenv(workerenv.TransactionScopes, "controller.scope")

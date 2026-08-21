@@ -119,6 +119,28 @@ func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t 
 			t.Fatalf("enforcement-off Txn-Token header = %q, want task authority", got)
 		}
 	})
+	t.Run("transactionless task skips injected service account TTS", func(t *testing.T) {
+		t.Setenv(workerenv.ServiceAccountToken, "controller-service-account-token")
+		task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+			Name: authenticated.Name, Namespace: authenticated.Namespace, UID: types.UID(authenticated.UID),
+		}}
+		exchanger := &recordingContextTokenExchanger{}
+		executor := newExecutor(true, task)
+		executor.TransactionExchange = &workerexecutor.TransactionExchangeConfig{
+			TTS: contexttoken.TTSConfig{
+				Endpoint:    acpMCPTestTTSEndpoint,
+				TokenSource: contexttoken.TTSTokenSourceServiceAccount,
+			},
+			Exchanger: exchanger,
+		}
+		callsBefore := upstreamCalls.Load()
+		result, err := executor.ExecuteHarnessV1BrokeredTool(ctx, namespace, tool.DeepCopy(), request)
+		gotTxnToken, _ := lastTxnToken.Load().(string)
+		requireHarnessV1TransactionlessExecution(
+			t, result, err, upstreamOKBody, exchanger,
+			upstreamCalls.Load(), callsBefore+1, gotTxnToken,
+		)
+	})
 	t.Run("enforcement off refuses controller service account despite matching task scope", func(t *testing.T) {
 		t.Setenv(workerenv.ContextTokenOutboundScope, "reports.read")
 		t.Setenv(workerenv.ServiceAccountToken, "controller-service-account-token")
@@ -226,6 +248,34 @@ func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t 
 			t.Fatalf("unowned token secret error = %v", err)
 		}
 	})
+}
+
+func requireHarnessV1TransactionlessExecution(
+	t *testing.T,
+	result json.RawMessage,
+	err error,
+	wantResult string,
+	exchanger *recordingContextTokenExchanger,
+	toolCalls int32,
+	wantToolCalls int32,
+	txnToken string,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("transactionless execution error = %v", err)
+	}
+	if string(result) != wantResult {
+		t.Fatalf("transactionless result = %s", result)
+	}
+	if calls := exchanger.calls.Load(); calls != 0 {
+		t.Fatalf("transactionless task reached TTS exchanger %d times: %#v", calls, exchanger.request)
+	}
+	if toolCalls != wantToolCalls {
+		t.Fatalf("transactionless task reached Tool %d times, want %d", toolCalls, wantToolCalls)
+	}
+	if txnToken != "" {
+		t.Fatalf("transactionless Txn-Token header = %q, want none", txnToken)
+	}
 }
 
 func TestContinueHarnessV1BrokeredToolCallStampsAuthenticatedTaskIdentity(t *testing.T) {
