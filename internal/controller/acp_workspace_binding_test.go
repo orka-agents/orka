@@ -14,11 +14,14 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -371,6 +374,35 @@ func TestResolveAgentExecutionCandidateDoesNotCreateWorkspaceSessionBeforeValida
 	}
 }
 
+func TestResolveAgentExecutionCandidateClassifiesMissingWorkspaceSessionAsPermanent(t *testing.T) {
+	ctx := context.Background()
+	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+	})
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "missing-session", Create: false, Append: true}
+	reconciler, durableStore := newBindingTestReconciler(t, task, bindingTestNamespace())
+	reconciler.ExecutionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProviderAgentSandbox
+	reconciler.DurableControlStore = durableStore
+	reconciler.SessionManager = NewSessionManager(durableStore)
+	reconciler.ControllerEpochManager = NewControllerEpochManager(durableStore, "workspace-session-missing-test")
+
+	_, err := reconciler.resolveAgentExecutionCandidate(ctx, task, bindingTestAgent())
+	if err == nil || !errors.Is(err, store.ErrNotFound) || !isPermanentACPAgentConfigurationError(err) {
+		t.Fatalf("missing Session candidate error = %v, permanent=%t, want permanent ErrNotFound", err, isPermanentACPAgentConfigurationError(err))
+	}
+}
+
+func TestPermanentACPWorkspaceSessionPlanningError(t *testing.T) {
+	for _, err := range []error{store.ErrNotFound, store.ErrConflict, store.ErrValidation} {
+		if !permanentACPWorkspaceSessionPlanningError(err) {
+			t.Fatalf("planning error %v was not classified as permanent", err)
+		}
+	}
+	if permanentACPWorkspaceSessionPlanningError(errors.New("store temporarily unavailable")) {
+		t.Fatal("transient store error was classified as permanent")
+	}
+}
+
 func TestAgentExecutionBindingDoesNotCreateWorkspaceSessionBeforeSnapshotPersistence(t *testing.T) {
 	ctx := context.Background()
 	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
@@ -539,6 +571,93 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 		!strings.Contains(err.Error(), "execution workspace binding does not match") {
 		t.Fatalf("mismatched pool binding error = %v, want exact-binding rejection", err)
 	}
+}
+
+func TestEnsureACPRuntimePoolValidatesCreateRaceWinner(t *testing.T) {
+	newFixture := func(t *testing.T) (*TaskReconciler, *corev1alpha1.Task, ACPRuntimePlan) {
+		t.Helper()
+		ctx := context.Background()
+		task := workspaceBindingTestTask(nil)
+		reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
+		configuration, err := resolveACPAgentSessionConfiguration(ctx, reconciler.Client, task, bindingTestAgent())
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := PlanACPRuntimeWithConfiguration(task, bindingTestAgent(), reconciler.ACPRuntimeImages, configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err = applyACPWorkspaceBindingToPlan(plan, binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reconciler, task, plan
+	}
+
+	t.Run("rejects mismatched winner", func(t *testing.T) {
+		reconciler, task, plan := newFixture(t)
+		withWatch, ok := reconciler.Client.(client.WithWatch)
+		if !ok {
+			t.Fatal("binding test client does not support watch")
+		}
+		reconciler.Client = interceptor.NewClient(withWatch, interceptor.Funcs{
+			Create: func(ctx context.Context, _ client.WithWatch, object client.Object, options ...client.CreateOption) error {
+				pool, ok := object.(*corev1alpha1.RuntimePool)
+				if !ok {
+					return withWatch.Create(ctx, object, options...)
+				}
+				winner := pool.DeepCopy()
+				winner.Spec.ExecutionWorkspace = nil
+				if err := withWatch.Create(ctx, winner, options...); err != nil {
+					return err
+				}
+				return apierrors.NewAlreadyExists(
+					schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "runtimepools"}, pool.Name,
+				)
+			},
+		})
+
+		if _, _, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan); err == nil ||
+			!strings.Contains(err.Error(), "execution workspace binding does not match") {
+			t.Fatalf("create-race winner error = %v, want exact workspace-binding rejection", err)
+		}
+	})
+
+	t.Run("activates matching winner", func(t *testing.T) {
+		reconciler, task, plan := newFixture(t)
+		withWatch, ok := reconciler.Client.(client.WithWatch)
+		if !ok {
+			t.Fatal("binding test client does not support watch")
+		}
+		reconciler.Client = interceptor.NewClient(withWatch, interceptor.Funcs{
+			Create: func(ctx context.Context, _ client.WithWatch, object client.Object, options ...client.CreateOption) error {
+				pool, ok := object.(*corev1alpha1.RuntimePool)
+				if !ok {
+					return withWatch.Create(ctx, object, options...)
+				}
+				winner := pool.DeepCopy()
+				winner.Spec.DesiredReplicas = 0
+				if err := withWatch.Create(ctx, winner, options...); err != nil {
+					return err
+				}
+				return apierrors.NewAlreadyExists(
+					schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "runtimepools"}, pool.Name,
+				)
+			},
+		})
+
+		pool, preexisting, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan)
+		if err != nil {
+			t.Fatalf("activate matching create-race winner: %v", err)
+		}
+		if !preexisting || pool.Spec.DesiredReplicas != 1 {
+			t.Fatalf("create-race winner = preexisting:%t desired:%d, want true/1", preexisting, pool.Spec.DesiredReplicas)
+		}
+	})
 }
 
 func TestACPRuntimePoolWorkspaceMatchesPlanRequiresExactProviderFields(t *testing.T) {

@@ -219,7 +219,11 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		if workspaceSessionUID == "" {
 			plannedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
 			if sessionErr != nil {
-				return nil, fmt.Errorf("plan immutable execution-workspace Session identity: %w", sessionErr)
+				wrapped := fmt.Errorf("plan immutable execution-workspace Session identity: %w", sessionErr)
+				if permanentACPWorkspaceSessionPlanningError(sessionErr) {
+					return nil, permanentACPAgentConfiguration(wrapped)
+				}
+				return nil, wrapped
 			}
 			workspaceSessionUID = plannedUID
 		}
@@ -349,6 +353,10 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	return &agentExecutionCandidate{
 		binding: binding, snapshotBody: encoded, workspaceSessionUID: workspaceSessionUID,
 	}, nil
+}
+
+func permanentACPWorkspaceSessionPlanningError(err error) bool {
+	return errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrValidation)
 }
 
 // canonicalAgentExecutionBindingDigest computes the canonical binding digest

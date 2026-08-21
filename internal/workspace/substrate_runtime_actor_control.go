@@ -44,6 +44,13 @@ func (a *SubstrateRuntimeActor) Suspending() bool {
 	return a != nil && a.Status == substrateStatusSuspending
 }
 
+// Crashed reports a provider state whose worker workload is no longer
+// assigned. A crashed actor may be deleted only after Orka has durably proven
+// the exact prior workload absent.
+func (a *SubstrateRuntimeActor) Crashed() bool {
+	return a != nil && a.Status == substrateStatusCrashed
+}
+
 // SubstrateRuntimeActorControl is the narrow Substrate control surface needed
 // to host one ACP RuntimePool instance in an Actor. Suspending a live
 // workload is prohibited: gVisor suspension checkpoints supervisor process
@@ -66,7 +73,7 @@ type SubstrateRuntimeActorControl interface {
 	// supervisor would checkpoint credentials and is prohibited.
 	SettleActor(ctx context.Context, actorID string) (*SubstrateRuntimeActor, error)
 	// DeleteActor returns nil when the actor is already absent. The provider
-	// only accepts deletion of suspended (settled) actors.
+	// accepts deletion of suspended (settled) or crashed actors.
 	DeleteActor(ctx context.Context, actorID string) error
 	Close() error
 }

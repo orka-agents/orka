@@ -45,6 +45,7 @@ const (
 	substrateStatusRunning    = "STATUS_RUNNING"
 	substrateStatusSuspending = "STATUS_SUSPENDING"
 	substrateStatusSuspended  = "STATUS_SUSPENDED"
+	substrateStatusCrashed    = "STATUS_CRASHED"
 )
 
 // SubstrateConfig configures a Substrate-backed WorkspaceExecutor.

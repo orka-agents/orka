@@ -40,6 +40,7 @@ import (
 const (
 	substrateTestStatusSuspended   = "STATUS_SUSPENDED"
 	substrateTestStatusSuspending  = "STATUS_SUSPENDING"
+	substrateTestStatusCrashed     = "STATUS_CRASHED"
 	substrateTestTemplateNamespace = "ate-demo"
 	substrateTestBaseTemplateName  = "orka-codex-infra"
 	substrateTestActorDNSSuffix    = "actors.test.example"
@@ -56,6 +57,8 @@ type fakeSubstrateActorControl struct {
 	deleted     []string
 	closed      int
 	afterCreate func()
+	afterResume func(*workspace.SubstrateRuntimeActor)
+	afterSettle func(*workspace.SubstrateRuntimeActor)
 }
 
 func newFakeSubstrateActorControl() *fakeSubstrateActorControl {
@@ -97,6 +100,9 @@ func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID strin
 	actor.PodNamespace = substrateTestWorkerNamespace
 	actor.PodName = "worker-0"
 	actor.PodIP = "10.99.0.5"
+	if f.afterResume != nil {
+		f.afterResume(actor)
+	}
 	view := *actor
 	return &view, nil
 }
@@ -108,12 +114,15 @@ func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID strin
 		return nil, fmt.Errorf("settle: actor %s not found", actorID)
 	}
 	actor.Status = substrateTestStatusSuspended
+	if f.afterSettle != nil {
+		f.afterSettle(actor)
+	}
 	view := *actor
 	return &view, nil
 }
 
 func (f *fakeSubstrateActorControl) DeleteActor(_ context.Context, actorID string) error {
-	if actor, ok := f.actors[actorID]; ok && actor.Status != substrateTestStatusSuspended {
+	if actor, ok := f.actors[actorID]; ok && actor.Status != substrateTestStatusSuspended && actor.Status != substrateTestStatusCrashed {
 		// Mirror the provider: only suspended (settled) actors are deletable.
 		return fmt.Errorf("FailedPrecondition: Actor %s is not suspended (status: %s)", actorID, actor.Status)
 	}
@@ -856,6 +865,55 @@ func TestSubstrateRuntimePoolServesThroughRouterHost(t *testing.T) {
 	}
 }
 
+func TestSubstrateRuntimePoolRequiresVerifiedWorkerPlacementBeforeBootRecord(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*workspace.SubstrateRuntimeActor)
+	}{
+		{
+			name: "missing placement",
+			mutate: func(actor *workspace.SubstrateRuntimeActor) {
+				actor.PodNamespace = ""
+				actor.PodName = ""
+			},
+		},
+		{
+			name: "wrong namespace",
+			mutate: func(actor *workspace.SubstrateRuntimeActor) {
+				actor.PodNamespace = "other-workers"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			control.afterResume = tt.mutate
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+			seedAttempts := 0
+			r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+				seedAttempts++
+				return nil
+			}
+
+			runtimePoolReconcile(t, r, pool)
+			runtimePoolReconcile(t, r, pool)
+
+			got := runtimePoolTestGetPool(t, r, pool)
+			if got.Annotations[substrateActorBootedAnnotation] != "" {
+				t.Fatalf("unsafe provider placement recorded a booted actor: %#v", got.Annotations)
+			}
+			if seedAttempts != 0 || supervisor.probeCalls != 0 {
+				t.Fatalf("unsafe provider placement reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+			}
+			if got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+				!strings.Contains(got.Status.Message, "placement") {
+				t.Fatalf("unsafe provider placement status = %s/%q, want Closed placement wait", got.Status.AdmissionState, got.Status.Message)
+			}
+		})
+	}
+}
+
 func TestSubstrateRuntimePoolColdStartTimeout(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
@@ -1114,6 +1172,57 @@ func TestSubstrateTeardownUsesFrozenWorkerPlacementAfterTemplateMutation(t *test
 	}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(worker), &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("original-placement worker pod get after teardown = %v, want deleted", err)
+	}
+}
+
+func TestSubstrateTeardownUsesWorkloadAbsenceBarrierAfterPlacementCleared(t *testing.T) {
+	tests := []struct {
+		name       string
+		finalState string
+	}{
+		{name: "suspended", finalState: substrateTestStatusSuspended},
+		{name: "crashed", finalState: substrateTestStatusCrashed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			control.afterSettle = func(actor *workspace.SubstrateRuntimeActor) {
+				actor.Status = tt.finalState
+				actor.PodNamespace = ""
+				actor.PodName = ""
+			}
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+			runtimePoolReconcile(t, r, pool)
+			actorID := substrateTestActorID(pool)
+
+			current := runtimePoolTestGetPool(t, r, pool)
+			gone, err := r.teardownSubstrateActor(context.Background(), &current, control, actorID)
+			if err != nil || gone {
+				t.Fatalf("teardown with live worker = (%v, %v), want in-progress", gone, err)
+			}
+
+			current = runtimePoolTestGetPool(t, r, pool)
+			gone, err = r.teardownSubstrateActor(context.Background(), &current, control, actorID)
+			if err != nil || gone {
+				t.Fatalf("teardown after workload deletion = (%v, %v), want settled in-progress", gone, err)
+			}
+			if len(control.settled) != 1 {
+				t.Fatalf("settled actors = %v, want one", control.settled)
+			}
+			current = runtimePoolTestGetPool(t, r, pool)
+			if current.Annotations[substrateActorWorkloadAbsentAnnotation] != actorID {
+				t.Fatalf("workload absence barrier = %q, want %q", current.Annotations[substrateActorWorkloadAbsentAnnotation], actorID)
+			}
+
+			gone, err = r.teardownSubstrateActor(context.Background(), &current, control, actorID)
+			if err != nil || !gone {
+				t.Fatalf("teardown after placement cleared = (%v, %v), want gone", gone, err)
+			}
+			if len(control.deleted) != 1 || control.deleted[0] != actorID {
+				t.Fatalf("deleted actors = %v, want %q", control.deleted, actorID)
+			}
+		})
 	}
 }
 

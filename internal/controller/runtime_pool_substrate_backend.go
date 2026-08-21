@@ -92,6 +92,11 @@ const (
 	// later read of the mutable derived ActorTemplate when selecting the worker
 	// Pod whose memory it destroys.
 	substrateActorWorkerPlacementAnnotation = "orka.ai/substrate-actor-worker-placement"
+	// substrateActorWorkloadAbsentAnnotation records the exact actor whose
+	// frozen worker Pod was observed absent before SettleActor. Providers may
+	// clear placement when an actor becomes suspended or crashed, so teardown
+	// must persist this proof before invoking the provider transition.
+	substrateActorWorkloadAbsentAnnotation = "orka.ai/substrate-actor-workload-absent"
 	// substrateNetworkPolicyNamespacesAnnotation records every provider worker
 	// namespace where this pool materialized egress policies. Cross-namespace
 	// policies cannot carry a RuntimePool owner reference, and finalization must
@@ -551,7 +556,8 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		// Boot from scratch exactly once per actor lifetime: a supervisor
 		// lifetime is exactly one boot, so the fence boot ID is never resumed
 		// from a snapshot.
-		if _, err := control.ResumeActor(ctx, actorID, true); err != nil {
+		resumedActor, err := control.ResumeActor(ctx, actorID, true)
+		if err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
 		if err := r.verifySubstrateRuntimeTemplateFence(
@@ -562,17 +568,33 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				"controller-derived substrate ActorTemplate changed while the actor booted; recycling the exact actor before credential bootstrap",
 			)
 		}
-		if err := r.setSubstrateActorBootedAnnotation(ctx, pool, actorID); err != nil {
-			return ctrl.Result{}, err
+		if resumedActor != nil && resumedActor.Running() {
+			if err := r.verifySubstrateActorWorkerPlacement(ctx, pool, resumedActor); err != nil {
+				r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("provider actor placement is not ready: "+err.Error()))
+				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+			}
+			if err := r.setSubstrateActorBootedAnnotation(ctx, pool, actorID); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		r.applyProviderRuntimePoolColdStartStatus(pool, &status, "provider actor is booting the runtime workload")
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if !booted {
+		bootCandidate := actor
 		if !actor.Running() {
-			if _, err := control.ResumeActor(ctx, actorID, true); err != nil {
+			bootCandidate, err = control.ResumeActor(ctx, actorID, true)
+			if err != nil {
 				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 			}
+		}
+		if bootCandidate == nil || !bootCandidate.Running() {
+			r.applyProviderRuntimePoolColdStartStatus(pool, &status, "waiting for the provider actor workload to run")
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+		}
+		if err := r.verifySubstrateActorWorkerPlacement(ctx, pool, bootCandidate); err != nil {
+			r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("provider actor placement is not ready: "+err.Error()))
+			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
 		if err := r.setSubstrateActorBootedAnnotation(ctx, pool, actorID); err != nil {
 			return ctrl.Result{}, err
@@ -582,6 +604,10 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 	if !actor.Running() {
 		r.applyProviderRuntimePoolColdStartStatus(pool, &status, "waiting for the provider actor workload to run")
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
+	if err := r.verifySubstrateActorWorkerPlacement(ctx, pool, actor); err != nil {
+		r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("provider actor placement is not ready: "+err.Error()))
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if err := r.verifySubstrateRuntimeTemplateFence(
@@ -1097,6 +1123,9 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkerPlacementAnnotation, ""); err != nil {
 		return err
 	}
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkloadAbsentAnnotation, ""); err != nil {
+		return err
+	}
 	return r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorRecyclingAnnotation, "")
 }
 
@@ -1140,14 +1169,20 @@ func (r *RuntimePoolReconciler) teardownSubstrateActor(
 		}
 		return true, nil
 	}
-	workloadGone, err := r.destroySubstrateActorWorkload(ctx, pool, actor)
-	if err != nil {
-		return false, err
+	workloadAbsent := pool.Annotations[substrateActorWorkloadAbsentAnnotation] == actorID
+	if !workloadAbsent {
+		workloadGone, err := r.destroySubstrateActorWorkload(ctx, pool, actor)
+		if err != nil {
+			return false, err
+		}
+		if !workloadGone {
+			return false, nil
+		}
+		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateActorWorkloadAbsentAnnotation, actorID); err != nil {
+			return false, err
+		}
 	}
-	if !workloadGone {
-		return false, nil
-	}
-	if actor.Suspended() {
+	if actor.Suspended() || actor.Crashed() {
 		if err := control.DeleteActor(ctx, actorID); err != nil {
 			return false, fmt.Errorf("delete RuntimePool substrate actor: %w", err)
 		}
@@ -1163,6 +1198,49 @@ func (r *RuntimePoolReconciler) teardownSubstrateActor(
 		return false, fmt.Errorf("settle RuntimePool substrate actor: %w", err)
 	}
 	return false, nil
+}
+
+func (r *RuntimePoolReconciler) verifySubstrateActorWorkerPlacement(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	actor *workspace.SubstrateRuntimeActor,
+) error {
+	workerNamespace, workerPool, err := substrateRuntimePoolWorkerPlacementFromAnnotation(pool)
+	if err != nil {
+		return err
+	}
+	if actor == nil {
+		return fmt.Errorf("provider actor is required for worker placement verification")
+	}
+	namespace := strings.TrimSpace(actor.PodNamespace)
+	name := strings.TrimSpace(actor.PodName)
+	if namespace == "" || name == "" {
+		return fmt.Errorf("provider actor worker placement is incomplete")
+	}
+	if namespace != workerNamespace {
+		return fmt.Errorf(
+			"provider actor worker namespace %s does not match infrastructure WorkerPool namespace %s",
+			namespace, workerNamespace,
+		)
+	}
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	pod := &corev1.Pod{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, pod); err != nil {
+		return fmt.Errorf("read provider actor worker Pod %s/%s: %w", namespace, name, err)
+	}
+	if strings.TrimSpace(pod.Labels[substrateWorkerPoolLabel]) != workerPool {
+		return fmt.Errorf(
+			"provider actor worker Pod %s/%s %s label does not match infrastructure WorkerPool %s",
+			namespace, name, substrateWorkerPoolLabel, workerPool,
+		)
+	}
+	if pod.DeletionTimestamp != nil {
+		return fmt.Errorf("provider actor worker Pod %s/%s is terminating", namespace, name)
+	}
+	return nil
 }
 
 // destroySubstrateActorWorkload destroys the memory of a live actor workload

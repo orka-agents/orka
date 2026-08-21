@@ -1134,16 +1134,22 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 				ColdStartTimeoutSeconds: corev1alpha1.DefaultRuntimePoolColdStartTimeoutSeconds,
 			},
 		}
-		if err := r.Create(ctx, pool); err != nil {
-			if !apierrors.IsAlreadyExists(err) {
-				return nil, false, fmt.Errorf("create RuntimePool: %w", err)
+		createErr := r.Create(ctx, pool)
+		if createErr != nil {
+			if !apierrors.IsAlreadyExists(createErr) {
+				return nil, false, fmt.Errorf("create RuntimePool: %w", createErr)
 			}
-			if err := r.Get(ctx, key, pool); err != nil {
-				return nil, false, err
+			if getErr := r.Get(ctx, key, pool); getErr != nil {
+				return nil, false, getErr
 			}
-			return pool, true, nil
+			// Another creator won the deterministic-name race. Validate and
+			// activate that observed object through the same path as a pool that
+			// existed before this reconcile; never bind a Task to an unchecked
+			// same-name winner.
+			err = nil
+		} else {
+			return pool, false, nil
 		}
-		return pool, false, nil
 	}
 	if err != nil {
 		return nil, false, err
