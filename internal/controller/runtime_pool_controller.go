@@ -3211,6 +3211,7 @@ func runtimePoolInstanceEndpoint(pool *corev1alpha1.RuntimePool, pod *corev1.Pod
 // suffix are refused: this transport exists only for actor-routed requests.
 type substrateRouteRoundTripper struct {
 	scheme    string
+	basePath  string
 	transport *http.Transport
 }
 
@@ -3221,6 +3222,13 @@ func (t *substrateRouteRoundTripper) RoundTrip(request *http.Request) (*http.Res
 	clone := request.Clone(request.Context())
 	urlCopy := *request.URL
 	urlCopy.Scheme = t.scheme
+	if t.basePath != "" {
+		urlCopy.Path = strings.TrimRight(t.basePath, "/") + "/" + strings.TrimLeft(urlCopy.Path, "/")
+		// Path now contains the decoded combination. Clear RawPath so net/http
+		// derives a matching escaped form instead of reusing the actor-relative
+		// path from the original request.
+		urlCopy.RawPath = ""
+	}
 	clone.URL = &urlCopy
 	return t.transport.RoundTrip(clone)
 }
@@ -3264,7 +3272,9 @@ func substrateRouteHTTPTransport(routerURL, actorDNSSuffix string) (http.RoundTr
 		}
 		return dialer.DialContext(ctx, network, routerAddress)
 	}
-	return &substrateRouteRoundTripper{scheme: parsed.Scheme, transport: transport}, nil
+	return &substrateRouteRoundTripper{
+		scheme: parsed.Scheme, basePath: strings.TrimRight(parsed.Path, "/"), transport: transport,
+	}, nil
 }
 
 func (r *RuntimePoolReconciler) randomSecret(size int) (string, error) {

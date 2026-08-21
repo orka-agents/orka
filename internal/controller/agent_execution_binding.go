@@ -42,8 +42,9 @@ const agentExecutionBindingConflictReason = "BindingConflict"
 // binding plus the plaintext snapshot body it references. Resolution performs
 // reads only; no durable writes or runtime side effects.
 type agentExecutionCandidate struct {
-	binding      corev1alpha1.AgentExecutionBinding
-	snapshotBody []byte
+	binding             corev1alpha1.AgentExecutionBinding
+	snapshotBody        []byte
+	workspaceSessionUID string
 }
 
 // agentExecutionSnapshotBody is the canonical non-secret executable input
@@ -182,6 +183,15 @@ func (r *TaskReconciler) resolveAgentExecutionCandidate(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) (*agentExecutionCandidate, error) {
+	return r.resolveAgentExecutionCandidateWithWorkspaceSessionUID(ctx, task, agent, "")
+}
+
+func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	workspaceSessionUID string,
+) (*agentExecutionCandidate, error) {
 	if r.AgentExecutionSnapshots == nil {
 		return nil, errors.New("encrypted agent execution snapshot store is required; execution admission fails closed")
 	}
@@ -205,12 +215,16 @@ func (r *TaskReconciler) resolveAgentExecutionCandidate(
 		return nil, permanentACPAgentConfiguration(err)
 	}
 	if workspaceBinding != nil && workspaceBinding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
-		sessionUID, sessionErr := r.ensureACPWorkspaceSessionUID(ctx, task)
-		if sessionErr != nil {
-			return nil, fmt.Errorf("establish immutable execution-workspace Session identity: %w", sessionErr)
+		workspaceSessionUID = strings.TrimSpace(workspaceSessionUID)
+		if workspaceSessionUID == "" {
+			plannedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
+			if sessionErr != nil {
+				return nil, fmt.Errorf("plan immutable execution-workspace Session identity: %w", sessionErr)
+			}
+			workspaceSessionUID = plannedUID
 		}
 		workspaceBinding, err = resolveACPWorkspaceBinding(
-			task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, sessionUID,
+			task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, workspaceSessionUID,
 		)
 		if err != nil {
 			return nil, permanentACPAgentConfiguration(err)
@@ -332,7 +346,9 @@ func (r *TaskReconciler) resolveAgentExecutionCandidate(
 	binding.BindingDigest = digest
 	binding.BoundAt = metav1.Now()
 
-	return &agentExecutionCandidate{binding: binding, snapshotBody: encoded}, nil
+	return &agentExecutionCandidate{
+		binding: binding, snapshotBody: encoded, workspaceSessionUID: workspaceSessionUID,
+	}, nil
 }
 
 // canonicalAgentExecutionBindingDigest computes the canonical binding digest
@@ -747,6 +763,30 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 	if err := r.persistAgentExecutionSnapshot(ctx, task, candidate); err != nil {
 		log.Error(err, "immutable execution snapshot persistence failed")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
+	}
+	if candidate.workspaceSessionUID != "" {
+		sessionUID, sessionErr := r.ensureACPWorkspaceSessionUID(ctx, task, candidate.workspaceSessionUID)
+		if sessionErr != nil {
+			log.Error(sessionErr, "execution-workspace Session identity establishment failed")
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
+		}
+		if sessionUID != candidate.workspaceSessionUID {
+			candidate, err = r.resolveAgentExecutionCandidateWithWorkspaceSessionUID(ctx, task, agent, sessionUID)
+			if err != nil {
+				if isPermanentACPAgentConfigurationError(err) {
+					result, failErr := r.failACPPlanningTask(
+						ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error(),
+					)
+					return result, failErr, true
+				}
+				log.Error(err, "agent execution candidate rebuild after concurrent Session creation failed")
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
+			}
+			if err := r.persistAgentExecutionSnapshot(ctx, task, candidate); err != nil {
+				log.Error(err, "immutable execution snapshot persistence failed after concurrent Session creation")
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
+			}
+		}
 	}
 	binding, err := r.persistAgentExecutionBinding(ctx, task, candidate)
 	if err != nil {

@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,8 +21,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
+
+type failingAgentExecutionSnapshotPersistStore struct {
+	store.AgentExecutionSnapshotStore
+}
+
+func (s failingAgentExecutionSnapshotPersistStore) PersistAgentExecutionSnapshot(
+	context.Context,
+	store.AgentExecutionSnapshot,
+) error {
+	return errors.New("snapshot persistence unavailable")
+}
 
 func workspaceBindingTestTask(mutate func(*corev1alpha1.ExecutionWorkspaceSpec)) *corev1alpha1.Task {
 	task := bindingTestTask()
@@ -331,6 +344,56 @@ func TestAgentExecutionBindingFreezesImmutableWorkspaceSessionUID(t *testing.T) 
 		verified.body.ExecutionWorkspace.SessionUID != control.SessionUID ||
 		verified.plan.Workspace.SessionKey != "session:"+control.SessionUID {
 		t.Fatalf("frozen workspace identity = plan %#v snapshot %#v, want Session UID %q", verified.plan.Workspace, verified.body.ExecutionWorkspace, control.SessionUID)
+	}
+}
+
+func TestResolveAgentExecutionCandidateDoesNotCreateWorkspaceSessionBeforeValidation(t *testing.T) {
+	ctx := context.Background()
+	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+	})
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "invalid-candidate", Create: true, Append: true}
+	reconciler, durableStore := newBindingTestReconciler(t, task)
+	reconciler.ExecutionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProviderAgentSandbox
+	reconciler.DurableControlStore = durableStore
+	reconciler.SessionManager = NewSessionManager(durableStore)
+	reconciler.ControllerEpochManager = NewControllerEpochManager(durableStore, "workspace-session-pure-candidate-test")
+
+	if _, err := reconciler.resolveAgentExecutionCandidate(ctx, task, bindingTestAgent()); err == nil ||
+		!strings.Contains(err.Error(), "resolve task namespace identity") {
+		t.Fatalf("candidate error = %v, want namespace validation failure", err)
+	}
+	if _, err := durableStore.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("failed candidate created SessionControl: %v", err)
+	}
+	if _, err := durableStore.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("failed candidate created transcript Session: %v", err)
+	}
+}
+
+func TestAgentExecutionBindingDoesNotCreateWorkspaceSessionBeforeSnapshotPersistence(t *testing.T) {
+	ctx := context.Background()
+	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+	})
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "snapshot-failure", Create: true, Append: true}
+	reconciler, durableStore := newBindingTestReconciler(t, task, bindingTestNamespace())
+	reconciler.ExecutionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProviderAgentSandbox
+	reconciler.DurableControlStore = durableStore
+	reconciler.SessionManager = NewSessionManager(durableStore)
+	reconciler.ControllerEpochManager = NewControllerEpochManager(durableStore, "workspace-session-snapshot-test")
+	reconciler.AgentExecutionSnapshots = failingAgentExecutionSnapshotPersistStore{
+		AgentExecutionSnapshotStore: reconciler.AgentExecutionSnapshots,
+	}
+
+	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, task.DeepCopy(), bindingTestAgent()); err != nil || !handled {
+		t.Fatalf("snapshot failure binding result = handled=%v err=%v, want handled retry", handled, err)
+	}
+	if _, err := durableStore.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("snapshot persistence failure created SessionControl: %v", err)
+	}
+	if _, err := durableStore.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("snapshot persistence failure created transcript Session: %v", err)
 	}
 }
 

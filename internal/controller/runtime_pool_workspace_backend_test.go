@@ -767,6 +767,11 @@ func TestWorkspaceRuntimePoolServesThroughSandboxPod(t *testing.T) {
 	runtimePoolReconcile(t, r, pool)
 	template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
 	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.71")
+	pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation] = "provider-bookkeeping"
+	pod.Annotations[sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation] = "provider-bookkeeping"
+	if err := r.Update(context.Background(), &pod); err != nil {
+		t.Fatalf("add provider-managed Pod annotations: %v", err)
+	}
 	if _, ok := pod.Labels[sandboxextv1beta1.SandboxIDLabel]; ok {
 		t.Fatal("test provider unexpectedly propagated its reserved SandboxClaim UID label onto the Pod")
 	}
@@ -959,6 +964,48 @@ func TestWorkspaceRuntimePoolRejectsForgedPodLabelsBeforeCredentialSeed(t *testi
 		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
 		!strings.Contains(status.Message, "Pod labels") {
 		t.Fatalf("forged Pod-label status = %s/%s %q, want Degraded/Closed label attestation failure", status.Lifecycle, status.AdmissionState, status.Message)
+	}
+}
+
+func TestWorkspaceRuntimePoolRejectsForgedPodAnnotationsBeforeCredentialSeed(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	seedCalls := 0
+	r.WorkspaceCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) (bool, error) {
+		seedCalls++
+		return false, nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace children were not materialized")
+	}
+	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.79")
+	pod.Annotations["k8s.v1.cni.cncf.io/networks"] = "attacker-network"
+	if err := r.Update(context.Background(), &pod); err != nil {
+		t.Fatalf("tamper materialized Pod annotations: %v", err)
+	}
+	supervisor.probe = runtimePoolValidProbe(pool, &pod, "sandbox-boot", false)
+
+	runtimePoolReconcile(t, r, pool)
+
+	if seedCalls != 0 {
+		t.Fatalf("forged Pod annotations received %d credential bootstrap requests before attestation", seedCalls)
+	}
+	if supervisor.probeCalls != 0 {
+		t.Fatalf("forged Pod annotations received %d authenticated probes before attestation", supervisor.probeCalls)
+	}
+	if _, _, currentClaim := runtimePoolWorkspaceTestChildren(t, r, pool); currentClaim != nil {
+		t.Fatal("forged Pod-annotation SandboxClaim was not recycled")
+	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		!strings.Contains(status.Message, "Pod annotations") {
+		t.Fatalf("forged Pod-annotation status = %s/%s %q, want Degraded/Closed annotation attestation failure", status.Lifecycle, status.AdmissionState, status.Message)
 	}
 }
 

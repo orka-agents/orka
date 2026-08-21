@@ -191,23 +191,93 @@ func validateACPWorkspaceBindingRequest(
 	return resolveACPWorkspaceBinding(task, defaultProvider, enforceNamespaceIsolation, validationSessionUID)
 }
 
-// ensureACPWorkspaceSessionUID establishes or reads the durable immutable
-// SessionControl identity before the execution snapshot and RuntimePool
-// identity are frozen.
-func (r *TaskReconciler) ensureACPWorkspaceSessionUID(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+func acpWorkspaceSessionIdentityRequest(task *corev1alpha1.Task) (string, string, bool, error) {
 	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil ||
 		!task.Spec.Execution.Workspace.Enabled ||
 		task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
-		return "", nil
+		return "", "", false, nil
 	}
 	if task.Spec.SessionRef == nil || strings.TrimSpace(task.Spec.SessionRef.Name) == "" {
-		return "", fmt.Errorf("execution workspace reusePolicy session requires spec.sessionRef.name")
+		return "", "", false, fmt.Errorf("execution workspace reusePolicy session requires spec.sessionRef.name")
+	}
+	name := strings.TrimSpace(task.Spec.SessionRef.Name)
+	transcriptBackedPrompt := task.Spec.SessionRef.PromptIncluded && strings.TrimSpace(task.Spec.SessionRef.ThroughMessageID) != ""
+	sessionType := defaultACPSessionType
+	if task.Spec.SessionRef.PromptIncluded && strings.HasPrefix(task.Spec.SessionRef.ThroughMessageID, "gateway:") {
+		sessionType = store.SessionTypeGateway
+	}
+	return name, sessionType, transcriptBackedPrompt, nil
+}
+
+// planACPWorkspaceSessionUID resolves an existing immutable Session identity
+// or proposes a fresh one without creating transcript or SessionControl state.
+// The proposal is established only after the complete execution candidate has
+// passed validation and canonical encoding.
+func (r *TaskReconciler) planACPWorkspaceSessionUID(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	name, sessionType, transcriptBackedPrompt, err := acpWorkspaceSessionIdentityRequest(task)
+	if err != nil || name == "" {
+		return "", err
 	}
 	if r.DurableControlStore == nil || r.SessionManager == nil || r.SessionManager.store == nil || r.ControllerEpochManager == nil {
 		return "", errors.New("durable Session control, transcript store, and controller epoch are required for session-reused execution workspaces")
 	}
-	name := strings.TrimSpace(task.Spec.SessionRef.Name)
-	transcriptBackedPrompt := task.Spec.SessionRef.PromptIncluded && strings.TrimSpace(task.Spec.SessionRef.ThroughMessageID) != ""
+	control, err := r.DurableControlStore.GetSessionControl(ctx, task.Namespace, name)
+	if err == nil {
+		if err := store.ValidateControlIdentifier("execution workspace Session UID", control.SessionUID); err != nil {
+			return "", err
+		}
+		transcript, transcriptErr := r.SessionManager.store.GetSession(ctx, task.Namespace, name)
+		if transcriptErr != nil {
+			return "", fmt.Errorf("load transcript for execution-workspace Session control: %w", transcriptErr)
+		}
+		if err := validateTranscriptSession(transcript, sessionType); err != nil {
+			return "", err
+		}
+		return control.SessionUID, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return "", err
+	}
+	if !task.Spec.SessionRef.Create && !transcriptBackedPrompt {
+		return "", fmt.Errorf("session %s/%s does not exist and create=false: %w", task.Namespace, name, store.ErrNotFound)
+	}
+	transcript, transcriptErr := r.SessionManager.store.GetSession(ctx, task.Namespace, name)
+	if transcriptErr == nil {
+		if err := validateTranscriptSession(transcript, sessionType); err != nil {
+			return "", err
+		}
+	} else if !errors.Is(transcriptErr, store.ErrNotFound) {
+		return "", fmt.Errorf("load transcript session: %w", transcriptErr)
+	} else if transcriptBackedPrompt && !task.Spec.SessionRef.Create {
+		return "", fmt.Errorf("session %s/%s does not exist and create=false: %w", task.Namespace, name, store.ErrNotFound)
+	}
+	uid, err := newACPSessionUID()
+	if err != nil {
+		return "", fmt.Errorf("generate execution-workspace Session UID proposal: %w", err)
+	}
+	return uid, nil
+}
+
+// ensureACPWorkspaceSessionUID establishes the proposed immutable Session
+// identity after candidate resolution. Concurrent creators converge on the
+// first durable SessionControl UID; the caller rebuilds the still-unbound
+// candidate if that winner differs from the proposal.
+func (r *TaskReconciler) ensureACPWorkspaceSessionUID(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	proposedUID string,
+) (string, error) {
+	name, sessionType, transcriptBackedPrompt, err := acpWorkspaceSessionIdentityRequest(task)
+	if err != nil || name == "" {
+		return "", err
+	}
+	if r.DurableControlStore == nil || r.SessionManager == nil || r.SessionManager.store == nil || r.ControllerEpochManager == nil {
+		return "", errors.New("durable Session control, transcript store, and controller epoch are required for session-reused execution workspaces")
+	}
+	proposedUID = strings.TrimSpace(proposedUID)
+	if err := store.ValidateControlIdentifier("proposed execution workspace Session UID", proposedUID); err != nil {
+		return "", err
+	}
 	if !task.Spec.SessionRef.Create && !transcriptBackedPrompt {
 		if _, err := r.DurableControlStore.GetSessionControl(ctx, task.Namespace, name); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
@@ -223,13 +293,10 @@ func (r *TaskReconciler) ensureACPWorkspaceSessionUID(ctx context.Context, task 
 	continuity, err := NewHarnessV1SessionContinuity(HarnessV1SessionContinuityConfig{
 		SessionControls: r.DurableControlStore,
 		Transcripts:     r.SessionManager.store,
+		NewSessionUID:   func() (string, error) { return proposedUID, nil },
 	})
 	if err != nil {
 		return "", err
-	}
-	sessionType := defaultACPSessionType
-	if task.Spec.SessionRef.PromptIncluded && strings.HasPrefix(task.Spec.SessionRef.ThroughMessageID, "gateway:") {
-		sessionType = store.SessionTypeGateway
 	}
 	control, err := continuity.EnsureSession(ctx, ACPEnsureSessionRequest{
 		Namespace: task.Namespace, SessionName: name, SessionType: sessionType,

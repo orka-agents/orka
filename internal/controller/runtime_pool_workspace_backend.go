@@ -819,6 +819,9 @@ func (r *RuntimePoolReconciler) attestWorkspaceRuntimePoolMaterialization(
 	if !runtimePoolWorkspacePodLabelsMatch(sandbox, pod) {
 		return false, fmt.Errorf("runtime Pod labels differ from the attested provider Sandbox")
 	}
+	if !runtimePoolWorkspacePodAnnotationsMatch(sandbox, pod) {
+		return false, fmt.Errorf("runtime Pod annotations differ from the attested provider Sandbox")
+	}
 	if !runtimePoolWorkspacePodSpecsMatch(sandbox.Spec.PodTemplate.Spec, pod.Spec) {
 		return false, fmt.Errorf("runtime PodSpec differs from the attested provider Sandbox")
 	}
@@ -837,6 +840,27 @@ func runtimePoolWorkspacePodLabelsMatch(sandbox *sandboxv1beta1.Sandbox, pod *co
 	delete(expected, sandboxextv1beta1.SandboxIDLabel)
 	expected[sandboxcontrollers.SandboxNameHashLabel] = sandboxcontrollers.NameHash(sandbox.Name)
 	return reflect.DeepEqual(expected, pod.Labels)
+}
+
+func runtimePoolWorkspacePodAnnotationsMatch(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) bool {
+	if sandbox == nil || pod == nil {
+		return false
+	}
+	actual := cloneStringMap(pod.Annotations)
+	// agent-sandbox adds only these bookkeeping annotations while propagating
+	// the attested PodTemplate metadata. Admission-added annotations are not
+	// allowlisted: annotations can select network and runtime integrations, so
+	// any other realized mutation must recycle the workspace before bootstrap.
+	delete(actual, sandboxv1beta1.SandboxPropagatedLabelsAnnotation)
+	delete(actual, sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation)
+	expected := sandbox.Spec.PodTemplate.ObjectMeta.Annotations
+	if len(expected) == 0 {
+		expected = nil
+	}
+	if len(actual) == 0 {
+		actual = nil
+	}
+	return reflect.DeepEqual(expected, actual)
 }
 
 // runtimePoolWorkspacePodSpecsMatch compares the realized Pod against the

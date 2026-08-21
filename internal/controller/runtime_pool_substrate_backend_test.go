@@ -1501,13 +1501,15 @@ func TestSubstrateRuntimePoolFinalizerPreservesForeignActorTemplate(t *testing.T
 
 func TestSubstrateRouteHTTPTransportDialsRouterPreservingHost(t *testing.T) {
 	seenHost := ""
+	seenPath := ""
 	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenHost = r.Host
+		seenPath = r.URL.Path
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer router.Close()
 
-	transport, err := substrateRouteHTTPTransport(router.URL, substrateTestActorDNSSuffix)
+	transport, err := substrateRouteHTTPTransport(router.URL+"/substrate", substrateTestActorDNSSuffix)
 	if err != nil {
 		t.Fatalf("substrateRouteHTTPTransport: %v", err)
 	}
@@ -1521,7 +1523,10 @@ func TestSubstrateRouteHTTPTransportDialsRouterPreservingHost(t *testing.T) {
 	if seenHost != routeHost {
 		t.Fatalf("router saw Host %q, want logical route host %q", seenHost, routeHost)
 	}
-	uppercaseSuffixTransport, err := substrateRouteHTTPTransport(router.URL, strings.ToUpper(substrateTestActorDNSSuffix))
+	if seenPath != "/substrate/v2/health" {
+		t.Fatalf("router saw path %q, want configured base path plus actor request path", seenPath)
+	}
+	uppercaseSuffixTransport, err := substrateRouteHTTPTransport(router.URL+"/substrate/", strings.ToUpper(substrateTestActorDNSSuffix))
 	if err != nil {
 		t.Fatalf("uppercase DNS suffix transport: %v", err)
 	}
