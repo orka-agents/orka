@@ -1416,8 +1416,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecrets(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (*corev1.Secret, *corev1.Secret, error) {
-	if pool.Spec.ExecutionWorkspace != nil &&
-		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderAgentSandbox {
+	if pool.Spec.ExecutionWorkspace != nil {
 		return r.ensurePrivateWorkspaceRuntimePoolSecrets(ctx, pool, cfg)
 	}
 
@@ -1446,11 +1445,10 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecrets(
 	return auth, provider, nil
 }
 
-// ensurePrivateWorkspaceRuntimePoolSecrets gives Agent Sandbox bootstrap
-// credentials unpredictable names that never enter the provider-visible
-// template. A principal that can mutate SandboxTemplate objects but cannot
-// read Secrets therefore cannot mount the credentials into a raced workload;
-// the controller seeds them only after exact Sandbox materialization checks.
+// ensurePrivateWorkspaceRuntimePoolSecrets gives provider-workspace bootstrap
+// credentials unpredictable names that never enter provider-visible templates.
+// The controller publishes the auth Secret's exact name and immutable UID only
+// after creation, then seeds credentials only after exact workload checks.
 func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolSecrets(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -1523,21 +1521,7 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 	}
 	binding := strings.TrimSpace(pool.Annotations[bindingKey])
 	if binding != "" {
-		name, uid, err := parseRuntimePoolPrivateSecretBinding(binding)
-		if err != nil {
-			return nil, err
-		}
-		secret := &corev1.Secret{}
-		if err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret); err != nil {
-			return nil, fmt.Errorf("read bound private RuntimePool auth Secret: %w", err)
-		}
-		if secret.UID != uid {
-			return nil, fmt.Errorf("bound private RuntimePool auth Secret UID changed")
-		}
-		if !runtimePoolPrivateAuthSecretMatchesPool(secret, pool, cfg) {
-			return nil, fmt.Errorf("bound private RuntimePool auth Secret does not carry the exact immutable RuntimePool ownership identity")
-		}
-		return secret, nil
+		return r.boundPrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, cfg.controllerEpoch)
 	}
 
 	var candidates corev1.SecretList
@@ -1570,6 +1554,40 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 	}
 	if err := r.bindPrivateRuntimePoolAuthSecret(ctx, pool, bindingKey, secret); err != nil {
 		return nil, err
+	}
+	return secret, nil
+}
+
+func (r *RuntimePoolReconciler) boundPrivateWorkspaceRuntimePoolAuthSecret(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	cfg runtimePoolConfig,
+	epoch int64,
+) (*corev1.Secret, error) {
+	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(epoch)
+	binding := strings.TrimSpace(pool.Annotations[bindingKey])
+	if binding == "" {
+		return nil, fmt.Errorf("private RuntimePool auth Secret binding for controller epoch %d is missing", epoch)
+	}
+	name, uid, err := parseRuntimePoolPrivateSecretBinding(binding)
+	if err != nil {
+		return nil, err
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	secret := &corev1.Secret{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret); err != nil {
+		return nil, fmt.Errorf("read bound private RuntimePool auth Secret: %w", err)
+	}
+	if secret.UID != uid {
+		return nil, fmt.Errorf("bound private RuntimePool auth Secret UID changed")
+	}
+	deployedConfig := cfg
+	deployedConfig.controllerEpoch = epoch
+	if !runtimePoolPrivateAuthSecretMatchesPool(secret, pool, deployedConfig) {
+		return nil, fmt.Errorf("bound private RuntimePool auth Secret does not carry the exact immutable RuntimePool ownership identity")
 	}
 	return secret, nil
 }

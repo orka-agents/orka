@@ -40,6 +40,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1980,44 +1981,34 @@ func (r *RuntimePoolReconciler) substrateRuntimePoolDeployedValidationTarget(
 	// The rendered template records immutable runtime identity, while the
 	// controller-owned namespace remains the stable location of pool Secrets.
 	validationConfig.namespace = cfg.namespace
-	deployedAuthSecret, err := r.substrateTemplateAuthSecret(ctx, cfg, deployedTemplate)
+	deployedAuthSecret, err := r.substrateTemplateAuthSecret(ctx, pool, cfg, deployedTemplate)
 	if err != nil {
 		return nil, runtimePoolConfig{}, nil, err
 	}
 	return validationPool, validationConfig, deployedAuthSecret, nil
 }
 
-// substrateTemplateAuthSecret resolves the epoch-scoped controller auth Secret
-// the deployed instance was seeded with, derived from the deployed template's
-// literal controller-epoch environment. Substrate templates never reference
-// Secrets directly.
+// substrateTemplateAuthSecret resolves the exact private controller auth Secret
+// the deployed instance was seeded with. Substrate templates record only the
+// controller epoch; the RuntimePool binds that epoch to an immutable Secret UID.
 func (r *RuntimePoolReconciler) substrateTemplateAuthSecret(
 	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 	deployed corev1.PodTemplateSpec,
 ) (*corev1.Secret, error) {
-	epoch := ""
+	rawEpoch := ""
 	if len(deployed.Spec.Containers) == 1 {
-		epoch = strings.TrimSpace(runtimePoolLiteralEnvironment(deployed.Spec.Containers[0].Env)["ORKA_ACP_CONTROLLER_EPOCH"])
+		rawEpoch = strings.TrimSpace(runtimePoolLiteralEnvironment(deployed.Spec.Containers[0].Env)["ORKA_ACP_CONTROLLER_EPOCH"])
 	}
-	if epoch == "" {
+	if rawEpoch == "" {
 		return nil, fmt.Errorf("deployed RuntimePool auth Secret reference is missing")
 	}
-	secretName := runtimePoolChildName(cfg.baseName, "auth-e"+epoch)
-	namespace := cfg.namespace
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
+	epoch, err := strconv.ParseInt(rawEpoch, 10, 64)
+	if err != nil || epoch <= 0 {
+		return nil, fmt.Errorf("deployed RuntimePool controller epoch is invalid")
 	}
-	secret := &corev1.Secret{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret); err != nil {
-		return nil, fmt.Errorf("get deployed RuntimePool auth Secret: %w", err)
-	}
-	if strings.TrimSpace(string(secret.Data[runtimePoolControllerTokenKey])) == "" ||
-		len(secret.Data[runtimePoolCapabilitySecretKey]) == 0 {
-		return nil, fmt.Errorf("deployed RuntimePool auth Secret is incomplete")
-	}
-	return secret, nil
+	return r.boundPrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, epoch)
 }
 
 // pruneStaleSubstrateRuntimePoolSecrets removes epoch-scoped credential

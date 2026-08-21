@@ -373,6 +373,80 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	runtimePoolReconcile(t, r, pool)
 }
 
+func TestSubstrateRuntimePoolReplacesPredictableUnboundAuthSecret(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	cfg, err := r.runtimePoolConfig(pool)
+	if err != nil {
+		t.Fatalf("runtimePoolConfig() error = %v", err)
+	}
+	epoch := fmt.Sprintf("%d", cfg.controllerEpoch)
+	forgedName := runtimePoolChildName(cfg.baseName, "auth-e"+epoch)
+	immutable := true
+	forged := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      forgedName,
+			Namespace: cfg.namespace,
+			Labels: mergeStringMap(cloneStringMap(cfg.labels), map[string]string{
+				runtimePoolAuthLabel:            scheduledRunLabelValue,
+				runtimePoolCredentialEpochLabel: epoch,
+			}),
+		},
+		Immutable: &immutable,
+		Data: map[string][]byte{
+			runtimePoolControllerTokenKey:  []byte(strings.Repeat("a", 32)),
+			runtimePoolCapabilitySecretKey: []byte(strings.Repeat("b", 32)),
+			runtimePoolBootstrapNonceKey:   []byte(strings.Repeat("c", 32)),
+		},
+	}
+	if err := controllerutil.SetControllerReference(pool, forged, r.Scheme); err != nil {
+		t.Fatalf("set forged Secret owner: %v", err)
+	}
+	if err := r.Create(context.Background(), forged); err != nil {
+		t.Fatalf("create forged predictable auth Secret: %v", err)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(forged), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("forged predictable auth Secret survived reconciliation: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	binding := current.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch)]
+	boundName, boundUID, err := parseRuntimePoolPrivateSecretBinding(binding)
+	if err != nil {
+		t.Fatalf("parse private auth binding %q: %v", binding, err)
+	}
+	if boundName == forgedName {
+		t.Fatalf("private auth binding retained predictable Secret name %q", boundName)
+	}
+	bound := &corev1.Secret{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: cfg.namespace, Name: boundName}, bound); err != nil {
+		t.Fatalf("get bound private auth Secret: %v", err)
+	}
+	if bound.UID != boundUID {
+		t.Fatalf("bound private auth Secret UID = %q, want %q", bound.UID, boundUID)
+	}
+	if string(bound.Data[runtimePoolControllerTokenKey]) == strings.Repeat("a", 32) ||
+		string(bound.Data[runtimePoolCapabilitySecretKey]) == strings.Repeat("b", 32) ||
+		string(bound.Data[runtimePoolBootstrapNonceKey]) == strings.Repeat("c", 32) {
+		t.Fatal("bound private auth Secret retained attacker-selected credential bytes")
+	}
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	deployed, err := substrateTemplatePodTemplateSpec(derived)
+	if err != nil {
+		t.Fatalf("read deployed substrate template: %v", err)
+	}
+	resolved, err := r.substrateTemplateAuthSecret(context.Background(), &current, cfg, deployed)
+	if err != nil {
+		t.Fatalf("resolve deployed private auth Secret: %v", err)
+	}
+	if resolved.Name != boundName || resolved.UID != boundUID {
+		t.Fatalf("resolved deployed auth Secret = %s/%s, want %s/%s", resolved.Name, resolved.UID, boundName, boundUID)
+	}
+}
+
 func TestSubstrateRuntimePoolRejectsTemplateMutateAndRestoreDuringActorCreation(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
