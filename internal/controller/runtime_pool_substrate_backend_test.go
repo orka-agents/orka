@@ -252,6 +252,57 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 	}
 }
 
+func TestSubstrateRuntimePoolRecyclesActorWithUnexpectedTemplateBeforeBootstrap(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	actorID := substrateTestActorID(pool)
+	control.actors[actorID] = &workspace.SubstrateRuntimeActor{
+		ActorID:           actorID,
+		TemplateNamespace: "attacker-owned",
+		TemplateName:      "credential-capture",
+		Status:            "STATUS_RUNNING",
+	}
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	if seedAttempts != 0 {
+		t.Fatalf("credential seed attempts = %d, want none for an actor with unexpected template identity", seedAttempts)
+	}
+	if len(control.resumed) != 0 {
+		t.Fatalf("resumed actors = %v, want none for an actor with unexpected template identity", control.resumed)
+	}
+	if len(control.settled) != 1 || control.settled[0] != actorID {
+		t.Fatalf("settled actors = %v, want the untrusted actor recycled", control.settled)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("status = %s/%s, want Degraded/Closed", got.Status.Lifecycle, got.Status.AdmissionState)
+	}
+	if !strings.Contains(got.Status.Message, "does not use the controller-derived runtime template") {
+		t.Fatalf("message = %q, want template-identity rejection", got.Status.Message)
+	}
+	if got.Annotations[substrateActorBootedAnnotation] != "" {
+		t.Fatal("untrusted actor was recorded as booted")
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != actorID {
+		t.Fatalf("recycling annotation = %q, want %q", got.Annotations[substrateActorRecyclingAnnotation], actorID)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.deleted) != 1 || control.deleted[0] != actorID {
+		t.Fatalf("deleted actors = %v, want the untrusted actor deleted", control.deleted)
+	}
+	if seedAttempts != 0 {
+		t.Fatalf("credential seed attempts after deletion = %d, want none", seedAttempts)
+	}
+}
+
 //nolint:gocyclo // Every rendered-template invariant is asserted in one place.
 func assertSubstrateDerivedTemplate(
 	t *testing.T,

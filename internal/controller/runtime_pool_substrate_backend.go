@@ -100,6 +100,16 @@ func substrateActorRouteHost(actorID, dnsSuffix string) string {
 	return actorID + "." + strings.Trim(strings.TrimSpace(dnsSuffix), ".")
 }
 
+func substrateActorMatchesRuntimeTemplate(
+	actor *workspace.SubstrateRuntimeActor,
+	actorID, templateNamespace, templateName string,
+) bool {
+	return actor != nil &&
+		strings.TrimSpace(actor.ActorID) == actorID &&
+		strings.TrimSpace(actor.TemplateNamespace) == templateNamespace &&
+		strings.TrimSpace(actor.TemplateName) == templateName
+}
+
 func runtimePoolIsSubstrateBacked(pool *corev1alpha1.RuntimePool) bool {
 	return pool != nil && pool.Spec.ExecutionWorkspace != nil &&
 		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderSubstrate
@@ -203,6 +213,26 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 	}
 
 	booted := pool.Annotations[substrateActorBootedAnnotation] == actorID
+	if actor != nil && !substrateActorMatchesRuntimeTemplate(
+		actor,
+		actorID,
+		templateNamespace,
+		runtimePoolSubstrateTemplateName(cfg.baseName),
+	) {
+		// Actor IDs are deterministic, so an existing actor is not proof of
+		// ownership. Never resume, record, probe, or credential-seed an actor
+		// unless the provider reports the exact controller-derived template.
+		if err := r.recycleSubstrateActor(ctx, pool, control, actorID); err != nil {
+			return ctrl.Result{}, err
+		}
+		status.ActiveInstance = nil
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
+		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+		status.Message = "provider actor does not use the controller-derived runtime template; recycling the exact instance before credential bootstrap"
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
 	if actor != nil && booted && (actor.SuspendedOrSuspending() || actor.SnapshotObserved) {
 		// A booted supervisor holds live pool and provider-proxy credentials in
 		// process memory; a provider-side suspension or snapshot has therefore
