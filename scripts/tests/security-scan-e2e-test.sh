@@ -30,6 +30,7 @@ source "${security_script}"
 
 [[ "${target_owner}" == "sozercan" ]]
 [[ "${target_repository}" == "vekil" ]]
+[[ "${authority_tool_name}" == "authority-probe" ]]
 
 manifest_capture="${work_dir}/manifest.yaml"
 kubectl() {
