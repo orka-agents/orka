@@ -51,7 +51,7 @@ spec:
         name: orka-codex-ci
         namespace: ate-demo
       reusePolicy: session
-      cleanupPolicy: retain
+      cleanupPolicy: delete
 YAML
 
 kubectl --context "$ctx" -n default get task substrate-smoke -o yaml
@@ -59,9 +59,10 @@ kubectl --context "$ctx" -n default get task substrate-smoke -o yaml
 
 With the dispatch flag off, check `status.executionWorkspace.phase=Failed` and
 `reason=WorkspaceValidationFailed`; provider/template metadata remains sanitized.
-With `--acp-workspace-dispatch-enabled`, an infrastructure `templateRef`, a
-digest-pinned ACP runtime image, and either the local fixture or provider-proxy model access, the same Task
-becomes a live success smoke waiting for `Succeeded`, backed by a dedicated
+With `--acp-workspace-dispatch-enabled`, an infrastructure `templateRef`,
+`cleanupPolicy: delete` (the only cleanup policy currently supported for ACP
+RuntimeSessions), a digest-pinned ACP runtime image, and either the local fixture
+or provider-proxy model access, the same Task becomes a live success smoke waiting for `Succeeded`, backed by a dedicated
 `acp-ws-*` RuntimePool whose Actor hosts the supervisor. Status must never
 expose actor IDs, route hosts, snapshot URIs, worker pod IPs, daemon URLs, or
 tokens.

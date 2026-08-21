@@ -234,6 +234,35 @@ wait_for_http() {
   die "${description} never became available at ${url}"
 }
 
+assert_task_result_contains() {
+  local namespace_arg="$1"
+  local task_name="$2"
+  local expected_marker="$3"
+  local api_base="http://127.0.0.1:${orka_api_local_port}"
+  local api_token result_file status attempts_remaining
+
+  wait_for_http "${api_base}/readyz" "Orka API /readyz"
+  api_token="$(kubectl -n "${orka_namespace}" create token orka-client)"
+  result_file="${work_dir}/${task_name}-result.json"
+  attempts_remaining=15
+  while (( attempts_remaining > 0 )); do
+    status="$(curl --silent --show-error --connect-timeout 5 --max-time 30 \
+      --header "Authorization: Bearer ${api_token}" \
+      --output "${result_file}" --write-out '%{http_code}' \
+      "${api_base}/api/v1/tasks/${task_name}/result?namespace=${namespace_arg}" \
+      2>>"${api_pf_log}" || true)"
+    if [[ "${status}" == "200" ]] &&
+      jq -er '.result' "${result_file}" | grep -Fq "${expected_marker}"; then
+      log "Task/${task_name} result contains ${expected_marker}"
+      return 0
+    fi
+    attempts_remaining=$((attempts_remaining - 1))
+    sleep 2
+  done
+
+  die "Task/${task_name} result did not contain the expected marker ${expected_marker} (last HTTP status: ${status:-none})"
+}
+
 deploy_responses_fixture() {
   log "Deploying local Responses-compatible provider fixture"
   kubectl -n vekil-system apply -f - <<YAML
@@ -1056,6 +1085,7 @@ YAML
     sleep 3
   done
   log "Workspace-backed Task reached Succeeded/Succeeded with an available result"
+  assert_task_result_contains "${acp_task_namespace}" "${acp_task_name}" "ORKA_WS_SANDBOX_OK"
 
   workspace_reason="$(kubectl -n "${acp_task_namespace}" get task "${acp_task_name}"     -o jsonpath='{.status.executionWorkspace.reason}')"
   [[ "${workspace_reason}" != "WorkspaceValidationFailed" ]] ||

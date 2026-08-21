@@ -128,7 +128,7 @@ func resolveACPWorkspaceBinding(
 	}
 	if cleanup != corev1alpha1.WorkspaceCleanupPolicyDelete {
 		return nil, fmt.Errorf(
-			"execution workspace cleanupPolicy %q is not supported for ACP RuntimeSessions; the sandbox workspace is always deleted after authenticated drain",
+			"execution workspace cleanupPolicy %q is not supported for ACP RuntimeSessions; the execution workspace is always deleted after authenticated drain",
 			cleanup,
 		)
 	}

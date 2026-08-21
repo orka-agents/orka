@@ -43,6 +43,8 @@ SUBSTRATE_DIR=""
 TMP_ROOT=""
 DOCKER_CONFIG_DIR=""
 PORT_FORWARD_PID=""
+ORKA_API_PORT_FORWARD_PID=""
+ORKA_API_LOCAL_PORT="${ORKA_API_LOCAL_PORT:-18084}"
 RUNSC_DELETE_INJECTION_NODE=""
 RUNSC_DELETE_INJECTION_PATH=""
 
@@ -126,6 +128,9 @@ cleanup() {
   if [[ -n "${PORT_FORWARD_PID}" ]]; then
     kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${ORKA_API_PORT_FORWARD_PID}" ]]; then
+    kill "${ORKA_API_PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  fi
   restore_runsc_delete_injector >/dev/null 2>&1 || true
   if [[ "${KEEP_CLUSTER}" != "1" ]]; then
     kind delete cluster --name "${KIND_CLUSTER}" >/dev/null 2>&1 || true
@@ -203,6 +208,61 @@ wait_jsonpath_equals() {
     fi
     sleep 5
   done
+}
+
+start_orka_api_port_forward() {
+  if [[ -n "${ORKA_API_PORT_FORWARD_PID}" ]] &&
+    kill -0 "${ORKA_API_PORT_FORWARD_PID}" >/dev/null 2>&1; then
+    return 0
+  fi
+  kubectl -n "${ORKA_NAMESPACE}" port-forward svc/orka-api \
+    "${ORKA_API_LOCAL_PORT}:8080" >"${TMP_ROOT}/orka-api-port-forward.log" 2>&1 &
+  ORKA_API_PORT_FORWARD_PID="$!"
+
+  local attempts_remaining=60
+  while (( attempts_remaining > 0 )); do
+    if curl -fsS --connect-timeout 5 --max-time 10 \
+      "http://127.0.0.1:${ORKA_API_LOCAL_PORT}/readyz" >/dev/null 2>&1; then
+      return 0
+    fi
+    if ! kill -0 "${ORKA_API_PORT_FORWARD_PID}" >/dev/null 2>&1; then
+      echo "Orka API port-forward exited before becoming ready" >&2
+      return 1
+    fi
+    attempts_remaining=$((attempts_remaining - 1))
+    sleep 2
+  done
+  echo "Orka API port-forward did not become ready" >&2
+  return 1
+}
+
+assert_orka_task_result_contains() {
+  local namespace_arg="$1"
+  local task_name="$2"
+  local expected_marker="$3"
+  local api_token result_file status attempts_remaining
+
+  start_orka_api_port_forward
+  api_token="$(kubectl -n "${ORKA_NAMESPACE}" create token orka-client)"
+  result_file="${TMP_ROOT}/${task_name}-result.json"
+  attempts_remaining=15
+  while (( attempts_remaining > 0 )); do
+    status="$(curl --silent --show-error --connect-timeout 5 --max-time 30 \
+      --header "Authorization: Bearer ${api_token}" \
+      --output "${result_file}" --write-out '%{http_code}' \
+      "http://127.0.0.1:${ORKA_API_LOCAL_PORT}/api/v1/tasks/${task_name}/result?namespace=${namespace_arg}" \
+      2>>"${TMP_ROOT}/orka-api-port-forward.log" || true)"
+    if [[ "${status}" == "200" ]] &&
+      jq -er '.result' "${result_file}" | grep -Fq "${expected_marker}"; then
+      log "Task/${task_name} result contains ${expected_marker}"
+      return 0
+    fi
+    attempts_remaining=$((attempts_remaining - 1))
+    sleep 2
+  done
+
+  echo "Task/${task_name} result did not contain the expected marker ${expected_marker} (last HTTP status: ${status:-none})" >&2
+  return 1
 }
 
 wait_jsonpath_int_at_least() {
@@ -2084,6 +2144,7 @@ YAML
     sleep 3
   done
   log "Workspace-backed Task reached Succeeded/Succeeded with an available result"
+  assert_orka_task_result_contains "${ORKA_NAMESPACE}" "orka-ws-substrate-smoke" "ORKA_WS_SUBSTRATE_OK"
 
   # Provider-native identifiers must never enter final public Task status: the
   # raw actor ID, actor route host (DNS suffix), assigned worker Pod, and
