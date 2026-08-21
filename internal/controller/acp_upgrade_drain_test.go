@@ -666,8 +666,8 @@ func upgradeDrainEpochObjects(fence store.ControllerEpochFence) (*corev1alpha1.C
 			Epoch: fence.Epoch, HolderID: fence.HolderID, LeaseName: leaseName, LeaseResourceVersion: "1",
 		},
 	}, &coordinationv1.Lease{
-		Name: leaseName, Namespace: namespace,
-		Spec: coordinationv1.LeaseSpec{HolderIdentity: &holder},
+		ObjectMeta: metav1.ObjectMeta{Name: leaseName, Namespace: namespace},
+		Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
 	}
 }
 
