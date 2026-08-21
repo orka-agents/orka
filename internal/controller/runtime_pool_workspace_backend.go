@@ -314,8 +314,10 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 		if err := r.createRuntimePoolSandboxClaim(ctx, pool, cfg); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 		}
+		r.applyProviderRuntimePoolColdStartStatus(pool, &status, "waiting to observe the new provider SandboxClaim before credential bootstrap")
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
-	if claim != nil && len(readyPods) == 1 {
+	if len(readyPods) == 1 {
 		materialized, err := r.attestWorkspaceRuntimePoolMaterialization(ctx, claim, sandboxTemplate, &readyPods[0])
 		if err != nil {
 			if deleteErr := r.deleteRuntimePoolSandboxClaim(ctx, claim); deleteErr != nil {

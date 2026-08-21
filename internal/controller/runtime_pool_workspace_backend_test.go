@@ -342,6 +342,41 @@ func TestWorkspaceRuntimePoolIgnoresForeignReadyPodWithSamePoolKey(t *testing.T)
 	}
 }
 
+func TestWorkspaceRuntimePoolRequeuesAfterCreatingClaimBeforeUsingReadyPod(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolWorkspaceTestObject()
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+
+	runtimePoolReconcile(t, r, pool)
+	template, _, claim := runtimePoolWorkspaceTestChildren(t, r, pool)
+	if template == nil || claim == nil {
+		t.Fatal("workspace template and claim were not materialized")
+	}
+	stale := runtimePoolWorkspaceReadyPod(pool, template, "stale-pod", "stale-pod-uid", "10.0.0.92")
+	runtimePoolTestCreatePod(t, r, &stale)
+	if err := r.Delete(context.Background(), claim); err != nil {
+		t.Fatalf("delete old SandboxClaim: %v", err)
+	}
+
+	result := runtimePoolReconcile(t, r, pool)
+	if result.RequeueAfter == 0 {
+		t.Fatal("new SandboxClaim creation did not requeue for a fresh claim and Pod read")
+	}
+	if supervisor.probeCalls != 0 {
+		t.Fatalf("stale pre-claim Pod triggered %d authenticated probes", supervisor.probeCalls)
+	}
+	if _, _, replacement := runtimePoolWorkspaceTestChildren(t, r, pool); replacement == nil {
+		t.Fatal("replacement SandboxClaim was not created")
+	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting ||
+		status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		status.ActiveInstance != nil {
+		t.Fatalf("replacement claim status = %s/%s active=%#v, want Starting/Closed with no active instance", status.Lifecycle, status.AdmissionState, status.ActiveInstance)
+	}
+}
+
 func TestWorkspaceRuntimePoolRejectsUnboundPrivateAuthSecret(t *testing.T) {
 	scheme := runtimePoolWorkspaceTestScheme(t)
 	pool := runtimePoolWorkspaceTestObject()
