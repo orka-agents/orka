@@ -91,10 +91,11 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	text := responseText(body)
 	responseID := fmt.Sprintf("resp_orka_fixture_%d", responseSequence.Add(1))
+	itemID := "msg_" + responseID
 	item := map[string]any{
 		"type":    "message",
 		"role":    "assistant",
-		"id":      "msg_" + responseID,
+		"id":      itemID,
 		"status":  "completed",
 		"content": []map[string]any{{"type": "output_text", "text": text, "annotations": []any{}}},
 	}
@@ -126,15 +127,56 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		"sequence_number": 0,
 		"response":        map[string]any{"id": responseID},
 	})
+	writeSSE(w, "response.output_item.added", map[string]any{
+		"type":            "response.output_item.added",
+		"sequence_number": 1,
+		"output_index":    0,
+		"item": map[string]any{
+			"type": "message", "role": "assistant", "id": itemID,
+			"status": "in_progress", "content": []any{},
+		},
+	})
+	writeSSE(w, "response.content_part.added", map[string]any{
+		"type":            "response.content_part.added",
+		"sequence_number": 2,
+		"item_id":         itemID,
+		"output_index":    0,
+		"content_index":   0,
+		"part":            map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+	})
+	writeSSE(w, "response.output_text.delta", map[string]any{
+		"type":            "response.output_text.delta",
+		"sequence_number": 3,
+		"item_id":         itemID,
+		"output_index":    0,
+		"content_index":   0,
+		"delta":           text,
+	})
+	writeSSE(w, "response.output_text.done", map[string]any{
+		"type":            "response.output_text.done",
+		"sequence_number": 4,
+		"item_id":         itemID,
+		"output_index":    0,
+		"content_index":   0,
+		"text":            text,
+	})
+	writeSSE(w, "response.content_part.done", map[string]any{
+		"type":            "response.content_part.done",
+		"sequence_number": 5,
+		"item_id":         itemID,
+		"output_index":    0,
+		"content_index":   0,
+		"part":            map[string]any{"type": "output_text", "text": text, "annotations": []any{}},
+	})
 	writeSSE(w, "response.output_item.done", map[string]any{
 		"type":            "response.output_item.done",
-		"sequence_number": 1,
+		"sequence_number": 6,
 		"output_index":    0,
 		"item":            item,
 	})
 	writeSSE(w, "response.completed", map[string]any{
 		"type":            "response.completed",
-		"sequence_number": 2,
+		"sequence_number": 7,
 		"response":        completed,
 	})
 }

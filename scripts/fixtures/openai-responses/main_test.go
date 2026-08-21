@@ -24,15 +24,24 @@ func TestHandleResponsesStreamsRequestedMarker(t *testing.T) {
 		t.Fatalf("Content-Type = %q, want text/event-stream", got)
 	}
 	body := response.Body.String()
+	cursor := 0
 	for _, expected := range []string{
 		"event: response.created",
+		"event: response.output_item.added",
+		"event: response.content_part.added",
+		"event: response.output_text.delta",
+		`"delta":"ORKA_WS_SUBSTRATE_OK"`,
+		"event: response.output_text.done",
+		"event: response.content_part.done",
 		"event: response.output_item.done",
 		`"text":"ORKA_WS_SUBSTRATE_OK"`,
 		"event: response.completed",
 	} {
-		if !strings.Contains(body, expected) {
+		offset := strings.Index(body[cursor:], expected)
+		if offset < 0 {
 			t.Fatalf("stream omitted %q:\n%s", expected, body)
 		}
+		cursor += offset + len(expected)
 	}
 }
 
