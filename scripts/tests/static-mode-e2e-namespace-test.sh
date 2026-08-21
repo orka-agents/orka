@@ -60,6 +60,35 @@ if [[ "${mcp_template_namespace}" != '${ORKA_NAMESPACE}' ]]; then
 fi
 grep -Fq 'kubectl -n ${ORKA_NAMESPACE} get actortemplate orka-mcp-ci' "${substrate_script}"
 
+acp_template_namespace="$(
+  awk '
+    $0 == "  name: orka-acp-infra" { found = 1; next }
+    found && $1 == "namespace:" { print $2; exit }
+  ' "${substrate_script}"
+)"
+if [[ "${acp_template_namespace}" != '${ORKA_NAMESPACE}' ]]; then
+  echo 'agent-substrate E2E must colocate the ACP infrastructure ActorTemplate with its isolated Task' >&2
+  exit 1
+fi
+
+workspace_task_body="$(awk '/^exercise_workspace_backed_acp_task\(\) {/,/^}/' "${substrate_script}")"
+workspace_template_namespace="$(
+  awk '
+    $1 == "templateRef:" { in_template_ref = 1; next }
+    in_template_ref && $1 == "namespace:" { namespace = $2; next }
+    in_template_ref && $1 == "name:" && $2 == "orka-acp-infra" { print namespace; exit }
+  ' <<<"${workspace_task_body}"
+)"
+if [[ "${workspace_template_namespace}" != '${ORKA_NAMESPACE}' ]]; then
+  echo 'agent-substrate E2E workspace Task must use its same-namespace ACP infrastructure ActorTemplate' >&2
+  exit 1
+fi
+
+if grep -Fq 'kubectl -n ate-demo get "${derived_template}"' <<<"${workspace_task_body}"; then
+  echo 'agent-substrate E2E must inspect derived ACP ActorTemplates in the infrastructure template namespace' >&2
+  exit 1
+fi
+
 for function_name in create_substrate_actor_pools create_mcp_tool; do
   function_body="$(awk "/^${function_name}\\(\\) {/,/^}/" "${substrate_script}")"
   template_namespace="$(

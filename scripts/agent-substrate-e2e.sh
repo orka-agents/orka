@@ -964,7 +964,7 @@ apiVersion: ate.dev/v1alpha1
 kind: ActorTemplate
 metadata:
   name: orka-acp-infra
-  namespace: ate-demo
+  namespace: ${ORKA_NAMESPACE}
 spec:
   pauseImage: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
   containers:
@@ -1930,12 +1930,12 @@ exercise_workspace_backed_acp_task() {
   kubectl -n ate-demo rollout status deployment/orka-workers-deployment --timeout=5m
   wait_worker_count_at_least 4 300
 
-  kubectl apply -f - <<'YAML'
+  kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: orka-ws-substrate-agent
-  namespace: orka-system
+  namespace: ${ORKA_NAMESPACE}
 spec:
   runtime:
     type: codex
@@ -1948,7 +1948,7 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: orka-ws-substrate-smoke
-  namespace: orka-system
+  namespace: ${ORKA_NAMESPACE}
 spec:
   type: agent
   agentRef:
@@ -1961,7 +1961,7 @@ spec:
       enabled: true
       provider: substrate
       templateRef:
-        namespace: ate-demo
+        namespace: ${ORKA_NAMESPACE}
         name: orka-acp-infra
       reusePolicy: none
       cleanupPolicy: delete
@@ -1982,7 +1982,7 @@ YAML
   local derived_template derived_template_name started now
   started="$(date +%s)"
   while true; do
-    derived_template_name="$(kubectl -n ate-demo get actortemplates \
+    derived_template_name="$(kubectl -n "${ORKA_NAMESPACE}" get actortemplates \
       -l "orka.ai/runtime-pool-name=${pool_name}" \
       -o json 2>/dev/null | jq -r 'if (.items | length) == 1 then .items[0].metadata.name else "" end' || true)"
     if [[ -n "${derived_template_name}" ]]; then
@@ -1991,7 +1991,7 @@ YAML
     fi
     now="$(date +%s)"
     if (( now - started >= 240 )); then
-      echo "controller did not render a derived ActorTemplate in ate-demo" >&2
+      echo "controller did not render a derived ActorTemplate in ${ORKA_NAMESPACE}" >&2
       echo "=== workspace-backed RuntimePool ===" >&2
       kubectl -n orka-system get runtimepools -o yaml >&2 || true
       echo "=== orka controller logs (runtimepool) ===" >&2
@@ -2004,12 +2004,12 @@ YAML
   # The provider requires snapshotsConfig and golden-snapshots the template by
   # booting one instance; that is safe only because the rendered container is
   # completely credential-free (awaiting-bootstrap supervisor + public nonce).
-  if ! kubectl -n ate-demo get "${derived_template}" -o jsonpath='{.spec.snapshotsConfig.location}' | grep -q .; then
+  if ! kubectl -n "${ORKA_NAMESPACE}" get "${derived_template}" -o jsonpath='{.spec.snapshotsConfig.location}' | grep -q .; then
     echo "derived ActorTemplate lost the operator snapshotsConfig" >&2
     return 1
   fi
   local derived_env
-  derived_env="$(kubectl -n ate-demo get "${derived_template}" -o jsonpath='{.spec.containers[0].env}')"
+  derived_env="$(kubectl -n "${ORKA_NAMESPACE}" get "${derived_template}" -o jsonpath='{.spec.containers[0].env}')"
   if grep -q "valueFrom" <<<"${derived_env}"; then
     echo "derived ActorTemplate resolves Secrets via valueFrom; provider workloads must be credential-free" >&2
     return 1
@@ -2018,9 +2018,9 @@ YAML
     echo "derived ActorTemplate is missing the credential bootstrap nonce env" >&2
     return 1
   fi
-  if kubectl -n ate-demo get secrets -l orka.ai/runtime-pool-uid -o name 2>/dev/null | grep -q .; then
+  if kubectl -n "${ORKA_NAMESPACE}" get secrets -l orka.ai/runtime-pool-uid -o name 2>/dev/null | grep -q .; then
     echo "pool Secrets leaked into the template namespace; credentials must stay in the runtime namespace" >&2
-    kubectl -n ate-demo get secrets -l orka.ai/runtime-pool-uid >&2 || true
+    kubectl -n "${ORKA_NAMESPACE}" get secrets -l orka.ai/runtime-pool-uid >&2 || true
     return 1
   fi
 
@@ -2034,22 +2034,22 @@ YAML
   local actors_json actor_count actor_id worker_pod
   actors_json="$("${TMP_ROOT}/kubectl-ate" get actors -o json)"
   actor_count="$(jq -r \
-    --arg namespace ate-demo \
+    --arg namespace "${ORKA_NAMESPACE}" \
     --arg template "${derived_template_name}" \
     '[.actors[]? | select(.actorTemplateNamespace == $namespace and .actorTemplateName == $template)] | length' \
     <<<"${actors_json}")"
   if [[ "${actor_count}" != "1" ]]; then
-    echo "expected exactly one provider actor for ate-demo/${derived_template_name}, found ${actor_count}" >&2
+    echo "expected exactly one provider actor for ${ORKA_NAMESPACE}/${derived_template_name}, found ${actor_count}" >&2
     "${TMP_ROOT}/kubectl-ate" get actors >&2 || true
     return 1
   fi
   actor_id="$(jq -r \
-    --arg namespace ate-demo \
+    --arg namespace "${ORKA_NAMESPACE}" \
     --arg template "${derived_template_name}" \
     '.actors[] | select(.actorTemplateNamespace == $namespace and .actorTemplateName == $template) | .actorId' \
     <<<"${actors_json}")"
   worker_pod="$(jq -r \
-    --arg namespace ate-demo \
+    --arg namespace "${ORKA_NAMESPACE}" \
     --arg template "${derived_template_name}" \
     '.actors[] | select(.actorTemplateNamespace == $namespace and .actorTemplateName == $template) | .ateomPodName // empty' \
     <<<"${actors_json}")"
@@ -2114,7 +2114,7 @@ YAML
   log "Cleaning up the workspace-backed Task and pool"
   kubectl -n orka-system delete task orka-ws-substrate-smoke --wait=true --timeout=4m
   kubectl -n orka-system delete runtimepool "${pool_name}" --wait=true --timeout=5m
-  if kubectl -n ate-demo get "${derived_template}" >/dev/null 2>&1; then
+  if kubectl -n "${ORKA_NAMESPACE}" get "${derived_template}" >/dev/null 2>&1; then
     echo "pool finalization left the derived ActorTemplate behind" >&2
     return 1
   fi
