@@ -17,6 +17,8 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/tasktrace"
 	"github.com/orka-agents/orka/test/utils"
 )
 
@@ -193,6 +195,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		verifyResultAvailable(codexTaskReadName)
 		summary := strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, codexTaskReadName))
 		Expect(summary).To(HaveSuffix(liveRuntimeRepoSentinel))
+		verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, codexTaskReadName)
 	})
 
 	It("should run OpenCode through ACP v2 and enforce read intent", func() {
@@ -421,4 +424,59 @@ func applyManifestJSON(manifest any) error {
 
 func boolPtr(v bool) *bool {
 	return &v
+}
+
+type liveACPTaskEventsResponse struct {
+	LatestSeq int64 `json:"latestSeq"`
+	Events    []struct {
+		Seq  int64  `json:"seq"`
+		Type string `json:"type"`
+	} `json:"events"`
+}
+
+func verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, taskName string) {
+	By("verifying the live ACP task persisted rich execution updates")
+	body, statusCode, err := doAuthorizedJSONRequest(
+		http.MethodGet,
+		fmt.Sprintf("%s/api/v1/tasks/%s/events?namespace=%s", strings.TrimRight(apiBaseURL, "/"), taskName, namespace),
+		token,
+		"",
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusOK), strings.TrimSpace(body))
+	var listed liveACPTaskEventsResponse
+	Expect(json.Unmarshal([]byte(body), &listed)).To(Succeed())
+	Expect(listed.LatestSeq).To(BeNumerically(">", 0))
+	typeCounts := map[string]int{}
+	for _, event := range listed.Events {
+		typeCounts[event.Type]++
+	}
+	for _, eventType := range []string{
+		events.ExecutionEventTypeModelRequestStarted,
+		events.ExecutionEventTypeModelMessage,
+		events.ExecutionEventTypeToolCallStarted,
+		events.ExecutionEventTypeToolCallCompleted,
+		events.ExecutionEventTypeModelRequestCompleted,
+	} {
+		Expect(typeCounts[eventType]).To(BeNumerically(">", 0), "missing live ACP event type %s in %#v", eventType, typeCounts)
+	}
+
+	By("verifying the live ACP event stream builds a completed trace")
+	body, statusCode, err = doAuthorizedJSONRequest(
+		http.MethodGet,
+		fmt.Sprintf("%s/api/v1/tasks/%s/trace?namespace=%s", strings.TrimRight(apiBaseURL, "/"), taskName, namespace),
+		token,
+		"",
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusOK), strings.TrimSpace(body))
+	var trace tasktrace.TaskTrace
+	Expect(json.Unmarshal([]byte(body), &trace)).To(Succeed())
+	Expect(trace.LatestSeq).To(BeNumerically(">", 0))
+	Expect(trace.ModelRequests).NotTo(BeEmpty())
+	Expect(trace.ModelRequests[len(trace.ModelRequests)-1].Status).To(Equal(tasktrace.StatusCompleted))
+	Expect(trace.ToolCalls).NotTo(BeEmpty())
+	Expect(trace.ToolCalls[len(trace.ToolCalls)-1].Status).To(Equal(tasktrace.StatusCompleted))
 }

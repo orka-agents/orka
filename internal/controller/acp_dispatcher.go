@@ -110,6 +110,9 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 	if _, ok := d.EventStore.(store.DeduplicatingExecutionEventStore); !ok {
 		return fmt.Errorf("ACP dispatcher requires an execution event store with atomic deduplication")
 	}
+	if _, ok := d.EventStore.(store.AtomicExecutionEventPlanStore); !ok {
+		return fmt.Errorf("ACP dispatcher requires an execution event store with atomic plan projection")
+	}
 	if d.APIReader == nil {
 		d.APIReader = d.Client
 	}
@@ -1308,10 +1311,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 						Summary: projection.Summary, ProgressPct: projection.ProgressPct,
 						GoalComplete: projection.GoalComplete, PlanDocument: projection.Document,
 					}
-					planErr = saveACPPlanUpdateWithRetry(ctx, d.PlanStore, task.Namespace, task.Name, planState)
 				}
-				_, _, journalErr := journalState.AppendUpdateIfNew(ctx, event)
-				if planState != nil {
+				var journalErr error
+				if planState == nil {
+					_, _, journalErr = journalState.AppendUpdateIfNew(ctx, event)
+				} else if _, ok := d.EventStore.(store.AtomicExecutionEventPlanStore); ok {
+					_, _, journalErr = journalState.AppendPlanUpdateIfNew(ctx, event, planState)
+				} else {
+					// Direct unit tests may use separate fake stores without starting
+					// the dispatcher. Production startup requires the atomic path above.
+					planErr = saveACPPlanUpdateWithRetry(ctx, d.PlanStore, task.Namespace, task.Name, planState)
+					_, _, journalErr = journalState.AppendUpdateIfNew(ctx, event)
 					planErr = reconcileACPPlanUpdateAfterJournal(
 						ctx, d.PlanStore, task.Namespace, task.Name, planState, planErr, journalErr,
 					)

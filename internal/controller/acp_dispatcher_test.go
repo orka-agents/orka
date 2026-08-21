@@ -124,6 +124,10 @@ type baseOnlyExecutionEventStore struct {
 	store.ExecutionEventStore
 }
 
+type dedupeOnlyExecutionEventStore struct {
+	store.DeduplicatingExecutionEventStore
+}
+
 func TestACPDispatcherStartRequiresAtomicEventDeduplication(t *testing.T) {
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "start-event-store.db"))
 	if err != nil {
@@ -144,6 +148,31 @@ func TestACPDispatcherStartRequiresAtomicEventDeduplication(t *testing.T) {
 	err = dispatcher.Start(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "execution event store with atomic deduplication") {
 		t.Fatalf("Start() error = %v, want atomic deduplication requirement", err)
+	}
+}
+
+func TestACPDispatcherStartRequiresAtomicPlanProjection(t *testing.T) {
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "start-plan-store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	persistence := sqlite.NewStore(db, "start-plan-store-test")
+	dispatcher := &ACPDispatcher{
+		Client:      fake.NewClientBuilder().Build(),
+		Store:       persistence,
+		ResultStore: persistence,
+		EventStore: dedupeOnlyExecutionEventStore{
+			DeduplicatingExecutionEventStore: persistence,
+		},
+		PlanStore: persistence,
+		Snapshots: persistence,
+		Epochs:    NewControllerEpochManager(persistence, "start-plan-store-controller"),
+	}
+
+	err = dispatcher.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "execution event store with atomic plan projection") {
+		t.Fatalf("Start() error = %v, want atomic plan projection requirement", err)
 	}
 }
 

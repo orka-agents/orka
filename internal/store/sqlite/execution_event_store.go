@@ -17,11 +17,12 @@ const sqliteUnknownMetricLabel = "unknown"
 
 var _ store.ExecutionEventStore = (*Store)(nil)
 var _ store.DeduplicatingExecutionEventStore = (*Store)(nil)
+var _ store.AtomicExecutionEventPlanStore = (*Store)(nil)
 
 // AppendExecutionEvent appends an execution event and allocates the next sequence
 // number transactionally for its (namespace, stream_type, stream_id) stream.
 func (s *Store) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
-	appended, _, err := s.appendExecutionEvent(ctx, event, "")
+	appended, _, err := s.appendExecutionEvent(ctx, event, "", nil)
 	return appended, err
 }
 
@@ -37,13 +38,34 @@ func (s *Store) AppendExecutionEventIfAbsent(
 	if err != nil {
 		return nil, false, err
 	}
-	return s.appendExecutionEvent(ctx, event, dedupeKey)
+	return s.appendExecutionEvent(ctx, event, dedupeKey, nil)
+}
+
+// AppendExecutionEventWithPlanIfAbsent atomically appends an execution event
+// and updates its task plan projection. Duplicate event keys leave the current
+// plan unchanged.
+func (s *Store) AppendExecutionEventWithPlanIfAbsent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+	plan *store.PlanState,
+) (*store.ExecutionEvent, bool, error) {
+	dedupeKey, err := store.NormalizeExecutionEventDedupeKey(dedupeKey)
+	if err != nil {
+		return nil, false, err
+	}
+	if plan == nil {
+		return nil, false, store.ValidationErrorf("plan state is required")
+	}
+	planCopy := *plan
+	return s.appendExecutionEvent(ctx, event, dedupeKey, &planCopy)
 }
 
 func (s *Store) appendExecutionEvent(
 	ctx context.Context,
 	event *store.ExecutionEvent,
 	dedupeKey string,
+	plan *store.PlanState,
 ) (*store.ExecutionEvent, bool, error) {
 	started := time.Now()
 	metricStreamType, metricEventType := sqliteMetricLabelsForExecutionEvent(event)
@@ -63,6 +85,14 @@ func (s *Store) appendExecutionEvent(
 	} else {
 		copy.CreatedAt = copy.CreatedAt.UTC()
 	}
+	if plan != nil {
+		if strings.TrimSpace(plan.Namespace) != copy.Namespace || strings.TrimSpace(plan.TaskName) != copy.TaskName {
+			return nil, false, store.ValidationErrorf("plan identity must match execution event task")
+		}
+		plan.Namespace = copy.Namespace
+		plan.TaskName = copy.TaskName
+	}
+	planUpdatedAt := time.Now().UTC()
 
 	contentJSON := nullableStringFromRaw(copy.Content)
 	truncationJSON, err := marshalExecutionEventTruncation(copy.Truncation)
@@ -85,7 +115,9 @@ func (s *Store) appendExecutionEvent(
 	}
 	var lastErr error
 	for attempt := range maxAttempts {
-		appended, isNew, err := s.appendExecutionEventOnce(ctx, copy, dedupeKey, contentJSON, truncationJSON)
+		appended, isNew, err := s.appendExecutionEventOnce(
+			ctx, copy, dedupeKey, contentJSON, truncationJSON, plan, planUpdatedAt,
+		)
 		if err == nil {
 			if isNew {
 				redacted, truncated := store.ExecutionEventPayloadSanitizationSignals(appended)
@@ -121,6 +153,8 @@ func (s *Store) appendExecutionEventOnce(
 	dedupeKey string,
 	contentJSON any,
 	truncationJSON any,
+	plan *store.PlanState,
+	planUpdatedAt time.Time,
 ) (*store.ExecutionEvent, bool, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -181,6 +215,11 @@ func (s *Store) appendExecutionEventOnce(
 		event.Summary, contentJSON, event.ContentText, truncationJSON, event.CreatedAt,
 	); err != nil {
 		return nil, false, err
+	}
+	if plan != nil {
+		if err := upsertSQLitePlan(ctx, conn, plan.Namespace, plan.TaskName, plan, planUpdatedAt); err != nil {
+			return nil, false, err
+		}
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return nil, false, err

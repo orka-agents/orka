@@ -212,6 +212,19 @@ type DeduplicatingExecutionEventStore interface {
 	) (persisted *ExecutionEvent, appended bool, err error)
 }
 
+// AtomicExecutionEventPlanStore persists a deduplicated execution event and
+// its plan projection in one transaction. A repeated event key returns the
+// existing event without changing the current plan projection.
+type AtomicExecutionEventPlanStore interface {
+	DeduplicatingExecutionEventStore
+	AppendExecutionEventWithPlanIfAbsent(
+		ctx context.Context,
+		event *ExecutionEvent,
+		dedupeKey string,
+		plan *PlanState,
+	) (persisted *ExecutionEvent, appended bool, err error)
+}
+
 // NormalizeExecutionEventDedupeKey validates and normalizes an opaque store-
 // internal execution-event deduplication key.
 func NormalizeExecutionEventDedupeKey(value string) (string, error) {

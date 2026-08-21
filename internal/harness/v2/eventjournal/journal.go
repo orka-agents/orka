@@ -580,6 +580,31 @@ func (s *State) projectPlanUpdate(update harnessv2.PlanUpdate) (PlanProjection, 
 // deduplication; complete assistant/tool text is persisted only after the
 // logical stream ends so redaction sees update boundaries.
 func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*store.ExecutionEvent, bool, error) {
+	return s.appendUpdateIfNew(ctx, event, nil)
+}
+
+// AppendPlanUpdateIfNew atomically persists a plan update's journal event and
+// materialized plan projection when the configured store supports that
+// capability. Duplicate protocol updates leave the current plan unchanged.
+func (s *State) AppendPlanUpdateIfNew(
+	ctx context.Context,
+	event harnessv2.Event,
+	plan *store.PlanState,
+) (*store.ExecutionEvent, bool, error) {
+	if event.Update == nil || event.Update.Plan == nil {
+		return nil, false, fmt.Errorf("harness v2 plan update is required")
+	}
+	if plan == nil {
+		return nil, false, fmt.Errorf("plan projection is required")
+	}
+	return s.appendUpdateIfNew(ctx, event, plan)
+}
+
+func (s *State) appendUpdateIfNew(
+	ctx context.Context,
+	event harnessv2.Event,
+	plan *store.PlanState,
+) (*store.ExecutionEvent, bool, error) {
 	if s == nil {
 		return nil, false, fmt.Errorf("harness v2 journal state is required")
 	}
@@ -672,8 +697,8 @@ func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*
 			return nil, false, err
 		}
 	}
-	appended, isNew, err := s.appendMappedEvent(
-		ctx, identity, mappedJournalRecordUpdate, mapped, "append mapped harness v2 update",
+	appended, isNew, err := s.appendMappedEventWithPlan(
+		ctx, identity, mappedJournalRecordUpdate, mapped, plan, "append mapped harness v2 update",
 	)
 	if err == nil {
 		if isNonTerminalToolUpdate(event) {
@@ -1129,6 +1154,17 @@ func (s *State) appendMappedEvent(
 	mapped *store.ExecutionEvent,
 	operation string,
 ) (*store.ExecutionEvent, bool, error) {
+	return s.appendMappedEventWithPlan(ctx, identity, kind, mapped, nil, operation)
+}
+
+func (s *State) appendMappedEventWithPlan(
+	ctx context.Context,
+	identity MappedUpdateIdentity,
+	kind mappedJournalRecordKind,
+	mapped *store.ExecutionEvent,
+	plan *store.PlanState,
+	operation string,
+) (*store.ExecutionEvent, bool, error) {
 	key := identity.Key()
 	if isMappedToolTerminalEvent(*mapped) {
 		// Real runtime terminal updates and synthesized recovery closures race
@@ -1146,12 +1182,22 @@ func (s *State) appendMappedEvent(
 			key = mappedPromptLifecycleKey(identity, mappedPromptTerminalKind)
 		}
 	}
-	deduplicatingStore, ok := s.journal.EventStore.(store.DeduplicatingExecutionEventStore)
-	if !ok {
-		return nil, false, fmt.Errorf("%s: execution event store does not support atomic deduplication", operation)
-	}
 	dedupeKey := mappedJournalDedupeKey(key)
-	appended, isNew, err := deduplicatingStore.AppendExecutionEventIfAbsent(ctx, mapped, dedupeKey)
+	appendIfAbsent := func() (*store.ExecutionEvent, bool, error) {
+		if plan != nil {
+			atomicStore, ok := s.journal.EventStore.(store.AtomicExecutionEventPlanStore)
+			if !ok {
+				return nil, false, fmt.Errorf("execution event store does not support atomic plan projection")
+			}
+			return atomicStore.AppendExecutionEventWithPlanIfAbsent(ctx, mapped, dedupeKey, plan)
+		}
+		deduplicatingStore, ok := s.journal.EventStore.(store.DeduplicatingExecutionEventStore)
+		if !ok {
+			return nil, false, fmt.Errorf("execution event store does not support atomic deduplication")
+		}
+		return deduplicatingStore.AppendExecutionEventIfAbsent(ctx, mapped, dedupeKey)
+	}
+	appended, isNew, err := appendIfAbsent()
 	if err == nil {
 		s.markPersisted(identity, kind)
 		if !isNew {
@@ -1169,7 +1215,7 @@ func (s *State) appendMappedEvent(
 		return nil, false, nil
 	}
 
-	appended, isNew, err = deduplicatingStore.AppendExecutionEventIfAbsent(ctx, mapped, dedupeKey)
+	appended, isNew, err = appendIfAbsent()
 	if err == nil {
 		s.markPersisted(identity, kind)
 		if !isNew {

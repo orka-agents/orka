@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
 )
 
@@ -68,6 +70,89 @@ func TestJournalDeduplicatesWithinPassAndAcrossRecovery(t *testing.T) {
 	}
 	if len(listed) != 2 {
 		t.Fatalf("persisted events = %d, want 2", len(listed))
+	}
+}
+
+func TestJournalPlanReplaySurvivesSQLiteReopen(t *testing.T) {
+	const (
+		firstPlanSummary  = "first"
+		secondPlanSummary = "done"
+	)
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "journal-reopen.db")
+	db, err := sqlite.NewDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstStore := sqlite.NewStore(db, "journal-reopen-first")
+	journal := Journal{EventStore: firstStore, MapContext: testMapContext()}
+	state, err := journal.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstEvent := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
+			{Content: firstPlanSummary, Status: harnessv2.PlanEntryInProgress},
+		}},
+	})
+	firstPlan := &store.PlanState{
+		Namespace: "default", TaskName: "task-1", Summary: firstPlanSummary,
+		ProgressPct: 50, PlanDocument: "# First",
+	}
+	if appended, isNew, err := state.AppendPlanUpdateIfNew(ctx, firstEvent, firstPlan); err != nil || !isNew || appended == nil {
+		t.Fatalf("first plan append = %#v new=%t err=%v", appended, isNew, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = sqlite.NewDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	reopenedStore := sqlite.NewStore(db, "journal-reopen-second")
+	reopenedJournal := Journal{EventStore: reopenedStore, MapContext: testMapContext()}
+	recovered, err := reopenedJournal.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recovered.HasUpdate(firstEvent) {
+		t.Fatal("reopened journal did not recover the persisted plan update")
+	}
+	stalePlan := *firstPlan
+	stalePlan.Summary = "stale replay"
+	if duplicate, isNew, err := recovered.AppendPlanUpdateIfNew(ctx, firstEvent, &stalePlan); err != nil || isNew || duplicate != nil {
+		t.Fatalf("reopened duplicate = %#v new=%t err=%v", duplicate, isNew, err)
+	}
+	persisted, err := reopenedStore.GetPlan(ctx, "default", "task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Summary != firstPlan.Summary {
+		t.Fatalf("replayed plan summary = %q, want %q", persisted.Summary, firstPlan.Summary)
+	}
+
+	secondEvent := testUpdateEvent(3, firstEvent.Identity.Timestamp.Add(time.Second), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdatePlan,
+		Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
+			{Content: secondPlanSummary, Status: harnessv2.PlanEntryCompleted},
+		}},
+	})
+	secondPlan := &store.PlanState{
+		Namespace: "default", TaskName: "task-1", Summary: secondPlanSummary,
+		ProgressPct: 100, GoalComplete: true, PlanDocument: "# Done",
+	}
+	if appended, isNew, err := recovered.AppendPlanUpdateIfNew(ctx, secondEvent, secondPlan); err != nil || !isNew || appended == nil || appended.Seq != 2 {
+		t.Fatalf("post-reopen plan append = %#v new=%t err=%v", appended, isNew, err)
+	}
+	persisted, err = reopenedStore.GetPlan(ctx, "default", "task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Summary != secondPlan.Summary || persisted.ProgressPct != 100 || !persisted.GoalComplete {
+		t.Fatalf("post-reopen plan = %#v, want %#v", persisted, secondPlan)
 	}
 }
 
