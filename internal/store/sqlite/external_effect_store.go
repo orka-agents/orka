@@ -13,6 +13,7 @@ import (
 )
 
 var _ store.ExternalEffectStore = (*Store)(nil)
+var _ store.ExternalEffectIdentityReader = (*Store)(nil)
 
 // ReserveExternalEffect creates or returns a durable same-digest effect identity.
 func (s *Store) ReserveExternalEffect(ctx context.Context, request store.ReserveExternalEffectRequest) (*store.ExternalEffect, error) {
@@ -93,6 +94,30 @@ func (s *Store) GetExternalEffect(ctx context.Context, id string) (*store.Extern
 		return nil, err
 	}
 	return &effect, nil
+}
+
+// GetExternalEffectByIdentity resolves one exact durable external-effect
+// identity and rejects any impossible identity mismatch.
+func (s *Store) GetExternalEffectByIdentity(ctx context.Context, identity store.ExternalEffectIdentity) (*store.ExternalEffect, error) {
+	identity.Kind = strings.TrimSpace(identity.Kind)
+	identity.Namespace = strings.TrimSpace(identity.Namespace)
+	identity.AggregateID = strings.TrimSpace(identity.AggregateID)
+	identity.OperationID = strings.TrimSpace(identity.OperationID)
+	if err := identity.Validate(); err != nil {
+		return nil, err
+	}
+	id, err := identity.CanonicalID()
+	if err != nil {
+		return nil, err
+	}
+	effect, err := s.GetExternalEffect(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if effect.Identity != identity {
+		return nil, controlConflict("external effect %q does not match its canonical identity", id)
+	}
+	return effect, nil
 }
 
 // TransitionExternalEffect applies an exact version/state/epoch CAS. Terminal

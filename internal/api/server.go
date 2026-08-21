@@ -80,6 +80,7 @@ type ServerConfig struct {
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore
 	ArtifactReservations      artifactcap.CapabilityReservationRecorder
+	ExternalEffects           store.ExternalEffectIdentityReader
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore

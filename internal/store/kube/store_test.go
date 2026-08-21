@@ -576,7 +576,8 @@ func TestControllerEpochStatusSyncRejectsChangedLeaseSnapshotWithoutWriting(t *t
 	})
 
 	err = kubeStore.syncControllerEpochStatus(ctx, epoch, staleLeaseSnapshot, "")
-	if !errors.Is(err, controlstore.ErrConflict) || !strings.Contains(err.Error(), "changed from UID/resourceVersion") {
+	if !errors.Is(err, controlstore.ErrConflict) || !errors.Is(err, errControllerEpochLeaseSnapshotChanged) ||
+		!strings.Contains(err.Error(), "changed resourceVersion") {
 		t.Fatalf("changed Lease snapshot sync error = %v, want resourceVersion conflict", err)
 	}
 	if got := writes.Load(); got != 0 {
@@ -587,6 +588,49 @@ func TestControllerEpochStatusSyncRejectsChangedLeaseSnapshotWithoutWriting(t *t
 	}
 	if object.ResourceVersion != beforeResourceVersion || object.Status.Epoch != epoch.Epoch || object.Status.Version != epoch.Version {
 		t.Fatalf("changed Lease snapshot changed controller epoch mirror: %#v", object.Status)
+	}
+}
+
+func TestGetControllerEpochRetriesConcurrentMutationOnlyLeaseChange(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
+	withWatch, ok := rawClient.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	var leaseReads atomic.Int32
+	kubeStore.reader = interceptor.NewClient(withWatch, interceptor.Funcs{
+		Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+			if err := delegate.Get(ctx, key, object, options...); err != nil {
+				return err
+			}
+			lease, isLease := object.(*coordinationv1.Lease)
+			if !isLease || lease.Name != controllerEpochLeaseName(controlstore.DefaultControllerEpochName) || leaseReads.Add(1) != 1 {
+				return nil
+			}
+			current := &coordinationv1.Lease{}
+			if err := rawClient.Get(ctx, key, current); err != nil {
+				return err
+			}
+			updated := current.DeepCopy()
+			if updated.Annotations == nil {
+				updated.Annotations = map[string]string{}
+			}
+			updated.Annotations[annotationMutationToken] = "concurrent-effect-mutation"
+			updated.Annotations[annotationMutationExpiresAt] = formatTime(time.Now().UTC().Add(time.Minute))
+			return rawClient.Update(ctx, updated)
+		},
+	})
+
+	current, err := kubeStore.GetControllerEpoch(ctx, controlstore.DefaultControllerEpochName)
+	if err != nil {
+		t.Fatalf("GetControllerEpoch() after concurrent mutation-only Lease change: %v", err)
+	}
+	if current.Epoch != fence.Epoch || current.Version != fence.Epoch || current.HolderID != fence.HolderID {
+		t.Fatalf("current controller epoch = %#v", current)
+	}
+	if got := leaseReads.Load(); got < 4 {
+		t.Fatalf("controller epoch Lease reads = %d, want retry after changed snapshot", got)
 	}
 }
 
@@ -1703,6 +1747,45 @@ func TestExternalEffectLifecyclesQueueThirtyConcurrentControllerEpochMutations(t
 		if err := <-results; err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestGetExternalEffectByIdentityUsesExactObjectGet(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
+	identity := controlstore.ExternalEffectIdentity{
+		Kind: "workspace.prepare", Namespace: "tenant-a", AggregateID: "task-uid", OperationID: "workspace-prepare-prompt",
+	}
+	effect, err := kubeStore.ReserveExternalEffect(ctx, controlstore.ReserveExternalEffectRequest{
+		Identity: identity, RequestDigest: testDigest("exact-effect"), Fence: fence, CreatedAt: testNow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseExpiry := testNow.Add(5 * time.Minute)
+	if _, err := kubeStore.TransitionExternalEffect(ctx, controlstore.ExternalEffectTransition{
+		ID: effect.ID, Fence: fence, ExpectedVersion: effect.Version, ExpectedState: controlstore.ExternalEffectPending,
+		NewState: controlstore.ExternalEffectInFlight, RequestDigest: effect.RequestDigest,
+		LeaseOwner: "exact-reader", LeaseExpiresAt: &leaseExpiry, UpdatedAt: testNow.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	withWatch, ok := rawClient.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	kubeStore.reader = interceptor.NewClient(withWatch, interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return errors.New("LIST must not be used for exact external-effect identity lookup")
+		},
+	})
+
+	got, err := kubeStore.GetExternalEffectByIdentity(ctx, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != effect.ID || got.Identity != identity || got.State != controlstore.ExternalEffectInFlight {
+		t.Fatalf("exact external effect = %#v", got)
 	}
 }
 

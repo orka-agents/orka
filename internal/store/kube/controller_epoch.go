@@ -26,6 +26,8 @@ const (
 	annotationControllerEpochPredecessorDigest       = "core.orka.ai/controller-epoch-predecessor-digest"
 )
 
+var errControllerEpochLeaseSnapshotChanged = errors.New("controller epoch Lease snapshot changed")
+
 // GetControllerEpoch reads the authoritative controller-epoch Lease.
 func (s *Store) GetControllerEpoch(ctx context.Context, name string) (*store.ControllerEpoch, error) {
 	if err := s.requireClient(); err != nil {
@@ -35,20 +37,30 @@ func (s *Store) GetControllerEpoch(ctx context.Context, name string) (*store.Con
 	if err != nil {
 		return nil, err
 	}
-	lease := &coordinationv1.Lease{}
-	key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochLeaseName(normalized)}
-	if err := s.readClient().Get(ctx, key, lease); err != nil {
-		return nil, mapKubernetesError("get controller epoch Lease", err)
-	}
-	result, err := controllerEpochFromLease(normalized, lease)
+	var result store.ControllerEpoch
+	err = retry.OnError(retry.DefaultBackoff, func(retryErr error) bool {
+		return errors.Is(retryErr, errControllerEpochLeaseSnapshotChanged)
+	}, func() error {
+		lease := &coordinationv1.Lease{}
+		key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochLeaseName(normalized)}
+		if getErr := s.readClient().Get(ctx, key, lease); getErr != nil {
+			return mapKubernetesError("get controller epoch Lease", getErr)
+		}
+		current, currentErr := controllerEpochFromLease(normalized, lease)
+		if currentErr != nil {
+			return currentErr
+		}
+		predecessorDigest, digestErr := controllerEpochPredecessorDigest(lease)
+		if digestErr != nil {
+			return digestErr
+		}
+		if syncErr := s.syncControllerEpochStatus(ctx, current, lease, predecessorDigest); syncErr != nil {
+			return syncErr
+		}
+		result = current
+		return nil
+	})
 	if err != nil {
-		return nil, err
-	}
-	predecessorDigest, err := controllerEpochPredecessorDigest(lease)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.syncControllerEpochStatus(ctx, result, lease, predecessorDigest); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -616,10 +628,17 @@ func validateControllerEpochLeaseSnapshot(
 	if err != nil {
 		return nil, err
 	}
-	if lease.ResourceVersion != snapshot.ResourceVersion || leaseUID != snapshotUID {
+	if leaseUID != snapshotUID {
 		return nil, controlConflict(
 			"controller epoch Lease %q changed from UID/resourceVersion %q/%q to %q/%q before status sync",
 			snapshot.Name, snapshotUID, snapshot.ResourceVersion, leaseUID, lease.ResourceVersion,
+		)
+	}
+	if lease.ResourceVersion != snapshot.ResourceVersion {
+		return nil, fmt.Errorf(
+			"%w: %w: controller epoch Lease %q changed resourceVersion from %q to %q before status sync",
+			store.ErrConflict, errControllerEpochLeaseSnapshotChanged,
+			snapshot.Name, snapshot.ResourceVersion, lease.ResourceVersion,
 		)
 	}
 	current, err := controllerEpochFromLease(epoch.Name, lease)

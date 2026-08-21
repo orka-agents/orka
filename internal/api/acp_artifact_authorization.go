@@ -313,12 +313,30 @@ func (s *Server) authorizePublisherWorkspaceUpload(ctx context.Context, request 
 		return fmt.Errorf("workspace Task is unavailable")
 	}
 	execution := task.Status.Execution
-	if execution.State != corev1alpha1.TaskExecutionStatePlanned || execution.PromptID == "" ||
-		request.Metadata.OperationID != "workspace-prepare-"+execution.PromptID {
+	// Task status and the external-effect lease are committed through separate
+	// Kubernetes objects. The fresh Task projection can therefore advance once
+	// to Submitting while the exact workspace effect still reads InFlight. Keep
+	// that observed handoff tolerant, but reject every later and terminal state.
+	// authorizePublisherParentEffect separately enforces the live current-epoch
+	// lease for this exact workspace preparation operation.
+	if (!taskStateAllowsWorkspacePreparation(execution.State) && execution.State != corev1alpha1.TaskExecutionStateSubmitting) ||
+		execution.PromptID == "" || request.Metadata.OperationID != "workspace-prepare-"+execution.PromptID {
 		log.Info("publisher artifact authorization denied", "reason", "workspace_task_state_mismatch", "parentOperation", request.ParentOperation, "namespace", request.Metadata.Namespace, "operationID", request.Metadata.OperationID, "executionState", execution.State, "promptIDMatches", request.Metadata.OperationID == "workspace-prepare-"+execution.PromptID)
-		return fmt.Errorf("workspace Task is not in the exact preparation state")
+		return fmt.Errorf("workspace Task is not in the exact preparation handoff")
 	}
 	return nil
+}
+
+func taskStateAllowsWorkspacePreparation(state corev1alpha1.TaskExecutionState) bool {
+	switch state {
+	case corev1alpha1.TaskExecutionStateQueued,
+		corev1alpha1.TaskExecutionStateReserved,
+		corev1alpha1.TaskExecutionStateSessionStarting,
+		corev1alpha1.TaskExecutionStatePlanned:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) authorizePublisherDeltaDownload(ctx context.Context, request publisherservice.ArtifactAuthorizationRequest) error {
@@ -416,7 +434,7 @@ func (s *Server) authorizePublisherParentEffect(
 	metadata publisherservice.OperationMetadata,
 ) error {
 	log := logf.FromContext(ctx)
-	if s.config.ControllerEpochs == nil {
+	if s.config.ControllerEpochs == nil || s.config.ExternalEffects == nil {
 		log.Info("publisher artifact authorization denied", "reason", "parent_epoch_authority_unavailable", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID)
 		return errPublisherArtifactAuthorizationUnavailable
 	}
@@ -449,25 +467,23 @@ func (s *Server) authorizePublisherParentEffect(
 		log.Info("publisher artifact authorization denied", "reason", "parent_identity_incomplete", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID)
 		return fmt.Errorf("publisher parent effect identity is incomplete")
 	}
-	var effects corev1alpha1.ExternalEffectList
-	if err := s.authorizationReader().List(ctx, &effects, client.InNamespace(metadata.Namespace)); err != nil {
+	identity := store.ExternalEffectIdentity{
+		Kind: kind, Namespace: metadata.Namespace, AggregateID: aggregateID, OperationID: metadata.OperationID,
+	}
+	effect, err := s.config.ExternalEffects.GetExternalEffectByIdentity(ctx, identity)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			log.Info("publisher artifact authorization denied", "reason", "parent_effect_not_in_flight", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID)
+			return fmt.Errorf("publisher parent effect is not exactly in flight")
+		}
 		log.Info("publisher artifact authorization denied", "reason", "parent_effect_read_failed", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID, "error", err)
-		return fmt.Errorf("%w: parent effect could not be read", errPublisherArtifactAuthorizationUnavailable)
+		return fmt.Errorf("%w: parent effect could not be read: %v", errPublisherArtifactAuthorizationUnavailable, err)
 	}
 	now := time.Now().UTC()
-	matches := 0
-	for i := range effects.Items {
-		effect := &effects.Items[i]
-		if effect.Spec.Kind == kind && effect.Spec.IdentityNamespace == metadata.Namespace &&
-			effect.Spec.AggregateID == aggregateID && effect.Spec.OperationID == metadata.OperationID &&
-			effect.Status.State == corev1alpha1.ExternalEffectControlState(store.ExternalEffectInFlight) &&
-			externalEffectLeaseActive(effect.Status, currentFence, now) {
-			matches++
-		}
-	}
-	if matches != 1 {
-		log.Info("publisher artifact authorization denied", "reason", "parent_effect_not_uniquely_in_flight", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID, "matches", matches, "controllerEpoch", currentFence.Epoch)
-		return fmt.Errorf("publisher parent effect is not uniquely in flight")
+	if effect.Identity != identity || effect.State != store.ExternalEffectInFlight ||
+		!externalEffectLeaseActive(effect, currentFence, now) {
+		log.Info("publisher artifact authorization denied", "reason", "parent_effect_not_exactly_in_flight", "parentOperation", operation, "namespace", metadata.Namespace, "operationID", metadata.OperationID, "controllerEpoch", currentFence.Epoch)
+		return fmt.Errorf("publisher parent effect is not exactly in flight")
 	}
 	return nil
 }
@@ -478,10 +494,10 @@ func (s *Server) authorizePublisherParentEffect(
 // epoch capability, so a lease from a superseded controller epoch must stop
 // authorizing broker access immediately even when its wall-clock expiry has not
 // elapsed yet.
-func externalEffectLeaseActive(status corev1alpha1.ExternalEffectStatus, fence store.ControllerEpochFence, now time.Time) bool {
-	if strings.TrimSpace(status.LeaseOwner) == "" || status.ControllerEpoch <= 0 {
+func externalEffectLeaseActive(effect *store.ExternalEffect, fence store.ControllerEpochFence, now time.Time) bool {
+	if effect == nil || strings.TrimSpace(effect.LeaseOwner) == "" || effect.ControllerEpoch <= 0 {
 		return false
 	}
-	return status.ControllerEpochName == fence.Name && status.ControllerEpoch == fence.Epoch &&
-		status.LeaseExpiresAt != nil && status.LeaseExpiresAt.After(now)
+	return effect.ControllerEpochName == fence.Name && effect.ControllerEpoch == fence.Epoch &&
+		effect.LeaseExpiresAt != nil && effect.LeaseExpiresAt.After(now)
 }
