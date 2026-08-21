@@ -215,6 +215,16 @@ func TestSubstrateConfigValidateACPRuntimePoolDoesNotRequireLegacyBootstrapSecre
 	}
 }
 
+func TestSubstrateConfigValidateACPRuntimePoolRejectsNonPositiveClaimTimeout(t *testing.T) {
+	cfg := DefaultSubstrateConfig()
+	cfg.APIInsecureSkipVerify = true
+	cfg.ClaimTimeout = -time.Second
+
+	if err := cfg.ValidateACPRuntimePool(); err == nil || !strings.Contains(err.Error(), "claim timeout") {
+		t.Fatalf("ValidateACPRuntimePool() error = %v, want claim timeout validation", err)
+	}
+}
+
 func TestSubstrateConfigValidateACPRuntimePoolRejectsInvalidRouting(t *testing.T) {
 	tests := []struct {
 		name      string

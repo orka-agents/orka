@@ -193,16 +193,76 @@ func runtimePoolIsSubstrateBacked(pool *corev1alpha1.RuntimePool) bool {
 		pool.Spec.ExecutionWorkspace.Provider == corev1alpha1.WorkspaceProviderSubstrate
 }
 
+type substrateRuntimeActorControlWithTimeout struct {
+	delegate workspace.SubstrateRuntimeActorControl
+	timeout  time.Duration
+}
+
+func (c *substrateRuntimeActorControlWithTimeout) GetActor(
+	ctx context.Context,
+	actorID string,
+) (*workspace.SubstrateRuntimeActor, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return c.delegate.GetActor(ctx, actorID)
+}
+
+func (c *substrateRuntimeActorControlWithTimeout) CreateActor(
+	ctx context.Context,
+	actorID, templateNamespace, templateName string,
+) (*workspace.SubstrateRuntimeActor, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return c.delegate.CreateActor(ctx, actorID, templateNamespace, templateName)
+}
+
+func (c *substrateRuntimeActorControlWithTimeout) ResumeActor(
+	ctx context.Context,
+	actorID string,
+	boot bool,
+) (*workspace.SubstrateRuntimeActor, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return c.delegate.ResumeActor(ctx, actorID, boot)
+}
+
+func (c *substrateRuntimeActorControlWithTimeout) SettleActor(
+	ctx context.Context,
+	actorID string,
+) (*workspace.SubstrateRuntimeActor, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return c.delegate.SettleActor(ctx, actorID)
+}
+
+func (c *substrateRuntimeActorControlWithTimeout) DeleteActor(ctx context.Context, actorID string) error {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return c.delegate.DeleteActor(ctx, actorID)
+}
+
+func (c *substrateRuntimeActorControlWithTimeout) Close() error {
+	return c.delegate.Close()
+}
+
 // substrateActorControlForCleanup remains available after the provider flag is
 // disabled so existing Actors can drain and cannot strand RuntimePool
 // finalizers. The enable gate controls new workload reconciliation, not
 // mandatory provider cleanup.
 func (r *RuntimePoolReconciler) substrateActorControlForCleanup() (workspace.SubstrateRuntimeActorControl, error) {
+	cfg := r.SubstrateConfig.WithDefaults()
+	if cfg.ClaimTimeout <= 0 {
+		return nil, fmt.Errorf("substrate claim timeout must be greater than zero")
+	}
 	factory := r.SubstrateActorControlFactory
 	if factory == nil {
 		factory = defaultSubstrateRuntimeActorControlFactory
 	}
-	return factory(r.SubstrateConfig)
+	control, err := factory(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &substrateRuntimeActorControlWithTimeout{delegate: control, timeout: cfg.ClaimTimeout}, nil
 }
 
 func defaultSubstrateRuntimeActorControlFactory(cfg SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error) {

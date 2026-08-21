@@ -258,7 +258,7 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			},
 			mutateAgent: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCodex
-				agent.Spec.Runtime.ContractVersion = ptr.To(corev1alpha1.AgentRuntimeContractHarnessV1)
+				agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV1)
 			},
 			agentSandboxEnabled:         true,
 			acpRuntimeEnabled:           true,

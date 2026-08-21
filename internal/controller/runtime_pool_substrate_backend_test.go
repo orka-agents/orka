@@ -61,6 +61,94 @@ type fakeSubstrateActorControl struct {
 	afterSettle func(*workspace.SubstrateRuntimeActor)
 }
 
+type blockingSubstrateActorControl struct{}
+
+func (blockingSubstrateActorControl) wait(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (c blockingSubstrateActorControl) GetActor(ctx context.Context, _ string) (*workspace.SubstrateRuntimeActor, error) {
+	return nil, c.wait(ctx)
+}
+
+func (c blockingSubstrateActorControl) CreateActor(
+	ctx context.Context,
+	_, _, _ string,
+) (*workspace.SubstrateRuntimeActor, error) {
+	return nil, c.wait(ctx)
+}
+
+func (c blockingSubstrateActorControl) ResumeActor(
+	ctx context.Context,
+	_ string,
+	_ bool,
+) (*workspace.SubstrateRuntimeActor, error) {
+	return nil, c.wait(ctx)
+}
+
+func (c blockingSubstrateActorControl) SettleActor(ctx context.Context, _ string) (*workspace.SubstrateRuntimeActor, error) {
+	return nil, c.wait(ctx)
+}
+
+func (c blockingSubstrateActorControl) DeleteActor(ctx context.Context, _ string) error {
+	return c.wait(ctx)
+}
+
+func (blockingSubstrateActorControl) Close() error {
+	return nil
+}
+
+func TestSubstrateActorControlForCleanupAppliesClaimTimeout(t *testing.T) {
+	const claimTimeout = 5 * time.Millisecond
+	r := &RuntimePoolReconciler{
+		SubstrateConfig: SubstrateConfig{ClaimTimeout: claimTimeout},
+		SubstrateActorControlFactory: func(cfg SubstrateConfig) (workspace.SubstrateRuntimeActorControl, error) {
+			if cfg.ClaimTimeout != claimTimeout {
+				t.Fatalf("factory claim timeout = %s, want %s", cfg.ClaimTimeout, claimTimeout)
+			}
+			return blockingSubstrateActorControl{}, nil
+		},
+	}
+	control, err := r.substrateActorControlForCleanup()
+	if err != nil {
+		t.Fatalf("create actor control: %v", err)
+	}
+	defer control.Close() //nolint:errcheck // fake close cannot fail
+
+	tests := []struct {
+		name string
+		call func(context.Context) error
+	}{
+		{name: "GetActor", call: func(ctx context.Context) error {
+			_, callErr := control.GetActor(ctx, "actor")
+			return callErr
+		}},
+		{name: "CreateActor", call: func(ctx context.Context) error {
+			_, callErr := control.CreateActor(ctx, "actor", "namespace", "template")
+			return callErr
+		}},
+		{name: "ResumeActor", call: func(ctx context.Context) error {
+			_, callErr := control.ResumeActor(ctx, "actor", true)
+			return callErr
+		}},
+		{name: "SettleActor", call: func(ctx context.Context) error {
+			_, callErr := control.SettleActor(ctx, "actor")
+			return callErr
+		}},
+		{name: "DeleteActor", call: func(ctx context.Context) error {
+			return control.DeleteActor(ctx, "actor")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.call(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("actor control error = %v, want context deadline exceeded", err)
+			}
+		})
+	}
+}
+
 func newFakeSubstrateActorControl() *fakeSubstrateActorControl {
 	return &fakeSubstrateActorControl{actors: map[string]*workspace.SubstrateRuntimeActor{}}
 }

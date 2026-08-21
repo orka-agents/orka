@@ -206,6 +206,9 @@ func (c SubstrateConfig) ValidateACPRuntimePool() error {
 	if strings.TrimSpace(cfg.ActorDNSSuffix) == "" {
 		return fmt.Errorf("substrate actor DNS suffix is required")
 	}
+	if cfg.ClaimTimeout <= 0 {
+		return fmt.Errorf("substrate claim timeout must be greater than zero")
+	}
 	if _, err := substrateRouteHTTPTransport(cfg.RouterURL, cfg.ActorDNSSuffix); err != nil {
 		return err
 	}
@@ -229,9 +232,6 @@ func (c SubstrateConfig) Validate() error {
 	}
 	if cfg.SessionIdentityMintCert {
 		return fmt.Errorf("substrate SessionIdentity certificate minting is not supported yet")
-	}
-	if cfg.ClaimTimeout <= 0 {
-		return fmt.Errorf("substrate claim timeout must be greater than zero")
 	}
 	if cfg.CommandTimeout <= 0 {
 		return fmt.Errorf("substrate command timeout must be greater than zero")

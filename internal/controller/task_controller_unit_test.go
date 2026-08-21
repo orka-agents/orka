@@ -6021,7 +6021,7 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeCodex,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -6092,7 +6092,7 @@ func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t 
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeCodex,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
@@ -6200,7 +6200,7 @@ func TestHandlePending_ExecutionWorkspaceDispatchDisabledFailsClosed(t *testing.
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeCodex,
-				ContractVersion: ptr.To(corev1alpha1.AgentRuntimeContractHarnessV2),
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 			},
 		},
 	}
