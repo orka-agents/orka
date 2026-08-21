@@ -1145,34 +1145,43 @@ func TestSubstrateRuntimePoolRecyclesActorOnCredentialSeedConflict(t *testing.T)
 	}
 }
 
-func TestSubstrateRuntimePoolRecyclesActorWhenClosedBootstrapCannotAuthenticate(t *testing.T) {
-	supervisor := &fakeRuntimePoolSupervisorClient{probeErr: errors.New("unauthorized")}
+func TestSubstrateRuntimePoolRetriesAmbiguousClosedBootstrapWithoutProof(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{probeErr: errors.New("route not ready")}
 	control := newFakeSubstrateActorControl()
 	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
 	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
-		return errSubstrateCredentialAlreadyComplete
+		seedAttempts++
+		if seedAttempts == 1 {
+			return errSubstrateCredentialAlreadyComplete
+		}
+		return nil
 	}
 
 	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
 	runtimePoolReconcile(t, r, pool)
 
-	actorID := substrateTestActorID(pool)
 	got := runtimePoolTestGetPool(t, r, pool)
-	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
-		t.Fatalf("status = %s/%s, want Degraded/Closed", got.Status.Lifecycle, got.Status.AdmissionState)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("status = %s/%s, want Starting/Closed", got.Status.Lifecycle, got.Status.AdmissionState)
 	}
-	if !strings.Contains(got.Status.Message, "without controller-authenticated proof") {
-		t.Fatalf("message = %q, want unauthenticated-bootstrap recycle reason", got.Status.Message)
+	if !strings.Contains(got.Status.Message, "completion is not yet authenticated") {
+		t.Fatalf("message = %q, want ambiguous-bootstrap retry reason", got.Status.Message)
 	}
-	if got.Annotations[substrateActorRecyclingAnnotation] != actorID {
-		t.Fatalf("recycling annotation = %q, want %q", got.Annotations[substrateActorRecyclingAnnotation], actorID)
+	if got.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.settled) != 0 || len(control.deleted) != 0 {
+		t.Fatalf("ambiguous route recycled actor: annotation=%q settled=%v deleted=%v", got.Annotations[substrateActorRecyclingAnnotation], control.settled, control.deleted)
 	}
+
+	supervisor.probeErr = nil
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-route-ready", false)
 	runtimePoolReconcile(t, r, pool)
-	if len(control.settled) != 1 || control.settled[0] != actorID {
-		t.Fatalf("settled actors = %v, want unauthenticated actor staged for deletion", control.settled)
+	got = runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
+		t.Fatalf("status after route propagation = %s/%s, want Serving/Accepting", got.Status.Lifecycle, got.Status.AdmissionState)
 	}
-	if got.Annotations[substrateActorCredentialSeededAnnotation] != "" {
-		t.Fatal("unauthenticated actor was recorded as controller-seeded")
+	if seedAttempts != 2 {
+		t.Fatalf("seed attempts = %d, want retry after ambiguous 404", seedAttempts)
 	}
 }
 

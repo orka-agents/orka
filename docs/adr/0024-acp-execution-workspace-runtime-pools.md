@@ -85,7 +85,10 @@ session` deterministically bind to the same pool (and therefore the same
 supervisor and claim while it is alive), which preserves logical RuntimeSession
 continuity without duplicating bootstrap history; a pool that has been drained
 and recreated continues the session through the existing generation-increment
-recreation path.
+recreation path. Because the current provider rollout replaces the physical
+workspace, a continuation that changes the runtime image or profile fails
+closed before new pool demand; callers must keep the original runtime
+configuration or create a new Session.
 
 ### Ownership state machine (pool workload)
 

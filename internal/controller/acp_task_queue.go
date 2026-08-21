@@ -75,6 +75,9 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	}
 	pool, poolPreexisting, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan)
 	if err != nil {
+		if errors.Is(err, store.ErrValidation) {
+			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error())
+		}
 		return ctrl.Result{}, err
 	}
 	if task.Status.Execution != nil && !taskExecutionStateTerminal(task.Status.Execution.State) {
@@ -1154,11 +1157,16 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 	if err != nil {
 		return nil, false, err
 	}
-	if pool.Spec.Runtime.Image != plan.Image || pool.Spec.Runtime.Profile.Digest != string(plan.Digest) {
-		return nil, false, fmt.Errorf("RuntimePool %s profile does not match queued Task", pool.Name)
-	}
 	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
 		return nil, false, fmt.Errorf("RuntimePool %s execution workspace binding does not match queued Task", pool.Name)
+	}
+	if pool.Spec.Runtime.Image != plan.Image || pool.Spec.Runtime.Profile.Digest != string(plan.Digest) {
+		if plan.Workspace != nil && plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+			return nil, false, store.ValidationErrorf(
+				"execution workspace reusePolicy session cannot rotate the runtime image or profile without replacing the physical workspace; create a new Session or keep the original runtime configuration",
+			)
+		}
+		return nil, false, fmt.Errorf("RuntimePool %s profile does not match queued Task", pool.Name)
 	}
 	base := pool.DeepCopy()
 	changed := false

@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -276,6 +277,60 @@ func TestApplyACPWorkspaceBindingToPlanChangesPoolIdentity(t *testing.T) {
 	unchanged, err := applyACPWorkspaceBindingToPlan(plainPlan, nil)
 	if err != nil || unchanged.PoolName != plainPlan.PoolName || unchanged.Workspace != nil {
 		t.Fatalf("nil binding changed the plan: %#v (err=%v)", unchanged, err)
+	}
+}
+
+func TestSessionWorkspacePoolIdentityRejectsRuntimeProfileRotation(t *testing.T) {
+	ctx := context.Background()
+	task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+		ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+	})
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "review-loop"}
+	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
+	configuration, err := resolveACPAgentSessionConfiguration(ctx, reconciler.Client, task, bindingTestAgent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainPlan, err := PlanACPRuntimeWithConfiguration(task, bindingTestAgent(), reconciler.ACPRuntimeImages, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := resolveACPWorkspaceBinding(
+		task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-uid-review-loop",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPlan, err := applyACPWorkspaceBindingToPlan(plainPlan, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedPlainPlan := plainPlan
+	rotatedPlainPlan.Profile.Model = "rotated-model"
+	rotatedPlainPlan.Digest, err = harnessv2.CanonicalProfileDigest(rotatedPlainPlan.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedPlan, err := applyACPWorkspaceBindingToPlan(rotatedPlainPlan, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotatedPlan.PoolName != firstPlan.PoolName {
+		t.Fatalf("session workspace pool rotated with the runtime profile: first=%q rotated=%q", firstPlan.PoolName, rotatedPlan.PoolName)
+	}
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, firstPlan); err != nil {
+		t.Fatalf("create session workspace RuntimePool: %v", err)
+	}
+	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, rotatedPlan); !errors.Is(err, store.ErrValidation) ||
+		!strings.Contains(err.Error(), "cannot rotate the runtime image or profile") {
+		t.Fatalf("rotated profile error = %v, want permanent session-workspace rejection", err)
+	}
+	var pools corev1alpha1.RuntimePoolList
+	if err := reconciler.List(ctx, &pools, client.InNamespace(task.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	if len(pools.Items) != 1 || pools.Items[0].Name != firstPlan.PoolName {
+		t.Fatalf("runtime pools after rejected rotation = %#v, want only %q", pools.Items, firstPlan.PoolName)
 	}
 }
 

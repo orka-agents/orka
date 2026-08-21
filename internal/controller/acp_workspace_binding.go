@@ -349,10 +349,12 @@ func applyACPWorkspaceBindingToPlan(plan ACPRuntimePlan, binding *ACPRuntimeWork
 	if strings.TrimSpace(binding.BindingDigest) == "" {
 		return ACPRuntimePlan{}, fmt.Errorf("execution workspace binding digest is required")
 	}
-	identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
-		"profileDigest": string(plan.Digest), "runtimeImage": plan.Image,
-		"workspaceBindingDigest": binding.BindingDigest,
-	})
+	identityFields := map[string]string{"workspaceBindingDigest": binding.BindingDigest}
+	if binding.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
+		identityFields["profileDigest"] = string(plan.Digest)
+		identityFields["runtimeImage"] = plan.Image
+	}
+	identity, err := acpDomainDigest("runtime-pool-identity", identityFields)
 	if err != nil {
 		return ACPRuntimePlan{}, err
 	}

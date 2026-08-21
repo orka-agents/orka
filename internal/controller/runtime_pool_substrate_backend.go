@@ -725,15 +725,11 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			_, probeErr = validateRuntimePoolProbeForRollout(pool, cfg, syntheticPod, probe, r.now())
 		}
 		if probeErr != nil {
-			if recycleErr := r.recycleSubstrateActor(ctx, pool, control, actorID); recycleErr != nil {
-				return ctrl.Result{}, recycleErr
-			}
-			status.ActiveInstance = nil
-			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
-			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = "provider actor completed credential bootstrap without controller-authenticated proof; recycling the exact instance"
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
+			r.applyProviderRuntimePoolColdStartStatus(
+				pool,
+				&status,
+				"provider actor credential bootstrap route is unavailable or completion is not yet authenticated; retrying",
+			)
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
 	}
@@ -811,9 +807,10 @@ func (r *RuntimePoolReconciler) seedSubstrateSupervisorCredentials(
 	case http.StatusConflict:
 		return false, errSubstrateCredentialConflict
 	case http.StatusNotFound:
-		// The supervisor already completed bootstrap and replaced the phase
-		// server; an authenticated probe must prove this actor was seeded with
-		// the controller's exact credentials before it can be trusted.
+		// A logical-router 404 is ambiguous: the actor route may not be published
+		// yet, or the supervisor may have completed bootstrap and replaced the
+		// phase server. An authenticated probe may prove the latter; otherwise
+		// reconciliation remains closed and retries the bootstrap route.
 		return true, nil
 	default:
 		return false, fmt.Errorf("credential bootstrap returned status %d", response.StatusCode)
