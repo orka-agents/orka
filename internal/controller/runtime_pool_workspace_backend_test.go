@@ -138,6 +138,12 @@ func runtimePoolWorkspaceReadyPod(
 	pod.Labels = cloneStringMap(template.Spec.PodTemplate.ObjectMeta.Labels)
 	pod.Annotations = cloneStringMap(template.Spec.PodTemplate.ObjectMeta.Annotations)
 	pod.Spec = *template.Spec.PodTemplate.Spec.DeepCopy()
+	if pod.Spec.ServiceAccountName == "" {
+		pod.Spec.ServiceAccountName = runtimePoolDefaultServiceAccountName
+	}
+	// Kubernetes mirrors serviceAccountName into the deprecated serviceAccount
+	// alias when it converts a stored Pod back to v1.
+	pod.Spec.DeprecatedServiceAccount = pod.Spec.ServiceAccountName
 	return pod
 }
 
@@ -763,6 +769,9 @@ func TestWorkspaceRuntimePoolServesThroughSandboxPod(t *testing.T) {
 	pod := runtimePoolWorkspaceTestMaterialization(t, r, pool, template, "10.0.0.71")
 	if _, ok := pod.Labels[sandboxextv1beta1.SandboxIDLabel]; ok {
 		t.Fatal("test provider unexpectedly propagated its reserved SandboxClaim UID label onto the Pod")
+	}
+	if pod.Spec.DeprecatedServiceAccount != runtimePoolDefaultServiceAccountName {
+		t.Fatalf("materialized Pod serviceAccount alias = %q, want Kubernetes default %q", pod.Spec.DeprecatedServiceAccount, runtimePoolDefaultServiceAccountName)
 	}
 	supervisor.probe = runtimePoolValidProbe(pool, &pod, "sandbox-boot", false)
 

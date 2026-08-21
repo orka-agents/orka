@@ -890,6 +890,10 @@ func normalizeRuntimePoolWorkspacePodSpec(spec corev1.PodSpec) corev1.PodSpec {
 	if result.ServiceAccountName == "" {
 		result.ServiceAccountName = runtimePoolDefaultServiceAccountName
 	}
+	// The core API's internal-to-v1 conversion mirrors the effective service
+	// account into this deprecated alias on Pods. Embedded PodSpecs in CRDs do
+	// not receive that conversion, so compare the canonical field once here.
+	result.DeprecatedServiceAccount = result.ServiceAccountName
 	for i := range result.InitContainers {
 		normalizeRuntimePoolWorkspaceContainer(&result.InitContainers[i])
 	}
