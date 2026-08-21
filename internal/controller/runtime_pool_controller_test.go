@@ -77,6 +77,26 @@ type runtimePoolNamespaceReadClient struct {
 	rejectNamespaceReads bool
 }
 
+func TestRuntimePoolWorkspaceDeletionDrainCompleteRequiresCurrentGeneration(t *testing.T) {
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{Generation: 2},
+		Status: corev1alpha1.RuntimePoolStatus{
+			ObservedGeneration: 1,
+			DesiredReplicas:    0,
+			CurrentReplicas:    0,
+			Lifecycle:          corev1alpha1.RuntimePoolLifecycleStopped,
+		},
+	}
+	if runtimePoolWorkspaceDeletionDrainComplete(pool) {
+		t.Fatal("stale Stopped status completed workspace deletion drain")
+	}
+
+	pool.Status.ObservedGeneration = pool.Generation
+	if !runtimePoolWorkspaceDeletionDrainComplete(pool) {
+		t.Fatal("current Stopped status did not complete workspace deletion drain")
+	}
+}
+
 func (c *runtimePoolNamespaceReadClient) Get(
 	ctx context.Context,
 	key client.ObjectKey,

@@ -931,10 +931,10 @@ func TestReapIdlePoolsDeletesStoppedWorkspacePools(t *testing.T) {
 	}
 
 	got := &corev1alpha1.RuntimePool{}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: stopped.Name}, got); err == nil {
+	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: corev1.NamespaceDefault, Name: stopped.Name}, got); err == nil {
 		t.Fatal("stopped idle workspace pool was not garbage collected")
 	}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: plain.Name}, got); err != nil {
+	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: corev1.NamespaceDefault, Name: plain.Name}, got); err != nil {
 		t.Fatalf("plain stopped pool must be retained for reuse: %v", err)
 	}
 

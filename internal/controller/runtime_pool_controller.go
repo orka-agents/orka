@@ -490,7 +490,8 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 func runtimePoolWorkspaceDeletionDrainComplete(pool *corev1alpha1.RuntimePool) bool {
-	return pool != nil && pool.Status.DesiredReplicas == 0 && pool.Status.CurrentReplicas == 0 &&
+	return pool != nil && pool.Status.ObservedGeneration == pool.Generation &&
+		pool.Status.DesiredReplicas == 0 && pool.Status.CurrentReplicas == 0 &&
 		pool.Status.ActiveInstance == nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped
 }
 
