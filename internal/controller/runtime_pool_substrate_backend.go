@@ -1343,6 +1343,8 @@ func (r *RuntimePoolReconciler) recycleSubstrateActor(
 // the actor is settled into the provider's deletable suspended state — with
 // nothing left to checkpoint — and then deleted. Callers requeue while the
 // teardown is in progress.
+//
+//nolint:gocyclo // Credential-safe teardown keeps each fail-closed workload and Actor transition auditable in one state machine.
 func (r *RuntimePoolReconciler) teardownSubstrateActor(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -1505,6 +1507,8 @@ func (r *RuntimePoolReconciler) verifySubstrateActorWorkerPlacement(
 // by deleting its assigned provider worker Pod (provider workers host exactly
 // one workload; the pool Deployment replaces the Pod fresh) and reports
 // whether the workload is provably gone.
+//
+//nolint:gocyclo // Exact worker-fence replacement and deletion branches stay together at one fail-closed boundary.
 func (r *RuntimePoolReconciler) destroySubstrateActorWorkload(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,

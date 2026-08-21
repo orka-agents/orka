@@ -40,6 +40,7 @@ const (
 	acpMCPTestOKBody         = `{"ok":true}`
 	acpMCPTestOtherNamespace = "other-namespace"
 	acpMCPTestTTSEndpoint    = "https://tts.example.test/token"
+	acpMCPTestToolName       = "mutate"
 )
 
 type recordingContextTokenExchanger struct {
@@ -456,7 +457,7 @@ func TestACPMCPBrokerConsequentialCallUsesDurableReplay(t *testing.T) {
 		}),
 		Executor: ACPMCPToolExecutorFunc(func(_ context.Context, got harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (json.RawMessage, error) {
 			executions.Add(1)
-			if descriptor.Name != "mutate" || got.Call.CallID != "call-1" {
+			if descriptor.Name != acpMCPTestToolName || got.Call.CallID != acpDispatcherToolCallID {
 				t.Fatalf("executor received wrong call: descriptor=%#v call=%#v", descriptor, got.Call)
 			}
 			return json.RawMessage(`{"changed":true}`), nil
@@ -970,7 +971,7 @@ func testMCPBrokerRequest(t *testing.T, effect harnessv2.MCPToolEffect) (harness
 		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 	}
 	descriptor := harnessv2.MCPToolDescriptor{
-		Name: "mutate", Description: "test broker tool", InputSchema: json.RawMessage(`{"type":"object"}`),
+		Name: acpMCPTestToolName, Description: "test broker tool", InputSchema: json.RawMessage(`{"type":"object"}`),
 		Source: harnessv2.MCPToolSourceBrokeredBuiltin, Effect: effect,
 	}
 	descriptorDigest, err := harnessv2.CanonicalMCPToolDescriptorDigest([]harnessv2.MCPToolDescriptor{descriptor})
@@ -978,7 +979,7 @@ func testMCPBrokerRequest(t *testing.T, effect harnessv2.MCPToolEffect) (harness
 		t.Fatal(err)
 	}
 	toolPolicy := harnessv2.MCPToolPolicy{
-		AllowedToolNames: []string{"mutate"}, AllowBash: true,
+		AllowedToolNames: []string{acpMCPTestToolName}, AllowBash: true,
 		Tools: []harnessv2.MCPToolDescriptor{descriptor}, DescriptorDigest: descriptorDigest,
 	}
 	approvalPolicy := harnessv2.MCPApprovalPolicy{}
@@ -1007,7 +1008,7 @@ func testMCPBrokerRequest(t *testing.T, effect harnessv2.MCPToolEffect) (harness
 	request := harnessv2.MCPBrokerCallRequest{
 		Protocol: harnessv2.ProtocolVersion, Namespace: "default", SessionState: harnessv2.RuntimeSessionStatePromptRunning,
 		Metadata: metadata, Lease: lease, Authorization: authorization,
-		Call: harnessv2.MCPToolCall{CallID: "call-1", ToolName: "mutate", Arguments: json.RawMessage(`{"value":"x"}`)},
+		Call: harnessv2.MCPToolCall{CallID: acpDispatcherToolCallID, ToolName: acpMCPTestToolName, Arguments: json.RawMessage(`{"value":"x"}`)},
 	}
 	digest, err := harnessv2.CanonicalRequestDigest(request)
 	if err != nil {

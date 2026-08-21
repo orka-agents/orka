@@ -178,7 +178,7 @@ func TestContinueHarnessV1BrokeredToolCallReplaysDurableResult(t *testing.T) {
 	}}
 	call := harness.ToolCallRequest{
 		Version: harness.ProtocolVersion, RuntimeSessionID: fixture.request.RuntimeSessionID,
-		TurnID: fixture.request.TurnID, ToolCallID: "call-1", ToolName: current.Name,
+		TurnID: fixture.request.TurnID, ToolCallID: acpDispatcherToolCallID, ToolName: current.Name,
 		Input: json.RawMessage(`{"query":"value"}`),
 	}
 	call.IdempotencyKey = harness.ToolRequestIdempotencyKey(call.RuntimeSessionID, call.TurnID, call.ToolCallID)

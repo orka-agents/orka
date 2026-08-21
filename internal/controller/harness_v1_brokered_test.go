@@ -55,7 +55,7 @@ func TestKubernetesHarnessV1BrokeredToolExecutorBindsTaskTransactionAuthority(t 
 	}
 	request := harness.ToolCallRequest{
 		Version: harness.ProtocolVersion, RuntimeSessionID: "runtime-session-a", TurnID: "turn-a",
-		ToolCallID: "call-1", ToolName: tool.Name, Input: json.RawMessage(`{"query":"value"}`),
+		ToolCallID: acpDispatcherToolCallID, ToolName: tool.Name, Input: json.RawMessage(`{"query":"value"}`),
 	}
 	request.IdempotencyKey = harness.ToolRequestIdempotencyKey(
 		request.RuntimeSessionID, request.TurnID, request.ToolCallID,
@@ -312,7 +312,7 @@ func TestContinueHarnessV1BrokeredToolCallStampsAuthenticatedTaskIdentity(t *tes
 	}}
 	call := harness.ToolCallRequest{
 		Version: harness.ProtocolVersion, RuntimeSessionID: fixture.request.RuntimeSessionID,
-		TurnID: fixture.request.TurnID, ToolCallID: "call-1", ToolName: current.Name,
+		TurnID: fixture.request.TurnID, ToolCallID: acpDispatcherToolCallID, ToolName: current.Name,
 		Input: json.RawMessage(`{"query":"value"}`),
 	}
 	call.IdempotencyKey = harness.ToolRequestIdempotencyKey(call.RuntimeSessionID, call.TurnID, call.ToolCallID)
