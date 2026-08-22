@@ -44,6 +44,12 @@ acp_task_smoke_enabled="${ORKA_AGENT_SANDBOX_ACP_TASK_SMOKE:-1}"
 # proves PVC-backed data-only suspension plus exact-Sandbox cold resume live.
 # It reuses the Codex runtime image and Responses fixture from the smoke.
 suspend_resume_enabled="${ORKA_AGENT_SANDBOX_SUSPEND_RESUME:-1}"
+# The lifecycle/recovery conformance (issue #411) proves Session continuation,
+# explicit cancellation, controller restart, and physical replacement through
+# a workspace-provider-backed RuntimePool, using the fixture's hold markers
+# and request counters for exactly-once delivery proof.
+lifecycle_enabled="${ORKA_AGENT_SANDBOX_LIFECYCLE:-1}"
+fixture_local_port="${ORKA_RESPONSES_FIXTURE_LOCAL_PORT:-18337}"
 acp_suspend_agent_name="orka-ws-suspend-agent"
 acp_suspend_class_name="acp-sandbox-suspend"
 acp_codex_runtime_image="${ORKA_ACP_CODEX_RUNTIME_IMAGE:-orka-acp-codex-runtime:live-agent-sandbox-e2e-${e2e_run_id}}"
@@ -53,6 +59,7 @@ acp_task_name="orka-ws-sandbox-smoke"
 acp_agent_name="orka-ws-sandbox-agent"
 api_pf_pid=""
 router_pf_pid=""
+fixture_pf_pid=""
 router_namespace=""
 created_kind_cluster="0"
 agent_sandbox_module_cache=""
@@ -84,6 +91,8 @@ cleanup_port_forward() {
   api_pf_pid=""
   cleanup_one_port_forward "${router_pf_pid}"
   router_pf_pid=""
+  cleanup_one_port_forward "${fixture_pf_pid}"
+  fixture_pf_pid=""
 }
 
 restore_manager_kustomization() {
@@ -1427,6 +1436,220 @@ YAML
   log "Class-backed suspend/cold-resume conformance (agent-sandbox) passed"
 }
 
+
+start_fixture_port_forward() {
+  if [[ -n "${fixture_pf_pid}" ]] && kill -0 "${fixture_pf_pid}" >/dev/null 2>&1; then
+    return 0
+  fi
+  fixture_pf_pid="$(start_port_forward vekil-system "svc/vekil" "${fixture_local_port}" 1337 "${work_dir}/fixture-port-forward.log")"
+  wait_for_http "http://127.0.0.1:${fixture_local_port}/healthz" "Responses fixture /healthz"
+}
+
+# fixture_marker_count prints how many /responses requests resolved to the
+# marker — the fixture-side proof that a prompt was sent exactly once (no
+# replay across cancellation or controller restart).
+fixture_marker_count() {
+  local marker="$1"
+  start_fixture_port_forward || return 1
+  curl -fsS --connect-timeout 2 --max-time 10 \
+    "http://127.0.0.1:${fixture_local_port}/fixture/marker-counts" |
+    jq -r --arg marker "${marker}" '.[$marker] // 0'
+}
+
+apply_lifecycle_task() {
+  local name="$1" session="$2" create="$3" prompt="$4"
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: ${name}
+  namespace: ${acp_task_namespace}
+spec:
+  type: agent
+  agentRef:
+    name: orka-ws-lc-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: 15m0s
+  sessionRef:
+    name: ${session}
+    create: ${create}
+  execution:
+    workspace:
+      enabled: true
+      provider: agent-sandbox
+      reusePolicy: session
+  prompt: "${prompt}"
+YAML
+}
+
+# run_workspace_lifecycle_acp_task proves ACP lifecycle and recovery behaviors
+# through a workspace-provider-backed RuntimePool (issue #411): Session
+# continuation with a preserved RuntimeSession UID and unchanged runtime
+# instance, explicit cancellation of a Running prompt with bounded
+# controller-owned settlement and no replay, a controller restart while a
+# prompt is Running with exactly-once delivery, and physical runtime
+# replacement (pool drained to zero and recovered from zero) that preserves
+# the logical Session while changing the runtime instance identity.
+run_workspace_lifecycle_acp_task() {
+  log "Running workspace-backed lifecycle/recovery conformance (agent-sandbox)"
+
+  bash "${repo_root}/scripts/lib/ensure-static-mode-namespace.sh" \
+    kubectl "${acp_task_namespace}" harness-v2
+  start_fixture_port_forward
+
+  kubectl apply -f - <<YAML
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: orka-ws-lc-agent
+  namespace: ${acp_task_namespace}
+spec:
+  runtime:
+    type: codex
+    contractVersion: orka.harness.v2
+    defaultMaxTurns: 1
+  model:
+    name: gpt-5.5
+YAML
+  apply_lifecycle_task orka-ws-lc-first orka-ws-lc-session true "Reply exactly: ORKA_WS_LC_FIRST_OK"
+  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-first '{.status.phase}' "Succeeded" 900
+  assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-first "ORKA_WS_LC_FIRST_OK"
+
+  local pool_name session_uid first_instance
+  pool_name="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-first \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  session_uid="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-first \
+    -o jsonpath='{.status.execution.runtimeSessionUID}')"
+  first_instance="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-first \
+    -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  [[ "${pool_name}" == acp-ws-session-* && -n "${session_uid}" && -n "${first_instance}" ]] ||
+    die "lifecycle Task did not bind a session workspace pool with runtime identities (pool=${pool_name:-<empty>})"
+
+  log "Continuing the Session on the same physical runtime"
+  apply_lifecycle_task orka-ws-lc-second orka-ws-lc-session false "Reply exactly: ORKA_WS_LC_SECOND_OK"
+  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-second '{.status.phase}' "Succeeded" 600
+  assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-second "ORKA_WS_LC_SECOND_OK"
+  local second_session second_instance
+  second_session="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-second \
+    -o jsonpath='{.status.execution.runtimeSessionUID}')"
+  second_instance="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-second \
+    -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  [[ "${second_session}" == "${session_uid}" ]] ||
+    die "continuation changed the RuntimeSession UID (${second_session:-<empty>} != ${session_uid})"
+  [[ "${second_instance}" == "${first_instance}" ]] ||
+    die "continuation changed the runtime instance without physical replacement"
+
+  log "Cancelling a Running prompt in a dedicated Session"
+  apply_lifecycle_task orka-ws-lc-cancel orka-ws-lc-cancel-session true "ORKA_HOLD_180S Reply exactly: ORKA_WS_LC_CANCEL_OK"
+  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.state}' "Running" 600
+  local cancel_pool
+  cancel_pool="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+  # Hold the object visible through settlement so the terminal projection is
+  # observable after deletion-triggered cancellation.
+  kubectl -n "${acp_task_namespace}" patch task orka-ws-lc-cancel --type=json \
+    -p '[{"op":"add","path":"/metadata/finalizers/-","value":"acp-e2e.orka.ai/lifecycle-observer"}]'
+  kubectl -n "${acp_task_namespace}" delete task orka-ws-lc-cancel --wait=false
+  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.phase}' "Cancelled" 240
+  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.state}' "Cancelled" 120
+  # Release the observer only after the controller's own cleanup finalizer has
+  # completed and removed itself, so cancellation cleanup is never skipped.
+  local release_started release_now finalizers
+  release_started="$(date +%s)"
+  while true; do
+    finalizers="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel \
+      -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)"
+    [[ -z "${finalizers}" ]] && break
+    if [[ "${finalizers}" == '["acp-e2e.orka.ai/lifecycle-observer"]' ]]; then
+      kubectl -n "${acp_task_namespace}" patch task orka-ws-lc-cancel --type=json \
+        -p '[{"op":"test","path":"/metadata/finalizers/0","value":"acp-e2e.orka.ai/lifecycle-observer"},{"op":"remove","path":"/metadata/finalizers/0"}]' >/dev/null || true
+      break
+    fi
+    release_now="$(date +%s)"
+    (( release_now - release_started >= 300 )) &&
+      die "controller cleanup did not settle for the cancelled Task (finalizers=${finalizers})"
+    sleep 3
+  done
+  local absent_started absent_now
+  absent_started="$(date +%s)"
+  while kubectl -n "${acp_task_namespace}" get task orka-ws-lc-cancel >/dev/null 2>&1; do
+    absent_now="$(date +%s)"
+    (( absent_now - absent_started >= 240 )) && die "cancelled Task was not removed after observer release"
+    sleep 3
+  done
+  # No-replay proof: the fixture request count for the cancelled prompt must
+  # not grow after settlement (a replay would re-deliver the prompt and issue
+  # a fresh provider request).
+  local cancel_count_settled cancel_count_later
+  cancel_count_settled="$(fixture_marker_count "ORKA_WS_LC_CANCEL_OK")"
+  [[ "${cancel_count_settled}" =~ ^[0-9]+$ && "${cancel_count_settled}" -ge 1 ]] || {
+    echo "cancelled prompt never reached the provider fixture (count=${cancel_count_settled:-<empty>})" >&2
+    return 1
+  }
+  sleep 20
+  cancel_count_later="$(fixture_marker_count "ORKA_WS_LC_CANCEL_OK")"
+  [[ "${cancel_count_later}" == "${cancel_count_settled}" ]] || {
+    echo "cancelled prompt was replayed after settlement (${cancel_count_settled} -> ${cancel_count_later})" >&2
+    return 1
+  }
+  log "Cancelled prompt settled with no replay (fixture requests: ${cancel_count_settled})"
+  if [[ -n "${cancel_pool}" ]]; then
+    kubectl -n "${acp_task_namespace}" delete runtimepool "${cancel_pool}" --ignore-not-found=true --wait=true --timeout=5m
+  fi
+
+  log "Restarting the controller while a prompt is Running"
+  apply_lifecycle_task orka-ws-lc-restart orka-ws-lc-restart-session true "ORKA_HOLD_90S Reply exactly: ORKA_WS_LC_RESTART_OK"
+  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-restart '{.status.execution.state}' "Running" 600
+  local restart_count_before restart_count_after
+  restart_count_before="$(fixture_marker_count "ORKA_WS_LC_RESTART_OK")"
+  kubectl -n "${orka_namespace}" rollout restart deployment/"${orka_controller_deployment}"
+  run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
+  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-restart '{.status.phase}' "Succeeded" 600
+  assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-restart "ORKA_WS_LC_RESTART_OK"
+  sleep 10
+  restart_count_after="$(fixture_marker_count "ORKA_WS_LC_RESTART_OK")"
+  [[ "${restart_count_before}" =~ ^[0-9]+$ && "${restart_count_before}" -ge 1 &&
+     "${restart_count_after}" == "${restart_count_before}" ]] || {
+    echo "accepted prompt was replayed across the controller restart (${restart_count_before:-<empty>} -> ${restart_count_after:-<empty>})" >&2
+    return 1
+  }
+  log "Accepted prompt survived the controller restart with no replay (fixture requests: ${restart_count_before})"
+  local restart_pool
+  restart_pool="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart \
+    -o jsonpath='{.status.execution.runtimePoolName}')"
+
+  log "Replacing the physical runtime and recovering the Session from zero"
+  run kubectl -n "${acp_task_namespace}" delete runtimepool "${pool_name}" --wait=true --timeout=5m
+  apply_lifecycle_task orka-ws-lc-replaced orka-ws-lc-session false "Reply exactly: ORKA_WS_LC_REPLACED_OK"
+  wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-replaced '{.status.phase}' "Succeeded" 900
+  assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-replaced "ORKA_WS_LC_REPLACED_OK"
+  local replaced_session replaced_instance
+  replaced_session="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-replaced \
+    -o jsonpath='{.status.execution.runtimeSessionUID}')"
+  replaced_instance="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-replaced \
+    -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  [[ "${replaced_session}" == "${session_uid}" ]] ||
+    die "physical replacement changed the logical RuntimeSession UID"
+  [[ -n "${replaced_instance}" && "${replaced_instance}" != "${first_instance}" ]] ||
+    die "physical replacement did not produce a new runtime instance identity"
+
+  log "Cleaning up lifecycle Tasks and pools"
+  run kubectl -n "${acp_task_namespace}" delete task orka-ws-lc-first orka-ws-lc-second orka-ws-lc-restart orka-ws-lc-replaced \
+    --wait=true --timeout=4m
+  kubectl -n "${acp_task_namespace}" delete runtimepool "${pool_name}" --ignore-not-found=true --wait=true --timeout=5m
+  if [[ -n "${restart_pool}" ]]; then
+    kubectl -n "${acp_task_namespace}" delete runtimepool "${restart_pool}" --ignore-not-found=true --wait=true --timeout=5m
+  fi
+  kubectl -n "${acp_task_namespace}" delete agent orka-ws-lc-agent --ignore-not-found=true
+  local leftovers
+  leftovers="$(kubectl get sandboxclaims,sandboxwarmpools,sandboxtemplates -n "${acp_runtime_namespace}" \
+    -l "orka.ai/runtime-pool-name=${pool_name}" -o name | wc -l | tr -d ' ')"
+  [[ "${leftovers}" == "0" ]] ||
+    die "lifecycle cleanup left ${leftovers} provider objects for ${pool_name}"
+  log "Workspace-backed lifecycle/recovery conformance (agent-sandbox) passed"
+}
+
 main() {
   require_cmd make
   require_cmd go
@@ -1457,7 +1680,7 @@ main() {
   run make docker-build IMG="${manager_image}"
   log "Building workspace publisher image ${publisher_image}"
   run make docker-build-workspace-publisher WORKSPACE_PUBLISHER_IMG="${publisher_image}"
-  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" ]]; then
+  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" ]]; then
     log "Building immutable Codex ACP runtime image ${acp_codex_runtime_image} for the workspace-backed Task smoke"
     run make docker-build-acp-codex-runtime ACP_CODEX_RUNTIME_IMG="${acp_codex_runtime_image}"
     log "Building local Responses-compatible provider fixture image ${responses_fixture_image}"
@@ -1473,7 +1696,7 @@ main() {
   run kind load docker-image "${manager_image}" --name "${kind_cluster}"
   run kind load docker-image "${sandbox_fixture_image}" --name "${kind_cluster}"
   run kind load docker-image "${sandbox_router_image}" --name "${kind_cluster}"
-  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" ]]; then
+  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" ]]; then
     run kind load docker-image "${responses_fixture_image}" --name "${kind_cluster}"
   fi
 
@@ -1483,14 +1706,14 @@ main() {
   local placeholder_digest codex_runtime_ref
   placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
   codex_runtime_ref="example.invalid/orka/acp-codex@${placeholder_digest}"
-  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" ]]; then
+  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" ]]; then
     codex_runtime_ref="$(orka_kind_registry_push "${acp_codex_runtime_image}" "orka/acp-codex-runtime")"
   fi
 
   log "Bootstrapping test-only admission TLS"
   orka_e2e_bootstrap_admission_tls
 
-  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" ]]; then
+  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" ]]; then
     deploy_responses_fixture
   fi
 
@@ -1533,6 +1756,11 @@ main() {
     run_workspace_suspend_resume_acp_task
   else
     log "Skipping class-backed suspend/cold-resume conformance (ORKA_AGENT_SANDBOX_SUSPEND_RESUME=0)"
+  fi
+  if [[ "${lifecycle_enabled}" == "1" ]]; then
+    run_workspace_lifecycle_acp_task
+  else
+    log "Skipping workspace-backed lifecycle/recovery conformance (ORKA_AGENT_SANDBOX_LIFECYCLE=0)"
   fi
   log "Live agent-sandbox installation/configuration/workspace-adapter e2e passed"
 }
