@@ -37,6 +37,7 @@ const (
 
 	acpTestSubstrateNamespace = "substrate-system"
 	acpTestDurableCapacity    = "1Gi"
+	acpTestSessionPoolName    = "acp-ws-session-0123456789abcdef"
 )
 
 func testACPWorkspaceScheme(t *testing.T) *runtime.Scheme {

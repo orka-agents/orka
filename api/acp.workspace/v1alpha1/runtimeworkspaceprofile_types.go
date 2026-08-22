@@ -91,6 +91,19 @@ type AgentSandboxSuspendPolicy struct {
 	Volume AgentSandboxDurableVolume `json:"volume"`
 }
 
+// RetentionPolicy bounds retained workspaces for one class.
+type RetentionPolicy struct {
+	// MaxSuspendedWorkspaces caps concurrently suspended workspaces of this
+	// class per namespace. A new suspension beyond the cap is rejected at Task
+	// admission, and a settlement that would exceed it falls back to the
+	// class's Delete disposition (the only deletion policy currently
+	// admitted). Unset means unbounded; the class lifecycle idleTimeout and
+	// maxLifetime still bound each retained workspace's age.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxSuspendedWorkspaces *int32 `json:"maxSuspendedWorkspaces,omitempty"`
+}
+
 // AgentSandboxProfileSpec carries operator-owned Agent Sandbox inputs.
 type AgentSandboxProfileSpec struct {
 	// Suspend permits PVC-backed cold suspension for this profile.
@@ -112,6 +125,10 @@ type RuntimeWorkspaceProfileSpec struct {
 	// AgentSandbox carries the operator-owned Agent Sandbox inputs.
 	// +optional
 	AgentSandbox *AgentSandboxProfileSpec `json:"agentSandbox,omitempty"`
+
+	// Retention bounds retained workspaces for classes using this profile.
+	// +optional
+	Retention *RetentionPolicy `json:"retention,omitempty"`
 }
 
 // +kubebuilder:object:root=true

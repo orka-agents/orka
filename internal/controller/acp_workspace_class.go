@@ -76,6 +76,9 @@ type ACPWorkspaceClassBinding struct {
 	// SandboxVolume freezes the durable workspace PVC shape for
 	// suspend-capable agent-sandbox classes. It is nil for every other class.
 	SandboxVolume *ACPSandboxDurableVolume
+	// MaxSuspendedWorkspaces freezes the class retention cap. Nil means
+	// unbounded.
+	MaxSuspendedWorkspaces *int32
 	// DefaultOnDetach and AllowedOnDetach freeze the class lifecycle policy in
 	// class order so the materialized ExecutionWorkspace carries the exact
 	// class lifecycle and never drifts from it.
@@ -354,13 +357,53 @@ func (r *TaskReconciler) resolveACPWorkspaceClass(
 			resolved.Binding.SandboxVolume = volume
 		}
 	}
+	if retention := profileSpec.Retention; retention != nil && retention.MaxSuspendedWorkspaces != nil {
+		limit := *retention.MaxSuspendedWorkspaces
+		resolved.Binding.MaxSuspendedWorkspaces = &limit
+	}
 	if backend != corev1alpha1.WorkspaceProviderAgentSandbox && profileSpec.AgentSandbox != nil {
 		return nil, fmt.Errorf(
 			"ACP runtime workspace profile %q sets agent-sandbox inputs, but provider %q backend is %s",
 			class.Spec.ParametersRef.Name, provider.Name, backend,
 		)
 	}
+	if err := r.enforceACPWorkspaceSuspendQuota(ctx, reader, task, class, resolved); err != nil {
+		return nil, err
+	}
 	return resolved, nil
+}
+
+// enforceACPWorkspaceSuspendQuota rejects a Task whose prospective Suspend
+// detach action would exceed the class retention cap. Settlement re-checks
+// the live count so a race between admissions still cannot exceed the cap.
+func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	class *workspacev1alpha1.ExecutionWorkspaceClass,
+	resolved *acpResolvedWorkspaceClass,
+) error {
+	if resolved.Binding.MaxSuspendedWorkspaces == nil {
+		return nil
+	}
+	prospective := resolved.DefaultOnDetach
+	if requested := task.Spec.Execution.Workspace.OnDetach; requested != "" {
+		prospective = workspacev1alpha1.WorkspaceOnDetach(requested)
+	}
+	if prospective != workspacev1alpha1.WorkspaceOnDetachSuspend {
+		return nil
+	}
+	suspended, err := countSuspendedClassWorkspaces(ctx, reader, task.Namespace, class.UID, "")
+	if err != nil {
+		return err
+	}
+	if suspended >= int(*resolved.Binding.MaxSuspendedWorkspaces) {
+		return fmt.Errorf(
+			"execution workspace class %q retention cap of %d suspended workspaces is exhausted; delete or resume a suspended workspace, or request onDetach Delete",
+			class.Name, *resolved.Binding.MaxSuspendedWorkspaces,
+		)
+	}
+	return nil
 }
 
 // frozenACPSandboxDurableVolume validates and freezes the profile's durable
@@ -552,6 +595,9 @@ func validateACPWorkspaceClassBindingValues(class *ACPWorkspaceClassBinding) err
 	}
 	if class.SuspendMode != "" && class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {
 		return fmt.Errorf("frozen execution workspace class binding suspension mode %q is not supported", class.SuspendMode)
+	}
+	if class.MaxSuspendedWorkspaces != nil && *class.MaxSuspendedWorkspaces < 0 {
+		return fmt.Errorf("frozen execution workspace class binding retention cap is negative")
 	}
 	if class.SandboxVolume != nil {
 		if class.SuspendMode != string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly) {

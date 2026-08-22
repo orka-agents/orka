@@ -1687,6 +1687,13 @@ func main() {
 			setupLog.Error(err, "unable to create controller", "controller", "ACPExecutionWorkspaceAdapter")
 			os.Exit(1)
 		}
+		if err := (&controller.ACPWorkspaceRetentionReconciler{
+			Client:   mgr.GetClient(),
+			Recorder: mgr.GetEventRecorder("acp-workspace-retention"),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ACPWorkspaceRetention")
+			os.Exit(1)
+		}
 	}
 	if workspaceProviderAPIEnabled {
 		if fakeWorkspaceProviderEnabled {

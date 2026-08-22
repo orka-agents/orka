@@ -144,7 +144,7 @@ func TestEnsureACPClassWorkspaceResumesSuspendedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: "acp-ws-session-0123456789abcdef", Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: acpTestSessionPoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestSettleACPClassWorkspaceAppliesSuspendAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
-	plan := ACPRuntimePlan{PoolName: "acp-ws-session-0123456789abcdef", Workspace: binding}
+	plan := ACPRuntimePlan{PoolName: acpTestSessionPoolName, Workspace: binding}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}

@@ -95,6 +95,17 @@ var (
 
 	// ACP RuntimePool metrics mirror authoritative controller status. Pool name
 	// and namespace are Kubernetes object identity labels, never Task/session IDs.
+	// ACPWorkspaceRetentionActionsTotal counts retention enforcement actions on
+	// class-backed ACP execution workspaces. Labels stay bounded: no object
+	// names, class names, or session identifiers.
+	ACPWorkspaceRetentionActionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_acp_workspace_retention_actions_total",
+			Help: "Retention enforcement actions applied to class-backed ACP execution workspaces",
+		},
+		[]string{"action", "reason"},
+	)
+
 	ACPRuntimePoolDesiredReplicas = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "orka_acp_runtime_pool_desired_replicas",
@@ -287,6 +298,7 @@ var (
 
 func init() {
 	metrics.Registry.MustRegister(
+		ACPWorkspaceRetentionActionsTotal,
 		APIRequestsTotal,
 		APIRequestDuration,
 		SkillsLoaded,
@@ -519,6 +531,12 @@ func RecordRepositoryMonitorGitHubMutation(operation, status string) {
 // RecordRepositoryMonitorBlock records a low-cardinality monitor block reason.
 func RecordRepositoryMonitorBlock(reason string) {
 	RepositoryMonitorBlocksTotal.WithLabelValues(normalizeMetricLabel(reason)).Inc()
+}
+
+// RecordACPWorkspaceRetentionAction records one retention enforcement action
+// (suspend or delete) with its bounded reason.
+func RecordACPWorkspaceRetentionAction(action, reason string) {
+	ACPWorkspaceRetentionActionsTotal.WithLabelValues(normalizeMetricLabel(action), normalizeMetricLabel(reason)).Inc()
 }
 
 func normalizeMetricLabel(value string) string {
