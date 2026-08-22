@@ -122,6 +122,9 @@ dump_diagnostics() {
     kubectl get pods,secrets,sandboxclaims,sandboxes,sandboxtemplates,sandboxwarmpools -n "${acp_runtime_namespace}" -o wide 2>/dev/null || true
     echo
     echo "=== Responses Fixture ==="
+    kubectl -n "${acp_task_namespace}" get tasks -o yaml 2>/dev/null || true
+    kubectl -n "${acp_task_namespace}" get events --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -80 || true
+    kubectl -n "${acp_runtime_namespace}" get events --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -40 || true
     kubectl get executionworkspaceproviders,runtimeproviderconfigs -o yaml 2>/dev/null || true
     kubectl -n "${acp_task_namespace}" get executionworkspaceclasses,executionworkspaces,runtimeworkspaceprofiles,runtimepools -o yaml 2>/dev/null || true
     kubectl get pods,svc,deploy -n vekil-system -o wide 2>/dev/null || true

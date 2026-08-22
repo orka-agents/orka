@@ -160,7 +160,61 @@ func TestRenderSubstrateRuntimeTemplateRejectsReservedVolumeCollision(t *testing
 // policy override must merge into the operator template's snapshotsConfig
 // rather than replace it.
 //
+// A provider whose ActorTemplate CRD predates the snapshot-policy fields
+// prunes them on write. The pool must fail closed with the capability gap
+// before booting any actor instead of looping through the revision fence.
+//
 //nolint:gocyclo // The suspension and cold-resume lifecycle is one auditable end-to-end scenario.
+func TestSubstrateSuspendCapablePoolFailsClosedWhenProviderPrunesPolicy(t *testing.T) {
+	r, pool, _, control := newSubstrateSuspendTestReconciler(t)
+	base := r.Client
+	r.Client = &substratePolicyPruningClient{Client: base}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.created) != 0 {
+		t.Fatalf("suspend-capable pool booted %d actor(s) under a policy-pruning provider", len(control.created))
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing {
+		t.Fatalf("lifecycle = %s, want a closed non-serving state", current.Status.Lifecycle)
+	}
+	if !strings.Contains(current.Status.Message, "cannot express DataOnly suspension") {
+		t.Fatalf("status message does not name the provider capability gap: %q", current.Status.Message)
+	}
+}
+
+// substratePolicyPruningClient mimics a provider API server whose
+// ActorTemplate schema lacks the snapshot-policy fields: every template write
+// silently drops onPause/onCommit/onResume, exactly like CRD pruning.
+type substratePolicyPruningClient struct {
+	client.Client
+}
+
+func (c *substratePolicyPruningClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	pruneSubstrateSnapshotPolicy(obj)
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+func (c *substratePolicyPruningClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	pruneSubstrateSnapshotPolicy(obj)
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func pruneSubstrateSnapshotPolicy(obj client.Object) {
+	template, ok := obj.(*unstructured.Unstructured)
+	if !ok || template.GroupVersionKind().Kind != substrateActorTemplateGVK.Kind {
+		return
+	}
+	snapshots, found, _ := unstructured.NestedMap(template.Object, "spec", "snapshotsConfig")
+	if !found {
+		return
+	}
+	delete(snapshots, "onPause")
+	delete(snapshots, "onCommit")
+	delete(snapshots, "onResume")
+	_ = unstructured.SetNestedMap(template.Object, snapshots, "spec", "snapshotsConfig")
+}
+
 func TestSubstrateDataOnlyRenderKeepsOperatorSnapshotInfrastructure(t *testing.T) {
 	r, pool, _, _ := newSubstrateSuspendTestReconciler(t)
 	runtimePoolReconcile(t, r, pool)

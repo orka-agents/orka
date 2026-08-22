@@ -31,7 +31,13 @@ SUBSTRATE_E2E_ACP_TASK_SMOKE="${SUBSTRATE_E2E_ACP_TASK_SMOKE:-1}"
 # Class-backed data-only suspend/cold-resume conformance (issue #425). Runs a
 # session-scoped classRef Task through suspension and continuation against the
 # local Responses fixture; requires the workspace provider API.
-SUBSTRATE_E2E_SUSPEND_RESUME="${SUBSTRATE_E2E_SUSPEND_RESUME:-1}"
+# The pinned Substrate release supports only snapshotsConfig.location: the
+# ActorTemplate CRD prunes the onPause/onCommit/onResume policy fields and
+# SuspendActor takes no snapshot scope, so the data-only suspension contract
+# (ADR 0027) cannot be expressed against this provider version and the
+# controller fails suspend-capable pools closed. Enable this gate when the
+# Substrate pin gains the per-template snapshot-scope policy API.
+SUBSTRATE_E2E_SUSPEND_RESUME="${SUBSTRATE_E2E_SUSPEND_RESUME:-0}"
 SUBSTRATE_E2E_LIFECYCLE="${SUBSTRATE_E2E_LIFECYCLE:-1}"
 FIXTURE_LOCAL_PORT="${FIXTURE_LOCAL_PORT:-18337}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
@@ -3005,7 +3011,7 @@ main() {
   if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
     exercise_workspace_suspend_resume_acp_task
   else
-    log "Skipping class-backed suspend/cold-resume conformance (SUBSTRATE_E2E_SUSPEND_RESUME=0)"
+    log "Skipping class-backed suspend/cold-resume conformance (SUBSTRATE_E2E_SUSPEND_RESUME=0; the pinned Substrate release cannot express the data-only snapshot policy)"
   fi
   if [[ "${SUBSTRATE_E2E_LIFECYCLE}" == "1" ]]; then
     exercise_workspace_lifecycle_acp_task

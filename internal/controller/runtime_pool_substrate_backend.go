@@ -690,6 +690,18 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 		if !substrateRuntimeTemplateOwnedByPool(derivedTemplate, desired.object) {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("created RuntimePool substrate ActorTemplate does not carry the exact RuntimePool ownership identity"))
 		}
+		// A provider whose ActorTemplate schema predates the snapshot-policy
+		// fields silently prunes them on write; without this check the pruned
+		// readback fails the revision fence forever and the pool loops through
+		// actor recycles instead of reporting the real capability gap.
+		if substrateRuntimePoolSuspendCapable(pool) {
+			if policyErr := verifySubstrateDeployedDataSnapshotPolicy(derivedTemplate); policyErr != nil {
+				return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf(
+					"the Substrate provider pruned the data-only snapshot policy from the derived ActorTemplate; this provider version cannot express DataOnly suspension, so the suspend-capable pool fails closed before booting any actor: %w",
+					policyErr,
+				))
+			}
+		}
 		createdRevision, integrityErr := substrateRuntimeTemplateIntegrity(derivedTemplate)
 		if integrityErr != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, integrityErr)
