@@ -27,7 +27,7 @@ func TestRepoLessWorkspaceBaselineIsStableAcrossSessionTurns(t *testing.T) {
 	d := &ACPDispatcher{}
 	session := &acpTaskSession{Binding: ACPRuntimeSessionBinding{SessionUID: "acp-session-stable"}}
 
-	first := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "turn-1", Namespace: "orka-system", UID: "task-uid-turn-1"}}
+	first := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "turn-1", Namespace: runtimePoolDefaultControllerNamespace, UID: "task-uid-turn-1"}}
 	first.Spec.Type = corev1alpha1.TaskTypeAgent
 	second := first.DeepCopy()
 	second.Name, second.UID = "turn-2", "task-uid-turn-2"
