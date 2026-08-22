@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -187,6 +188,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	text := responseText(body)
 	hold := requestHold(body)
 	recordMarker(text)
+	log.Printf("responses request resolved marker=%s hold=%s roles=%s", text, hold, inputRoles(body))
 	responseID := fmt.Sprintf("resp_orka_fixture_%d", responseSequence.Add(1))
 	itemID := "msg_" + responseID
 	item := map[string]any{
@@ -292,14 +294,74 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 var responseTextMarker = regexp.MustCompile(`ORKA_[A-Z0-9_]+_OK`)
 
 func responseText(body []byte) string {
-	// Continuation requests carry the full session history, so earlier turns'
-	// markers precede the newest user message; the last match is the marker of
-	// the turn being answered.
+	// Continuation requests carry the full session history. Prefer the marker
+	// from the newest user message in a structured input array - a resumed
+	// session may order replayed context after the active prompt, so a raw
+	// last-match can resolve to an earlier turn.
+	if marker, ok := structuredUserMarker(body); ok {
+		return marker
+	}
 	matches := responseTextMarker.FindAll(body, -1)
 	if len(matches) == 0 {
 		return "ORKA_RESPONSES_FIXTURE_OK"
 	}
 	return string(matches[len(matches)-1])
+}
+
+// structuredUserMarker walks a structured Responses input array from the end
+// and returns the marker of the newest user message.
+func structuredUserMarker(body []byte) (string, bool) {
+	var request struct {
+		Input json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil || len(request.Input) == 0 {
+		return "", false
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(request.Input, &items); err != nil {
+		return "", false
+	}
+	for _, item := range slices.Backward(items) {
+		role, _ := item["role"].(string)
+		if role != "user" {
+			continue
+		}
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			continue
+		}
+		if marker := responseTextMarker.Find(encoded); marker != nil {
+			return string(marker), true
+		}
+	}
+	return "", false
+}
+
+// inputRoles renders the structured input's role sequence (never content) so
+// fixture logs explain marker resolution for replayed sessions.
+func inputRoles(body []byte) string {
+	var request struct {
+		Input json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil || len(request.Input) == 0 {
+		return "unstructured"
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(request.Input, &items); err != nil {
+		return "unstructured"
+	}
+	roles := make([]string, 0, len(items))
+	for _, item := range items {
+		role, _ := item["role"].(string)
+		if role == "" {
+			role, _ = item["type"].(string)
+		}
+		if role == "" {
+			role = "?"
+		}
+		roles = append(roles, role)
+	}
+	return strings.Join(roles, ",")
 }
 
 func writeSSE(w http.ResponseWriter, event string, value any) {

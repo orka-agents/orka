@@ -98,6 +98,19 @@ func TestMarkerCountsRecordEachResolvedRequest(t *testing.T) {
 	}
 }
 
+// A resumed session may order replayed context after the active user prompt;
+// structured extraction must still answer the newest user message's marker.
+func TestResponseTextPrefersNewestUserMessage(t *testing.T) {
+	body := `{"input":[` +
+		`{"role":"user","content":"Reply exactly: ORKA_WS_SUSPEND_FIRST_OK"},` +
+		`{"role":"assistant","content":"ORKA_WS_SUSPEND_FIRST_OK"},` +
+		`{"role":"user","content":"Reply exactly: ORKA_WS_SUSPEND_SECOND_OK"},` +
+		`{"role":"assistant","content":"replayed context mentioning ORKA_WS_SUSPEND_FIRST_OK"}]}`
+	if got := responseText([]byte(body)); got != "ORKA_WS_SUSPEND_SECOND_OK" {
+		t.Fatalf("responseText = %q, want the newest user message marker", got)
+	}
+}
+
 func TestHandleResponsesRejectsMissingModel(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"stream":true}`))
 	response := httptest.NewRecorder()
