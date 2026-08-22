@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -198,11 +198,14 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// responseTextMarker matches deterministic scenario markers embedded in the
+// request ("Reply exactly: ORKA_..._OK") so each Task in a multi-Task scenario
+// gets an independently verifiable result.
+var responseTextMarker = regexp.MustCompile(`ORKA_[A-Z0-9_]+_OK`)
+
 func responseText(body []byte) string {
-	for _, marker := range []string{"ORKA_WS_SANDBOX_OK", "ORKA_WS_SUBSTRATE_OK"} {
-		if bytes.Contains(body, []byte(marker)) {
-			return marker
-		}
+	if marker := responseTextMarker.Find(body); marker != nil {
+		return string(marker)
 	}
 	return "ORKA_RESPONSES_FIXTURE_OK"
 }

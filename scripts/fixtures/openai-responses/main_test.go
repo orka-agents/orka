@@ -45,6 +45,19 @@ func TestHandleResponsesStreamsRequestedMarker(t *testing.T) {
 	}
 }
 
+func TestResponseTextEchoesScenarioMarkers(t *testing.T) {
+	for body, want := range map[string]string{
+		`{"input":"Reply exactly: ORKA_WS_SUBSTRATE_OK"}`:      "ORKA_WS_SUBSTRATE_OK",
+		`{"input":"Reply exactly: ORKA_WS_SUSPEND_FIRST_OK"}`:  "ORKA_WS_SUSPEND_FIRST_OK",
+		`{"input":"Reply exactly: ORKA_WS_SUSPEND_SECOND_OK"}`: "ORKA_WS_SUSPEND_SECOND_OK",
+		`{"input":"no marker here"}`:                           "ORKA_RESPONSES_FIXTURE_OK",
+	} {
+		if got := responseText([]byte(body)); got != want {
+			t.Fatalf("responseText(%s) = %q, want %q", body, got, want)
+		}
+	}
+}
+
 func TestHandleResponsesRejectsMissingModel(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"stream":true}`))
 	response := httptest.NewRecorder()
