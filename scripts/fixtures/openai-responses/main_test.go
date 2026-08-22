@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+const (
+	fixtureTestFirstMarker  = "ORKA_WS_SUSPEND_FIRST_OK"
+	fixtureTestSecondMarker = "ORKA_WS_SUSPEND_SECOND_OK"
+)
+
 func TestHandleResponsesStreamsRequestedMarker(t *testing.T) {
 	request := httptest.NewRequest(
 		http.MethodPost,
@@ -50,8 +55,8 @@ func TestHandleResponsesStreamsRequestedMarker(t *testing.T) {
 func TestResponseTextEchoesScenarioMarkers(t *testing.T) {
 	for body, want := range map[string]string{
 		`{"input":"Reply exactly: ORKA_WS_SUBSTRATE_OK"}`:      "ORKA_WS_SUBSTRATE_OK",
-		`{"input":"Reply exactly: ORKA_WS_SUSPEND_FIRST_OK"}`:  "ORKA_WS_SUSPEND_FIRST_OK",
-		`{"input":"Reply exactly: ORKA_WS_SUSPEND_SECOND_OK"}`: "ORKA_WS_SUSPEND_SECOND_OK",
+		`{"input":"Reply exactly: ORKA_WS_SUSPEND_FIRST_OK"}`:  fixtureTestFirstMarker,
+		`{"input":"Reply exactly: ORKA_WS_SUSPEND_SECOND_OK"}`: fixtureTestSecondMarker,
 		`{"input":"no marker here"}`:                           "ORKA_RESPONSES_FIXTURE_OK",
 		`{"input":[{"role":"user","content":"Reply exactly: ORKA_WS_LC_FIRST_OK"},` +
 			`{"role":"assistant","content":"ORKA_WS_LC_FIRST_OK"},` +
@@ -103,10 +108,10 @@ func TestMarkerCountsRecordEachResolvedRequest(t *testing.T) {
 func TestResponseTextPrefersNewestUserMessage(t *testing.T) {
 	body := `{"input":[` +
 		`{"role":"user","content":"Reply exactly: ORKA_WS_SUSPEND_FIRST_OK"},` +
-		`{"role":"assistant","content":"ORKA_WS_SUSPEND_FIRST_OK"},` +
+		`{"role":"assistant","content":fixtureTestFirstMarker},` +
 		`{"role":"user","content":"Reply exactly: ORKA_WS_SUSPEND_SECOND_OK"},` +
 		`{"role":"assistant","content":"replayed context mentioning ORKA_WS_SUSPEND_FIRST_OK"}]}`
-	if got := responseText([]byte(body)); got != "ORKA_WS_SUSPEND_SECOND_OK" {
+	if got := responseText([]byte(body)); got != fixtureTestSecondMarker {
 		t.Fatalf("responseText = %q, want the newest user message marker", got)
 	}
 
@@ -116,7 +121,7 @@ func TestResponseTextPrefersNewestUserMessage(t *testing.T) {
 		`{"role":"developer","content":"agent configuration"},` +
 		`{"role":"user","content":"history: Reply exactly: ORKA_WS_SUSPEND_FIRST_OK / ` +
 		`ORKA_WS_SUSPEND_FIRST_OK -- now: Reply exactly: ORKA_WS_SUSPEND_SECOND_OK"}]}`
-	if got := responseText([]byte(concatenated)); got != "ORKA_WS_SUSPEND_SECOND_OK" {
+	if got := responseText([]byte(concatenated)); got != fixtureTestSecondMarker {
 		t.Fatalf("responseText(concatenated) = %q, want the active prompt marker", got)
 	}
 }
