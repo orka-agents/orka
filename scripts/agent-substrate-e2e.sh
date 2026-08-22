@@ -115,6 +115,8 @@ dump_diagnostics() {
     log "Logs for job/${job}"
     run_redacted kubectl -n "${ORKA_NAMESPACE}" logs "job/${job}" --all-containers --tail=-1 || true
   done
+  run_redacted kubectl get executionworkspaceproviders,runtimeproviderconfigs -o yaml || true
+  run_redacted kubectl -n "${ORKA_NAMESPACE}" get executionworkspaceclasses,executionworkspaces,runtimeworkspaceprofiles,runtimepools -o yaml || true
   run_redacted kubectl -n "${ORKA_NAMESPACE}" get substrateactorpools,tools,leases -o wide || true
   run_redacted kubectl -n "${ORKA_NAMESPACE}" get substrateactorpools,tools,leases -o yaml || true
 
