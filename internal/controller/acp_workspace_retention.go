@@ -57,7 +57,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	if err := r.Get(ctx, req.NamespacedName, workspace); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceProviderControllerName ||
+	if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue ||
 		!workspace.DeletionTimestamp.IsZero() ||
 		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted ||
 		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined {
@@ -203,7 +203,7 @@ func acpWorkspaceSuspendedCapFromAnnotation(workspace *workspacev1alpha1.Executi
 // SetupWithManager registers retention enforcement for ACP class workspaces.
 func (r *ACPWorkspaceRetentionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	ours := predicate.NewPredicateFuncs(func(object client.Object) bool {
-		return object.GetLabels()[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceProviderControllerName
+		return object.GetLabels()[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
 	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacev1alpha1.ExecutionWorkspace{}).

@@ -280,7 +280,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) workspaceOwnership(
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	err := r.Get(ctx, types.NamespacedName{Name: workspace.Spec.ProviderBinding.Name}, provider)
 	if apierrors.IsNotFound(err) {
-		labeled := workspace.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceProviderControllerName
+		labeled := workspace.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
 		return labeled, false, nil
 	}
 	if err != nil {
