@@ -82,12 +82,30 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 			logf.FromContext(ctx).Info("ACP workspace adapter holding a resume request",
 				"workspace", workspace.Name, "generation", workspace.Generation,
 				"exact", exact, "coreAdmitted", workspaceCurrentlyAdmittedByCore(workspace))
+			// Core admission is normally observed through a workspace event,
+			// but a resume must never strand on a missed one.
+			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, nil
 		}
 		return ctrl.Result{}, nil
 	}
 
 	switch workspace.Spec.DesiredState {
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
+		if pool, foreign, poolErr := r.linkedRuntimePool(ctx, workspace); poolErr == nil {
+			suspended := pool != nil && strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceSuspendAnnotation]) != ""
+			if foreign || pool == nil || suspended || (pool != nil && pool.Spec.DesiredReplicas == 0) {
+				logf.FromContext(ctx).Info("ACP workspace adapter serving a Ready workspace",
+					"workspace", workspace.Name, "generation", workspace.Generation,
+					"poolFound", pool != nil, "poolForeign", foreign,
+					"poolSuspendIntent", suspended,
+					"poolReplicas", func() int32 {
+						if pool == nil {
+							return -1
+						}
+						return pool.Spec.DesiredReplicas
+					}())
+			}
+		}
 		if requeue, err := r.driveLinkedRuntimePoolResume(ctx, workspace); err != nil || requeue {
 			return ctrl.Result{RequeueAfter: acpWorkspaceAdapterRequeue}, err
 		}
